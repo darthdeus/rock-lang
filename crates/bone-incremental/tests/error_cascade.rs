@@ -34,7 +34,7 @@ fn main() {
 ";
 
 fn diags(src: &str) -> Vec<String> {
-    let mut s = Session::new(vec![], vec![]).expect("session");
+    let mut s = Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session");
     let _ = s.update_file("c.rock", src);
     s.diagnostics().iter().map(|e| e.message.clone()).collect()
 }

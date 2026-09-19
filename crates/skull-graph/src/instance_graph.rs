@@ -896,7 +896,7 @@ pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
     ("__vec_data_capacity", StorageCond::VecStrided, &["table_len", "__rock_stride_capacity"]),
     ("__vec_data_insert", StorageCond::VecStrided, &["__rock_stride_insert"]),
     ("__vec_data_clone", StorageCond::VecStrided, &["__rock_stride_copy"]),
-    ("__vec_data_sort", StorageCond::VecStrided, &["__rock_stride_sort"]),
+    ("__vec_data_sort", StorageCond::VecStrided, &["__rock_stride_sort", "__rock_stride_sort_leaves"]),
     ("__rock_vec_to_lua_array", StorageCond::VecStrided, &["__rock_vec_strided_elements"]),
     ("map_new", StorageCond::MapColumn, &["__map_col_new_spine"]),
     ("table_unset", StorageCond::MapColumn, &["__map_col_free"]),
@@ -966,6 +966,8 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__rock_stride_copy",
     "__rock_stride_insert",
     "__rock_stride_sort",
+    "__rock_stride_sort_leaves",
+    "__rock_strided_column_view",
     "__rock_vec_column_elements",
     "__rock_vec_strided_elements",
     "table_len",
@@ -5360,16 +5362,24 @@ enum CondVerdict {
     Failed(MonoTyReason),
 }
 
-/// Which of `__vec_data_sort`'s two column arms a site emits
-/// (`skull-mir/src/lower/storage.rs`, the `("__vec_data_sort", ..)` arm): a
-/// `nobox` element applies the key to the LEAVES, everything else to the
-/// materialized element.
-///
-fn sort_entry(elem: &skull_mir::mir::ColumnElem) -> &'static str {
-    if elem.is_nobox() {
-        "__rock_col_sort_leaves"
-    } else {
-        "__rock_col_sort"
+/// Which `__vec_data_sort` arm a site emits (`skull-mir/src/lower/storage.rs`,
+/// the column and strided `("__vec_data_sort", ..)` arms): a `nobox` element
+/// applies the key to the LEAVES, everything else to the materialized element.
+/// A strided `nobox` struct row is those leaves; a strided enum row is not.
+fn sort_entry(
+    ws: &bone_semantic::inference::Workspace,
+    cond: StorageCond,
+    elem: &skull_mir::mir::ColumnElem,
+) -> &'static str {
+    match cond {
+        StorageCond::VecStrided
+            if elem.is_nobox() && ws.struct_by_name.contains_key(&elem.name) =>
+        {
+            "__rock_stride_sort_leaves"
+        }
+        StorageCond::VecStrided => "__rock_stride_sort",
+        _ if elem.is_nobox() => "__rock_col_sort_leaves",
+        _ => "__rock_col_sort",
     }
 }
 
@@ -5528,9 +5538,9 @@ fn compiler_generated_sites(
                     // receiver cannot be a specialized storage form.
                     let Some(recv) = args.clone().next() else { continue };
                     let Some(elem) = settle(recv, *cond, e) else { continue };
-                    if *trigger == "__vec_data_sort" && *cond == StorageCond::VecColumn {
+                    if *trigger == "__vec_data_sort" {
                         let Some(elem) = elem else { continue };
-                        out.push(GeneratedSite { expr: e, name: sort_entry(&elem) });
+                        out.push(GeneratedSite { expr: e, name: sort_entry(ws, *cond, &elem) });
                         continue;
                     }
                     out.extend(names.iter().map(|name| GeneratedSite { expr: e, name }));

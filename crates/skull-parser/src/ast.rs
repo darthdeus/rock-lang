@@ -7,6 +7,7 @@
 
 use crate::OrderedFloat;
 pub use comfy_la_arena::{Arena, Idx};
+use rock_core::source_code::Dialect;
 use rock_core::{CompilerError, Span};
 use rock_tokenizer::TokenKind;
 use ustr::Ustr;
@@ -105,6 +106,24 @@ pub enum InterpolatedPart {
     Expr(Idx<ExprData>, Option<FormatSpec>),
 }
 
+/// A `::` path (modules-v1 grammar): `a::b::c`, `self::x`, `super::super::y`,
+/// or the root-anchored `::a::b`. Resolution (owner package, lexical first
+/// segment) is a lowering concern; the parser only records the segments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Path {
+    /// `::a::b` — anchored at the package root, bypassing local shadowing.
+    pub from_root: bool,
+    pub segments: Vec<Ident>,
+}
+
+impl Path {
+    pub fn span(&self) -> Span {
+        let first = self.segments.first().expect("path has segments").span;
+        let last = self.segments.last().expect("path has segments").span;
+        first.merge(&last)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExprData {
     pub span: Span,
@@ -126,6 +145,20 @@ pub enum ExprKind {
         base: Ident,
         member: Ident,
     },
+    /// `p::f`, `E::V`, `p::Type` — a modules-v1 value-position path. The
+    /// generic args of `p::Type<T>` (a type used as a value, not followed by
+    /// a call's parens) ride here; `p::f<T>(x)` puts them on the FunctionCall
+    /// like an unqualified generic call.
+    Path {
+        path: Path,
+        generic_args: Vec<Idx<TypeExprData>>,
+    },
+    /// `p::Type { f: v }` / `p::E::V { f: v }` — a qualified record literal.
+    PathStructLiteral {
+        path: Path,
+        bases: Vec<Idx<ExprData>>,
+        fields: Vec<(Vec<Ident>, Idx<ExprData>)>,
+    },
 
     Int(i64, Ustr),
     Float(OrderedFloat<f64>),
@@ -143,6 +176,10 @@ pub enum ExprKind {
     Bitcast(Idx<ExprData>, Idx<TypeExprData>),
     /// `expr :: Type` type ascription
     TypeAscription(Idx<ExprData>, Idx<TypeExprData>),
+    /// `(expr : Type)` — the modules-v1 contextual-ascription form. Same
+    /// lowering as [`ExprKind::TypeAscription`]; a separate node because the
+    /// spellings format differently (v1 rejects the infix form).
+    ParenAscription(Idx<ExprData>, Idx<TypeExprData>),
 
     Not(Idx<ExprData>),
     BitNot(Idx<ExprData>),
@@ -297,9 +334,20 @@ pub enum Pattern {
         variant_name: Ident,
         args: Option<Vec<Pattern>>,
     },
+    /// `p::E::V(..)` (modules-v1) — a variant pattern behind a path.
+    PathVariant {
+        path: Path,
+        args: Option<Vec<Pattern>>,
+    },
     Record {
         enum_name: Option<Ident>,
         name: Option<Ident>,
+        fields: Vec<(Ident, Pattern)>,
+        rest: bool,
+    },
+    /// `p::Type { f: pat, .. }` (modules-v1) — a record pattern behind a path.
+    PathRecord {
+        path: Path,
         fields: Vec<(Ident, Pattern)>,
         rest: bool,
     },
@@ -339,6 +387,9 @@ pub enum StatementKind {
     Expression(Idx<ExprData>),
     Let(Let),
     Static(Static),
+    /// `use a::b;` inside a block (v1; spec 8.2 block scope). Scoped from its
+    /// declaration to block end when module resolution lands (plan M2).
+    Use(UseDecl),
     NestedFn(NestedFn),
     /// `return [expr]` — `keyword_span` is the `return` token (rock parity).
     Return {
@@ -473,9 +524,16 @@ pub enum TypeExprKind {
     Bool,
     Ref(Idx<TypeExprData>),
     Ident(Ident),
+    /// `a::b::T` (modules-v1) — a qualified type path.
+    Path(Path),
     Array(Idx<TypeExprData>),
     App {
         ctor: Ident,
+        args: Vec<Idx<TypeExprData>>,
+    },
+    /// `a::b::T<A, B>` (modules-v1) — a qualified generic application.
+    AppPath {
+        ctor: Path,
         args: Vec<Idx<TypeExprData>>,
     },
     Tuple(Vec<Idx<TypeExprData>>),
@@ -604,6 +662,10 @@ pub struct Field {
     pub span: Span,
     pub name: Ident,
     pub ty: Idx<TypeExprData>,
+    /// Declared visibility (v1). `None` = public read/write (spec 9/10).
+    pub vis: Option<Visibility>,
+    /// `private(set)` — restricted setter on a readable field.
+    pub set_private: bool,
     pub default: Option<Idx<ExprData>>,
     /// Leading `@name` / `@name(args)` on the field. Preserved for the
     /// bone-side registry pass; no skull consumer reads it yet.
@@ -690,11 +752,87 @@ pub struct AnnoArg {
     pub value: Idx<ExprData>,
 }
 
+/// Declared visibility (modules-v1 grammar; spec 9). `None` on an item means
+/// "not written" and takes the item-kind's default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Visibility {
+    /// `private` / `pub(self)` — the defining module and its descendants.
+    Private,
+    /// `pub` — any consumer with an accessible path.
+    Pub,
+    /// `pub(super)` — the parent module and its descendants.
+    PubSuper,
+    /// `pub(package)` — every module in the defining package.
+    PubPackage,
+    /// `pub(in a::b)` — the named ancestor module and its descendants. The
+    /// path is package-root-relative.
+    PubIn(Vec<Ident>),
+}
+
+/// The visibility modifiers one declaration may carry. Items use `vis`;
+/// stored fields additionally use `set_private` (`private(set)`, spec 10).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct VisMods {
+    pub vis: Option<Visibility>,
+    /// `private(set)` — public read (per `vis`), owner-subtree write.
+    pub set_private: bool,
+}
+
+/// The file's module header: `mod a::b;` / `pub mod a::b;` — first
+/// non-comment item only, `;`-terminated. The header selects which logical
+/// module the REST of the file contributes to (plan M2 coalesces them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleHeader {
+    /// Package-root-relative module path (`mod combat::casting;` -> [combat,
+    /// casting]). `mod self;` yields an empty vec (explicit root).
+    pub path: Vec<Ident>,
+    pub vis: Option<Visibility>,
+    pub span: Span,
+}
+
+/// `use` declarations (spec 8.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UseDecl {
+    pub span: Span,
+    pub vis: Option<Visibility>,
+    pub tree: UseTree,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UseTree {
+    /// `a::b::c` with a trailing shape. `from_root` marks `::a::b`. Segments
+    /// may be the contextual words `self`/`super` (resolver's business).
+    Path {
+        from_root: bool,
+        segments: Vec<Ident>,
+        kind: UseSuffix,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UseSuffix {
+    /// `use a::b;` — bind `b`.
+    Bind,
+    /// `use a::b as c;`
+    BindAs(Ident),
+    /// `use a::*;` — immediate accessible members.
+    Glob,
+    /// `use a::operator(+);` — the glyph family under a nameable selector;
+    /// `op` is its function name (`__op_add`). With `as add` (spec 8.5) the
+    /// import binds only `add`, not the glyph.
+    Operator { op: Ident, alias: Option<Ident> },
+    /// `use a::b::{ .. }` — sub-trees, each relative (`c`, `d::e as f`,
+    /// `self`, `operator(+)', nested braces).
+    Nested(Vec<UseTree>),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub span: Span,
     pub annotations: Vec<Annotation>,
     pub kind: ItemKind,
+    /// Declared visibility (modules-v1). `None` = not written.
+    pub vis: Option<Visibility>,
     /// True if the item was prefixed with `@global_write`. Consumed into a flag
     /// the way `@guarded` is (`GlobalDef.is_guarded`) rather than left in
     /// `annotations`, so it does not render as an ordinary annotation.
@@ -716,6 +854,11 @@ pub enum ItemKind {
     Global(GlobalDef),
     CompilerDirective(CompilerDirective),
     Comment(Ustr),
+    /// `pub mod x { .. }` — an inline module block (v1). Reopening a module
+    /// adds fragments; the namespace tree (plan M2) coalesces them.
+    Module(ModBlock),
+    /// `use ...;` at item level (v1 scoping; parses in legacy too, additive).
+    Use(UseDecl),
     /// A top-level macro invocation `name(args)` / `name!(args)` (sigil enables
     /// type-shaped args). Expansion replaces it with the macro's spliced items
     /// (item-macro) or drops it; it never survives into a cooked module.
@@ -726,6 +869,15 @@ pub enum ItemKind {
     },
 }
 
+/// `pub mod name { .. }` — an inline module block (v1 grammar).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModBlock {
+    pub span: Span,
+    pub name: Ident,
+    pub vis: Option<Visibility>,
+    pub items: Vec<Item>,
+}
+
 /// One parsed module: the arenas backing every node plus the top-level
 /// item list. Children reference each other by `Idx` into these arenas.
 #[derive(Clone, Debug, Default)]
@@ -734,6 +886,15 @@ pub struct Ast {
     /// for the whole module -- independent of item spans (which macro expansion
     /// can retag) and defined even for an item-less module.
     pub file: Ustr,
+    /// The source dialect this file was parsed under (set by the parser).
+    pub dialect: Dialect,
+    /// The owning package (set by the loader from the package graph; `None`
+    /// for standalone/editor sources). Package loaders overwrite the
+    /// directive-derived dialect with the graph fact at the same time.
+    pub package: Option<rock_core::source_code::PackageTag>,
+    /// The file's `mod a::b;` header (v1), if the first non-comment item was
+    /// one. Selects the logical module this file's items contribute to.
+    pub module_header: Option<ModuleHeader>,
     pub exprs: Arena<ExprData>,
     pub stmts: Arena<StatementData>,
     pub blocks: Arena<BlockData>,

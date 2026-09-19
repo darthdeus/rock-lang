@@ -18,6 +18,7 @@
 //! references are a direct index format. (Regalloc to fit luajit's 200-local cap
 //! is a later refinement; see `docs/skull-bone-mir-faithful-plan.md` Phase 5.)
 
+mod frame_limits;
 mod regalloc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -700,6 +701,13 @@ pub struct CodegenCtx {
     /// [`callee_binding_plan`]; empty on any path that never populated it,
     /// which binds nothing rather than binding unsoundly.
     call_sccs: HashMap<FuncRef, u32>,
+    /// Whether a body over LuaJIT's parse-time frame limits is rejected
+    /// ([`frame_limits`]). Always true in production; the boundary-agreement
+    /// test turns it off so it can obtain the Lua whose `loadfile` verdict the
+    /// check is compared against. There is deliberately NO environment switch:
+    /// a program the check rejects cannot load, so shipping an escape hatch
+    /// would only trade a Rock diagnostic for LuaJIT's.
+    frame_limits: bool,
 }
 
 impl Clone for CodegenCtx {
@@ -716,6 +724,7 @@ impl Clone for CodegenCtx {
             value_ctor: self.value_ctor,
             index_shape: self.index_shape,
             call_sccs: self.call_sccs.clone(),
+            frame_limits: self.frame_limits,
         }
     }
 }
@@ -776,8 +785,9 @@ impl CodegenCtx {
                 reserved.insert(name, f.name_span);
             }
             for (_, g) in m.globals.iter() {
-                reserved_namespace_collision(g.name.as_str(), g.name_span, &mut collisions);
-                reserved.insert(g.name.as_str().to_string(), g.name_span);
+                let symbol = skull_mir::mangle::symbol_of_key(g.name);
+                reserved_namespace_collision(symbol.as_str(), g.name_span, &mut collisions);
+                reserved.insert(symbol.as_str().to_string(), g.name_span);
             }
         }
         // Permanent mangle-collision check (reject, don't fall back): two distinct
@@ -796,6 +806,7 @@ impl CodegenCtx {
             value_ctor: value_ctor_shape(),
             index_shape: index_shape(),
             call_sccs: HashMap::default(),
+            frame_limits: true,
         }
     }
 
@@ -873,6 +884,18 @@ impl CodegenCtx {
         self.index_shape
     }
 
+    /// Turn the LuaJIT frame-limit rejection off for this context. ONLY the
+    /// boundary-agreement test does this: it needs the emitted Lua of a body
+    /// the check rejects so it can ask the bundled LuaJIT whether that Lua
+    /// really fails to load. Production always leaves it on.
+    pub fn set_frame_limits(&mut self, on: bool) {
+        self.frame_limits = on;
+    }
+
+    pub fn frame_limits(&self) -> bool {
+        self.frame_limits
+    }
+
     /// Record every function's call-graph strongly connected component. The
     /// caller owns the graph this is derived from (`skull::mir_emit` projects
     /// the whole-program instance graph onto declarations, which can only MERGE
@@ -941,8 +964,13 @@ impl CodegenCtx {
         sink.drain(..).next().map(|(_, e)| e)
     }
 
+    /// The Session slot of `name`. The map is keyed on the emitted SYMBOL, so a
+    /// caller may hand over either spelling of a v1 global: its DefKey (what MIR
+    /// carries) or the symbol (what the schema publishes).
     pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
-        self.state_slots.get(&name).copied()
+        self.state_slots
+            .get(&skull_mir::mangle::symbol_of_key(name))
+            .copied()
     }
 
     /// The highest compiler-assigned Session slot, 0 when there is none. The
@@ -2132,6 +2160,7 @@ fn emit_named_framed_with_statics_impl(
         ws,
         ctx,
         interner,
+        name,
         func,
         entry,
         params,
@@ -2257,6 +2286,22 @@ fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Ins
 /// with a duplicate key.
 fn splice_is_admissible(suffix: &str, fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
     suffix == "_vt" && fields.iter().all(|(name, _)| name.as_str() != "__ty")
+}
+
+/// THE answer to "does this value construction emit a table literal rather
+/// than a `<Name>_vt(..)` call" -- read by the emitter that writes it and by
+/// the frame-limit model that counts the call's arity. Two seams for one
+/// question drift, and a model that guessed CALL for a spliced construction
+/// would over-count the frame and reject a program LuaJIT loads.
+fn value_ctor_is_spliced(ctx: &CodegenCtx, func: &MirFunc, inst: &Inst) -> bool {
+    let (Inst::MakeValueStruct { representation, form, fields, .. }
+    | Inst::MaterializeValueStruct { representation, form, fields, .. }) = inst
+    else {
+        return false;
+    };
+    ctx.value_ctor_shape() == ValueCtorShape::Splice
+        && ctor_suffix(func, *representation, *form)
+            .is_some_and(|suffix| splice_is_admissible(suffix, fields))
 }
 
 fn ctor_suffix(func: &MirFunc, representation: skull_mir::lower::RepId, form: ValueCtorForm) -> Option<&'static str> {
@@ -2991,6 +3036,70 @@ fn always_inlinable(inst: &Inst) -> bool {
     )
 }
 
+/// Cells written exactly once in `scope`, as a multi-return destination, and
+/// read only after that call in the same block. A load of one is the call's
+/// result local itself, like a parameter load: without this every leaf of a
+/// wide value returned by a call occupied two locals (the result and a copy),
+/// which is what pushed functions holding a few wide values past LuaJIT's
+/// 250-slot frame limit. No later write can intervene, because the one write
+/// dominates every read. Narrow receives qualify too; the evidence against a
+/// width threshold is in `docs/nobox-wide-trace-plan.md`.
+fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
+    // cell -> (defs, the receive's block and position). Only a receive records
+    // a position, so a cell qualifies iff its one def is one.
+    let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
+        rustc_hash::FxHashMap::default();
+    for &b in scope {
+        for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
+            match &func.insts[id] {
+                Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
+                    for cell in dests {
+                        let entry = defs.entry(*cell).or_insert((0, None));
+                        entry.0 += 1;
+                        entry.1 = Some((b, pos));
+                    }
+                }
+                // A placeholder the bound substitution replaces; never a receive.
+                Inst::CallBoundMulti { dests, .. } => {
+                    for cell in dests {
+                        defs.entry(*cell).or_insert((0, None)).0 += 1;
+                    }
+                }
+                other => regalloc::cell_defs(other, &mut |cell| {
+                    defs.entry(cell).or_insert((0, None)).0 += 1;
+                }),
+            }
+        }
+    }
+    let pinned = regalloc::pinned_cells(func);
+    let captured = |cell: Idx<Cell>| {
+        func.closure_env_plans
+            .values()
+            .any(|plan| plan.captures_cell(cell) || plan.env_cell() == Some(cell))
+    };
+    let mut out: HashSet<Idx<Cell>> = defs
+        .iter()
+        .filter(|(cell, (count, at))| {
+            *count == 1 && at.is_some() && !pinned[raw(**cell) as usize] && !captured(**cell)
+        })
+        .map(|(cell, _)| *cell)
+        .collect();
+    for &b in scope {
+        for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
+            regalloc::cell_uses(&func.insts[id], &mut |cell| {
+                if !out.contains(&cell) {
+                    return;
+                }
+                let Some((_, Some((def_block, def_pos)))) = defs.get(&cell) else { return };
+                if *def_block != b || *def_pos >= pos || !matches!(func.insts[id], Inst::Load(_)) {
+                    out.remove(&cell);
+                }
+            });
+        }
+    }
+    out
+}
+
 /// The set of values to TREE-FOLD into their use site (no `local rN`). Pure
 /// expressions qualify at one same-block use. Loads of parameters never written
 /// in this scope qualify at every use: the Lua parameter is already their value.
@@ -3041,14 +3150,17 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>])
             use_block[k] = br;
         });
     }
+    let received = single_receive_cells(func, scope);
     // Dense `raw(inst) -> bool` (no hashing); probed per operand in `write_opnd`
     // and per use in `color_values`'s liveness/interference loops.
     let mut inl = vec![false; ni];
     for &b in scope {
         for &id in &func.blocks[b].insts {
             let k = raw(id) as usize;
-            let parameter_load =
-                matches!(&func.insts[id], Inst::Load(cell) if immutable_params.contains(cell));
+            let parameter_load = matches!(
+                &func.insts[id],
+                Inst::Load(cell) if immutable_params.contains(cell) || received.contains(cell)
+            );
             if parameter_load
                 || (use_count[k] == 1
                     && def_block[k] != NONE
@@ -3069,6 +3181,8 @@ fn render_scope(
     ws: &Workspace,
     ctx: &CodegenCtx,
     interner: &MonoInterner,
+    // The emitted Lua name, for the rejection key of a frame-limit overflow.
+    lua_name: &str,
     func: &MirFunc,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
@@ -3219,11 +3333,15 @@ fn render_scope(
     let decl_start = out.len();
     out.push_str("  local ");
     let mut any = false;
+    // Counted as the names are written, so the frame-limit model reads THIS
+    // declaration rather than a second derivation of it.
+    let mut top_locals = 0usize;
     for &c in &distinct {
         if any {
             out.push_str(", ");
         }
         any = true;
+        top_locals += 1;
         out.push('r');
         push_uint(out, c);
     }
@@ -3253,6 +3371,7 @@ fn render_scope(
                 out.push_str(", ");
             }
             any = true;
+            top_locals += 1;
             out.push('c');
             match col {
                 Some(col) => push_uint(out, col),
@@ -3264,6 +3383,26 @@ fn render_scope(
         out.push('\n');
     } else {
         out.truncate(decl_start); // no locals -> drop the stamped `  local `
+    }
+
+    // The declarations above are final, so this is the earliest point at which
+    // the emitted frame is fully known. A body over one of LuaJIT's parse-time
+    // caps is rejected here with a Rock span instead of failing at `loadfile`
+    // with a Lua chunk position (`frame_limits`).
+    if ctx.frame_limits() {
+        check_frame_limits(
+            ws,
+            ctx,
+            lua_name,
+            func,
+            rpo,
+            params.len() + top_locals,
+            &loops,
+            &color_scope,
+            hoist,
+            tail_forwards,
+            call_arg_forwards,
+        );
     }
 
     // (Box `{ v = .. }` init lines are gone -- `convert_closures` materializes a
@@ -3299,6 +3438,243 @@ fn render_scope(
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
     }
     out.push_str("end");
+}
+
+/// Reject a body whose emitted Lua function would break one of LuaJIT's
+/// parse-time frame caps, with a Rock span in place of LuaJIT's load-time
+/// error. See [`frame_limits`] for the model and the direction it errs in.
+///
+/// Everything it reads is the emitter's own final answer: `top_locals` is the
+/// `local` line just written, `color_scope` and `loops` are what the body-scoped
+/// declarations and `for` lines come from, and the forward tables are what
+/// decides which calls keep their results and which return statements survive.
+#[allow(clippy::too_many_arguments)]
+fn check_frame_limits(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    lua_name: &str,
+    func: &MirFunc,
+    rpo: &[Idx<Block>],
+    top_locals: usize,
+    loops: &HashMap<Idx<Block>, CountedLoop>,
+    color_scope: &[Option<Idx<Block>>],
+    hoist: &HashMap<Idx<Inst>, u32>,
+    tail_forwards: &[Option<TailForward>],
+    call_arg_forwards: &[Option<CallArgForward>],
+) {
+    // Almost every body is far under both caps, and the exact walk below needs
+    // several instruction-sized side tables. Take an allocation-free upper
+    // bound first, so a MAG build pays one linear scan per body rather than
+    // five allocations.
+    let loop_scoped_locals = color_scope.iter().flatten().count();
+    if frame_limits::fits_without_measuring(func, top_locals, loops.len(), loop_scoped_locals) {
+        return;
+    }
+
+    // Locals in scope inside each block: the function-top declarations, plus,
+    // for every enclosing counted loop, its four control locals and its own
+    // body-scoped `local r<N>` line. Regions nest, so adding per loop over its
+    // region accumulates the whole enclosing nest.
+    let mut actives = vec![top_locals; func.blocks.len()];
+    let mut loop_locals: HashMap<Idx<Block>, usize> = HashMap::default();
+    for header in color_scope.iter().flatten() {
+        *loop_locals.entry(*header).or_default() += 1;
+    }
+    for (header, cl) in loops.iter() {
+        let add = frame_limits::FOR_CONTROL_LOCALS + loop_locals.get(header).copied().unwrap_or(0);
+        for &b in cl.region.iter().chain(std::iter::once(&cl.latch)) {
+            actives[raw(b) as usize] += add;
+        }
+    }
+
+    let mut emits_nothing = vec![false; func.insts.len()];
+    for id in hoist.keys() {
+        emits_nothing[raw(*id) as usize] = true;
+    }
+    for (header, cl) in loops.iter() {
+        for &id in func.blocks[*header].insts.iter().chain(func.blocks[cl.latch].insts.iter()) {
+            emits_nothing[raw(id) as usize] = true;
+        }
+    }
+    let mut results_unassigned = vec![false; func.insts.len()];
+    let mut return_replaced = vec![false; func.blocks.len()];
+    for (b, forward) in tail_forwards.iter().enumerate() {
+        let Some(tail) = forward else { continue };
+        return_replaced[b] = true;
+        if let Some(&call) = tail.suppressed.first() {
+            results_unassigned[raw(call) as usize] = true;
+        }
+    }
+    let mut fixed_arity_override = vec![None; func.insts.len()];
+    for forward in call_arg_forwards.iter().flatten() {
+        // `f(prefix.., g(..))`: only the prefix are fixed arguments of `f`, and
+        // `g`'s own results never land in locals.
+        fixed_arity_override[raw(forward.consumer) as usize] = Some(forward.prefix.len());
+        let producer = match &forward.producer {
+            TailForwardCall::Direct { call, .. } => Some(*call),
+            TailForwardCall::Value { .. } => None,
+        };
+        if let Some(call) = producer {
+            results_unassigned[raw(call) as usize] = true;
+        }
+    }
+    let mut spliced_value_ctor = vec![false; func.insts.len()];
+    for (id, inst) in func.insts.iter() {
+        spliced_value_ctor[raw(id) as usize] = value_ctor_is_spliced(ctx, func, inst);
+    }
+
+    let shape = frame_limits::EmittedShape {
+        emits_nothing: &emits_nothing,
+        results_unassigned: &results_unassigned,
+        fixed_arity_override: &fixed_arity_override,
+        return_replaced: &return_replaced,
+        spliced_value_ctor: &spliced_value_ctor,
+    };
+    let Some(overflow) = frame_limits::frame_overflow(func, rpo, &actives, &shape) else {
+        return;
+    };
+    ctx.reject(lua_name.to_string(), frame_limit_error(ws, func, &overflow));
+}
+
+/// The spanned diagnostic for a [`frame_limits::FrameOverflow`]: which Rock
+/// function, which LuaJIT limit, the emitter's count, and the wide values that
+/// are live across the statement that reaches it.
+fn frame_limit_error(
+    ws: &Workspace,
+    func: &MirFunc,
+    overflow: &frame_limits::FrameOverflow,
+) -> CompilerError {
+    let limit = overflow.limit;
+    let rock_name = func.name;
+    let mut message = format!(
+        "`{rock_name}` is too wide for LuaJIT: the emitted Lua function needs {} {}, \
+         and LuaJIT refuses to load a function over {} ({} is {}, \"{}\")",
+        overflow.count,
+        limit.subject(),
+        limit.max_loadable(),
+        limit.constant(),
+        match limit {
+            frame_limits::FrameLimit::Slots => frame_limits::LJ_MAX_SLOTS,
+            frame_limits::FrameLimit::Locals => frame_limits::LJ_MAX_LOCVAR,
+        },
+        limit.luajit_message(),
+    );
+    if overflow.at.is_some() && (overflow.cost.call_arity > 0 || overflow.cost.wire_values > 0) {
+        message.push_str(&format!(
+            "\n  {} locals are live at that statement, which needs {} more slots \
+             ({} call arguments, {} values received or returned)",
+            overflow.actives,
+            overflow.cost.slots,
+            overflow.cost.call_arity,
+            overflow.cost.wire_values,
+        ));
+    }
+    let mut contributors: Vec<String> = Vec::new();
+    for &call in &overflow.wide_calls {
+        for line in wide_call_contributors(ws, func, call) {
+            if !contributors.contains(&line) {
+                contributors.push(line);
+            }
+        }
+    }
+    contributors.truncate(3);
+    let nobox = contributors.iter().any(|c| c.contains("nobox"));
+    if !contributors.is_empty() {
+        message.push_str("\n  widest values live across a call in it:");
+    }
+    for line in &contributors {
+        message.push_str("\n    ");
+        message.push_str(line);
+    }
+    if nobox {
+        message.push_str(
+            "\n  a `nobox value` cannot be boxed automatically -- keep fewer wide values \
+             live across one call, or split this function",
+        );
+    } else {
+        message.push_str(
+            "\n  keep fewer values live across one call, or split this function",
+        );
+    }
+    let span = overflow
+        .at
+        .into_iter()
+        .chain(overflow.wide_calls.iter().copied())
+        .find_map(|at| func.inst_spans.get(at).copied())
+        .or_else(|| any_inst_span(func))
+        .unwrap_or_else(Span::unknown);
+    let mut err = CompilerError::new_with_label(
+        span,
+        format!("`{rock_name}` exceeds LuaJIT's {} limit", limit.constant()),
+    );
+    err.message = message;
+    err
+}
+
+/// The widest values on the wire of the call at `id`, as message lines. Read
+/// from the ABI plan the call lowering itself used, so the lane counts are the
+/// ones the emitted argument list actually has.
+fn wide_call_contributors(ws: &Workspace, func: &MirFunc, id: Idx<Inst>) -> Vec<String> {
+    let Some(abi) = func.call_abi_plans.get(&id) else {
+        return Vec::new();
+    };
+    let decl = abi.decl();
+    let callee = func_of(ws, decl);
+    let callee_name = callee.name;
+    let mut lines: Vec<(usize, String)> = Vec::new();
+    if let Some(widths) = abi.param_leaf_widths() {
+        let reps = abi.representation().params();
+        for (i, width) in widths.iter().copied().enumerate() {
+            if width < 2 {
+                continue;
+            }
+            let nobox = reps.get(i).is_some_and(|r| abi.rep_plan(*r).nobox());
+            let param = callee
+                .param_decls
+                .get(i)
+                .map(|p| p.name.to_string())
+                .unwrap_or_else(|| format!("#{i}"));
+            lines.push((
+                width,
+                format!(
+                    "parameter `{param}` of `{callee_name}` is {width} scalar lanes{}",
+                    if nobox { " (nobox: cannot be boxed)" } else { "" }
+                ),
+            ));
+        }
+    }
+    let result_lanes = abi.result_lanes();
+    if result_lanes > 1 {
+        let nobox = abi
+            .representation()
+            .result()
+            .is_some_and(|r| abi.rep_plan(r).nobox());
+        lines.push((
+            result_lanes,
+            format!(
+                "the return of `{callee_name}` is {result_lanes} scalar lanes{}",
+                if nobox { " (nobox: cannot be boxed)" } else { "" }
+            ),
+        ));
+    }
+    lines.sort_by(|a, b| b.0.cmp(&a.0));
+    lines.truncate(3);
+    lines.into_iter().map(|(_, line)| line).collect()
+}
+
+/// Any source span inside `func`, for a rejection with no single offending
+/// instruction. The declarations that overflow have no instruction of their
+/// own; the body's first spanned instruction still points inside the Rock
+/// function the user has to change.
+fn any_inst_span(func: &MirFunc) -> Option<Span> {
+    for (_, block) in func.blocks.iter() {
+        for &id in &block.insts {
+            if let Some(span) = func.inst_spans.get(id) {
+                return Some(*span);
+            }
+        }
+    }
+    None
 }
 
 fn func_of(ws: &Workspace, r: FuncRef) -> &Function {
@@ -3425,7 +3801,8 @@ impl Emitter<'_> {
             && !self.hoist.contains_key(&id)
     }
     fn has_state_slot(&self, name: ustr::Ustr) -> bool {
-        self.state_slots.contains_key(&name) || self.static_slots.contains_key(&name)
+        let symbol = skull_mir::mangle::symbol_of_key(name);
+        self.state_slots.contains_key(&symbol) || self.static_slots.contains_key(&symbol)
     }
 
     /// The table a mutable-global access indexes: the chunk-level cell under the
@@ -3447,6 +3824,7 @@ impl Emitter<'_> {
     }
 
     fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
+        let name = skull_mir::mangle::symbol_of_key(name);
         if let Some(&slot) = self.state_slots.get(&name) {
             push_uint(out, slot);
         } else if let Some(slot) = self.static_slots.get(&name) {
@@ -4021,7 +4399,7 @@ impl Emitter<'_> {
                     self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
-                    out.push_str(g.as_str());
+                    out.push_str(skull_mir::mangle::symbol_of_key(*g).as_str());
                 }
             }
             Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
@@ -4206,7 +4584,7 @@ impl Emitter<'_> {
                 out.push_str("] = {repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, elem.as_str());
+                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
                 out.push_str(", cap = ");
                 self.write_opnd(out, *capacity);
                 out.push_str("}, ");
@@ -4223,7 +4601,7 @@ impl Emitter<'_> {
                 out.push_str("{repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, elem.as_str());
+                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
                 out.push_str(", cap = ");
                 self.write_opnd(out, *capacity);
                 out.push('}');
@@ -4238,7 +4616,7 @@ impl Emitter<'_> {
                 out.push_str("] = {repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, elem.as_str());
+                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
                 let _ = write!(out, ", stride = {stride}, cap = ");
                 self.write_opnd(out, *capacity);
                 out.push_str("}}");
@@ -4247,7 +4625,7 @@ impl Emitter<'_> {
                 out.push_str("{repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, elem.as_str());
+                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
                 let _ = write!(out, ", stride = {stride}, cap = ");
                 self.write_opnd(out, *capacity);
                 out.push('}');
@@ -4257,7 +4635,7 @@ impl Emitter<'_> {
                 let mut first = true;
                 if let Some(name) = ty {
                     out.push_str("__ty = ");
-                    write_lua_string(out, name.as_str());
+                    write_lua_string(out, skull_mir::mangle::symbol_of_key(*name).as_str());
                     first = false;
                 }
                 for (n, id) in fields {
@@ -4281,9 +4659,7 @@ impl Emitter<'_> {
                     );
                     return;
                 };
-                if self.ctx.value_ctor_shape() == ValueCtorShape::Splice
-                    && splice_is_admissible(suffix, fields)
-                {
+                if value_ctor_is_spliced(self.ctx, self.func, inst) {
                     // The `<Name>_vt` body, written here: same table, same shared
                     // metatable, same field ORDER (so an effectful operand still
                     // evaluates where the argument list put it) -- without the
@@ -4294,12 +4670,13 @@ impl Emitter<'_> {
                         self.write_opnd(out, *id);
                         out.push_str(", ");
                     }
+                    let symbol = skull_mir::mangle::symbol_of_key(*name);
                     let _ = write!(out, "__ty = ");
-                    write_lua_string(out, name.as_str());
-                    let _ = write!(out, " }}, {})", value_struct_metatable_name(name.as_str()));
+                    write_lua_string(out, symbol.as_str());
+                    let _ = write!(out, " }}, {})", value_struct_metatable_name(symbol.as_str()));
                     return;
                 }
-                let _ = write!(out, "{name}{suffix}(");
+                let _ = write!(out, "{}{suffix}(", skull_mir::mangle::symbol_of_key(*name));
                 for (i, (_, id)) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -4317,7 +4694,7 @@ impl Emitter<'_> {
                 out.push_str("{__variant = ");
                 write_lua_string(out, tag.as_str());
                 out.push_str(", __ty = ");
-                write_lua_string(out, ty.as_str());
+                write_lua_string(out, skull_mir::mangle::symbol_of_key(*ty).as_str());
                 for id in positional {
                     out.push_str(", ");
                     self.write_opnd(out, *id);
@@ -4332,7 +4709,7 @@ impl Emitter<'_> {
                 out.push_str("{__variant = ");
                 self.write_opnd(out, *tag);
                 out.push_str(", __ty = ");
-                write_lua_string(out, ty.as_str());
+                write_lua_string(out, skull_mir::mangle::symbol_of_key(*ty).as_str());
                 for id in positional {
                     out.push_str(", ");
                     self.write_opnd(out, *id);
@@ -4345,12 +4722,12 @@ impl Emitter<'_> {
             }
 
             Inst::FfiNewArray { ctype, count, .. } => {
-                let _ = write!(out, "ffi.new(\"{ctype}[?]\", ");
+                let _ = write!(out, "ffi.new(\"{}[?]\", ", skull_mir::mangle::symbol_of_key(*ctype));
                 self.write_opnd(out, *count);
                 out.push(')');
             }
             Inst::FfiViewCast { cty, ptr } => {
-                let _ = write!(out, "ffi.cast(\"{cty}*\", ");
+                let _ = write!(out, "ffi.cast(\"{}*\", ", skull_mir::mangle::symbol_of_key(*cty));
                 self.write_opnd(out, *ptr);
                 out.push(')');
             }
@@ -4688,7 +5065,7 @@ impl Emitter<'_> {
                     self.write_state_slot(out, *name);
                     out.push_str("] = true\n");
                 } else {
-                    let _ = write!(out, "  {name} = ");
+                    let _ = write!(out, "  {} = ", skull_mir::mangle::symbol_of_key(*name));
                     self.write_opnd(out, *value);
                     out.push('\n');
                 }

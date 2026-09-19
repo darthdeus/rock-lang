@@ -13,6 +13,9 @@
 use bone_semantic::prelude::*;
 use bone_incremental::session::{changed_names, item_prints, name_shapes, Session, UpdateResult, UpdateTier};
 
+mod common;
+use common::{mid_for, type_profile};
+
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {
     skull_parser::parse_module_clean(src, Ustr::from(file))
 }
@@ -21,22 +24,12 @@ fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, Comp
 // Harness: parse + batch check
 // ---------------------------------------------------------------------------
 
-type Files = Vec<(String, String)>;
+type Files = Vec<bone_incremental::session::SessionFile>;
 
 fn files(list: &[(&str, &str)]) -> Files {
     list.iter()
-        .map(|(p, t)| (p.to_string(), t.to_string()))
+        .map(|(p, t)| bone_incremental::session::SessionFile::legacy(*p, *t))
         .collect()
-}
-
-/// `ModuleId` for a file checked through this harness. `ModuleId` is now an
-/// opaque dense index assigned by the workspace's `module_ids` interner during
-/// `semantic_pass`, so the id is recovered by looking the file path up in `ws`
-/// (files are parsed with `parse_rock_with_file(text, path)`, so a module's
-/// file == `Ustr::from(path)`). Files with no items are rejected up front (see
-/// `parse_files`), so the lookup never misses for a tracked path.
-fn mid_for(ws: &Workspace, path: &str) -> ModuleId {
-    ws.module_ids[&Ustr::from(path)]
 }
 
 /// True if `mid` is a warm stdlib module. Stdlib files are stamped
@@ -50,7 +43,8 @@ fn is_stdlib_mid(ws: &Workspace, mid: ModuleId) -> bool {
 
 fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
     let mut modules = Vec::with_capacity(files.len());
-    for (path, text) in files {
+    for f in files {
+        let (path, text) = (&f.path, &f.text);
         let module = parse_rock_with_file(text, path)?;
         assert!(
             !module.items.is_empty(),
@@ -92,24 +86,6 @@ fn diag_keys(ws: &Workspace) -> Vec<(String, usize, String)> {
     keys
 }
 
-/// Rendered type at every `stride`-th byte offset of `path` (None where
-/// `type_at` has no node). Text-anchored so it survives arena-index
-/// divergence between an incrementally updated workspace and a fresh batch
-/// one. Stride 1 = every offset; the real-project fuzz uses a coarser stride
-/// to keep wall time sane (files are tens of KB).
-fn type_profile(ws: &Workspace, path: &str, text: &str, stride: usize) -> Vec<Option<String>> {
-    let mid = mid_for(ws, path);
-    let Some(inf) = ws.inference(mid) else {
-        return vec![None; text.len().div_ceil(stride)];
-    };
-    (0..text.len())
-        .step_by(stride)
-        .map(|offset| {
-            bone_semantic::query::type_at(ws, mid, inf, offset).map(|ta| ws.render(ta.body, ta.ty))
-        })
-        .collect()
-}
-
 /// Structural equivalence of two checked workspaces over the same file set.
 /// Returns the first divergence as a human-readable description.
 fn ws_equiv(
@@ -125,7 +101,8 @@ fn ws_equiv(
         ));
     }
 
-    for (path, text) in files {
+    for f in files {
+        let (path, text) = (&f.path, &f.text);
         let lp = type_profile(left, path, text, stride);
         let rp = type_profile(right, path, text, stride);
         for (i, (l, r)) in lp.iter().zip(rp.iter()).enumerate() {
@@ -231,7 +208,7 @@ impl Harness {
     }
 
     fn with_warm(warm: Vec<skull_parser::Ast>, texts: Files, stride: usize) -> Harness {
-        let session = Session::new(warm.clone(), texts.clone()).expect("session init");
+        let session = Session::new(warm.clone(), texts.clone(), &bone_core::modules::NsAliases::default()).expect("session init");
         let h = Harness {
             session,
             warm,
@@ -247,9 +224,11 @@ impl Harness {
             .session
             .update_file(path, text)
             .unwrap_or_else(|e| panic!("update_file({path}) failed: {}", e.message));
-        match self.texts.iter_mut().find(|(p, _)| p == path) {
-            Some((_, t)) => *t = text.to_string(),
-            None => self.texts.push((path.to_string(), text.to_string())),
+        match self.texts.iter_mut().find(|f| f.path == path) {
+            Some(f) => f.text = text.to_string(),
+            None => self
+                .texts
+                .push(bone_incremental::session::SessionFile::legacy(path, text)),
         }
         self.assert_matches_batch();
         result
@@ -261,7 +240,7 @@ impl Harness {
             .session
             .remove_file(path)
             .unwrap_or_else(|e| panic!("remove_file({path}) failed: {}", e.message));
-        self.texts.retain(|(p, _)| p != path);
+        self.texts.retain(|f| f.path != path);
         self.assert_matches_batch();
         result
     }
@@ -708,6 +687,7 @@ fn itemless_file_before_others_keeps_module_ids_aligned() {
             ("empty.rock", ""),
             ("later.rock", "fn foo() -> int { 1 }\nfn use_foo() -> int { foo() }"),
         ]),
+        &bone_core::modules::NsAliases::default(),
     )
     .expect("session init must not crash on an item-less file");
 
@@ -1813,6 +1793,7 @@ fn warm_stdlib_is_never_reinferred_by_updates() {
             "main.rock",
             "fn main() { let xs = vec_new() \n xs.push(1) \n print(\"{xs[0]}\") }",
         )]),
+        &bone_core::modules::NsAliases::default(),
     )
     .expect("session with warm stdlib");
     assert!(
@@ -2449,7 +2430,7 @@ fn run_fuzz_session(seed: u64, steps: usize) {
 
     let warm = parse_rock_with_file(WARM_PRELUDE, WARM_PRELUDE_PATH).expect("warm prelude parses");
     let initial: Files = (0..model.files.len())
-        .map(|i| (FuzzModel::path(i), model.render(i)))
+        .map(|i| bone_incremental::session::SessionFile::legacy(FuzzModel::path(i), model.render(i)))
         .collect();
     let mut h = Harness::with_warm(vec![warm], initial, 1);
 
@@ -2536,7 +2517,7 @@ fn fuzz_session_real_match3() {
     );
 
     let read = |p: &String| {
-        (
+        bone_incremental::session::SessionFile::legacy(
             p.clone(),
             std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {p}: {e}")),
         )
@@ -2551,7 +2532,8 @@ fn fuzz_session_real_match3() {
     let seed = fuzz_seed();
     let mut rng = Rng::new(seed);
     for step in 0..8 {
-        let (path, original) = &originals[rng.pick(originals.len())];
+        let picked = &originals[rng.pick(originals.len())];
+        let (path, original) = (&picked.path, &picked.text);
         match rng.pick(3) {
             0 => {
                 let text = format!(
@@ -2570,7 +2552,8 @@ fn fuzz_session_real_match3() {
         }
     }
     // Leave every file back at its original text.
-    for (path, original) in &originals {
+    for f in &originals {
+        let (path, original) = (&f.path, &f.text);
         h.update(path, original);
     }
 }

@@ -19,6 +19,8 @@ mod replay_flight_tests;
 mod artifact_fingerprint_replay_tests;
 #[path = "replay_bindings_tests.rs"]
 mod replay_bindings_tests;
+#[path = "telemetry_isolation_tests.rs"]
+mod telemetry_isolation_tests;
 #[path = "action_layer_v2_landing_gaps.rs"]
 mod action_layer_v2_landing_gaps;
 #[path = "replay_restore_tests.rs"]
@@ -57,6 +59,8 @@ mod sim_allocation_census;
 mod sim_worker_differential;
 #[path = "mag_worker_product_tests.rs"]
 mod mag_worker_product_tests;
+#[path = "sim_memory_cap.rs"]
+mod sim_memory_cap;
 #[path = "sim_reload_lane.rs"]
 mod sim_reload_lane;
 #[path = "sim_worker_pool.rs"]
@@ -70,3 +74,6 @@ mod shader_corpus_oracle;
 
 #[path = "graph_update_projects.rs"]
 mod graph_update_projects;
+
+#[path = "sim_presentation_differential.rs"]
+mod sim_presentation_differential;

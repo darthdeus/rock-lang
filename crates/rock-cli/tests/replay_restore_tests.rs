@@ -1266,9 +1266,8 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
-    // The boot anchor remains available even when viewer cadence is disabled.
-    // Use an invalid future target for the refusal arm; a valid backward scrub
-    // must now be able to resimulate from boot.
+    // With WorldImage capture disabled, an invalid future target must still be
+    // refused without leaving a half-open seek.
     let refused = run_replay_dump(
         game,
         60,
@@ -1303,6 +1302,7 @@ fn live_record_rewind_matches_plain_replay_at_target() {
         &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_AUDIO_PROBE", "1"),
@@ -1416,6 +1416,7 @@ fn live_rewind_ignores_superseded_wall_clock_window() {
         runtime_frames,
         &log_s,
         &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.001"),
             ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.001"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
@@ -1447,6 +1448,7 @@ fn live_rewind_after_body_reload_uses_boot_only() {
         140,
         &log_s,
         &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_RELOAD_AT_FRAME", "60"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "100"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "20"),
@@ -1471,6 +1473,7 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
         120,
         &log_s,
         &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_RELOAD_AT_FRAME", "60"),
             ("STONE_RELOAD_FULL", "1"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "90"),
@@ -2024,6 +2027,7 @@ fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
             &[
                 ("ROCK_TEST_SEED", "42"),
                 ("STONE_LIVE_REWIND", "1"),
+                ("STONE_KEYFRAME_INTERVAL", "10"),
                 ("STONE_LIVE_REWIND_UNSUPPORTED", mode),
                 ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
                 ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
@@ -2087,6 +2091,7 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
             &[
                 ("ROCK_TEST_SEED", "42"),
                 ("STONE_LIVE_REWIND", "1"),
+                ("STONE_KEYFRAME_INTERVAL", "10"),
                 ("STONE_LIVE_REWIND_UNSUPPORTED", mode),
                 ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
                 ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
@@ -2146,6 +2151,7 @@ fn live_admission_failure_clears_partial_history() {
         &log_s,
         &[
             ("ROCK_TEST_SEED", "42"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_LIVE_REWIND_UNSUPPORTED", "foreign"),
             ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "30"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "70"),
@@ -2177,6 +2183,7 @@ fn live_record_rewind_admits_supported_late_state() {
     let env: &[(&str, &str)] = &[
         ("ROCK_TEST_SEED", "42"),
         ("STONE_LIVE_REWIND", "1"),
+        ("STONE_KEYFRAME_INTERVAL", "10"),
         ("STONE_LIVE_REWIND_UNSUPPORTED", "supported"),
         ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
         ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
@@ -2365,6 +2372,7 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
         game, 80, &rewound_log,
         &[
             ("STONE_OPEN_LIVE_TIMELINE_AT_FRAME", "5"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
         ],
@@ -2379,22 +2387,29 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
 }
 
 #[test]
-fn ordinary_recording_keeps_one_boot_anchor_without_timeline_arming() {
+fn ordinary_recording_captures_no_world_image_by_default() {
     let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("default-anchor.replay").to_string_lossy().into_owned();
-    let state = run_record_dump(
-        "bitgun",
-        30,
-        &log,
-        &[("STONE_KEYFRAME_INTERVAL", "1")],
-    );
+    let log = dir.path().join("default-no-world-image.replay").to_string_lossy().into_owned();
+    let state = run_record_dump("bitgun", 30, &log, &[]);
     let diag = &state["__stone_diag"];
-    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1), "default recording must admit live rewind: {diag}");
-    assert_eq!(diag["STONE_KEYFRAME_BOOT_CAPTURES"].as_i64(), Some(1), "boot admission must have one capture: {diag}");
-    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "ordinary recording must retain only its boot anchor: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(0), "default recording must not arm WorldImage rewind: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_BOOT_CAPTURES"].as_i64(), Some(0), "default recording must not capture a boot WorldImage: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(0), "ordinary recording must retain no WorldImages: {diag}");
     assert_eq!(diag.get("STONE_KEYFRAME_CADENCE_CAPTURES").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "live recording must not pay periodic capture cost: {diag}");
     assert_eq!(diag.get("STONE_KEYFRAME_RECORDING_PERIODIC_CALLS").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "the live runner must not call the periodic authority: {diag}");
     assert!(diag.get("REPLAY_TIMELINE_DRAWS").is_none(), "the unopened timeline must not draw: {diag}");
+}
+
+#[test]
+fn ordinary_replay_captures_no_world_image_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("default-replay-no-world-image.replay").to_string_lossy().into_owned();
+    let _ = run_record_dump("bitgun", 30, &log, &[]);
+    let state = run_replay_dump("bitgun", 30, &log, &[]);
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["STONE_KEYFRAME_INIT_COUNT"].as_i64(), Some(0), "ordinary replay must not capture a boot WorldImage: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(0), "ordinary replay must retain no WorldImages: {diag}");
+    assert_eq!(diag.get("STONE_KEYFRAME_CADENCE_CAPTURES").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "ordinary replay must not capture cadence WorldImages: {diag}");
 }
 
 #[test]
@@ -2412,7 +2427,8 @@ fn live_recording_without_timeline_has_zero_periodic_captures_even_with_old_cade
         ],
     );
     let diag = &state["__stone_diag"];
-    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "old live cadence settings must not create a second mechanism: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(0), "old live cadence settings must not opt into WorldImage capture: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(0), "old live cadence settings must leave rewind disarmed: {diag}");
     assert_eq!(diag.get("STONE_KEYFRAME_CADENCE_CAPTURES").and_then(serde_json::Value::as_i64).unwrap_or(0), 0, "no timeline use means no periodic WorldImage captures: {diag}");
 }
 
@@ -2429,7 +2445,8 @@ fn replay_picker_live_action_opens_history_without_indexing_it() {
     let diag = &state["__stone_diag"];
     assert_eq!(diag["STONE_LIVE_TIMELINE_OPEN"].as_i64(), Some(1), "the replay picker action must open the live timeline: {diag}");
     assert!(diag["REPLAY_TIMELINE_DRAWS"].as_i64().is_some_and(|n| n > 0), "opening the live timeline must expose its retained history: {diag}");
-    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1), "opening the timeline must not pre-index the recording: {diag}");
+    assert_eq!(diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(0), "opening the timeline must not capture a WorldImage: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(0), "opening the timeline alone must not arm rewind: {diag}");
 }
 
 #[test]
@@ -2492,7 +2509,7 @@ fn second_seek_restores_from_the_nearest_lazily_generated_keyframe() {
 }
 
 #[test]
-fn boot_image_refusal_does_not_stop_default_recording() {
+fn world_image_opt_in_refusal_does_not_stop_recording() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("boot-refusal-recording.replay").to_string_lossy().into_owned();
     let frames = 40;
@@ -2500,7 +2517,11 @@ fn boot_image_refusal_does_not_stop_default_recording() {
         "survivors",
         frames,
         &log,
-        &[("ROCK_TEST_SEED", "42"), ("STONE_LIVE_REWIND_UNSUPPORTED", "foreign")],
+        &[
+            ("ROCK_TEST_SEED", "42"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_LIVE_REWIND_UNSUPPORTED", "foreign"),
+        ],
     );
     let diag = &state["__stone_diag"];
     assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(0), "the unsupported boot anchor must report unavailable rewind: {diag}");
@@ -2576,6 +2597,7 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
         game, 120, &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_CHECKPOINT_INTERVAL", "5"),
             ("STONE_RESIZE_AT_FRAME", "30"),      // a resize event past T
             ("STONE_RESIZE_W", "1000"),
@@ -2619,11 +2641,11 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
         );
     }
     assert_eq!(
-        diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1),
-        "only the keyframes at or before T survive: {diag}"
+        diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(3),
+        "only boot, tick-10, and tick-20 keyframes survive T=25: {diag}"
     );
     assert_eq!(
-        diag["STONE_BRANCH_IMAGES_AFTER"].as_i64(), Some(1),
+        diag["STONE_BRANCH_IMAGES_AFTER"].as_i64(), Some(3),
         "branch invalidation must release discarded keyframe images: {diag}"
     );
     assert_eq!(
@@ -2663,6 +2685,7 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
         game, 120, &replayable_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_CHECKPOINT_INTERVAL", "5"),
             ("STONE_RESIZE_AT_FRAME", "10"),
             ("STONE_RESIZE_W", "1000"),
@@ -2720,6 +2743,7 @@ fn draw_phase_branch_while_paused_commits_at_displayed_tick() {
         &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_DRAW_AT_FRAME", "70"),
@@ -2752,6 +2776,7 @@ fn draw_phase_branch_while_playing_includes_the_request_frame_tick() {
         &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_LIVE_PLAY_AT_FRAME", "70"),
@@ -2782,6 +2807,7 @@ fn branch_projects_game_input_authority_and_drops_replay_latches() {
             ("STONE_INPUT_PROBE_KEY", "input_probe"),
             ("STONE_INPUT_PROBE_MOUSE_BUTTON", "1"),
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_LIVE_PLAY_AT_FRAME", "70"),
@@ -2878,6 +2904,7 @@ fn resume_live_here_persists_the_branched_mag_world_not_the_discarded_future() {
             ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
             ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", &bindings_history_s),
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
             ("STONE_BRANCH_AT_FRAME", "70"),
@@ -3016,6 +3043,12 @@ fn recorded_game_input_is_projected_into_replay_authority() {
     let text = std::fs::read_to_string(&log_s).unwrap();
     let mut tick = 0;
     let rewritten = text.lines().map(|line| {
+        if line.starts_with("a 10 ") {
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 15, "v17 input detail row must carry text: {line}");
+            fields[14] = "4dc3bd74696e61";
+            return fields.join(" ");
+        }
         if !line.starts_with("t ") { return line.to_string() }
         let mut fields: Vec<&str> = line.split_whitespace().collect();
         if tick == 10 { fields[6] = "input_probe" }
@@ -3024,10 +3057,15 @@ fn recorded_game_input_is_projected_into_replay_authority() {
     }).collect::<Vec<_>>().join("\n");
     std::fs::write(&log_s, rewritten + "\n").unwrap();
 
-    let replayed = run_replay_dump("bitgun", 40, &log_s, &[("STONE_INPUT_PROBE_KEY", "input_probe")]);
+    let replayed = run_replay_dump("bitgun", 40, &log_s, &[
+        ("STONE_INPUT_PROBE_KEY", "input_probe"),
+        ("STONE_INPUT_PROBE_TEXT", "M\u{fd}tina"),
+    ]);
     let diag = &replayed["__stone_diag"];
     assert!(diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0) > 0, "recorded held input must reach replay game logic: {diag}");
     assert!(diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0) > 0, "recorded input must produce its replay press edge: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_TEXT_INPUT"].as_i64(), Some(1),
+        "recorded UTF-8 text must reach replay game logic once: {diag}");
 }
 
 #[test]
@@ -3128,6 +3166,7 @@ fn screenshot_after_render_skipped_seek_reaches_its_frame_budget() {
         &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
         ],
@@ -3158,6 +3197,7 @@ fn a_failed_branch_rewrite_leaves_the_future_intact() {
         game, 140, &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_BRANCH_FAIL", "rewrite"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
@@ -3211,6 +3251,7 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
     let live = run_record_dump(
         game, 200, &log_s,
         &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
@@ -3230,7 +3271,7 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
         horizon, recorded_tick_lines(&log_s) as i64,
         "the second rewind's horizon must be the branched history, not the discarded future: {diag}"
     );
-    assert_eq!(diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64(), Some(0), "without a prior live seek the second rewind restores from boot: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64(), Some(20), "the second rewind restores from the nearest surviving lazy keyframe: {diag}");
     assert_eq!(current_tick(&live), 55, "the second rewind must land at its target: {diag}");
 }
 
@@ -3243,6 +3284,7 @@ fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
         90,
         &log_s,
         &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
@@ -3319,6 +3361,7 @@ fn playback_jumps_clear_real_stone_transients_and_keep_persistent_state() {
             ("STONE_QUIET", "0"),
             ("STONE_AUDIO_STUB", "0"),
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
         ],
@@ -3461,6 +3504,7 @@ fn replay_reports_its_own_costs() {
         game, 120, &branch_log,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_SAVE_REPRO_AT_FRAME", "41"),

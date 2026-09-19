@@ -115,6 +115,48 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
+/// One fragment of a modules-v1 package fixture (plan 2.2: fragment = file,
+/// logical module = its `mod` header). The FIRST fragment is the one emission
+/// starts from, so it owns `main`.
+pub struct V1Fragment<'a> {
+    pub file: &'a str,
+    pub src: &'a str,
+}
+
+/// A v1 package's workspace over the real stdlib (which stays legacy, as it is
+/// in a real build). Each fragment parses under the v1 dialect and carries the
+/// package tag the host's graph stamps, so its definitions register under their
+/// DefKeys (`<package>::<module path>::<name>`) instead of bare names.
+pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
+    let mut modules = STDLIB.clone();
+    for fragment in fragments {
+        let mut module = skull_parser::parse_module_clean_with_dialect(
+            fragment.src,
+            Ustr::from(fragment.file),
+            skull_parser::Dialect::V1,
+        )
+        .expect("parse");
+        module.package = Some(skull_parser::PackageTag {
+            id: 0,
+            self_name: package.to_string(),
+        });
+        modules.push(module);
+    }
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
+/// Full MIR emit for a v1 package, rooted at its first fragment.
+pub fn emit_v1_package(package: &str, fragments: &[V1Fragment]) -> skull::mir_emit::MirEmit {
+    let ws = ws_v1_package(package, fragments);
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from(fragments[0].file))
+        .expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+}
+
 /// Like [`try_emit_module`] but with `Workspace.comptime_inputs` set before
 /// emission -- the seam the host CLI uses for `build_var`/`embed_string`
 /// (docs/comptime-plan.md tier 1).
@@ -158,6 +200,50 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
+/// Like [`try_emit_module`] but with LuaJIT's frame-limit rejection OFF, so the
+/// emitted Lua of a body the check rejects is still produced. The
+/// boundary-agreement test needs it: without the Lua there is nothing to ask
+/// `loadfile` about, and "the compiler rejected it" would be unfalsifiable.
+pub fn emit_module_without_frame_limits(src: &str) -> String {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_full_with_shapes(
+        &ws,
+        mid,
+        skull::mir_emit::ShapeOverrides {
+            frame_limits: Some(false),
+            ..Default::default()
+        },
+    )
+    .map(|(emit, _cache)| emit.lua)
+    .expect("emit with the frame-limit check off")
+}
+
+/// Whether the bundled LuaJIT can LOAD `prog` (parse only -- the chunk is never
+/// run), and the parse error when it cannot. This is the oracle the frame-limit
+/// model is measured against.
+pub fn luajit_loads(prog: &str, tag: &str) -> Result<(), String> {
+    use std::process::Command;
+    let path = std::env::temp_dir().join(format!("skull_load_{}_{tag}.lua", std::process::id()));
+    std::fs::write(&path, prog).expect("write program");
+    let out = Command::new("luajit")
+        .arg("-e")
+        .arg(format!(
+            "local f, e = loadfile({:?}); if not f then io.stderr:write(e) os.exit(1) end",
+            path.to_string_lossy()
+        ))
+        .output()
+        .expect("spawn luajit");
+    let _ = std::fs::remove_file(&path);
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
 }
 
 /// The body of the emitted definition named (or prefixed by) `name`. `name` is

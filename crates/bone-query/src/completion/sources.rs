@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
 
 use bone_incremental::session::Session;
-use bone_semantic::prelude::{InferenceResult, ModuleId, TyId, Workspace};
+use bone_semantic::prelude::{
+    is_intrinsic_key, is_intrinsic_key_in, InferenceResult, ModuleId, TyId, Workspace,
+};
 use ustr::Ustr;
 
 use crate::backend::{
@@ -121,7 +123,7 @@ fn fieldref_slot_owner(
     let p = f.param_decls.get(pi)?;
     let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
         TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if matches!(n.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef")
+            if is_intrinsic_key_in(n, &["FieldRef", "ReadFieldRef", "WriteFieldRef"])
                 && params.len() == 2 =>
         {
             let mut it = params.into_iter();
@@ -1519,7 +1521,7 @@ fn build_member_items(
         // always followed by `.unwrap()`. Rank `get` first, and offer the whole
         // `get().unwrap()` chain (matches a `getu`/`getunwrap` prefix, which the
         // bare `get` method can't since it filters on `starts_with`).
-        if recv_struct.is_some_and(|s| s.as_str() == "Entity") {
+        if recv_struct.is_some_and(|s| is_intrinsic_key(s, "Entity")) {
             for it in items.iter_mut() {
                 if it.label == "get" {
                     it.sort_text = Some(RankKey { len: RankKey::len_key(9999, "get".len()), ..Default::default() }.encode("get"));

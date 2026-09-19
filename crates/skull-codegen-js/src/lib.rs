@@ -892,10 +892,10 @@ function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 /// The RNG runtime: mulberry32 over a single 32-bit state word (`>>> 0` keeps it
 /// unsigned; `Math.imul` for the 32-bit multiplies) -- zero allocation. The fn
 /// surface mirrors the Lua splitmix prelude (`crates/skull/src/lib.rs`):
-/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` (the single-word replay
-/// serialization surface), and the draw. Streams differ per backend by doctrine
+/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` for gameplay, and
+/// `__rock_presentation_rng_*` for presentation. Streams differ per backend by doctrine
 /// (Lua splitmix64, JS mulberry32) -- bit-parity is a non-goal; the SEMANTIC
-/// (seedable + deterministic + single serializable stream) is upheld. Engine-
+/// (seedable + deterministic + independent serializable streams) is upheld. Engine-
 /// agnostic: seeding is done by the driver glue (it reads `ROCK_TEST_SEED`), not
 /// here. `random()` draws one 32-bit word / 2^32 in [0,1); `random_int(min,max)`
 /// is `[min,max)` exclusive (`r=max-min`, `r<=0 -> min`), single draw for
@@ -929,6 +929,35 @@ function __rock_random_int(min, max) {
   if (r <= 0) return min;
   if (r <= 4294967296) return min + (__rock_rng_next32() % r);
   var hi = __rock_rng_next32(), lo = __rock_rng_next32();
+  return min + ((hi * 2097152 + (lo >>> 11)) % r);
+}
+var __rock_presentation_rng_state = 0;
+function __rock_presentation_rng_current() {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session
+      && __rock_active_session.__rock_presentation_rng_state !== null) return __rock_active_session.__rock_presentation_rng_state;
+  return __rock_presentation_rng_state;
+}
+function __rock_presentation_rng_store(s) {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_presentation_rng_state = s >>> 0;
+  else __rock_presentation_rng_state = s >>> 0;
+}
+function __rock_presentation_rng_seed(s) { __rock_presentation_rng_store(s); }
+function __rock_presentation_rng_state_get() { return __rock_presentation_rng_current(); }
+function __rock_presentation_rng_state_set(s) { __rock_presentation_rng_store(s); }
+function __rock_presentation_rng_next32() {
+  var state = (__rock_presentation_rng_current() + 0x6D2B79F5) >>> 0;
+  __rock_presentation_rng_store(state);
+  var t = state;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+  return (t ^ (t >>> 14)) >>> 0;
+}
+function __rock_presentation_random() { return __rock_presentation_rng_next32() / 4294967296; }
+function __rock_presentation_random_int(min, max) {
+  var r = max - min;
+  if (r <= 0) return min;
+  if (r <= 4294967296) return min + (__rock_presentation_rng_next32() % r);
+  var hi = __rock_presentation_rng_next32(), lo = __rock_presentation_rng_next32();
   return min + ((hi * 2097152 + (lo >>> 11)) % r);
 }
 "#;
@@ -3195,7 +3224,7 @@ function __rock_web_arm_raf(frameFn) {
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
 pub const JS_SESSION_RUNTIME: &str = r#"
 function __rock_session_new(schema_id) {
-  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null };
+  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null, __rock_presentation_rng_state: null };
 }
 function __rock_session_activate(session) {
   if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
@@ -3523,7 +3552,8 @@ function __rock_state_image_capture(kind, tick) {
   var id = ++__rock_state_image_next_id;
   var image = { id: id, kind: kind, tick: tick, schema_id: __rock_state_schema_id,
     layouts: Object.create(null), entries: Object.create(null), members: Object.create(null),
-    rng_state: __rock_active_session.__rock_rng_state };
+    rng_state: __rock_active_session.__rock_rng_state,
+    presentation_rng_state: __rock_active_session.__rock_presentation_rng_state };
   __ROCK_STATE_IMAGE_PLAN.entries.forEach(function (entry) { image.layouts[entry.identity] = entry.layout; });
   var seen = new Map();
   __ROCK_STATE_SCHEMA.forEach(function (entry) {
@@ -3568,6 +3598,7 @@ function __rock_state_image_materialize(image_id, kind) {
   __rock_state_image_validate_layouts(image);
   var candidate = __rock_session_new(image.schema_id);
   candidate.__rock_rng_state = image.rng_state;
+  candidate.__rock_presentation_rng_state = image.presentation_rng_state;
   var seen = new Map();
   var source = __rock_active_session;
   __ROCK_STATE_SCHEMA.forEach(function (entry) {
@@ -3652,6 +3683,8 @@ function __rock_state_image_session_commit(session_id) {
     __rock_session_activate(candidate);
     if (candidate.__rock_rng_state !== null && candidate.__rock_rng_state !== undefined
         && typeof __rock_rng_state_set === "function") __rock_rng_state_set(candidate.__rock_rng_state);
+    if (candidate.__rock_presentation_rng_state !== null && candidate.__rock_presentation_rng_state !== undefined
+        && typeof __rock_presentation_rng_state_set === "function") __rock_presentation_rng_state_set(candidate.__rock_presentation_rng_state);
     if (old_id >= 0 && old_id !== session_id) delete __rock_state_image_sessions[old_id];
     return true;
   } catch (e) {
@@ -3666,6 +3699,8 @@ function __rock_state_image_session_activate(session_id) {
   __rock_session_activate(session);
   if (session.__rock_rng_state !== null && session.__rock_rng_state !== undefined
       && typeof __rock_rng_state_set === "function") __rock_rng_state_set(session.__rock_rng_state);
+  if (session.__rock_presentation_rng_state !== null && session.__rock_presentation_rng_state !== undefined
+      && typeof __rock_presentation_rng_state_set === "function") __rock_presentation_rng_state_set(session.__rock_presentation_rng_state);
   return true;
 }
 function __rock_state_image_current_session() {

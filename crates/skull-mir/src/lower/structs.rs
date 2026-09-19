@@ -169,7 +169,7 @@ impl Builder<'_> {
         name: Ustr,
         mut fields: Vec<(Ustr, Idx<Inst>)>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if name.as_str() != "NativeBuffer" {
+        if !bone_semantic::prelude::is_intrinsic_key(name, "NativeBuffer") {
             return Ok(fields);
         }
         // The element comes from the literal's own inferred type, the same
@@ -346,6 +346,15 @@ impl Builder<'_> {
             self.ty_node(rt),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if self.is_value_struct(name)
         )
+    }
+
+    /// The fn-typed field a call with first argument `recv` goes through, if
+    /// any. The field is named as the method was WRITTEN (`Body::
+    /// method_names`): a v1 callee's name is a DefKey or an alias target,
+    /// never the field. A call written by name keeps its callee name.
+    pub(crate) fn fn_field_of_call(&self, recv: Idx<Expr>, callee: Ustr) -> Option<Ustr> {
+        let field = self.body.method_names.get(&recv).copied().unwrap_or(callee);
+        self.struct_field_is_fn(recv, field).then_some(field)
     }
 
     /// Whether `recv`'s static type is a struct with a fn-typed field named
@@ -620,74 +629,21 @@ impl Builder<'_> {
         ))
     }
 
+    /// The box `materialize(v)` asks for: the ordinary whole-value pack, with
+    /// every ctor it mints marked EXPLICIT so the guarantee's verifier lets it
+    /// through. Routing it through `pack` rather than a second recursion is what
+    /// gives the explicit box the tiers the implicit one already had -- the
+    /// GC-table, leaf-table and flat-enum arms.
+    ///
+    /// An ABSENT value has no leaves to build from -- the ctor would get nil per
+    /// field and fail the cdata conversion -- so a presence-carrying group
+    /// branches: nil when absent, the ctor when present. The branch is legal
+    /// HERE precisely because it is not legal in `repack_bound_next_element`:
+    /// there the present arm would be an implicit materialization the mark
+    /// forbids, while `materialize` IS the authorized box, so building one is
+    /// the request.
     pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
-        match repr {
-            ValueRepr::Scalar(value) => Ok(value),
-            ValueRepr::Tuple { parts, .. } => {
-                let vs = parts
-                    .into_iter()
-                    .map(|p| self.materialize_repr(p))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(self.emit_cur(Inst::MakeTuple(vs)))
-            }
-            // An ABSENT value has no leaves to build from -- the ctor would get
-            // nil per field and fail the cdata conversion -- so a presence-carrying
-            // group branches: nil when absent, the ctor when present.
-            //
-            // The branch is legal HERE precisely because it is not legal in
-            // `repack_bound_next_element`: there the present arm would be an
-            // implicit materialization the mark forbids, while `materialize` IS
-            // the authorized box, so building one is the request.
-            ValueRepr::Group { name, parts, present: Some(present) } => {
-                let result = self.f.new_cell(None);
-                let absent_bb = self.f.new_block();
-                let present_bb = self.f.new_block();
-                let join = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch { cond: present, then_bb: present_bb, else_bb: absent_bb },
-                );
-
-                self.cur = absent_bb;
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                self.emit_cur(Inst::Store { cell: result, value: nil });
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = present_bb;
-                let boxed = self.materialize_group(name, parts)?;
-                self.emit_cur(Inst::Store { cell: result, value: boxed });
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = join;
-                Ok(self.emit_cur(Inst::Load(result)))
-            }
-            ValueRepr::Group { name, parts, .. } => self.materialize_group(name, parts),
-        }
-    }
-
-    fn materialize_group(
-        &mut self,
-        name: Ustr,
-        parts: Vec<ValueRepr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let representation = self.nominal_value_representation(name)?;
-        let names = struct_field_names(self.ws, name);
-        let fields = parts
-            .into_iter()
-            .enumerate()
-            .map(|(i, part)| -> Result<(Ustr, Idx<Inst>), CompilerError> {
-                let field = *names
-                    .get(i)
-                    .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
-                Ok((field, self.materialize_repr(part)?))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(self.emit_cur(Inst::MaterializeValueStruct {
-            name,
-            representation,
-            form: ValueCtorForm::Declared,
-            fields,
-        }))
+        self.pack_maybe_absent_boxed(repr, BoxKind::Explicit)
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
@@ -913,8 +869,7 @@ impl Builder<'_> {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
 
-        let repr = self.lower_expr_repr(u_e)?;
-        let leaves = self.repr_to_leaves_bundle(&repr)?;
+        let leaves = self.uniform_block_leaves(u_e, struct_name)?;
         // `uniform_block_checked` already proved the two walkers agree on the
         // leaf PATH sequence, so this can only differ if the repr handed back a
         // different leaf count than the shape describes.
@@ -934,6 +889,30 @@ impl Builder<'_> {
             self.emit_uniform_leaf_store(fv, iv, *leaf, store);
         }
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// The leaves of a uniform-block argument, whatever WIRE its expression
+    /// arrived on.
+    ///
+    /// A uniform block's packing is a property of its TYPE
+    /// (`docs/luajit-wide-value-abi.md` gate 4), so the leaf shape comes from
+    /// the nominal rather than from the argument's `RepPlan`. It has to: an
+    /// ordinary `value` wider than the ABI cut crosses a Rock-to-Rock call as
+    /// one boxed slot, and that slot's plan is `Opaque` -- it carries no leaf
+    /// list of its own, exactly as a global's boxed cdata does on the path
+    /// just above. Reading the box field by field is what `repr_to_leaves_shape`
+    /// already does for every other boxed source.
+    fn uniform_block_leaves(
+        &mut self,
+        u_e: Idx<Expr>,
+        struct_name: Ustr,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let repr = self.lower_expr_repr(u_e)?;
+        if self.scx.rep_arena().value_shape(repr.representation()).is_some() {
+            return self.repr_to_leaves_bundle(&repr);
+        }
+        let shape = self.nominal_rep_shape_required(struct_name, false)?;
+        self.repr_to_leaves_shape(repr.value(), &shape)
     }
 
     /// One std140 slot of a uniform block: a direct typed store of `leaf`
@@ -1040,8 +1019,7 @@ impl Builder<'_> {
         };
         let packet = uniform_values_return_shape(self.ws, block_name)
             .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
-        let repr = self.lower_expr_repr(*u_e)?;
-        let leaves = self.repr_to_leaves_bundle(&repr)?;
+        let leaves = self.uniform_block_leaves(*u_e, struct_name)?;
         let expected: Vec<crate::gpu_layout::WireKind> = members
             .iter()
             .flat_map(|(_, kind)| std::iter::repeat(*kind).take(kind.leaf_suffixes().len()))
@@ -1199,7 +1177,9 @@ impl Builder<'_> {
             // INTERNED singleton table (emitted by `enum_runtime_defs`): the
             // enum still has payload variants, so its values stay tables, and the
             // singleton is reference-equal across uses + usable as a Map key.
-            let g = Ustr::from(format!("__rock_enum_{enum_name}_{variant}").as_str());
+            let g = Ustr::from(
+                format!("__rock_enum_{}_{variant}", crate::mangle::symbol_of_key(enum_name)).as_str(),
+            );
             return Ok(self.emit_cur(Inst::Global(g)));
         }
         let (positional, named) = match args {

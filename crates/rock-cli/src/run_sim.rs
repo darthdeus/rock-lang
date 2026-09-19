@@ -82,6 +82,14 @@ fn active_sim_renderer(project_dir: &Path) -> &'static str {
 /// `ROCK_SIM_TIMEOUT_SECS` for a genuinely long-running sim.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+/// Resident-plus-swap ceiling for one sim child, in MB. A sim that loops
+/// while allocating grows until the machine's OOM killer picks a victim, and
+/// that victim's cgroup can take unrelated processes down with it; the
+/// wall-clock watchdog is far too slow to stop it (one looping sim reached
+/// ~25 GB inside the 300 s timeout, 2026-09-18). A normal MAG sim child peaks
+/// under 3 GB. `ROCK_SIM_MEMORY_MB` overrides; `0` disables the cap.
+const DEFAULT_MEMORY_CAP_MB: u64 = 8192;
+
 #[derive(Clone, Debug, PartialEq)]
 struct AllocationCensus {
     build_sha: String,
@@ -176,6 +184,43 @@ fn sim_timeout_secs() -> u64 {
         },
         Err(_) => DEFAULT_TIMEOUT_SECS,
     }
+}
+
+fn sim_memory_cap_mb() -> Option<u64> {
+    match std::env::var("ROCK_SIM_MEMORY_MB") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(0) => None,
+            Ok(n) => Some(n),
+            Err(_) => {
+                log::warn!(target: "SIM",
+                    "ROCK_SIM_MEMORY_MB=`{v}` is not a nonnegative integer; \
+                     using {DEFAULT_MEMORY_CAP_MB} MB");
+                Some(DEFAULT_MEMORY_CAP_MB)
+            }
+        },
+        Err(_) => Some(DEFAULT_MEMORY_CAP_MB),
+    }
+}
+
+/// Resident plus swapped memory of a live process, in MB. Swap counts: the
+/// looping sim that set the cap held 20 of its 25 GB in swap.
+#[cfg(target_os = "linux")]
+fn process_memory_mb(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let mut kb = 0u64;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:").or_else(|| line.strip_prefix("VmSwap:")) {
+            kb += rest.trim().trim_end_matches("kB").trim().parse::<u64>().ok()?;
+        }
+    }
+    Some(kb / 1024)
+}
+
+// Only Linux exposes this cheaply (/proc); elsewhere the cap is not enforced
+// and the wall-clock watchdog remains the only bound.
+#[cfg(not(target_os = "linux"))]
+fn process_memory_mb(_pid: u32) -> Option<u64> {
+    None
 }
 
 /// Split a `--sim` value on `,` into chain parts. Empty parts dropped,
@@ -3969,6 +4014,8 @@ fn run_worker(
     };
 
     let timeout = Duration::from_secs(sim_timeout_secs());
+    let memory_cap_mb = sim_memory_cap_mb();
+    let mut memory_error: Option<SiteMessage> = None;
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
     let mut reload_ledger = ReloadLedger::default();
@@ -3998,6 +4045,20 @@ fn run_worker(
                     let _ = child.kill();
                     let s = child.wait()?;
                     break (s, true);
+                }
+                if let (Some(cap), Some(used)) = (memory_cap_mb, process_memory_mb(child.id())) {
+                    if used > cap {
+                        let _ = child.kill();
+                        let s = child.wait()?;
+                        memory_error = Some(SiteMessage {
+                            message: format!(
+                                "sim child exceeded its memory cap of {cap} MB ({used} MB resident \
+                                 plus swap) and was killed; override with ROCK_SIM_MEMORY_MB"
+                            ),
+                            site: String::new(),
+                        });
+                        break (s, false);
+                    }
                 }
                 // Service mid-sim reload_edit requests while waiting; the 50ms
                 // recv timeout doubles as the child poll interval. Disconnected
@@ -4240,6 +4301,7 @@ fn run_worker(
         }
         if i == blamed {
             summary.errors.extend(std::mem::take(&mut reload_errors));
+            summary.errors.extend(memory_error.take());
             if reload_summary.requests > 0 {
                 summary.reload_ledger = Some(reload_summary);
             }

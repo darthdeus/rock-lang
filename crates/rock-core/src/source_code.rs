@@ -8,6 +8,26 @@ use crate::prelude::*;
 /// path, and `"<unknown>".into()` re-hashes the ustr interner each time.
 static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr("<unknown>"));
 
+/// Source dialect of one file. Legacy is today's grammar and flat lookup;
+/// `V1` opts a package into the modules-v1 grammar (`::` paths, `mod`/`use`,
+/// visibility). Selected per package by its stick.toml
+/// (`[language] modules = "v1"`), never per file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Dialect {
+    #[default]
+    Legacy,
+    V1,
+}
+
+/// The package a file belongs to, minted by the host's PackageGraph.
+/// `id` is dense and stable within one graph build; `self_name` is the
+/// manifest name with `-` normalized to `_`, case preserved.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PackageTag {
+    pub id: u32,
+    pub self_name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SourceFile {
     pub module_id: ModuleId,
@@ -17,6 +37,11 @@ pub struct SourceFile {
     pub is_test: bool,
     pub is_test_util: bool,
     pub used_packages: Vec<String>,
+    /// Owning package and source dialect, stamped by the loader that resolved
+    /// the package graph. `None`/`Legacy` for files loaded outside a package
+    /// (standalone scripts, editor synthetic sources).
+    pub package: Option<PackageTag>,
+    pub dialect: Dialect,
 }
 
 /// Build a `SourceFile` from an on-disk path + already-read contents. The
@@ -36,6 +61,8 @@ pub fn source_file_from_path_and_contents(
         is_test: false,
         is_test_util: false,
         used_packages: vec![],
+        package: None,
+        dialect: Dialect::Legacy,
     }
 }
 

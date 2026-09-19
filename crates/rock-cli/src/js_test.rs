@@ -606,7 +606,12 @@ pub(crate) fn try_emit_js_program_project_cached(
 /// to Rock null (`undefined -> null`), matching `os.getenv`.
 const NODE_RNG_ENV_GLUE: &str = r#"
 function __rock_env_var(n) { var v = process.env[n]; return v === undefined ? null : v; }
-(function() { var s = Number(process.env.ROCK_TEST_SEED); __rock_rng_seed(Number.isFinite(s) ? s : Date.now()); })();
+(function() {
+  var s = Number(process.env.ROCK_TEST_SEED);
+  var base = Number.isFinite(s) ? s : Date.now();
+  __rock_rng_seed(base);
+  __rock_presentation_rng_seed(base + 10007);
+})();
 "#;
 
 /// Assemble the streaming run program: the same runtime prelude set/order as the

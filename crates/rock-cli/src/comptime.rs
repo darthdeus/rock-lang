@@ -168,6 +168,10 @@ pub fn inputs_for_project_with_config(
 
     let mut inputs = ComptimeInputs::default();
     inputs.channel = resolved.channel;
+    inputs.modules_mode = match cfg.dialect() {
+        rock_core::source_code::Dialect::V1 => "v1".to_string(),
+        rock_core::source_code::Dialect::Legacy => "legacy".to_string(),
+    };
     inputs.volatile_vars = resolved
         .volatile_vars
         .into_iter()

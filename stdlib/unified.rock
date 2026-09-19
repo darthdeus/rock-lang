@@ -1856,6 +1856,27 @@ inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     for i = 1, n * stride do data[i] = sorted[i] end
 """
 
+// The strided twin of `__rock_col_sort_leaves`: a key fn over a `nobox` row
+// takes the row's leaves, in row order, so no element is built. Leaves are
+// copied with explicit bounds because a raw row may hold nil.
+@nomangle inline(lua) fn __rock_stride_sort_leaves(vec: any, key_fn: any, stride: int) = """
+    local n, data = vec.len or 0, vec._data
+    local order = {}
+    for i = 1, n do order[i] = i end
+    local function key_at(row)
+        local base = (row - 1) * stride
+        return key_fn(unpack(data, base + 1, base + stride))
+    end
+    table.sort(order, function(a, b) return key_at(a) < key_at(b) end)
+    local sorted = {}
+    for row = 1, n do
+        local source = (order[row] - 1) * stride
+        local target = (row - 1) * stride
+        for j = 1, stride do sorted[target + j] = data[source + j] end
+    end
+    for i = 1, n * stride do data[i] = sorted[i] end
+"""
+
 // Whether `v` is a column-stored Vec.
 @nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
     if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
@@ -1881,6 +1902,21 @@ inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
         if value ~= false then out[j - 1] = value end
     end
     return out
+"""
+
+// A read-only view of a strided `nobox` struct row Vec in column form:
+// `view[path][index]` reads that leaf of element `index`. `offsets` maps each
+// leaf path to its 1-based offset in the row (`__ROCK_STRIDED_ROWS`, emitted
+// from the same plan the lowering stores by). Reflection-only: it builds tables.
+@nomangle inline(lua) fn __rock_strided_column_view(vec: any, offsets: any) -> any = """
+    local stride, data = rawget(vec, "@vec").stride, vec._data
+    return setmetatable({}, {__index = function(_, path)
+        local offset = offsets[path]
+        if offset == nil then return nil end
+        return setmetatable({}, {__index = function(_, index)
+            return data[(index - 1) * stride + offset]
+        end})
+    end})
 """
 
 @nomangle inline(lua) fn __rock_vec_strided_elements(vec: any) -> any = """
@@ -2297,9 +2333,10 @@ const EPSILON: float = 0.0000001
 
 // Math functions
 // random / random_range / random_int / random_seed read and mutate the
-// 32-bit RNG state (`__rock_rng_next`, seeded in skull's prelude) —
-// NotPure, intentionally no @pure. One stream: the state is a single
-// serializable number, so replay/keyframe restore can round-trip it
+// 32-bit gameplay RNG state (`__rock_rng_next`, seeded in skull's prelude) —
+// NotPure, intentionally no @pure. Two streams: authoritative gameplay
+// (`random*`) and presentation (`presentation_random*`). Each state is a single
+// serializable number, so replay/keyframe restore can round-trip them
 // (docs/replay-scrub-plan.md).
 // A 32-bit draw / 2^32 gives a uniform [0, 1) double.
 inline(lua) fn random() -> float = """
@@ -2316,6 +2353,37 @@ inline(lua) fn random_int(min: int, max: int) -> int = """
 """
 inline(lua) fn random_seed(seed: int) = """
     __rock_rng_seed(seed)
+"""
+inline(lua) fn random_get_state() -> int = """
+    return __rock_rng_state_get()
+"""
+inline(lua) fn random_set_state(state: int) = """
+    __rock_rng_state_set(state)
+"""
+
+// Presentation RNG
+// Independent stream for visual VFX, particles, audio detuning, and cosmetic UI.
+// Advances without shifting the authoritative gameplay RNG stream.
+inline(lua) fn presentation_random() -> float = """
+    return __rock_presentation_rng_next() * (1.0 / 4294967296.0)
+"""
+fn presentation_random_range(min: float, max: float) -> float { return presentation_random() * (max - min) + min }
+inline(lua) fn presentation_random_int(min: int, max: int) -> int = """
+    local r = max - min
+    if r <= 0 then return min end
+    if r <= 4294967296 then return __rock_presentation_rng_next() % r + min end
+    local hi = __rock_presentation_rng_next()
+    local lo = __rock_presentation_rng_next()
+    return (hi * 2097152 + math.floor(lo / 2048)) % r + min
+"""
+inline(lua) fn presentation_random_seed(seed: int) = """
+    __rock_presentation_rng_seed(seed)
+"""
+inline(lua) fn presentation_random_get_state() -> int = """
+    return __rock_presentation_rng_state_get()
+"""
+inline(lua) fn presentation_random_set_state(state: int) = """
+    __rock_presentation_rng_state_set(state)
 """
 @intrinsic @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
 @intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
@@ -3187,6 +3255,18 @@ fn Vec<T>.sample(vec) -> T? {
     let len = vec_len(vec)
     if len == 0 { return null }
     let index = random_int(0, len)
+    return vec_get(vec, index)
+}
+
+// The presentation-stream twin, paired the way stdlib/vec.rock pairs
+// random_dir/presentation_random_dir. A decorative caller needs this one: a
+// generic helper spells no stream at its call site, so drawing gameplay
+// randomness for a visual effect is invisible in review and shifts every later
+// gameplay roll.
+fn Vec<T>.presentation_sample(vec) -> T? {
+    let len = vec_len(vec)
+    if len == 0 { return null }
+    let index = presentation_random_int(0, len)
     return vec_get(vec, index)
 }
 

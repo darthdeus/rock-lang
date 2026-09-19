@@ -48,6 +48,16 @@ impl Ast {
             format!("{} ", anns)
         };
         let body = match &item.kind {
+            ItemKind::Use(u) => self.use_sexp(u),
+            ItemKind::Module(m) => {
+                let items = m
+                    .items
+                    .iter()
+                    .map(|i| self.item_sexp(i))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("(mod {} {{ {} }})", m.name.name, items)
+            }
             ItemKind::Function(f) => {
                 let tag = if f.is_macro {
                     "macro"
@@ -211,9 +221,52 @@ impl Ast {
         format!("(block {})", stmts)
     }
 
+    fn use_sexp(&self, u: &UseDecl) -> String {
+        let vis = match &u.vis {
+            Some(Visibility::Pub) => "pub ",
+            Some(Visibility::Private) => "private ",
+            Some(Visibility::PubSuper) => "pub(super) ",
+            Some(Visibility::PubPackage) => "pub(package) ",
+            Some(Visibility::PubIn(_)) => "pub(in) ",
+            None => "",
+        };
+        let tree = self.use_tree_sexp(&u.tree);
+        format!("(use {vis}{tree})")
+    }
+
+    fn use_tree_sexp(&self, t: &UseTree) -> String {
+        match t {
+            UseTree::Path { from_root, segments, kind } => {
+                let root = if *from_root { "::" } else { "" };
+                let segs = segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let suffix = match kind {
+                    UseSuffix::Bind => String::new(),
+                    UseSuffix::BindAs(a) => format!(" as {}", a.name),
+                    UseSuffix::Glob => "::*".to_string(),
+                    UseSuffix::Operator { op, alias: None } => format!("::operator({})", op.name),
+                    UseSuffix::Operator { op, alias: Some(a) } => format!("::operator({}) as {}", op.name, a.name),
+                    UseSuffix::Nested(trees) => {
+                        let inner = trees
+                            .iter()
+                            .map(|t| self.use_tree_sexp(t))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("::{{{inner}}}")
+                    }
+                };
+                format!("{root}{segs}{suffix}")
+            }
+        }
+    }
+
     pub fn stmt_sexp(&self, s: Idx<StatementData>) -> String {
         match &self.stmts[s].kind {
             StatementKind::Expression(e) => self.expr_sexp(*e),
+            StatementKind::Use(u) => self.use_sexp(u),
             StatementKind::Return { value, .. } => format!(
                 "(return {})",
                 value.map(|e| self.expr_sexp(e)).unwrap_or_else(|| "()".to_string())
@@ -280,6 +333,47 @@ impl Ast {
             ExprKind::QualifiedIdent { base, member } => {
                 format!("{}::{}", base.name, member.name)
             }
+            ExprKind::Path { path, generic_args } => {
+                let root = if path.from_root { "::" } else { "" };
+                let segs = path
+                    .segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if generic_args.is_empty() {
+                    format!("{root}{segs}")
+                } else {
+                    let args = generic_args
+                        .iter()
+                        .map(|t| self.type_sexp(*t))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{root}{segs}<{args}>")
+                }
+            }
+            ExprKind::PathStructLiteral { path, fields, .. } => {
+                let root = if path.from_root { "::" } else { "" };
+                let segs = path
+                    .segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let fields_str = fields
+                    .iter()
+                    .map(|(names, v)| {
+                        let name_str = names
+                            .iter()
+                            .map(|n| n.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" + ");
+                        format!("{}: {}", name_str, self.expr_sexp(*v))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({root}{segs} {{ {fields_str} }})")
+            }
             ExprKind::Int(num, _) => num.to_string(),
             ExprKind::Float(num) => num.to_string(),
             ExprKind::String(s) => format!("{:?}", s.to_string()),
@@ -308,6 +402,9 @@ impl Ast {
             }
             ExprKind::TypeAscription(inner, ty) => {
                 format!("(:: {} {})", self.expr_sexp(*inner), self.type_sexp(*ty))
+            }
+            ExprKind::ParenAscription(inner, ty) => {
+                format!("(ascribe {} {})", self.expr_sexp(*inner), self.type_sexp(*ty))
             }
 
             ExprKind::Block(b) => {
@@ -563,7 +660,23 @@ impl Ast {
             TypeExprKind::Bool => "bool".to_string(),
             TypeExprKind::Ref(inner) => format!("(ref {})", self.type_sexp(*inner)),
             TypeExprKind::Ident(id) => id.name.to_string(),
+            TypeExprKind::Path(path) => {
+                let root = if path.from_root { "::" } else { "" };
+                format!(
+                    "{root}{}",
+                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                )
+            }
             TypeExprKind::Array(inner) => format!("[{}]", self.type_sexp(*inner)),
+            TypeExprKind::AppPath { ctor, args } => {
+                let root = if ctor.from_root { "::" } else { "" };
+                format!(
+                    "({}{} {})",
+                    root,
+                    ctor.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::"),
+                    args.iter().map(|&a| self.type_sexp(a)).collect::<Vec<_>>().join(" ")
+                )
+            }
             TypeExprKind::App { ctor, args } => {
                 // `Map<K,V>` renders `(Map K V)` to match rock's Map variant.
                 format!(
@@ -608,7 +721,23 @@ impl Ast {
             TypeExprKind::Ref(inner) => format!("ref {}", self.type_surface(*inner)),
             TypeExprKind::Hole(..) => "?".to_string(),
             TypeExprKind::Ident(id) => id.name.to_string(),
+            TypeExprKind::Path(path) => {
+                let root = if path.from_root { "::" } else { "" };
+                format!(
+                    "{root}{}",
+                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                )
+            }
             TypeExprKind::Array(inner) => format!("[{}]", self.type_surface(*inner)),
+            TypeExprKind::AppPath { ctor, args } => {
+                let root = if ctor.from_root { "::" } else { "" };
+                format!(
+                    "{}{}<{}>",
+                    root,
+                    ctor.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::"),
+                    args.iter().map(|&a| self.type_surface(a)).collect::<Vec<_>>().join(", ")
+                )
+            }
             TypeExprKind::Tuple(ts) => format!(
                 "({})",
                 ts.iter().map(|&t| self.type_surface(t)).collect::<Vec<_>>().join(", ")
@@ -665,6 +794,35 @@ impl Ast {
                     ),
                     None => name_str,
                 }
+            }
+            Pattern::PathVariant { path, args } => {
+                let root = if path.from_root { "::" } else { "" };
+                let name_str = format!(
+                    "{root}{}",
+                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                );
+                match args {
+                    Some(args) => format!(
+                        "({} {})",
+                        name_str,
+                        args.iter().map(|p| self.pattern_sexp(p)).collect::<Vec<_>>().join(" ")
+                    ),
+                    None => name_str,
+                }
+            }
+            Pattern::PathRecord { path, fields, rest } => {
+                let root = if path.from_root { "::" } else { "" };
+                let name_str = format!(
+                    "{root}{}",
+                    path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+                );
+                let fields_str = fields
+                    .iter()
+                    .map(|(f, p)| format!("{}: {}", f.name, self.pattern_sexp(p)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let rest_str = if *rest { ", .." } else { "" };
+                format!("({} {{ {fields_str}{rest_str} }})", name_str)
             }
             Pattern::Record { enum_name, name, fields, rest } => {
                 let name_str = match (enum_name, name) {

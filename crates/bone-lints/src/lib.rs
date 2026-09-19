@@ -3791,7 +3791,7 @@ pub fn unused_pure_exprs_in_body(body: &Body) -> Vec<UnusedPureExpr> {
 fn reportable_root(body: &Body, e: Idx<Expr>) -> Option<bool> {
     match &body.expr_arena[e] {
         Expr::BinOp { op, .. } => Some(is_comparison_op(*op)),
-        Expr::Not(_) | Expr::BitNot(_) | Expr::UnaryMinus(_) => Some(false),
+        Expr::Not(..) | Expr::BitNot(_) | Expr::UnaryMinus(..) => Some(false),
         Expr::Var(_) => Some(false),
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => Some(false),
         Expr::Unit | Expr::Null => Some(false),
@@ -3823,7 +3823,7 @@ fn is_pure(body: &Body, e: Idx<Expr>) -> bool {
         | Expr::Global(_)
         | Expr::SiblingRef(_) => true,
 
-        Expr::Not(x) | Expr::BitNot(x) | Expr::UnaryMinus(x) => is_pure(body, *x),
+        Expr::Not(x, _) | Expr::BitNot(x) | Expr::UnaryMinus(x, _) => is_pure(body, *x),
         Expr::As { value, .. } => is_pure(body, *value),
         Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => is_pure(body, *base),
         Expr::TupleIndex { tuple, .. } => is_pure(body, *tuple),

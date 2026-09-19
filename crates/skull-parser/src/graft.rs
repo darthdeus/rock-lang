@@ -53,6 +53,7 @@ pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
     Item {
         span: item.span,
         annotations: item.annotations.clone(),
+        vis: item.vis.clone(),
         kind,
         is_global_write: item.is_global_write,
     }
@@ -108,6 +109,8 @@ fn graft_field(src: &Ast, dst: &mut Ast, fl: &Field) -> Field {
         span: fl.span,
         name: fl.name.clone(),
         ty: graft_type(src, dst, fl.ty),
+        vis: fl.vis.clone(),
+        set_private: fl.set_private,
         default: fl.default.map(|e| graft_expr(src, dst, e)),
         annotations: fl.annotations.clone(),
         is_embed: fl.is_embed,
@@ -159,6 +162,7 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
     let is_global_write = data.is_global_write;
     let kind = match &data.kind {
         StatementKind::Expression(e) => StatementKind::Expression(graft_expr(src, dst, *e)),
+        StatementKind::Use(u) => StatementKind::Use(u.clone()),
         StatementKind::Let(l) => StatementKind::Let(Let {
             span: l.span,
             keyword_span: l.keyword_span,
@@ -242,6 +246,8 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
         | ExprKind::Unit
         | ExprKind::Ident(_)
         | ExprKind::QualifiedIdent { .. }
+        | ExprKind::Path { .. }
+        | ExprKind::PathStructLiteral { .. }
         | ExprKind::Int(_, _)
         | ExprKind::Float(_)
         | ExprKind::String(_)
@@ -269,6 +275,7 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
         ExprKind::As(x, t) => ExprKind::As(ge(dst, *x), gt(dst, *t)),
         ExprKind::Bitcast(x, t) => ExprKind::Bitcast(ge(dst, *x), gt(dst, *t)),
         ExprKind::TypeAscription(x, t) => ExprKind::TypeAscription(ge(dst, *x), gt(dst, *t)),
+        ExprKind::ParenAscription(x, t) => ExprKind::ParenAscription(ge(dst, *x), gt(dst, *t)),
         ExprKind::Not(x) => ExprKind::Not(ge(dst, *x)),
         ExprKind::BitNot(x) => ExprKind::BitNot(ge(dst, *x)),
         ExprKind::UnaryMinus(x) => ExprKind::UnaryMinus(ge(dst, *x)),
@@ -388,6 +395,18 @@ fn graft_pattern(src: &Ast, dst: &mut Ast, p: &Pattern) -> Pattern {
             variant_name: variant_name.clone(),
             args: args.as_ref().map(|ps| ps.iter().map(|p| graft_pattern(src, dst, p)).collect()),
         },
+        Pattern::PathVariant { path, args } => Pattern::PathVariant {
+            path: path.clone(),
+            args: args.as_ref().map(|ps| ps.iter().map(|p| graft_pattern(src, dst, p)).collect()),
+        },
+        Pattern::PathRecord { path, fields, rest } => Pattern::PathRecord {
+            path: path.clone(),
+            fields: fields
+                .iter()
+                .map(|(id, p)| (id.clone(), graft_pattern(src, dst, p)))
+                .collect(),
+            rest: *rest,
+        },
         Pattern::Record { enum_name, name, fields, rest } => Pattern::Record {
             enum_name: enum_name.clone(),
             name: name.clone(),
@@ -431,9 +450,14 @@ fn graft_type_kind(src: &Ast, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKin
         | TypeExprKind::Float
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
-        | TypeExprKind::Ident(_) => kind.clone(),
+        | TypeExprKind::Ident(_)
+        | TypeExprKind::Path(_) => kind.clone(),
         TypeExprKind::Ref(t) => TypeExprKind::Ref(graft_type(src, dst, *t)),
         TypeExprKind::Array(t) => TypeExprKind::Array(graft_type(src, dst, *t)),
+        TypeExprKind::AppPath { ctor, args } => TypeExprKind::AppPath {
+            ctor: ctor.clone(),
+            args: args.iter().map(|t| graft_type(src, dst, *t)).collect(),
+        },
         TypeExprKind::App { ctor, args } => TypeExprKind::App {
             ctor: ctor.clone(),
             args: args.iter().map(|t| graft_type(src, dst, *t)).collect(),

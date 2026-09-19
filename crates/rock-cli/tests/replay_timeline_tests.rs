@@ -182,8 +182,8 @@ fn run_to_tick_stops_at_target() {
 /// Scope is the engine's simulation-state predicate (P3.5): compare every
 /// global the engine hashes as sim state (from `sim_state_names`), across all
 /// packages. Render OUTPUT legitimately differs -- skipping render leaves the
-/// batch pools / shadow scratch / graphics-stats counters and game Materials'
-/// `cached_batch` unbuilt (`RENDER_BATCHES`, `SHADOW_*`, `stats_history_*`,
+/// batch pools / shadow scratch / last-frame graphics counters and game Materials'
+/// `cached_batch` unbuilt (`RENDER_BATCHES`, `SHADOW_*`, `LAST_FRAME_GFX`,
 /// `tileset_mat`, ...); those are excluded by the predicate, not compared here.
 /// Tick 25 is far enough that the render-only material batches have grown, so
 /// this would catch a predicate that failed to exclude them.
@@ -832,14 +832,11 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         "bitgun",
         40,
         &[
-            (20, "o"),
-            (21, "f8"),
-            (22, "f6"),
-            (23, "f10"),
-            (24, "lctrl,f8"),
-            (25, "lctrl,f6"),
-            (26, "lctrl,f10"),
-            (27, "lctrl,f11"),
+            (20, "f8"),
+            (21, "f6"),
+            (22, "lctrl,f8"),
+            (23, "lctrl,f6"),
+            (24, "lctrl,f11"),
         ],
     );
     let log = dir.path().join("keys.replay");
@@ -850,15 +847,14 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
     );
     let engine = &replayed["stone"]["ENGINE"];
     // Every field these keys reach, not only the windows: F6 is bound twice
-    // (SFX browser + visibility), while F8, F10, and F11 each own one tool.
+    // (SFX browser + visibility), while F8 and F11 each own one tool.
     let recorded_consumers = [
-        ("show_graphics_stats_window", "o/F10"),
         ("show_pipeline_inspector", "f11"),
         ("show_sfx_browser", "f6"),
         ("debug_draw_visibility", "f6"),
         ("profiler_enabled", "f8"),
     ];
-    assert_eq!(recorded_consumers.len(), 5, "recorded consumer census must be nonzero");
+    assert_eq!(recorded_consumers.len(), 4, "recorded consumer census must be nonzero");
     for (field, key) in recorded_consumers {
         assert_eq!(
             engine[field].as_bool(), Some(false),
@@ -875,25 +871,13 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
     assert!(diag.get("TOOL_KEYS_PROBED").is_none(), "the false census must be gone: {diag}");
     assert!(diag.get("TOOL_KEYS_UNMAPPED").is_none(), "the false census must be gone: {diag}");
 
-    // The live arm, through the same ImGui IO the timeline shortcuts use.
-    let injected = run_frame_env(
-        "bitgun", 20, &[],
-        &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", "o")],
-    );
-    assert_eq!(
-        injected["stone"]["ENGINE"]["show_graphics_stats_window"].as_bool(), Some(true),
-        "a live 'o' must still open the graphics stats window: {}",
-        injected["stone"]["ENGINE"]
-    );
-
     let bare_function_consumers = [
         ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
         ("f8", vec!["profiler_enabled"]),
-        ("f10", vec!["show_graphics_stats_window"]),
         ("f11", vec!["show_pipeline_inspector"]),
     ];
     let bare_consumer_count: usize = bare_function_consumers.iter().map(|(_, fields)| fields.len()).sum();
-    assert_eq!(bare_consumer_count, 5, "bare F-key consumer census must be nonzero");
+    assert_eq!(bare_consumer_count, 4, "bare F-key consumer census must be nonzero");
     for (key, fields) in bare_function_consumers {
         let bare = run_frame_env(
             "bitgun", 20, &[],
@@ -911,11 +895,10 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
     let live_chords = [
         ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
         ("f8", vec!["profiler_enabled"]),
-        ("f10", vec!["show_graphics_stats_window"]),
         ("f11", vec!["show_pipeline_inspector"]),
     ];
     let live_consumer_count: usize = live_chords.iter().map(|(_, fields)| fields.len()).sum();
-    assert_eq!(live_consumer_count, 5, "Ctrl+F consumer census must be nonzero");
+    assert_eq!(live_consumer_count, 4, "Ctrl+F consumer census must be nonzero");
     for (key, fields) in live_chords {
         let chord = run_frame_env(
             "bitgun",

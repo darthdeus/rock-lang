@@ -214,7 +214,7 @@ impl Builder<'_> {
 
             // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
             // records the target on `e`); a scalar uses the native op.
-            Expr::Not(x) => {
+            Expr::Not(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
@@ -231,7 +231,7 @@ impl Builder<'_> {
                     None => Ok(self.emit_cur(Inst::BitNot(v))),
                 }
             }
-            Expr::UnaryMinus(x) => {
+            Expr::UnaryMinus(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
@@ -383,6 +383,7 @@ impl Builder<'_> {
                 target,
                 op_fn,
                 value,
+                ..
             } => {
                 self.lower_compound_assign_effect(e, target, op_fn, value)?;
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
@@ -672,7 +673,7 @@ impl Builder<'_> {
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
             }
 
-            Expr::SafeNavCall { receiver, method, args } => {
+            Expr::SafeNavCall { receiver, method, args, .. } => {
                 self.lower_safe_nav_call(e, receiver, method, args)
             }
             Expr::SafeNavLet { receiver, binding, body } => {
@@ -722,6 +723,12 @@ impl Builder<'_> {
                 ))
             }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            // A leaf of a column-stored or strided element has no slot to name;
+            // read it. A leaf that can be a place base holds a reference
+            // (`xs[i].o` in `xs[i].o.hp = v`), so the read is that object.
+            Expr::FieldAccess { base, field } if self.flat_leaf_path(base, field)?.is_some() => {
+                self.lower_expr(e)
+            }
             // A swizzle and a flattened-enum field are not places (both
             // materialize a fresh value); leave them to the rvalue path, which
             // rejects or copies as it does today.
@@ -806,11 +813,15 @@ impl Builder<'_> {
                 self.nobox_global_store(&leaves, shape, value)?;
             }
             Expr::FieldAccess { base, field } => {
-                // `xs[i].x = v` on a column-stored Vec: there is no element slot
-                // to take a place base of, so the write lands directly in the
-                // leaf's own column.
-                if let Some((vec, idx, elem)) = self.column_index_place(base)? {
-                    return self.column_leaf_store(vec, idx, elem, field, value);
+                // `xs[i].x = v` / `xs[i].at.x = v` on a column-stored or strided
+                // Vec: there is no element slot to take a place base of, so the
+                // write lands directly in the leaf named by the dotted path.
+                let (root, path) = self.flat_leaf_path(base, field)?.unwrap_or((base, field));
+                if let Some((vec, idx, elem)) = self.column_index_place(root)? {
+                    return self.column_leaf_store(vec, idx, elem, path, value);
+                }
+                if let Some((vec, idx, elem)) = self.strided_index_place(root)? {
+                    return self.strided_leaf_store(vec, idx, elem, path, value);
                 }
                 // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
                 // leaf-addressed NativeBuffer: there is no element slot to take a
@@ -1171,10 +1182,10 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<ValueBundle, CompilerError> {
-        let value = if self.struct_field_is_fn(receiver, method) {
+        let value = if let Some(field) = self.fn_field_of_call(receiver, method) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
-            let fieldv = self.emit_cur(Inst::Field { base: recv, field: method });
+            let fieldv = self.emit_cur(Inst::Field { base: recv, field });
             let mut argv = Vec::new();
             for a in args {
                 argv.push(self.lower_expr(a)?);
@@ -1595,11 +1606,15 @@ impl Builder<'_> {
                     leaves.len()
                 )));
             }
-            values.extend(
-                leaves
-                    .into_iter()
-                    .map(|leaf| self.emit_cur(Inst::VecStrideNilToFalse(leaf))),
-            );
+            if self.strided_stores_raw(elem) {
+                values.extend(leaves);
+            } else {
+                values.extend(
+                    leaves
+                        .into_iter()
+                        .map(|leaf| self.emit_cur(Inst::VecStrideNilToFalse(leaf))),
+                );
+            }
         }
         let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
         Ok(self.emit_cur(Inst::MakeVecStrided {

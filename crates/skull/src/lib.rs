@@ -206,11 +206,19 @@ pub fn user_module_id(ws: &Workspace) -> Result<ModuleId, CompilerError> {
         .find(|m| *m != ModuleId::builtin())
         .ok_or_else(|| CompilerError::new_no_location("skull: no user module after semantic_pass"))
 }
-/// A `@test` function discovered in a module: the Lua name to call (a `@test`
-/// fn is never mangled) and the expected stdout of `@test(output = "...")`.
+/// A `@test` function discovered in a module: its LOGICAL name (the DefKey --
+/// what a report labels and what the value backends look the fn up by), the
+/// SYMBOL the artifact defines it under, and the expected stdout of
+/// `@test(output = "...")`.
+///
+/// The two differ for a v1 package. `@test` is mangling-exempt, so the emitted
+/// global is the key's declared segment, while the key itself (`pkg::mod::name`)
+/// is not an identifier in any backend's grammar. A harness that must CALL the
+/// test uses `symbol`; text a human reads uses `name`.
 #[derive(Clone, Debug)]
 pub struct SkullTest {
     pub name: String,
+    pub symbol: String,
     pub output: Option<String>,
     /// `@test(returns = <literal>)`: the fn's return value is captured by the
     /// backend harness and compared HOST-side against this pinned literal.
@@ -275,12 +283,12 @@ pub fn module_tests_with_ids(
     };
     let mut out = Vec::new();
     for (fid, f) in module.functions.iter() {
-        let Some(test_ann) = f.annotations.iter().find(|a| a.name.name.as_str() == "test") else {
+        let Some(test_ann) = f.annotations.iter().find(|a| a.is_builtin("test")) else {
             continue;
         };
         // Honor `@ignore` (same convention as rock-cli/src/test.rs): a test
         // marked ignored is not run.
-        if f.annotations.iter().any(|a| a.name.name.as_str() == "ignore") {
+        if f.annotations.iter().any(|a| a.is_builtin("ignore")) {
             continue;
         }
         let returns = match test_ann
@@ -353,6 +361,9 @@ pub fn module_tests_with_ids(
             fid,
             SkullTest {
                 name: f.name.as_str().to_string(),
+                // The one emitted-name oracle, so the harness cannot drift from
+                // the definition the artifact actually writes.
+                symbol: skull_mir::mangle::mangle_fn(ws, f),
                 output,
                 returns,
             },
@@ -380,7 +391,7 @@ pub fn global_init_fn_name(global: &str) -> String {
 
 /// Lua name for a decorator fn (`@register` -> `__deco_register`).
 pub fn decorator_fn_name(deco: &str) -> String {
-    format!("__deco_{}", deco)
+    format!("__deco_{}", skull_mir::mangle::symbol_of_key(ustr::Ustr::from(deco)))
 }
 
 /// A `@deco`-annotation argument (or `deco` param default) as a Lua literal.
@@ -584,6 +595,7 @@ _G.__rock_session_new = function(schema_id)
     __rock_initialized = __rock_table_new(narr, nhash),
     __rock_initializer_keys = {},
     __rock_rng_state = nil,
+    __rock_presentation_rng_state = nil,
     __rock_state_capacity = { narr, nhash }
   }
 end
@@ -888,9 +900,45 @@ if not _G.__rock_rng_next then
     if output < 0 then return output + 4294967296 end
     return output
   end
+
+  local __rock_presentation_rng_state = 0
+  local function active_presentation_rng_state()
+    local session = _G.__rock_active_session
+    if session and session.__rock_presentation_rng_state ~= nil then return session.__rock_presentation_rng_state end
+    return __rock_presentation_rng_state
+  end
+  local function store_presentation_rng_state(state)
+    local session = _G.__rock_active_session
+    if session then session.__rock_presentation_rng_state = state else __rock_presentation_rng_state = state end
+  end
+  _G.__rock_presentation_rng_seed = function(s)
+    local state = __rock_bit.tobit(tonumber(s))
+    store_presentation_rng_state(state)
+  end
+  _G.__rock_presentation_rng_state_get = function() return active_presentation_rng_state() end
+  _G.__rock_presentation_rng_state_set = function(s)
+    local state = __rock_bit.tobit(tonumber(s))
+    store_presentation_rng_state(state)
+  end
+  _G.__rock_presentation_rng_next = function()
+    local state = __rock_bit.tobit(active_presentation_rng_state() + 0x9E3779B9)
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
+    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
+    store_presentation_rng_state(state)
+    local output = __rock_bit.bxor(state, __rock_bit.rshift(state, 16))
+    if output < 0 then return output + 4294967296 end
+    return output
+  end
+
   local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
-  if __seed then _G.__rock_rng_seed(__seed)
-  else _G.__rock_rng_seed(os.time()) end
+  if __seed then
+    _G.__rock_rng_seed(__seed)
+    _G.__rock_presentation_rng_seed(__seed + 10007)
+  else
+    _G.__rock_rng_seed(os.time())
+    _G.__rock_presentation_rng_seed(os.time() + 10007)
+  end
 end
 "#;
 
@@ -901,6 +949,16 @@ end
 /// `_ct`/`_vt` choice can never diverge).
 fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
     skull_mir::lower::value_field_c_type(ws, ty)
+}
+
+/// The emitted name of a nominal type. A modules-v1 definition's name is its
+/// DefKey, which is neither a Lua nor a C identifier, so every minted name --
+/// the cdef typedef, `<N>_ct`/`<N>_lct`/`<N>_vt`, an `ffi.typeof`/`metatype`
+/// argument, an `__rock_enum_<E>` global -- takes its identifier form. A legacy
+/// name has no `::` and passes through byte-identical. DISPLAY text keeps the
+/// DefKey: it reads as the definition's path, and nothing parses it.
+fn type_symbol(name: ustr::Ustr) -> ustr::Ustr {
+    skull_mir::mangle::symbol_of_key(name)
 }
 
 /// Whether a struct named `name` is declared `value` (C-layout cdata).
@@ -1044,13 +1102,16 @@ fn value_struct_defs(
                 if ffi_names.contains(&dep) && !emitted.contains(&dep) {
                     blocked = true;
                 }
-                body.push_str(&format!("  {} {};\n", ct, f.name));
+                // The dependency key above is the LOGICAL name (what the
+                // workspace sets hold); the cdef text is the C one.
+                body.push_str(&format!("  {} {};\n", type_symbol(dep), f.name));
             }
             if blocked {
                 next.push(s);
             } else {
-                typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, s.name));
-                ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = s.name));
+                let sym = type_symbol(s.name);
+                typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, sym));
+                ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
                 // Leaf-taking ctor: LuaJIT has no brace elision, so a nested
                 // field cannot be passed as loose scalars to `_ct`. Allocate and
                 // write leaves instead, hoisting each nested reference once.
@@ -1064,7 +1125,7 @@ fn value_struct_defs(
                     )
                     .map_err(|e| CompilerError::new_no_location(e.message))?;
                 if paths.iter().any(|p| p.contains('.')) {
-                    ctors.push_str(&leaf_ctor_def(s.name, &paths));
+                    ctors.push_str(&leaf_ctor_def(sym, &paths));
                 }
                 emitted.insert(s.name);
                 progress = true;
@@ -1133,15 +1194,16 @@ fn value_leaf_layout_checks(
                     e.message
                 ))
             })?;
+        let sym = type_symbol(name);
         let _ = writeln!(
             out,
-            "if ffi.sizeof(\"{name}\") ~= {size} then error(\"skull layout drift: \
-             sizeof({name}) = \" .. ffi.sizeof(\"{name}\") .. \", expected {size}\", 0) end"
+            "if ffi.sizeof(\"{sym}\") ~= {size} then error(\"skull layout drift: \
+             sizeof({sym}) = \" .. ffi.sizeof(\"{sym}\") .. \", expected {size}\", 0) end"
         );
         for l in &leaves {
             let _ = writeln!(
                 out,
-                "if ({expr}) ~= {off} then error(\"skull layout drift: {name}.{path} at \" \
+                "if ({expr}) ~= {off} then error(\"skull layout drift: {sym}.{path} at \" \
                  .. ({expr}) .. \", expected {off}\", 0) end",
                 expr = l.offsetof_expr,
                 off = l.byte_off,
@@ -1176,7 +1238,10 @@ fn value_struct_gc_defs(
             continue;
         }
         let n = s.name;
-        let mt = skull_codegen_lua::value_struct_metatable_name(n.as_str());
+        // `n` stays the readable path for DISPLAY text; every name the chunk
+        // defines or tags with is the type's symbol.
+        let sym = type_symbol(n);
+        let mt = skull_codegen_lua::value_struct_metatable_name(sym.as_str());
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
@@ -1223,10 +1288,10 @@ fn value_struct_gc_defs(
                 })
                 .collect();
             out.push_str(&format!(
-                "{n}_lct = function({p})\n{r}\nend\n",
+                "{sym}_lct = function({p})\n{r}\nend\n",
                 p = params.join(", "),
                 r = skull_codegen_lua::wrapper_return(&format!(
-                    "setmetatable({{ {b}__ty = \"{n}\" }}, {mt})",
+                    "setmetatable({{ {b}__ty = \"{sym}\" }}, {mt})",
                     b = assigns.concat(),
                 )),
             ));
@@ -1277,10 +1342,10 @@ fn value_struct_gc_defs(
             body.push_str(", ");
         }
         out.push_str(&format!(
-            "{n}_vt = function({p})\n{r}\nend\n",
+            "{sym}_vt = function({p})\n{r}\nend\n",
             p = params.join(", "),
             r = skull_codegen_lua::wrapper_return(&format!(
-                "setmetatable({{ {b}__ty = \"{n}\" }}, {mt})",
+                "setmetatable({{ {b}__ty = \"{sym}\" }}, {mt})",
                 b = body,
             )),
         ));
@@ -1306,8 +1371,9 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
         {
             let slots: String =
                 shape.slots.iter().map(|(nm, t)| format!(" {t} {nm};")).collect();
-            typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = name));
-            ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = name));
+            let sym = type_symbol(name);
+            typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = sym));
+            ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
         }
     }
     if typedefs.is_empty() {
@@ -1342,7 +1408,8 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
         for (nm, _) in &shape.slots {
             eq.push_str(&format!(" and a.{nm} == b.{nm}"));
         }
-        out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{name}\"] = {{\n"));
+        let sym = type_symbol(name);
+        out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
         out.push_str(&format!(
             "  __eq = function(a, b)\n\
              \x20   if type(b) ~= \"cdata\" or type(a) ~= \"cdata\" then return false end\n\
@@ -1381,9 +1448,9 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
         ts.push_str("    return \"?\"\n  end,\n}\n");
         out.push_str(&ts);
         out.push_str(&format!(
-            "pcall(ffi.metatype, \"{name}\", {{\n\
-             \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{name}\"].__eq(a, b) end,\n\
-             \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{name}\"].__tostring(v) end,\n\
+            "pcall(ffi.metatype, \"{sym}\", {{\n\
+             \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{sym}\"].__eq(a, b) end,\n\
+             \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{sym}\"].__tostring(v) end,\n\
              }})\n"
         ));
     }
@@ -1410,7 +1477,8 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
                 any = true;
             }
             let n = s.name;
-            out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{n}\"] = {{\n"));
+            let sym = type_symbol(n);
+            out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
             out.push_str("  __eq = function(a, b)\n");
             out.push_str(
                 "    if type(b) ~= \"cdata\" or type(a) ~= \"cdata\" then return false end\n",
@@ -1441,9 +1509,9 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
             }
             out.push_str("  end,\n}\n");
             out.push_str(&format!(
-                "pcall(ffi.metatype, \"{n}\", {{\n\
-                 \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{n}\"].__eq(a, b) end,\n\
-                 \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{n}\"].__tostring(v) end,\n\
+                "pcall(ffi.metatype, \"{sym}\", {{\n\
+                 \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{sym}\"].__eq(a, b) end,\n\
+                 \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{sym}\"].__tostring(v) end,\n\
                  }})\n"
             ));
         }
@@ -1498,16 +1566,25 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                     .enumerate()
                     .map(|(ord, v)| format!("[{ord}] = \"{e}::{v}\"", e = e.name, v = v.name))
                     .collect();
-                out.push_str(&format!("__rock_enum_{}_names = {{ {} }}\n", e.name, items.join(", ")));
+                // The table is a Lua GLOBAL, so its name carries the enum's
+                // symbol; the values it holds are display text.
+                out.push_str(&format!(
+                    "__rock_enum_{}_names = {{ {} }}\n",
+                    type_symbol(e.name),
+                    items.join(", ")
+                ));
             } else {
                 // Mixed: unit variants are interned singleton tables.
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
-                        let g = enum_singleton_name(e.name.as_str(), v.name.as_str());
+                        let sym = type_symbol(e.name);
+                        let g = enum_singleton_name(sym.as_str(), v.name.as_str());
+                        // `__ty` is looked up in `__ROCK_TYPE_TABLE`, so it is
+                        // the same spelling that registry is keyed on.
                         out.push_str(&format!(
                             "{g} = {g} or {{ __variant = \"{var}\", __ty = \"{ty}\" }}\n",
                             var = v.name,
-                            ty = e.name,
+                            ty = sym,
                         ));
                     }
                 }
@@ -1551,9 +1628,10 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             };
             let copy_args: Vec<String> =
                 shape.field_names().iter().map(|f| format!("v.{f}")).collect();
+            let sym = type_symbol(name);
             out.push_str(&format!(
-                "_G.__ROCK_C_STRUCT[\"{name}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
-                 end, copy = function(v)\n  return {name}_ct({})\nend, name = \"{name}\" }}\n",
+                "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
+                 end, copy = function(v)\n  return {sym}_ct({})\nend, name = \"{sym}\" }}\n",
                 copy_args.join(", ")
             ));
         }
@@ -1562,7 +1640,8 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
                 continue;
             }
             let n = s.name;
-            out.push_str(&format!("_G.__ROCK_C_STRUCT[\"{n}\"] = {{ inspect = function(v)\n"));
+            let sym = type_symbol(n);
+            out.push_str(&format!("_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n"));
             if s.fields.is_empty() {
                 out.push_str(&format!("  return \"{n} {{ }}\"\n"));
             } else {
@@ -1579,7 +1658,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             let copy_args: Vec<String> =
                 s.fields.iter().map(|f| format!("v.{}", f.name)).collect();
             out.push_str(&format!(
-                "end, copy = function(v)\n  return {n}_ct({})\nend, name = \"{n}\" }}\n",
+                "end, copy = function(v)\n  return {sym}_ct({})\nend, name = \"{sym}\" }}\n",
                 copy_args.join(", ")
             ));
         }
@@ -1713,7 +1792,7 @@ fn desc_into(ws: &Workspace, ty: bone_semantic::prelude::TyId, out: &mut String,
                 // struct's own fields are reached through the type table's
                 // per-field descriptors rather than repeated inside this one.
                 out.push_str("{k=\"nom\",name=\"");
-                out.push_str(name.as_str());
+                out.push_str(type_symbol(name).as_str());
                 out.push_str("\"}");
                 true
             }
@@ -1797,7 +1876,7 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
         Some(TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        }) => (name.as_str().to_string(), false),
+        }) => (type_symbol(name).as_str().to_string(), false),
         Some(TypeExpr::App {
             ctor: TypeCtor::Array,
             ..
@@ -1808,17 +1887,49 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
-/// value's metadata from its `__ty` tag. Mirrors
-/// rock-codegen/src/codegen_pass.rs. The prelude already seeds the table empty,
-/// so this only adds entries. No metatables: type tagging is the direct `__ty`.
+/// value's metadata from its `__ty` tag. The prelude already seeds the table
+/// empty, so this only adds entries. No metatables: type tagging is the direct
+/// `__ty`.
+///
+/// `type_id` below is WRITE-ONLY, and deliberately so. It is a counter over
+/// `ws.modules` in resolution order, so it renumbers whenever a declaration
+/// moves between files or a dependency is added -- it is not stable across
+/// builds, worktrees or manifest edits. Every consumer of this table keys by
+/// the type NAME (`serialization.rock`, `snapshot.rock`, `sim_checkpoint.rock`,
+/// `stdlib/unified.rock`) and reads `.kind`/`.fields`/`.variants`; nothing in
+/// the tree reads `.type_id`, and `docs/incremental-testing.md` already treats
+/// its variation as harmless.
+///
+/// It becomes load-bearing the moment anything reads it -- a `type_id<T>()`
+/// intrinsic, an entry in the canonical serializer's hash, a save, a wire
+/// message, an FFI tag. If that day comes, derive the number from a sorted,
+/// order-independent key the way `StateSchema` already does with
+/// `(kind, identity)`, rather than from module order.
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
-    let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n");
+    let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
+            // Row offsets of a `[S]` stored as strided rows, so reflection
+            // reads a row by leaf path (`serialization.rock`).
+            if s.is_nobox
+                && s.generics.is_empty()
+                && let Some(offsets) = skull_mir::lower::ContainerPlan::strided_struct_row_offsets(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                )
+            {
+                let entries = offsets
+                    .iter()
+                    .map(|(path, offset)| format!("[\"{path}\"] = {offset}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", s.name));
+            }
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
             // immutable Lua tables (`value_table`).
@@ -1856,7 +1967,7 @@ fn type_table_defs(
             }
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}, fields = {{ {f} }} }}\n",
-                n = s.name,
+                n = type_symbol(s.name),
                 k = kind,
                 id = type_id,
                 f = fields.join(", ")
@@ -1866,7 +1977,7 @@ fn type_table_defs(
         for (_, nt) in module.newtypes.iter() {
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}, fields = {{ }} }}\n",
-                n = nt.name,
+                n = type_symbol(nt.name),
                 id = type_id
             ));
             type_id += 1;
@@ -1897,7 +2008,7 @@ fn type_table_defs(
                 if let Some(vd) = boxed_variant_descs(ws, e) {
                     out.push_str(&format!(
                         "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", type_id = {id}, fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
-                        n = e.name,
+                        n = type_symbol(e.name),
                         id = type_id,
                     ));
                     type_id += 1;
@@ -1953,7 +2064,7 @@ fn type_table_defs(
                 .collect();
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }}, variants = {{ {v} }} }}\n",
-                n = e.name,
+                n = type_symbol(e.name),
                 id = type_id,
                 f = fields.join(", "),
                 v = variants.join(", ")

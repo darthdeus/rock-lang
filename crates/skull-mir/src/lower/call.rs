@@ -257,12 +257,16 @@ impl Builder<'_> {
                     {
                         self.f.struct_registry_roots.insert(name);
                     }
-                    if let Some(elem) = self.vec_column_elem_of(arg)? {
+                    let flat_elem = match self.vec_column_elem_of(arg)? {
+                        Some(elem) => Some(elem),
+                        None => self.vec_strided_elem_of(arg)?,
+                    };
+                    if let Some(elem) = flat_elem {
                         if elem.is_nobox() {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
                                 format!(
-                                    "cannot inspect a column-stored nobox value `{}`: \
+                                    "cannot inspect a flat-stored nobox value `{}`: \
                                      inspection requires implicit element materialization",
                                     elem.name
                                 ),
@@ -553,10 +557,10 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if !any_named {
                 if let Some(&recv_expr) = arg_idxs.first() {
-                    if self.struct_field_is_fn(recv_expr, name) {
+                    if let Some(field) = self.fn_field_of_call(recv_expr, name) {
                         let arg_vals: Vec<Idx<Inst>> =
                             arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                        let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field: name });
+                        let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field });
                         let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec())?;
                         return Ok(ValueRepr::Scalar(v));
                     }
@@ -852,7 +856,7 @@ impl Builder<'_> {
         let lua_opaque = self.scx.target() == bone_semantic::hir::FnBackend::Lua
             && callee.inline_body.is_some()
             && !callee.generics.is_empty()
-            && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
+            && !callee.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
         if !dc.plan.uses_scalar_abi() {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
@@ -1270,12 +1274,30 @@ impl Builder<'_> {
     /// Materialize a `ValueRepr` as a single value — the one place a `Group`
     /// becomes a real `<name>_ct(...)` cdata (an escape: stored/compared/boxed).
     pub(crate) fn pack(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
+        self.pack_boxed(r, BoxKind::Implicit)
+    }
+
+    /// [`Self::pack`] with the box's AUTHORIZATION carried through the whole
+    /// tree. This is the one packer: `materialize(v)` differs from an ordinary
+    /// escape only in which ctor instruction each `value`-struct box mints, so
+    /// it takes this path rather than a parallel one. A second recursion went
+    /// wrong at every tier the first one had grown an arm for -- a flat-enum
+    /// field reached it as if it were a struct, and a leaf-table struct emitted
+    /// a declared-form ctor against a leaf-table plan.
+    pub(crate) fn pack_boxed(
+        &mut self,
+        r: ValueRepr,
+        kind: BoxKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
         match r {
             ValueRepr::Scalar(v) => Ok(v),
             // A splatting tuple's box. Its `nobox` elements pack too, which is
             // exactly how a whole-tuple use reaches the guarantee's rejection.
             ValueRepr::Tuple { parts, .. } => {
-                let vs = parts.into_iter().map(|p| self.pack(p)).collect::<Result<Vec<_>, _>>()?;
+                let vs = parts
+                    .into_iter()
+                    .map(|p| self.pack_boxed(p, kind))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
@@ -1297,7 +1319,7 @@ impl Builder<'_> {
                 }
                 let packed: Vec<Idx<Inst>> = parts
                     .into_iter()
-                    .map(|p| self.pack(p))
+                    .map(|p| self.pack_boxed(p, kind))
                     .collect::<Result<Vec<_>, _>>()?;
                 let cells = FlatCells {
                     tag: packed[0],
@@ -1358,14 +1380,15 @@ impl Builder<'_> {
                         )));
                     }
                     let fields = paths.into_iter().zip(leaves).collect();
-                    Ok(self.emit_cur(Inst::MakeValueStruct {
+                    let ctor = kind.value_ctor(
                         name,
                         representation,
-                        form: ValueCtorForm::Leaves,
+                        ValueCtorForm::Leaves,
                         fields,
-                    }))
+                    );
+                    Ok(self.emit_cur(ctor))
                 } else {
-                    self.pack_group_fields(name, parts)
+                    self.pack_group_fields(name, parts, kind)
                 }
             }
         }
@@ -1382,8 +1405,18 @@ impl Builder<'_> {
     /// is already an escape -- the ctor survives either way, so honouring
     /// presence buys the correct `nil` for free. Same split safe-nav uses.
     pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
+        self.pack_maybe_absent_boxed(r, BoxKind::Implicit)
+    }
+
+    /// [`Self::pack_maybe_absent`] carrying the box's authorization, the shape
+    /// `materialize(v)` of a nullable value takes.
+    pub(crate) fn pack_maybe_absent_boxed(
+        &mut self,
+        r: ValueRepr,
+        kind: BoxKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let ValueRepr::Group { name, parts, present: Some(present) } = r else {
-            return self.pack(r);
+            return self.pack_boxed(r, kind);
         };
         let result = self.f.new_cell(None);
         let absent_bb = self.f.new_block();
@@ -1400,7 +1433,10 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = present_bb;
-        let boxed = self.pack_group_fields(name, parts)?;
+        // The present arm is an ordinary whole-value box, so it goes through the
+        // same tier dispatch: a leaf-table or flat-enum payload has no
+        // declared-field ctor to take.
+        let boxed = self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
         self.emit_cur(Inst::Store { cell: result, value: boxed });
         self.f.set_term(self.cur, Term::Goto(join));
 
@@ -1415,7 +1451,12 @@ impl Builder<'_> {
     /// forward a `Field` read to its ctor operand (SROA), eliminating the cdata
     /// when it never escapes. A payload-free enum field is just an `int` value
     /// (Prim), packed like any primitive.
-    fn pack_group_fields(&mut self, name: Ustr, parts: Vec<ValueRepr>) -> Result<Idx<Inst>, CompilerError> {
+    fn pack_group_fields(
+        &mut self,
+        name: Ustr,
+        parts: Vec<ValueRepr>,
+        kind: BoxKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let representation = self.nominal_value_representation(name)?;
         let names = struct_field_names(self.ws, name);
         let fields = parts
@@ -1429,15 +1470,11 @@ impl Builder<'_> {
                 let fname = *names
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
-                Ok((fname, self.pack(p)?))
+                Ok((fname, self.pack_boxed(p, kind)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(self.emit_cur(Inst::MakeValueStruct {
-            name,
-            representation,
-            form: ValueCtorForm::Declared,
-            fields,
-        }))
+        let ctor = kind.value_ctor(name, representation, ValueCtorForm::Declared, fields);
+        Ok(self.emit_cur(ctor))
     }
 
     /// Flatten a `ValueRepr` to its primitive leaf values per `shape` (the wire

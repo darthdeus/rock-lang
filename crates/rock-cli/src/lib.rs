@@ -21,7 +21,7 @@ pub use rock_host::process_management::*;
 pub use rock_host::source_files::{
     source_file_from_code, source_file_new_preprocessed, SourceFilesExt,
 };
-pub use rock_host::stick::{RendererBackend, StickConfig};
+pub use rock_host::stick::{graph::{PackageGraph, PackageId, PackageNode}, RendererBackend, StickConfig};
 pub use std::collections::{HashMap, HashSet};
 pub use std::sync::mpsc::channel;
 pub use std::time::Duration;
@@ -83,6 +83,10 @@ pub mod stone_test;
 mod test;
 mod text_utils;
 pub mod unified_compile;
+mod modules_analysis;
+mod modules_audit;
+mod modules_fix;
+mod modules_migrate;
 mod watch;
 
 pub use common::*;
@@ -331,6 +335,17 @@ pub enum CliCommand {
     SdkCheck,
     /// Build/stage engine libraries once and write a content-bound receipt for a test session.
     EngineBuildReceipt,
+    /// `rock modules audit <project> [--closed] [--format pretty|json]` --
+    /// read-only modules-v1 audit of one project's package graph and analyzed
+    /// sources (spec 15.1). See `modules_audit::run`.
+    /// `rock modules migrate <package> --check|--apply [--consumer <dir>]...`
+    /// -- convert a legacy package to modules-v1 (spec 15.2). See
+    /// `modules_migrate::run`.
+    Modules,
+    /// `rock fix --imports <package|file> [--check|--apply]` -- add the
+    /// imports a modules-v1 fragment's unresolved names need (spec 15.3).
+    /// See `modules_fix::run`.
+    Fix,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -374,6 +389,8 @@ impl clap::ValueEnum for CliCommand {
             Self::DocsIndex,
             Self::SdkCheck,
             Self::EngineBuildReceipt,
+            Self::Modules,
+            Self::Fix,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -435,6 +452,8 @@ impl CliCommand {
             Self::DocsIndex => "docs-index",
             Self::SdkCheck => "sdk-check",
             Self::EngineBuildReceipt => "engine-build-receipt",
+            Self::Modules => "modules",
+            Self::Fix => "fix",
         }
     }
 }
@@ -756,6 +775,17 @@ pub struct Args {
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
     pub union: bool,
+    /// `rock modules audit --closed`: fail unless the selected root and every
+    /// package it reaches, other than the compiler-owned std, is modules-v1.
+    pub closed: bool,
+    /// `rock modules migrate --apply`: write the planned edits (the default,
+    /// and `--check`, only plan).
+    pub apply: bool,
+    /// `rock modules migrate --consumer <dir>` (repeatable): the consumer set
+    /// whose references decide the package's exports (spec 15.2).
+    pub consumer: Vec<String>,
+    /// `rock fix --imports`: the fix to run (the only one so far).
+    pub imports: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
     /// (`libs/chess-core`) needs the repo root passed explicitly.
@@ -832,7 +862,7 @@ impl Args {
                 .value_parser(["stopped", "running"])
                 .help("`rock perf --gc-window` only: `stopped` isolates mutator allocation after a collection; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
-                .help("Output format for `rock perf`, `rock replay-report`, or `rock replay-profile-report`: \"pretty\" (default) or \"json\"."))
+                .help("Output format for `rock perf`, `rock replay-report`, `rock replay-profile-report`, `rock sim-report`, or `rock modules audit`: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("top").long("top").default_value("20")
                 .value_parser(clap::value_parser!(usize))
                 .help("For replay reports: rank this many slow observations (default 20)."))
@@ -933,6 +963,14 @@ impl Args {
                 .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
+            .arg(Arg::new("closed").long("closed").action(ArgAction::SetTrue)
+                .help("For `rock modules audit`: exit non-zero if the root or any package it reaches (other than the compiler-owned std) is legacy."))
+            .arg(Arg::new("apply").long("apply").action(ArgAction::SetTrue).conflicts_with("check")
+                .help("For `rock modules migrate`: write the planned edits after verifying them (without it, or with --check, only the plan is printed)."))
+            .arg(Arg::new("consumer").long("consumer").value_name("DIR").action(ArgAction::Append)
+                .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
+            .arg(Arg::new("imports").long("imports").action(ArgAction::SetTrue)
+                .help("For `rock fix`: add the `use` items a modules-v1 fragment's unresolved names need, when one accessible candidate exists (plans by default; --apply writes)."))
             .arg(Arg::new("consumers").long("consumers")
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
@@ -1034,6 +1072,10 @@ impl Args {
             only_types: m.get_one::<String>("only-types").cloned(),
             ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
+            closed: m.get_flag("closed"),
+            apply: m.get_flag("apply"),
+            consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
+            imports: m.get_flag("imports"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is

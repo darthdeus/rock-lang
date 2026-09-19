@@ -7,9 +7,10 @@
 //! invisible from any single repro: a 2-field `Opt` is 4 leaves (presence + x +
 //! y + a) and column-stores, a 3-field `Opt` is 5 and boxes. Both must round-trip,
 //! present and absent, and the count is what tells you which path a row exercised.
-//! An element explicitly marked `nobox` bypasses this heuristic and stays in
-//! columns at any supported width; the constant only chooses storage for
-//! unmarked values.
+//! An element explicitly marked `nobox` bypasses this heuristic and stays flat
+//! at any supported width -- columns up to the constant, one strided row
+//! backing above it (`nobox_wide_strided.rs`); for unmarked values the constant
+//! chooses between columns and a box.
 //!
 //! The GC-tier ctor itself (one field, no Vec) is pinned by
 //! `nobox_nested_ctor.rs`.
@@ -28,7 +29,7 @@ fn main() {
 "#;
 
 #[test]
-fn wide_nobox_vec_uses_columns_past_the_implicit_threshold() {
+fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
     let lua = try_emit_module(WIDE_NOBOX_OVERWRITE)
         .expect("an explicit nobox guarantee must not fall back to boxed Vec elements");
     let body = function_body(&lua, "main");
@@ -37,8 +38,8 @@ fn wide_nobox_vec_uses_columns_past_the_implicit_threshold() {
         "wide nobox Vec materialized an element:\n{body}"
     );
     assert!(
-        !body.contains("._data"),
-        "wide nobox Vec reached boxed storage:\n{body}"
+        body.contains(r#"repr = "strided""#),
+        "wide nobox Vec left flat row storage:\n{body}"
     );
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_vec"), "6 10");
 }

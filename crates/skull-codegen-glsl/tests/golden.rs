@@ -992,3 +992,22 @@ fn a_nobox_value_local_stays_a_single_glsl_vec() {
         "a double underscore is a reserved GLSL identifier:\n{glsl}"
     );
 }
+
+#[test]
+fn glsl_emits_no_double_underscore_for_lua_escaped_names_or_idiv() {
+    let src = r#"
+        @pure fn compute(a: int, b: int) -> int {
+            let local = a ./ b
+            return local
+        }
+    "#;
+    let glsl = emit(src, &["compute"]).expect("must emit GLSL");
+    assert!(
+        !glsl.contains("__"),
+        "GLSL identifiers must not contain reserved double underscores:\n{glsl}"
+    );
+    assert!(
+        glsl.contains("rock_idiv"),
+        "GLSL floored division helper must be emitted:\n{glsl}"
+    );
+}

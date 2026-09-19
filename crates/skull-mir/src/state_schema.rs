@@ -12,8 +12,9 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
 
-use crate::code_identity::{CodeArtifact, CodeIdentity, FrameSchema};
+use crate::code_identity::{logical_def_key, CodeArtifact, CodeIdentity, FrameSchema};
 use crate::lifecycle::LifecyclePlan;
+use crate::mangle::symbol_of_key;
 use crate::lower::{GlobalPlan, NB_PRIM_ELEMS, ScalarCtx, ValueStorage};
 use crate::mir::{MirFunc, StaticCell};
 use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy};
@@ -277,9 +278,7 @@ impl StateSchema {
                     identity: global_identity(module.file, global.name),
                     }
                 })?;
-                let names = plan
-                    .leaf_names(global.name)
-                    .unwrap_or_else(|| vec![global.name]);
+                let names = physical_leaf_names(&plan, global.name);
                 let logical = global_identity(module.file, global.name);
                 expected
                     .entry(StateKind::Global)
@@ -295,7 +294,7 @@ impl StateSchema {
                     identity: logical.clone(),
                     fingerprint,
                     physical: names.iter().map(|n| n.to_string()).collect(),
-                    owner: Some(module.file.to_string()),
+                    owner: Some(global_owner(module.file, global.name)),
                     initializer_identity: None,
                     metadata: Some(global.state_metadata),
                 };
@@ -457,10 +456,12 @@ fn registry_role(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<&'s
     if !params.is_empty() {
         return None;
     }
-    match name.as_str() {
-        "SceneRegistry" => Some("SceneRegistry"),
-        "ArenaRegistry" => Some("ArenaRegistry"),
-        _ => None,
+    if bone_semantic::prelude::is_intrinsic_key(name, "SceneRegistry") {
+        Some("SceneRegistry")
+    } else if bone_semantic::prelude::is_intrinsic_key(name, "ArenaRegistry") {
+        Some("ArenaRegistry")
+    } else {
+        None
     }
 }
 
@@ -545,7 +546,28 @@ fn collect_dynamic_entries(
 }
 
 pub fn global_identity(file: Ustr, name: Ustr) -> String {
-    format!("global:{}::{}", file, name)
+    format!("global:{}", logical_def_key(file, name))
+}
+
+/// The module a global belongs to, as the schema reports it. Entries are
+/// compared field by field for reload compatibility, so this follows identity:
+/// a v1 global's owner is its logical module (its DefKey's
+/// `<package>::<module path>` prefix), not the fragment that happens to declare
+/// it; a legacy global's owner is its file.
+pub fn global_owner(file: Ustr, name: Ustr) -> String {
+    match name.as_str().rfind("::") {
+        Some(cut) => name.as_str()[..cut].to_string(),
+        None => file.to_string(),
+    }
+}
+
+/// The physical leaf names a global occupies, in the backend's own identifier
+/// namespace: a v1 DefKey is not an identifier, so the leaves are minted from
+/// the global's emitted SYMBOL. Lowering mints its `nobox` leaves the same way,
+/// so a MIR global name and a schema leaf name are the same string.
+pub fn physical_leaf_names(plan: &GlobalPlan, name: Ustr) -> Vec<Ustr> {
+    let symbol = symbol_of_key(name);
+    plan.leaf_names(symbol).unwrap_or_else(|| vec![symbol])
 }
 
 pub fn static_identity(owner: &str, name: Ustr, ordinal: u32) -> String {
@@ -572,9 +594,9 @@ pub fn global_state_slots(
                     identity: global_identity(module.file, global.name),
                 }
             })?;
-            let names = plan
-                .leaf_names(global.name)
-                .unwrap_or_else(|| vec![global.name]);
+            // Keyed on the emitted symbol, which is what both the schema's
+            // `physical` names and a lookup from codegen carry.
+            let names = physical_leaf_names(&plan, global.name);
             let multi_leaf = names.len() != 1;
             let identity = global_identity(module.file, global.name);
             for (index, name) in names.into_iter().enumerate() {

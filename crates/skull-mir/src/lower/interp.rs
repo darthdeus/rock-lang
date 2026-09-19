@@ -293,7 +293,9 @@ impl Builder<'_> {
             // deferred box-on-escape-into-`any` work; see docs/skull-enum-value-types.md.
             StringifyRoute::EnumNames(name) => {
                 let names =
-                    self.emit_cur(Inst::Global(Ustr::from(format!("__rock_enum_{name}_names").as_str())));
+                    self.emit_cur(Inst::Global(Ustr::from(
+                        format!("__rock_enum_{}_names", crate::mangle::symbol_of_key(*name)).as_str(),
+                    )));
                 Ok(self.emit_cur(Inst::Index { base: names, index: v, kind: ContainerKind::Map }))
             }
             StringifyRoute::Inspect => self.dispatched_call("inspect", path, vec![v]),

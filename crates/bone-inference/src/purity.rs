@@ -58,7 +58,7 @@ pub(crate) fn reject_cf_in_destructure_rhs(c: BodyCtx, value: Idx<Expr>) -> Resu
 
 /// Does function `f` carry annotation `@name`?
 pub(crate) fn fn_has_anno(f: &Function, name: &str) -> bool {
-    f.annotations.iter().any(|a| a.name.name == name)
+    f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
 /// Verify a `@pure` function body: push an error at each construct that is not
@@ -176,9 +176,9 @@ pub(crate) fn reject_captures_expr(
         | Expr::Return(None)
         | Expr::Yield(None) => {}
 
-        Expr::Not(i)
+        Expr::Not(i, _)
         | Expr::BitNot(i)
-        | Expr::UnaryMinus(i)
+        | Expr::UnaryMinus(i, _)
         | Expr::Spread(i)
         | Expr::YieldDelegate(i)
         | Expr::Return(Some(i))
@@ -477,9 +477,9 @@ pub(crate) fn verify_pure_expr(
             go!(low);
             go!(high);
         }
-        Expr::Not(i)
+        Expr::Not(i, _)
         | Expr::BitNot(i)
-        | Expr::UnaryMinus(i)
+        | Expr::UnaryMinus(i, _)
         | Expr::Spread(i)
         | Expr::YieldDelegate(i)
         | Expr::Return(Some(i))

@@ -247,16 +247,20 @@ fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
 ///
 /// LEAF reads are the exception: one ELEMENT access is decomposed into K leaf
 /// reads sharing ONE hoisted check (`__nb_checked_index` for a NativeBuffer;
-/// `Inst::VecCheckedIndex` for columns -- "one call per ELEMENT access, not per
-/// column"). Each leaf read is then a raw pointer read carrying no error of its
-/// own, so reading one field of a K-leaf element would otherwise emit all K
-/// loads and discard K-1.
+/// `Inst::VecCheckedIndex` for columns and strided rows -- "one call per
+/// ELEMENT access, not per column"). Each leaf read is then a raw pointer read
+/// carrying no error of its own, so reading one field of a K-leaf element would
+/// otherwise emit all K loads and discard K-1. The shared check itself stays
+/// live, so an element read whose leaves are all unused still raises.
 ///
 /// Consulted by BOTH [`is_dead_rc`] (initial seeding) and [`is_dead_value`]
 /// (cascade). They must agree: a kind dead in one and live in the other either
 /// leaks the loads back or deletes a real bounds error.
 fn index_read_is_checked(kind: &ContainerKind) -> bool {
-    !matches!(kind, ContainerKind::NativeBufferLeaf | ContainerKind::VecColumn)
+    !matches!(
+        kind,
+        ContainerKind::NativeBufferLeaf | ContainerKind::VecColumn | ContainerKind::VecStrideSlot
+    )
 }
 
 /// Whether a value-producing inst is pure enough that an unused result is dead.
@@ -265,6 +269,8 @@ fn is_dead_value(inst: &Inst) -> bool {
     match inst {
         Inst::Call { .. } | Inst::CallValue { .. } => false,
         Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
+        // The shared bounds check of a flat element read raises on its own.
+        Inst::VecCheckedIndex { .. } => false,
         _ => inst.produces_value(),
     }
 }
@@ -599,6 +605,12 @@ fn leaf_operand(
 /// construction. A ctor that is itself a field operand of another ctor is
 /// therefore skipped -- the outer one absorbs it.
 ///
+/// Only the CDATA tier is rewritten, because only a cdata parent has physical
+/// fields to splice the child's leaves into. The other two tiers need nothing
+/// from this pass: a leaf-table box is already built from leaves by `pack`, and
+/// a GC-table box keeps its declared keys, so a `nobox` child inside one is a
+/// real box that the verifier rejects at its own span.
+///
 /// The dotted form exists only between here (end of `cleanup`) and emit. Field
 /// names are documented as MIR-pass metadata rather than the wire shape, and
 /// every pass that runs in between (`convert_closures`, `recover_counted_loops`,
@@ -635,23 +647,47 @@ pub fn flatten_nobox_nested_ctors(
     })?;
     let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
     for t in targets {
-        let (name, representation, explicit) = match &func.insts[t] {
-            Inst::MakeValueStruct { name, representation, .. } => (*name, *representation, false),
-            Inst::MaterializeValueStruct { name, representation, .. } => (*name, *representation, true),
+        let span = func.inst_spans.get(t).copied();
+        let reject = |msg: String| match span {
+            Some(sp) => CompilerError::new_with_label(sp, msg),
+            None => CompilerError::new_no_location(msg),
+        };
+        let (name, representation, form, explicit) = match &func.insts[t] {
+            Inst::MakeValueStruct { name, representation, form, .. } => {
+                (*name, *representation, *form, false)
+            }
+            Inst::MaterializeValueStruct { name, representation, form, .. } => {
+                (*name, *representation, *form, true)
+            }
             _ => continue,
         };
+        // A ctor ALREADY in leaf form carries the canonical leaves as its
+        // operands, so there is nothing left to splice. It still matches the
+        // trigger (a `nobox` name is its own), and re-resolving its dotted keys
+        // as a field path fails whenever a path has more than one component --
+        // `lo` is not a field of a ctor keyed `lo.x` -- which is what made
+        // `materialize` of a nested cdata `nobox` value reject on the pass's
+        // second iteration.
+        if matches!(form, ValueCtorForm::Leaves) {
+            continue;
+        }
         let plan = rep_arena.try_get(representation).ok_or_else(|| {
-            CompilerError::new_no_location(format!(
+            reject(format!(
                 "nobox constructor `{name}` carries representation {representation:?} that does not belong to its build arena"
             ))
         })?;
+        // Flattening splices a nested ctor's leaves into the PARENT's physical
+        // fields, which only the cdata tier has -- a GC-table parent keeps its
+        // declared keys and a leaf-table parent is already built from leaves by
+        // `pack`. Leaving those trees alone is not a fallback: an explicit
+        // `materialize` at those tiers is legal exactly as it stands, and an
+        // IMPLICIT nobox ctor still inside one is rejected, at its own span, by
+        // `nobox_materialization_violations`.
         if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
-            return Err(CompilerError::new_no_location(format!(
-                "nobox constructor `{name}` carries representation {representation:?} without CData storage"
-            )));
+            continue;
         }
         let paths = plan.leaf_paths().ok_or_else(|| {
-            CompilerError::new_no_location(format!(
+            reject(format!(
                 "nobox constructor `{name}` carries representation {representation:?} without a leaf-path plan"
             ))
         })?;
@@ -659,7 +695,7 @@ pub fn flatten_nobox_nested_ctors(
         let mut leaves: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(paths.len());
         for path in &paths {
             let op = leaf_operand(func, t, path.as_str(), &mut pre).ok_or_else(|| {
-                CompilerError::new_no_location(format!(
+                reject(format!(
                     "nobox constructor `{name}` representation {representation:?} leaf `{path}` does not resolve through its physical fields"
                 ))
             })?;
@@ -677,7 +713,6 @@ pub fn flatten_nobox_nested_ctors(
         if unchanged {
             continue;
         }
-        let span = func.inst_spans.get(t).copied();
         // Preserve the variant: an explicit box stays explicit, it just stops
         // building a nested one on the way.
         let flat = func.alloc_inst(if explicit {
@@ -745,8 +780,10 @@ pub fn flatten_nobox_nested_ctors(
 /// [`nobox_materialization_violations`] must use THIS, not `cleanup`:
 /// normalization has to run before the verifier, and after `cleanup`'s own final
 /// DCE (the verifier walks `block.insts`, so an orphaned inner ctor left in the
-/// list still rejects). Idempotent -- the rewritten form no longer matches the
-/// trigger -- which matters because `cleanup` is called from many sites.
+/// list still rejects). Idempotent -- a rewritten ctor is in LEAF form and the
+/// pass skips those -- which matters because `cleanup` is called from many
+/// sites. The name-based trigger still fires on it, so the skip has to be the
+/// form and not the trigger.
 ///
 /// Every emit-path caller uses this; plain `cleanup` survives only as this
 /// function's own first step. Were a site to miss it, the failure would be
@@ -1793,6 +1830,7 @@ fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) 
     match inst {
         Inst::Call { .. } | Inst::CallValue { .. } => false,
         Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
+        Inst::VecCheckedIndex { .. } => false,
         Inst::Store { cell, .. } => load_count[raw(*cell) as usize] == 0,
         _ if inst.produces_value() => use_count[raw(i) as usize] == 0,
         _ => false,

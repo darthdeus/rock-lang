@@ -31,8 +31,11 @@ use lsp_types::{
 };
 
 use bone_semantic::inference::{self, Gamma};
-use bone_semantic::prelude::{BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace};
-use bone_incremental::session::{Session, UpdateTier};
+use bone_semantic::prelude::{
+    is_intrinsic_key_in, BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span,
+    TyId, Workspace,
+};
+use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
@@ -58,37 +61,70 @@ fn reparse_user_file(uf: &bone_incremental::session::UserFile, path: &str) -> Op
 // Warm stdlib (parsed once, cloned into every session)
 // ---------------------------------------------------------------------------
 
-/// Canonical on-disk path of a stdlib file, keyed exactly like a project file
-/// (`canon`/`root_for` produce the same form), so the warm module a user opens
-/// resolves to the SAME `ModuleId` -- no duplicate, no self-collision -- and
-/// source-based queries find the stdlib in `texts`.
-fn stdlib_path(name: &str) -> String {
-    canonicalize_lenient(&rock_host::stdlib_loader::stdlib_dir().join(name).to_string_lossy())
+/// Each stdlib file's session id and canonical on-disk path. Computed once:
+/// `canonicalize` is a syscall and the id <-> path translation below runs on
+/// every request.
+fn stdlib_paths() -> &'static [(String, String)] {
+    static PATHS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    PATHS.get_or_init(|| {
+        let dir = rock_host::stdlib_loader::stdlib_dir();
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                (
+                    rock_host::stdlib_loader::stdlib_file_id(f.name),
+                    canonicalize_lenient(&dir.join(f.name).to_string_lossy()),
+                )
+            })
+            .collect()
+    })
 }
 
-/// Stdlib sources keyed by canonical path, seeded into every project's `texts`
-/// so default-value slicing, `workspace_symbols`, and span->text see the stdlib
-/// like any other file.
+/// The session keys the stdlib by the loader's stdlib ids (`<stdlib>/name`,
+/// the CLI's spelling), because bone reads std ownership -- the v1 prelude,
+/// the std-only primitives -- from that spelling. The editor names the same
+/// files by their real paths. These two functions are the only translation
+/// between the two: every public entry maps an editor path in through
+/// [`session_file_id`] (via `canon`), and everything handed back to the editor
+/// -- a location, a diagnostic's file, a symbol -- goes out through
+/// [`editor_path`].
+fn session_file_id(canonical_path: String) -> String {
+    match stdlib_paths().iter().find(|(_, p)| *p == canonical_path) {
+        Some((id, _)) => id.clone(),
+        None => canonical_path,
+    }
+}
+
+/// The editor's path for a session file id (see [`session_file_id`]).
+pub fn editor_path(id: &str) -> Cow<'_, str> {
+    stdlib_paths()
+        .iter()
+        .find(|(sid, _)| sid == id)
+        .map_or(Cow::Borrowed(id), |(_, p)| Cow::Borrowed(p.as_str()))
+}
+
+/// Stdlib sources keyed by their session ids, seeded into every project's
+/// `texts` so default-value slicing, `workspace_symbols`, and span->text see
+/// the stdlib like any other file.
 fn stdlib_texts() -> Vec<(String, String)> {
     rock_host::stdlib_loader::stdlib_files()
         .iter()
-        .map(|f| (stdlib_path(f.name), f.contents.to_string()))
+        .map(|f| (rock_host::stdlib_loader::stdlib_file_id(f.name), f.contents.to_string()))
         .collect()
 }
 
-/// The real stdlib, parsed through skull-parser (bone's front end) keyed by each
-/// file's REAL canonical path. Opening a stdlib buffer then interns to the same
-/// `ModuleId` as the warm copy (`warm_mids` still distinguishes warm from user
-/// code for lints/ctags policy), so it's navigable and diagnosable without a
-/// second colliding module. Parsing with the path stamps every span, so bone's
-/// `ModuleId` (the first item's `span.file`) lands on it directly. Parsed once.
+/// The real stdlib, parsed through skull-parser (bone's front end) under its
+/// session ids. Opening a stdlib buffer maps its path to the same id and so
+/// interns to the same `ModuleId` as the warm copy (`warm_mids` still
+/// distinguishes warm from user code for lints/ctags policy), so it's
+/// navigable and diagnosable without a second colliding module. Parsed once.
 fn warm_stdlib() -> Vec<skull_parser::Ast> {
     static WARM: OnceLock<Vec<skull_parser::Ast>> = OnceLock::new();
     WARM.get_or_init(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
             .filter_map(|f| {
-                let id = Ustr::from(stdlib_path(f.name).as_str());
+                let id = Ustr::from(rock_host::stdlib_loader::stdlib_file_id(f.name).as_str());
                 match skull_parser::parse_module(f.contents, id) {
                     Ok(m) => Some(m),
                     Err(e) => {
@@ -164,6 +200,155 @@ struct BoneProject {
     /// `rock/modules` can render "how long ago did this recompile" -- the
     /// incremental-perf watch view. Modules never yet touched are absent.
     module_touched: HashMap<String, std::time::Instant>,
+    /// The package graph of this root's manifest, built once when the
+    /// project is created. It supplies the resolver's alias tables and the
+    /// dialect and package of a file that enters after the load (see
+    /// `update`). `None` for a root with no manifest, or one whose graph does
+    /// not build (logged): every file is then a standalone legacy source,
+    /// as in a compile.
+    graph: Option<rock_host::stick::graph::PackageGraph>,
+}
+
+/// The package graph for the project rooted at `root`, if it has a manifest.
+fn project_graph(root: &Path) -> Option<rock_host::stick::graph::PackageGraph> {
+    if !root.join("stick.toml").exists() {
+        return None;
+    }
+    match rock_host::stick::graph::PackageGraph::build(root) {
+        Ok(graph) => Some(graph),
+        Err(e) => {
+            log::warn!(
+                "bone LSP: package graph for `{}` does not build ({e}); its files read as legacy",
+                root.display()
+            );
+            None
+        }
+    }
+}
+
+/// The `a::b::` path written right before `at` (the start of the identifier
+/// being typed), as `(::-anchored, segments)`. `None` when no `::` precedes.
+fn qualified_prefix_before(src: &str, at: usize) -> Option<(bool, Vec<Ustr>)> {
+    let b = src.as_bytes();
+    let mut end = at.min(b.len());
+    let mut segments = Vec::new();
+    while end >= 2 && &b[end - 2..end] == b"::" {
+        let colon = end - 2;
+        let mut start = colon;
+        while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
+            start -= 1;
+        }
+        if start == colon {
+            // A `::` with nothing before it anchors the path at the root.
+            segments.reverse();
+            return (!segments.is_empty()).then_some((true, segments));
+        }
+        segments.push(Ustr::from(&src[start..colon]));
+        end = start;
+    }
+    segments.reverse();
+    (!segments.is_empty()).then_some((false, segments))
+}
+
+/// Completion after a qualified path in a modules-v1 fragment
+/// (`modules_scope::path_members`). `None` for a legacy file or a prefix
+/// that names neither a module nor an enum, which leaves the legacy
+/// `Enum::` route to try.
+fn v1_path_completions(ws: &Workspace, path: &str, src: &str, at: usize, prefix: &str) -> Option<Vec<CompletionItem>> {
+    let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
+    let (from_root, segments) = qualified_prefix_before(src, at)?;
+    let members = crate::modules_scope::path_members(ws, frag, from_root, &segments)?;
+    let pfx = prefix.as_bytes();
+    let mut items: Vec<CompletionItem> = members
+        .into_iter()
+        .filter(|(name, _)| prefix.is_empty() || crate::completion::match_policy::admit(name.as_bytes(), pfx))
+        .enumerate()
+        .map(|(i, (name, member))| {
+            let kind = match member {
+                crate::modules_scope::Member::Module => CompletionItemKind::MODULE,
+                crate::modules_scope::Member::Variant => CompletionItemKind::ENUM_MEMBER,
+                crate::modules_scope::Member::Def(key) => {
+                    if ws.functions_by_name.contains_key(&key) {
+                        CompletionItemKind::FUNCTION
+                    } else if ws.struct_by_name.contains_key(&key) {
+                        CompletionItemKind::STRUCT
+                    } else if ws.enums_by_name.contains_key(&key) {
+                        CompletionItemKind::ENUM
+                    } else if ws.newtypes_by_name.contains_key(&key) {
+                        CompletionItemKind::STRUCT
+                    } else {
+                        CompletionItemKind::VARIABLE
+                    }
+                }
+            };
+            CompletionItem {
+                sort_text: Some(closed_set_sort_text(name.as_str(), pfx, 0, i)),
+                label: name.to_string(),
+                kind: Some(kind),
+                ..Default::default()
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    Some(items)
+}
+
+/// The identifier at or ending at `offset` in `src`.
+fn ident_around(src: &str, offset: usize) -> &str {
+    let b = src.as_bytes();
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut start = offset.min(b.len());
+    while start > 0 && is_ident(b[start - 1]) {
+        start -= 1;
+    }
+    let mut end = offset.min(b.len());
+    while end < b.len() && is_ident(b[end]) {
+        end += 1;
+    }
+    &src[start..end]
+}
+
+/// Where module `node` of `package` is declared: a fragment's `mod` header
+/// naming it, else an inline `mod` block. `None` for a package root, which
+/// no item declares.
+fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Span> {
+    fn inline_block(items: &[bone_semantic::semantic_passes::ScopeItem], path: &mut Vec<Ustr>, node: Ustr) -> Option<Span> {
+        for item in items {
+            if let bone_semantic::semantic_passes::ScopeItem::Module { name, item_span, items, .. } = item {
+                path.push(*name);
+                if bone_core::modules::NsPackage::path_key(path) == node {
+                    return Some(*item_span);
+                }
+                let found = inline_block(items, path, node);
+                path.pop();
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        None
+    }
+    if node.is_empty() {
+        return None;
+    }
+    let ours = session
+        .files
+        .values()
+        .map(|uf| &uf.contribution)
+        .filter(|c| c.package.as_ref().is_some_and(|p| p.id == package));
+    let mut block = None;
+    for c in ours {
+        let mut path: Vec<Ustr> = c.header.iter().flat_map(|h| h.path.iter().map(|i| i.name)).collect();
+        if let Some(h) = &c.header
+            && bone_core::modules::NsPackage::path_key(&path) == node
+        {
+            return Some(h.span);
+        }
+        if block.is_none() {
+            block = inline_block(&c.items, &mut path, node);
+        }
+    }
+    block
 }
 
 /// One module's row for the `rock/modules` snapshot: its id (file path) and how
@@ -308,7 +493,7 @@ impl BoneWorkspace {
     /// not-yet-saved buffer). Idempotent: discovery and `root_for`/`stick_root`
     /// already canonicalize, so re-canonicalizing here yields the same key.
     fn canon_str(path: &str) -> String {
-        canonicalize_lenient(path)
+        session_file_id(canonicalize_lenient(path))
     }
 
     /// `canon_str` with memoization -- for the `&mut self` mutators on the
@@ -334,7 +519,8 @@ impl BoneWorkspace {
     /// standalone file with no project. Determines whether `update` should
     /// batch-index siblings (real project) or stay single-file (scratch file).
     fn stick_root(path: &str) -> Option<PathBuf> {
-        let p = Path::new(path);
+        let on_disk = editor_path(path);
+        let p = Path::new(on_disk.as_ref());
         let canon = fs_err::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let mut cur = canon.parent();
         while let Some(dir) = cur {
@@ -353,7 +539,8 @@ impl BoneWorkspace {
         if let Some(root) = Self::stick_root(path) {
             return root;
         }
-        let p = Path::new(path);
+        let on_disk = editor_path(path);
+        let p = Path::new(on_disk.as_ref());
         let canon = fs_err::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         canon
             .parent()
@@ -363,12 +550,16 @@ impl BoneWorkspace {
 
     fn project_mut(&mut self, root: &Path) -> &mut BoneProject {
         let is_bin = stick_is_bin(root);
-        self.projects
-            .entry(root.to_path_buf())
-            .or_insert_with(|| BoneProject {
+        self.projects.entry(root.to_path_buf()).or_insert_with(|| {
+            let graph = project_graph(root);
+            let aliases = graph
+                .as_ref()
+                .map(crate::package_aliases::from_graph)
+                .unwrap_or_default();
+            BoneProject {
                 // Warm-only session is always valid even if the first file
                 // doesn't parse; the file is added by the update_file below.
-                session: Session::new(warm_stdlib(), Vec::new())
+                session: Session::new(warm_stdlib(), Vec::new(), &aliases)
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: Default::default(),
@@ -378,7 +569,9 @@ impl BoneWorkspace {
                 is_bin,
                 root: root.to_path_buf(),
                 module_touched: HashMap::new(),
-            })
+                graph,
+            }
+        })
     }
 
     fn project(&self, path: &str) -> Option<&BoneProject> {
@@ -409,7 +602,7 @@ impl BoneWorkspace {
                     .texts
                     .keys()
                     .map(|id| ModuleRecency {
-                        id: id.clone(),
+                        id: editor_path(id).into_owned(),
                         ago_ms: proj
                             .module_touched
                             .get(id)
@@ -442,10 +635,23 @@ impl BoneWorkspace {
             return; // couldn't resolve the unit; `update` still adds the one file
         };
         let is_bin = stick_is_bin(&root);
-        match Session::new(warm_stdlib(), files.clone()) {
+        let file_texts: Vec<(String, String)> =
+            files.iter().map(|f| (f.path.clone(), f.text.clone())).collect();
+        // The alias table the resolver needs comes from the same graph that
+        // selected these files, so a v1 package in the editor resolves its
+        // dependencies exactly as a compile does.
+        // `root` is the deepest enclosing `stick.toml` directory, or a scratch
+        // file's own parent -- where there is no manifest the graph build fails
+        // and the empty table is correct (a standalone source owns no package).
+        let graph = project_graph(&root);
+        let aliases = graph
+            .as_ref()
+            .map(crate::package_aliases::from_graph)
+            .unwrap_or_default();
+        match Session::new(warm_stdlib(), files, &aliases) {
             Ok(session) => {
                 let texts: HashMap<String, String> =
-                    stdlib_texts().into_iter().chain(files).collect();
+                    stdlib_texts().into_iter().chain(file_texts).collect();
                 // Baseline every loaded file at load time, so `ago_ms` is
                 // meaningful for modules not yet re-inferred by an edit.
                 let now = std::time::Instant::now();
@@ -462,6 +668,7 @@ impl BoneWorkspace {
                     is_bin,
                     root: root.clone(),
                     module_touched,
+                    graph,
                 };
                 prime_lint_cache(&mut project);
                 self.projects.insert(
@@ -474,7 +681,7 @@ impl BoneWorkspace {
                     "batch load failed for `{}` ({e:?}); falling back to per-file indexing",
                     root.display()
                 );
-                for (p, src) in files {
+                for (p, src) in file_texts {
                     let _ = self.update(&p, src);
                 }
             }
@@ -486,7 +693,7 @@ impl BoneWorkspace {
     /// resolution `rock compile` performs. Paths are canonicalized so they match
     /// the canonical paths the LSP queries with (`root_for` / the CLI's
     /// `canonical`); a mismatch would leave the opened file's module unfindable.
-    fn project_sources(file_path: &str) -> Option<Vec<(String, String)>> {
+    fn project_sources(file_path: &str) -> Option<Vec<SessionFile>> {
         let unit =
             rock_host::compilation_units::determine_compilation_unit_for_file(file_path).ok()?;
         let sources = rock_host::compilation_units::load_sources_for_compilation_unit(&unit).ok()?;
@@ -494,7 +701,15 @@ impl BoneWorkspace {
         for f in &sources.files {
             let f = f.borrow();
             let raw = f.file.to_id_path();
-            out.push((canonicalize_lenient(&raw), f.contents.clone()));
+            // The loader already stamped each file's dialect and owning package
+            // from the package graph; carry both into the session so the LSP
+            // reads a v1 package the way a real compile does.
+            out.push(SessionFile {
+                path: canonicalize_lenient(&raw),
+                text: f.contents.clone(),
+                dialect: f.dialect,
+                package: f.package.clone(),
+            });
         }
         Some(out)
     }
@@ -549,6 +764,22 @@ impl BoneWorkspace {
         // change -- so rebuild only on a non-`BodyOnly` edit (or the very first
         // build), and reuse them across body keystrokes.
         let mut rebuild_type_caches = proj.reach.is_none() || proj.fn_sigs.is_none();
+        // A file the session does not hold yet (created after the batch load,
+        // or entering one by one after a failed batch) takes its dialect and
+        // package from the manifest, exactly as the batch load's files did.
+        if !proj.session.is_tracked(path) {
+            let facts = proj
+                .graph
+                .as_ref()
+                .and_then(|g| rock_host::compilation_units::source_facts(g, Path::new(path)));
+            let (package, dialect) = match facts {
+                Some((package, dialect)) => (Some(package), dialect),
+                None => (None, skull_parser::Dialect::Legacy),
+            };
+            if let Err(e) = proj.session.declare_file_facts(path, dialect, package) {
+                log::error!("bone LSP: {}", e.message);
+            }
+        }
         match proj.session.update_file(path, &text) {
             Ok(upd) => {
                 if !matches!(upd.tier, UpdateTier::BodyOnly | UpdateTier::NoChange) {
@@ -579,7 +810,7 @@ impl BoneWorkspace {
                             });
                         }
                     }
-                    UpdateTier::Interface | UpdateTier::FullUser => lint_full = true,
+                    UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => lint_full = true,
                     UpdateTier::NoChange => {}
                 }
             }
@@ -737,7 +968,10 @@ impl BoneWorkspace {
             );
         }
 
-        by_file.into_iter().collect()
+        by_file
+            .into_iter()
+            .map(|(file, diags)| (editor_path(&file).into_owned(), diags))
+            .collect()
     }
 
     /// Drop a closed/removed file from its session.
@@ -903,6 +1137,18 @@ impl BoneWorkspace {
                 return self.location_from_span(proj, &span);
             }
         }
+        // A modules-v1 path segment navigates by what the resolver recorded
+        // for that segment: a module to its header, a definition or variant
+        // to its declaration -- not to whatever the whole path lowered to.
+        if let Some(seg) = crate::query::path_segment_at(ws, mid, offset) {
+            let span = match seg.target {
+                bone_semantic::hir::SegmentTarget::Module { package, node } => {
+                    module_declaration(&proj.session, package, node)
+                }
+                target => crate::query::segment_target_def(ws, target),
+            }?;
+            return self.location_from_span(proj, &span);
+        }
         let pat_def = raw
             .as_ref()
             .and_then(|ast| crate::query::enum_variant_pattern_def(ws, ast, offset));
@@ -956,7 +1202,7 @@ impl BoneWorkspace {
     pub fn document_highlight(&self, path: &str, pos: Position) -> Vec<DocumentHighlight> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
-        let want = format!("file://{path}");
+        let want = format!("file://{}", editor_path(path));
         self.references(path, pos)
             .into_iter()
             .filter(|loc| loc.uri.as_str() == want)
@@ -1229,6 +1475,76 @@ impl BoneWorkspace {
         )
     }
 
+    /// The sites a rename at `offset` rewrites: [`Self::v1_rename_sites`]
+    /// for a modules-v1 definition or import alias, else every reference of
+    /// the symbol, all overloads of a function included.
+    fn rename_sites(&self, proj: &BoneProject, path: &str, offset: usize) -> Vec<crate::query::RefSite> {
+        self.v1_rename_sites(proj, path, offset).unwrap_or_else(|| {
+            self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads)
+        })
+    }
+
+    /// Rename sites that tell a definition from an import alias (spec 15.3).
+    /// Renaming a modules-v1 definition rewrites every site that spells its
+    /// name -- its declaration, bare uses, the naming segment of each path,
+    /// `use` items and re-exports -- and not the local name an alias binds.
+    /// Renaming an alias (`use a::f as g`, at the `g` or at a use of it)
+    /// rewrites that alias and the uses of `g` in its own file. `None` when
+    /// the cursor is on neither.
+    fn v1_rename_sites(&self, proj: &BoneProject, path: &str, offset: usize) -> Option<Vec<crate::query::RefSite>> {
+        use bone_semantic::hir::{PathSegmentRef, SegmentTarget};
+        let ws = proj.session.workspace();
+        let mid = user_module_for_path(ws, path)?;
+        let text_at = |span: &Span| {
+            proj.texts
+                .get(span.file.as_str())
+                .and_then(|t| t.get(span.offset_range.0..span.offset_range.1))
+        };
+        let (key, alias) = match crate::query::path_segment_at(ws, mid, offset) {
+            Some(PathSegmentRef { target: SegmentTarget::Def(key), alias: true, span }) => {
+                (key, Some(text_at(&span)?.to_string()))
+            }
+            Some(PathSegmentRef { target: SegmentTarget::Def(key), .. }) => (key, None),
+            Some(_) => return None,
+            None => {
+                let key = crate::query::v1_def_named_at(ws, Ustr::from(path), offset).or_else(|| {
+                    let def = gaps::definition(ws, mid, ws.inference(mid)?, offset)?;
+                    crate::query::v1_def_declared_at(ws, &def)
+                })?;
+                let src = proj.texts.get(path)?;
+                let word = ident_around(src, offset);
+                let is_alias = word != ws.defs.get(&key)?.name.as_str()
+                    && crate::modules_scope::fragment(ws, Ustr::from(path))
+                        .is_some_and(|frag| frag.named.contains_key(&Ustr::from(word)));
+                (key, is_alias.then(|| word.to_string()))
+            }
+        };
+        let name = ws.defs.get(&key)?.name;
+        let decl = crate::query::segment_target_def(ws, SegmentTarget::Def(key))?;
+        // Every site of the definition: the reference walks from its
+        // declaration, then each recorded path segment naming it (a walk
+        // reports a qualified call by the whole path's span, which no site
+        // spelling check below keeps).
+        let mut sites: Vec<Span> = self
+            .all_reference_spans(proj, decl.file.as_str(), decl.offset_range.0, crate::query::FnRefScope::AllOverloads)
+            .into_iter()
+            .map(|site| site.span)
+            .collect();
+        sites.extend(
+            crate::query::segments_naming(ws, SegmentTarget::Def(key))
+                .into_iter()
+                .filter(|seg| alias.is_some() || !seg.alias)
+                .map(|seg| seg.span),
+        );
+        let spelling = alias.as_deref().unwrap_or(name.as_str());
+        sites.retain(|span| {
+            text_at(span) == Some(spelling) && (alias.is_none() || span.file.as_str() == path)
+        });
+        sites.sort_by_key(|span| (span.file.as_str().to_string(), span.offset_range));
+        sites.dedup_by_key(|span| (span.file, span.offset_range));
+        Some(sites.into_iter().map(|span| crate::query::RefSite { span, shorthand: None }).collect())
+    }
+
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
 
     pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
@@ -1430,6 +1746,20 @@ impl BoneWorkspace {
                 return items;
             }
         }
+        // `a::b::|` in a modules-v1 fragment: what the path names, as the
+        // resolver walks it -- a module's accessible members and child
+        // modules, or an enum's variants. Served from the live workspace:
+        // the half-typed path is in the buffer, not in the namespace tree.
+        if let Some(items) = v1_path_completions(
+            proj.session.workspace(),
+            path,
+            src,
+            offset - prefix_raw.len(),
+            &prefix,
+        ) {
+            path_ms("v1 path", items.len());
+            return items;
+        }
         if let Some(enum_name) = cx.qualified.clone() {
             let mut items = enum_qualified_completions(
                 &mut proj.session, path, src, offset, &enum_name, &prefix,
@@ -1612,6 +1942,7 @@ impl BoneWorkspace {
                     name,
                     kind: SymCat::Macro,
                     detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
+                    signature_key: None,
                     ty: None,
                     takes_params: !md.params.is_empty(),
                     variant_shape: None,
@@ -1620,6 +1951,38 @@ impl BoneWorkspace {
                     def_file,
                     rec: 0,
                 });
+            }
+        }
+        // Out-of-scope accessible definitions of a v1 fragment, each with the
+        // `use` that brings it in (spec 15.3). Only while a name is being
+        // typed: the empty-prefix list is what the file already binds.
+        let mut import_edits: HashMap<String, TextEdit> = HashMap::new();
+        if !prefix.is_empty() {
+            if let Some(frag) = crate::modules_scope::fragment(ws, Ustr::from(path)) {
+                let show_private = prefix.starts_with('_');
+                let pfx = prefix.as_bytes();
+                let admit = |name: &str| {
+                    (!name.starts_with('_') || show_private)
+                        && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
+                            || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
+                };
+                let contribution = proj.session.files.get(path).map(|uf| &uf.contribution);
+                let mut offered: std::collections::HashSet<Ustr> = cands.iter().map(|c| c.name).collect();
+                for cand in crate::modules_scope::import_candidates(ws, frag, admit) {
+                    let entries = crate::query::key_entries(ws, cand.name, cand.key, expr_position, pfx, show_private);
+                    for entry in entries {
+                        if !offered.insert(entry.name) {
+                            continue;
+                        }
+                        let (at, new_text) = match contribution {
+                            Some(c) => crate::modules_scope::use_insertion(c, src, &cand.path),
+                            None => (0, format!("use {};\n", cand.path)),
+                        };
+                        let at = offset_to_position(src, at);
+                        import_edits.insert(entry.name.to_string(), TextEdit { range: Range::new(at, at), new_text });
+                        cands.push(entry);
+                    }
+                }
             }
         }
         let cands_ms = t_cands.elapsed().as_secs_f64() * 1000.0;
@@ -1990,9 +2353,15 @@ impl BoneWorkspace {
         // table, not the old per-root O(functions) `ufcs_methods` scan. Ranked
         // with the type-matching variables (rank 0), shortest paths first.
         let t_reach = std::time::Instant::now();
+        // The reach and call-through indexes spell every workspace function
+        // by its key, which in a modules-v1 fragment is a DefKey the file
+        // cannot write (`chess_core::ch_to_fen(pos)`), and they consult no
+        // tier or access. Until they spell what the fragment binds, a v1
+        // fragment gets neither synthesis -- no candidate beats a wrong one.
+        let synthesize = crate::modules_scope::fragment(ws, Ustr::from(path)).is_none();
         // A pattern head is not a value slot: a dotted reach path is not a
         // valid pattern, so the expansion is suppressed there.
-        if !expected_types.is_empty() && !pattern_pos {
+        if synthesize && !expected_types.is_empty() && !pattern_pos {
             let reach_owned;
             let reach = match &proj.reach {
                 Some(r) => r,
@@ -2081,7 +2450,7 @@ impl BoneWorkspace {
         // cap but is skipped here at a >=MAX short prefix; acceptable under the
         // `isIncomplete` contract (the user narrows and it reappears).
         // Suppressed in a pattern head like reach: `f(arg)` is not a pattern.
-        if expr_position && !pattern_pos && sink.len() < max_items {
+        if synthesize && expr_position && !pattern_pos && sink.len() < max_items {
             // reach (for local-arg expansion) + the precomputed call-through
             // index, both cached on the project and rebuilt only on non-BodyOnly
             // edits. The one-shot CLI path has neither cached -> build throwaways.
@@ -2149,10 +2518,19 @@ impl BoneWorkspace {
         }
         sink.cands.sort_by(cand_cmp);
         sink.cands.truncate(max_items);
-        sink.cands
+        let mut items: Vec<CompletionItem> = sink
+            .cands
             .into_iter()
             .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren, pattern_pos))
-            .collect()
+            .collect();
+        if !import_edits.is_empty() {
+            for item in &mut items {
+                if let Some(edit) = import_edits.get(&item.label) {
+                    item.additional_text_edits = Some(vec![edit.clone()]);
+                }
+            }
+        }
+        items
     }
 
     // -- Feature: rename + prepare-rename (stubbed: gaps::references) --------
@@ -2170,7 +2548,7 @@ impl BoneWorkspace {
         // at a declaration name ("nothing to rename" on `fn foo`), and the whole
         // enclosing `Call` span at a callee (prefilling `foo(args)`, not `foo`).
         let here = self
-            .all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads)
+            .rename_sites(proj, path, offset)
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
@@ -2188,7 +2566,7 @@ impl BoneWorkspace {
         let src = proj.texts.get(path)?;
         let offset = offset_at_line_col(src, pos.line, pos.character);
         // Rename rewrites the whole (shared) overloaded name, not one overload.
-        let sites = self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads);
+        let sites = self.rename_sites(proj, path, offset);
         if sites.is_empty() {
             return None;
         }
@@ -2278,7 +2656,7 @@ impl BoneWorkspace {
                 let Some(mid) = user_module_for_path(ws, file) else {
                     continue;
                 };
-                let Ok(uri) = <Uri as std::str::FromStr>::from_str(&format!("file://{file}")) else {
+                let Ok(uri) = <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))) else {
                     continue;
                 };
                 // Built lazily on the first match in this file: a Ctrl-T query
@@ -2353,14 +2731,14 @@ impl BoneWorkspace {
         // Iterating the workspace modules directly (vs `texts.keys()` +
         // `user_module_for_path`) can't silently drop a file on a path mismatch
         // and needs no canonicalization round-trip. The warm stdlib is included
-        // (its modules carry real canonical paths), so `vec_push` & co. are
+        // (written under its real path, `editor_path`), so `vec_push` & co. are
         // jump-to-by-name; only the builtin (pathless) module is excluded.
         for m in ws.modules.iter() {
             if m.id == ModuleId::builtin() {
                 continue;
             }
             let mid = m.id;
-            let file = m.file.as_str().to_string();
+            let file = editor_path(m.file.as_str()).into_owned();
             // Function `signature:`/`returns:` fields, looked up per function by
             // declaration-span start. Built once per file, not on the hot
             // `document_symbols` path.
@@ -2450,7 +2828,7 @@ impl BoneWorkspace {
             // each file's macro signatures at parse time (`UserFile.macros`), so
             // read them directly. No reparse; the recorded spans are shifted on
             // incremental edits, so the lines stay accurate.
-            if let Some(uf) = proj.session.files.get(&file) {
+            if let Some(uf) = proj.session.files.get(m.file.as_str()) {
                 for md in &uf.macros {
                     let params: Vec<String> = md
                         .params
@@ -2620,7 +2998,7 @@ impl BoneWorkspace {
         span: &Span,
     ) -> Option<(Uri, Cow<'a, str>)> {
         let file = span.file.as_str();
-        let uri = <Uri as std::str::FromStr>::from_str(&format!("file://{file}")).ok()?;
+        let uri = <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))).ok()?;
         match proj.texts.get(file) {
             Some(t) => Some((uri, Cow::Borrowed(t))),
             None => Some((uri, Cow::Owned(fs_err::read_to_string(file).ok()?))),
@@ -3490,7 +3868,7 @@ pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: u
                 TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
                 TyId::Local(_) => continue,
             };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if matches!(n.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef"))
+            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_intrinsic_key_in(n, &["FieldRef", "ReadFieldRef", "WriteFieldRef"]))
             {
                 found = true;
             }
@@ -3863,16 +4241,18 @@ pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: T
     match ty_of(ws, body, ty) {
         TypeExpr::App { ctor: TypeCtor::Array, .. }
         | TypeExpr::App { ctor: TypeCtor::Map, .. } => true,
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
-            n.as_str(),
-            "Arena"
-                | "NativeBuffer"
-                | "NativeBufferU8"
-                | "NativeBufferI8"
-                | "NativeBufferU16"
-                | "NativeBufferI16"
-                | "NativeBufferU32"
-                | "NativeBufferI32"
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => is_intrinsic_key_in(
+            n,
+            &[
+                "Arena",
+                "NativeBuffer",
+                "NativeBufferU8",
+                "NativeBufferI8",
+                "NativeBufferU16",
+                "NativeBufferI16",
+                "NativeBufferU32",
+                "NativeBufferI32",
+            ],
         ),
         _ => false,
     }

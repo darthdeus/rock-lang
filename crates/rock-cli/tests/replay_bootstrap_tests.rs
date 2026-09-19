@@ -927,6 +927,7 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
     let mut env = env_refs(&env_owned);
     env.extend([
         ("STONE_LIVE_REWIND", "1"),
+        ("STONE_KEYFRAME_INTERVAL", "10"),
         ("STONE_CHECKPOINT_INTERVAL", "5"),
         ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
         ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
