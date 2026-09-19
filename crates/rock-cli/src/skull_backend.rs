@@ -3480,6 +3480,31 @@ impl SkullStone {
         &self.artifact_fingerprint
     }
 
+    /// Exact source texts and `embed_string` files that produced a sim
+    /// artifact. The test-full compile receipt uses these as its invalidation
+    /// boundary; it deliberately does not retain this live compile session.
+    pub(crate) fn sim_receipt_inputs(
+        &self,
+    ) -> (Vec<(String, String)>, Vec<std::path::PathBuf>) {
+        let sources = self
+            .project
+            .sources()
+            .files
+            .iter()
+            .map(|source| {
+                let source = source.borrow();
+                (source.file.to_id_path(), source.contents.clone())
+            })
+            .collect();
+        let comptime_files = self
+            .cache
+            .comptime_files()
+            .into_iter()
+            .map(|path| std::path::PathBuf::from(path.as_str()))
+            .collect();
+        (sources, comptime_files)
+    }
+
     /// On a watch event: refresh the cached sources (re-read only `changed` off
     /// disk, or fully re-discover if the file SET changed), `update_file` every
     /// source (the Session content-hashes unchanged ones to a no-op), then route

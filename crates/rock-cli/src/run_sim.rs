@@ -19,6 +19,7 @@ use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
+use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -432,6 +433,431 @@ fn compile_sims(
     compile_sims_with_allocation(backend, project_path, output_path, None)
 }
 
+const SIM_COMPILE_RECEIPT_DIR_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_DIR";
+const SIM_COMPILE_RECEIPT_PREPARE_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_PREPARE";
+const SIM_COMPILE_RECEIPT_VERSION: u64 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SimReceiptInput {
+    kind: String,
+    path: String,
+    sha256: String,
+}
+
+struct PreparedSims {
+    wire_names: Vec<String>,
+    env_by_wire: HashMap<String, Vec<(String, String)>>,
+    stone: Option<crate::skull_backend::SkullStone>,
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sim_receipt_project_dir(root: &Path, project: &Path) -> PathBuf {
+    root.join(sha256_bytes(project.to_string_lossy().as_bytes()))
+}
+
+fn canonical_string(path: &Path) -> Result<String> {
+    Ok(path
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", path.display()))?
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn nearest_manifest(path: &Path) -> Option<PathBuf> {
+    let mut dir = if path.is_dir() { path } else { path.parent()? };
+    loop {
+        let candidate = dir.join("stick.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn receipt_source_inputs_from_pairs(
+    project: &Path,
+    sources: Vec<(String, String)>,
+) -> Result<Vec<SimReceiptInput>> {
+    let mut inputs = Vec::new();
+    let mut manifests = std::collections::BTreeSet::new();
+    if let Some(path) = nearest_manifest(project) {
+        manifests.insert(path);
+    }
+    for (path, contents) in sources {
+        let path = PathBuf::from(path);
+        let canonical = canonical_string(&path)?;
+        inputs.push(SimReceiptInput {
+            kind: "source".to_string(),
+            path: canonical,
+            sha256: sha256_bytes(contents.as_bytes()),
+        });
+        if let Some(path) = nearest_manifest(&path) {
+            manifests.insert(path);
+        }
+    }
+    for path in manifests {
+        let canonical = canonical_string(&path)?;
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("read sim receipt manifest input {}", path.display()))?;
+        inputs.push(SimReceiptInput {
+            kind: "manifest".to_string(),
+            path: canonical,
+            sha256: sha256_bytes(&bytes),
+        });
+    }
+    inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
+    Ok(inputs)
+}
+
+fn receipt_inputs_from_stone(
+    project: &Path,
+    stone: &crate::skull_backend::SkullStone,
+) -> Result<Vec<SimReceiptInput>> {
+    let (sources, comptime_files) = stone.sim_receipt_inputs();
+    let mut inputs = receipt_source_inputs_from_pairs(project, sources)?;
+    for path in comptime_files {
+        let canonical = canonical_string(&path)?;
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("read sim receipt embedded input {}", path.display()))?;
+        inputs.push(SimReceiptInput {
+            kind: "embedded".to_string(),
+            path: canonical,
+            sha256: sha256_bytes(&bytes),
+        });
+    }
+    inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
+    Ok(inputs)
+}
+
+fn current_receipt_source_inputs(project: &Path) -> Result<Vec<SimReceiptInput>> {
+    let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
+    let sources = crate::unified_compile::discover_sources(&spec)?;
+    let pairs = sources
+        .files
+        .iter()
+        .map(|source| {
+            let source = source.borrow();
+            (source.file.to_id_path(), source.contents.clone())
+        })
+        .collect();
+    receipt_source_inputs_from_pairs(project, pairs)
+}
+
+fn sim_receipt_context(project: &Path) -> Result<serde_json::Value> {
+    const ENV_KEYS: &[&str] = &[
+        "ROCK_ASSET_OVERLAYS",
+        "ROCK_CONTEXT_ROOT",
+        "ROCK_SOURCE_REVISION",
+        "ROCK_STDLIB_DIR",
+        "ROCK_SKULL_CALLEE_BINDING",
+        "ROCK_SKULL_INDEX_SHAPE",
+        "ROCK_SKULL_LOOP_SHAPE",
+        "ROCK_SKULL_NIL_KILL",
+        "ROCK_SKULL_STATE_CELL",
+        "ROCK_SKULL_STATE_RESERVE",
+        "ROCK_SKULL_TAIL_CALLS",
+        "ROCK_SKULL_VALUE_CTOR",
+        "ROCK_SKULL_WRAPPER_RET",
+    ];
+    let env = ENV_KEYS
+        .iter()
+        .map(|key| {
+            (
+                (*key).to_string(),
+                std::env::var_os(key).map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(serde_json::json!({
+        "project": canonical_string(project)?,
+        "renderer": active_sim_renderer(project),
+        "callee_binding": match skull::callee_binding_mode() {
+            skull::CalleeBindingMode::Global => "global",
+            skull::CalleeBindingMode::Upvalue => "upvalue",
+        },
+        "environment": env,
+    }))
+}
+
+fn receipt_inputs_json(inputs: &[SimReceiptInput]) -> serde_json::Value {
+    serde_json::Value::Array(
+        inputs
+            .iter()
+            .map(|input| {
+                serde_json::json!({
+                    "kind": input.kind,
+                    "path": input.path,
+                    "sha256": input.sha256,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn parse_receipt_inputs(value: &serde_json::Value) -> Result<Vec<SimReceiptInput>> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| anyhow!("sim compile receipt `inputs` is not an array"))?;
+    rows.iter()
+        .map(|row| {
+            let field = |name| {
+                row.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("sim compile receipt input `{name}` is not a string"))
+            };
+            Ok(SimReceiptInput {
+                kind: field("kind")?,
+                path: field("path")?,
+                sha256: field("sha256")?,
+            })
+        })
+        .collect()
+}
+
+fn registry_json(
+    wire_names: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        wire_names
+            .iter()
+            .map(|name| {
+                let env = env_by_wire.get(name).map_or(&[][..], Vec::as_slice);
+                serde_json::json!({
+                    "wire_name": name,
+                    "env": env.iter().map(|(key, value)| serde_json::json!([key, value])).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn parse_registry(
+    value: &serde_json::Value,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| anyhow!("sim compile receipt `registry` is not an array"))?;
+    let mut names = Vec::with_capacity(rows.len());
+    let mut env_by_wire = HashMap::new();
+    for row in rows {
+        let name = row
+            .get("wire_name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("sim compile receipt registry wire name is not a string"))?
+            .to_owned();
+        let env_rows = row
+            .get("env")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow!("sim compile receipt registry env for `{name}` is not an array"))?;
+        let mut env = Vec::with_capacity(env_rows.len());
+        for pair in env_rows {
+            let pair = pair.as_array().filter(|pair| pair.len() == 2).ok_or_else(|| {
+                anyhow!("sim compile receipt registry env pair for `{name}` is malformed")
+            })?;
+            let key = pair[0].as_str().ok_or_else(|| {
+                anyhow!("sim compile receipt registry env key for `{name}` is not a string")
+            })?;
+            let value = pair[1].as_str().ok_or_else(|| {
+                anyhow!("sim compile receipt registry env value for `{name}` is not a string")
+            })?;
+            env.push((key.to_owned(), value.to_owned()));
+        }
+        names.push(name.clone());
+        env_by_wire.insert(name, env);
+    }
+    Ok((names, env_by_wire))
+}
+
+fn publish_sim_receipt(
+    root: &Path,
+    receipt_dir: &Path,
+    project: &Path,
+    output: &Path,
+    wire_names: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    stone: &crate::skull_backend::SkullStone,
+) -> Result<()> {
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("create sim compile receipt root {}", root.display()))?;
+    let staged = tempfile::Builder::new()
+        .prefix(".sim-receipt-")
+        .tempdir_in(root)
+        .with_context(|| format!("stage sim compile receipt under {}", root.display()))?;
+    let main_source = output.join(rock_host::project::MAIN_LUA_FILENAME);
+    let main_bytes = std::fs::read(&main_source)
+        .with_context(|| format!("read compiled sim artifact {}", main_source.display()))?;
+    std::fs::write(staged.path().join(rock_host::project::MAIN_LUA_FILENAME), &main_bytes)
+        .context("write staged sim compile artifact")?;
+    let inputs = receipt_inputs_from_stone(project, stone)?;
+    let manifest = serde_json::json!({
+        "schema_version": SIM_COMPILE_RECEIPT_VERSION,
+        "context": sim_receipt_context(project)?,
+        "main_sha256": sha256_bytes(&main_bytes),
+        "inputs": receipt_inputs_json(&inputs),
+        "registry": registry_json(wire_names, env_by_wire),
+    });
+    let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .context("serialize sim compile receipt")?;
+    manifest_bytes.push(b'\n');
+    std::fs::write(staged.path().join("receipt.json"), manifest_bytes)
+        .context("write staged sim compile receipt manifest")?;
+    let staged_path = staged.keep();
+    std::fs::rename(&staged_path, receipt_dir).with_context(|| {
+        format!(
+            "publish sim compile receipt {} -> {}",
+            staged_path.display(),
+            receipt_dir.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn load_sim_receipt(
+    receipt_dir: &Path,
+    project: &Path,
+    output: &Path,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
+    let manifest_path = receipt_dir.join("receipt.json");
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .with_context(|| format!("read sim compile receipt {}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        .with_context(|| format!("parse sim compile receipt {}", manifest_path.display()))?;
+    let version = manifest
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow!("sim compile receipt has no numeric schema version"))?;
+    if version != SIM_COMPILE_RECEIPT_VERSION {
+        return Err(anyhow!(
+            "sim compile receipt schema version {version} is not supported (expected {SIM_COMPILE_RECEIPT_VERSION})"
+        ));
+    }
+    let expected_context = manifest
+        .get("context")
+        .ok_or_else(|| anyhow!("sim compile receipt has no context"))?;
+    let current_context = sim_receipt_context(project)?;
+    if expected_context != &current_context {
+        return Err(anyhow!(
+            "sim compile receipt context changed; prepare a new receipt for this test lane"
+        ));
+    }
+
+    let expected_inputs = parse_receipt_inputs(
+        manifest
+            .get("inputs")
+            .ok_or_else(|| anyhow!("sim compile receipt has no inputs"))?,
+    )?;
+    let mut current_inputs = current_receipt_source_inputs(project)?;
+    for expected in expected_inputs.iter().filter(|input| input.kind == "embedded") {
+        let bytes = std::fs::read(&expected.path).with_context(|| {
+            format!("read sim compile receipt embedded input {}", expected.path)
+        })?;
+        current_inputs.push(SimReceiptInput {
+            kind: expected.kind.clone(),
+            path: expected.path.clone(),
+            sha256: sha256_bytes(&bytes),
+        });
+    }
+    current_inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
+    if expected_inputs != current_inputs {
+        return Err(anyhow!(
+            "sim compile receipt inputs changed; prepare a new receipt for this test lane"
+        ));
+    }
+
+    let main_path = receipt_dir.join(rock_host::project::MAIN_LUA_FILENAME);
+    let main_bytes = std::fs::read(&main_path)
+        .with_context(|| format!("read sim compile receipt artifact {}", main_path.display()))?;
+    let expected_main_hash = manifest
+        .get("main_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("sim compile receipt has no main artifact hash"))?;
+    if sha256_bytes(&main_bytes) != expected_main_hash {
+        return Err(anyhow!("sim compile receipt main.lua hash does not match its manifest"));
+    }
+    std::fs::write(output.join(rock_host::project::MAIN_LUA_FILENAME), main_bytes)
+        .with_context(|| format!("materialize sim compile receipt into {}", output.display()))?;
+    let incremental = output.join("incremental.lua");
+    if incremental.exists() {
+        std::fs::remove_file(&incremental)
+            .with_context(|| format!("remove stale sim overlay {}", incremental.display()))?;
+    }
+    parse_registry(
+        manifest
+            .get("registry")
+            .ok_or_else(|| anyhow!("sim compile receipt has no registry"))?,
+    )
+}
+
+fn prepare_sims(
+    backend: crate::Backend,
+    project_path: PathBuf,
+    output_path: PathBuf,
+) -> Result<PreparedSims> {
+    let Some(root) = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        let (wire_names, env_by_wire, stone) =
+            compile_sims(backend, project_path, output_path)?;
+        return Ok(PreparedSims { wire_names, env_by_wire, stone: Some(stone) });
+    };
+    let project_path = project_path.canonicalize().with_context(|| {
+        format!("canonicalize sim receipt project {}", project_path.display())
+    })?;
+    let receipt_dir = sim_receipt_project_dir(&root, &project_path);
+    if receipt_dir.is_dir() {
+        timed_sim_compile_phase(
+            "compile_sims",
+            "sound_bank",
+            &project_path,
+            Some(&output_path),
+            || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
+        )?;
+        let (wire_names, env_by_wire) = timed_sim_compile_phase(
+            "compile_sims",
+            "receipt_materialize",
+            &project_path,
+            Some(&output_path),
+            || load_sim_receipt(&receipt_dir, &project_path, &output_path),
+        )?;
+        return Ok(PreparedSims { wire_names, env_by_wire, stone: None });
+    }
+    if std::env::var_os(SIM_COMPILE_RECEIPT_PREPARE_ENV).as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return Err(anyhow!(
+            "no sim compile receipt for `{}` under {}; prepare this test lane first",
+            project_path.display(),
+            root.display()
+        ));
+    }
+    let (wire_names, env_by_wire, stone) =
+        compile_sims(backend, project_path.clone(), output_path.clone())?;
+    timed_sim_compile_phase(
+        "compile_sims",
+        "receipt_publish",
+        &project_path,
+        Some(&output_path),
+        || {
+            publish_sim_receipt(
+                &root,
+                &receipt_dir,
+                &project_path,
+                &output_path,
+                &wire_names,
+                &env_by_wire,
+                &stone,
+            )
+        },
+    )?;
+    Ok(PreparedSims { wire_names, env_by_wire, stone: Some(stone) })
+}
+
 fn compile_sims_with_allocation(
     backend: crate::Backend,
     project_path: PathBuf,
@@ -558,8 +984,8 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
     let project_path = rock_host::project::resolve_project_dir(project)?;
 
     let out_dir = sim_output_dir()?;
-    let (wire_names, _, _) = compile_sims(backend, project_path, out_dir.path().to_path_buf())?;
-    for name in wire_names {
+    let prepared = prepare_sims(backend, project_path, out_dir.path().to_path_buf())?;
+    for name in prepared.wire_names {
         // Result output, NOT logging: `--list` exists to print the sim
         // names to stdout — this is the command's answer, consumed by
         // callers/CI, not a diagnostic.
@@ -634,13 +1060,28 @@ fn do_run_sim_opts_recorded(
     // The runner applies them via `Command::env` before luajit spawns --
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `ANVIL_VIDEO`.
-    let (wire_names, env_by_wire, mut stone) = recorder.phase("compile_and_discover", || {
-        compile_sims(backend, project_path.clone(), output_path)
+    let mut prepared = recorder.phase("compile_and_discover", || {
+        prepare_sims(backend, project_path.clone(), output_path.clone())
     })?;
+    // Receipt consumers do not retain the compiler session. A reload entry is
+    // the one exception: it edits that live session, so preserve the existing
+    // fresh-compile behavior for that explicitly selected lane.
+    if prepared.stone.is_none()
+        && entry_is_reload_lane(sim_name, &prepared.env_by_wire)
+    {
+        let (wire_names, env_by_wire, stone) = recorder.phase("compile_reload_session", || {
+            compile_sims(backend, project_path.clone(), output_path)
+        })?;
+        prepared = PreparedSims {
+            wire_names,
+            env_by_wire,
+            stone: Some(stone),
+        };
+    }
     let entry_ids = recorder.plan_entries(&[sim_name.to_string()]);
     recorder.configure(
         &project_path,
-        &wire_names,
+        &prepared.wire_names,
         requested_jobs,
         1,
         None,
@@ -658,8 +1099,8 @@ fn do_run_sim_opts_recorded(
         false,
         update_snapshots,
         &output,
-        &env_by_wire,
-        Some(&mut stone),
+        &prepared.env_by_wire,
+        prepared.stone.as_mut(),
         None,
         Some(&recorder),
         entry_ids.first().copied(),
@@ -990,9 +1431,11 @@ fn do_run_named_sims_recorded(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, _stone) = recorder.phase("compile_and_discover", || {
-        compile_sims(backend, project_path.clone(), PathBuf::from(&output))
+    let prepared = recorder.phase("compile_and_discover", || {
+        prepare_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
+    let wire_names = prepared.wire_names;
+    let env_by_wire = prepared.env_by_wire;
     emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
     sim_spawn_barrier();
@@ -1444,9 +1887,11 @@ fn do_run_all_sims_recorded(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, _stone) = recorder.phase("compile_and_discover", || {
-        compile_sims(backend, project_path.clone(), PathBuf::from(&output))
+    let prepared = recorder.phase("compile_and_discover", || {
+        prepare_sims(backend, project_path.clone(), PathBuf::from(&output))
     })?;
+    let wire_names = prepared.wire_names;
+    let env_by_wire = prepared.env_by_wire;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
     if wire_names.is_empty() {
@@ -5114,8 +5559,9 @@ pub fn run_multi_order_gate(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, _stone) =
-        compile_sims(backend, project_path, PathBuf::from(&output))?;
+    let prepared = prepare_sims(backend, project_path, PathBuf::from(&output))?;
+    let wire_names = prepared.wire_names;
+    let env_by_wire = prepared.env_by_wire;
     // Hot-reload sims are out of the corpus, and not because they are awkward:
     // they mutate the ONE `incremental.lua` overlay, which the suite runner
     // serializes behind an exclusive lane holding the compile session. This gate
@@ -5279,7 +5725,8 @@ pub fn run_worker_suite(
 
     let out_dir = timed_sim_output_dir("run_worker_suite", &project_path)?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (_, env_by_wire, _stone) = compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+    let prepared = prepare_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+    let env_by_wire = prepared.env_by_wire;
 
     let results = timed_sim_compile_phase(
         "run_worker_suite",
@@ -5336,7 +5783,8 @@ pub fn run_differential(
 
     let out_dir = timed_sim_output_dir("run_differential", &project_path)?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (_, env_by_wire, _stone) = compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+    let prepared = prepare_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+    let env_by_wire = prepared.env_by_wire;
 
     let isolated = timed_sim_compile_phase(
         "run_differential",
