@@ -117,6 +117,7 @@
 // prelude: __nb_checked_index
 // prelude: __nb_checked_set
 // prelude: __nb_refresh_views
+// prelude: __not
 // prelude: __op_add
 // prelude: __op_and
 // prelude: __op_bitand
@@ -133,7 +134,6 @@
 // prelude: __op_mod
 // prelude: __op_mul
 // prelude: __op_ne
-// prelude: __op_not
 // prelude: __op_null_coalesce
 // prelude: __op_or
 // prelude: __op_shl
@@ -207,6 +207,7 @@
 // prelude: __stone_log_level
 // prelude: __stone_log_now
 // prelude: __stone_log_wall_clock
+// prelude: __unm
 // prelude: __vec_checked_get
 // prelude: __vec_checked_index
 // prelude: __vec_checked_set

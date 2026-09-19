@@ -194,3 +194,35 @@ fn f() -> int {
 fn g() -> int {
     x_lib::sub::f()
 }
+
+//- a_legacy_unary_operator_declarations
+//-- legacy.rock
+struct P {
+    x: int,
+}
+
+operator -(a: P) -> P {
+    P { x: 0 - a.x }
+}
+
+operator !(a: P) -> bool {
+    a.x == 7
+}
+
+fn use_it(p: P) -> bool {
+    let neg = -p
+            //^ P
+    let flag = !p
+             //^ bool
+    flag
+}
+
+//- a_legacy_one_parameter_binary_only_operator_is_rejected @fail=operator `+` takes two parameters; only `-` and `!` have a prefix (unary) form
+//-- legacy.rock
+struct P {
+    x: int,
+}
+
+operator +(a: P) -> P {
+    a
+}

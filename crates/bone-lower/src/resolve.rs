@@ -280,7 +280,8 @@ pub fn resolve_v1_unary(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Res
 }
 
 fn v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Option<CalleeFamily>, String> {
-    let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable);
+    let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable)
+        || bone_core::hir::unary_operator_entry(name.as_str()).is_some();
     let (mut hits, hidden) = match bind_bare(ws, frag, name)? {
         Bound::Unbound => return Ok(None),
         Bound::One(resolved, Tier::Std) => return Ok(Some(CalleeFamily::Single(resolved))),
@@ -357,10 +358,7 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
         let hidden = hidden_for_scope(ws, name, &glob_hits);
         let mut hits: Vec<Hit> = Vec::new();
         for target in targets {
-            match walk_path(ws, frag, &[], target, WalkMode::Definition, &mut Vec::new())? {
-                Landing::Def(r) => hits.push(Hit { key: r.key, kind: r.kind, owner: r.owner }),
-                Landing::Module(..) => return Err(format!("`{name}` names a module, not a definition")),
-            }
+            hits.extend(resolve_import_target(ws, frag, name, target)?);
         }
         hits.sort_by_key(Hit::sort_key);
         hits.dedup();
@@ -368,6 +366,39 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
             [hit] => Bound::One(Resolved::of(hit, hidden), Tier::Scope),
             _ => Bound::Several(hits, hidden, Via::Imports),
         });
+    }
+
+    // An unaliased `operator(-)` selector binds the binary spelling
+    // (`__op_sub`) because that is the name a binary expression uses. Prefix
+    // lowering asks for `__unm`, so follow that selector to the sibling unary
+    // member without making a second import spelling or a second family.
+    if name.as_str() == "__unm" {
+        let binary = Ustr::from("__op_sub");
+        if let Some(targets) = frag.named.get(&binary) {
+            let mut hits = Vec::new();
+            for target in targets {
+                let Some(unary) = operator_family_paths(target).nth(1) else {
+                    continue;
+                };
+                match walk_path(ws, frag, &[], &unary, WalkMode::Definition, &mut Vec::new()) {
+                    Ok(Landing::Def(resolved)) => hits.push(Hit {
+                        key: resolved.key,
+                        kind: resolved.kind,
+                        owner: resolved.owner,
+                    }),
+                    Ok(Landing::Module(..)) | Err(_) => {}
+                }
+            }
+            hits.sort_by_key(Hit::sort_key);
+            hits.dedup();
+            if !hits.is_empty() {
+                let hidden = hidden_for_scope(ws, name, &glob_hits);
+                return Ok(match hits[..] {
+                    [hit] => Bound::One(Resolved::of(hit, hidden), Tier::Scope),
+                    _ => Bound::Several(hits, hidden, Via::Imports),
+                });
+            }
+        }
     }
 
     // Tier 4: glob bindings. Several candidates are one family only in
@@ -382,6 +413,48 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     // Tier 5: the compiler-owned std export view. There is no legacy
     // workspace-map fall-through for v1 names.
     Ok(std_bound(ws, name))
+}
+
+/// `operator(-)` is recorded under the binary family name because binary
+/// expressions use `__op_sub`. Its sibling prefix family is part of the same
+/// selector, including when the selector has an alias.
+fn operator_family_paths(path: &UsePathRef) -> impl Iterator<Item = UsePathRef> {
+    let mut paths = vec![path.clone()];
+    if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
+        let mut unary = path.clone();
+        if let Some(last) = unary.segments.last_mut() {
+            *last = Ustr::from("__unm");
+        }
+        paths.push(unary);
+    }
+    paths.into_iter()
+}
+
+fn resolve_import_target(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    name: Ustr,
+    path: &UsePathRef,
+) -> Result<Vec<Hit>, String> {
+    let candidates = operator_family_paths(path).collect::<Vec<_>>();
+    let mut hits = Vec::new();
+    let mut first_error = None;
+    for candidate in candidates {
+        match walk_path(ws, frag, &[], &candidate, WalkMode::Definition, &mut Vec::new()) {
+            Ok(Landing::Def(r)) => hits.push(Hit { key: r.key, kind: r.kind, owner: r.owner }),
+            Ok(Landing::Module(..)) => {
+                first_error.get_or_insert_with(|| format!("`{name}` names a module, not a definition"));
+            }
+            Err(message) => {
+                first_error.get_or_insert(message);
+            }
+        }
+    }
+    if hits.is_empty() {
+        Err(first_error.unwrap_or_else(|| format!("`{name}` did not resolve to any definition")))
+    } else {
+        Ok(hits)
+    }
 }
 
 fn hidden_for_scope(ws: &Workspace, name: Ustr, lower: &[Hit]) -> Vec<Ustr> {
@@ -863,7 +936,7 @@ pub fn check_use_target(
     path: &UsePathRef,
     glob: bool,
 ) -> Result<(), String> {
-    check_target(ws, frag, path, glob, false)
+    check_operator_selector_target(ws, frag, path, glob, false)
 }
 
 /// `check_use_target` for a shared export binding (`pub use`, `private use`)
@@ -878,7 +951,29 @@ pub fn check_export_target(
 ) -> Result<(), String> {
     let pkg = ws.ns.package(package).ok_or("unknown package")?;
     let exporter = exporter_scope(pkg, module_path);
-    check_target(ws, &exporter, path, glob, true)
+    check_operator_selector_target(ws, &exporter, path, glob, true)
+}
+
+fn check_operator_selector_target(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    path: &UsePathRef,
+    glob: bool,
+    export: bool,
+) -> Result<(), String> {
+    let result = check_target(ws, frag, path, glob, export);
+    if result.is_ok() || glob || path.segments.last().copied() != Some(Ustr::from("__op_sub")) {
+        return result;
+    }
+    let mut unary = path.clone();
+    if let Some(last) = unary.segments.last_mut() {
+        *last = Ustr::from("__unm");
+    }
+    if check_target(ws, frag, &unary, false, export).is_ok() {
+        Ok(())
+    } else {
+        result
+    }
 }
 
 fn check_target(
