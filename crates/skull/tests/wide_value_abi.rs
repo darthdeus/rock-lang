@@ -292,72 +292,95 @@ fn a_wide_nobox_value_keeps_its_scalar_lanes() {
 
 // --- gate 2: the per-signature lane budget --------------------------------
 
-/// Five 16-leaf ordinary values is 80 parameter lanes with every value UNDER
-/// the cut, so only the budget can catch it. The two widest box; the `nobox`
-/// member is never a candidate and keeps its lanes. These widths are fixed on
-/// purpose: they must stay under the cut for the budget to be the only actor,
-/// and a cut below 16 would be a different-in-kind policy (`UiRect` and
-/// `Entity` cross at 7 and 4) that this file would be rewritten for.
-const BUDGET_SRC: &str = r#"
-nobox value NB8 { a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float }
-nobox value NB20 {
-    a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float,
-    i: float, j: float, k: float, l: float, m: float, n: float, o: float, p: float,
-    q: float, r: float, s: float, t: float
-}
-value M16 {
-    m0: float, m1: float, m2: float, m3: float, m4: float, m5: float, m6: float, m7: float,
-    m8: float, m9: float, m10: float, m11: float, m12: float, m13: float, m14: float, m15: float
-}
-value M12 {
-    m0: float, m1: float, m2: float, m3: float, m4: float, m5: float,
-    m6: float, m7: float, m8: float, m9: float, m10: float, m11: float
-}
+/// The budget fixtures' member width. Every member must stay UNDER the cut, so
+/// the per-value rule cannot fire and the budget is the only actor; and five of
+/// them must be over the budget, with one boxed still over and two boxed under,
+/// so "widest first, until it fits" has a distinguishable answer. The
+/// preconditions are ASSERTED below rather than trusted, so a `K` or budget
+/// that moves this fixture out of its regime fails loudly instead of quietly
+/// testing nothing.
+const BUDGET_MEMBER: usize = 24;
+/// The `nobox` member of `budget_nobox_widest`, wider than `BUDGET_MEMBER` so
+/// that a budget ranking candidates by lanes alone would reach for it first.
+const BUDGET_NOBOX_WIDE: usize = 30;
+/// The narrow members of `budget_mixed`.
+const BUDGET_NARROW: usize = 12;
 
-fn m16(x: float) -> M16 {
-    return M16 { m0: x, m1: x, m2: x, m3: x, m4: x, m5: x, m6: x, m7: x,
-                 m8: x, m9: x, m10: x, m11: x, m12: x, m13: x, m14: x, m15: x }
-}
-fn m12(x: float) -> M12 {
-    return M12 { m0: x, m1: x, m2: x, m3: x, m4: x, m5: x,
-                 m6: x, m7: x, m8: x, m9: x, m10: x, m11: x }
-}
-
-fn budget_five(a: M16, b: M16, c: M16, d: M16, e: M16) -> float {
+fn budget_src() -> String {
+    let value = |kw: &str, name: &str, n: usize| {
+        let fields = (0..n).map(|k| format!("m{k}: float")).collect::<Vec<_>>().join(", ");
+        let inits = (0..n).map(|k| format!("m{k}: x")).collect::<Vec<_>>().join(", ");
+        format!(
+            "{kw} value {name} {{ {fields} }}\nfn mk{name}(x: float) -> {name} {{ return {name} {{ {inits} }} }}\n"
+        )
+    };
+    format!(
+        "{}{}{}{}
+fn budget_five(a: M, b: M, c: M, d: M, e: M) -> float {{
     return a.m0 + b.m1 + c.m2 + d.m3 + e.m4
-}
+}}
 
-fn budget_mixed(a: M16, b: M16, c: M16, n: NB8, d: M12) -> float {
-    return a.m0 + b.m1 + c.m2 + n.a + d.m3
-}
+fn budget_mixed(a: M, b: M, c: M, n: NB, d: N) -> float {{
+    return a.m0 + b.m1 + c.m2 + n.m0 + d.m3
+}}
 
 // The `nobox` member is the WIDEST thing in this signature, so a budget that
 // ranked candidates by lanes without excluding `nobox` would box it first.
-fn budget_nobox_widest(n: NB20, a: M16, b: M16, c: M16) -> float {
-    return n.a + a.m0 + b.m1 + c.m2
+fn budget_nobox_widest(n: NW, a: M, b: M, c: M) -> float {{
+    return n.m0 + a.m0 + b.m1 + c.m2
+}}
+
+fn main() {{
+    print(\"{{budget_five(mkM(1.0), mkM(2.0), mkM(3.0), mkM(4.0), mkM(5.0))}}\")
+}}
+",
+        value("", "M", BUDGET_MEMBER),
+        value("", "N", BUDGET_NARROW),
+        value("nobox", "NB", BUDGET_NARROW),
+        value("nobox", "NW", BUDGET_NOBOX_WIDE),
+    )
 }
 
-fn main() {
-    print("{budget_five(m16(1.0), m16(2.0), m16(3.0), m16(4.0), m16(5.0))}")
+/// The regime the budget fixtures need. Checked as its own test so a `K` or
+/// budget change that invalidates them says so directly.
+#[test]
+fn the_budget_fixtures_are_in_the_regime_they_claim() {
+    let b = SIGNATURE_SCALAR_LANE_BUDGET;
+    assert!(
+        BUDGET_MEMBER <= WIDE_VALUE_PAYLOAD_LEAF_CUT
+            && BUDGET_NOBOX_WIDE <= WIDE_VALUE_PAYLOAD_LEAF_CUT
+            && BUDGET_NARROW <= WIDE_VALUE_PAYLOAD_LEAF_CUT,
+        "a member wider than the cut would be boxed by the CUT, not the budget"
+    );
+    assert!(5 * BUDGET_MEMBER + 1 > b, "five members must exceed the budget");
+    assert!(1 + 4 * BUDGET_MEMBER + 1 > b, "boxing one member must not be enough");
+    assert!(2 + 3 * BUDGET_MEMBER + 1 <= b, "boxing two members must be enough");
+    assert!(
+        3 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1 > b
+            && 1 + 2 * BUDGET_MEMBER + BUDGET_NARROW * 2 + 1 <= b,
+        "budget_mixed must need exactly one box"
+    );
+    assert!(
+        BUDGET_NOBOX_WIDE + 3 * BUDGET_MEMBER + 1 > b
+            && BUDGET_NOBOX_WIDE + 1 + 2 * BUDGET_MEMBER + 1 <= b,
+        "budget_nobox_widest must need exactly one box"
+    );
 }
-"#;
 
 #[test]
 fn a_signature_over_the_lane_budget_boxes_widest_first() {
-    let lua = try_emit_module(BUDGET_SRC).expect("emits");
+    let lua = try_emit_module(&budget_src()).expect("emits");
     let params = emitted_params(&lua, "budget_five");
-    // Five 16-leaf values is 80 lanes plus one return lane. Boxing one leaves
-    // 65; boxing two leaves 49, under the budget.
     assert_eq!(
         params.len(),
-        2 + 16 * 3,
+        2 + BUDGET_MEMBER * 3,
         "the budget must box the two widest values and leave the rest scalar:\n{}",
         function_body(&lua, "budget_five")
     );
     assert!(
-        params.len() <= SIGNATURE_SCALAR_LANE_BUDGET,
-        "the surviving parameter lanes must fit the budget: {}",
-        params.len()
+        params.len() + 1 <= SIGNATURE_SCALAR_LANE_BUDGET,
+        "the surviving lanes must fit the budget: {}",
+        params.len() + 1
     );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_budget"),
@@ -370,23 +393,20 @@ fn a_signature_over_the_lane_budget_boxes_widest_first() {
 /// (presence flags included) against the budget like any other.
 #[test]
 fn the_budget_never_boxes_a_nobox_member() {
-    let lua = try_emit_module(BUDGET_SRC).expect("emits");
+    let lua = try_emit_module(&budget_src()).expect("emits");
     let params = emitted_params(&lua, "budget_mixed");
-    // 16+16+16+8+12 = 68 lanes plus one return lane. Boxing the widest ordinary
-    // value leaves 53.
     assert_eq!(
         params.len(),
-        1 + 16 + 16 + 8 + 12,
+        1 + BUDGET_MEMBER * 2 + BUDGET_NARROW * 2,
         "exactly one ordinary value must box, and the nobox member must keep its lanes:\n{}",
         function_body(&lua, "budget_mixed")
     );
-    // 20 + 16 + 16 + 16 = 68 lanes plus one return lane, and the WIDEST member
-    // is the 20-leaf `nobox` value. Ranking candidates without excluding
-    // `nobox` would box it and stop; the budget must box an `M16` instead.
+    // The WIDEST member here is the `nobox` one. Ranking candidates without
+    // excluding `nobox` would box it and stop; the budget must box an `M`.
     let widest = emitted_params(&lua, "budget_nobox_widest");
     assert_eq!(
         widest.len(),
-        20 + 16 + 16 + 1,
+        BUDGET_NOBOX_WIDE + 1 + BUDGET_MEMBER * 2,
         "the budget boxed the nobox member instead of the widest ORDINARY value:\n{}",
         function_body(&lua, "budget_nobox_widest")
     );

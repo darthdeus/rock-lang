@@ -963,12 +963,19 @@ fn mono_value_storage(
 ///
 /// `nobox` values are exempt (decision 3): they keep scalar lanes at any width.
 ///
-/// 32 comes from the K sweep in that document: the added allocation on
-/// canonical MAG is +186 calls per frame at 16 and +160 at 24, because the
-/// renderer's per-frame crossings are 17-28 leaves wide; at 32 it is +37. Above
-/// 32 this cut and [`SIGNATURE_SCALAR_LANE_BUDGET`] overlap, since a signature
-/// that passes and returns one value at the cut is `2 * K` lanes.
-pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 32;
+/// 48 sits ABOVE every ordinary `value` that crosses a call in a game today
+/// (the widest is `EngineU` at 41), and below the 58-leaf uniform this ABI
+/// exists to make loadable. That placement is deliberate, not incidental:
+/// LuaJIT sinks a box of 37 leaves or more not at all, so any per-frame type
+/// this cut boxed would pay one real allocation per crossing, and the defect
+/// being fixed is a load-time frame overflow, not an allocation. A cut that
+/// boxes nothing a game passes fixes it for free.
+///
+/// It also pairs exactly with [`SIGNATURE_SCALAR_LANE_BUDGET`]: a signature
+/// that passes and returns one value AT the cut is `2 * K` = 96 lanes, which
+/// the budget permits, so the two rules meet at the boundary instead of
+/// overlapping.
+pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 48;
 
 /// The per-signature lane budget, decisions 1 and 2 of
 /// `docs/luajit-wide-value-abi.md`. Per-value `K` does not bound a signature's
@@ -979,13 +986,18 @@ pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 32;
 /// Lane accounting: the sum over every parameter of that parameter's
 /// [`RepPlan::lanes`] plus the result's, each at its post-cut width. A boxed
 /// value is one lane; a `nobox` value's real lanes count, presence flags
-/// included. A call that passes and receives a full budget costs about
-/// 2 x 64 + 2 of LuaJIT's 250 frame slots, leaving 120 for the body.
+/// included.
+///
+/// 96 is `2 * WIDE_VALUE_PAYLOAD_LEAF_CUT`, so one value at the cut passed and
+/// returned is exactly at the budget rather than over it. Worst case a call
+/// that passes and receives a full budget costs 2 x 96 + 2 = 194 of LuaJIT's
+/// 250 frame slots; the emit-time frame-limit check is the backstop for a body
+/// that still does not fit, which is what makes a generous budget safe.
 ///
 /// `nobox` values are never candidates and are never rejected by the budget: a
 /// signature whose `nobox` lanes alone exceed it keeps them, and the emit-time
 /// frame-limit check (`skull_codegen_lua::frame_limits`) is its only diagnostic.
-pub const SIGNATURE_SCALAR_LANE_BUDGET: usize = 64;
+pub const SIGNATURE_SCALAR_LANE_BUDGET: usize = 96;
 
 /// The leaf count the per-value cut compares: the payload, without the nullable
 /// presence flag [`ValueShape::leaf_count`] includes.
