@@ -377,6 +377,27 @@ pub operator +(a: P) -> P {
     a
 }
 
+//- a_private_unary_operator_in_operator_selector_surfaces_privacy @fail=operator `-` is not accessible from this module
+//-- lib.rock @pkg=lib,1 @v1
+pub struct P {
+    pub x: int,
+}
+
+pub operator -(a: P, b: P) -> P {
+    P { x: a.x - b.x }
+}
+
+operator -(a: P) -> P {
+    P { x: 0 - a.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use lib::{P, operator(-)};
+
+fn use_it(p: P) -> P {
+    -p
+}
+
 //- explicit_imports_of_a_callable_and_a_type_are_an_error @fail=`Pick` is imported from several definitions that do not form one overload family: lib_a::Pick, lib_b::Pick
 //-- a.rock @pkg=lib_a,1 @v1
 pub struct Pick {
@@ -704,7 +725,7 @@ fn neg() -> bool {
     z && !false
 }
 
-//- an_unimported_unary_operator_is_not_reached @fail=No overload for `__unm` with argument types (geo::Pt)
+//- an_unimported_unary_operator_is_not_reached @fail=operator `-` is not defined for `geo::Pt`
 //-- geo.rock @pkg=geo,1 @v1
 pub struct Pt {
     pub x: int,

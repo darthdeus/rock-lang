@@ -380,13 +380,14 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
                 let Some(unary) = operator_family_paths(target).nth(1) else {
                     continue;
                 };
-                match walk_path(ws, frag, &[], &unary, WalkMode::Definition, &mut Vec::new()) {
-                    Ok(Landing::Def(resolved)) => hits.push(Hit {
+                match walk_optional_definition(ws, frag, &[], &unary, &mut Vec::new()) {
+                    Ok(Some(resolved)) => hits.push(Hit {
                         key: resolved.key,
                         kind: resolved.kind,
                         owner: resolved.owner,
                     }),
-                    Ok(Landing::Module(..)) | Err(_) => {}
+                    Ok(None) => {}
+                    Err(message) => return Err(operator_family_error(&unary, message)),
                 }
             }
             hits.sort_by_key(Hit::sort_key);
@@ -438,22 +439,47 @@ fn resolve_import_target(
 ) -> Result<Vec<Hit>, String> {
     let candidates = operator_family_paths(path).collect::<Vec<_>>();
     let mut hits = Vec::new();
-    let mut first_error = None;
-    for candidate in candidates {
-        match walk_path(ws, frag, &[], &candidate, WalkMode::Definition, &mut Vec::new()) {
+    if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
+        for candidate in &candidates {
+            match walk_optional_definition(ws, frag, &[], candidate, &mut Vec::new()) {
+                Ok(Some(resolved)) => hits.push(Hit {
+                    key: resolved.key,
+                    kind: resolved.kind,
+                    owner: resolved.owner,
+                }),
+                Ok(None) => {}
+                Err(message) => return Err(operator_family_error(candidate, message)),
+            }
+        }
+    } else {
+        match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new()) {
             Ok(Landing::Def(r)) => hits.push(Hit { key: r.key, kind: r.kind, owner: r.owner }),
-            Ok(Landing::Module(..)) => {
-                first_error.get_or_insert_with(|| format!("`{name}` names a module, not a definition"));
-            }
-            Err(message) => {
-                first_error.get_or_insert(message);
-            }
+            Ok(Landing::Module(..)) => return Err(format!("`{name}` names a module, not a definition")),
+            Err(message) => return Err(message),
         }
     }
     if hits.is_empty() {
-        Err(first_error.unwrap_or_else(|| format!("`{name}` did not resolve to any definition")))
+        Err(format!("`{name}` did not resolve to any definition"))
     } else {
         Ok(hits)
+    }
+}
+
+fn operator_family_error(path: &UsePathRef, message: String) -> String {
+    let Some(symbol) = path.segments.last().and_then(|name| match name.as_str() {
+        "__unm" => Some("-"),
+        "__not" => Some("!"),
+        _ => None,
+    }) else {
+        return message;
+    };
+    let internal = path.segments.last().expect("path has a last segment").as_str();
+    let quoted = format!("`{internal}`");
+    let operator = format!("operator `{symbol}`");
+    if message.contains(&quoted) {
+        message.replace(&quoted, &operator)
+    } else {
+        message.replace(internal, symbol)
     }
 }
 
@@ -1367,6 +1393,31 @@ fn walk_path(
             let hit = collapse(ws, members, last_of(&path.segments), not_found, "glob re-exports")?;
             Ok(Landing::Def(Resolved::of(hit, Vec::new())))
         }
+    }
+}
+
+/// Resolve a definition path while keeping a missing final member distinct
+/// from access and path errors. Operator-family selectors may omit the unary
+/// sibling, but must surface every other failure.
+fn walk_optional_definition(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    outer: &[Viewer],
+    path: &UsePathRef,
+    visiting: &mut Visiting,
+) -> Result<Option<Resolved>, String> {
+    let members = walk_members(ws, frag, outer, path, visiting)?;
+    let name = last_of(&path.segments);
+    match members.found.as_slice() {
+        [single] => Ok(Some(Resolved::of(*single, Vec::new()))),
+        [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
+        [] if members.denied => Err(format!("`{name}` is not accessible from this module")),
+        [] if members.module => Err(format!("`{name}` names a module, not a definition")),
+        [] => Ok(None),
+        many => Err(format!(
+            "`{name}` is ambiguous between glob re-exports {}",
+            many.iter().map(|hit| hit_display(ws, hit)).collect::<Vec<_>>().join(", ")
+        )),
     }
 }
 
