@@ -952,6 +952,119 @@ fn mono_value_storage(
     declared_value_storage(ws, target, *name)
 }
 
+/// The Lua wide-value calling convention, decision 1 of
+/// `docs/luajit-wide-value-abi.md` (author, 2026-09-19). An ORDINARY `value`
+/// whose PAYLOAD leaf count is greater than this crosses a Rock-to-Rock Lua
+/// call as ONE slot -- its existing boxed form -- instead of N scalar lanes.
+///
+/// The PAYLOAD count is compared, not [`ValueShape::leaf_count`], which also
+/// counts the nullable presence flag: `T` and `T?` must take the same wire, or
+/// `Mat4?` would box while `Mat4` stayed scalar.
+///
+/// `nobox` values are exempt (decision 3): they keep scalar lanes at any width.
+pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 16;
+
+/// The per-signature lane budget, decisions 1 and 2 of
+/// `docs/luajit-wide-value-abi.md`. Per-value `K` does not bound a signature's
+/// width -- five 16-leaf values are 80 lanes with every value at the cut -- so
+/// after the per-value cut a signature whose surviving lanes exceed this boxes
+/// its widest remaining ORDINARY values, widest first, until it fits.
+///
+/// Lane accounting: the sum over every parameter of that parameter's
+/// [`RepPlan::lanes`] plus the result's, each at its post-cut width. A boxed
+/// value is one lane; a `nobox` value's real lanes count, presence flags
+/// included. A call that passes and receives a full budget costs about
+/// 2 x 64 + 2 of LuaJIT's 250 frame slots, leaving 120 for the body.
+///
+/// `nobox` values are never candidates and are never rejected by the budget: a
+/// signature whose `nobox` lanes alone exceed it keeps them, and the emit-time
+/// frame-limit check (`skull_codegen_lua::frame_limits`) is its only diagnostic.
+pub const SIGNATURE_SCALAR_LANE_BUDGET: usize = 64;
+
+/// The leaf count the per-value cut compares: the payload, without the nullable
+/// presence flag [`ValueShape::leaf_count`] includes.
+fn payload_leaf_count(shape: &ValueShape) -> usize {
+    shape.leaf_count() - usize::from(shape.nullable)
+}
+
+/// Whether boxing `ty` would IMPLICITLY materialize a `nobox` child, which the
+/// `nobox` guarantee forbids (`docs/nobox-values-plan.md`).
+///
+/// Two of the three value tiers have an answer already. A CDATA box is
+/// normalized by `flatten_nobox_nested_ctors` (`crates/skull-transform`), which
+/// splices a `nobox` child's leaves into the parent's physical fields so the
+/// child is never built; a LEAF-TABLE box is assembled from the parent's leaves
+/// by `pack` for the same reason. A GC-TABLE box keeps its DECLARED keys, so a
+/// `nobox` child inside one is a real box and
+/// `nobox_materialization_violations` rejects it at its own span.
+///
+/// The ABI cut therefore leaves a GC-tier value carrying a `nobox` descendant
+/// on the scalar wire. Its bodies keep today's frame cost and today's spanned
+/// frame-limit diagnostic; what they do not get is the new wire. See
+/// "AUTHOR DECISION: GC-tier ABI box of an ordinary value with nobox fields"
+/// in `docs/luajit-wide-value-abi.md`.
+fn box_would_materialize_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
+    let crate::monoty::MonoTy::App {
+        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+    } = ty.peel_nullable().0
+    else {
+        return false;
+    };
+    super::shape::planned_value(ws, *name)
+        .is_some_and(|plan| plan_box_materializes_nobox(ws, &plan))
+}
+
+fn plan_box_materializes_nobox(ws: &Workspace, plan: &super::shape::PlannedValue) -> bool {
+    use super::shape::PlannedField;
+    if plan.storage != ValueStorage::GcTable {
+        return false;
+    }
+    plan.fields.iter().any(|(_, field)| match field {
+        PlannedField::Nested(child) | PlannedField::Nullable(child) => {
+            crate::lower::is_nobox_nominal(ws, child.name)
+                || plan_box_materializes_nobox(ws, child)
+        }
+        PlannedField::Primitive(_) | PlannedField::FlatEnum(_) | PlannedField::Opaque => false,
+    })
+}
+
+/// **The one per-value wire choice**, consulted by BOTH ABI modes.
+/// `Some(shape)` is the scalar wire; `None` is the aggregate wire, which the
+/// caller renders as the same [`RepLayout::Opaque`] the boxed ABI already uses.
+///
+/// - A `nobox` value is never boxed, in any mode, at any width (decision 3).
+/// - An ordinary `value` is boxed when the mode demands it -- `nobox_only`
+///   (a taken-by-ref body, whose indirect callers can only derive `nobox`
+///   shapes from the fn type) or a tuple element -- and, on a direct call
+///   wire, when its payload is wider than [`WIDE_VALUE_PAYLOAD_LEAF_CUT`].
+/// - Off the call wire (a global's storage, a container element) width decides
+///   nothing: those are not frames.
+///
+/// Boxing an ordinary value is SILENT (decision 3). There is no shape the wire
+/// cannot handle: a value either has a planned leaf shape or is already opaque.
+fn wire_value_shape(
+    ws: &Workspace,
+    ty: &crate::monoty::MonoTy,
+    use_context: RepUse,
+    guarantees: RepGuarantees,
+    tuple_element: bool,
+) -> Option<ValueShape> {
+    if let Some(shape) = crate::lower::mono_nobox_value_shape(ws, ty) {
+        return Some(shape);
+    }
+    if guarantees.nobox || tuple_element {
+        return None;
+    }
+    let shape = crate::lower::mono_value_shape(ws, ty)?;
+    if matches!(use_context, RepUse::Parameter | RepUse::Return)
+        && payload_leaf_count(&shape) > WIDE_VALUE_PAYLOAD_LEAF_CUT
+        && !box_would_materialize_nobox(ws, ty)
+    {
+        return None;
+    }
+    Some(shape)
+}
+
 fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
     let (payload, _) = ty.peel_nullable();
     let crate::monoty::MonoTy::App {
@@ -1487,11 +1600,8 @@ impl RepArena {
                     Ok(self.intern(target, use_context, RepLayout::Opaque))
                 }
                 _ => {
-                    let shape = if guarantees.nobox || tuple_element_shape {
-                        crate::lower::mono_nobox_value_shape(ws, ty)
-                    } else {
-                        crate::lower::mono_value_shape(ws, ty)
-                    };
+                    let shape =
+                        wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
                     if let Some(shape) = shape {
                         return Ok(self.intern_value_shape_plan(ws, target, use_context, ty, shape));
                     }
@@ -1535,11 +1645,7 @@ impl RepArena {
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
             MonoTy::App { ctor: MonoCtor::Nominal(_), .. } => {
-                let shape = if guarantees.nobox || tuple_element_shape {
-                    crate::lower::mono_nobox_value_shape(ws, ty)
-                } else {
-                    crate::lower::mono_value_shape(ws, ty)
-                };
+                let shape = wire_value_shape(ws, ty, use_context, guarantees, tuple_element_shape);
                 if let Some(shape) = shape {
                     return Ok(self.intern_value_shape_plan(ws, target, use_context, ty, shape));
                 }
@@ -1571,6 +1677,59 @@ impl RepArena {
         }
     }
 
+    /// Apply [`SIGNATURE_SCALAR_LANE_BUDGET`] to one signature, after the
+    /// per-value cut has already run: while the signature's lanes exceed the
+    /// budget, box the widest remaining ORDINARY value.
+    ///
+    /// The result is a pure function of the positions' representations, so the
+    /// definition and every caller reach the same answer: candidates are ranked
+    /// by lane count and, for a tie, by wire position (parameters in order, the
+    /// result last), and the loop stops as soon as the budget is met. A
+    /// `nobox` value is never a candidate, so a signature the budget cannot
+    /// satisfy keeps its lanes rather than acquiring a diagnostic here.
+    /// `boxable` is one flag per wire position, parameters in order and the
+    /// result last: false for a `nobox` value (decision 3) and for an ordinary
+    /// value whose box would materialize a `nobox` child
+    /// ([`box_would_materialize_nobox`]).
+    fn apply_lane_budget(
+        &self,
+        target: FnBackend,
+        params: &mut [RepId],
+        result: &mut Option<RepId>,
+        boxable: &[bool],
+    ) {
+        let lanes = |id: &RepId| self.get(*id).lanes(self);
+        let total = |params: &[RepId], result: &Option<RepId>| {
+            params.iter().map(lanes).sum::<usize>() + result.as_ref().map_or(0, lanes)
+        };
+        if total(params, result) <= SIGNATURE_SCALAR_LANE_BUDGET {
+            return;
+        }
+        loop {
+            let widest = params
+                .iter()
+                .enumerate()
+                .map(|(index, id)| (index, *id, RepUse::Parameter))
+                .chain(result.map(|id| (params.len(), id, RepUse::Return)))
+                .filter(|(index, id, _)| {
+                    let plan = self.get(*id);
+                    matches!(plan.layout(), RepLayout::Leaves(_))
+                        && !plan.nobox()
+                        && boxable.get(*index).copied().unwrap_or(false)
+                })
+                .max_by_key(|(index, id, _)| (lanes(id), std::cmp::Reverse(*index)));
+            let Some((index, _, use_context)) = widest else { return };
+            let boxed = self.intern(target, use_context, RepLayout::Opaque);
+            match use_context {
+                RepUse::Return => *result = Some(boxed),
+                _ => params[index] = boxed,
+            }
+            if total(params, result) <= SIGNATURE_SCALAR_LANE_BUDGET {
+                return;
+            }
+        }
+    }
+
     pub fn function_value(
         &self,
         ws: &Workspace,
@@ -1588,13 +1747,13 @@ impl RepArena {
         nobox_only: bool,
     ) -> Result<FunctionRepPlan, RepError> {
         let (ty, _) = ty.peel_nullable();
-        let crate::monoty::MonoTy::Function { params, ret } = ty else {
+        let crate::monoty::MonoTy::Function { params: fn_params, ret } = ty else {
             return Err(RepError {
                 span: None,
                 message: "a function-value representation requires a function type".into(),
             });
         };
-        let params = params
+        let mut params = fn_params
             .iter()
             .map(|param| {
                 let tuple_spelled = if matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
@@ -1620,7 +1779,7 @@ impl RepArena {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
+        let mut result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
             None
         } else {
             Some(self.plan(
@@ -1635,6 +1794,12 @@ impl RepArena {
                 RepGuarantees { nobox: nobox_only, allow_opaque: true },
             )?)
         };
+        let boxable: Vec<bool> = fn_params
+            .iter()
+            .chain(std::iter::once(ret.as_ref()))
+            .map(|ty| !box_would_materialize_nobox(ws, ty))
+            .collect();
+        self.apply_lane_budget(target, &mut params, &mut result, &boxable);
         let scalar_abi = params.iter().any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
             || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_)));
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
@@ -1654,9 +1819,11 @@ impl RepArena {
         subst: &SpecSubst,
         mode: Option<AbiMode>,
     ) -> Result<FunctionRepPlan, RepError> {
-        let mut params = Vec::with_capacity(f.param_decls.len());
+        let mut params: Vec<RepId> = Vec::with_capacity(f.param_decls.len());
+        let mut boxable: Vec<bool> = Vec::with_capacity(f.param_decls.len() + 1);
         for param in &f.param_decls {
             let ty = declared_mono_type(ws, param.ty, subst)?;
+            boxable.push(ty.as_ref().is_none_or(|ty| !box_would_materialize_nobox(ws, ty)));
             let id = match (mode, ty) {
                 (Some(mode), Some(ty)) => self.plan(
                     ws,
@@ -1680,6 +1847,8 @@ impl RepArena {
                 return Ok(None);
             }
             let tuple_spelled = declared_tuple_spelled(ws, return_ty);
+            let result_boxable =
+                ty.as_ref().is_none_or(|ty| !box_would_materialize_nobox(ws, ty));
             let id = if let Some(ty) = ty {
                 let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
                 if let Some(mode) = mode {
@@ -1706,8 +1875,11 @@ impl RepArena {
             } else {
                 self.intern(target, RepUse::Return, RepLayout::Opaque)
             };
-            Ok(Some(id))
+            Ok(Some((id, result_boxable)))
         }).transpose()?.flatten();
+        boxable.push(result.is_some_and(|(_, ok)| ok));
+        let mut result = result.map(|(id, _)| id);
+        self.apply_lane_budget(target, &mut params, &mut result, &boxable);
         let scalar_abi = mode.is_some()
             && (params
                 .iter()
@@ -1738,7 +1910,12 @@ impl RepArena {
         param_tuple_spelled: &[bool],
         mode: Option<AbiMode>,
     ) -> FunctionRepPlan {
-        let params: Vec<RepId> = if let Some(mode) = mode {
+        let boxable: Vec<bool> = params
+            .iter()
+            .chain(result_ty)
+            .map(|ty| !box_would_materialize_nobox(ws, ty))
+            .collect();
+        let mut params: Vec<RepId> = if let Some(mode) = mode {
             params
                 .iter()
                 .enumerate()
@@ -1766,7 +1943,7 @@ impl RepArena {
                 .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
                 .collect()
         };
-        let result = result_ty.map(|ty| {
+        let mut result = result_ty.map(|ty| {
             let tuple_spelled = match ty {
                 crate::monoty::MonoTy::Tuple(_) => true,
                 crate::monoty::MonoTy::Nullable(inner) => {
@@ -1791,6 +1968,7 @@ impl RepArena {
                 self.intern(target, RepUse::Return, RepLayout::Opaque)
             }
         });
+        self.apply_lane_budget(target, &mut params, &mut result, &boxable);
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
         let scalar_abi = mode.is_some()
             && (params
@@ -2314,6 +2492,34 @@ fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
         plan.nobox(),
         plan.lanes(arena)
     )
+}
+
+#[cfg(test)]
+mod wide_value_cut_tests {
+    use super::*;
+
+    fn shape(leaves: usize, nullable: bool) -> ValueShape {
+        ValueShape {
+            name: Ustr::from("V"),
+            fields: (0..leaves)
+                .map(|k| (Ustr::from(&format!("f{k}")), FieldShape::Prim))
+                .collect(),
+            nullable,
+        }
+    }
+
+    /// The cut compares the PAYLOAD, so `T` and `T?` answer alike. Reading
+    /// `leaf_count()` instead would make a value at exactly the cut box only
+    /// when it is nullable -- the census's "Observed: `leaf_count()` counts the
+    /// nullable presence flag".
+    #[test]
+    fn the_cut_reads_the_payload_not_the_presence_flag() {
+        let cut = WIDE_VALUE_PAYLOAD_LEAF_CUT;
+        assert_eq!(payload_leaf_count(&shape(cut, false)), cut);
+        assert_eq!(payload_leaf_count(&shape(cut, true)), cut);
+        assert_eq!(shape(cut, true).leaf_count(), cut + 1, "the fixture must carry a presence flag");
+        assert_eq!(payload_leaf_count(&shape(cut + 1, true)), cut + 1);
+    }
 }
 
 #[cfg(test)]

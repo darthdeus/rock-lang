@@ -1,0 +1,575 @@
+//! The Lua wide-value calling convention (`docs/luajit-wide-value-abi.md`).
+//!
+//! An ORDINARY `value` whose PAYLOAD leaf count exceeds
+//! `WIDE_VALUE_PAYLOAD_LEAF_CUT` crosses a Rock-to-Rock Lua call as ONE slot
+//! (its existing boxed form) instead of N scalar lanes, and a signature whose
+//! surviving scalar lanes exceed `SIGNATURE_SCALAR_LANE_BUDGET` boxes its
+//! widest remaining ordinary values until it fits. A `nobox` value is never
+//! boxed by either rule and counts toward no budget decision: the only
+//! rejection it can meet is the emit-time frame-limit check.
+//!
+//! These tests assert the EMITTED SHAPE -- the emitted Lua parameter lists --
+//! not merely that the program runs, because "it runs" is equally true of the
+//! old all-scalar wire for every case below 250 frame slots.
+
+use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
+
+use crate::common::{
+    definition_names, emit_module_without_frame_limits, function_body, luajit_loads,
+    run_luajit, try_emit_module,
+};
+
+/// The emitted Lua parameter list of the definition `name` names.
+fn emitted_params<'a>(lua: &'a str, name: &str) -> Vec<&'a str> {
+    let body = function_body(lua, name);
+    let open = body.find('(').expect("a parameter list");
+    let close = body[open..].find(')').expect("a closed parameter list") + open;
+    let inner = body[open + 1..close].trim();
+    if inner.is_empty() {
+        return Vec::new();
+    }
+    inner.split(',').map(str::trim).collect()
+}
+
+/// `leaves` float fields, `f0 .. f{leaves-1}`.
+fn float_fields(leaves: usize) -> String {
+    (0..leaves).map(|k| format!("f{k}: float")).collect::<Vec<_>>().join(", ")
+}
+
+fn float_inits(leaves: usize, base: &str) -> String {
+    (0..leaves).map(|k| format!("f{k}: {base} + {k}.0")).collect::<Vec<_>>().join(", ")
+}
+
+// --- gate 1: the wide-uniform witness compiles, loads and computes ---------
+//
+// `docs/repros/luajit-wide-uniform/source.rock.txt`'s shape: a 58-leaf ordinary
+// `value` built once, then passed to and returned from helpers inside a loop,
+// with other live locals in the caller. On the scalar wire the caller's frame
+// is past `LJ_MAX_SLOTS` and the compiler rejects the body; the retained
+// `generated-function.lua` witness keeps failing either way.
+
+/// The 27-field / 58-leaf shape of MAG's `DungeonRelightU`, in a form that
+/// needs no MAG or Stone type: five 2-leaf `nobox` pairs, eleven 3-leaf
+/// `nobox` triples, one 4-leaf `nobox` quad and eleven plain floats.
+const WIDE_UNIFORM_SRC: &str = r#"
+nobox value P2 { x: float, y: float }
+nobox value P3 { x: float, y: float, z: float }
+nobox value P4 { x: float, y: float, z: float, w: float }
+value RelightU {
+    origin: P2, extent: P2, space_origin: P2, grid_size: P2, cell: P2,
+    count: float, resolution: float, samples: float, radius: float,
+    strength: float, clock: float, cached: float,
+    dynamic_active: float, first_caster: float, sprite_receiver: float,
+    ambient: P3, sprite_origin: P3, sprite_dx: P3, sprite_dy: P3, sprite_dz: P3,
+    sprite_ground: P3, sprite_position: P3, axis_x: P3, axis_y: P3, axis_z: P3,
+    mesh_lo: P3,
+    mesh_info: P4,
+}
+
+fn relight_base(seed: float) -> RelightU {
+    return RelightU {
+        origin: P2 { x: seed, y: seed }, extent: P2 { x: 1.0, y: 1.0 },
+        space_origin: P2 { x: 0.0, y: 0.0 }, grid_size: P2 { x: 4.0, y: 4.0 },
+        cell: P2 { x: 0.0, y: 0.0 },
+        count: 0.0, resolution: 64.0, samples: 8.0, radius: 3.0,
+        strength: 1.0, clock: 0.0, cached: 0.0,
+        dynamic_active: 0.0, first_caster: 0.0, sprite_receiver: 0.0,
+        ambient: P3 { x: 0.1, y: 0.1, z: 0.1 },
+        sprite_origin: P3 { x: 0.0, y: 0.0, z: 0.0 },
+        sprite_dx: P3 { x: 1.0, y: 0.0, z: 0.0 },
+        sprite_dy: P3 { x: 0.0, y: 1.0, z: 0.0 },
+        sprite_dz: P3 { x: 0.0, y: 0.0, z: 1.0 },
+        sprite_ground: P3 { x: 0.0, y: 0.0, z: 0.0 },
+        sprite_position: P3 { x: 0.0, y: 0.0, z: 0.0 },
+        axis_x: P3 { x: 1.0, y: 0.0, z: 0.0 },
+        axis_y: P3 { x: 0.0, y: 1.0, z: 0.0 },
+        axis_z: P3 { x: 0.0, y: 0.0, z: 1.0 },
+        mesh_lo: P3 { x: 0.0, y: 0.0, z: 0.0 },
+        mesh_info: P4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 },
+    }
+}
+
+fn sprite_uniform(index: float, base: RelightU) -> RelightU {
+    return RelightU {
+        ..base,
+        sprite_position: P3 { x: index, y: index * 2.0, z: index * 3.0 },
+        sprite_receiver: 1.0,
+        count: base.count + 1.0,
+    }
+}
+
+fn uniform_signal(u: RelightU) -> float {
+    return u.count + u.sprite_position.x + u.sprite_receiver + u.origin.x
+}
+
+fn queue_sprites(seed: float, n: int) -> float {
+    let base = relight_base(seed)
+    let total = 0.0
+    let lo = P2 { x: 0.0, y: 0.0 }
+    let hi = P2 { x: 1.0, y: 1.0 }
+    let span = P3 { x: 2.0, y: 2.0, z: 2.0 }
+    for index in 0..n {
+        let u = sprite_uniform(float(index), base)
+        total += uniform_signal(u) + lo.x + hi.y + span.z
+    }
+    return total
+}
+
+fn main() { print("{queue_sprites(0.5, 3)}") }
+"#;
+
+#[test]
+fn the_wide_uniform_witness_compiles_loads_and_computes() {
+    let lua = try_emit_module(WIDE_UNIFORM_SRC).expect("the wide-uniform shape must emit");
+    luajit_loads(&lua, "wide_value_abi_uniform").expect("the emitted chunk must load");
+    // Per iteration: count 1 + sprite_position.x (the index) + sprite_receiver 1
+    // + origin.x 0.5, plus 0 + 1 + 2 from the three live narrow locals.
+    // (2.5 + 3.5 + 4.5) + 3 * 3 = 19.5.
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_uniform_run"), "19.5");
+}
+
+/// The 58-leaf ordinary value crosses as ONE slot, so the helper's emitted
+/// parameter list is two entries, not 59.
+#[test]
+fn the_wide_uniform_helper_takes_one_slot_per_wide_value() {
+    let lua = try_emit_module(WIDE_UNIFORM_SRC).expect("emits");
+    assert_eq!(
+        emitted_params(&lua, "sprite_uniform").len(),
+        2,
+        "the 58-leaf ordinary value must cross as one slot:\n{}",
+        function_body(&lua, "sprite_uniform")
+    );
+    assert_eq!(
+        emitted_params(&lua, "uniform_signal").len(),
+        1,
+        "the 58-leaf ordinary value must cross as one slot:\n{}",
+        function_body(&lua, "uniform_signal")
+    );
+}
+
+/// Gate 3: the boxed wide value CONTAINS `nobox` values. The callee must read
+/// their fields out of the box without the implicit-materialization rejection
+/// recorded in `mag/LIGHTING_COMPILER_LIMITS.md`, and must be able to build a
+/// new one from them.
+#[test]
+fn a_boxed_wide_value_carrying_nobox_fields_reads_and_writes_them() {
+    let types = WIDE_UNIFORM_SRC
+        .replace("fn main() { print(\"{queue_sprites(0.5, 3)}\") }", "");
+    let src = format!(
+        "{types}
+fn anchor_of(u: RelightU) -> P4 {{ return u.mesh_info }}
+fn with_anchor(u: RelightU, a: P4) -> RelightU {{ return RelightU {{ ..u, mesh_info: a }} }}
+fn axis_sum(u: RelightU) -> float {{
+    let ax = u.axis_x
+    let ay = u.axis_y
+    return ax.x + ax.y + ax.z + ay.x + ay.y + ay.z
+}}
+fn roundtrip(seed: float) -> float {{
+    let u = with_anchor(relight_base(seed), P4 {{ x: 2.0, y: 3.0, z: 4.0, w: 5.0 }})
+    let a = anchor_of(u)
+    return a.x + a.y + a.z + a.w + axis_sum(u)
+}}
+fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
+"
+    );
+    let lua = try_emit_module(&src).expect("reading nobox fields out of a boxed wide value");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_fields"), "16");
+    // The `nobox` value that IS a parameter keeps its scalar lanes.
+    assert_eq!(
+        emitted_params(&lua, "with_anchor").len(),
+        5,
+        "a nobox P4 parameter must stay four lanes beside the one boxed slot:\n{}",
+        function_body(&lua, "with_anchor")
+    );
+}
+
+/// The retained witness of the OLD ABI must keep failing; a compiler fix
+/// produces different Lua rather than making that file load.
+#[test]
+fn the_retained_old_abi_witness_still_fails_to_load() {
+    let witness = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/repros/luajit-wide-uniform/generated-function.lua"
+    ))
+    .expect("the retained witness");
+    let err = luajit_loads(&witness, "wide_value_abi_old_witness")
+        .expect_err("the retained witness is a diagnostic of the old ABI, not a repaired oracle");
+    assert!(err.contains("too complex"), "unexpected parse error: {err}");
+}
+
+// --- gate 2: the cut, exactly ---------------------------------------------
+
+/// `payload` float leaves in an ordinary value, crossed at a parameter and at a
+/// return; `nullable` makes the parameter and return `T?`.
+fn cut_fixture(payload: usize, nullable: bool) -> String {
+    let q = if nullable { "?" } else { "" };
+    let read = if nullable { "if u == null { return -1.0 }\n    return u.unwrap().f0" } else { "return u.f0" };
+    format!(
+        "value V {{ {fields} }}\n\
+         fn mk(x: float) -> V {{ return V {{ {inits} }} }}\n\
+         fn thru(u: V{q}) -> V{q} {{ return u }}\n\
+         fn read(u: V{q}) -> float {{ {read} }}\n\
+         fn main() {{ print(\"{{read(thru(mk(1.0)))}}\") }}\n",
+        fields = float_fields(payload),
+        inits = float_inits(payload, "x"),
+    )
+}
+
+#[test]
+fn a_value_at_the_cut_keeps_the_scalar_wire() {
+    let lua = try_emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT, false)).expect("emits");
+    assert_eq!(
+        emitted_params(&lua, "thru").len(),
+        WIDE_VALUE_PAYLOAD_LEAF_CUT,
+        "a value AT the cut must stay scalar:\n{}",
+        function_body(&lua, "thru")
+    );
+}
+
+#[test]
+fn a_value_one_leaf_over_the_cut_takes_the_aggregate_wire() {
+    let lua = try_emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, false)).expect("emits");
+    assert_eq!(
+        emitted_params(&lua, "thru").len(),
+        1,
+        "a value one leaf over the cut must cross as one slot:\n{}",
+        function_body(&lua, "thru")
+    );
+}
+
+/// `K` compares the PAYLOAD leaf count, not `ValueShape::leaf_count()`, which
+/// also counts the nullable presence flag. A nullable ORDINARY `value` never
+/// reached the Lua scalar wire in the first place (`sig_shape_of_nullable_
+/// nominal` produces a leaf shape only for a `nobox` struct or a flat enum), so
+/// `V?` is one slot at every width -- including two leaves, far under the cut.
+/// The witness that the CUT is not the reason is exactly that: width does not
+/// move it.
+#[test]
+fn a_nullable_ordinary_value_is_one_slot_at_every_width() {
+    for payload in [2, WIDE_VALUE_PAYLOAD_LEAF_CUT, WIDE_VALUE_PAYLOAD_LEAF_CUT + 1] {
+        let lua = try_emit_module(&cut_fixture(payload, true)).expect("emits");
+        assert_eq!(
+            emitted_params(&lua, "thru").len(),
+            1,
+            "`V?` at {payload} payload leaves:\n{}",
+            function_body(&lua, "thru")
+        );
+    }
+    assert_eq!(
+        run_luajit(
+            &format!(
+                "{}\nmain()\n",
+                try_emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, true)).expect("emits")
+            ),
+            "wide_value_abi_nullable"
+        ),
+        "1",
+    );
+}
+
+/// A `nobox` value is never boxed, at any width.
+#[test]
+fn a_wide_nobox_value_keeps_its_scalar_lanes() {
+    let payload = WIDE_VALUE_PAYLOAD_LEAF_CUT + 1;
+    let src = format!(
+        "nobox value N {{ {fields} }}\n\
+         fn mk(x: float) -> N {{ return N {{ {inits} }} }}\n\
+         fn thru(u: N) -> N {{ return u }}\n\
+         fn read(u: N) -> float {{ return u.f0 }}\n\
+         fn main() {{ print(\"{{read(thru(mk(1.0)))}}\") }}\n",
+        fields = float_fields(payload),
+        inits = float_inits(payload, "x"),
+    );
+    let lua = try_emit_module(&src).expect("emits");
+    assert_eq!(
+        emitted_params(&lua, "thru").len(),
+        payload,
+        "a nobox value wider than the cut must keep its lanes:\n{}",
+        function_body(&lua, "thru")
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_wide"), "1");
+}
+
+// --- gate 2: the per-signature lane budget --------------------------------
+
+/// Five 16-leaf ordinary values is 80 parameter lanes, every value AT the cut,
+/// so only the budget can catch it. The two widest box; the `nobox` member is
+/// never a candidate and keeps its lanes.
+const BUDGET_SRC: &str = r#"
+nobox value NB8 { a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float }
+value M16 {
+    m0: float, m1: float, m2: float, m3: float, m4: float, m5: float, m6: float, m7: float,
+    m8: float, m9: float, m10: float, m11: float, m12: float, m13: float, m14: float, m15: float
+}
+value M12 {
+    m0: float, m1: float, m2: float, m3: float, m4: float, m5: float,
+    m6: float, m7: float, m8: float, m9: float, m10: float, m11: float
+}
+
+fn m16(x: float) -> M16 {
+    return M16 { m0: x, m1: x, m2: x, m3: x, m4: x, m5: x, m6: x, m7: x,
+                 m8: x, m9: x, m10: x, m11: x, m12: x, m13: x, m14: x, m15: x }
+}
+fn m12(x: float) -> M12 {
+    return M12 { m0: x, m1: x, m2: x, m3: x, m4: x, m5: x,
+                 m6: x, m7: x, m8: x, m9: x, m10: x, m11: x }
+}
+
+fn budget_five(a: M16, b: M16, c: M16, d: M16, e: M16) -> float {
+    return a.m0 + b.m1 + c.m2 + d.m3 + e.m4
+}
+
+fn budget_mixed(a: M16, b: M16, c: M16, n: NB8, d: M12) -> float {
+    return a.m0 + b.m1 + c.m2 + n.a + d.m3
+}
+
+fn main() {
+    print("{budget_five(m16(1.0), m16(2.0), m16(3.0), m16(4.0), m16(5.0))}")
+}
+"#;
+
+#[test]
+fn a_signature_over_the_lane_budget_boxes_widest_first() {
+    let lua = try_emit_module(BUDGET_SRC).expect("emits");
+    let params = emitted_params(&lua, "budget_five");
+    // Five 16-leaf values is 80 lanes plus one return lane. Boxing one leaves
+    // 65; boxing two leaves 49, under the budget.
+    assert_eq!(
+        params.len(),
+        2 + 16 * 3,
+        "the budget must box the two widest values and leave the rest scalar:\n{}",
+        function_body(&lua, "budget_five")
+    );
+    assert!(
+        params.len() <= SIGNATURE_SCALAR_LANE_BUDGET,
+        "the surviving parameter lanes must fit the budget: {}",
+        params.len()
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_budget"),
+        "15",
+        "boxing must not change what the call computes"
+    );
+}
+
+/// The budget never boxes a `nobox` member, and counts its REAL lanes
+/// (presence flags included) against the budget like any other.
+#[test]
+fn the_budget_never_boxes_a_nobox_member() {
+    let lua = try_emit_module(BUDGET_SRC).expect("emits");
+    let params = emitted_params(&lua, "budget_mixed");
+    // 16+16+16+8+12 = 68 lanes plus one return lane. Boxing the widest ordinary
+    // value leaves 53.
+    assert_eq!(
+        params.len(),
+        1 + 16 + 16 + 8 + 12,
+        "exactly one ordinary value must box, and the nobox member must keep its lanes:\n{}",
+        function_body(&lua, "budget_mixed")
+    );
+}
+
+// --- the wire is a property of the TYPE, so every call kind agrees ---------
+
+/// Direct calls, calls through a function value, closures, methods/UFCS,
+/// generic instantiations and a `co fn` all target the same boxed wire. Every
+/// one of them runs; a disagreement is a Lua arity mismatch, which shows up as
+/// a nil arithmetic error rather than a wrong number.
+const CALL_KINDS_SRC: &str = r#"
+value W17 {
+    a0: float, a1: float, a2: float, a3: float, a4: float, a5: float,
+    a6: float, a7: float, a8: float, a9: float, a10: float, a11: float,
+    a12: float, a13: float, a14: float, a15: float, a16: float
+}
+
+fn w17(x: float) -> W17 {
+    return W17 { a0: x, a1: 0.0, a2: 0.0, a3: 0.0, a4: 0.0, a5: 0.0,
+                 a6: 0.0, a7: 0.0, a8: 0.0, a9: 0.0, a10: 0.0, a11: 0.0,
+                 a12: 0.0, a13: 0.0, a14: 0.0, a15: 0.0, a16: 0.0 }
+}
+
+fn bump(w: W17) -> W17 { return W17 { ..w, a0: w.a0 + 1.0 } }
+fn head(w: W17) -> float { return w.a0 }
+
+fn head_method(w: W17) -> float { return w.a0 * 10.0 }
+
+fn thru_generic<T>(t: T) -> T { return t }
+
+fn apply(f: fn(W17) -> W17, w: W17) -> W17 { return f(w) }
+
+fn via_closure(w: W17) -> W17 {
+    let step = (v: W17) => bump(v)
+    return step(w)
+}
+
+co fn pipeline(w: W17) -> Coroutine<W17, float> {
+    let a = bump(w)
+    yield a
+    let b = bump(a)
+    return head(b)
+}
+
+fn two_wide(w: W17) -> (W17, W17) { return (bump(w), bump(bump(w))) }
+
+fn tail_forward(w: W17) -> W17 { return bump(w) }
+
+fn main() {
+    let w = w17(0.0)
+    let direct = head(bump(w))
+    let indirect = head(apply(bump, w))
+    let closed = head(via_closure(w))
+    let generic = head(thru_generic(bump(w)))
+    let method = w.head_method()
+    let tailed = head(tail_forward(w))
+    let (p, q) = two_wide(w)
+    let multi = head(p) + head(q)
+    let co = pipeline(w)
+    let first = co.resume()
+    let yielded = if first == null { -1.0 } else { head(first.unwrap()) }
+    let _ = co.resume()
+    let finished = co.result() ?? -1.0
+    print("{direct} {indirect} {closed} {generic} {method} {tailed} {multi} {yielded} {finished}")
+}
+"#;
+
+#[test]
+fn every_call_kind_agrees_on_the_boxed_wire() {
+    let lua = try_emit_module(CALL_KINDS_SRC).expect("emits");
+    assert_eq!(
+        emitted_params(&lua, "bump").len(),
+        1,
+        "the 17-leaf value must box:\n{}",
+        function_body(&lua, "bump")
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_call_kinds"),
+        "1 1 1 1 0 1 3 1 2",
+    );
+}
+
+/// Value semantics survive the box: a callee that mutates its own copy of a
+/// boxed parameter must not be observable in the caller, and vice versa.
+#[test]
+fn a_boxed_parameter_does_not_alias_the_callers_value() {
+    let src = r#"
+value W17 {
+    a0: float, a1: float, a2: float, a3: float, a4: float, a5: float,
+    a6: float, a7: float, a8: float, a9: float, a10: float, a11: float,
+    a12: float, a13: float, a14: float, a15: float, a16: float
+}
+fn w17(x: float) -> W17 {
+    return W17 { a0: x, a1: 0.0, a2: 0.0, a3: 0.0, a4: 0.0, a5: 0.0,
+                 a6: 0.0, a7: 0.0, a8: 0.0, a9: 0.0, a10: 0.0, a11: 0.0,
+                 a12: 0.0, a13: 0.0, a14: 0.0, a15: 0.0, a16: 0.0 }
+}
+global CALLER: W17
+global CALLEE: W17
+// The callee keeps its boxed parameter in its own storage and then mutates it.
+// If the box were the caller's, `CALLER.a0` would move with it.
+fn keep_and_mutate(w: W17) -> float {
+    CALLEE = w
+    CALLEE.a0 = 99.0
+    return CALLEE.a0
+}
+// And the other direction: the caller writes AFTER the call, which the copy the
+// callee kept must not see.
+fn main() {
+    CALLER = w17(1.0)
+    let seen = keep_and_mutate(CALLER)
+    let caller_after_callee_wrote = CALLER.a0
+    CALLER.a0 = 7.0
+    print("{caller_after_callee_wrote} {seen} {CALLER.a0} {CALLEE.a0}")
+}
+"#;
+    let lua = try_emit_module(src).expect("emits");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_aliasing"),
+        "1 99 7 99",
+        "a boxed parameter must not alias the caller's value"
+    );
+}
+
+/// A callee that just forwards a boxed value forwards the BOX -- no unpack and
+/// repack. The emitted body is a one-line forward, so it contains no leaf
+/// constructor for the value.
+#[test]
+fn a_forwarding_callee_forwards_the_box() {
+    let src = r#"
+value W17 {
+    a0: float, a1: float, a2: float, a3: float, a4: float, a5: float,
+    a6: float, a7: float, a8: float, a9: float, a10: float, a11: float,
+    a12: float, a13: float, a14: float, a15: float, a16: float
+}
+fn w17(x: float) -> W17 {
+    return W17 { a0: x, a1: 0.0, a2: 0.0, a3: 0.0, a4: 0.0, a5: 0.0,
+                 a6: 0.0, a7: 0.0, a8: 0.0, a9: 0.0, a10: 0.0, a11: 0.0,
+                 a12: 0.0, a13: 0.0, a14: 0.0, a15: 0.0, a16: 0.0 }
+}
+fn forward(w: W17) -> W17 { return w }
+fn main() { print("{forward(w17(3.0)).a0}") }
+"#;
+    let lua = try_emit_module(src).expect("emits");
+    assert_eq!(
+        emitted_params(&lua, "forward").len(),
+        1,
+        "the forwarder must take the box:\n{}",
+        function_body(&lua, "forward")
+    );
+    let body = function_body(&lua, "forward");
+    assert!(
+        !body.contains("a16") && !body.contains("_ct("),
+        "the forwarder unpacked and repacked the box:\n{body}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"), "3");
+}
+
+/// The boxed wire is a property of the type alone, so a body whose CALLEE's
+/// wire changed must be re-emitted. Byte identity between a full build and an
+/// incremental one is what proves both agree; the witness here is narrower and
+/// local: every definition the full build emits is emitted with the same
+/// parameter arity for the boxed callee and its callers.
+#[test]
+fn the_boxed_wire_is_consistent_across_every_emitted_definition() {
+    let lua = try_emit_module(CALL_KINDS_SRC).expect("emits");
+    let names = definition_names(&lua);
+    for name in names {
+        if !name.starts_with("bump") {
+            continue;
+        }
+        assert_eq!(
+            emitted_params(&lua, name).len(),
+            1,
+            "a `bump` variant disagrees on the boxed wire:\n{}",
+            function_body(&lua, name)
+        );
+    }
+}
+
+/// The frame-limit diagnostic is what a wide `nobox` value still meets, and it
+/// still names the value: the ABI cut must not have turned a `nobox` rejection
+/// into a silent box.
+#[test]
+fn a_frame_limit_rejection_still_names_the_nobox_value() {
+    let fields = float_fields(50);
+    let inits = float_inits(50, "x");
+    let copies: Vec<String> = (1..50).map(|k| format!("f{k}: w.f{k}")).collect();
+    let mut src = format!(
+        "nobox value W {{ {fields} }}\n\
+         fn mk(x: float) -> W {{ return W {{ {inits} }} }}\n\
+         fn tweak(w: W) -> W {{ return W {{ f0: w.f0 + 1.0, {} }} }}\n\
+         fn check(w: W, k: int) -> float {{ return w.f0 + w.f49 + float(k) }}\n\
+         fn run(x: float) -> float {{\n    let v0 = mk(x)\n",
+        copies.join(", "),
+    );
+    for i in 1..4 {
+        src.push_str(&format!("    let v{i} = tweak(v{})\n", i - 1));
+    }
+    src.push_str("    let total = 0.0\n");
+    for i in 0..4 {
+        src.push_str(&format!("    total += check(v{i}, {i})\n"));
+    }
+    src.push_str("    return total\n}\nfn main() { print(\"{run(1.0)}\") }\n");
+    let err = try_emit_module(&src).expect_err("four live 50-leaf nobox values must not emit");
+    assert!(err.message.contains("nobox"), "no nobox contributor:\n{}", err.message);
+    let lua = emit_module_without_frame_limits(&src);
+    luajit_loads(&lua, "wide_value_abi_nobox_frame").expect_err("must not load");
+}
