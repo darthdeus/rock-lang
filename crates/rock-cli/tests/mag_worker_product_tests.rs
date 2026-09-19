@@ -2,6 +2,16 @@ use rock_cli::run_sim::{run_differential, run_worker_suite, DifferentialPlan};
 use rock_cli::sim_record::compare;
 use rock_cli::Backend;
 
+fn without_absent_agent_daemon_diagnostic(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            !(line.contains("[IPC] agent daemon startup failed")
+                && line.contains("cannot locate rock-agent-daemon; set ROCK_AGENT_DAEMON_BIN"))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
 #[test]
 fn mag_worker_reset_discards_unfinished_save() {
     let entries = vec![
@@ -95,7 +105,13 @@ fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
         )
         .unwrap_or_else(|err| panic!("fresh-process control `{entry}` failed: {err:#}"))
         .0;
-        let comparison = compare(&isolated, worker_record);
+        let mut isolated_for_compare = isolated.clone();
+        let mut worker_for_compare = worker_record.clone();
+        isolated_for_compare.entry_diagnostics =
+            without_absent_agent_daemon_diagnostic(&isolated.entry_diagnostics);
+        worker_for_compare.entry_diagnostics =
+            without_absent_agent_daemon_diagnostic(&worker_record.entry_diagnostics);
+        let comparison = compare(&isolated_for_compare, &worker_for_compare);
         assert!(
             comparison.is_equivalent(),
             "`{entry}` differs between fresh process and BootImage worker:\n{}",
