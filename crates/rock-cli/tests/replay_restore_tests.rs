@@ -3043,6 +3043,12 @@ fn recorded_game_input_is_projected_into_replay_authority() {
     let text = std::fs::read_to_string(&log_s).unwrap();
     let mut tick = 0;
     let rewritten = text.lines().map(|line| {
+        if line.starts_with("a 10 ") {
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 15, "v17 input detail row must carry text: {line}");
+            fields[14] = "4dc3bd74696e61";
+            return fields.join(" ");
+        }
         if !line.starts_with("t ") { return line.to_string() }
         let mut fields: Vec<&str> = line.split_whitespace().collect();
         if tick == 10 { fields[6] = "input_probe" }
@@ -3051,10 +3057,15 @@ fn recorded_game_input_is_projected_into_replay_authority() {
     }).collect::<Vec<_>>().join("\n");
     std::fs::write(&log_s, rewritten + "\n").unwrap();
 
-    let replayed = run_replay_dump("bitgun", 40, &log_s, &[("STONE_INPUT_PROBE_KEY", "input_probe")]);
+    let replayed = run_replay_dump("bitgun", 40, &log_s, &[
+        ("STONE_INPUT_PROBE_KEY", "input_probe"),
+        ("STONE_INPUT_PROBE_TEXT", "M\u{fd}tina"),
+    ]);
     let diag = &replayed["__stone_diag"];
     assert!(diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0) > 0, "recorded held input must reach replay game logic: {diag}");
     assert!(diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0) > 0, "recorded input must produce its replay press edge: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_TEXT_INPUT"].as_i64(), Some(1),
+        "recorded UTF-8 text must reach replay game logic once: {diag}");
 }
 
 #[test]
