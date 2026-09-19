@@ -22,6 +22,8 @@ mod modules_emit;
 mod modules_migrate;
 #[path = "modules_fix.rs"]
 mod modules_fix;
+#[path = "formatting_modules.rs"]
+mod formatting_modules;
 #[path = "modules_witness.rs"]
 mod modules_witness;
 #[path = "sound_inspect_cli.rs"]
