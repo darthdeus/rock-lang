@@ -676,6 +676,17 @@ impl CommandContext {
 
     /// Run command directly
     fn run_command(&self) -> Result<()> {
+        if self.args.command == CliCommand::EngineBuildReceipt {
+            let output = self.args.output.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: rock engine-build-receipt [<game>...] --output <receipt.json>"
+                )
+            })?;
+            return rock_host::engine_build::prepare_engine_build_receipt(
+                &self.args.files,
+                std::path::Path::new(output),
+            );
+        }
         if self.args.command == CliCommand::SdkCheck {
             if self.args.files.len() != 1 {
                 anyhow::bail!("usage: rock sdk-check <project>");

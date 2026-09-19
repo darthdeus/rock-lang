@@ -9688,7 +9688,7 @@ fn main() { let result = first() }
         );
         assert_eq!(
             census.candidate_derivations,
-            census.candidate_worker_derivations.values().sum(),
+            census.candidate_worker_derivations.values().sum::<usize>(),
             "worker derivations must cover the global derivation population: {census:?}"
         );
         assert!(

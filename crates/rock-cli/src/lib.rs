@@ -329,6 +329,8 @@ pub enum CliCommand {
     DocsIndex,
     /// Check SDK support for a project manifest and its native libraries without building.
     SdkCheck,
+    /// Build/stage engine libraries once and write a content-bound receipt for a test session.
+    EngineBuildReceipt,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -371,6 +373,7 @@ impl clap::ValueEnum for CliCommand {
             Self::SoundInspect,
             Self::DocsIndex,
             Self::SdkCheck,
+            Self::EngineBuildReceipt,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -431,6 +434,7 @@ impl CliCommand {
             Self::SoundInspect => "sound-inspect",
             Self::DocsIndex => "docs-index",
             Self::SdkCheck => "sdk-check",
+            Self::EngineBuildReceipt => "engine-build-receipt",
         }
     }
 }
