@@ -3030,38 +3030,35 @@ fn always_inlinable(inst: &Inst) -> bool {
     )
 }
 
-/// A receive this narrow keeps its copy into value locals; the copy costs at
-/// most four slots and the wide case is the one the frame limit needs. The cut
-/// is provisional: the allocation spikes it was added for are LuaJIT failing to
-/// sink MAG's own per-event allocations, and they occur with it too. Whether
-/// reading narrow receives in place shifts their rate is unsettled
-/// (`docs/unfuck-backlog.md`, "`NARROW_RECEIVE_LANES` guards an effect it does
-/// not prevent").
-const NARROW_RECEIVE_LANES: usize = 4;
-
-/// Cells written exactly once in `scope`, as a multi-return destination wider
-/// than [`NARROW_RECEIVE_LANES`], and read only after that call in the same
-/// block. A load of one is the call's result local itself, like a parameter
-/// load: without this every leaf of a wide value returned by a call occupied
-/// two locals (the result and a copy), which is what pushed functions holding
-/// a few wide values past LuaJIT's 250-slot frame limit. No later write can
-/// intervene, because the one write dominates every read.
+/// Cells written exactly once in `scope`, as a multi-return destination, and
+/// read only after that call in the same block. A load of one is the call's
+/// result local itself, like a parameter load: without this every leaf of a
+/// wide value returned by a call occupied two locals (the result and a copy),
+/// which is what pushed functions holding a few wide values past LuaJIT's
+/// 250-slot frame limit. No later write can intervene, because the one write
+/// dominates every read.
+///
+/// Every qualifying receive is read in place, narrow ones included. A
+/// four-lane threshold stood here from 2026-09-18 to 2026-09-19 because
+/// reading narrow receives in place appeared to make MAG's damage feedback
+/// allocate 4-6x in a minority of processes. It did not: that allocation was
+/// MAG's own, four per-event allocations LuaJIT only sometimes sank, and with
+/// them gone (`c381399ff`) 51 interleaved runs per arm from one build read no
+/// spike in any of the three -- every receive in place, the threshold, and no
+/// receive at all.
 fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
-    // cell -> (defs, the wide receive's block and position). Only a wide
-    // receive records a position, so a cell qualifies iff its one def is one.
+    // cell -> (defs, the receive's block and position). Only a receive records
+    // a position, so a cell qualifies iff its one def is one.
     let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
         rustc_hash::FxHashMap::default();
     for &b in scope {
         for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
             match &func.insts[id] {
                 Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
-                    let wide = dests.len() > NARROW_RECEIVE_LANES;
                     for cell in dests {
                         let entry = defs.entry(*cell).or_insert((0, None));
                         entry.0 += 1;
-                        if wide {
-                            entry.1 = Some((b, pos));
-                        }
+                        entry.1 = Some((b, pos));
                     }
                 }
                 // A placeholder the bound substitution replaces; never a receive.
