@@ -1,0 +1,29 @@
+value ProbeVertex {
+    aPos: Vec2,
+}
+
+value ProbeVary {
+    position: Vec4,
+    texCoord: Vec2,
+}
+
+value ProbeUniform {
+    scale: float,
+}
+
+@shader(vertex)
+fn shader_probe_vert(@attr a: ProbeVertex) -> ProbeVary {
+    let p = Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
+    return ProbeVary { position: p, texCoord: a.aPos }
+}
+
+@shader(fragment)
+fn shader_probe_frag(vary: ProbeVary, @uniform u: ProbeUniform) -> Vec4 {
+    let p = shader_probe::helpers::shader_helper(vary.texCoord, u.scale)
+    let d = shader_probe::helpers::dot(p, vary.texCoord)
+    return Vec4 { x: p.x, y: p.y, z: d, w: 1.0 }
+}
+
+global PROBE_SHADER: string = rock_shader(shader_probe_vert, shader_probe_frag)
+
+fn main() {}
