@@ -53,6 +53,8 @@ mod texture_slot_gate;
 mod skull_overlay_wipe;
 #[path = "sim_concurrent_invocations.rs"]
 mod sim_concurrent_invocations;
+#[path = "sim_compile_receipt.rs"]
+mod sim_compile_receipt;
 #[path = "sim_allocation_census.rs"]
 mod sim_allocation_census;
 #[path = "sim_worker_differential.rs"]

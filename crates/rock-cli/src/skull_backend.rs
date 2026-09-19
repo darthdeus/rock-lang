@@ -337,7 +337,9 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
 pub fn skull_mem2reg_stats(path: &str) -> Result<()> {
     let source_spec = crate::common::path_to_source_spec(path);
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
-    let sources = sources.production_only();
+    let sources = sources
+        .production_only(std::path::Path::new(path))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let (mut modules, entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
         Err(errs) => {
@@ -574,7 +576,7 @@ end
 /// that same id -- registering under a placeholder makes every span lookup fail
 /// ("Unable to fetch source") and silently drops the snippet + labels.
 pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
         file.to_string(),
@@ -662,7 +664,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
 /// (passing) outcome and each counts as a passing test. Shared by the luajit
 /// and JS executors (both bone-type-check first, so the rule is identical).
 pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
         file.to_string(),
@@ -1331,7 +1333,13 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let sources = if path_ref.is_dir()
             && rock_host::project::is_game_project(path_ref).unwrap_or(false)
         {
-            sources.production_only()
+            match sources.production_only(path_ref) {
+                Ok(sources) => sources,
+                Err(error) => {
+                    log::error!(target: "WATCH", "skull: production source selection failed: {error}");
+                    return;
+                }
+            }
         } else {
             sources
         };
@@ -1531,7 +1539,7 @@ pub(crate) fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> St
 /// [`render_project_err`] over every collected diagnostic, joined into one
 /// report — the CLI prints ALL of them, matching the LSP.
 pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     for file in &sources.files {
         let f = file.borrow();
         let id = f.file.to_id_path();
@@ -1562,7 +1570,7 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// Renders against the project sources and exits 1 on any discovery / type /
 /// emit failure. The `bool` is the emitter's own `emits_main`, which decides
 /// whether the caller appends the `__rock_main_wrapper(main)` entry.
-fn skull_emit_project(dir: &str) -> (String, bool) {
+fn skull_emit_project(dir: &str) -> Result<(String, bool)> {
     let inputs = match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
         Ok(inputs) => inputs,
         Err(e) => {
@@ -1576,7 +1584,7 @@ fn skull_emit_project(dir: &str) -> (String, bool) {
 fn skull_emit_project_with_inputs(
     dir: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
-) -> (String, bool) {
+) -> Result<(String, bool)> {
     use std::path::PathBuf;
     let renderer_target = match skull_renderer_target(dir) {
         Ok(target) => target,
@@ -1596,7 +1604,9 @@ fn skull_emit_project_with_inputs(
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
     // sim/test can't break the running game. See
     // `docs/sim-layering.md`.
-    let sources = sources.production_only();
+    let sources = sources
+        .production_only(std::path::Path::new(dir))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
     // Compile core: parse(assemble) + bone check + skull codegen. Excludes
     // discovery (disk read) and the caller's output write, matching the bone
@@ -1688,7 +1698,7 @@ fn skull_emit_project_with_inputs(
     rayon::spawn(move || drop((ws, modules)));
     #[cfg(feature = "sequential")]
     drop((ws, modules));
-    (lua, emits_main)
+    Ok((lua, emits_main))
 }
 
 fn write_allocation_report(
@@ -2049,7 +2059,7 @@ pub fn skull_compile_project_with_inputs(
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<()> {
     use std::path::PathBuf;
-    let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs);
+    let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs)?;
     // A game's runnable main.lua is the same shape run/stone produce via
     // write_full_main: preamble (game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble game asset paths are
@@ -2078,7 +2088,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
     if is_game {
         crate::package::prepare_sound_bank(dir)?;
     }
-    let (lua, emits_main) = skull_emit_project(dir);
+    let (lua, emits_main) = skull_emit_project(dir)?;
 
     // Game projects need the rock backend's run recipe, not a bare stdin
     // pipe: stage libstone into tmp/ (build_engine_libs), run luajit on a
@@ -2632,7 +2642,9 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// write into a temporary output path.
 fn iter_incremental_sources(path: &str) -> Result<rock_core::SourceFiles> {
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(path));
-    Ok(crate::unified_compile::discover_sources(&spec)?.production_only())
+    crate::unified_compile::discover_sources(&spec)?
+        .production_only(std::path::Path::new(path))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
@@ -3478,6 +3490,31 @@ impl SkullStone {
 
     pub fn artifact_fingerprint(&self) -> &str {
         &self.artifact_fingerprint
+    }
+
+    /// Exact source texts and `embed_string` files that produced a sim
+    /// artifact. The test-full compile receipt uses these as its invalidation
+    /// boundary; it deliberately does not retain this live compile session.
+    pub(crate) fn sim_receipt_inputs(
+        &self,
+    ) -> (Vec<(String, String)>, Vec<std::path::PathBuf>) {
+        let sources = self
+            .project
+            .sources()
+            .files
+            .iter()
+            .map(|source| {
+                let source = source.borrow();
+                (source.file.to_id_path(), source.contents.clone())
+            })
+            .collect();
+        let comptime_files = self
+            .cache
+            .comptime_files()
+            .into_iter()
+            .map(|path| std::path::PathBuf::from(path.as_str()))
+            .collect();
+        (sources, comptime_files)
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off

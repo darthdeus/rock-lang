@@ -80,7 +80,9 @@ pub fn is_exempt(f: &Function) -> bool {
 }
 
 /// The declared (last) segment of a DefKey. A legacy key IS the declared name.
-fn declared_name(key: &str) -> &str {
+/// Classifiers use this spelling; emitted identifiers use [`ident_of_key`]
+/// instead.
+pub fn declared_name(key: &str) -> &str {
     match key.rfind("::") {
         Some(cut) => &key[cut + 2..],
         None => key,

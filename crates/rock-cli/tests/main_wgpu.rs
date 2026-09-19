@@ -18,3 +18,5 @@ mod wgpu_capture_contract_gate;
 mod wgpu_gameplay_origin_gate;
 #[path = "wgpu_menu_parity_gate.rs"]
 mod wgpu_menu_parity_gate;
+#[path = "shader_modules_v1_wgpu.rs"]
+mod shader_modules_v1_wgpu;

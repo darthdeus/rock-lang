@@ -5,7 +5,7 @@
 
 use bone_semantic::prelude::{InferenceResult, ModuleId, Workspace};
 
-use crate::backend::{expected_for_anchor, fn_unique_return_ty, ExpectedArg};
+use crate::backend::{expected_for_anchor, fn_unique_return_ty_in_scope, ExpectedArg};
 
 /// True when a leading `.` sits just before the partial identifier under the
 /// cursor (a key-path `.field`, not member access -- `receiver_path` already
@@ -571,7 +571,11 @@ impl CompletionCx {
             let recv_ty = self.ast.as_ref().and_then(|cx| {
                 cx.call_receiver().and_then(|a| match a {
                     crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
-                        fn_unique_return_ty(ws, &name)
+                        fn_unique_return_ty_in_scope(
+                            ws,
+                            &name,
+                            crate::modules_scope::fragment(ws, ws.module(mid).file),
+                        )
                     }
                     crate::cursor_context::ReceiverAnchor::End(e) => e
                         .checked_sub(1)
