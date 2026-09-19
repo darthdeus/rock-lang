@@ -513,7 +513,23 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                     plan.blockers.push(format!("`{}` references a definition of the package at `{file}` byte {offset} that is not a top-level item", c.name()));
                     continue;
                 };
-                let u = if SourceFiles::is_test_only_path(from_file.as_str()) {
+                let from_root = c
+                    .file_pkg
+                    .get(&from_file)
+                    .map(|package_id| c.graph.package(PackageId(*package_id)).root.as_path())
+                    .unwrap_or(c.root.as_path());
+                let test_only = match SourceFiles::is_test_only_path(from_file.as_str(), from_root) {
+                    Ok(test_only) => test_only,
+                    Err(error) => {
+                        plan.blockers.push(format!(
+                            "{}: cannot classify reference source: {}",
+                            c.name(),
+                            error
+                        ));
+                        continue;
+                    }
+                };
+                let u = if test_only {
                     plan.test_uses.entry(di).or_default().entry(c.name().to_string()).or_default()
                 } else {
                     plan.exports.entry(di).or_default().consumers.entry(c.name().to_string()).or_default()
@@ -936,7 +952,10 @@ fn candidate_sources(
         f.dialect = Dialect::V1;
         files.push(Arc::new(AtomicRefCell::new(f)));
     }
-    SourceFiles { files }
+    SourceFiles {
+        files,
+        package_roots: c.sources.package_roots.clone(),
+    }
 }
 
 fn candidate_file_pkg(c: &Ctx, plan: &Plan) -> HashMap<Ustr, u32> {

@@ -41,6 +41,7 @@ use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::lower::{ScalarCtx, SpecSubst};
 use skull_mir::instance::Instance;
+use skull_mir::mangle::{declared_name, symbol_of_key};
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
@@ -538,7 +539,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
 /// a GLSL fn definition. Backs [`GlslIntrinsics::lookup`].
 fn intrinsic_template(f: &Function) -> Option<&'static str> {
-    let n = f.name.as_str();
+    let n = declared_name(f.name.as_str());
     let arity = f.param_decls.iter().count();
     GLSL_INTRINSICS
         .iter()
@@ -572,7 +573,7 @@ impl IntrinsicTable for GlslIntrinsics {
 /// this predicate: lowering turns them into native MIR instructions.
 pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
-        || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
+        || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.iter().count() == 2)
 }
 
 /// The graph sees HIR call obligations before scalar operators are lowered away,
@@ -587,7 +588,7 @@ pub fn renders_inline_instance(
     if GlslIntrinsics.lookup(f).is_some() {
         return true;
     }
-    if vec_op_symbol(f.name.as_str()).is_none() || f.param_decls.iter().count() != 2 {
+    if vec_op_symbol(declared_name(f.name.as_str())).is_none() || f.param_decls.iter().count() != 2 {
         return false;
     }
     let subst = inst.subst(ws, interner);
@@ -611,7 +612,7 @@ pub fn is_lowered_native_operator(
     interner: &MonoInterner,
 ) -> bool {
     if !matches!(
-        f.name.as_str(),
+        declared_name(f.name.as_str()),
         "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_idiv" | "__op_mod"
     ) || f.param_decls.iter().count() != 2
         || renders_inline_instance(ws, f, inst, interner)
@@ -943,7 +944,7 @@ fn emit_fn_def_with(
     let name = if emits_main {
         "main".to_string()
     } else if entry.is_some() {
-        f.name.as_str().to_string()
+        symbol_of_key(f.name).to_string()
     } else {
         glsl_name(ws, interner, inst)
     };
@@ -1459,7 +1460,7 @@ impl FnEmit<'_> {
                         // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
                         // GLSL's result type is the argument type. Load-bearing under
                         // ES300, which has no implicit int->float on assignment.
-                        None if matches!(cf.name.as_str(), "min" | "max" | "clamp" | "abs")
+                        None if matches!(declared_name(cf.name.as_str()), "min" | "max" | "clamp" | "abs")
                             && !args.is_empty() =>
                         {
                             self.ty_of(args[0])?
@@ -1648,7 +1649,7 @@ impl FnEmit<'_> {
         let cf = &self.ws.module(func.module).functions[func.func];
         let callee = self.callee_inst(iid);
         let param_types = self.call_param_types(iid, cf)?;
-        let name = cf.name.as_str();
+        let name = declared_name(cf.name.as_str());
         // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
         // operand (`*(Vec2, int)`) is cast to float (GLSL has no vec*int).
         if let Some(sym) = vec_op_symbol(name) {
@@ -2814,7 +2815,7 @@ impl<'a> BlockWire<'a> {
     ) -> Self {
         let mut w = BlockWire::default();
         for (binding, p) in scalar {
-            w.names.push(p.struct_name.as_str());
+            w.names.push(symbol_of_key(p.struct_name).as_str());
             w.bindings.push(*binding as i64);
             w.sizes.push(p.size as i64);
             w.fingerprints.push(p.fingerprint() as i64);
@@ -2831,7 +2832,7 @@ impl<'a> BlockWire<'a> {
             }
         }
         for (binding, p) in arrays {
-            w.names.push(p.block_name.as_str());
+            w.names.push(symbol_of_key(p.block_name).as_str());
             w.bindings.push(*binding as i64);
             w.sizes.push(p.size as i64);
             w.fingerprints.push(p.fingerprint() as i64);
@@ -3537,7 +3538,7 @@ pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: u32 = 4;
 /// other. A collision with a user's `@uniform` group name is possible and is
 /// rejected (`check_block_name_collisions`), never renamed around.
 fn array_block_name(entry: Ustr) -> Ustr {
-    Ustr::from(&format!("{entry}_Arrays"))
+    Ustr::from(&format!("{}_Arrays", symbol_of_key(entry)))
 }
 
 /// **One stage's validated plan**: its lowered body, the emittable helpers it
@@ -3906,7 +3907,10 @@ fn render_shader_entry(
         Some(entry_plan),
     )?);
     px.push('\n');
-    px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
+    px.push_str(&format!(
+        "void main() {{\n  FragColor = {}(TexCoord);\n}}\n",
+        symbol_of_key(f.name)
+    ));
 
     // Both stages carry the profile's precision preamble: ES requires an
     // explicit fragment float precision, and the vertex declarations are
@@ -4120,7 +4124,10 @@ fn classify_array_param(
 /// declaration and a layout drift into disagreeing, and "one layout authority"
 /// would stop being true the moment it existed.
 fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
-    let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
+    let mut s = format!(
+        "layout(std140) uniform {} {{\n",
+        symbol_of_key(plan.block_name)
+    );
     for m in &plan.members {
         s.push_str(&format!("    {} {}[{}];\n", wire_glsl_ty(m.elem), m.name, m.capacity));
     }
@@ -4161,7 +4168,10 @@ fn wire_glsl_ty(k: WireKind) -> &'static str {
 /// resolves members by name, so the names here and the offsets the packer writes
 /// must come from one place or they can drift silently.
 fn uniform_block_decl(plan: &UniformBlockPlan) -> String {
-    let mut s = format!("layout(std140) uniform {} {{\n", plan.struct_name);
+    let mut s = format!(
+        "layout(std140) uniform {} {{\n",
+        symbol_of_key(plan.struct_name)
+    );
     for m in &plan.members {
         s.push_str(&format!("    {} {};\n", wire_glsl_ty(m.kind), m.name));
     }
@@ -4728,7 +4738,7 @@ fn emit_fragment_stage(
         out.push('\n');
         out.push_str(&format!(
             "void main() {{\n  FragColor = {}();\n}}\n",
-            ws.module(fref.module).functions[fref.func].name
+            symbol_of_key(ws.module(fref.module).functions[fref.func].name)
         ));
     }
     Ok((out, dependencies))
@@ -4812,14 +4822,14 @@ fn check_block_name_collisions<'a>(
     // scalar list is deduped by identity before the census rather than after --
     // otherwise it collides with itself.
     let names = scalar
-        .map(|p| p.struct_name)
+        .map(|p| (p.struct_name, symbol_of_key(p.struct_name)))
         .collect::<HashSet<_>>()
         .into_iter()
-        .chain(arrays.map(|p| p.block_name));
-    for n in names {
-        if !seen.insert(n) {
+        .chain(arrays.map(|p| (p.block_name, symbol_of_key(p.block_name))));
+    for (logical, physical) in names {
+        if !seen.insert(physical) {
             return Err(err(span, format!(
-                "shader pipeline: uniform block name `{n}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
+                "shader pipeline: uniform block name `{logical}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
             )));
         }
     }

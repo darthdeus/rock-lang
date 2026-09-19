@@ -169,7 +169,7 @@ fn reject(sources: &SourceFiles, errs: &[rock_core::CompilerError]) -> anyhow::E
 }
 
 fn single_source(path: &str, src: &str) -> SourceFiles {
-    let mut sources = SourceFiles { files: vec![] };
+    let mut sources = SourceFiles::empty();
     sources.add_or_update_file(rock_core::source_file_from_path_and_contents(
         path.to_string(),
         path.to_string(),

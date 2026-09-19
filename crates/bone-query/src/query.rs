@@ -306,6 +306,7 @@ pub fn hover_at(
     sources: Option<&SourceMap>,
 ) -> Option<(String, Span)> {
     let module = ws.modules.get(mid.index())?;
+    let frag = ws.fragment_scopes.get(&module.file);
 
     // Body-level nodes: values, calls, struct-literal heads.
     if let Some(owner) = module.body_at(offset) {
@@ -362,7 +363,7 @@ pub fn hover_at(
                             } => {
                                 let selected = bi.resolved_overload_calls.get(&e).copied();
                                 if let Some(h) =
-                                    render_call_overloads_hover(ws, *name, selected, sources)
+                                    render_call_overloads_hover(ws, *name, selected, frag, sources)
                                 {
                                     return Some((h, *name_span));
                                 }
@@ -520,12 +521,17 @@ fn render_call_overloads_hover(
     ws: &Workspace,
     name: Ustr,
     selected: Option<(ModuleId, Idx<Function>)>,
+    frag: Option<&bone_core::modules::FragmentScope>,
     sources: Option<&SourceMap>,
 ) -> Option<String> {
     let mut all: Vec<(ModuleId, Idx<Function>)> = Vec::new();
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
-            all.extend(fns.iter().copied());
+            all.extend(fns.iter().copied().filter(|&(fmid, fid)| {
+                frag.is_none_or(|frag| {
+                    crate::modules_scope::callable_member_admitted(ws, frag, name, fmid, fid)
+                })
+            }));
         }
     }
     if all.is_empty() {
@@ -3794,6 +3800,18 @@ pub struct UfcsMethod {
 /// `[string]` receiver still gets `join([string])`. `None` (nominal receivers,
 /// or an unresolved Vec element) keeps name-only matching.
 pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<UfcsMethod> {
+    ufcs_methods_in_scope(ws, name, recv_elem, None)
+}
+
+/// Scope-aware UFCS method enumeration. The unscoped wrapper remains for
+/// legacy callers; v1 completion passes its fragment so private overload
+/// members cannot leak into method candidates.
+pub fn ufcs_methods_in_scope(
+    ws: &Workspace,
+    name: Ustr,
+    recv_elem: Option<&str>,
+    frag: Option<&bone_core::modules::FragmentScope>,
+) -> Vec<UfcsMethod> {
     let mut out = Vec::new();
     // Overloads collapse to one method item (identical label + insert --
     // the duplicate is popup noise), first-wins to match the general path's
@@ -3804,10 +3822,15 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<
     // is `it: I` with `<I: Iterator<..>>` -- not a nominal match, but UFCS-legal
     // (`it.enumerate()`). Gated on the receiver structurally satisfying
     // `Iterator` (bone's rule: a `next(recv) -> (bool, E)` in scope).
-    let recv_is_iter = receiver_is_iterator(ws, name);
+    let recv_is_iter = receiver_is_iterator(ws, name, frag);
     for m in ws.modules.iter() {
-        for f in m.functions.values() {
+        for (fid, f) in m.functions.iter() {
             if f.name.as_str().starts_with("__") {
+                continue;
+            }
+            if frag.is_some_and(|frag| {
+                !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid)
+            }) {
                 continue;
             }
             if let Some(p0) = f.param_decls.first() {
@@ -3840,13 +3863,22 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<
 /// Whether receiver struct `name` structurally satisfies `Iterator` -- bone's
 /// rule (`bone-inference/src/iter.rs`): a `next(name) -> (bool, E)` resolves.
 /// Gates the generic `Iterator`-bounded UFCS combinators.
-fn receiver_is_iterator(ws: &Workspace, name: Ustr) -> bool {
-    ws.modules.iter().flat_map(|m| m.functions.values()).any(|f| {
-        f.name.as_str() == "next"
-            && f.param_decls
-                .first()
-                .is_some_and(|p0| struct_name_of_ty(ws, None, p0.ty) == Some(name))
-            && f.return_ty.is_some_and(|rt| ty_is_bool_first_pair(ws, rt))
+fn receiver_is_iterator(
+    ws: &Workspace,
+    name: Ustr,
+    frag: Option<&bone_core::modules::FragmentScope>,
+) -> bool {
+    ws.modules.iter().any(|m| {
+        m.functions.iter().any(|(fid, f)| {
+            f.name.as_str() == "next"
+                && !frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid)
+                })
+                && f.param_decls
+                    .first()
+                    .is_some_and(|p0| struct_name_of_ty(ws, None, p0.ty) == Some(name))
+                && f.return_ty.is_some_and(|rt| ty_is_bool_first_pair(ws, rt))
+        })
     })
 }
 
@@ -4559,7 +4591,7 @@ fn v1_scope_entries(
                 || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
     };
     for (name, key) in crate::modules_scope::bound_names(ws, frag, admit) {
-        for e in key_entries(ws, name, key, expr_position, pfx, show_private) {
+        for e in key_entries_in_scope(ws, Some(frag), name, key, expr_position, pfx, show_private) {
             if seen.insert(e.name) {
                 out.push(e);
             }
@@ -4567,12 +4599,11 @@ fn v1_scope_entries(
     }
 }
 
-/// The completion entries for the definition `key` spelled `name` in a
-/// modules-v1 fragment, in a value (`expr_position`) or type slot, that
-/// match `pfx`. An enum in a value slot is offered as its qualified
-/// variants (`name::V`), as a legacy enum is.
-pub(crate) fn key_entries(
+/// The completion entries for a definition `key`, optionally filtered at a
+/// modules-v1 access site. `None` preserves the legacy/global query behavior.
+pub(crate) fn key_entries_in_scope(
     ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
     name: ustr::Ustr,
     key: ustr::Ustr,
     expr_position: bool,
@@ -4595,9 +4626,20 @@ pub(crate) fn key_entries(
         rec: 0,
     };
     let mut out = Vec::new();
-    if let Some(&(fmid, fid)) = ws.functions_by_name.get(&key).and_then(|l| l.first()) {
+    if let Some((fmid, fid)) = ws.functions_by_name.get(&key).and_then(|l| {
+        l.iter().copied().find(|&(fmid, fid)| {
+            frag.is_none_or(|frag| {
+                crate::modules_scope::callable_member_admitted(ws, frag, key, fmid, fid)
+            })
+        })
+    }) {
         if expr_position && matches(name.as_str()) {
             out.push(CompletionEntry {
+                detail: Some(crate::query::render_fn_signature(
+                    ws,
+                    name,
+                    &ws.module(fmid).functions[fid],
+                )),
                 signature_key: Some(key),
                 takes_params: !ws.module(fmid).functions[fid].param_decls.is_empty(),
                 ..entry(name, SymCat::Function, file_of(fmid))
@@ -5076,6 +5118,7 @@ pub fn signature_help(
     sources: Option<&SourceMap>,
 ) -> Option<(Vec<SignatureEntry>, Span)> {
     let module = ws.modules.get(mid.index())?;
+    let frag = ws.fragment_scopes.get(&module.file);
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
 
@@ -5121,7 +5164,7 @@ pub fn signature_help(
                     let first = args.clone().next()?;
                     nominal_name_of_ty(ws, Some(bi), *bi.expr_types.get(first)?)
                 });
-            let sigs = functions_named(ws, *name, sources, recv_nominal);
+            let sigs = functions_named(ws, *name, sources, recv_nominal, frag);
             (!sigs.is_empty()).then_some((sigs, call_span))
         }
         hir::Expr::StructLiteral { name, .. } => {
@@ -5162,12 +5205,18 @@ fn functions_named(
     name: Ustr,
     sources: Option<&SourceMap>,
     recv_nominal: Option<Ustr>,
+    frag: Option<&bone_core::modules::FragmentScope>,
 ) -> Vec<SignatureEntry> {
     let mut all = Vec::new();
     let mut matched = Vec::new();
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
             for (fmid, fid) in fns {
+                if frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
+                }) {
+                    continue;
+                }
                 let entry = fn_sig_entry(ws, *fmid, *fid, sources);
                 if let Some(recv) = recv_nominal {
                     let p0 = ws.modules[fmid.index()].functions[*fid].param_decls.first();

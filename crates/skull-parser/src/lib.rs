@@ -1118,6 +1118,32 @@ mod tests {
             item0("operator(lua) ==(a: int, b: int) -> bool { a == b }").0,
             "__op_eq"
         );
+        assert_eq!(
+            item0("operator -(a: int) -> int { -a }").0,
+            "__unm"
+        );
+        assert_eq!(
+            item0("operator !(a: bool) -> bool { !a }").0,
+            "__not"
+        );
+        assert_eq!(
+            item0("operator ~(a: int) -> int { ~a }").0,
+            "__op_bitnot"
+        );
+    }
+
+    #[test]
+    fn one_parameter_binary_operator_is_rejected() {
+        let err = parse_module_clean(
+            "struct P { x: int }\noperator +(a: P) -> P { a }",
+            Ustr::from("<operator_arity>"),
+        )
+        .expect_err("a one-parameter binary operator must be rejected");
+        assert!(
+            err.message.contains("operator `+` takes two parameters"),
+            "unexpected diagnostic: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -1782,6 +1808,7 @@ mod modules_items_tests {
             "use a::b::{self, Actor};",
             "use geo::operator(+);",
             "use geo::operator(+) as add_pt;",
+            "use geo::operator(!);",
             "use geo::{Pt, operator(*) as scale};",
             "use ::rooted::a;",
             "pub use a::b::*;",
@@ -1798,6 +1825,7 @@ mod modules_items_tests {
             "use a::b::{self, Actor};",
             "use geo::operator(+);",
             "use geo::operator(+) as add_pt;",
+            "use geo::operator(!);",
             "use geo::{Pt, operator(*) as scale};",
             "use ::rooted::a;",
         ];
@@ -1828,6 +1856,14 @@ mod modules_items_tests {
         assert_eq!(segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["geo"]);
         assert_eq!(op.name, "__op_add");
         assert_eq!(alias.as_ref().map(|a| a.name.as_str()), Some("add_pt"));
+
+        let ast = parse_v1("use geo::operator(!);").expect("parse unary selector");
+        let ItemKind::Use(u) = &ast.items[0].kind else { panic!("expected use") };
+        let UseTree::Path { kind: UseSuffix::Operator { op, alias }, .. } = &u.tree else {
+            panic!("expected an operator selector, got {:?}", u.tree);
+        };
+        assert_eq!(op.name, "__not");
+        assert!(alias.is_none());
 
         let err = parse_v1("use geo::operator(+) as _;").expect_err("as _ must reject");
         assert!(err.message.contains("as _"), "got: {}", err.message);

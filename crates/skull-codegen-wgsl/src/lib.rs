@@ -16,6 +16,7 @@ use comfy_la_arena::Idx;
 use skull_codegen_shader::structure::{LoopRegion, Structure};
 use skull_codegen_shader::{ShaderArtifactPlan, ShaderPlannerPolicy};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
+use skull_mir::mangle::{declared_name, symbol_of_key};
 use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use skull_mir::monoty::{MonoInterner, MonoTy};
 use skull_mir::shader_ir::{
@@ -168,7 +169,7 @@ enum WgslIntrinsic {
 impl WgslIntrinsic {
     fn classify(function: &Function) -> Option<Self> {
         let arity = function.param_decls.len();
-        let intrinsic = Self::classify_name_arity(function.name.as_str(), arity);
+        let intrinsic = Self::classify_name_arity(declared_name(function.name.as_str()), arity);
         if matches!(intrinsic, Some(Self::Operator(_))) && arity != 2 {
             return Some(Self::UnsupportedOperator);
         }
@@ -267,7 +268,7 @@ impl ShaderPlannerPolicy for WgslShaderPolicy {
         interner: &skull_mir::monoty::MonoInterner,
     ) -> bool {
         if !matches!(
-            function.name.as_str(),
+            declared_name(function.name.as_str()),
             "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_idiv" | "__op_mod"
         ) || function.param_decls.len() != 2
             || self.inline_instance(ws, function, instance, interner)
@@ -307,7 +308,8 @@ fn round_up(value: u32, alignment: u32) -> u32 {
 }
 
 fn identifier(name: Ustr, what: &str, span: Span) -> Result<(), CompilerError> {
-    let s = name.as_str();
+    let emitted = symbol_of_key(name);
+    let s = emitted.as_str();
     let first = s.chars().next();
     if s.is_empty()
         || !first.is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
@@ -1002,7 +1004,7 @@ impl WgslAbiPlan {
                 .enumerate()
                 .map(|(index, input)| SharedWgslVertexInput {
                     index: index as u32,
-                    struct_name: input.struct_name.to_string(),
+                    struct_name: symbol_of_key(input.struct_name).to_string(),
                     rate: match input.rate {
                         VertexRate::PerVertex => "vertex".into(),
                         VertexRate::PerInstance => "instance".into(),
@@ -1084,7 +1086,7 @@ fn shared_visibility(visibility: WgslStageVisibility) -> SharedWgslVisibility {
 fn shared_uniform_block_with_role(block: &WgslUniformBlock, role: &str) -> SharedWgslUniformBlock {
     SharedWgslUniformBlock {
         role: role.into(),
-        struct_name: block.struct_name.to_string(),
+        struct_name: symbol_of_key(block.struct_name).to_string(),
         binding: block.binding,
         size: block.size,
         visibility: shared_visibility(block.visibility),
@@ -1528,7 +1530,7 @@ fn layout_uniform_group(
 /// with a user `@uniform` group is rejected by `identifier`/emission rather than
 /// renamed around.
 fn array_block_name(owner: Ustr) -> Ustr {
-    Ustr::from(&format!("{owner}_Arrays"))
+    Ustr::from(&format!("{}_Arrays", symbol_of_key(owner)))
 }
 
 fn layout_array_group(
@@ -2315,7 +2317,7 @@ fn emit_value_struct(
     fields: &[(Ustr, ValueKind)],
     span: Span,
 ) -> Result<(), CompilerError> {
-    writeln!(out, "struct {} {{", name).unwrap();
+    writeln!(out, "struct {} {{", symbol_of_key(name)).unwrap();
     for (field, kind) in fields {
         let ty = wgsl_value_type(*kind)
             .ok_or_else(|| err(span, format!("WGSL value struct field {field} has no type")))?;
@@ -2380,7 +2382,7 @@ fn emit_explicit_types(
         .ok_or_else(|| err(span, "WGSL explicit vertex return is not a varying struct"))?;
     let fields = explicit_struct_fields(ws, varying, span)?;
     emit_value_struct(out, varying, &fields, span)?;
-    writeln!(out, "struct {varying}Out {{").unwrap();
+    writeln!(out, "struct {}Out {{", symbol_of_key(varying)).unwrap();
     writeln!(out, "  @builtin(position) position: vec4<f32>,").unwrap();
     for field in &abi.varyings {
         let kind = fields
@@ -2415,7 +2417,8 @@ fn emit_array_blocks(
     span: Span,
 ) -> Result<(), CompilerError> {
     for block in &abi.array_blocks {
-        writeln!(out, "struct {} {{", block.struct_name).unwrap();
+        let struct_name = symbol_of_key(block.struct_name);
+        writeln!(out, "struct {} {{", struct_name).unwrap();
         for member in &block.members {
             let elem = array_element_type(member.elem).ok_or_else(|| {
                 err(
@@ -2437,7 +2440,7 @@ fn emit_array_blocks(
         writeln!(
             out,
             "@group({}) @binding({}) var<uniform> u_{}: {};",
-            abi.bind_group, block.binding, block.struct_name, block.struct_name
+            abi.bind_group, block.binding, struct_name, struct_name
         )
         .unwrap();
     }
@@ -2449,7 +2452,8 @@ fn emit_array_blocks(
 
 fn emit_explicit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
     for block in &abi.uniform_blocks {
-        writeln!(out, "struct {} {{", block.struct_name).unwrap();
+        let struct_name = symbol_of_key(block.struct_name);
+        writeln!(out, "struct {} {{", struct_name).unwrap();
         for member in &block.members {
             writeln!(out, "  {}: {},", member.name, uniform_member_type(member.kind).unwrap()).unwrap();
         }
@@ -2459,8 +2463,8 @@ fn emit_explicit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
             "@group({}) @binding({}) var<uniform> u_{}: {};",
             abi.bind_group,
             block.binding,
-            block.struct_name,
-            block.struct_name
+            struct_name,
+            struct_name
         )
         .unwrap();
     }
@@ -2479,7 +2483,8 @@ fn emit_explicit_entries(
     span: Span,
 ) -> Result<(), CompilerError> {
     let varying = varying_output_name(ws, vertex, span)?;
-    let output = format!("{varying}Out");
+    let varying_name = symbol_of_key(Ustr::from(varying.as_str()));
+    let output = format!("{varying_name}Out");
     writeln!(out, "@vertex\nfn {}(", abi.vertex_entry).unwrap();
     for input in &abi.vertex_inputs {
         for attr in &input.attrs {
@@ -2503,8 +2508,9 @@ fn emit_explicit_entries(
             .map(|attr| attr_input_expression(attr.location, attr.kind))
             .collect::<Vec<_>>()
             .join(", ");
-        let name = format!("{}_attrs", input.struct_name);
-        writeln!(out, "  let {name} = {}({input_args});", input.struct_name).unwrap();
+        let input_name = symbol_of_key(input.struct_name);
+        let name = format!("{}_attrs", input_name);
+        writeln!(out, "  let {name} = {}({input_args});", input_name).unwrap();
         args.push(name);
     }
     args.push("vertex_index".to_string());
@@ -2519,7 +2525,8 @@ fn emit_explicit_entries(
     let outputs = &abi.fragment_outputs;
     let mrt = outputs.len() > 1;
     let result_ty = if mrt {
-        let targets = format!("{}Targets", fragment_result_struct(ws, fragment, span)?);
+        let result_name = symbol_of_key(fragment_result_struct(ws, fragment, span)?);
+        let targets = format!("{result_name}Targets");
         writeln!(out, "struct {targets} {{").unwrap();
         for output in outputs {
             writeln!(
@@ -2553,8 +2560,8 @@ fn emit_explicit_entries(
         abi.fragment_entry,
     )
     .unwrap();
-    let varying_name = Ustr::from(varying.as_str());
-    let declared_fields = explicit_struct_fields(ws, varying_name, span)?;
+    let varying_logical = Ustr::from(varying.as_str());
+    let declared_fields = explicit_struct_fields(ws, varying_logical, span)?;
     let varying_args = declared_fields
         .iter()
         .map(|(name, _)| {
@@ -2570,7 +2577,7 @@ fn emit_explicit_entries(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    writeln!(out, "  let vary = {varying}({});", varying_args.join(", ")).unwrap();
+    writeln!(out, "  let vary = {}({});", varying_name, varying_args.join(", ")).unwrap();
     let call_args = if fragment_reads_frag_coord(ws, fragment) {
         format!(
             "vary, {}",
@@ -2632,7 +2639,7 @@ fn explicit_frag_coord_expression(
     })?;
     Ok(format!(
         "vec4<f32>(input.position.x, ((2.0 / abs(u_{}.uProjection[1][1])) - input.position.y), input.position.z, input.position.w)",
-        engine.struct_name
+        symbol_of_key(engine.struct_name)
     ))
 }
 
@@ -2682,7 +2689,8 @@ fn emit_fullscreen_types(out: &mut String, abi: &WgslAbiPlan) {
 
 fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
     let block = &abi.fullscreen_uniform;
-    writeln!(out, "struct {} {{", block.struct_name).unwrap();
+    let struct_name = symbol_of_key(block.struct_name);
+    writeln!(out, "struct {} {{", struct_name).unwrap();
     for member in &block.members {
         writeln!(
             out,
@@ -2696,13 +2704,14 @@ fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
     writeln!(
         out,
         "@group({}) @binding({}) var<uniform> u_{}: {};",
-        abi.bind_group, block.binding, block.struct_name, block.struct_name
+        abi.bind_group, block.binding, struct_name, struct_name
     )
     .unwrap();
     out.push('\n');
 
     for block in &abi.uniform_blocks {
-        writeln!(out, "struct {} {{", block.struct_name).unwrap();
+        let struct_name = symbol_of_key(block.struct_name);
+        writeln!(out, "struct {} {{", struct_name).unwrap();
         for member in &block.members {
             writeln!(
                 out,
@@ -2716,7 +2725,7 @@ fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
         writeln!(
             out,
             "@group({}) @binding({}) var<uniform> u_{}: {};",
-            abi.bind_group, block.binding, block.struct_name, block.struct_name
+            abi.bind_group, block.binding, struct_name, struct_name
         )
         .unwrap();
     }
@@ -2896,7 +2905,7 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        } => match name.as_str() {
+        } => match declared_name(name.as_str()) {
             "Vec2" => Some(ValueKind::Vec2),
             "Vec3" => Some(ValueKind::Vec3),
             "Vec4" => Some(ValueKind::Vec4),
@@ -2929,7 +2938,7 @@ fn value_kind_for_instance_type(
         MonoTy::App {
             ctor: skull_mir::monoty::MonoCtor::Nominal(name),
             ..
-        } => match name.as_str() {
+        } => match declared_name(name.as_str()) {
             "Vec2" => Some(ValueKind::Vec2),
             "Vec3" => Some(ValueKind::Vec3),
             "Vec4" => Some(ValueKind::Vec4),
@@ -2948,7 +2957,7 @@ fn value_kind_for_instance_type(
 /// all, which is why [`uniform_member_type`] answers that question separately.
 fn wgsl_value_type(kind: ValueKind) -> Option<String> {
     match kind {
-        ValueKind::Struct(name) => Some(name.to_string()),
+        ValueKind::Struct(name) => Some(symbol_of_key(name).to_string()),
         other => other.wgsl().map(str::to_string),
     }
 }
@@ -3272,7 +3281,9 @@ fn compute_helper_param_roles(
 }
 
 fn is_compute_resource_type(ws: &Workspace, ty: TyId) -> bool {
-    nominal_name(ws, ty).is_some_and(|name| matches!(name.as_str(), "StorageBuffer" | "AtomicStorageBuffer"))
+    nominal_name(ws, ty).is_some_and(|name| {
+        matches!(declared_name(name.as_str()), "StorageBuffer" | "AtomicStorageBuffer")
+    })
 }
 
 fn param_span(function: &Function, _index: usize) -> Span {
@@ -4643,7 +4654,7 @@ impl<'a> FunctionEmitter<'a> {
                                         ),
                                     )
                                 })?;
-                            let read = format!("u_{}.{}", block.struct_name, field);
+                            let read = format!("u_{}.{}", symbol_of_key(block.struct_name), field);
                             // A `bool` uniform crosses as the u32 the CPU wrote;
                             // the boolean is recovered here and nowhere else.
                             return Ok(match member.kind {
@@ -4928,7 +4939,7 @@ impl<'a> FunctionEmitter<'a> {
         args: &[Idx<Inst>],
     ) -> Result<String, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
-        let name = function.name.as_str();
+        let name = declared_name(function.name.as_str());
         match WgslIntrinsic::classify(function) {
             Some(
                 WgslIntrinsic::GlobalInvocationId
@@ -5143,7 +5154,7 @@ impl<'a> FunctionEmitter<'a> {
                 })?;
                 Ok(format!(
                     "u_{}.{}[{}]{}",
-                    block.struct_name,
+                    symbol_of_key(block.struct_name),
                     member.name,
                     self.render_val(args[1])?,
                     projection
@@ -5374,7 +5385,7 @@ impl<'a> FunctionEmitter<'a> {
         })?;
         Ok(format!(
             "u_{}.uTextureVFlip.{component} > 0.5",
-            engine.struct_name
+            symbol_of_key(engine.struct_name)
         ))
     }
 
@@ -5563,7 +5574,7 @@ fn struct_field_kind_by_name(ws: &Workspace, name: Ustr, field: Ustr) -> Option<
 }
 
 fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
-    match name.as_str() {
+    match declared_name(name.as_str()) {
         "Vec2" => Some(ValueKind::Vec2),
         "Vec3" => Some(ValueKind::Vec3),
         "Vec4" => Some(ValueKind::Vec4),
@@ -5584,7 +5595,7 @@ fn zero_value(kind: ValueKind) -> String {
         ValueKind::Vec3 => "vec3<f32>(0.0)".into(),
         ValueKind::Vec4 => "vec4<f32>(0.0)".into(),
         ValueKind::Mat4 => "mat4x4<f32>(0.0)".into(),
-        ValueKind::Struct(name) => format!("{}()", name),
+        ValueKind::Struct(name) => format!("{}()", symbol_of_key(name)),
         ValueKind::Sampler(_) => "0.0".into(),
     }
 }

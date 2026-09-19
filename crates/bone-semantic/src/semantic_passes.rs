@@ -890,12 +890,25 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
             continue;
         };
 
-        let is_exported = reachable_defs.contains(def_key)
-            || (matches!(meta.vis, NsVisibility::Pub) && {
-                let pkg = ws.ns.package(pkg_id).unwrap();
-                let mod_key = pkg.key_of(&meta.module);
-                reachable_modules.contains(&mod_key)
-            });
+        let module_reachable = ws
+            .ns
+            .package(pkg_id)
+            .is_some_and(|pkg| reachable_modules.contains(&pkg.key_of(&meta.module)));
+        let is_exported = match meta.kind {
+            bone_core::modules::DefKind::Callable => {
+                let has_public_member = ws
+                    .functions_by_name
+                    .get(def_key)
+                    .is_some_and(|fns| {
+                        fns.iter()
+                            .any(|&(mid, fid)| ws.callable_member_is_public(*def_key, mid, fid))
+                    });
+                has_public_member && (reachable_defs.contains(def_key) || module_reachable)
+            }
+            _ => {
+                reachable_defs.contains(def_key) || (matches!(meta.vis, NsVisibility::Pub) && module_reachable)
+            }
+        };
 
         if !is_exported {
             continue;
@@ -917,6 +930,9 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
             bone_core::modules::DefKind::Callable => {
                 if let Some(fn_list) = ws.functions_by_name.get(def_key) {
                     for &(mid, fid) in fn_list.iter() {
+                        if !ws.callable_member_is_public(*def_key, mid, fid) {
+                            continue;
+                        }
                         let f = &ws.module(mid).functions[fid];
                         for p in &f.param_decls {
                             need(p.ty, f.span, "public function");
@@ -1162,7 +1178,7 @@ pub enum ScopeItem {
     },
     Use(skull_parser::UseDecl),
     /// An owned definition: bare name, kind (`owned_name_and_kind`),
-    /// declared visibility, item span.
+    /// declared visibility and item span.
     Def {
         name: ustr::Ustr,
         kind: &'static str,
@@ -1368,7 +1384,7 @@ pub fn assemble_namespaces(
             }
         }
 
-        register_items(ws, pkg_id, &module_path, &contribution.items, &mut scope, &mut errs);
+        register_items(ws, pkg_id, contribution.file, &module_path, &contribution.items, &mut scope, &mut errs);
         if !errs.is_empty() {
             errs.sort_by_key(|e| e.location.offset);
             return Err(errs.remove(0));
@@ -1777,6 +1793,7 @@ fn collect_use_leaves(
 fn register_items(
     ws: &mut Workspace,
     pkg_id: u32,
+    file: ustr::Ustr,
     path: &[ustr::Ustr],
     items: &[ScopeItem],
     scope: &mut FragmentScope,
@@ -1872,7 +1889,7 @@ fn register_items(
                     }
                     node.vis = Some(ns_vis);
                 }
-                register_items(ws, pkg_id, &child, block_items, scope, errs);
+                register_items(ws, pkg_id, file, &child, block_items, scope, errs);
             }
             ScopeItem::Use(u) => flatten_use_decl(ws, pkg_id, path, scope, u, errs),
             ScopeItem::Def { name: bare, kind, vis: item_vis, span: item_span } => {
@@ -1940,18 +1957,29 @@ fn register_items(
                     "callable" => bone_core::modules::DefKind::Callable,
                     _ => bone_core::modules::DefKind::Decorator,
                 };
-                ws.defs.insert(
-                    def_key,
-                    bone_core::modules::DefMeta {
-                        package: pkg_id,
-                        module: path.to_vec(),
-                        kind: def_kind,
-                        name: bare,
-                        vis: to_ns_vis(&item_vis.clone().unwrap_or(skull_parser::Visibility::Private)),
-                        span: *item_span,
-                        dialect: skull_parser::Dialect::V1,
-                    },
-                );
+                let vis = to_ns_vis(&item_vis.clone().unwrap_or(skull_parser::Visibility::Private));
+                if def_kind == bone_core::modules::DefKind::Callable {
+                    let members = node.callable_members.entry(bare).or_default();
+                    let ordinal = members.iter().filter(|member| member.file == file).count();
+                    members.push(bone_core::modules::CallableMember { file, ordinal, vis: vis.clone() });
+                }
+                let meta = bone_core::modules::DefMeta {
+                    package: pkg_id,
+                    module: path.to_vec(),
+                    kind: def_kind,
+                    name: bare,
+                    // Callable families use `callable_members`; retaining the
+                    // first declaration here keeps metadata deterministic for
+                    // tools that only need the family span/name.
+                    vis,
+                    span: *item_span,
+                    dialect: skull_parser::Dialect::V1,
+                };
+                if def_kind == bone_core::modules::DefKind::Callable {
+                    ws.defs.entry(def_key).or_insert(meta);
+                } else {
+                    ws.defs.insert(def_key, meta);
+                }
             }
         }
     }

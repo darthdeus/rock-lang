@@ -76,7 +76,7 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
     // under `<bone-stdlib:NAME>` and appear in no caller's source set -- the
     // span lookup then fails and the snippet plus every label is dropped. Added
     // here, the one sink all render paths share, rather than per caller.
-    let mut sf = SourceFiles { files: sources.files.clone() };
+    let mut sf = sources.clone();
     for f in rock_host::stdlib_loader::stdlib_files() {
         let id = format!("<bone-stdlib:{}>", f.name);
         sf.add_or_update_file(source_file_from_path_and_contents(
@@ -517,7 +517,7 @@ pub(crate) fn bone_stdlib_modules() -> Vec<skull_parser::Ast> {
 /// same id for the span lookup to resolve — the real on-disk `path` is only used
 /// in the human-facing header line we print separately.
 fn render_source_errs(src: &str, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         "<parse_rock>".to_string(),
         "<parse_rock>".to_string(),
@@ -1366,7 +1366,7 @@ mod tests {
             offset_range: (offset, offset + NEEDLE.len()),
         };
         let err = CompilerError::new_with_label(span, "boxed here".to_string());
-        let rendered = render_errs(&SourceFiles { files: vec![] }, &[err]);
+        let rendered = render_errs(&SourceFiles::empty(), &[err]);
 
         assert!(
             rendered.contains(NEEDLE),
