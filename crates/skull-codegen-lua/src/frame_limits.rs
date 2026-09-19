@@ -173,6 +173,63 @@ fn raw<T>(i: Idx<T>) -> usize {
     u32::from(i.into_raw()) as usize
 }
 
+/// An UPPER bound on the slots one statement can reserve above the locals in
+/// scope, ignoring every emitter decision that only makes a statement narrower
+/// (a spliced constructor, a forwarded producer, a suppressed return). Used by
+/// [`fits_without_measuring`], which is the allocation-free fast path: every
+/// body in the corpus is far enough under both caps that the exact walk never
+/// has to run.
+fn statement_slots_upper_bound(inst: &Inst) -> usize {
+    match inst {
+        Inst::Call { args, .. } | Inst::CallValue { args, .. } => CALL_BASE_SLOTS + args.len(),
+        Inst::CallMulti { args, dests, .. } | Inst::CallValueMulti { args, dests, .. } => {
+            (CALL_BASE_SLOTS + args.len()).max(dests.len())
+        }
+        Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
+            CALL_BASE_SLOTS + fields.len()
+        }
+        Inst::MapNext { .. } => CALL_BASE_SLOTS + 2,
+        _ => 0,
+    }
+}
+
+/// Whether this function is so far under both caps that the exact model cannot
+/// possibly reject it. One allocation-free pass over the instructions, against
+/// an upper bound of what [`frame_overflow`] would compute:
+/// `actives_upper` is the whole loop nest's declarations summed as if every
+/// loop enclosed every block, and the widest statement is taken without any of
+/// the narrowing the emitter applies.
+///
+/// This is what keeps the check off the compile-time budget: a MAG build emits
+/// tens of thousands of bodies and none of them comes near 200 locals, so the
+/// side tables [`frame_overflow`] needs are never allocated.
+pub(crate) fn fits_without_measuring(
+    func: &MirFunc,
+    top_locals: usize,
+    loop_count: usize,
+    loop_scoped_locals: usize,
+) -> bool {
+    let actives_upper = top_locals + loop_count * FOR_CONTROL_LOCALS + loop_scoped_locals;
+    if actives_upper > LJ_MAX_LOCVAR {
+        return false;
+    }
+    let mut widest = 0usize;
+    for (_, inst) in func.insts.iter() {
+        let slots = statement_slots_upper_bound(inst);
+        if slots > widest {
+            widest = slots;
+        }
+    }
+    for (_, block) in func.blocks.iter() {
+        if let Term::Return(values) = &block.term
+            && values.len() > widest
+        {
+            widest = values.len();
+        }
+    }
+    actives_upper + widest <= FrameLimit::Slots.max_loadable()
+}
+
 /// The fixed arguments the emitter writes for `id`, when it renders as a Lua
 /// CALL. `None` for every other form -- an unlisted form only makes the bound
 /// looser, never wrong.
