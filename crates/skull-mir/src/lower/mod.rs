@@ -334,6 +334,7 @@ pub use abi::{
     RepArena, RepArenaStats, RepError,
     RepId, RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
+    SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT,
 };
 
 mod struct_plan;

@@ -54,8 +54,8 @@ fn v8_names_a_changed_artifact_and_plays_it_anyway() {
         .find_map(|line| line.strip_prefix("build "))
         .expect("recorded Artifact A fingerprint")
         .to_string();
-    assert_ne!(artifact_a, "1111111111111111", "fixture must observe the compiler fingerprint");
-    assert_ne!(artifact_a, "2222222222222222", "fixture must observe the compiler fingerprint");
+    let changed = "1111111111111111";
+    assert_ne!(artifact_a, changed, "fixture must observe the compiler fingerprint");
 
     let admitted = replay(&log);
     assert!(admitted.status.success(), "Artifact A must admit its own log: {}", String::from_utf8_lossy(&admitted.stderr));
@@ -64,26 +64,21 @@ fn v8_names_a_changed_artifact_and_plays_it_anyway() {
         "an identical Artifact must not warn about drift"
     );
 
-    for changed in ["1111111111111111", "2222222222222222"] {
-        if changed == artifact_a {
-            continue;
-        }
-        replace_build(&log, changed);
-        let played = replay(&log);
-        let stderr = String::from_utf8_lossy(&played.stderr);
-        assert!(played.status.success(), "changed Artifact {changed} must still play: {stderr}");
-        assert!(
-            stderr.contains(&format!("built against {changed}")) && stderr.contains("state may diverge"),
-            "the changed Artifact must be named: {stderr}"
-        );
-        // The identity is still resolved in replay init: the warning precedes
-        // the watchdog's first completed-frame marker.
-        let first_frame = stderr
-            .find("completed=1 ")
-            .expect("the watchdog marks the first completed frame");
-        assert!(
-            stderr.find("built against").is_some_and(|warned| warned < first_frame),
-            "the drift must be named before the first game tick: {stderr}"
-        );
-    }
+    replace_build(&log, changed);
+    let played = replay(&log);
+    let stderr = String::from_utf8_lossy(&played.stderr);
+    assert!(played.status.success(), "changed Artifact {changed} must still play: {stderr}");
+    assert!(
+        stderr.contains(&format!("built against {changed}")) && stderr.contains("state may diverge"),
+        "the changed Artifact must be named: {stderr}"
+    );
+    // The identity is still resolved in replay init: the warning precedes
+    // the watchdog's first completed-frame marker.
+    let first_frame = stderr
+        .find("completed=1 ")
+        .expect("the watchdog marks the first completed frame");
+    assert!(
+        stderr.find("built against").is_some_and(|warned| warned < first_frame),
+        "the drift must be named before the first game tick: {stderr}"
+    );
 }

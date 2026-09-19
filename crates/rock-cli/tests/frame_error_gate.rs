@@ -55,7 +55,7 @@ fn run_frame_with(envs: &[(&str, String)]) -> (String, bool) {
 }
 
 #[test]
-fn a_caught_frame_error_fails_a_bounded_run() {
+fn a_repeating_caught_frame_error_fails_once_with_its_total() {
     let (text, ok) = run_frame(Some(2));
     assert!(
         text.contains("forced frame error"),
@@ -76,20 +76,10 @@ fn a_caught_frame_error_fails_a_bounded_run() {
         !text.contains("frames executed successfully"),
         "the run still announced success over raised frames:\n{text}"
     );
-}
 
-/// A frame error that repeats every frame must be logged ONCE, not per frame.
-///
-/// The raise is deterministic, so the loop reproduces it on every remaining
-/// frame: at 60fps an unthrottled traceback buries every other line in the log,
-/// which is how a real one was found (a missing image on iOS produced an
-/// identical traceback on every frame and nothing else was readable).
-///
-/// Collapsing must not SWALLOW: the shutdown suppression summary carries the
-/// total, and the frame-error count still fails the run.
-#[test]
-fn a_repeating_frame_error_is_logged_once_with_its_total() {
-    let (text, ok) = run_frame(Some(2));
+    // The deterministic raise repeats on frames 2 through 5. It must be logged
+    // once rather than burying the stream in tracebacks, while the shutdown
+    // summary and bounded-run failure retain the total.
     // Count EMITTED lines: the shutdown summary echoes the stored message, so a
     // bare "Error in frame" also matches inside the summary and reads as a
     // second copy.
@@ -101,18 +91,17 @@ fn a_repeating_frame_error_is_logged_once_with_its_total() {
     // The denominator: without this, logging once is indistinguishable from
     // losing every repeat.
     assert!(
-        text.contains("suppressed x"),
-        "the suppression summary must report the repeats:\n{text}"
+        text.contains("suppressed x4 at") && text.contains("4 frame(s) raised during run"),
+        "the suppression and bounded-run summaries must report all four errors:\n{text}"
     );
     // The key must come from the ERROR, not the call site. Every frame error is
     // raised through one line in runner.rock, so a site key would collapse two
     // DIFFERENT faults into whichever happened first -- silently, and worse than
     // the spam this replaces. The summary prints its key, so this reads it.
     assert!(
-        text.contains("suppressed x5 at") && text.contains("forced frame error (STONE_FRAME_FORCE_ERROR)"),
+        text.contains("forced frame error (STONE_FRAME_FORCE_ERROR)"),
         "the dedupe key is not derived from the error message:\n{text}"
     );
-    assert!(!ok, "collapsing the log must not stop the run from failing:\n{text}");
 }
 
 /// A raised frame must still publish the image uploads it queued.

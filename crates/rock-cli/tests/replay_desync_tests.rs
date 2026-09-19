@@ -173,7 +173,7 @@ fn desync_compare_is_off_past_a_reload() {
 /// seek (`STONE_RUN_TO_TICK`) skips the render pass on the intermediate ticks,
 /// so render-derived globals differ from a rendered run. Two categories, two
 /// mechanisms (both exercised here):
-///   - engine render/accumulative globals (`RENDER_BATCHES`, `stats_history_*`)
+///   - engine render/accumulative globals (`RENDER_BATCHES`, `LAST_FRAME_GFX`)
 ///     and game render handles (Materials, `RetainedMesh`) are excluded from
 ///     hashing entirely by the sim-state predicate -- they would stay divergent
 ///     even AFTER the seek;

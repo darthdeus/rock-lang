@@ -333,6 +333,8 @@ pub enum CliCommand {
     DocsIndex,
     /// Check SDK support for a project manifest and its native libraries without building.
     SdkCheck,
+    /// Build/stage engine libraries once and write a content-bound receipt for a test session.
+    EngineBuildReceipt,
     /// `rock modules audit <project> [--closed] [--format pretty|json]` --
     /// read-only modules-v1 audit of one project's package graph and analyzed
     /// sources (spec 15.1). See `modules_audit::run`.
@@ -386,6 +388,7 @@ impl clap::ValueEnum for CliCommand {
             Self::SoundInspect,
             Self::DocsIndex,
             Self::SdkCheck,
+            Self::EngineBuildReceipt,
             Self::Modules,
             Self::Fix,
         ]
@@ -448,6 +451,7 @@ impl CliCommand {
             Self::SoundInspect => "sound-inspect",
             Self::DocsIndex => "docs-index",
             Self::SdkCheck => "sdk-check",
+            Self::EngineBuildReceipt => "engine-build-receipt",
             Self::Modules => "modules",
             Self::Fix => "fix",
         }

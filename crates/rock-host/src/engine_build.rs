@@ -9,8 +9,30 @@
 //! the FFI loader sees the same name on both layouts.
 
 use anyhow::Result;
+use sha1::{Digest, Sha1};
+use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+pub const ENGINE_BUILD_RECEIPT_ENV: &str = "ROCK_ENGINE_BUILD_RECEIPT";
+const ENGINE_BUILD_RECEIPT_VERSION: u32 = 1;
+
+#[derive(Debug)]
+struct EngineBuildReceipt {
+    version: u32,
+    workspace: String,
+    libs: Vec<ReceiptLib>,
+}
+
+#[derive(Debug)]
+struct ReceiptLib {
+    src_stem: String,
+    dst_stem: String,
+    inputs: Vec<String>,
+    inputs_sha1: String,
+    staged_sha1: String,
+}
 
 /// Run `cargo <args>` with inherited stdio, bailing with `fail_msg`
 /// if cargo exits non-zero. Single place for the build-invoke +
@@ -101,6 +123,179 @@ pub fn game_engine_libs(game_path: &str) -> Result<Vec<&'static EngineLib>> {
                 || (lib.need == "wgpu" && renderer == crate::stick::RendererBackend::Wgpu)
         })
         .collect())
+}
+
+fn dep_info_path(root: &Path, src_stem: &str) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    return root.join("target/debug").join(format!("{src_stem}.d"));
+    #[cfg(not(target_os = "windows"))]
+    root.join("target/debug").join(format!("lib{src_stem}.d"))
+}
+
+fn staged_cdylib_path(root: &Path, dst_stem: &str) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    return root.join("tmp").join(format!("lib{dst_stem}.so"));
+    #[cfg(target_os = "macos")]
+    return root.join("tmp").join(format!("lib{dst_stem}.dylib"));
+    #[cfg(target_os = "windows")]
+    return root.join("tmp").join(format!("{dst_stem}.dll"));
+}
+
+fn makefile_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\n') => {}
+                Some('\r') if chars.peek() == Some(&'\n') => {
+                    chars.next();
+                }
+                Some(next) => word.push(next),
+                None => word.push(ch),
+            }
+        } else if ch.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(ch);
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+fn local_dep_inputs(root: &Path, src_stem: &str) -> Result<Vec<String>> {
+    let root = fs_err::canonicalize(root)?;
+    let dep_info = dep_info_path(&root, src_stem);
+    let text = fs_err::read_to_string(&dep_info).map_err(|error| {
+        anyhow::anyhow!(
+            "engine build receipt cannot read Cargo dep-info `{}`: {error}",
+            dep_info.display()
+        )
+    })?;
+    let text = text.replace("\\\r\n", "").replace("\\\n", "");
+    let mut inputs = BTreeSet::new();
+    for line in text.lines() {
+        let Some((_, dependencies)) = line.split_once(": ") else {
+            continue;
+        };
+        for dependency in makefile_words(dependencies) {
+            let path = PathBuf::from(dependency);
+            let path = if path.is_absolute() { path } else { root.join(path) };
+            if path.is_file() {
+                let path = fs_err::canonicalize(path)?;
+                if let Ok(relative) = path.strip_prefix(&root) {
+                    inputs.insert(relative.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    for entry in walkdir::WalkDir::new(&root).into_iter().filter_entry(|entry| {
+        let name = entry.file_name().to_string_lossy();
+        !matches!(name.as_ref(), ".git" | "target" | "tmp" | "prebuilt")
+    }) {
+        let entry = entry?;
+        if entry.file_type().is_file() && entry.file_name() == "Cargo.toml" {
+            let relative = entry.path().strip_prefix(&root)?;
+            inputs.insert(relative.to_string_lossy().into_owned());
+        }
+    }
+    for extra in ["Cargo.lock", ".cargo/config.toml"] {
+        if root.join(extra).is_file() {
+            inputs.insert(extra.to_string());
+        }
+    }
+    if inputs.is_empty() {
+        anyhow::bail!(
+            "engine build receipt found no local inputs in `{}`",
+            dep_info.display()
+        );
+    }
+    Ok(inputs.into_iter().collect())
+}
+
+fn sha1_file(path: &Path) -> Result<String> {
+    let mut file = fs_err::File::open(path)?;
+    let mut hash = Sha1::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn inputs_sha1(root: &Path, inputs: &[String]) -> Result<String> {
+    let mut hash = Sha1::new();
+    for relative in inputs {
+        let path = root.join(relative);
+        let bytes = fs_err::read(&path).map_err(|error| {
+            anyhow::anyhow!("engine build input `{}` is unavailable: {error}", path.display())
+        })?;
+        hash.update((relative.len() as u64).to_le_bytes());
+        hash.update(relative.as_bytes());
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(&bytes);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn capture_receipt_lib(root: &Path, src_stem: &str, dst_stem: &str) -> Result<ReceiptLib> {
+    let root = fs_err::canonicalize(root)?;
+    let inputs = local_dep_inputs(&root, src_stem)?;
+    let inputs_sha1 = inputs_sha1(&root, &inputs)?;
+    let staged = staged_cdylib_path(&root, dst_stem);
+    let staged_sha1 = sha1_file(&staged).map_err(|error| {
+        anyhow::anyhow!(
+            "engine build receipt cannot fingerprint staged library `{}`: {error}",
+            staged.display()
+        )
+    })?;
+    Ok(ReceiptLib {
+        src_stem: src_stem.to_string(),
+        dst_stem: dst_stem.to_string(),
+        inputs,
+        inputs_sha1,
+        staged_sha1,
+    })
+}
+
+fn validate_receipt_lib(root: &Path, receipt: &ReceiptLib) -> Result<()> {
+    let root = fs_err::canonicalize(root)?;
+    let current_inputs = inputs_sha1(&root, &receipt.inputs).map_err(|error| {
+        anyhow::anyhow!(
+            "engine build receipt for `{}` rejected because its inputs changed: {error}",
+            receipt.dst_stem
+        )
+    })?;
+    if current_inputs != receipt.inputs_sha1 {
+        anyhow::bail!(
+            "engine build receipt for `{}` rejected because its inputs changed",
+            receipt.dst_stem
+        );
+    }
+    let staged = staged_cdylib_path(&root, &receipt.dst_stem);
+    let current_stage = sha1_file(&staged).map_err(|error| {
+        anyhow::anyhow!(
+            "engine build receipt for `{}` rejected because its staged library changed: {error}",
+            receipt.dst_stem
+        )
+    })?;
+    if current_stage != receipt.staged_sha1 {
+        anyhow::bail!(
+            "engine build receipt for `{}` rejected because its staged library changed",
+            receipt.dst_stem
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -236,6 +431,64 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.lines().any(|line| line == "@rpath/libstone.dylib"), "{stdout}");
     }
+
+    fn receipt_fixture() -> (tempfile::TempDir, ReceiptLib) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("stone-rs/src/lib.rs");
+        fs_err::create_dir_all(source.parent().unwrap()).expect("source dir");
+        fs_err::create_dir_all(root.path().join("target/debug")).expect("target dir");
+        fs_err::create_dir_all(root.path().join("tmp")).expect("stage dir");
+        fs_err::write(&source, "pub fn version() -> u32 { 1 }\n").expect("source");
+        fs_err::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("manifest");
+        fs_err::write(
+            dep_info_path(root.path(), "probe"),
+            format!("target/debug/libprobe.rlib: {}\n", source.display()),
+        )
+        .expect("dep info");
+        fs_err::write(staged_cdylib_path(root.path(), "probe"), b"built artifact")
+            .expect("staged dylib");
+        let receipt = capture_receipt_lib(root.path(), "probe", "probe").expect("capture");
+        (root, receipt)
+    }
+
+    #[test]
+    fn a_shared_engine_receipt_rejects_an_input_changed_after_capture() {
+        let (root, receipt) = receipt_fixture();
+        validate_receipt_lib(root.path(), &receipt).expect("unchanged receipt is valid");
+
+        fs_err::write(root.path().join("stone-rs/src/lib.rs"), "pub fn version() -> u32 { 2 }\n")
+            .expect("mutate source");
+        let error = validate_receipt_lib(root.path(), &receipt).expect_err("stale input must reject");
+        assert!(error.to_string().contains("inputs changed"), "{error:#}");
+    }
+
+    #[test]
+    fn a_shared_engine_receipt_rejects_a_replaced_staged_library() {
+        let (root, receipt) = receipt_fixture();
+        fs_err::write(staged_cdylib_path(root.path(), "probe"), b"different artifact")
+            .expect("replace stage");
+        let error = validate_receipt_lib(root.path(), &receipt).expect_err("wrong dylib must reject");
+        assert!(error.to_string().contains("staged library changed"), "{error:#}");
+    }
+
+    #[test]
+    fn a_shared_engine_receipt_round_trips_its_workspace_and_library_identity() {
+        let (root, lib) = receipt_fixture();
+        let root_path = fs_err::canonicalize(root.path()).expect("canonical root");
+        let receipt = EngineBuildReceipt {
+            version: ENGINE_BUILD_RECEIPT_VERSION,
+            workspace: root_path.to_string_lossy().into_owned(),
+            libs: vec![lib],
+        };
+        let path = root.path().join("receipt.json");
+        fs_err::write(&path, engine_build_receipt_json(&receipt).expect("encode")).expect("receipt");
+
+        let loaded = load_engine_build_receipt(&root_path, &path).expect("load");
+        assert_eq!(loaded.version, ENGINE_BUILD_RECEIPT_VERSION);
+        assert_eq!(loaded.workspace, receipt.workspace);
+        assert_eq!(loaded.libs.len(), 1);
+        validate_receipt_lib(&root_path, &loaded.libs[0]).expect("loaded identity remains valid");
+    }
 }
 
 /// Build a cargo crate and stage its cdylib into tmp/ under the given name.
@@ -365,6 +618,19 @@ fn set_macos_install_name(path: &Path, dst_stem: &str) -> Result<()> {
 /// have a specific game in scope; this raw form is fine for callers that
 /// have no game (REPL, library compiles).
 pub fn build_libstone() -> Result<()> {
+    if crate::project::is_release_layout() {
+        return Ok(());
+    }
+    if let Some((root, receipt_path, receipt)) = engine_build_receipt_from_env()? {
+        let core = receipt_lib(&receipt, "stone").ok_or_else(|| {
+            anyhow::anyhow!(
+                "engine build receipt `{}` does not contain core libstone",
+                receipt_path.display()
+            )
+        })?;
+        validate_receipt_lib(&root, core)?;
+        return Ok(());
+    }
     cargo_build_and_stage_lib("stone-rs", &["build", "--lib"], "stone_rs", "stone")?;
     Ok(())
 }
@@ -380,6 +646,16 @@ pub fn build_optional_engine_lib(lib: &EngineLib) -> Result<()> {
     if crate::project::is_release_layout() {
         return Ok(());
     }
+    if let Some((root, _, receipt)) = engine_build_receipt_from_env()? {
+        if let Some(prebuilt) = receipt_lib(&receipt, lib.dst_stem) {
+            validate_receipt_lib(&root, prebuilt)?;
+            return Ok(());
+        }
+    }
+    build_optional_engine_lib_fresh(lib)
+}
+
+fn build_optional_engine_lib_fresh(lib: &EngineLib) -> Result<()> {
     let crate_path = PathBuf::from(crate::rock_dir()).join(lib.crate_name);
     if !crate_path.exists() {
         anyhow::bail!(
@@ -397,14 +673,148 @@ pub fn build_optional_engine_lib(lib: &EngineLib) -> Result<()> {
     )
 }
 
+/// Build and stage the core engine plus the optional libraries declared by
+/// `game_paths`, then write the content-bound receipt inherited by a test
+/// session. Ordinary commands do not create receipts and retain their usual
+/// build-before-run behavior.
+pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Result<()> {
+    if crate::project::is_release_layout() {
+        anyhow::bail!("engine build receipts are only meaningful in a source workspace");
+    }
+    let root = fs_err::canonicalize(crate::rock_dir())?;
+    cargo_build_and_stage_lib("stone-rs", &["build", "--lib"], "stone_rs", "stone")?;
+
+    let mut optional = BTreeSet::new();
+    for game_path in game_paths {
+        for lib in game_engine_libs(game_path)? {
+            optional.insert(lib.need);
+        }
+    }
+    for lib in OPTIONAL_ENGINE_LIBS.iter().filter(|lib| optional.contains(lib.need)) {
+        build_optional_engine_lib_fresh(lib)?;
+    }
+
+    let mut libs = vec![capture_receipt_lib(&root, "stone_rs", "stone")?];
+    for lib in OPTIONAL_ENGINE_LIBS.iter().filter(|lib| optional.contains(lib.need)) {
+        libs.push(capture_receipt_lib(&root, lib.src_stem, lib.dst_stem)?);
+    }
+    let receipt = EngineBuildReceipt {
+        version: ENGINE_BUILD_RECEIPT_VERSION,
+        workspace: root.to_string_lossy().into_owned(),
+        libs,
+    };
+    crate::project::write_atomic(path, engine_build_receipt_json(&receipt)?)?;
+    Ok(())
+}
+
+fn engine_build_receipt_json(receipt: &EngineBuildReceipt) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec_pretty(&serde_json::json!({
+        "version": receipt.version,
+        "workspace": receipt.workspace,
+        "libs": receipt.libs.iter().map(|lib| serde_json::json!({
+            "src_stem": lib.src_stem,
+            "dst_stem": lib.dst_stem,
+            "inputs": lib.inputs,
+            "inputs_sha1": lib.inputs_sha1,
+            "staged_sha1": lib.staged_sha1,
+        })).collect::<Vec<_>>(),
+    }))?)
+}
+
+fn load_engine_build_receipt(root: &Path, path: &Path) -> Result<EngineBuildReceipt> {
+    let bytes = fs_err::read(path).map_err(|error| {
+        anyhow::anyhow!("cannot read engine build receipt `{}`: {error}", path.display())
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        anyhow::anyhow!("invalid engine build receipt `{}`: {error}", path.display())
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        anyhow::anyhow!("invalid engine build receipt `{}`: root is not an object", path.display())
+    })?;
+    let required_string = |object: &serde_json::Map<String, serde_json::Value>, field: &str| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("invalid engine build receipt: `{field}` is not a string"))
+    };
+    let version = object.get("version").and_then(serde_json::Value::as_u64).ok_or_else(|| {
+        anyhow::anyhow!("invalid engine build receipt `{}`: `version` is not an integer", path.display())
+    })? as u32;
+    let workspace_name = required_string(object, "workspace")?;
+    let lib_values = object.get("libs").and_then(serde_json::Value::as_array).ok_or_else(|| {
+        anyhow::anyhow!("invalid engine build receipt `{}`: `libs` is not an array", path.display())
+    })?;
+    let mut libs = Vec::with_capacity(lib_values.len());
+    for value in lib_values {
+        let lib = value.as_object().ok_or_else(|| {
+            anyhow::anyhow!("invalid engine build receipt `{}`: a library is not an object", path.display())
+        })?;
+        let input_values = lib.get("inputs").and_then(serde_json::Value::as_array).ok_or_else(|| {
+            anyhow::anyhow!("invalid engine build receipt `{}`: `inputs` is not an array", path.display())
+        })?;
+        let inputs = input_values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("invalid engine build receipt: an input is not a string"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        libs.push(ReceiptLib {
+            src_stem: required_string(lib, "src_stem")?,
+            dst_stem: required_string(lib, "dst_stem")?,
+            inputs,
+            inputs_sha1: required_string(lib, "inputs_sha1")?,
+            staged_sha1: required_string(lib, "staged_sha1")?,
+        });
+    }
+    let receipt = EngineBuildReceipt { version, workspace: workspace_name, libs };
+    if receipt.version != ENGINE_BUILD_RECEIPT_VERSION {
+        anyhow::bail!(
+            "engine build receipt `{}` has version {}, expected {}",
+            path.display(),
+            receipt.version,
+            ENGINE_BUILD_RECEIPT_VERSION
+        );
+    }
+    let workspace = fs_err::canonicalize(&receipt.workspace).map_err(|error| {
+        anyhow::anyhow!("engine build receipt workspace `{}` is unavailable: {error}", receipt.workspace)
+    })?;
+    if workspace != root {
+        anyhow::bail!(
+            "engine build receipt `{}` belongs to `{}`, not `{}`",
+            path.display(),
+            workspace.display(),
+            root.display()
+        );
+    }
+    Ok(receipt)
+}
+
+fn receipt_lib<'a>(receipt: &'a EngineBuildReceipt, dst_stem: &str) -> Option<&'a ReceiptLib> {
+    receipt.libs.iter().find(|lib| lib.dst_stem == dst_stem)
+}
+
+fn engine_build_receipt_from_env() -> Result<Option<(PathBuf, PathBuf, EngineBuildReceipt)>> {
+    let Some(path) = std::env::var_os(ENGINE_BUILD_RECEIPT_ENV).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let root = fs_err::canonicalize(crate::rock_dir())?;
+    let path = PathBuf::from(path);
+    let receipt = load_engine_build_receipt(&root, &path)?;
+    Ok(Some((root, path, receipt)))
+}
+
 /// Build the engine cdylibs required for a specific game. Always builds
 /// stone-rs; additionally builds each optional lib the game's stick.toml
-/// declares under `[engine] needs`. Missing/unparseable stick.toml is treated
-/// as "core only" — we don't fail the run, the caller will hit a clearer error
-/// during compile if the game is misconfigured.
+/// declares under `[engine] needs`. A missing stick.toml is core-only; a
+/// malformed manifest or unknown engine need is rejected here.
 pub fn build_engine_libs(game_path: &str) -> Result<()> {
+    let optional = game_engine_libs(game_path)?;
     build_libstone()?;
-    for lib in game_engine_libs(game_path)? {
+    for lib in optional {
         build_optional_engine_lib(lib)?;
     }
     Ok(())

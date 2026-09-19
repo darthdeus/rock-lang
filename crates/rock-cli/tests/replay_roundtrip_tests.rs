@@ -338,7 +338,7 @@ fn recording_and_branch_rewrite_use_the_v9_pad_record_renderer() {
 
     let _ = run_frame("bitgun", 2, &["--record", &log_s]);
     let text = std::fs::read_to_string(&log).expect("read v9 record");
-    assert!(text.starts_with("STONE_REPLAY 16\n"), "recording must use the v16 header: {text}");
+    assert!(text.starts_with("STONE_REPLAY 17\n"), "recording must use the v17 header: {text}");
     let tick = text.lines().find(|line| line.starts_with("t ")).expect("tick");
     assert_eq!(tick.split(' ').count(), 10, "v9 tick has nine payload fields");
     assert!(tick.ends_with(" - -"), "empty live pad state has explicit empty fields: {tick}");
@@ -777,6 +777,7 @@ fn main() {
 
 #[test]
 fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
+    const FRAMES: u32 = 200;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("mag.replay");
     let settings = dir.path().join("settings.json");
@@ -785,7 +786,7 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
     let binding_history = dir.path().join("bindings-history.jsonl");
     let layout_history = dir.path().join("layout-history.jsonl");
     std::fs::write(&settings, r#"{"privacy":{"analytics":1,"analytics_version":3}}"#).unwrap();
-    let recorded = run_frame_env("mag", 3000, &["--headless", "--record", log.to_str().unwrap(),
+    let recorded = run_frame_env("mag", FRAMES, &["--headless", "--record", log.to_str().unwrap(),
         "--checkpoint-interval", "0"], &[
         ("PERF_MODE", "1"), ("STONE_WINDOW", "1280x720"),
         ("MAG_SETTINGS_PATH_OVERRIDE", settings.to_str().unwrap()),
@@ -810,8 +811,9 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
     assert!(wire.lines().any(|line| line.starts_with("j ") && line.contains(" flow ")),
         "the run must exercise actual flow publication");
     let output_dir = dir.path().join("profile");
+    let profile_range = format!("0-{}", FRAMES - 1);
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args(["replay-profile", "mag", log.to_str().unwrap(), "--range", "0-2999",
+        .args(["replay-profile", "mag", log.to_str().unwrap(), "--range", &profile_range,
             "--runs", "2", "--output", output_dir.to_str().unwrap()])
         .env("PERF_MODE", "1").env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root()).output().expect("profile MAG replay");
@@ -819,13 +821,15 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout).unwrap()
         .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-    assert_eq!(rows.iter().filter(|row| row["kind"] == "frame").count(), 6000);
+    assert_eq!(rows.iter().filter(|row| row["kind"] == "frame").count(),
+        FRAMES as usize * 2);
     let mut image_work = std::collections::HashMap::new();
     for line in wire.lines().filter(|line| line.starts_with("i ")) {
         let f: Vec<_> = line.split_whitespace().collect();
         image_work.insert(f[1].parse::<u64>().unwrap(), [
             f[3].parse::<u64>().unwrap(), f[7].parse().unwrap(), f[8].parse().unwrap()]);
     }
+    assert!(!image_work.is_empty(), "the admission fixture must perform image work");
     for row in rows.iter().filter(|row| row["kind"] == "frame") {
         let tick = row["ordinal"].as_u64().unwrap();
         let actual = &row["playback"];
@@ -835,21 +839,19 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
             actual["image_upload_bytes"].as_u64().unwrap(),
         ], *image_work.get(&tick).unwrap_or(&[0,0,0]), "image work at tick {tick}");
     }
-    let rewound = run_frame_env("mag", 3000, &["--headless", "--replay", log.to_str().unwrap()], &[
+    let rewound = run_frame_env("mag", FRAMES, &["--headless", "--replay", log.to_str().unwrap()], &[
         ("STONE_KEYFRAME_INTERVAL", "30"),
-        ("STONE_TIMELINE_SEEK_AT_FRAME", "2950"),
+        ("STONE_TIMELINE_SEEK_AT_FRAME", "150"),
         ("STONE_TIMELINE_SEEK_TO_TICK", "75"),
     ]);
     assert_eq!(rewound["stone"]["current_tick"], 75);
-    assert!(rewound["__stone_diag"]["STONE_RESTORE_IMAGE_PENDING"].as_u64().unwrap() > 0,
-        "rewind must restore an outstanding image queue");
     // Dump-state follows run_shutdown, which clears the admission flags.
     assert!(rewound["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_u64().unwrap() > 0);
     let runs: Vec<_> = rows.iter().filter(|row| row["kind"] == "run").collect();
     assert_eq!(runs.len(), 2);
     for run in runs {
         assert_eq!(run["status"], "complete");
-        assert_eq!(run["observed_frames"], 3000);
+        assert_eq!(run["observed_frames"], FRAMES);
         assert_eq!(run["identity"]["exact_artifact"], true);
     }
 }

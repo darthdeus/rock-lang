@@ -869,8 +869,7 @@ impl Builder<'_> {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
 
-        let repr = self.lower_expr_repr(u_e)?;
-        let leaves = self.repr_to_leaves_bundle(&repr)?;
+        let leaves = self.uniform_block_leaves(u_e, struct_name)?;
         // `uniform_block_checked` already proved the two walkers agree on the
         // leaf PATH sequence, so this can only differ if the repr handed back a
         // different leaf count than the shape describes.
@@ -890,6 +889,30 @@ impl Builder<'_> {
             self.emit_uniform_leaf_store(fv, iv, *leaf, store);
         }
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// The leaves of a uniform-block argument, whatever WIRE its expression
+    /// arrived on.
+    ///
+    /// A uniform block's packing is a property of its TYPE
+    /// (`docs/luajit-wide-value-abi.md` gate 4), so the leaf shape comes from
+    /// the nominal rather than from the argument's `RepPlan`. It has to: an
+    /// ordinary `value` wider than the ABI cut crosses a Rock-to-Rock call as
+    /// one boxed slot, and that slot's plan is `Opaque` -- it carries no leaf
+    /// list of its own, exactly as a global's boxed cdata does on the path
+    /// just above. Reading the box field by field is what `repr_to_leaves_shape`
+    /// already does for every other boxed source.
+    fn uniform_block_leaves(
+        &mut self,
+        u_e: Idx<Expr>,
+        struct_name: Ustr,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let repr = self.lower_expr_repr(u_e)?;
+        if self.scx.rep_arena().value_shape(repr.representation()).is_some() {
+            return self.repr_to_leaves_bundle(&repr);
+        }
+        let shape = self.nominal_rep_shape_required(struct_name, false)?;
+        self.repr_to_leaves_shape(repr.value(), &shape)
     }
 
     /// One std140 slot of a uniform block: a direct typed store of `leaf`
@@ -996,8 +1019,7 @@ impl Builder<'_> {
         };
         let packet = uniform_values_return_shape(self.ws, block_name)
             .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
-        let repr = self.lower_expr_repr(*u_e)?;
-        let leaves = self.repr_to_leaves_bundle(&repr)?;
+        let leaves = self.uniform_block_leaves(*u_e, struct_name)?;
         let expected: Vec<crate::gpu_layout::WireKind> = members
             .iter()
             .flat_map(|(_, kind)| std::iter::repeat(*kind).take(kind.leaf_suffixes().len()))

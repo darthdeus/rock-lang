@@ -165,3 +165,31 @@ fn replay_report_validates_v16_image_publications() {
         assert_eq!(output.status.success(), accepted, "{}", String::from_utf8_lossy(&output.stderr));
     }
 }
+
+#[test]
+fn replay_report_preserves_v17_text_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("text-input.replay");
+    let row = "a 0 - - - - - - - - - - - 0 4dc3bd74696e61";
+    let valid = REPLAY_V14_WITH_JOB_DECISIONS.replace("STONE_REPLAY 14", "STONE_REPLAY 17")
+        .replace("j 0 flow 42 1", &format!("{row}\nu 0 5b5d\nj 0 flow 42 1"));
+    let report = |text: &str| {
+        std::fs::write(&path, text).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(["replay-report", path.to_str().unwrap(), "--top", "1", "--format", "json"])
+            .output().unwrap()
+    };
+    let output = report(&valid);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["top_frames"][0]["input"]["text"], "M\u{fd}tina");
+
+    for bad in [
+        row.rsplit_once(' ').unwrap().0.to_string(),
+        format!("{row} ff"),
+        row.replacen("4dc3bd74696e61", "ff", 1),
+    ] {
+        let output = report(&valid.replace(row, &bad));
+        assert!(!output.status.success(), "accepted corrupt v17 text row: {bad}");
+    }
+}
