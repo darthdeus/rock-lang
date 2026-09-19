@@ -1178,14 +1178,12 @@ pub enum ScopeItem {
     },
     Use(skull_parser::UseDecl),
     /// An owned definition: bare name, kind (`owned_name_and_kind`),
-    /// declared visibility, item span, and the function declaration span when
-    /// the item is a callable.
+    /// declared visibility and item span.
     Def {
         name: ustr::Ustr,
         kind: &'static str,
         vis: Option<skull_parser::Visibility>,
         span: Span,
-        member_span: Option<Span>,
     },
 }
 
@@ -1217,10 +1215,6 @@ fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
                 kind,
                 vis: item.vis.clone(),
                 span: item.span,
-                member_span: match other {
-                    ItemKind::Function(f) => Some(f.span),
-                    _ => None,
-                },
             }),
         })
         .collect()
@@ -1898,7 +1892,7 @@ fn register_items(
                 register_items(ws, pkg_id, file, &child, block_items, scope, errs);
             }
             ScopeItem::Use(u) => flatten_use_decl(ws, pkg_id, path, scope, u, errs),
-            ScopeItem::Def { name: bare, kind, vis: item_vis, span: item_span, member_span } => {
+            ScopeItem::Def { name: bare, kind, vis: item_vis, span: item_span } => {
                 // Ordinary definitions: register under the DefKey on the node.
                 let (bare, kind) = (*bare, *kind);
                 if path.is_empty() {
@@ -1965,13 +1959,9 @@ fn register_items(
                 };
                 let vis = to_ns_vis(&item_vis.clone().unwrap_or(skull_parser::Visibility::Private));
                 if def_kind == bone_core::modules::DefKind::Callable {
-                    node.callable_members.entry(bare).or_default().push(
-                        bone_core::modules::CallableMember {
-                            file,
-                            span: member_span.unwrap_or(*item_span),
-                            vis: vis.clone(),
-                        },
-                    );
+                    let members = node.callable_members.entry(bare).or_default();
+                    let ordinal = members.iter().filter(|member| member.file == file).count();
+                    members.push(bone_core::modules::CallableMember { file, ordinal, vis: vis.clone() });
                 }
                 let meta = bone_core::modules::DefMeta {
                     package: pkg_id,

@@ -227,10 +227,16 @@ impl Workspace {
         mid: ModuleId,
         fid: Idx<Function>,
     ) -> Option<&crate::modules::NsVisibility> {
-        let function = &self.module(mid).functions[fid];
-        self.callable_family_members(key)?
+        let members = self.callable_family_members(key)?;
+        let ordinal = self
+            .module(mid)
+            .functions_by_name
+            .get(&key)?
             .iter()
-            .find(|member| member.file == self.module(mid).file && member.span == function.span)
+            .position(|(_, candidate)| *candidate == fid)?;
+        members
+            .iter()
+            .find(|member| member.file == self.module(mid).file && member.ordinal == ordinal)
             .map(|member| &member.vis)
     }
 

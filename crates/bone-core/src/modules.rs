@@ -110,12 +110,12 @@ pub fn is_setter_audience_within_getter(write_vis: &NsVisibility, read_vis: &NsV
 
 /// One callable declaration in an overload family. The family key alone is
 /// not enough to identify a member because multiple files may contribute to
-/// one logical module; the source file and declaration span make the member
-/// identity stable across the namespace and HIR maps.
+/// one logical module; the source file and per-file overload ordinal identify
+/// the member without depending on source offsets that body edits can shift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallableMember {
     pub file: Ustr,
-    pub span: crate::prelude::Span,
+    pub ordinal: usize,
     pub vis: NsVisibility,
 }
 
