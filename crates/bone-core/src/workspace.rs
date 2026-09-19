@@ -245,22 +245,32 @@ impl Workspace {
         site: crate::modules::AccessSite<'_>,
     ) -> bool {
         let Some(meta) = self.defs.get(&key) else { return true };
-        let Some(from_pkg) = site.package else { return true };
-        let vis = self.callable_member_visibility(key, mid, fid).unwrap_or(&meta.vis);
-        self.ns.can_access(vis, meta.package, &meta.module, from_pkg, site.module_path)
+        let vis = match self.callable_family_members(key) {
+            Some(_) => {
+                let Some(vis) = self.callable_member_visibility(key, mid, fid) else {
+                    return false;
+                };
+                vis
+            }
+            None => &meta.vis,
+        };
+        match site.package {
+            Some(from_pkg) => self.ns.can_access(vis, meta.package, &meta.module, from_pkg, site.module_path),
+            None => *vis == crate::modules::NsVisibility::Pub,
+        }
     }
 
     /// Whether a lowered callable member is public in its defining namespace.
     pub fn callable_member_is_public(&self, key: Ustr, mid: ModuleId, fid: Idx<Function>) -> bool {
-        self.callable_member_visibility(key, mid, fid)
-            .map_or_else(
-                || {
-                    self.defs
-                        .get(&key)
-                        .is_some_and(|meta| meta.vis == crate::modules::NsVisibility::Pub)
-                },
-                |vis| *vis == crate::modules::NsVisibility::Pub,
-            )
+        match self.callable_family_members(key) {
+            Some(_) => self
+                .callable_member_visibility(key, mid, fid)
+                .is_some_and(|vis| *vis == crate::modules::NsVisibility::Pub),
+            None => self
+                .defs
+                .get(&key)
+                .is_some_and(|meta| meta.vis == crate::modules::NsVisibility::Pub),
+        }
     }
 
     pub fn inference(&self, mid: ModuleId) -> Option<&InferenceResult> {
