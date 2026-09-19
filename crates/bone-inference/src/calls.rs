@@ -6,6 +6,7 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
     let ws = gamma.workspace;
+    gamma.inaccessible_overloads.borrow_mut().remove(&name);
     match *family {
         CallFamily::Legacy(_) => member_overloads(gamma, FamilyMember { key: name, owner: None }),
         CallFamily::Resolved { key, owner, .. } => member_overloads(gamma, FamilyMember { key, owner }),
@@ -18,8 +19,16 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
                 .and_then(|mid| ws.module(*mid).call_families.get(&name))
                 .unwrap_or_else(|| panic!("merged family `{name}` of `{file}` was not recorded at lowering"));
             let mut out = FnList::default();
+            let mut inaccessible = FnList::default();
             for &member in members {
+                gamma.inaccessible_overloads.borrow_mut().remove(&member.key);
                 out.extend(member_overloads(gamma, member));
+                if let Some(hidden) = gamma.inaccessible_overloads.borrow().get(&member.key) {
+                    inaccessible.extend(hidden.iter().copied());
+                }
+            }
+            if !inaccessible.is_empty() {
+                gamma.inaccessible_overloads.borrow_mut().insert(name, inaccessible);
             }
             out
         }
@@ -45,10 +54,31 @@ fn member_overloads(gamma: &Gamma, member: FamilyMember) -> FnList {
     gamma.dep_acc.borrow_mut().insert(member.key);
     let ws = gamma.workspace;
     let Some(fns) = ws.functions_by_name.get(&member.key) else { return FnList::default() };
-    match member.owner {
-        None => fns.clone(),
-        Some(owner) => fns.iter().copied().filter(|(mid, _)| ws.ns.owns_file(owner, ws.module(*mid).file)).collect(),
+    let site = gamma.access_site();
+    let mut visible = FnList::default();
+    let mut inaccessible = FnList::default();
+    for &(mid, fid) in fns {
+        let owned_by_view = member
+            .owner
+            .is_none_or(|owner| ws.ns.owns_file(owner, ws.module(mid).file));
+        if !owned_by_view {
+            continue;
+        }
+        if ws.callable_member_admits(member.key, mid, fid, site) {
+            visible.push((mid, fid));
+        } else {
+            inaccessible.push((mid, fid));
+        }
     }
+    if !inaccessible.is_empty() {
+        gamma
+            .inaccessible_overloads
+            .borrow_mut()
+            .entry(member.key)
+            .or_default()
+            .extend(inaccessible);
+    }
+    visible
 }
 
 /// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
@@ -433,9 +463,36 @@ pub(crate) fn select_overload_with_generics(
                 .iter()
                 .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
                 .join("\n");
+            let inaccessible = gamma
+                .inaccessible_overloads
+                .borrow()
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            let mut hidden_bound_fail = None;
+            let hidden_fit = inaccessible.iter().any(|&(mid, fid)| {
+                score_candidate_with_generics(
+                    c,
+                    gamma,
+                    mid,
+                    fid,
+                    recv_ty,
+                    args,
+                    arg_ty,
+                    generic_args,
+                    span,
+                    &mut hidden_bound_fail,
+                )
+                .is_some()
+            });
             Err(SelectError::NoFit(CompilerError::new_with_label(
                 span,
-                match bound_fail {
+                if hidden_fit {
+                    format!(
+                        "No accessible overload for `{name}` with argument types ({args_msg}); the matching overload is not accessible\navailable overloads:\n{overloads}"
+                    )
+                } else {
+                    match bound_fail {
                     Some(be) => format!(
                         "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}\navailable overloads:\n{overloads}",
                         be.message
@@ -443,6 +500,7 @@ pub(crate) fn select_overload_with_generics(
                     None => format!(
                         "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}"
                     ),
+                    }
                 },
             )))
         }
@@ -1339,7 +1397,12 @@ pub(crate) fn resolve_named_call_inner(
 
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
 
-    let (callee_mid, callee_fn) = if candidates.len() == 1 {
+    let has_inaccessible_overloads = gamma
+        .inaccessible_overloads
+        .borrow()
+        .get(&name)
+        .is_some_and(|hidden| !hidden.is_empty());
+    let (callee_mid, callee_fn) = if candidates.len() == 1 && !has_inaccessible_overloads {
         candidates[0]
     } else {
         let mut arg_tys: Vec<TyId> = Vec::new();

@@ -10,7 +10,7 @@ use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
 
 use bone_incremental::session::Session;
 use bone_semantic::prelude::{
-    is_intrinsic_key, is_intrinsic_key_in, InferenceResult, ModuleId, TyId, Workspace,
+    is_intrinsic_key, is_intrinsic_key_in, Idx, InferenceResult, ModuleId, TyId, Workspace,
 };
 use ustr::Ustr;
 
@@ -26,15 +26,24 @@ use super::classify::{balance_delimiters, completion_munges, in_pattern_position
 use super::rank::*;
 use super::select::*;
 
-/// Declared params of every fn named `callee`, unioned across overloads in
-/// first-seen order (param name + rendered declared type). Drives named-arg
-/// completion at a call site.
-pub(crate) fn callee_param_names(ws: &Workspace, callee: &str) -> Vec<(Ustr, String)> {
+/// Declared params of every accessible fn named `callee`, unioned across
+/// overloads in first-seen order (param name + rendered declared type). Drives
+/// named-arg completion at a call site.
+pub(crate) fn callee_param_names_in_scope(
+    ws: &Workspace,
+    callee: &str,
+    frag: Option<&bone_core::modules::FragmentScope>,
+) -> Vec<(Ustr, String)> {
     let name = Ustr::from(callee);
     let mut out: Vec<(Ustr, String)> = Vec::new();
     for m in ws.modules.iter() {
         let Some(fns) = m.functions_by_name.get(&name) else { continue };
         for (fmid, fid) in fns {
+            if frag.is_some_and(|frag| {
+                !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
+            }) {
+                continue;
+            }
             let f = &ws.modules[fmid.index()].functions[*fid];
             for p in &f.param_decls {
                 if out.iter().any(|(n, _)| *n == p.name) {
@@ -198,6 +207,7 @@ pub(crate) fn field_ref_arg_completions(
     recv_end: Option<usize>,
 ) -> Option<Vec<CompletionItem>> {
     let name = Ustr::from(callee);
+    let frag = crate::modules_scope::fragment(ws, Ustr::from(path));
     // UFCS receiver struct + sole-type-arg element (`Entity<Glyph>` ->
     // `("Entity", Some("Glyph"))`); `(None, None)` for a non-UFCS prefix call.
     let (recv_struct, recv_elem) = recv_end
@@ -212,6 +222,11 @@ pub(crate) fn field_ref_arg_completions(
     // First overload whose `arg_idx` slot resolves to a FieldRef with >=1 field.
     let (t_name, v_str) = ws.modules.iter().find_map(|m| {
         m.functions_by_name.get(&name)?.iter().find_map(|(fmid, fid)| {
+            if frag.is_some_and(|frag| {
+                !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
+            }) {
+                return None;
+            }
             let f = &ws.modules[fmid.index()].functions[*fid];
             let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
             let (owner, v_str) = fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
@@ -311,6 +326,8 @@ pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
 /// its first-param type (rendered), and whether it has more than one param.
 pub(crate) struct CtFn {
     pub(crate) name: ustr::Ustr,
+    pub(crate) mid: ModuleId,
+    pub(crate) fid: Idx<bone_semantic::hir::Function>,
     pub(crate) name_lc: String,
     pub(crate) first_param_ty: String,
     pub(crate) multiparam: bool,
@@ -325,11 +342,12 @@ pub(crate) struct CtArg {
     pub(crate) text: String,
     pub(crate) payload: ArgPayload,
     pub(crate) method: bool,
+    pub(crate) method_members: Vec<crate::reachability::MethodRef>,
 }
 
 impl CtArg {
     pub(crate) fn direct(text: String, payload: ArgPayload) -> Self {
-        CtArg { text, payload, method: false }
+        CtArg { text, payload, method: false, method_members: Vec::new() }
     }
 
     pub(crate) fn reach(root: &str, p: &crate::reachability::ReachPath) -> Self {
@@ -338,7 +356,12 @@ impl CtArg {
         } else {
             format!("{root}.{}", p.suffix)
         };
-        CtArg { text, payload: ArgPayload::None, method: p.via_call }
+        CtArg {
+            text,
+            payload: ArgPayload::None,
+            method: p.via_call,
+            method_members: p.method_members.clone(),
+        }
     }
 }
 
@@ -369,13 +392,15 @@ pub(crate) fn build_call_through(
 ) -> CallThroughIndex {
     let mut fns: Vec<CtFn> = Vec::new();
     for m in ws.modules.iter() {
-        for f in m.functions.values() {
+        for (fid, f) in m.functions.iter() {
             if f.name.as_str().starts_with("__") {
                 continue;
             }
             let Some(p0) = f.param_decls.first() else { continue };
             fns.push(CtFn {
                 name: f.name,
+                mid: m.id,
+                fid,
                 name_lc: f.name.as_str().to_lowercase(),
                 first_param_ty: ws.render(None, p0.ty),
                 multiparam: f.param_decls.len() > 1,
@@ -455,6 +480,7 @@ pub(crate) fn call_through_param_completions(
         // start to match, so call-through is meaningful.
         return counts;
     }
+    let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
     // In-scope LOCAL roots only -- the position-dependent part. Globals + their
     // reach expansion are precomputed in `index` (the slow part, now cached).
     let locals: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
@@ -498,7 +524,10 @@ pub(crate) fn call_through_param_completions(
             .entry(lt.clone())
             .or_default()
             .push(CtArg::direct(ln.clone(), ArgPayload::None));
-        for p in reach.arg_paths_from(lt) {
+        let paths = frag
+            .map(|frag| reach.arg_paths_in_scope(ws, frag, lt))
+            .unwrap_or_else(|| reach.arg_paths_from(lt).iter().collect());
+        for p in paths {
             if p.is_method && p.takes_args {
                 continue;
             }
@@ -508,6 +537,11 @@ pub(crate) fn call_through_param_completions(
 
     for &fi in bucket {
         let cf = &index.fns[fi as usize];
+        if frag.is_some_and(|frag| {
+            !crate::modules_scope::callable_member_admitted(ws, frag, cf.name, cf.mid, cf.fid)
+        }) {
+            continue;
+        }
         // Never autofill a call to the fn being defined -- a recursive self-call
         // is not what completing its own body means (mag blood.rock:16:39).
         if enclosing_fn == Some(cf.name.as_str()) {
@@ -580,6 +614,9 @@ pub(crate) fn call_through_param_completions(
                 .map(|a| (a, false))
                 .chain(largs.iter().map(|a| (a, true)))
             {
+                if !arg_admitted(ws, frag, a) {
+                    continue;
+                }
                 counts.arg_iters += 1;
                 if arg_matches_residual(q, k, &a.text) {
                     let mut suffix = Vec::new();
@@ -781,12 +818,34 @@ pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
 /// variables of that type.
 /// Whether any function named `name` in the workspace is a `co fn`. Drives
 /// coroutine-fn ranking after a `yield`/`await`.
-pub(crate) fn fn_is_coroutine(ws: &Workspace, name: &str) -> bool {
+pub(crate) fn fn_is_coroutine_in_scope(
+    ws: &Workspace,
+    name: &str,
+    frag: Option<&bone_core::modules::FragmentScope>,
+) -> bool {
     let n = Ustr::from(name);
     ws.modules.iter().any(|m| {
         m.functions_by_name
             .get(&n)
-            .is_some_and(|fns| fns.iter().any(|(fmid, fid)| ws.modules[fmid.index()].functions[*fid].is_coroutine))
+            .is_some_and(|fns| {
+                fns.iter().any(|(fmid, fid)| {
+                    !frag.is_some_and(|frag| {
+                        !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
+                    }) && ws.modules[fmid.index()].functions[*fid].is_coroutine
+                })
+            })
+    })
+}
+
+fn arg_admitted(
+    ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    arg: &CtArg,
+) -> bool {
+    frag.is_none_or(|frag| {
+        arg.method_members.iter().all(|(key, mid, fid)| {
+            crate::modules_scope::callable_member_admitted(ws, frag, *key, *mid, *fid)
+        })
     })
 }
 
@@ -1284,13 +1343,19 @@ fn field_ref_methods<'a>(
     ws: &'a Workspace,
     recv_struct: Ustr,
     recv_elem: Option<Ustr>,
+    frag: Option<&bone_core::modules::FragmentScope>,
 ) -> Vec<(&'a bone_semantic::hir::Function, usize, Vec<Ustr>)> {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
     for m in ws.modules.iter() {
-        for f in m.functions.values() {
+        for (fid, f) in m.functions.iter() {
             if f.name.as_str().starts_with("__") {
+                continue;
+            }
+            if frag.is_some_and(|frag| {
+                !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid)
+            }) {
                 continue;
             }
             let Some(p0) = f.param_decls.first() else { continue };
@@ -1344,10 +1409,11 @@ fn build_member_items(
     paren_follows: bool,
 ) -> Vec<CompletionItem> {
     {
+        let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
         // UFCS methods: functions whose first param is the receiver's struct,
         // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
         let methods = recv_struct
-            .map(|name| crate::query::ufcs_methods(ws, name, vec_elem.as_deref()))
+            .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem.as_deref(), frag))
             .unwrap_or_default();
         if fields.is_empty() && methods.is_empty() {
             return Vec::new();
@@ -1432,7 +1498,7 @@ fn build_member_items(
         // `ufcs_methods` DOES surface as a plain item). For the latter, suppress
         // the plain method item below so the pre-filled version isn't doubled.
         let field_ref_matches = recv_struct
-            .map(|rs| field_ref_methods(ws, rs, recv_elem))
+            .map(|rs| field_ref_methods(ws, rs, recv_elem, frag))
             .unwrap_or_default();
         let field_ref_names: std::collections::HashSet<Ustr> =
             field_ref_matches.iter().map(|(f, _, _)| f.name).collect();

@@ -108,10 +108,22 @@ pub fn is_setter_audience_within_getter(write_vis: &NsVisibility, read_vis: &NsV
     }
 }
 
+/// One callable declaration in an overload family. The family key alone is
+/// not enough to identify a member because multiple files may contribute to
+/// one logical module; the source file and declaration span make the member
+/// identity stable across the namespace and HIR maps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallableMember {
+    pub file: Ustr,
+    pub span: crate::prelude::Span,
+    pub vis: NsVisibility,
+}
+
 /// One namespace node: a logical module within a package. Multi-file
 /// contributions coalesce here; the node owns visibility and the items
 /// declared in it (callables stay families in the workspace maps — the node
-/// records their presence and the DefKey prefix).
+/// records their presence and the DefKey prefix). Callable visibility stays
+/// on each family member rather than on the shared family key.
 #[derive(Clone, Debug, Default)]
 pub struct NsNode {
     /// `::`-joined module path ("" for the package root).
@@ -129,6 +141,10 @@ pub struct NsNode {
     /// Callable families owned here: bare name -> family DefKey prefix (the
     /// family key is the DefKey itself; overloads share it).
     pub owned_callables: FxHashMap<Ustr, Ustr>,
+    /// The declarations contributing each callable family, in source order.
+    /// This is the authoritative per-member visibility table; `DefMeta::vis`
+    /// is not meaningful for callable families.
+    pub callable_members: FxHashMap<Ustr, Vec<CallableMember>>,
     /// Decorators owned here.
     pub owned_decorators: FxHashMap<Ustr, Ustr>,
     /// Child modules by segment.

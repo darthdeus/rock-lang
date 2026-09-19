@@ -205,6 +205,64 @@ impl Workspace {
         &mut self.modules[mid.index()]
     }
 
+    /// The per-declaration visibility records for a v1 callable family.
+    /// Legacy and compiler-owned callable keys have no namespace member table
+    /// and return `None`, which means their existing visibility remains public.
+    pub fn callable_family_members(&self, key: Ustr) -> Option<&[crate::modules::CallableMember]> {
+        let meta = self.defs.get(&key)?;
+        if meta.kind != crate::modules::DefKind::Callable {
+            return None;
+        }
+        let package = self.ns.package(meta.package)?;
+        let node = package.node(package.key_of(&meta.module))?;
+        node.callable_members.get(&meta.name).map(Vec::as_slice)
+    }
+
+    /// The declared visibility of one lowered callable member. The source
+    /// namespace table remains authoritative, so a visibility-only edit does
+    /// not require a second visibility field on HIR functions.
+    pub fn callable_member_visibility(
+        &self,
+        key: Ustr,
+        mid: ModuleId,
+        fid: Idx<Function>,
+    ) -> Option<&crate::modules::NsVisibility> {
+        let function = &self.module(mid).functions[fid];
+        self.callable_family_members(key)?
+            .iter()
+            .find(|member| member.file == self.module(mid).file && member.span == function.span)
+            .map(|member| &member.vis)
+    }
+
+    /// Whether a lowered callable member is admitted at an access site.
+    /// Callable keys without v1 member metadata are legacy or compiler-owned
+    /// families and retain their existing public behavior.
+    pub fn callable_member_admits(
+        &self,
+        key: Ustr,
+        mid: ModuleId,
+        fid: Idx<Function>,
+        site: crate::modules::AccessSite<'_>,
+    ) -> bool {
+        let Some(meta) = self.defs.get(&key) else { return true };
+        let Some(from_pkg) = site.package else { return true };
+        let vis = self.callable_member_visibility(key, mid, fid).unwrap_or(&meta.vis);
+        self.ns.can_access(vis, meta.package, &meta.module, from_pkg, site.module_path)
+    }
+
+    /// Whether a lowered callable member is public in its defining namespace.
+    pub fn callable_member_is_public(&self, key: Ustr, mid: ModuleId, fid: Idx<Function>) -> bool {
+        self.callable_member_visibility(key, mid, fid)
+            .map_or_else(
+                || {
+                    self.defs
+                        .get(&key)
+                        .is_some_and(|meta| meta.vis == crate::modules::NsVisibility::Pub)
+                },
+                |vis| *vis == crate::modules::NsVisibility::Pub,
+            )
+    }
+
     pub fn inference(&self, mid: ModuleId) -> Option<&InferenceResult> {
         self.inferences.get(mid.index()).and_then(|o| o.as_ref())
     }

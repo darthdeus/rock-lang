@@ -1716,7 +1716,12 @@ impl BoneWorkspace {
             // field-ref slot is caught even through a parse error. The gate reads
             // the param's nominal HEAD (`TypeCtor`), not a rendered substring.
             let definitely_not_field_ref = matches!(
-                callee_slot_is_field_of(proj.session.workspace(), &callee, arg_idx as usize),
+                callee_slot_is_field_of_in_scope(
+                    proj.session.workspace(),
+                    crate::modules_scope::fragment(proj.session.workspace(), Ustr::from(path)),
+                    &callee,
+                    arg_idx as usize,
+                ),
                 Some(false)
             );
             let plausible = lead_dot || !definitely_not_field_ref;
@@ -1848,6 +1853,7 @@ impl BoneWorkspace {
         let Some(inf) = ws.inference(mid) else {
             return Vec::new();
         };
+        let frag = crate::modules_scope::fragment(ws, Ustr::from(path));
         // Type-vs-expression slot governs enum completion (bare `Enum` in a type
         // slot, qualified `Enum::Variant` values in an expression slot).
         let expr_position = cx.expr_position;
@@ -1969,7 +1975,15 @@ impl BoneWorkspace {
                 let contribution = proj.session.files.get(path).map(|uf| &uf.contribution);
                 let mut offered: std::collections::HashSet<Ustr> = cands.iter().map(|c| c.name).collect();
                 for cand in crate::modules_scope::import_candidates(ws, frag, admit) {
-                    let entries = crate::query::key_entries(ws, cand.name, cand.key, expr_position, pfx, show_private);
+                    let entries = crate::query::key_entries_in_scope(
+                        ws,
+                        Some(frag),
+                        cand.name,
+                        cand.key,
+                        expr_position,
+                        pfx,
+                        show_private,
+                    );
                     for entry in entries {
                         if !offered.insert(entry.name) {
                             continue;
@@ -2088,7 +2102,9 @@ impl BoneWorkspace {
                     SymCat::Local | SymCat::Param => 0,
                     // After `yield`/`await`, a coroutine fn is the expected
                     // operand -- promote it above plain fns/types.
-                    SymCat::Function if after_yield && fn_is_coroutine(ws, c.name.as_str()) => 0,
+                    SymCat::Function
+                        if after_yield
+                            && fn_is_coroutine_in_scope(ws, c.name.as_str(), frag) => 0,
                     SymCat::Global => 1,
                     SymCat::Variant => 3,
                     _ => 2,
@@ -2115,7 +2131,11 @@ impl BoneWorkspace {
                             0
                         }
                         SymCat::Function
-                            if fn_unique_return_ty(ws, c.name.as_str())
+                            if fn_unique_return_ty_in_scope(
+                                ws,
+                                c.name.as_str(),
+                                crate::modules_scope::fragment(ws, ws.module(mid).file),
+                            )
                                 .is_some_and(|t| is_iterable_ty(ws, None, t)) =>
                         {
                             1
@@ -2256,7 +2276,8 @@ impl BoneWorkspace {
                 .iter()
                 .flat_map(|&p| crate::query::struct_field_names_at(ws, mid, inf, p))
                 .collect();
-            for (i, (pname, pty)) in callee_param_names(ws, &nargs.callee).into_iter().enumerate() {
+            let frag = crate::modules_scope::fragment(ws, Ustr::from(path));
+            for (i, (pname, pty)) in callee_param_names_in_scope(ws, &nargs.callee, frag).into_iter().enumerate() {
                 if i < nargs.positional
                     || nargs.named.iter().any(|n| n.as_str() == pname.as_str())
                     || spread_covered.contains(&pname)
@@ -2390,7 +2411,10 @@ impl BoneWorkspace {
                 }
             }
             for (vname, vty, root_kind) in roots {
-                let res = reach.paths_to(&vty, &expected_types, REACH_CAP);
+                let res = match frag {
+                    Some(frag) => reach.paths_to_in_scope(ws, frag, &vty, &expected_types, REACH_CAP),
+                    None => reach.paths_to(&vty, &expected_types, REACH_CAP),
+                };
                 if res.truncated && lsp_profile_enabled() {
                     eprintln!("[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}");
                 }
@@ -3849,11 +3873,16 @@ fn call_is_ufcs_dot_syntax(src: &str, call_start: usize, paren_start: usize) -> 
     j > start && b[j - 1] == b'.'
 }
 
-/// Whether any overload of `callee` declares arg `arg_index` as a
+/// Whether any accessible overload of `callee` declares arg `arg_index` as a
 /// `FieldRef<..>` slot, decided on the param's nominal head. None when no
 /// overload is known live (unknown callee / arity) -- the caller treats that
 /// as "can't rule it out".
-pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Option<bool> {
+pub(crate) fn callee_slot_is_field_of_in_scope(
+    ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    callee: &str,
+    arg_index: usize,
+) -> Option<bool> {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     let name = Ustr::from(callee);
     let mut any = false;
@@ -3861,6 +3890,11 @@ pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: u
     for m in ws.modules.iter() {
         let Some(fns) = m.functions_by_name.get(&name) else { continue };
         for (fmid, fid) in fns {
+            if frag.is_some_and(|frag| {
+                !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
+            }) {
+                continue;
+            }
             let f = &ws.modules[fmid.index()].functions[*fid];
             let Some(p) = f.param_decls.get(arg_index) else { continue };
             any = true;
@@ -3936,11 +3970,17 @@ impl<'a> ExpectedArg<'a> {
     ) -> Option<ExpectedArg<'a>> {
         let (mut gamma, span) = Self::scratch(ws, mid, inf, offset)?;
         let name = Ustr::from(callee);
+        let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
         let mut slots = Vec::new();
         let mut rendered: Vec<String> = Vec::new();
         for m in ws.modules.iter() {
             let Some(fns) = m.functions_by_name.get(&name) else { continue };
             for (fmid, fid) in fns {
+                if frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
+                }) {
+                    continue;
+                }
                 let f = &ws.modules[fmid.index()].functions[*fid];
                 if f.param_decls.len() <= arg_idx {
                     continue;
@@ -4032,9 +4072,15 @@ impl<'a> ExpectedArg<'a> {
         let n = Ustr::from(name);
         let span = self.span;
         let slots = self.slots.clone();
+        let frag = crate::modules_scope::fragment(ws, ws.module(self.gamma.current_module_id).file);
         for m in ws.modules.iter() {
             let Some(fns) = m.functions_by_name.get(&n) else { continue };
             for (fmid, fid) in fns {
+                if frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
+                }) {
+                    continue;
+                }
                 let f = &ws.modules[fmid.index()].functions[*fid];
                 let Some(ret) = f.return_ty else { continue };
                 if let Some(&b) = self.ret_memo.get(&ret) {
@@ -4084,16 +4130,25 @@ impl<'a> ExpectedArg<'a> {
     }
 }
 
-/// The return TyId shared by ALL overloads of `name`, or None if the
+/// The return TyId shared by ALL accessible overloads of `name`, or None if the
 /// overloads disagree / any lacks a return type. Agreement is decided on the
 /// RENDERED form (structural sameness across overloads' Static arenas), but
 /// the TyId is what flows on -- the typed compare never re-parses the string.
-pub(crate) fn fn_unique_return_ty(ws: &Workspace, name: &str) -> Option<TyId> {
+pub(crate) fn fn_unique_return_ty_in_scope(
+    ws: &Workspace,
+    name: &str,
+    frag: Option<&bone_core::modules::FragmentScope>,
+) -> Option<TyId> {
     let n = Ustr::from(name);
     let mut ret: Option<(TyId, String)> = None;
     for m in ws.modules.iter() {
         let Some(fns) = m.functions_by_name.get(&n) else { continue };
         for (fmid, fid) in fns {
+            if frag.is_some_and(|frag| {
+                !crate::modules_scope::callable_member_admitted(ws, frag, n, *fmid, *fid)
+            }) {
+                continue;
+            }
             let f = &ws.modules[fmid.index()].functions[*fid];
             let t = f.return_ty?;
             let r = ws.render(None, t);
