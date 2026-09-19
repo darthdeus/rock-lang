@@ -96,7 +96,7 @@ impl SourceFiles {
     }
 
     /// Path-convention test-only check: true if a `tests` component is below
-    /// `root`. Components in the absolute path before `root` are ignored. The
+    /// `root`. Components in the absolute path before `root` are ignored.
     /// The caller supplies a package-owned path; an outside path is an error.
     /// Production filtering uses the private helper with `tagged = false` for
     /// unowned sources that may legitimately sit outside the project root.
