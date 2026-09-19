@@ -4,9 +4,9 @@
 //! Read-only. The package graph is the host's `PackageGraph`; the analyzed
 //! population and the semantic pass are the ones `rock compile` runs
 //! (`discover_sources` -> `production_only` -> `skull_assemble_project` ->
-//! `check_modules`), except for a root that lives under a `tests/` path, which
-//! `rock compile` would drop entirely and which is therefore analyzed with the
-//! whole-package population `rock test` builds. Every section carries a status:
+//! `check_modules`). Production filtering is relative to each owning package
+//! root, so an unrelated `tests/` component above a root does not change the
+//! population. Every section carries a status:
 //! `exact` (compiler- or manifest-derived), `unknown` (analysis did not
 //! complete) or `not_computed` (this version does not derive it). A section
 //! that was not analyzed is never printed as zero.
@@ -738,9 +738,9 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
                 "  population: {}",
                 match pop.mode {
                     PopMode::Production =>
-                        "production -- the `rock compile` set; files under a `tests/` path are excluded",
+                        "production -- the `rock compile` set; each package's own `tests/` files are excluded",
                     PopMode::Test =>
-                        "test -- the root lives under a `tests/` path, which `rock compile` drops entirely, so it is analyzed with the whole-package set `rock test` builds",
+                        "test -- the whole-package set `rock test <dir>` builds",
                 }
             );
             for row in &pop.rows {

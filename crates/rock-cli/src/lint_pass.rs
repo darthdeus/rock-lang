@@ -469,8 +469,8 @@ fn report_timed(
 }
 
 /// Whether this build's sources are the author's WHOLE project. A game build
-/// drops `tests/` (`SourceFiles::production_only`), so `@sim`/`@test` roots and
-/// every call they make are missing from the workspace -- the closed-world lints
+/// drops each package's own `tests/` files (`SourceFiles::production_only`), so
+/// `@sim`/`@test` roots and every call they make are missing from the workspace -- the closed-world lints
 /// (`unused_fn`) would report a sim-only helper as dead. They run only for a
 /// [`Scope::WholeProject`] source set; the per-body lints run either way.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

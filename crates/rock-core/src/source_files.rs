@@ -70,17 +70,24 @@ impl SourceFiles {
                 .iter()
                 .filter(|f| {
                     let file = f.borrow();
-                    let root = file
-                        .package
-                        .as_ref()
-                        .and_then(|tag| {
-                            self.package_roots
+                    let (root, tagged) = match file.package.as_ref() {
+                        Some(tag) => {
+                            let root = self
+                                .package_roots
                                 .iter()
                                 .find(|(id, _)| *id == tag.id)
-                                .map(|(_, root)| root.as_path())
-                        })
-                        .unwrap_or(project_root);
-                    !Self::is_test_only_path(&file.file.to_id_path(), root)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "SourceFiles invariant: tagged source `{}` has no package root for package id {}",
+                                        file.file.to_id_path(),
+                                        tag.id
+                                    )
+                                });
+                            (root.1.as_path(), true)
+                        }
+                        None => (project_root, false),
+                    };
+                    !Self::is_test_only_path_for_source(&file.file.to_id_path(), root, tagged)
                 })
                 .cloned()
                 .collect(),
@@ -89,24 +96,47 @@ impl SourceFiles {
     }
 
     /// Path-convention test-only check: true if a `tests` component is below
-    /// `root`. Components in the absolute path before `root` are ignored.
+    /// `root`. Components in the absolute path before `root` are ignored. The
+    /// caller supplies a package-owned path, so an outside path is an
+    /// invariant violation rather than a non-test result.
     pub fn is_test_only_path(path: &str, root: &Path) -> bool {
-        let root = root
-            .canonicalize()
-            .unwrap_or_else(|_| root.to_path_buf());
-        let Ok(relative) = Path::new(path).strip_prefix(root) else {
-            return false;
+        Self::is_test_only_path_for_source(path, root, true)
+    }
+
+    fn is_test_only_path_for_source(path: &str, root: &Path, tagged: bool) -> bool {
+        let canonical_root = root.canonicalize().unwrap_or_else(|error| {
+            panic!(
+                "SourceFiles invariant: cannot canonicalize source root `{}`: {error}",
+                root.display()
+            )
+        });
+        let canonical_path = match Path::new(path).canonicalize() {
+            Ok(path) => path,
+            Err(error) if tagged => {
+                panic!("SourceFiles invariant: cannot canonicalize tagged source `{path}`: {error}")
+            }
+            Err(_) => {
+                // Untagged stdlib and loose sources may use non-filesystem ids.
+                return false;
+            }
+        };
+        let relative = match canonical_path.strip_prefix(&canonical_root) {
+            Ok(relative) => relative,
+            Err(_) if tagged => {
+                panic!(
+                    "SourceFiles invariant: tagged source `{}` is outside package root `{}`",
+                    canonical_path.display(),
+                    canonical_root.display()
+                )
+            }
+            Err(_) => {
+                // Untagged stdlib and loose files are not project-owned; admit them outside this root.
+                return false;
+            }
         };
         relative
             .components()
             .any(|c| c.as_os_str() == "tests")
-    }
-
-    /// Whether a path contains a `tests` component anywhere. This is only for
-    /// identifying package roots placed under a repository test fixture tree;
-    /// file admission uses `is_test_only_path` with an owning root.
-    pub fn contains_tests_component(path: &Path) -> bool {
-        path.components().any(|c| c.as_os_str() == "tests")
     }
 }
 
@@ -124,34 +154,41 @@ mod tests {
 
     #[test]
     fn production_only_keeps_files_when_project_root_is_under_tests() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "rock_core_source_files_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let project_root = temp_root.join("tests/project");
+        std::fs::create_dir_all(project_root.join("tests")).unwrap();
+        let main_path = project_root.join("main.rock");
+        let broken_path = project_root.join("tests/broken.rock");
+        std::fs::write(&main_path, "fn main() {}\n").unwrap();
+        std::fs::write(&broken_path, "fn broken() {}\n").unwrap();
+        let main_path = main_path.to_string_lossy().into_owned();
+        let broken_path = broken_path.to_string_lossy().into_owned();
         let sources = SourceFiles {
             files: vec![
                 std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(
-                    "/tmp/tests/project/main.rock",
+                    &main_path,
                 ))),
                 std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(
-                    "/tmp/tests/project/tests/broken.rock",
+                    &broken_path,
                 ))),
             ],
             package_roots: Vec::new(),
         };
 
-        let project_root = Path::new("/tmp/tests/project");
-        let production = sources.production_only(project_root);
+        let production = sources.production_only(&project_root);
         let paths: Vec<_> = production
             .files
             .iter()
             .map(|file| file.borrow().file.to_id_path())
             .collect();
 
-        assert_eq!(paths, ["/tmp/tests/project/main.rock"]);
-        assert!(!SourceFiles::is_test_only_path(
-            "/tmp/tests/project/main.rock",
-            project_root
-        ));
-        assert!(SourceFiles::is_test_only_path(
-            "/tmp/tests/project/tests/broken.rock",
-            project_root
-        ));
+        assert_eq!(paths, [main_path.clone()]);
+        assert!(!SourceFiles::is_test_only_path(&main_path, &project_root));
+        assert!(SourceFiles::is_test_only_path(&broken_path, &project_root));
+        std::fs::remove_dir_all(temp_root).unwrap();
     }
 }
