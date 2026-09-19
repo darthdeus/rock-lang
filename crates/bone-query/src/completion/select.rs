@@ -257,10 +257,11 @@ pub(crate) fn materialize_cand(
             // for survivors only; non-fn kinds carry their (cheap) detail
             // already.
             let detail = match c.kind {
-                SymCat::Function => c
-                    .signature_key
-                    .and_then(|key| fn_sigs.get(&key).cloned())
-                    .or_else(|| fn_sigs.get(&c.name).cloned()),
+                // `name` is presentation spelling and may be an imported
+                // alias. Every function candidate carries its canonical HIR
+                // key, so falling back to the spelling could show an
+                // unrelated same-named function if the cache ever drifted.
+                SymCat::Function => c.signature_key.and_then(|key| fn_sigs.get(&key).cloned()),
                 _ => c.detail,
             };
             // The full detail goes in the panel; a concise form renders
