@@ -1100,6 +1100,18 @@ fn reject_legacy_unscoped_ast_items(rock_module: &Ast) -> Result<(), CompilerErr
             "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
         ));
     }
+    if rock_module.package.is_none() {
+        if let Some(item) = rock_module
+            .items
+            .iter()
+            .find(|item| matches!(item.kind, ItemKind::Use(_)))
+        {
+            return Err(CompilerError::new_with_label(
+                item.span,
+                "legacy item-level `use` needs an owning package to resolve its path".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 
