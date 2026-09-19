@@ -10,7 +10,7 @@ use skull_parser::{parse_module, parse_module_with_dialect};
 use crate::prelude::*;
 
 pub fn render_err(sources: &[(&str, &str)], e: &CompilerError) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     for (path, content) in sources {
         sf.add_or_update_file(source_file_from_path_and_contents(
             path.to_string(),

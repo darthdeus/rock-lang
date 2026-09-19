@@ -67,7 +67,10 @@ impl SourceFilesExt for SourceFiles {
             .map(|x| Arc::new(AtomicRefCell::new(x)))
             .collect();
 
-        Ok(SourceFiles { files })
+        Ok(SourceFiles {
+            files,
+            package_roots: Vec::new(),
+        })
     }
 
     fn test_from_code_literal(code: &str) -> SourceFiles {
@@ -99,7 +102,10 @@ fn source_files_from_dir_impl<P: AsRef<Path>>(source_dir: P, preprocess: bool) -
         .map(|x| Arc::new(AtomicRefCell::new(x)))
         .collect();
 
-    Ok(SourceFiles { files })
+    Ok(SourceFiles {
+        files,
+        package_roots: Vec::new(),
+    })
 }
 
 /// Scan a file's leading `//!` directives for `modules: v1` (spec 3.1:

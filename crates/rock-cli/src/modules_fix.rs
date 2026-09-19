@@ -255,6 +255,7 @@ impl Round {
                     Arc::new(AtomicRefCell::new(f))
                 })
                 .collect(),
+            package_roots: ctx.sources.package_roots.clone(),
         };
         match modules_analysis::check(&sources) {
             Ok(checked) => {

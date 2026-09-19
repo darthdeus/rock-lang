@@ -1,25 +1,27 @@
-//! `bone_core::hir::OPERATOR_FNS` classifies every operator symbol as
+//! `bone_core::hir::OPERATOR_FNS` classifies every binary/operator symbol as
 //! overloadable or not, and `pass_lower_functions` rejects a user overload of
-//! the second group. That table is a restatement of the parser's symbol match
-//! (`skull-parser/src/parser.rs`, `parse_operator`), so it can drift -- and a
-//! symbol missing from it would be misreported as a reserved name rather than
-//! classified. These tests tie the two together in both directions.
+//! the second group. `UNARY_OPERATOR_FNS` records the two prefix families that
+//! have their own callable names. Those tables restate the parser's symbol
+//! match (`skull-parser/src/parser.rs`, `parse_operator`), so they can drift --
+//! and a symbol missing from them would be misreported rather than classified.
+//! These tests tie the tables to the parser in both directions.
 //!
 //! The behavioural halves live elsewhere, one per side of the admission:
 //! `tests/errors/non_overloadable_operator_def.rock.err` asserts each
 //! non-overloadable symbol REJECTS, and `tests/overloadable_operators.rock`
 //! asserts each overloadable one actually DISPATCHES to the user fn.
 
-use bone_core::hir::{operator_entry, OPERATOR_FNS};
+use bone_core::hir::{operator_entry, unary_operator_entry, OPERATOR_FNS, UNARY_OPERATOR_FNS};
 use skull_parser::ItemKind;
 use ustr::Ustr;
 
 /// Parse `operator <symbol>(..)` and report the fn name the parser minted.
 fn parser_fn_name_for(symbol: &str) -> Option<String> {
-    // Unary `!` and `~` take one param; `[]` is spelled with the index in
-    // parens. Arity does not affect the name, so one shape per group is enough.
+    // Unary `~` takes one param; `[]` is spelled with the index in parens.
+    // `!` is tested with its binary family here because its one-parameter
+    // spelling now belongs to `__not`.
     let src = match symbol {
-        "!" | "~" => format!("value V {{ a: int }}\noperator {symbol}(x: V) -> V {{ return x }}\n"),
+        "~" => format!("value V {{ a: int }}\noperator {symbol}(x: V) -> V {{ return x }}\n"),
         "[]" => "value V { a: int }\noperator [](x: V, i: int) -> int { return 1 }\n".to_string(),
         _ => format!(
             "value V {{ a: int }}\noperator {symbol}(x: V, y: V) -> V {{ return x }}\n"
@@ -80,4 +82,22 @@ fn operator_entry_declines_non_operator_names() {
     assert_eq!(operator_entry("__op_eq"), Some(("==", false)));
     assert_eq!(operator_entry("main"), None);
     assert_eq!(operator_entry("__op_nonexistent"), None);
+}
+
+#[test]
+fn unary_operator_table_matches_prefix_parser_names() {
+    let expected = [("-", "__unm"), ("!", "__not")];
+    for (symbol, fn_name) in expected {
+        let src = format!("struct P {{ x: int }}\noperator {symbol}(a: P) -> P {{ a }}");
+        let ast = skull_parser::parse_module_clean(&src, Ustr::from("<unary_operator_table>"))
+            .expect("unary operator should parse");
+        let parsed = ast.items.iter().find_map(|item| match &item.kind {
+            ItemKind::Function(f) => Some(f.name.name.as_str()),
+            _ => None,
+        });
+        assert_eq!(parsed, Some(fn_name), "parser mapping for `{symbol}`");
+        assert_eq!(unary_operator_entry(fn_name), Some(symbol));
+    }
+    assert_eq!(UNARY_OPERATOR_FNS, &[("__unm", "-"), ("__not", "!")]);
+    assert_eq!(unary_operator_entry("__op_sub"), None);
 }

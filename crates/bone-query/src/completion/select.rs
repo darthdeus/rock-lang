@@ -261,7 +261,9 @@ pub(crate) fn materialize_cand(
                 // alias. Every function candidate carries its canonical HIR
                 // key, so falling back to the spelling could show an
                 // unrelated same-named function if the cache ever drifted.
-                SymCat::Function => c.signature_key.and_then(|key| fn_sigs.get(&key).cloned()),
+                SymCat::Function => c
+                    .detail
+                    .or_else(|| c.signature_key.and_then(|key| fn_sigs.get(&key).cloned())),
                 _ => c.detail,
             };
             // The full detail goes in the panel; a concise form renders

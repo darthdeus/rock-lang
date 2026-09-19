@@ -945,8 +945,10 @@ pub enum BinOp {
     Shr,
 }
 
-/// Every operator symbol the parser can mint a definition for, as
-/// `(fn name, symbol as written, may a user overload it)`.
+/// Every binary/operator declaration name the parser can mint, as
+/// `(fn name, symbol as written, may a user overload it)`. One-parameter `-`
+/// and `!` declarations select the prefix names in `UNARY_OPERATOR_FNS`
+/// instead.
 ///
 /// Overloadable means exactly one thing: the operator's USE lowers to a call
 /// resolved by name, so a user fn can be found there. `+ - * / % ./` do.
@@ -956,9 +958,10 @@ pub enum BinOp {
 /// of emitting a fn nothing calls; before it did, `operator ==` silently left
 /// structural equality in place with no diagnostic at any stage.
 ///
-/// This table must stay total over the parser's symbol match
-/// (`skull-parser/src/parser.rs`, `parse_operator`). `operator_table_covers_parser`
-/// in bone-core's tests asserts that by spelling every symbol.
+/// This table must stay total over the parser's symbol match for binary
+/// declarations (`skull-parser/src/parser.rs`, `parse_operator`). The
+/// `operator_table_matches_the_parser` test spells every symbol with its
+/// binary arity.
 pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
     ("__op_add", "+", true),
     ("__op_sub", "-", true),
@@ -984,6 +987,12 @@ pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
     ("__op_index", "[]", false),
 ];
 
+/// The function names selected by the prefix forms of the two glyphs that
+/// have a unary spelling. They are separate from `OPERATOR_FNS`: the latter
+/// remains the table for binary/operator declarations and non-overloadable
+/// reserved symbols, while these names are ordinary callable families too.
+pub const UNARY_OPERATOR_FNS: &[(&str, &str)] = &[("__unm", "-"), ("__not", "!")];
+
 
 /// `None` for a name that is not an operator fn at all.
 pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {
@@ -991,6 +1000,14 @@ pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {
         .iter()
         .find(|(fn_name, _, _)| *fn_name == name)
         .map(|(_, symbol, overloadable)| (*symbol, *overloadable))
+}
+
+/// `None` for a name that is not the prefix family of `-` or `!`.
+pub fn unary_operator_entry(name: &str) -> Option<&'static str> {
+    UNARY_OPERATOR_FNS
+        .iter()
+        .find(|(fn_name, _)| *fn_name == name)
+        .map(|(_, symbol)| *symbol)
 }
 
 /// The symbols a user may write an `operator` definition for, for diagnostics.

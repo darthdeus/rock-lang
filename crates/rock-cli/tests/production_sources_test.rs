@@ -22,7 +22,7 @@ fn has_tests_component(path: &str) -> bool {
 #[test]
 fn production_only_excludes_tests_dir_but_keeps_game_files() {
     let abs_path = workspace_root().join("mag");
-    let spec = rock_cli::unified_compile::SourceSpec::Directory(abs_path);
+    let spec = rock_cli::unified_compile::SourceSpec::Directory(abs_path.clone());
     let full = rock_cli::unified_compile::discover_sources(&spec)
         .expect("discover_sources(mag) succeeds");
 
@@ -39,8 +39,10 @@ fn production_only_excludes_tests_dir_but_keeps_game_files() {
         "premise broken: mag full discovery has no tests/ files"
     );
 
-    // Fix: production_only drops every tests/ file...
-    let prod = full.production_only();
+    // The production view drops tests/ files below the owning package root...
+    let prod = full
+        .production_only(&abs_path)
+        .expect("production_only(mag) succeeds");
     let leaked: Vec<String> = prod
         .files
         .iter()
@@ -66,5 +68,98 @@ fn production_only_excludes_tests_dir_but_keeps_game_files() {
         "production_only removed nothing (full={}, prod={})",
         full.files.len(),
         prod.files.len()
+    );
+}
+
+#[test]
+fn production_only_uses_real_package_roots_and_rejects_tagged_mismatch() {
+    let outer = tempfile::tempdir().expect("create outer tempdir");
+    let project = outer.path().join("tests").join("production-project");
+    let tests_dir = project.join("tests");
+    std::fs::create_dir_all(&tests_dir).expect("create project directories");
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"production-project\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
+    )
+    .expect("write manifest");
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").expect("write production source");
+    std::fs::write(tests_dir.join("broken.rock"), "fn broken() {}\n").expect("write test source");
+
+    assert!(
+        project
+            .components()
+            .any(|component| component.as_os_str() == "tests"),
+        "the project must live below an unrelated tests component"
+    );
+
+    let spec = rock_cli::unified_compile::SourceSpec::Directory(project.clone());
+    let full = rock_cli::unified_compile::discover_sources(&spec)
+        .expect("discover_sources(temp project) succeeds");
+    let production = full
+        .production_only(&project)
+        .expect("production_only(temp project) succeeds");
+    let production_paths: Vec<_> = production
+        .files
+        .iter()
+        .map(|file| file.borrow().file.to_id_path())
+        .collect();
+    assert!(
+        production_paths.iter().any(|path| path.ends_with("main.rock")),
+        "the production source below a parent tests component must survive: {production_paths:?}"
+    );
+    assert!(
+        production_paths
+            .iter()
+            .all(|path| !path.ends_with("tests/broken.rock")),
+        "the project's own tests directory must be filtered: {production_paths:?}"
+    );
+
+    let package_id = full
+        .files
+        .iter()
+        .find_map(|file| file.borrow().package.as_ref().map(|tag| tag.id))
+        .expect("discovered package source has a package tag");
+    let wrong_root = outer.path().join("tests").join("different-project");
+    std::fs::create_dir_all(&wrong_root).expect("create wrong package root");
+    let mut malformed = full.clone();
+    malformed.package_roots = vec![(package_id, wrong_root)];
+    let error = malformed
+        .production_only(&project)
+        .expect_err("a tagged source outside its package root must become an error");
+    assert!(error.to_string().contains("main.rock"), "error: {error}");
+    assert!(
+        error.to_string().contains("different-project"),
+        "error must name the package root: {error}"
+    );
+}
+
+#[test]
+fn production_only_reports_deleted_tagged_source_as_an_error() {
+    let outer = tempfile::tempdir().expect("create outer tempdir");
+    let project = outer.path().join("tests").join("deleted-project");
+    let tests_dir = project.join("tests");
+    std::fs::create_dir_all(&tests_dir).expect("create project directories");
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"deleted-project\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
+    )
+    .expect("write manifest");
+    let deleted_source = project.join("main.rock");
+    std::fs::write(&deleted_source, "fn main() {}\n").expect("write production source");
+    std::fs::write(tests_dir.join("broken.rock"), "fn broken() {}\n")
+        .expect("write test source");
+
+    let spec = rock_cli::unified_compile::SourceSpec::Directory(project.clone());
+    let full = rock_cli::unified_compile::discover_sources(&spec)
+        .expect("discover_sources(temp project) succeeds");
+    std::fs::remove_file(&deleted_source).expect("delete source after discovery");
+
+    let error = full
+        .production_only(&project)
+        .expect_err("a tagged source deleted after discovery must become an error");
+    assert!(error.to_string().contains("main.rock"), "error: {error}");
+    assert!(
+        error.to_string().contains("deleted-project"),
+        "error must name the project root: {error}"
     );
 }

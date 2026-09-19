@@ -148,6 +148,9 @@ impl ScopeDelta {
                                 delta.members.insert((package, key, name));
                             }
                         }
+                        for name in changed_keys(&on.callable_members, &nn.callable_members) {
+                            delta.members.insert((package, key, name));
+                        }
                         for name in changed_keys(&on.exports, &nn.exports) {
                             delta.members.insert((package, key, name));
                         }
@@ -2425,6 +2428,7 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
 }
 
 /// Resolve a `TyId` to a canonical, `ty_arena`-index-independent shape string.
+#[cfg(debug_assertions)]
 fn render_ty(ws: &Workspace, ty: &bone_semantic::hir::TyId) -> String {
     use bone_semantic::hir::TyId;
     match ty {
@@ -2434,6 +2438,7 @@ fn render_ty(ws: &Workspace, ty: &bone_semantic::hir::TyId) -> String {
     }
 }
 
+#[cfg(debug_assertions)]
 fn render_ty_node(ws: &Workspace, mid: ModuleId, idx: Idx<bone_semantic::hir::TypeExpr>) -> String {
     use bone_semantic::hir::TypeExpr;
 
