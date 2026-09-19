@@ -1344,7 +1344,7 @@ pub(crate) fn resolve_named_call_inner(
 
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
 
-    let (callee_mid, callee_fn) = if candidates.len() == 1 {
+    let (callee_mid, callee_fn) = if candidates.len() == 1 && unary_operator_symbol(name).is_none() {
         candidates[0]
     } else {
         let mut arg_tys: Vec<TyId> = Vec::new();

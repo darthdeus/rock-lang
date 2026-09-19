@@ -742,7 +742,7 @@ fn neg() -> Pt {
     -Pt { x: 1 }
 }
 
-//- a_private_unary_operator_is_not_reached_through_a_glob @fail=type mismatch: expected `bool`, found `geo::Pt`
+//- a_private_unary_operator_is_not_reached_through_a_glob @fail=operator `!` is not defined for `geo::Pt`
 //-- geo.rock @pkg=geo,1 @v1
 pub struct Pt {
     pub x: int,
