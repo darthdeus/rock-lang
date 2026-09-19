@@ -573,20 +573,26 @@ pub fn lower_type_expr_local(
 
 /// Whether a `Static` type's source span is safe to record in `module.ty_spans`
 /// (keyed by the freshly-allocated `ty_arena` idx). True for every non-`Ident`
-/// type and for `Ident`s that name a nominal struct/enum/newtype -- those get a
-/// fresh per-occurrence idx, so per-occurrence span recording is correct and
-/// lets hover / goto-definition resolve `m: Mob` / `-> Vec2`. Skipped for
+/// type and for `Ident`s that resolve to a nominal struct/enum/newtype -- those
+/// get a fresh per-occurrence idx, so per-occurrence span recording is correct
+/// and lets hover / goto-definition resolve `m: Mob` / `-> Vec2`. Skipped for
 /// generics-in-scope and `_`, which resolve to a SHARED/pre-existing `TyId`
 /// (recording would clobber another occurrence's span).
-fn span_recordable(ctx: &LowerCtx, kind: &skull_parser::TypeExprKind) -> bool {
+fn span_recordable(
+    ctx: &LowerCtx,
+    kind: &skull_parser::TypeExprKind,
+    resolved_key: Option<&Ustr>,
+) -> bool {
     use skull_parser::TypeExprKind;
     match kind {
         TypeExprKind::Ident(n) => {
             !ctx.generics_in_scope.contains_key(&n.name)
                 && n.name.as_str() != "_"
-                && (ctx.workspace.struct_by_name.contains_key(&n.name)
-                    || ctx.workspace.enums_by_name.contains_key(&n.name)
-                    || ctx.workspace.newtypes_by_name.contains_key(&n.name))
+                && resolved_key.is_some_and(|key| {
+                    ctx.workspace.struct_by_name.contains_key(key)
+                        || ctx.workspace.enums_by_name.contains_key(key)
+                        || ctx.workspace.newtypes_by_name.contains_key(key)
+                })
         }
         _ => true,
     }
@@ -670,6 +676,7 @@ pub fn lower_type_expr_in(
 ) -> Result<TyId, CompilerError> {
     use skull_parser::TypeExprKind;
 
+    let mut resolved_key = None;
     let idx = match &te.kind {
         TypeExprKind::Int => ctx.workspace.builtins.int(),
         TypeExprKind::Uint => ctx.workspace.builtins.uint(),
@@ -742,6 +749,7 @@ pub fn lower_type_expr_in(
                 *g
             } else {
                 let bare_key = ctx.resolve_bare_key(name.name, name.span)?;
+                resolved_key = Some(bare_key);
                 lower_resolved_type_name(ctx, body, pos, te, &bare_key)?
             }
         }
@@ -928,7 +936,7 @@ pub fn lower_type_expr_in(
             if mid != ctx.workspace.builtin_module().module_id() {
                 if mid != ctx.module.module_id() {
                     comp_error!(te.span, "Lowered expr got a different module id than current module during lowering ... expected: {:?} ... actual {:?}", ctx.module.module_id(), mid);
-                } else if span_recordable(ctx, &te.kind) {
+                } else if span_recordable(ctx, &te.kind, resolved_key.as_ref()) {
                     ctx.module.ty_spans.insert(tidx, te.span);
                 }
             }
@@ -1457,7 +1465,10 @@ pub fn lower_expr_value(
                     }
                 }
                 Expr::Call {
-                    callee: hir::Callee::Unresolved { name: key, name_span: e.span },
+                    callee: hir::Callee::Unresolved {
+                        name: key,
+                        name_span: path.segments.last().map_or(e.span, |segment| segment.span),
+                    },
                     args: args_range,
                     generic_args,
                     family: hir::CallFamily::resolved(key, owner, &[]),

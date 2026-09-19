@@ -257,7 +257,10 @@ pub(crate) fn materialize_cand(
             // for survivors only; non-fn kinds carry their (cheap) detail
             // already.
             let detail = match c.kind {
-                SymCat::Function => fn_sigs.get(&c.name).cloned(),
+                SymCat::Function => c
+                    .signature_key
+                    .and_then(|key| fn_sigs.get(&key).cloned())
+                    .or_else(|| fn_sigs.get(&c.name).cloned()),
                 _ => c.detail,
             };
             // The full detail goes in the panel; a concise form renders

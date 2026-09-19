@@ -4476,6 +4476,9 @@ pub struct CompletionEntry {
     pub name: ustr::Ustr,
     pub kind: SymCat,
     pub detail: Option<String>,
+    /// Canonical function key used to retrieve deferred signature detail.
+    /// This differs from `name` for an imported alias in a modules-v1 scope.
+    pub signature_key: Option<ustr::Ustr>,
     /// The candidate's type when one is knowable: locals/params carry their
     /// inferred/declared TyId (Locals index the cursor body's inference --
     /// only resolvable against a Gamma seeded from that body), globals their
@@ -4583,6 +4586,7 @@ pub(crate) fn key_entries(
         name,
         kind,
         detail: None,
+        signature_key: None,
         ty: None,
         takes_params: false,
         variant_shape: None,
@@ -4594,6 +4598,7 @@ pub(crate) fn key_entries(
     if let Some(&(fmid, fid)) = ws.functions_by_name.get(&key).and_then(|l| l.first()) {
         if expr_position && matches(name.as_str()) {
             out.push(CompletionEntry {
+                signature_key: Some(key),
                 takes_params: !ws.module(fmid).functions[fid].param_decls.is_empty(),
                 ..entry(name, SymCat::Function, file_of(fmid))
             });
@@ -4708,6 +4713,7 @@ pub fn completion(
                         BindingKind::Let | BindingKind::Static | BindingKind::Fn => SymCat::Local,
                     },
                     detail: (!ty.is_empty()).then_some(ty),
+                    signature_key: None,
                     ty: ty_id,
                     takes_params: false,
                     variant_shape: None,
@@ -4748,6 +4754,7 @@ pub fn completion(
                 // (from `BoneProject::fn_sigs`) only for the post-cap survivors,
                 // not rendered or cloned for every workspace function here.
                 detail: None,
+                signature_key: Some(*name),
                 ty: None,
                 takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
                 variant_shape: None,
@@ -4758,7 +4765,7 @@ pub fn completion(
         }
         for name in m.struct_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         // A user enum in an expression slot is offered as its qualified
@@ -4790,6 +4797,7 @@ pub fn completion(
                             name: qn,
                             kind: SymCat::Variant,
                             detail: Some(name.to_string()),
+                            signature_key: None,
                             ty: None,
                             takes_params: false,
                             variant_shape: Some(VariantShape::of(&v.payload)),
@@ -4800,12 +4808,12 @@ pub fn completion(
                     }
                 }
             } else if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for name in m.newtypes_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for (name, gidx) in m.global_by_name.iter() {
@@ -4821,6 +4829,7 @@ pub fn completion(
                     name: *name,
                     kind: SymCat::Global,
                     detail: (!ty.is_empty()).then_some(ty),
+                    signature_key: None,
                     ty: Some(m.globals[*gidx].ty),
                     takes_params: false,
                     variant_shape: None,
@@ -4845,6 +4854,7 @@ pub fn completion(
                     name: n,
                     kind: SymCat::Struct,
                     detail: None,
+                    signature_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -4866,6 +4876,7 @@ pub fn completion(
                     name: n,
                     kind: SymCat::Keyword,
                     detail: None,
+                    signature_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,

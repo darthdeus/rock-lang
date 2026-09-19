@@ -213,6 +213,27 @@ fn definition_of_a_qualified_path_lands_on_the_function() {
 }
 
 #[test]
+fn references_of_a_qualified_call_cover_only_the_callable_segment() {
+    let project = V1Project::new();
+    let bone = project.open();
+    let main = project.path("main.rock");
+    let references = bone.references(&main, pos_of(MAIN, "depth()", 0, 1));
+    let covered: Vec<_> = references
+        .iter()
+        .filter_map(|location| {
+            let (path, text) = located_text(location);
+            (file_name(&path) == "main.rock").then_some(text)
+        })
+        .collect();
+
+    assert!(covered.iter().any(|text| text == "depth"), "references: {covered:?}");
+    assert!(
+        covered.iter().all(|text| text != "shapes::inner::depth"),
+        "a qualified reference must not cover its path: {covered:?}"
+    );
+}
+
+#[test]
 fn definition_of_an_aliased_import_lands_on_the_original_function() {
     let project = V1Project::new();
     let bone = project.open();
@@ -303,6 +324,48 @@ fn an_aliased_type_lands_on_the_original_type() {
     let (file, covered) = definition_in_main(&bone, &project, "Crate)", 0, 1);
     assert_eq!(file, "shapes.rock");
     assert!(covered.contains("Box"), "landed on {covered:?}");
+}
+
+#[test]
+fn hover_on_v1_signature_types_records_each_nominal_spelling() {
+    let project = V1Project::new();
+    let text = format!(
+        "{}\nfn signature(first: Crate) -> shapes::Box {{\n    first\n}}\n",
+        MAIN
+    );
+    std::fs::write(project.path("main.rock"), &text).unwrap();
+
+    let mut bone = BoneWorkspace::new();
+    let main = project.path("main.rock");
+    let diagnostics = bone.update(&main, text.clone());
+    assert_eq!(errors_in(&diagnostics, &main), Vec::<String>::new());
+
+    let hover_at = |position| {
+        bone.hover(&main, position)
+            .unwrap_or_else(|| panic!("no hover at {position:?}"))
+    };
+
+    let alias_hover = hover_at(pos_of(&text, "first: Crate", 0, 8));
+    let qualified_hover = hover_at(pos_of(&text, "-> shapes::Box", 0, 11));
+
+    let alias_text = match alias_hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        contents => panic!("unexpected aliased hover contents: {contents:?}"),
+    };
+    let qualified_text = match qualified_hover.contents {
+        lsp_types::HoverContents::Markup(markup) => markup.value,
+        contents => panic!("unexpected qualified hover contents: {contents:?}"),
+    };
+
+    assert!(
+        alias_text.contains("struct app::shapes::Box"),
+        "aliased hover: {alias_text}"
+    );
+    assert!(
+        qualified_text.contains("struct app::shapes::Box"),
+        "qualified hover: {qualified_text}"
+    );
+    assert_ne!(alias_hover.range, qualified_hover.range);
 }
 
 #[test]
@@ -481,6 +544,18 @@ fn bare_completion_of_a_bound_name_carries_no_import_edit() {
     let items = complete_in_main("let q = perim");
     let perimeter = items.iter().find(|c| c.label == "perimeter").expect("globbed name offered");
     assert!(perimeter.additional_text_edits.is_none(), "a glob already binds it");
+}
+
+#[test]
+fn aliased_callable_completion_carries_signature_detail() {
+    let items = complete_in_main("let q = surf");
+    let surface = items
+        .iter()
+        .find(|item| item.label == "surface")
+        .expect("the aliased callable is offered");
+    let detail = surface.detail.as_deref().unwrap_or("");
+    assert!(detail.starts_with("fn "), "aliased callable detail: {detail:?}");
+    assert!(detail.contains("(w: int) -> int"), "aliased callable detail: {detail:?}");
 }
 
 // -- rename -------------------------------------------------------------------

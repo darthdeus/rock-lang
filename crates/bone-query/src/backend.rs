@@ -1942,6 +1942,7 @@ impl BoneWorkspace {
                     name,
                     kind: SymCat::Macro,
                     detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
+                    signature_key: None,
                     ty: None,
                     takes_params: !md.params.is_empty(),
                     variant_shape: None,
