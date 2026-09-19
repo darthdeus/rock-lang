@@ -189,6 +189,17 @@ fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> Str
     format!("{}({}){}", f.name, params, ret)
 }
 
+fn with_hidden_note<T>(family: CallFamily, result: Result<T, CompilerError>) -> Result<T, CompilerError> {
+    result.map_err(|mut error| {
+        if let Some(hidden) = family.hidden() {
+            error.message.push_str(&format!(
+                "; shadowed candidate `{hidden}` needs an explicit import to be called"
+            ));
+        }
+        error
+    })
+}
+
 /// Backend-selection rank: a lower rank is the preferred representative when a
 /// group of same-signature backend-variant decls is collapsed. `Any` (portable
 /// Rock) wins, then `Lua` (native default), then `Js` -- so the luajit-servable
@@ -1309,18 +1320,14 @@ pub(crate) fn resolve_named_call_inner(
         // spelling, name it: spec 8.3 forbids the fallthrough, so the user
         // has to import it explicitly.
         let shown = gamma.workspace.defs.get(&name).map(|m| m.name).unwrap_or(name);
-        if let Some(hidden) = family.hidden() {
-            comp_error!(
-                span,
-                "Function `{}` doesn't exist -- `{}` binds to `{}` here, and a \
-                 shadowed candidate `{}` needs an explicit import to be called",
-                shown,
-                shown,
-                name,
-                hidden
-            );
-        }
-        comp_error!(span, "Function `{}` doesn't exist", shown);
+        let message = match family.hidden() {
+            Some(hidden) => format!(
+                "Function `{shown}` doesn't exist -- `{shown}` binds to `{name}` here, and a \
+                 shadowed candidate `{hidden}` needs an explicit import to be called"
+            ),
+            None => format!("Function `{shown}` doesn't exist"),
+        };
+        return Err(CompilerError::new_with_label(span, message));
     }
 
     // let (callee_mid, callee_fn) = resolve_callee(gamma, name).ok_or_else(|| {
@@ -1423,13 +1430,13 @@ pub(crate) fn resolve_named_call_inner(
                     }
                 }
 
-                return Err(e.into());
+                return with_hidden_note(family, Err(e.into()));
             }
         }
     };
 
     let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
-    commit_selected_call(
+    with_hidden_note(family, commit_selected_call(
         c,
         gamma,
         name,
@@ -1441,7 +1448,7 @@ pub(crate) fn resolve_named_call_inner(
         generic_args,
         call_expr,
         span,
-    )
+    ))
 }
 
 /// The post-selection half of a named call: record the callee, instantiate

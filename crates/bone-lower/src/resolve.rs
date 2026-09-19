@@ -139,6 +139,11 @@ fn hit_display(ws: &Workspace, hit: &Hit) -> String {
     }
 }
 
+fn hit_display_key(ws: &Workspace, hit: &Hit) -> Ustr {
+    let display = hit_display(ws, hit);
+    Ustr::from(display.as_str())
+}
+
 /// The owner of a callable found in module node `pkg_id`: a definition with
 /// no `DefMeta` there is the std view's or a legacy provider's, keyed by its
 /// bare legacy name.
@@ -341,7 +346,7 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     if let Some(own) = own {
         let not_found = || format!("`{name}` did not resolve to any definition");
         let hit = collapse(ws, own, name, not_found, "definitions")?;
-        let hidden: Vec<Ustr> = glob_hits.iter().map(|hit| hit.key).collect();
+        let hidden = hidden_for_scope(ws, name, &glob_hits);
         return Ok(Bound::One(Resolved::of(hit, hidden), Tier::Scope));
     }
 
@@ -349,7 +354,7 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     // through, even if a target is missing or a module. Several routes to
     // one definition are that definition once.
     if let Some(targets) = frag.named.get(&name) {
-        let hidden: Vec<Ustr> = glob_hits.iter().map(|hit| hit.key).collect();
+        let hidden = hidden_for_scope(ws, name, &glob_hits);
         let mut hits: Vec<Hit> = Vec::new();
         for target in targets {
             match walk_path(ws, frag, &[], target, WalkMode::Definition, &mut Vec::new())? {
@@ -370,13 +375,24 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     // HashMap-order pick (spec 8.3 / 8.7).
     match glob_hits[..] {
         [] => {}
-        [hit] => return Ok(Bound::One(Resolved::of(hit, Vec::new()), Tier::Scope)),
-        _ => return Ok(Bound::Several(glob_hits, Vec::new(), Via::Globs)),
+        [hit] => return Ok(Bound::One(Resolved::of(hit, hidden_for_scope(ws, name, &[])), Tier::Scope)),
+        _ => return Ok(Bound::Several(glob_hits, hidden_for_scope(ws, name, &[]), Via::Globs)),
     }
 
     // Tier 5: the compiler-owned std export view. There is no legacy
     // workspace-map fall-through for v1 names.
     Ok(std_bound(ws, name))
+}
+
+fn hidden_for_scope(ws: &Workspace, name: Ustr, lower: &[Hit]) -> Vec<Ustr> {
+    let mut hidden = lower.iter().map(|hit| hit_display_key(ws, hit)).collect::<Vec<_>>();
+    if let Some(std) = std_definition(ws, name).filter(|resolved| resolved.kind == ResolvedKind::Callable) {
+        hidden.push(hit_display_key(
+            ws,
+            &Hit { key: std.key, kind: std.kind, owner: std.owner },
+        ));
+    }
+    hidden
 }
 
 fn std_bound(ws: &Workspace, name: Ustr) -> Bound {
