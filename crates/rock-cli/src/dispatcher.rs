@@ -676,12 +676,77 @@ impl CommandContext {
 
     /// Run command directly
     fn run_command(&self) -> Result<()> {
+        if self.args.command == CliCommand::EngineBuildReceipt {
+            let output = self.args.output.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: rock engine-build-receipt [<game>...] --output <receipt.json>"
+                )
+            })?;
+            return rock_host::engine_build::prepare_engine_build_receipt(
+                &self.args.files,
+                std::path::Path::new(output),
+            );
+        }
         if self.args.command == CliCommand::SdkCheck {
             if self.args.files.len() != 1 {
                 anyhow::bail!("usage: rock sdk-check <project>");
             }
             crate::sdk_check::check(&self.args.files[0], std::path::Path::new(&rock_host::rock_dir()))?;
             println!("SDK manifest compatibility: OK");
+            return Ok(());
+        }
+        if self.args.command == CliCommand::Modules {
+            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]\n       rock modules migrate <package> --check|--apply [--consumer <dir>]... [--format pretty|json]";
+            let format = match self.args.perf_format.as_str() {
+                "pretty" => crate::modules_audit::Format::Pretty,
+                "json" => crate::modules_audit::Format::Json,
+                other => anyhow::bail!("rock modules: unknown --format `{other}` (pretty|json)\n{usage}"),
+            };
+            let code = match self.args.files.as_slice() {
+                [sub, project] if sub == "audit" => {
+                    crate::modules_audit::run(std::path::Path::new(project), self.args.closed, format)?
+                }
+                [sub, package] if sub == "migrate" => {
+                    let mode = if self.args.apply {
+                        crate::modules_migrate::Mode::Apply
+                    } else {
+                        crate::modules_migrate::Mode::Check
+                    };
+                    let consumers: Vec<std::path::PathBuf> =
+                        self.args.consumer.iter().map(std::path::PathBuf::from).collect();
+                    crate::modules_migrate::run(
+                        std::path::Path::new(package),
+                        &consumers,
+                        mode,
+                        format,
+                    )?
+                }
+                [sub, ..] if sub != "audit" && sub != "migrate" => {
+                    anyhow::bail!("rock modules: unknown subcommand `{sub}`; `audit` and `migrate` exist\n{usage}")
+                }
+                _ => anyhow::bail!("{usage}"),
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
+        if self.args.command == CliCommand::Fix {
+            let usage = "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]";
+            if !self.args.imports {
+                anyhow::bail!("rock fix: name the fix to run (`--imports` is the only one)\n{usage}");
+            }
+            let format = match self.args.perf_format.as_str() {
+                "pretty" => crate::modules_audit::Format::Pretty,
+                "json" => crate::modules_audit::Format::Json,
+                other => anyhow::bail!("rock fix: unknown --format `{other}` (pretty|json)\n{usage}"),
+            };
+            let [target] = self.args.files.as_slice() else { anyhow::bail!("{usage}") };
+            let mode = if self.args.apply { crate::modules_migrate::Mode::Apply } else { crate::modules_migrate::Mode::Check };
+            let code = crate::modules_fix::run(std::path::Path::new(target), mode, format)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
             return Ok(());
         }
         if self.args.command == CliCommand::DocsIndex {

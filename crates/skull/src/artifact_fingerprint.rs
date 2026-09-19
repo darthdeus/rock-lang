@@ -60,6 +60,7 @@ pub fn compute(
     h.string(FINGERPRINT_VERSION);
     h.string(renderer);
     h.string(&ws.comptime_inputs.channel);
+    h.string(&ws.comptime_inputs.modules_mode);
 
     let mut volatile = volatile_vars
         .iter()

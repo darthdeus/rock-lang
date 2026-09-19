@@ -32,8 +32,8 @@ pub struct HintEntry {
 ///
 /// Delegates to `crate::query::definition_at`, which resolves all identifier
 /// kinds (local/param uses, function calls, struct literals, enum variants,
-/// globals). A callee in the warm stdlib resolves to the stdlib's real on-disk
-/// path (warm modules carry real paths), so goto-def into the stdlib works.
+/// globals). A callee in the warm stdlib resolves to its stdlib id, which the
+/// backend maps to the file's real path (`editor_path`).
 pub fn definition(
     ws: &Workspace,
     mid: ModuleId,

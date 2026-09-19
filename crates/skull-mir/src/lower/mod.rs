@@ -1024,16 +1024,18 @@ fn raw(b: Idx<BindingInfo>) -> u32 {
 }
 
 /// The `NativeBuffer*` nominal type names (T-typed + phantom-size variants).
-fn is_native_buffer(name: &str) -> bool {
-    matches!(
+fn is_native_buffer(name: Ustr) -> bool {
+    bone_semantic::prelude::is_intrinsic_key_in(
         name,
-        "NativeBuffer"
-            | "NativeBufferU8"
-            | "NativeBufferI8"
-            | "NativeBufferU16"
-            | "NativeBufferI16"
-            | "NativeBufferU32"
-            | "NativeBufferI32"
+        &[
+            "NativeBuffer",
+            "NativeBufferU8",
+            "NativeBufferI8",
+            "NativeBufferU16",
+            "NativeBufferI16",
+            "NativeBufferU32",
+            "NativeBufferI32",
+        ],
     )
 }
 
@@ -1170,9 +1172,9 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 }
             }
         }
-        Expr::Not(i)
+        Expr::Not(i, _)
         | Expr::BitNot(i)
-        | Expr::UnaryMinus(i)
+        | Expr::UnaryMinus(i, _)
         | Expr::Spread(i)
         | Expr::YieldDelegate(i) => {
             tag!(14);
@@ -1235,7 +1237,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             go!(target);
             go!(value);
         }
-        Expr::CompoundAssign { target, op_fn, value } => {
+        Expr::CompoundAssign { target, op_fn, value, .. } => {
             tag!(32);
             op_fn.hash(h);
             go!(target);
@@ -1301,7 +1303,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(x);
             }
         }
-        Expr::SafeNavCall { receiver, method, args } => {
+        Expr::SafeNavCall { receiver, method, args, .. } => {
             tag!(39);
             method.hash(h);
             go!(receiver);
@@ -1963,7 +1965,7 @@ fn lower_decorator_inner(
         crate::code_identity::CodeOwner::Artifact {
             kind: crate::code_identity::CodeOwnerKind::Decorator,
             module: module.file,
-            name: module.decorators[did].name,
+            name: module.decorators[did].def_key,
         },
     ));
     f.rep_arena = Some(scx.rep_arena());
@@ -2635,7 +2637,7 @@ impl Builder<'_> {
         else {
             return Ok(())
         };
-        if name.as_str() != "Coroutine" {
+        if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
             return Ok(())
         }
         let Some(result) = params.get(1) else { return Ok(()) };
@@ -3176,7 +3178,7 @@ pub struct ComputeCollection {
 /// A local read of the annotation (skull-codegen-glsl has the same helper, but
 /// skull-mir must not depend on it -- the layering constraint).
 fn shader_stage_of(f: &Function) -> Option<&'static str> {
-    let ann = f.annotations.iter().find(|a| a.name.name.as_str() == "shader")?;
+    let ann = f.annotations.iter().find(|a| a.is_builtin("shader"))?;
     match ann.args.first().map(|a| &a.value) {
         Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
         Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
@@ -3261,7 +3263,7 @@ fn resolve_shader_arg(
                 .param_decls
                 .iter()
                 .flat_map(|param| param.annotations.iter())
-                .find(|annotation| annotation.name.name.as_str() == "storage")
+                .find(|annotation| annotation.is_builtin("storage"))
             {
                 return Err(CompilerError::new_with_label(
                     annotation.span,
@@ -4015,7 +4017,10 @@ fn function_has_gpu_resource_param(ws: &Workspace, function: &Function) -> bool 
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
             return false;
         };
-        matches!(name.as_str(), "StorageBuffer" | "AtomicStorageBuffer" | "WorkgroupArray")
+        bone_semantic::prelude::is_intrinsic_key_in(
+            name,
+            &["StorageBuffer", "AtomicStorageBuffer", "WorkgroupArray"],
+        )
     })
 }
 
@@ -4024,13 +4029,13 @@ fn is_workgroup_array_type(ws: &Workspace, ty: TyId) -> bool {
     let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
         return false;
     };
-    name.as_str() == "WorkgroupArray"
+    bone_semantic::prelude::is_intrinsic_key(name, "WorkgroupArray")
 }
 
 fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
     match body.expr_arena[e] {
         Expr::Int(v) => Some(v),
-        Expr::UnaryMinus(inner) => match body.expr_arena[inner] {
+        Expr::UnaryMinus(inner, _) => match body.expr_arena[inner] {
             Expr::Int(v) => Some(-v),
             _ => None,
         },

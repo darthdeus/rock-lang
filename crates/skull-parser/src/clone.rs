@@ -38,6 +38,7 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
     let data = ast.stmts[s].clone();
     let kind = match data.kind {
         StatementKind::Expression(e) => StatementKind::Expression(clone_expr(ast, e)),
+        StatementKind::Use(u) => StatementKind::Use(u),
         StatementKind::Let(l) => StatementKind::Let(Let {
             span: l.span,
             keyword_span: l.keyword_span,
@@ -121,6 +122,8 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         | ExprKind::Unit
         | ExprKind::Ident(_)
         | ExprKind::QualifiedIdent { .. }
+        | ExprKind::Path { .. }
+        | ExprKind::PathStructLiteral { .. }
         | ExprKind::Int(_, _)
         | ExprKind::Float(_)
         | ExprKind::String(_)
@@ -147,6 +150,7 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         ExprKind::As(x, t) => ExprKind::As(ce(ast, x), ct(ast, t)),
         ExprKind::Bitcast(x, t) => ExprKind::Bitcast(ce(ast, x), ct(ast, t)),
         ExprKind::TypeAscription(x, t) => ExprKind::TypeAscription(ce(ast, x), ct(ast, t)),
+        ExprKind::ParenAscription(x, t) => ExprKind::ParenAscription(ce(ast, x), ct(ast, t)),
         ExprKind::Not(x) => ExprKind::Not(ce(ast, x)),
         ExprKind::BitNot(x) => ExprKind::BitNot(ce(ast, x)),
         ExprKind::UnaryMinus(x) => ExprKind::UnaryMinus(ce(ast, x)),
@@ -276,6 +280,15 @@ fn clone_pattern(ast: &mut Ast, p: Pattern) -> Pattern {
             variant_name,
             args: args.map(|ps| ps.into_iter().map(|p| clone_pattern(ast, p)).collect()),
         },
+        Pattern::PathVariant { path, args } => Pattern::PathVariant {
+            path,
+            args: args.map(|ps| ps.into_iter().map(|p| clone_pattern(ast, p)).collect()),
+        },
+        Pattern::PathRecord { path, fields, rest } => Pattern::PathRecord {
+            path,
+            fields: fields.into_iter().map(|(id, p)| (id, clone_pattern(ast, p))).collect(),
+            rest,
+        },
         Pattern::Record { enum_name, name, fields, rest } => Pattern::Record {
             enum_name,
             name,
@@ -301,8 +314,13 @@ fn clone_type_kind(ast: &mut Ast, kind: TypeExprKind) -> TypeExprKind {
         | TypeExprKind::Float
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
-        | TypeExprKind::Ident(_) => kind,
+        | TypeExprKind::Ident(_)
+        | TypeExprKind::Path(_) => kind,
         TypeExprKind::Ref(t) => TypeExprKind::Ref(clone_type(ast, t)),
+        TypeExprKind::AppPath { ctor, args } => TypeExprKind::AppPath {
+            ctor,
+            args: args.into_iter().map(|t| clone_type(ast, t)).collect(),
+        },
         TypeExprKind::Array(t) => TypeExprKind::Array(clone_type(ast, t)),
         TypeExprKind::App { ctor, args } => TypeExprKind::App {
             ctor,

@@ -91,6 +91,9 @@ impl<'a> Printer<'a> {
     // ---- module -----------------------------------------------------------
 
     pub fn module(&self) -> Doc {
+        // The `mod a::b;` file header (v1) prints first, verbatim: it has no
+        // internal layout decisions.
+        let header = self.ast.module_header.as_ref().map(|h| self.raw(h.span));
         // Render every item, then preserve hand-aligned runs of adjacent items
         // verbatim (sfx.rock's aligned `global` declarations) before assembling.
         let item_spans: Vec<Span> = self.ast.items.iter().map(|it| it.span).collect();
@@ -128,6 +131,12 @@ impl<'a> Printer<'a> {
         }
 
         let mut parts = Vec::new();
+        if let Some(h) = header {
+            // The file header leads the output with one blank line after it.
+            parts.push(h);
+            parts.push(hardline());
+            parts.push(hardline());
+        }
         let mut prev_end: Option<usize> = None;
         let mut prev_was_comment = false;
         let mut prev_multiline = false;
@@ -250,7 +259,14 @@ impl<'a> Printer<'a> {
             // declaration line) then slice the declaration verbatim, stripping a
             // trailing `;`. The body (inline-lua / extern / operator) isn't
             // recoverable from the AST, so it stays byte-for-byte.
-            let mut parts = self.item_global_write(item);
+            // An unannotated item's slice starts at `item.span`, which covers
+            // its visibility; an annotated one starts after the last
+            // annotation, so the visibility is printed ahead of them.
+            let mut parts = Vec::new();
+            if !item.annotations.is_empty() {
+                parts.extend(item_visibility(item.vis.as_ref()));
+            }
+            parts.extend(self.item_global_write(item));
             for anno in &item.annotations {
                 parts.push(self.annotation(anno));
                 parts.push(Doc::text(" "));
@@ -266,7 +282,15 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(decl));
             return self.with_trailing_comment(Doc::concat(parts), item.span, 'N');
         }
-        let mut parts = self.item_global_write(item);
+        // Structurally printed declarations re-spell their keyword, so the
+        // visibility (which leads the item, annotations included) is printed
+        // here. Raw-sliced kinds already carry it in `item.span`.
+        let structural = matches!(
+            item.kind,
+            ItemKind::Function(_) | ItemKind::Global(_) | ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(_)
+        );
+        let mut parts = if structural { item_visibility(item.vis.as_ref()) } else { Vec::new() };
+        parts.extend(self.item_global_write(item));
         let decl_line = self.item_decl_line(item);
         let annos = &item.annotations;
         for (i, anno) in annos.iter().enumerate() {
@@ -312,7 +336,11 @@ impl<'a> Printer<'a> {
             // recover -- slice verbatim for now.
             ItemKind::Decorator(_)
             | ItemKind::CompilerDirective(_)
-            | ItemKind::MacroInvocation { .. } => self.raw(item.span),
+            | ItemKind::MacroInvocation { .. }
+            // `use` / inline `mod` print verbatim: the path/tree spelling is
+            // the source spelling (no internal layout decisions to re-flow).
+            | ItemKind::Use(_)
+            | ItemKind::Module(_) => self.raw(item.span),
         };
         parts.push(body);
         let mut doc = Doc::concat(parts);
@@ -479,6 +507,10 @@ impl<'a> Printer<'a> {
     fn field(&self, field: &Field) -> Doc {
         let mut parts = vec![];
         parts.extend(self.leading_annotations(&field.annotations));
+        parts.extend(item_visibility(field.vis.as_ref()));
+        if field.set_private {
+            parts.push(Doc::text("private(set) "));
+        }
         if field.is_embed {
             parts.push(Doc::text("embed "));
         }
@@ -1243,6 +1275,8 @@ impl<'a> Printer<'a> {
     fn stmt_structural(&self, s: Idx<StatementData>) -> Doc {
         match &self.ast.s(&s).kind {
             StatementKind::Expression(e) => self.expr(*e),
+            // `use` prints verbatim (no internal layout decisions).
+            StatementKind::Use(u) => self.raw(u.span),
             StatementKind::Let(l) => self.let_stmt(l),
             StatementKind::Static(st) => self.static_stmt(st),
             StatementKind::NestedFn(f) => {
@@ -1400,6 +1434,8 @@ impl<'a> Printer<'a> {
             | ExprKind::Bool(_)
             | ExprKind::SiblingFieldRef(_)
             | ExprKind::FunctionRef(_)
+            | ExprKind::Path { .. }
+            | ExprKind::PathStructLiteral { .. }
             | ExprKind::AnaphoricIdent(_) => self.raw(data.span),
 
             ExprKind::Paren(inner) => {
@@ -1428,6 +1464,15 @@ impl<'a> Printer<'a> {
             ExprKind::TypeAscription(x, ty) => {
                 Doc::concat([self.expr(*x), Doc::text(" :: "), self.type_expr(*ty)])
             }
+            // The modules-v1 spelling round-trips as the parenthesized form:
+            // an infix re-print would not re-parse in v1 sources.
+            ExprKind::ParenAscription(x, ty) => Doc::concat([
+                Doc::text("("),
+                self.expr(*x),
+                Doc::text(" : "),
+                self.type_expr(*ty),
+                Doc::text(")"),
+            ]),
 
             ExprKind::FieldAccess(x, field) => {
                 Doc::concat([self.expr(*x), Doc::text(format!(".{}", kw(field.name)))])
@@ -2385,6 +2430,8 @@ impl<'a> Printer<'a> {
                 }
             }
             TypeExprKind::Ident(id) => Doc::text(kw(id.name)),
+            // Paths print verbatim: no internal spacing decisions.
+            TypeExprKind::Path(_) | TypeExprKind::AppPath { .. } => self.raw(data.span),
             TypeExprKind::Array(el) => {
                 Doc::concat([Doc::text("["), self.type_expr(*el), Doc::text("]")])
             }
@@ -2470,6 +2517,57 @@ impl<'a> Printer<'a> {
                     ]),
                     None => Doc::text(head),
                 }
+            }
+            Pattern::PathVariant { path, args } => {
+                let root = if path.from_root { "::" } else { "" };
+                let head = format!(
+                    "{root}{}",
+                    path.segments
+                        .iter()
+                        .map(|s| kw(s.name))
+                        .collect::<Vec<_>>()
+                        .join("::")
+                );
+                match args {
+                    Some(args) => Doc::concat([
+                        Doc::text(head),
+                        Doc::text("("),
+                        Doc::join(Doc::text(", "), args.iter().map(|p| self.pattern(p))),
+                        Doc::text(")"),
+                    ]),
+                    None => Doc::text(head),
+                }
+            }
+            Pattern::PathRecord { path, fields, rest } => {
+                let root = if path.from_root { "::" } else { "" };
+                let head = format!(
+                    "{root}{} ",
+                    path.segments
+                        .iter()
+                        .map(|s| kw(s.name))
+                        .collect::<Vec<_>>()
+                        .join("::")
+                );
+                let mut entries: Vec<Doc> = fields
+                    .iter()
+                    .map(|(n, p)| {
+                        if let Pattern::Ident(id) = p {
+                            if id.name == n.name {
+                                return Doc::text(kw(n.name));
+                            }
+                        }
+                        Doc::concat([Doc::text(format!("{}: ", kw(n.name))), self.pattern(p)])
+                    })
+                    .collect();
+                if *rest {
+                    entries.push(Doc::text(".."));
+                }
+                Doc::concat([
+                    Doc::text(head),
+                    Doc::text("{ "),
+                    Doc::join(Doc::text(", "), entries.into_iter()),
+                    Doc::text(" }"),
+                ])
             }
             Pattern::Record {
                 enum_name,
@@ -2595,4 +2693,21 @@ fn binop_sep(op: &TokenKind) -> Doc {
         TokenKind::DoubleDot => Doc::text(".."),
         other => Doc::text(format!(" {} ", binop_str(other))),
     }
+}
+
+/// The modules-v1 visibility modifier as written, with its trailing space;
+/// nothing when none was written.
+fn item_visibility(vis: Option<&Visibility>) -> Vec<Doc> {
+    let text = match vis {
+        None => return Vec::new(),
+        Some(Visibility::Pub) => "pub ".to_string(),
+        Some(Visibility::Private) => "private ".to_string(),
+        Some(Visibility::PubSuper) => "pub(super) ".to_string(),
+        Some(Visibility::PubPackage) => "pub(package) ".to_string(),
+        Some(Visibility::PubIn(path)) => {
+            let path: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
+            format!("pub(in {}) ", path.join("::"))
+        }
+    };
+    vec![Doc::text(text)]
 }

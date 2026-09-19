@@ -22,12 +22,14 @@ pub(crate) struct RecordedInputDetails {
     repeated_keys: Vec<String>,
     pressed_buttons: Vec<i64>,
     released_buttons: Vec<i64>,
+    text_input: Option<String>,
 }
 
-// Mirrors the runtime's v15 input projection schema; reject a corrupt field
-// before replay-profile can treat a partially decoded observation as complete.
-fn parse_input_details(fields: &[&str], line: usize) -> Result<RecordedInputDetails> {
-    if fields.len() != 14 || !matches!(fields[13], "0" | "1") {
+// Mirrors the runtime's versioned input projection schema; reject a corrupt
+// field before replay-profile can treat a partial observation as complete.
+fn parse_input_details(fields: &[&str], line: usize, version: u32) -> Result<RecordedInputDetails> {
+    let expected = if version >= 17 { 15 } else { 14 };
+    if fields.len() != expected || !matches!(fields[13], "0" | "1") {
         bail!("line {line}: malformed input detail row");
     }
     let mut details = RecordedInputDetails::default();
@@ -77,6 +79,13 @@ fn parse_input_details(fields: &[&str], line: usize) -> Result<RecordedInputDeta
                 _ => {}
             }
         }
+    }
+    if version >= 17 {
+        details.text_input = Some(if fields[14] == "-" {
+            String::new()
+        } else {
+            decode_hex(fields[14], line, "text input")?
+        });
     }
     Ok(details)
 }
@@ -164,6 +173,7 @@ pub struct TopFrame {
     pub released_keys: Vec<String>,
     pub pressed_buttons: Vec<i64>,
     pub released_buttons: Vec<i64>,
+    pub text_input: String,
     pub profile: Option<RecordedProfile>,
     pub image_resources: Option<RecordedImageResources>,
 }
@@ -336,7 +346,7 @@ impl ReplayReport {
                 }
                 "a" => {
                     if report.version < 15 { bail!("line {line_number}: input details require v15"); }
-                    let details = parse_input_details(&fields, line_number)?;
+                    let details = parse_input_details(&fields, line_number, report.version)?;
                     let tick = parse_u64(fields[1], line_number, "input detail tick")?;
                     if !fields[1].bytes().all(|b| b.is_ascii_digit())
                         || report.inputs.is_empty() || tick != (report.inputs.len() - 1) as u64 {
@@ -547,6 +557,8 @@ impl ReplayReport {
             let mut released_keys = difference(previous_keys, &current.keys);
             let mut pressed_buttons = difference(&current.buttons, previous_buttons);
             let mut released_buttons = difference(previous_buttons, &current.buttons);
+            let text_input = current.input_details.as_ref()
+                .and_then(|details| details.text_input.clone()).unwrap_or_default();
             if let Some(details) = &current.input_details {
                 pressed_keys.retain(|key| !details.repeated_keys.contains(key));
                 pressed_keys.extend(details.pressed_keys.iter().cloned());
@@ -582,6 +594,7 @@ impl ReplayReport {
                 released_keys,
                 pressed_buttons,
                 released_buttons,
+                text_input,
                 profile: self.profiles.get(&row.ordinal).cloned(),
                 image_resources: self.image_resources.get(&row.ordinal).cloned(),
             }
@@ -678,6 +691,7 @@ impl ReplayAnalysis {
                 "released_keys": row.released_keys,
                 "pressed_buttons": row.pressed_buttons,
                 "released_buttons": row.released_buttons,
+                "text": row.text_input,
             },
             "recorded_profile": row.profile.as_ref().map(|profile| serde_json::json!({
                 "heap_bytes": profile.heap_bytes,

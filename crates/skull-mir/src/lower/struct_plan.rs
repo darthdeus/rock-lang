@@ -222,7 +222,7 @@ pub fn struct_field_plan(
         .struct_by_name
         .get(&child_name)
         .map(|sid| &ws.modules[sid.module.index()].structs[sid.def]);
-    let known_nominal = child_name.as_str() == "Coroutine"
+    let known_nominal = bone_semantic::prelude::is_intrinsic_key(child_name, "Coroutine")
         || child.is_some()
         || ws.enums_by_name.contains_key(&child_name)
         || ws.newtypes_by_name.contains_key(&child_name);

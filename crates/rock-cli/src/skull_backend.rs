@@ -12,7 +12,7 @@
 //! goal is `rock test tests --backend skull` at 100%.
 
 use crate::Result;
-use crate::bone_backend::{categorize, collect_rock_files, short_path};
+use crate::bone_backend::{categorize, short_path};
 use colored::Colorize;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
@@ -157,7 +157,15 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     // call explicit here (the verdict is a bool, not a gate, and the timer must
     // bracket exactly this call).
     let mut modules = crate::bone_backend::with_stdlib(user_modules);
-    let mut ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+    let aliases = match crate::bone_backend::aliases_for_modules(&modules) {
+        Ok(aliases) => aliases,
+        Err(error) => {
+            times.semantic = t.elapsed();
+            times.failure = Some(error);
+            return (false, times);
+        }
+    };
+    let mut ws = match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
         Ok(ws) => ws,
         Err(error) => {
             times.semantic = t.elapsed();
@@ -504,13 +512,15 @@ fn build_test_harness(tests: &[skull::SkullTest]) -> String {
             Some(s) => lua_str(s),
             None => "nil".to_string(),
         };
-        // `f` is the global test fn by name; `out` is the expected stdout (or nil).
-        // `name` labels the FAIL line (a package unit runs many tests together).
+        // `f` is the global test fn by its EMITTED symbol; `out` is the expected
+        // stdout (or nil). `name` labels the FAIL line and stays the logical
+        // DefKey, which is what a human reading the report wants (a package unit
+        // runs many tests together, and two modules may declare the same name).
         // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
         // line carrying the serialized return value; the HOST compares it.
         h.push_str(&format!(
             "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
-            t.name,
+            t.symbol,
             out,
             lua_str(&t.name),
             t.returns.is_some()
@@ -781,7 +791,8 @@ fn run_emitted_tests(
 /// file-by-file. A `type=lib` split across files can only be tested this way:
 /// per-file, a file referencing a sibling's symbol fails to compile. Root
 /// `tests/` (no stick.toml, hundreds of independent colliding programs) is NOT
-/// a package and stays on the per-file path.
+/// a package and stays on the per-file path; a package NESTED under it is one,
+/// and [`walk_test_units`] finds it.
 fn is_test_package_dir(path: &str) -> bool {
     let p = std::path::Path::new(path);
     p.is_dir() && p.join("stick.toml").is_file()
@@ -804,6 +815,59 @@ pub(crate) fn is_package_tests_dir(path: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Split the `.rock` files under `path` into loose-file units and PACKAGE
+/// units. A directory holding a `stick.toml` is a package: it becomes one unit
+/// compiled through its own manifest, and the walk does not descend into it.
+///
+/// Building a package's sources as loose files drops the manifest that supplies
+/// their dialect and their dependencies, so a v1 source is parsed in the legacy
+/// dialect and fails with `unsupported item start` -- an emit failure that says
+/// nothing about the package it came from. Spec 6.3 makes this the ownership
+/// rule: a nested manifest starts a different package and is not absorbed as
+/// source of the tree above it.
+///
+/// A path naming a single file stays that one file, and the `~` and extension
+/// filters match `rock_host::project::find_rock_files_at_path`, which this
+/// replaces on the `rock test` route only.
+fn walk_test_units(
+    path: &str,
+    files: &mut Vec<String>,
+    package_dirs: &mut Vec<String>,
+) -> Result<()> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        anyhow::bail!("Path does not exist: {}", path);
+    }
+    if p.is_file() {
+        files.push(path.to_string());
+        return Ok(());
+    }
+    let base = fs_err::canonicalize(p)?;
+    let mut walk = walkdir::WalkDir::new(&base).sort_by_file_name().into_iter();
+    while let Some(entry) = walk.next() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("rock: skipping path under `{}` while scanning for tests: {e}", base.display());
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        if entry.file_type().is_dir() {
+            if entry_path != base && entry_path.join("stick.toml").is_file() {
+                package_dirs.push(entry_path.to_string_lossy().into_owned());
+                walk.skip_current_dir();
+            }
+            continue;
+        }
+        let name = entry_path.to_string_lossy();
+        if entry_path.extension().is_some_and(|e| e == "rock") && !name.ends_with('~') {
+            files.push(name.into_owned());
+        }
+    }
+    Ok(())
 }
 
 /// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
@@ -1271,14 +1335,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         } else {
             sources
         };
-        let files: Vec<(String, String)> = sources
-            .files
-            .iter()
-            .map(|f| {
-                let f = f.borrow();
-                (f.file.to_id_path(), f.contents.clone())
-            })
-            .collect();
+        let files = crate::bone_backend::session_files(&sources);
 
         let t = Instant::now();
         let mut reinferred: Vec<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)> = Vec::new();
@@ -1301,10 +1358,10 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 }
             },
             Some(s) => {
-                for (file_path, text) in &files {
-                    match s.update_file(file_path, text) {
+                for f in &files {
+                    match s.update_file(&f.path, &f.text) {
                         Ok(result) => {
-                            if matches!(result.tier, bone_incremental::session::UpdateTier::Interface | bone_incremental::session::UpdateTier::FullUser) {
+                            if matches!(result.tier, bone_incremental::session::UpdateTier::Interface | bone_incremental::session::UpdateTier::Scope | bone_incremental::session::UpdateTier::FullUser) {
                                 full = true;
                             }
                             reinferred.extend(result.reinferred);
@@ -1318,7 +1375,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 let gone: Vec<String> = s
                     .tracked_paths()
                     .into_iter()
-                    .filter(|p| !files.iter().any(|(fp, _)| fp == p))
+                    .filter(|p| !files.iter().any(|f| f.path == *p))
                     .map(|p| p.to_string())
                     .collect();
                 for file_path in gone {
@@ -1760,12 +1817,15 @@ fn build_state_nobox_accessors(
             } = acc;
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
-            let all_leaves = plan.leaf_names(g.name).ok_or_else(|| {
-                CompilerError::new_no_location(format!(
-                    "nobox global `{}` has an accessor shape but no leaf-name plan",
-                    g.name
-                ))
-            })?;
+            // The leaves are emitted symbols, matching the Session slot map.
+            let all_leaves = plan
+                .leaf_names(skull_mir::mangle::symbol_of_key(g.name))
+                .ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "nobox global `{}` has an accessor shape but no leaf-name plan",
+                        g.name
+                    ))
+                })?;
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below
             // pairs the REMAINING leaves with the paths.
@@ -1901,11 +1961,11 @@ fn collect_skull_sims(
         .into_iter()
         .map(|(f, wire)| {
             let mut env_pairs = Vec::new();
-            if f.annotations.iter().any(|a| a.name.name.as_str() == "sim_render") {
+            if f.annotations.iter().any(|a| a.is_builtin("sim_render")) {
                 env_pairs.push(("SIM_SKIP_RENDER".to_string(), "0".to_string()));
             }
             for ann in &f.annotations {
-                if ann.name.name.as_str() != "sim_env" {
+                if !ann.is_builtin("sim_env") {
                     continue;
                 }
                 let (Some(AnnoValue::String(k)), Some(AnnoValue::String(v))) = (
@@ -2096,7 +2156,7 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
         } else if let Some(pkg) = is_package_tests_dir(path) {
             package_dirs.push(pkg);
         } else {
-            files.extend(collect_rock_files(path)?);
+            walk_test_units(path, &mut files, &mut package_dirs)?;
         }
     }
     files.sort();
@@ -2399,14 +2459,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     let renderer_target = skull_renderer_target(path)?;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
     let sources = crate::unified_compile::discover_sources(&spec)?;
-    let files: Vec<(String, String)> = sources
-        .files
-        .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
-        })
-        .collect();
+    let files = crate::bone_backend::session_files(&sources);
 
     eprintln!("=== Skull Incremental Profile: {path} ===\n");
 
@@ -2450,7 +2503,8 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     let mut rows: Vec<SkullIncrRow> = Vec::new();
     let mut skipped = 0usize;
 
-    for (fpath, text) in &files {
+    for file in &files {
+        let (fpath, text) = (&file.path, &file.text);
         if !fpath.contains(&proj_dir) {
             continue;
         }
@@ -2584,14 +2638,7 @@ fn iter_incremental_sources(path: &str) -> Result<rock_core::SourceFiles> {
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
     let renderer_target = skull_renderer_target(path)?;
     let sources = iter_incremental_sources(path)?;
-    let files: Vec<(String, String)> = sources
-        .files
-        .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
-        })
-        .collect();
+    let files = crate::bone_backend::session_files(&sources);
 
     let mut session =
         crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
@@ -2626,10 +2673,11 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     // `SKULL_ITER_FN=update_mobs rock iter-incremental mag` flips `tick_anim(..,
     // 3, ..)` 3<->2. Else: auto-pick a file and inject whitespace (body_touch).
     let (target, mut state_a, mut state_b) = if let Ok(fname) = std::env::var("SKULL_ITER_FN") {
-        let (p, t) = files
+        let f = files
             .iter()
-            .find(|(p, t)| p.contains(&proj_dir) && t.contains(&format!("fn {fname}")))
+            .find(|f| f.path.contains(&proj_dir) && f.text.contains(&format!("fn {fname}")))
             .ok_or_else(|| anyhow::anyhow!("no project file with `fn {fname}` in {path}"))?;
+        let (p, t) = (&f.path, &f.text);
         let flipped = body_digit_flip(t, &fname)
             .ok_or_else(|| anyhow::anyhow!("no body digit to flip in `fn {fname}`"))?;
         // alternate flipped <-> original (a genuine 1-char body edit each pass)
@@ -2642,7 +2690,8 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         // untouched). Profiling a 0-reinferred file would only measure reassembly.
         let want_file = std::env::var("SKULL_ITER_FILE").ok();
         let mut chosen: Option<(String, String)> = None;
-        for (p, t) in &files {
+        for file in &files {
+            let (p, t) = (&file.path, &file.text);
             if !p.contains(&proj_dir) {
                 continue;
             }
@@ -2970,14 +3019,16 @@ fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::Path
     if !config.dependencies.contains_key("stone") {
         return Ok(None);
     }
-    let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
-    let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
-    let resolved = resolver.resolve(&config)?;
-    let stone = resolved
-        .into_iter()
-        .find(|dependency| dependency.name == "stone")
+    let manifest_dir = config_path.parent().unwrap_or(&config_path);
+    let graph = rock_host::stick::graph::PackageGraph::build(manifest_dir)?;
+    let root_node = graph.package(graph.root());
+    let edge = root_node
+        .dependencies
+        .iter()
+        .find(|edge| edge.declared_key == "stone")
         .ok_or_else(|| anyhow::anyhow!("Stone dependency is declared but could not be resolved"))?;
-    Ok(Some(stone.path.canonicalize().unwrap_or(stone.path)))
+    let stone_root = graph.package(edge.target).root.clone();
+    Ok(Some(stone_root))
 }
 
 fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {

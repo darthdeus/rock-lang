@@ -115,6 +115,48 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
+/// One fragment of a modules-v1 package fixture (plan 2.2: fragment = file,
+/// logical module = its `mod` header). The FIRST fragment is the one emission
+/// starts from, so it owns `main`.
+pub struct V1Fragment<'a> {
+    pub file: &'a str,
+    pub src: &'a str,
+}
+
+/// A v1 package's workspace over the real stdlib (which stays legacy, as it is
+/// in a real build). Each fragment parses under the v1 dialect and carries the
+/// package tag the host's graph stamps, so its definitions register under their
+/// DefKeys (`<package>::<module path>::<name>`) instead of bare names.
+pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
+    let mut modules = STDLIB.clone();
+    for fragment in fragments {
+        let mut module = skull_parser::parse_module_clean_with_dialect(
+            fragment.src,
+            Ustr::from(fragment.file),
+            skull_parser::Dialect::V1,
+        )
+        .expect("parse");
+        module.package = Some(skull_parser::PackageTag {
+            id: 0,
+            self_name: package.to_string(),
+        });
+        modules.push(module);
+    }
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
+/// Full MIR emit for a v1 package, rooted at its first fragment.
+pub fn emit_v1_package(package: &str, fragments: &[V1Fragment]) -> skull::mir_emit::MirEmit {
+    let ws = ws_v1_package(package, fragments);
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from(fragments[0].file))
+        .expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+}
+
 /// Like [`try_emit_module`] but with `Workspace.comptime_inputs` set before
 /// emission -- the seam the host CLI uses for `build_var`/`embed_string`
 /// (docs/comptime-plan.md tier 1).

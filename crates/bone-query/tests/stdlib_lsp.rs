@@ -1,14 +1,15 @@
 //! The LSP must treat the stdlib as a first-class part of the workspace:
 //! opening a stdlib file must not collide with the warm copy, source-based
 //! queries (default values) must work on stdlib functions, and stdlib symbols
-//! must be searchable / navigable (workspace-symbols, ctags). The warm stdlib is
-//! keyed by its REAL canonical path and its source is seeded into the project's
-//! `texts`, so it behaves like any other project file.
+//! must be searchable / navigable (workspace-symbols, ctags). The session keys
+//! the warm stdlib by the loader's stdlib ids (which is what makes it the std
+//! package to bone), the editor sees its REAL canonical paths, and its source
+//! is seeded into the project's `texts`, so it behaves like any other file.
 
 use bone_query::BoneWorkspace;
 use lsp_types::{HoverContents, Position};
 
-/// Canonical on-disk path of a stdlib file, matching the LSP's path keying.
+/// Canonical on-disk path of a stdlib file: what the editor sends and sees.
 fn stdlib_path(name: &str) -> String {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -119,4 +120,38 @@ fn stdlib_functions_are_not_flagged_unused_in_a_bin_project() {
         stdlib_unused.is_empty(),
         "stdlib functions must not be flagged unused: {stdlib_unused:?}"
     );
+}
+
+#[test]
+fn the_stdlib_builds_clean_in_the_editor() {
+    // The editor must read the stdlib as the stdlib: std-only primitives
+    // (`@frame_ref_source` in arena.rock) are admitted by the file's stdlib
+    // identity, so a session that keys the stdlib by any other id reports its
+    // own stdlib as broken.
+    let (_dir, main) = project_calling_stdlib("fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n");
+    let mut bone = BoneWorkspace::new();
+    let s = std::fs::read_to_string(&main).unwrap();
+    let per_file = bone.update(&main, s);
+    let errors: Vec<_> = per_file
+        .iter()
+        .flat_map(|(f, d)| d.iter().map(move |x| (f, x)))
+        .filter(|(_, d)| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .map(|(f, d)| (f.clone(), d.message.clone()))
+        .collect();
+    assert!(errors.is_empty(), "a legacy project over the stdlib must build clean: {errors:?}");
+}
+
+#[test]
+fn stdlib_diagnostics_are_published_under_the_stdlib_file_path() {
+    // Whatever id the session keys the stdlib by, the editor sees the
+    // stdlib's real path: every file `update` reports is a real file.
+    let (_dir, main) = project_calling_stdlib("fn main() {}\n");
+    let mut bone = BoneWorkspace::new();
+    let s = std::fs::read_to_string(&main).unwrap();
+    let per_file = bone.update(&main, s);
+    let unified = stdlib_path("unified.rock");
+    assert!(per_file.iter().any(|(f, _)| f == &unified), "unified.rock reported under its real path");
+    for (f, _) in &per_file {
+        assert!(std::path::Path::new(f).exists(), "`{f}` is not a file the editor can open");
+    }
 }

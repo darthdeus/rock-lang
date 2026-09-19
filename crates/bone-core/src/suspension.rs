@@ -265,9 +265,9 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.expr(lhs, flow);
                 self.expr(rhs, flow);
             }
-            Expr::Not(value)
+            Expr::Not(value, _)
             | Expr::BitNot(value)
-            | Expr::UnaryMinus(value)
+            | Expr::UnaryMinus(value, _)
             | Expr::Spread(value)
             | Expr::As { value, .. }
             | Expr::FieldAccess { base: value, .. }

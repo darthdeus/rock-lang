@@ -20,7 +20,7 @@ pub(crate) struct DeferOrigin {
 #[derive(Debug)]
 pub(crate) enum Pending {
     Call {
-        name: Ustr,
+        family: CallFamily,
         call_expr: Idx<Expr>,
         recv_override: Option<TyId>,
         args: Vec<Idx<Expr>>,
@@ -132,7 +132,7 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
     let c = gamma.body_ctx();
     match p {
         Pending::Call {
-            name,
+            family,
             call_expr,
             recv_override,
             args,
@@ -143,13 +143,14 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
             span,
             result,
         } => {
+            let name = family.key();
             // A queue entry can be a speculative duplicate (scoring infers
             // spread operands and rolls back only the substitution trail); if
             // an equivalent entry already committed this call, drop it.
             if gamma.out.resolved_overload_calls.contains_key(&call_expr) {
                 return Ok(());
             }
-            let candidates = resolve_callee(gamma, name);
+            let candidates = resolve_callee(gamma, &family);
             match select_overload(
                 c, gamma, &candidates, recv_override, &args, &arg_ty, &arg_tys, name, span,
             ) {
@@ -178,7 +179,7 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
                             gamma,
                             v,
                             Pending::Call {
-                                name,
+                                family,
                                 call_expr,
                                 recv_override,
                                 args,

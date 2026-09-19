@@ -259,7 +259,10 @@ impl Builder<'_> {
         let tag = cells.tag;
         if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
             if self.variant_is_unit(shape.name, variant) {
-                let global = Ustr::from(format!("__rock_enum_{}_{}", shape.name, variant).as_str());
+                let global = Ustr::from(
+                    format!("__rock_enum_{}_{}", crate::mangle::symbol_of_key(shape.name), variant)
+                        .as_str(),
+                );
                 return self.emit_cur(Inst::Global(global));
             }
             return self.emit_cur(Inst::MakeEnumDyn {

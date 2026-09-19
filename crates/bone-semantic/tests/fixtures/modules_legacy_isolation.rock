@@ -1,0 +1,281 @@
+//! A legacy definition's key is its bare name, and so is a standard-library
+//! one, so every legacy overload of a std-named function or operator shares
+//! the std key. A v1 fragment still reaches only what its tiers bring in
+//! (spec 8.3): tier 5 is the compiler-owned std view (spec 5), which holds
+//! the standard library's own members and no legacy file's; a legacy
+//! provider's view holds the declarations its own files define (spec 3.2),
+//! not other legacy files' overloads of the same name. Legacy callers keep
+//! the whole bare family.
+//!
+//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`;
+//! a file without `@v1` is legacy.
+
+//- a_legacy_overload_of_a_std_function_is_not_in_the_std_tier @fail=No overload for `lerp` with argument types (string, string, float)
+//-- game.rock @pkg=game,3
+fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g() -> string {
+    lerp("a", "b", 0.5)
+}
+
+//- the_std_tier_keeps_the_std_members_beside_a_legacy_overload
+//-- game.rock @pkg=game,3
+fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g() -> float {
+    let x = lerp(1.0, 2.0, 0.5)
+            //^ float
+    let y = std::lerp(1.0, 2.0, 0.5)
+            //^ float
+    x + y
+}
+
+//- a_std_path_names_only_std_members @fail=No overload for `lerp` with argument types (string, string, float)
+//-- game.rock @pkg=game,3
+fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g() -> string {
+    std::lerp("a", "b", 0.5)
+}
+
+//- a_legacy_operator_overload_is_not_in_the_std_operator_family @fail=No overload for `__op_mod` with argument types (Vec2, Vec2)
+//-- game.rock @pkg=game,3
+operator %(a: Vec2, b: Vec2) -> Vec2 {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g(a: Vec2, b: Vec2) -> Vec2 {
+    a % b
+}
+
+//- a_legacy_providers_operator_needs_an_import @fail=No overload for `__op_add` with argument types (Q, Q)
+//-- game.rock @pkg=game,3
+struct Q {
+    x: int,
+}
+
+operator +(a: Q, b: Q) -> Q {
+    Q { x: a.x + b.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g(a: game::Q, b: game::Q) -> game::Q {
+    a + b
+}
+
+//- legacy_callers_keep_the_whole_bare_family
+//-- game.rock @pkg=game,3
+fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+operator %(a: Vec2, b: Vec2) -> Vec2 {
+    a
+}
+
+//-- other.rock @pkg=game,3
+fn use_them(a: Vec2, b: Vec2) -> string {
+    let s = lerp("a", "b", 0.5)
+            //^ string
+    let f = lerp(1.0, 2.0, 0.5)
+            //^ float
+    let m = a % b
+            //^ Vec2
+    s
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g() -> float {
+    lerp(1.0, 2.0, 0.5)
+}
+
+//- a_providers_path_names_only_its_own_overloads @fail=expected `int`, found `string`
+//-- xlib.rock @pkg=x_lib,1
+fn mix(a: int) -> int {
+    a
+}
+
+//-- game.rock @pkg=game,3
+fn mix(a: string) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g() -> string {
+    x_lib::mix("s")
+}
+
+//- a_providers_glob_opens_only_its_own_overloads @fail=expected `int`, found `string`
+//-- xlib.rock @pkg=x_lib,1
+fn mix(a: int) -> int {
+    a
+}
+
+//-- game.rock @pkg=game,3
+fn mix(a: string) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use x_lib::*;
+
+fn g() -> string {
+    mix("s")
+}
+
+//- a_providers_own_overloads_stay_one_family
+//-- xlib_a.rock @pkg=x_lib,1
+fn mix(a: int) -> int {
+    a
+}
+
+//-- xlib_b.rock @pkg=x_lib,1
+fn mix(a: string) -> string {
+    a
+}
+
+//-- game.rock @pkg=game,3
+fn mix(a: bool) -> bool {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use x_lib::mix as blend;
+
+fn g() -> string {
+    let n = x_lib::mix(1)
+            //^ int
+    let m = blend(2)
+            //^ int
+    blend("s")
+}
+
+//- a_providers_family_hides_the_std_family @fail=expected `P`, found `float`
+//-- xlib.rock @pkg=x_lib,1
+struct P {
+    x: float,
+}
+
+fn lerp(a: P, b: P, t: float) -> P {
+    P { x: a.x + (b.x - a.x) * t }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use x_lib::*;
+
+fn g() -> float {
+    lerp(1.0, 2.0, 0.5)
+}
+
+//- imports_of_a_providers_family_and_the_std_family_compose
+//-- xlib.rock @pkg=x_lib,1
+struct P {
+    x: float,
+}
+
+fn lerp(a: P, b: P, t: float) -> P {
+    P { x: a.x + (b.x - a.x) * t }
+}
+
+//-- game.rock @pkg=game,3
+fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use x_lib::{P, lerp};
+use std::lerp;
+
+fn g(p: P, q: P) -> float {
+    let r = lerp(p, q, 0.5)
+            //^ P
+    let x = lerp(1.0, 2.0, 0.5)
+            //^ float
+    r.x + x
+}
+
+//- a_composed_std_and_provider_family_still_excludes_other_legacy_files @fail=No overload for `lerp` with argument types (string, string, float)
+//-- xlib.rock @pkg=x_lib,1
+struct P {
+    x: float,
+}
+
+fn lerp(a: P, b: P, t: float) -> P {
+    P { x: a.x + (b.x - a.x) * t }
+}
+
+//-- game.rock @pkg=game,3
+fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use x_lib::lerp;
+use std::lerp;
+
+fn g() -> string {
+    lerp("a", "b", 0.5)
+}
+
+//- a_std_function_value_is_not_overloaded_by_a_legacy_file
+//-- game.rock @pkg=game,3
+fn smoothstep(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g() -> float {
+    let f = smoothstep
+    let x = f(1.0, 2.0, 0.5)
+            //^ float
+    x
+}
+
+//- a_providers_function_value_names_its_own_definition
+//-- xlib.rock @pkg=x_lib,1
+fn mix(a: int) -> int {
+    a
+}
+
+//-- game.rock @pkg=game,3
+fn mix(a: string) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn g() -> int {
+    let f = x_lib::mix
+    let n = f(1)
+            //^ int
+    n
+}
+
+//- a_std_function_value_passed_as_an_argument_is_the_std_definition
+//-- game.rock @pkg=game,3
+fn smoothstep(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn apply(f: fn(float, float, float) -> float) -> float {
+    f(0.0, 1.0, 0.5)
+}
+
+fn g() -> float {
+    let x = apply(smoothstep)
+            //^ float
+    let y = apply((smoothstep))
+            //^ float
+    let s = "{apply(smoothstep)}"
+    x + y
+}

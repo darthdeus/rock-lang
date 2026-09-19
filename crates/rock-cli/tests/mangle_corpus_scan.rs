@@ -216,18 +216,26 @@ fn workspace_for_dir(rel: &str) -> Option<Workspace> {
             skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect();
+    // The loader stamped each file's dialect and owning package from the
+    // package graph; a corpus that dropped them would read a v1 dependency
+    // (libs/chess-core) as legacy source and fail on its first `pub`.
     for file in &sources.files {
         let f = file.borrow();
         let id = Ustr::from(f.file.to_id_path().as_str());
-        match skull_parser::parse_module_clean(&f.contents, id) {
-            Ok(m) => modules.push(m),
+        match skull_parser::parse_module_clean_with_dialect(&f.contents, id, f.dialect) {
+            Ok(mut m) => {
+                m.package = f.package.clone();
+                modules.push(m);
+            }
             Err(e) => {
                 eprintln!("  [{dir}] parse failed for {id}: {}", e.message);
                 return None;
             }
         }
     }
-    match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+    let aliases = bone_query::package_aliases::for_manifest_dir(std::path::Path::new(dir))
+        .unwrap_or_default();
+    match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
         Ok(ws) => Some(ws),
         Err(e) => {
             eprintln!("  [{dir}] semantic_pass returned Err: {}", e.message);

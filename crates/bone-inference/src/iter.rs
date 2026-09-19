@@ -18,7 +18,7 @@ pub(crate) fn for_elem_ty(gamma: &mut Gamma, iter_ty: TyId, span: Span) -> Resul
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } if matches!(name.as_str(), "NativeBuffer" | "FlatVec") => {
+        } if bone_core::modules::is_intrinsic_key_in(name, &["NativeBuffer", "FlatVec"]) => {
             let elem = or_fail!(
                 params.into_iter().next(),
                 span,
@@ -30,14 +30,16 @@ pub(crate) fn for_elem_ty(gamma: &mut Gamma, iter_ty: TyId, span: Span) -> Resul
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        } if matches!(
-            name.as_str(),
-            "NativeBufferU8"
-                | "NativeBufferI8"
-                | "NativeBufferU16"
-                | "NativeBufferI16"
-                | "NativeBufferU32"
-                | "NativeBufferI32"
+        } if bone_core::modules::is_intrinsic_key_in(
+            name,
+            &[
+                "NativeBufferU8",
+                "NativeBufferI8",
+                "NativeBufferU16",
+                "NativeBufferI16",
+                "NativeBufferU32",
+                "NativeBufferI32",
+            ],
         ) =>
         {
             gamma.workspace.builtins.int()
@@ -60,7 +62,7 @@ pub(crate) fn for_elem_ty(gamma: &mut Gamma, iter_ty: TyId, span: Span) -> Resul
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } if name.as_str() == "Arena" => {
+        } if bone_core::modules::is_intrinsic_key(name, "Arena") => {
             // Arena<T> yields (Entity<T>, T)
             let elem = or_fail!(
                 params.into_iter().next(),
@@ -86,16 +88,18 @@ pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
         TypeExpr::App { ctor: TypeCtor::Array, .. } | TypeExpr::App { ctor: TypeCtor::Map, .. } => {
             true
         }
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
-            n.as_str(),
-            "Arena"
-                | "NativeBuffer"
-                | "NativeBufferU8"
-                | "NativeBufferI8"
-                | "NativeBufferU16"
-                | "NativeBufferI16"
-                | "NativeBufferU32"
-                | "NativeBufferI32"
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => bone_core::modules::is_intrinsic_key_in(
+            n,
+            &[
+                "Arena",
+                "NativeBuffer",
+                "NativeBufferU8",
+                "NativeBufferI8",
+                "NativeBufferU16",
+                "NativeBufferI16",
+                "NativeBufferU32",
+                "NativeBufferI32",
+            ],
         ),
         _ => false,
     }
@@ -151,7 +155,9 @@ pub(crate) fn infer_for_elem(
             // above still calls it directly for the element type.
             let is_protocol_builtin = match *gamma.get(iter_ty) {
                 TypeExpr::App { ctor: TypeCtor::Array, .. } => true,
-                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n.as_str() == "Arena",
+                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                    bone_core::modules::is_intrinsic_key(n, "Arena")
+                }
                 _ => false,
             };
             if is_protocol_builtin {
@@ -515,7 +521,7 @@ pub(crate) fn resolve_unary_by_recv(
     recv_ty: TyId,
     span: Span,
 ) -> Result<((ModuleId, Idx<Function>), TyId, FxHashMap<VarId, TyId>), CompilerError> {
-    let candidates = resolve_callee(gamma, name);
+    let candidates = resolve_callee(gamma, &CallFamily::from_name(name));
     if candidates.is_empty() {
         comp_error!(span, "no `{}` function in scope", name);
     }

@@ -114,9 +114,9 @@ pub fn shift_module_after_edit(
                 | Expr::Var(_)
                 | Expr::Tuple(_)
                 | Expr::InterpolatedString(_)
-                | Expr::Not(_)
+                | Expr::Not(..)
                 | Expr::BitNot(_)
-                | Expr::UnaryMinus(_)
+                | Expr::UnaryMinus(..)
                 | Expr::IncDec { .. }
                 | Expr::Return(_)
                 | Expr::Break
@@ -189,6 +189,14 @@ pub fn shift_module_after_edit(
         for (_, f) in body.record_pat_field_arena.iter_mut() {
             sh.span(&mut f.name_span);
         }
+        for seg in body.path_segments.iter_mut() {
+            sh.span(&mut seg.span);
+        }
+    }
+
+    // `use` items and interface-position path segments.
+    for seg in module.path_segments.iter_mut() {
+        sh.span(&mut seg.span);
     }
 
     // Interface type spans (params / returns / fields) of every later signature.

@@ -368,6 +368,8 @@ pub fn nb_prim_storage_lua() -> String {
 /// leaves and size rather than re-walking: the emitter needs one layout per
 /// struct and the registry is a second view of it, not a second computation.
 pub fn nb_value_storage_lua(elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
+    // `__rock_nb_storage` runs `ffi.typeof` on this name: a C type, not a DefKey.
+    let elem = crate::mangle::symbol_of_key(elem);
     let mut views: Vec<&'static str> = Vec::new();
     for l in leaves {
         if !views.contains(&l.cty) {
@@ -490,8 +492,10 @@ fn planned_alignment(plan: &PlannedValue) -> Option<usize> {
     })
 }
 
-/// Extend an `ffi.offsetof` composition by one field hop.
+/// Extend an `ffi.offsetof` composition by one field hop. `owner` names a C
+/// TYPE, so a v1 nominal contributes its emitted symbol, never its DefKey.
 pub(crate) fn join_offsetof(prefix: &str, owner: Ustr, field: &str) -> String {
+    let owner = crate::mangle::symbol_of_key(owner);
     let hop = format!("ffi.offsetof(\"{owner}\", \"{field}\")");
     if prefix.is_empty() {
         hop
@@ -2486,7 +2490,7 @@ pub fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<Yield
     else {
         return None;
     };
-    if name.as_str() != "Coroutine" {
+    if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
         return None;
     }
     let MonoTy::App {
