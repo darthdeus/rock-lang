@@ -54,6 +54,50 @@ fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
 }
 
 #[test]
+fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let mut provider = parse_module_with_dialect(
+        "pub struct Provider {}",
+        Ustr::from("provider.rock"),
+        Dialect::V1,
+    )
+    .expect("parse v1 provider");
+    provider.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "provider".to_string(),
+    });
+
+    let legacy_src = "use provider::Provider;\nfn main() {}";
+    let legacy = parse_module_with_dialect(
+        legacy_src,
+        Ustr::from("legacy.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy consumer");
+
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: Ustr::from("provider"),
+            aliases: vec![],
+        }],
+    };
+    let err = semantic_pass_with_aliases(&mut [provider, legacy], &aliases)
+        .expect_err("a package-less legacy use must be rejected");
+
+    assert_eq!(
+        err.message,
+        "legacy item-level `use` needs an owning package to resolve its path"
+    );
+    let label = err.labels.first().expect("the rejected use is labeled");
+    assert_eq!(label.span.file, Ustr::from("legacy.rock"));
+    let covered = &legacy_src[label.span.offset_range.0..label.span.offset_range.1];
+    assert!(covered.starts_with("use provider::Provider"), "labeled span: {covered:?}");
+}
+
+#[test]
 fn legacy_only_workspace_keeps_the_std_namespace() {
     use skull_parser::Dialect;
 

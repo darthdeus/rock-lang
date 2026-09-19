@@ -1061,19 +1061,32 @@ pub fn semantic_pass_without_closure_gate(
 
 /// Legacy compilation units keep their flat grammar. Item-level `use` is
 /// handled as an additive compatibility import; module headers and inline
-/// `mod` blocks still need modules-v1 resolution.
-fn reject_legacy_unscoped_module_items(contribution: &FragmentContribution) -> Result<(), CompilerError> {
-    if let Some(h) = &contribution.header {
+/// `mod` blocks still need modules-v1 resolution. Both the legacy-only fast
+/// path and the mixed-workspace contribution path feed this one rule set so
+/// they cannot drift in either rejection or span selection.
+fn reject_legacy_unscoped_items(
+    header_span: Option<Span>,
+    has_package: bool,
+    inline_module_span: Option<Span>,
+    use_span: Option<Span>,
+) -> Result<(), CompilerError> {
+    if let Some(span) = header_span {
         return Err(CompilerError::new_with_label(
-            h.span,
+            span,
             "module file headers require module resolution (not yet implemented)".to_string(),
         ));
     }
-    for item in contribution.items.iter() {
-        if let ScopeItem::Module { block_span, .. } = item {
+    if let Some(span) = inline_module_span {
+        return Err(CompilerError::new_with_label(
+            span,
+            "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
+        ));
+    }
+    if !has_package {
+        if let Some(span) = use_span {
             return Err(CompilerError::new_with_label(
-                *block_span,
-                "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
+                span,
+                "legacy item-level `use` needs an owning package to resolve its path".to_string(),
             ));
         }
     }
@@ -1081,38 +1094,20 @@ fn reject_legacy_unscoped_module_items(contribution: &FragmentContribution) -> R
 }
 
 fn reject_legacy_unscoped_ast_items(rock_module: &Ast) -> Result<(), CompilerError> {
-    if let Some(h) = &rock_module.module_header {
-        return Err(CompilerError::new_with_label(
-            h.span,
-            "module file headers require module resolution (not yet implemented)".to_string(),
-        ));
-    }
-    if let Some(item) = rock_module
-        .items
-        .iter()
-        .find(|item| matches!(item.kind, ItemKind::Module(_)))
-    {
-        let ItemKind::Module(module) = &item.kind else {
-            unreachable!()
-        };
-        return Err(CompilerError::new_with_label(
-            module.span,
-            "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
-        ));
-    }
-    if rock_module.package.is_none() {
-        if let Some(item) = rock_module
-            .items
-            .iter()
-            .find(|item| matches!(item.kind, ItemKind::Use(_)))
-        {
-            return Err(CompilerError::new_with_label(
-                item.span,
-                "legacy item-level `use` needs an owning package to resolve its path".to_string(),
-            ));
-        }
-    }
-    Ok(())
+    let inline_module_span = rock_module.items.iter().find_map(|item| match &item.kind {
+        ItemKind::Module(module) => Some(module.span),
+        _ => None,
+    });
+    let use_span = rock_module.items.iter().find_map(|item| match &item.kind {
+        ItemKind::Use(decl) => Some(decl.span),
+        _ => None,
+    });
+    reject_legacy_unscoped_items(
+        rock_module.module_header.as_ref().map(|header| header.span),
+        rock_module.package.is_some(),
+        inline_module_span,
+        use_span,
+    )
 }
 
 /// Walk every definition-bearing item, descending into inline mod blocks.
@@ -1274,7 +1269,20 @@ pub fn assemble_namespaces(
         }
         let is_v1 = contribution.dialect == skull_parser::Dialect::V1;
         if !is_v1 {
-            reject_legacy_unscoped_module_items(contribution)?;
+            let inline_module_span = contribution.items.iter().find_map(|item| match item {
+                ScopeItem::Module { block_span, .. } => Some(*block_span),
+                _ => None,
+            });
+            let use_span = contribution.items.iter().find_map(|item| match item {
+                ScopeItem::Use(decl) => Some(decl.span),
+                _ => None,
+            });
+            reject_legacy_unscoped_items(
+                contribution.header.as_ref().map(|header| header.span),
+                contribution.package.is_some(),
+                inline_module_span,
+                use_span,
+            )?;
             continue;
         }
         let header_span = contribution
