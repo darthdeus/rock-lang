@@ -456,7 +456,7 @@ fn gate_c_glob_member_added() {
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
 
     let r = h.edit("b.rock", b1).expect("accepted");
-    assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), None)]);
+    assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), Some("std::warm_one".to_string()))]);
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.reinferred_body_count(), 3);
     assert_eq!(h.relowered_body_count(), 3);
@@ -639,7 +639,7 @@ fn a_glob_member_that_shadowed_std_is_removed() {
     let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
     let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    warm_one()\n}\n";
     let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
-    assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), None)]);
+    assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), Some("std::warm_one".to_string()))]);
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
