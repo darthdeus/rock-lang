@@ -2891,6 +2891,50 @@ pub fn lower_struct_def(
 
         let field_annotations = lower_annotations_with_ctx(ctx, a, &field.annotations);
         validate_annotations(AnnoPos::StructField, &field_annotations, &ctx.workspace.decorator_names)?;
+        let is_derived = field_annotations.iter().any(|anno| anno.is_builtin("derived"));
+        if is_derived {
+            // A skipped field is an ABSENT key at every consumer, and an absent
+            // key reads as null. Every shape below either has no key of its own
+            // or cannot read as null, so it could not survive the skip.
+            if s.is_nobox {
+                comp_error!(
+                    field.name.span,
+                    "`@derived` needs a GC struct field: `{}` is a `nobox` type, whose fields are spliced into the parent and have no key of their own",
+                    s.name.name
+                );
+            }
+            if s.is_value {
+                comp_error!(
+                    field.name.span,
+                    "`@derived` needs a GC struct field: `{}` is a `value` type, whose fields are immutable and cannot hold a lazily built cache",
+                    s.name.name
+                );
+            }
+            if field.is_embed {
+                comp_error!(
+                    field.name.span,
+                    "`@derived` cannot be combined with `embed`: an embedded field's leaves live in the parent and have no key of their own"
+                );
+            }
+            if !matches!(ctx.type_node(&body, ty, field.name.span)?, hir::TypeExpr::Nullable(_)) {
+                comp_error!(
+                    field.name.span,
+                    "`@derived` needs a nullable field: a skipped field reads as null after a restore, so `{}` must be declared `T?`",
+                    field.name.name
+                );
+            }
+            let defaults_to_null = field
+                .default
+                .as_ref()
+                .is_some_and(|d| matches!(a.e(d).kind, skull_parser::ExprKind::Null));
+            if !defaults_to_null {
+                comp_error!(
+                    field.name.span,
+                    "`@derived` field `{}` needs `= null`: a fresh value and a restored one must read the same",
+                    field.name.name
+                );
+            }
+        }
         fields.push(hir::StructFieldDef {
             name: field.name.name,
             ty,
@@ -2898,6 +2942,7 @@ pub fn lower_struct_def(
             has_default: field.default.is_some(),
             annotations: field_annotations,
             is_embed: field.is_embed,
+            is_derived,
             read_vis,
             write_vis,
         });
@@ -2966,6 +3011,7 @@ pub fn lower_enum_def(
                             has_default: false,
                             annotations: annos,
                             is_embed: false,
+                            is_derived: false,
                             read_vis: bone_core::modules::NsVisibility::Pub,
                             write_vis: bone_core::modules::NsVisibility::Pub,
                         })

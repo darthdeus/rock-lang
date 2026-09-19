@@ -253,6 +253,14 @@ fn validate_one(
             at(anno, pos, AnnoPos::StructField)?;
             no_args(anno)
         }
+        // A cache the owner can rebuild from the state beside it, so no state
+        // walker captures it: the world image, the canonical serializer, the
+        // checkpoint census and `inspect` skip it and a restored owner reads
+        // it as null. Field shape is checked where the struct is lowered.
+        "derived" => {
+            at(anno, pos, AnnoPos::StructField)?;
+            no_args(anno)
+        }
         "lifecycle" => {
             at(anno, pos, AnnoPos::DecoItem)?;
             const KEYS: &[&str] = &["phase", "owner", "stage_param", "replay_param"];

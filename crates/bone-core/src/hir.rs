@@ -1118,6 +1118,11 @@ pub struct StructFieldDef {
     /// (docs/scalarization-and-boxing-design.md S 6). Enum record variants
     /// cannot carry it -- always false there.
     pub is_embed: bool,
+    /// `@derived f: T? = null` -- a cache the owner rebuilds on a null read,
+    /// so state capture skips it (world image, canonical serializer, checkpoint
+    /// census, `inspect`). Only a nullable GC-struct field can carry it; the
+    /// rejections live in `lower_struct_def`.
+    pub is_derived: bool,
     /// Getter visibility (spec 9/10). Default is public.
     pub read_vis: NsVisibility,
     /// Setter visibility (spec 10). `private(set)` restricts this to owner subtree.

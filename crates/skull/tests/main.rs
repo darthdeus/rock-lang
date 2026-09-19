@@ -43,6 +43,7 @@ mod const_hot_reload;
 mod coroutine_hook_hoist;
 #[path = "dead_lambda_scope.rs"]
 mod dead_lambda_scope;
+mod derived_field_emission;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
 #[path = "expansion_admission.rs"]

@@ -1960,9 +1960,21 @@ fn type_table_defs(
                     Some(d) => format!(", desc = {d}"),
                     None => String::new(),
                 };
+                // bone-lower rejects `@derived` on every shape whose leaves are
+                // spliced into the parent, so a derived field always owns its
+                // key here. Re-check against the representation plan rather
+                // than trusting that: a walker skipping one dotted leaf of a
+                // spliced field would drop a sibling's data with it.
+                if f.is_derived && !embed.is_empty() {
+                    return Err(CompilerError::new_no_location(format!(
+                        "`@derived` field `{}.{}` is laid out inline, so it has no key a state walker could skip",
+                        s.name, f.name
+                    )));
+                }
+                let derived = if f.is_derived { ", derived = true" } else { "" };
                 fields.push(format!(
-                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
-                    f.name, tystr, nullable, embed, desc
+                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{} }}",
+                    f.name, tystr, nullable, embed, desc, derived
                 ));
             }
             out.push_str(&format!(
