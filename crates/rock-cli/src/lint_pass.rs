@@ -484,7 +484,7 @@ pub enum Scope {
 /// its own. `file` must be the same path the module was parsed under, or every
 /// span lookup misses and the findings render without their snippet.
 pub fn run_build_lints_single(ws: &Workspace, file: &str, src: &str) -> Vec<CompilerError> {
-    let mut sources = SourceFiles { files: vec![] };
+    let mut sources = SourceFiles::empty();
     sources.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
         file.to_string(),
@@ -669,7 +669,7 @@ mod tests {
     }
 
     fn empty_sources() -> SourceFiles {
-        SourceFiles { files: vec![] }
+        SourceFiles::empty()
     }
 
     #[test]

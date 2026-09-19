@@ -72,7 +72,7 @@ mod tests {
     use super::*;
 
     fn discover(src: &str) -> Vec<TestMetadata> {
-        let mut sf = SourceFiles { files: vec![] };
+        let mut sf = SourceFiles::empty();
         sf.add_or_update_file(source_file_from_path_and_contents(
             "t.rock".to_string(),
             "t.rock".to_string(),

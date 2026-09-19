@@ -337,7 +337,7 @@ fn check_project(
             },
         )?;
     let sources = if game_project {
-        sources.production_only()
+        sources.production_only(std::path::Path::new(dir))
     } else {
         sources
     };

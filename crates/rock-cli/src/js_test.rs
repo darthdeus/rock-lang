@@ -567,7 +567,7 @@ pub(crate) fn try_emit_js_program_project_cached(
     let sources = crate::unified_compile::discover_sources(&spec)
         .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
     let sources = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
-        sources.production_only()
+        sources.production_only(std::path::Path::new(dir))
     } else {
         sources
     };

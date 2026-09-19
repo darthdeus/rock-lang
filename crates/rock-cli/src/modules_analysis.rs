@@ -43,14 +43,14 @@ pub(crate) fn population(
 ) -> Result<Population, String> {
     let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
     let discovered = crate::unified_compile::discover_sources(&spec).map_err(|e| format!("{e:#}"))?;
-    let root_path = graph.package(graph.root()).root.to_string_lossy().into_owned();
-    let mode = mode.unwrap_or(if SourceFiles::is_test_only_path(&root_path) {
+    let root_path = &graph.package(graph.root()).root;
+    let mode = mode.unwrap_or(if SourceFiles::contains_tests_component(root_path) {
         PopMode::Test
     } else {
         PopMode::Production
     });
     let analyzed = match mode {
-        PopMode::Production => discovered.production_only(),
+        PopMode::Production => discovered.production_only(root_path),
         PopMode::Test => discovered.clone(),
     };
     Ok(Population { mode, discovered, analyzed })

@@ -337,7 +337,7 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
 pub fn skull_mem2reg_stats(path: &str) -> Result<()> {
     let source_spec = crate::common::path_to_source_spec(path);
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
-    let sources = sources.production_only();
+    let sources = sources.production_only(std::path::Path::new(path));
     let (mut modules, entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
         Err(errs) => {
@@ -574,7 +574,7 @@ end
 /// that same id -- registering under a placeholder makes every span lookup fail
 /// ("Unable to fetch source") and silently drops the snippet + labels.
 pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
         file.to_string(),
@@ -662,7 +662,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
 /// (passing) outcome and each counts as a passing test. Shared by the luajit
 /// and JS executors (both bone-type-check first, so the rule is identical).
 pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
         file.to_string(),
@@ -1331,7 +1331,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let sources = if path_ref.is_dir()
             && rock_host::project::is_game_project(path_ref).unwrap_or(false)
         {
-            sources.production_only()
+            sources.production_only(path_ref)
         } else {
             sources
         };
@@ -1531,7 +1531,7 @@ pub(crate) fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> St
 /// [`render_project_err`] over every collected diagnostic, joined into one
 /// report — the CLI prints ALL of them, matching the LSP.
 pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     for file in &sources.files {
         let f = file.borrow();
         let id = f.file.to_id_path();
@@ -1596,7 +1596,7 @@ fn skull_emit_project_with_inputs(
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
     // sim/test can't break the running game. See
     // `docs/sim-layering.md`.
-    let sources = sources.production_only();
+    let sources = sources.production_only(std::path::Path::new(dir));
 
     // Compile core: parse(assemble) + bone check + skull codegen. Excludes
     // discovery (disk read) and the caller's output write, matching the bone
@@ -2632,7 +2632,9 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// write into a temporary output path.
 fn iter_incremental_sources(path: &str) -> Result<rock_core::SourceFiles> {
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(path));
-    Ok(crate::unified_compile::discover_sources(&spec)?.production_only())
+    Ok(crate::unified_compile::discover_sources(&spec)?.production_only(
+        std::path::Path::new(path),
+    ))
 }
 
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {

@@ -22,7 +22,7 @@ fn has_tests_component(path: &str) -> bool {
 #[test]
 fn production_only_excludes_tests_dir_but_keeps_game_files() {
     let abs_path = workspace_root().join("mag");
-    let spec = rock_cli::unified_compile::SourceSpec::Directory(abs_path);
+    let spec = rock_cli::unified_compile::SourceSpec::Directory(abs_path.clone());
     let full = rock_cli::unified_compile::discover_sources(&spec)
         .expect("discover_sources(mag) succeeds");
 
@@ -39,8 +39,8 @@ fn production_only_excludes_tests_dir_but_keeps_game_files() {
         "premise broken: mag full discovery has no tests/ files"
     );
 
-    // Fix: production_only drops every tests/ file...
-    let prod = full.production_only();
+    // The production view drops tests/ files below the owning package root...
+    let prod = full.production_only(&abs_path);
     let leaked: Vec<String> = prod
         .files
         .iter()
