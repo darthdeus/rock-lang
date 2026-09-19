@@ -2991,11 +2991,13 @@ fn always_inlinable(inst: &Inst) -> bool {
     )
 }
 
-/// A receive this narrow keeps its copy into value locals: the copy costs at
-/// most four slots, and reading narrow receives in place made MAG's
-/// `damage_feedback_alloc_steady_state` allocate 1.4-5x its baseline in 4 of
-/// 21 runs (0 of 18 with only wider receives read in place). The wide case is
-/// the one the frame limit needs (`docs/nobox-wide-trace-plan.md`).
+/// A receive this narrow keeps its copy into value locals; the copy costs at
+/// most four slots and the wide case is the one the frame limit needs. The cut
+/// is provisional: the allocation spikes it was added for are LuaJIT failing to
+/// sink MAG's own per-event allocations, and they occur with it too. Whether
+/// reading narrow receives in place shifts their rate is unsettled
+/// (`docs/unfuck-backlog.md`, "`NARROW_RECEIVE_LANES` guards an effect it does
+/// not prevent").
 const NARROW_RECEIVE_LANES: usize = 4;
 
 /// Cells written exactly once in `scope`, as a multi-return destination wider
