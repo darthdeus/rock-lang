@@ -62,7 +62,9 @@ impl LiveProject {
         let sources = if include_tests {
             discovered
         } else {
-            discovered.production_only()
+            discovered
+                .production_only(Path::new(dir))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
         };
         let entry_path = entry_path(&sources)?;
         let files = crate::bone_backend::session_files(&sources);
@@ -428,7 +430,9 @@ impl LiveProject {
         self.sources = if self.include_tests {
             discovered
         } else {
-            discovered.production_only()
+            discovered
+                .production_only(Path::new(&self.dir))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
         };
         self.entry_path = entry_path(&self.sources)?;
         Ok(())

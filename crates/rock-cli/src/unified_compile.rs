@@ -58,7 +58,15 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                     }
                 }
 
-                Ok(SourceFiles { files: dependency_files })
+                let package_roots = graph
+                    .packages()
+                    .iter()
+                    .map(|node| (node.id.0, node.root.clone()))
+                    .collect();
+                Ok(SourceFiles {
+                    files: dependency_files,
+                    package_roots,
+                })
             } else {
                 // No stick.toml - check if there's exactly one .rock file
                 let rock_files = rock_host::project::find_rock_files_at_path(project_dir)?;

@@ -182,15 +182,9 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// The witness packages copied OUT of the repository's `tests/` tree.
-///
-/// `SourceFiles::production_only` drops every file whose path has a `tests`
-/// component -- that is how a game build keeps a broken sim out of the running
-/// game. A package that lives under `tests/` is therefore invisible to `rock
-/// run` and `rock compile`, as the target and as a dependency, so the RUN
-/// assertions work on a copy outside that tree. `rock test` uses the full file
-/// set and reads the witness where it lives; see
-/// `the_witness_library_builds_and_tests_in_place`.
+/// The witness packages copied into a scratch tree for mutation tests. The
+/// production filter is package-root-relative, so the unmodified witness can
+/// also run where it lives under the repository's `tests/` tree.
 fn staged_witness(tag: &str) -> PathBuf {
     let dir = scratch(tag);
     copy_tree(&witness_root(), &dir);
@@ -228,6 +222,16 @@ fn the_v1_consumer_reaches_the_librarys_public_exports() {
         assert!(stdout.contains(line), "missing `{line}`\nstdout:\n{stdout}\nstderr:\n{stderr}");
     }
     let _ = std::fs::remove_dir_all(&staged);
+}
+
+#[test]
+fn the_v1_consumer_runs_in_place_under_repository_tests_tree() {
+    let root = witness_root();
+    let (stdout, stderr, ok) = run_pkg(&root, "witness-v1");
+    assert!(ok, "the in-place v1 consumer failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    for line in ["v1 greeting: hello, v1", "v1 answer: 42", "v1 sauce: sauce"] {
+        assert!(stdout.contains(line), "missing `{line}`\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    }
 }
 
 #[test]

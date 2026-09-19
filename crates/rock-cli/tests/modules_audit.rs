@@ -81,16 +81,16 @@ fn chess_core_is_closed() {
     assert!(run.stdout.contains("--closed: pass"), "stdout:\n{}", run.stdout);
 }
 
-/// chess-scoped lives under `tests/`, which `rock compile` drops entirely
-/// (`SourceFiles::production_only`). The audit analyzes it the way `rock test`
-/// builds it and says so, rather than auditing an empty root as clean.
+/// chess-scoped lives under `tests/`, but package-root-relative production
+/// filtering keeps its root files. The audit uses that same production
+/// population rather than switching modes based on the absolute path.
 #[test]
-fn chess_scoped_is_closed_and_analyzed_with_its_test_population() {
+fn chess_scoped_is_closed_and_analyzed_with_its_production_population() {
     let root = repo_root().join("tests/modules/chess-scoped");
     let run = audit(&root, &["--closed", "--format", "json"]);
     assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
     let v = json(&run);
-    assert_eq!(v["configuration"]["population"]["mode"], "test");
+    assert_eq!(v["configuration"]["population"]["mode"], "production");
     assert_eq!(v["configuration"]["analysis"]["status"], "ok");
     let root_row = v["configuration"]["population"]["packages"]
         .as_array()
