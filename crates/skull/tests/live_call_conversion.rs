@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use crate::common::{emit_module, function_body};
@@ -38,15 +37,13 @@ fn main() {
 }
 "#;
 
-fn pinned_luajit() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../prebuilt/gamelibs-linux-x86_64/bin/luajit-2.1.1781602682")
-}
-
 fn run_pinned_luajit(lua: &str, tag: &str) -> Output {
     let path = std::env::temp_dir().join(format!("skull_{tag}_{}.lua", std::process::id()));
     std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write generated Lua");
-    let output = Command::new(pinned_luajit()).arg(&path).output().expect("spawn repository LuaJIT");
+    let output = Command::new(rock_host::project::luajit_path())
+        .arg(&path)
+        .output()
+        .expect("spawn repository LuaJIT");
     let _ = std::fs::remove_file(path);
     output
 }

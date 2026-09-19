@@ -47,7 +47,9 @@ fn process_gone(pid: i32) -> bool {
     // counts as ended once it has actually died.
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat.rsplit(')').next().map(|s| s.trim().starts_with('Z')).unwrap_or(true),
-        Err(_) => !cfg!(target_os = "linux"),
+        // Linux exposes zombies through /proc; on platforms without /proc a
+        // successful kill(0) above is the only portable evidence available.
+        Err(_) => cfg!(target_os = "linux"),
     }
 }
 

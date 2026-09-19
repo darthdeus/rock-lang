@@ -1426,6 +1426,7 @@ mod overlay_runtime_tests {
     /// retained CodeRef. The overlay contains no decorator rebind call.
     #[test]
     fn sim_overlay_refreshes_existing_code_ref_registry_entry() {
+        super::pin_overlay_shape();
         let v0 = sim_fixture(1);
         let v1 = sim_fixture(2);
 
@@ -1476,6 +1477,7 @@ mod overlay_runtime_tests {
     /// on v0, even though the overlay has staged the edited callback body.
     #[test]
     fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
+        super::pin_overlay_shape();
         let v0 = format!(
             "const LATE: int = 0\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
             sim_fixture(1).replace("TICK_OUT = 1", "TICK_OUT = 1 + LATE")
@@ -2420,6 +2422,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// the NEW body on the next fire through the retained CodeRef.
     #[test]
     fn on_reload_body_edit_runs_new_body_via_code_ref() {
+        super::pin_overlay_shape();
         let prog = |v: i32| {
             format!(
                 "global OUT: int = 0\n\
@@ -2672,6 +2675,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
     #[test]
     fn named_and_capture_free_values_refresh_through_reusable_slots() {
+        super::pin_overlay_shape();
         let program = |named_delta: i32, free_value: i32| {
             format!(
                 "global NAMED: (fn(int) -> int)? = null\n\
