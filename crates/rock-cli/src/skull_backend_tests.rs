@@ -489,7 +489,9 @@ mod overlay_runtime_tests {
     //! cache, and compose `frozen_baseline ++ overlay` against a fresh `emit_full`.
 
     use crate::bone_backend::bone_session;
+    use super::super::{SkullReload, SkullStone};
     use super::{emit_overlay_checked, exec_lua, normalize_stdout, ExecOutcome};
+    use std::path::Path;
 
     /// Standalone `@test`/synthetic programs have no engine. Stub the full-reload
     /// registry reset only when a fixture emits one; body overlays refresh the
@@ -506,6 +508,130 @@ mod overlay_runtime_tests {
     /// overlay so the overlay's fresh `main` wins over the stale baseline's.
     fn run_parts(parts: &[&str]) -> ExecOutcome {
         exec_lua(&parts.join("\n"))
+    }
+
+    /// Execute the files written by `SkullStone`, including the game entry
+    /// wrapper. The two small host hooks make this the same Lua artifact the
+    /// engine consumes while keeping the test independent of a renderer.
+    fn run_stone_artifacts(main_path: &Path, incremental_path: &Path, call_after_overlay: bool) -> String {
+        let main = std::fs::read_to_string(main_path).expect("read generated main.lua");
+        let overlay = std::fs::read_to_string(incremental_path).unwrap_or_default();
+        let tail = if call_after_overlay { "\nmain()\n" } else { "\n" };
+        let program = format!(
+            "function clear_all_systems() end\nfunction __rock_main_wrapper(f) f() end\n{main}\n{overlay}{tail}"
+        );
+        match exec_lua(&program) {
+            ExecOutcome::Output(output) => normalize_stdout(&output),
+            ExecOutcome::Errored(error) => panic!(
+                "generated SkullStone artifacts failed to execute:\n{error}\n--- main.lua ---\n{main}\n--- incremental.lua ---\n{overlay}"
+            ),
+        }
+    }
+
+    fn run_production_body_overlay(manifest: Option<&str>) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        if let Some(manifest) = manifest {
+            std::fs::write(dir.path().join("stick.toml"), manifest).expect("stick.toml");
+        }
+        let main_path = dir.path().join("main.lua");
+        let incremental_path = dir.path().join("incremental.lua");
+        let source_path = dir.path().join("main.rock");
+        let v0 = "fn probe() -> int { static value = 1\n value = value + 1\n value }\nfn main() { print(probe()) }\n";
+        let v1 = "fn probe() -> int { static value = 1\n value = value + 10\n value }\nfn main() { print(probe()) }\n";
+        std::fs::write(&source_path, v0).expect("initial source");
+        let mut stone = SkullStone::init(
+            dir.path().to_str().expect("tempdir path"),
+            &main_path,
+            &incremental_path,
+        )
+        .expect("initial production build");
+        assert!(!incremental_path.exists(), "initial load must not leave an overlay");
+
+        std::fs::write(&source_path, v1).expect("edited source");
+        let reload = stone
+            .recompile(std::slice::from_ref(&source_path), &main_path, &incremental_path)
+            .expect("body edit through production recompile");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "body edit must publish an overlay, got {reload:?}"
+        );
+        assert!(incremental_path.exists(), "body edit must write incremental.lua");
+
+        // The first call is made by main.lua's production entry wrapper. The
+        // second call happens after the overlay is loaded, so the static cell
+        // proves both changed code and retained state.
+        run_stone_artifacts(&main_path, &incremental_path, true)
+    }
+
+    #[test]
+    fn production_overlay_executes_v1_body_edit_and_preserves_state() {
+        super::pin_overlay_shape();
+        let legacy = run_production_body_overlay(None);
+        assert_eq!(legacy.trim(), "2\n12", "legacy control must execute the overlay");
+
+        let v1 = run_production_body_overlay(Some(
+            "[package]\nname = \"overlay-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        ));
+        assert_eq!(v1.trim(), "2\n12", "v1 overlay must execute changed code with retained state");
+    }
+
+    #[test]
+    fn production_v1_namespace_edit_takes_full_reload_and_runs_new_definition() {
+        super::pin_overlay_shape();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"namespace-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        )
+        .expect("stick.toml");
+        let main_path = dir.path().join("main.lua");
+        let incremental_path = dir.path().join("incremental.lua");
+        let main_source = dir.path().join("main.rock");
+        let module_source = dir.path().join("a.rock");
+        std::fs::write(
+            &main_source,
+            "fn main() { print(a::bump(2)) }\n",
+        )
+        .expect("initial main source");
+        std::fs::write(
+            &module_source,
+            "mod a;\npub fn bump(n: int) -> int { n + 1 }\n",
+        )
+        .expect("initial module source");
+        let mut stone = SkullStone::init(
+            dir.path().to_str().expect("tempdir path"),
+            &main_path,
+            &incremental_path,
+        )
+        .expect("initial v1 namespace build");
+        let baseline = run_stone_artifacts(&main_path, &incremental_path, false);
+        assert_eq!(baseline.trim(), "3");
+
+        std::fs::write(
+            &main_source,
+            "fn main() { print(a::twice(3)) }\n",
+        )
+        .expect("edited main source");
+        std::fs::write(
+            &module_source,
+            "mod a;\npub fn bump(n: int) -> int { n + 1 }\npub fn twice(n: int) -> int { n * 2 }\n",
+        )
+        .expect("edited module source");
+        let reload = stone
+            .recompile(
+                &[module_source.clone(), main_source.clone()],
+                &main_path,
+                &incremental_path,
+            )
+            .expect("namespace edit through production recompile");
+        assert!(
+            matches!(reload, SkullReload::Full { body_only: false, .. }),
+            "a namespace-affecting edit must publish the supported full path, got {reload:?}"
+        );
+        assert!(!incremental_path.exists(), "full namespace reload must wipe the overlay");
+        let updated = run_stone_artifacts(&main_path, &incremental_path, false);
+        assert_eq!(updated.trim(), "6", "the full artifact must contain the new namespace definition");
+        assert_ne!(updated.trim(), baseline.trim(), "namespace edit must not serve stale output");
     }
 
     /// Assert the frozen-baseline+overlay execution matches the fresh full build
