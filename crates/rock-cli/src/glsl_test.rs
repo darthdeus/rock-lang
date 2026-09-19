@@ -766,6 +766,7 @@ pub fn validate_shader_workspace(dir: &str) -> Result<bone_semantic::inference::
         .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;
     let production_paths: std::collections::HashSet<String> = sources
         .production_only(std::path::Path::new(dir))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
         .files
         .iter()
         .map(|file| file.borrow().file.to_id_path())

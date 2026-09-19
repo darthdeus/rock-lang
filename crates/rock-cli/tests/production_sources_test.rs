@@ -40,7 +40,9 @@ fn production_only_excludes_tests_dir_but_keeps_game_files() {
     );
 
     // The production view drops tests/ files below the owning package root...
-    let prod = full.production_only(&abs_path);
+    let prod = full
+        .production_only(&abs_path)
+        .expect("production_only(mag) succeeds");
     let leaked: Vec<String> = prod
         .files
         .iter()
@@ -93,7 +95,9 @@ fn production_only_uses_real_package_roots_and_rejects_tagged_mismatch() {
     let spec = rock_cli::unified_compile::SourceSpec::Directory(project.clone());
     let full = rock_cli::unified_compile::discover_sources(&spec)
         .expect("discover_sources(temp project) succeeds");
-    let production = full.production_only(&project);
+    let production = full
+        .production_only(&project)
+        .expect("production_only(temp project) succeeds");
     let production_paths: Vec<_> = production
         .files
         .iter()
@@ -119,11 +123,43 @@ fn production_only_uses_real_package_roots_and_rejects_tagged_mismatch() {
     std::fs::create_dir_all(&wrong_root).expect("create wrong package root");
     let mut malformed = full.clone();
     malformed.package_roots = vec![(package_id, wrong_root)];
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        malformed.production_only(&project)
-    }));
+    let error = malformed
+        .production_only(&project)
+        .expect_err("a tagged source outside its package root must become an error");
+    assert!(error.to_string().contains("main.rock"), "error: {error}");
     assert!(
-        result.is_err(),
-        "a tagged source outside its package root must surface the invariant violation"
+        error.to_string().contains("different-project"),
+        "error must name the package root: {error}"
+    );
+}
+
+#[test]
+fn production_only_reports_deleted_tagged_source_as_an_error() {
+    let outer = tempfile::tempdir().expect("create outer tempdir");
+    let project = outer.path().join("tests").join("deleted-project");
+    let tests_dir = project.join("tests");
+    std::fs::create_dir_all(&tests_dir).expect("create project directories");
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"deleted-project\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
+    )
+    .expect("write manifest");
+    let deleted_source = project.join("main.rock");
+    std::fs::write(&deleted_source, "fn main() {}\n").expect("write production source");
+    std::fs::write(tests_dir.join("broken.rock"), "fn broken() {}\n")
+        .expect("write test source");
+
+    let spec = rock_cli::unified_compile::SourceSpec::Directory(project.clone());
+    let full = rock_cli::unified_compile::discover_sources(&spec)
+        .expect("discover_sources(temp project) succeeds");
+    std::fs::remove_file(&deleted_source).expect("delete source after discovery");
+
+    let error = full
+        .production_only(&project)
+        .expect_err("a tagged source deleted after discovery must become an error");
+    assert!(error.to_string().contains("main.rock"), "error: {error}");
+    assert!(
+        error.to_string().contains("deleted-project"),
+        "error must name the project root: {error}"
     );
 }

@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::errors::CompilerError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use atomic_refcell::AtomicRefCell;
@@ -63,80 +64,86 @@ impl SourceFiles {
     /// `<pkg>/tests/`). Game builds (`rock run/stone/frame/perf/compile <game>`)
     /// use this so a compile error in a sim/test can't break the running game.
     /// Test/sim/lint/lsp paths use the full set. See `docs/sim-layering.md`.
-    pub fn production_only(&self, project_root: &Path) -> SourceFiles {
-        SourceFiles {
-            files: self
-                .files
-                .iter()
-                .filter(|f| {
-                    let file = f.borrow();
-                    let (root, tagged) = match file.package.as_ref() {
-                        Some(tag) => {
-                            let root = self
-                                .package_roots
-                                .iter()
-                                .find(|(id, _)| *id == tag.id)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "SourceFiles invariant: tagged source `{}` has no package root for package id {}",
-                                        file.file.to_id_path(),
-                                        tag.id
-                                    )
-                                });
-                            (root.1.as_path(), true)
-                        }
-                        None => (project_root, false),
-                    };
-                    !Self::is_test_only_path_for_source(&file.file.to_id_path(), root, tagged)
-                })
-                .cloned()
-                .collect(),
-            package_roots: self.package_roots.clone(),
+    pub fn production_only(&self, project_root: &Path) -> Result<SourceFiles, CompilerError> {
+        let mut files = Vec::with_capacity(self.files.len());
+        for source in &self.files {
+            let file = source.borrow();
+            let (root, tagged) = match file.package.as_ref() {
+                Some(tag) => {
+                    let root = self
+                        .package_roots
+                        .iter()
+                        .find(|(id, _)| *id == tag.id)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "SourceFiles invariant: tagged source `{}` has no package root for package id {}",
+                                file.file.to_id_path(),
+                                tag.id
+                            )
+                        });
+                    (root.1.as_path(), true)
+                }
+                None => (project_root, false),
+            };
+            if !Self::is_test_only_path_for_source(&file.file.to_id_path(), root, tagged)? {
+                files.push(source.clone());
+            }
         }
+        Ok(SourceFiles {
+            files,
+            package_roots: self.package_roots.clone(),
+        })
     }
 
     /// Path-convention test-only check: true if a `tests` component is below
     /// `root`. Components in the absolute path before `root` are ignored. The
-    /// caller supplies a package-owned path, so an outside path is an
-    /// invariant violation rather than a non-test result.
-    pub fn is_test_only_path(path: &str, root: &Path) -> bool {
+    /// The caller supplies a package-owned path; an outside path is an error.
+    /// Production filtering uses the private helper with `tagged = false` for
+    /// unowned sources that may legitimately sit outside the project root.
+    pub fn is_test_only_path(path: &str, root: &Path) -> Result<bool, CompilerError> {
         Self::is_test_only_path_for_source(path, root, true)
     }
 
-    fn is_test_only_path_for_source(path: &str, root: &Path, tagged: bool) -> bool {
-        let canonical_root = root.canonicalize().unwrap_or_else(|error| {
-            panic!(
-                "SourceFiles invariant: cannot canonicalize source root `{}`: {error}",
+    fn is_test_only_path_for_source(
+        path: &str,
+        root: &Path,
+        tagged: bool,
+    ) -> Result<bool, CompilerError> {
+        let canonical_root = root.canonicalize().map_err(|error| {
+            CompilerError::new_no_location(format!(
+                "cannot classify source `{path}` against root `{}`: cannot canonicalize root: {error}",
                 root.display()
-            )
-        });
+            ))
+        })?;
         let canonical_path = match Path::new(path).canonicalize() {
             Ok(path) => path,
             Err(error) if tagged => {
-                panic!("SourceFiles invariant: cannot canonicalize tagged source `{path}`: {error}")
+                return Err(CompilerError::new_no_location(format!(
+                    "cannot classify source `{path}` against root `{}`: cannot canonicalize source: {error}",
+                    root.display()
+                )));
             }
             Err(_) => {
                 // Untagged stdlib and loose sources may use non-filesystem ids.
-                return false;
+                return Ok(false);
             }
         };
         let relative = match canonical_path.strip_prefix(&canonical_root) {
             Ok(relative) => relative,
             Err(_) if tagged => {
-                panic!(
-                    "SourceFiles invariant: tagged source `{}` is outside package root `{}`",
-                    canonical_path.display(),
-                    canonical_root.display()
-                )
+                return Err(CompilerError::new_no_location(format!(
+                    "production source `{path}` is outside package root `{}`",
+                    root.display()
+                )));
             }
             Err(_) => {
                 // Untagged stdlib and loose files are not project-owned; admit them outside this root.
-                return false;
+                return Ok(false);
             }
         };
-        relative
+        Ok(relative
             .components()
-            .any(|c| c.as_os_str() == "tests")
+            .any(|c| c.as_os_str() == "tests"))
     }
 }
 
@@ -179,7 +186,7 @@ mod tests {
             package_roots: Vec::new(),
         };
 
-        let production = sources.production_only(&project_root);
+        let production = sources.production_only(&project_root).unwrap();
         let paths: Vec<_> = production
             .files
             .iter()
@@ -187,8 +194,8 @@ mod tests {
             .collect();
 
         assert_eq!(paths, [main_path.clone()]);
-        assert!(!SourceFiles::is_test_only_path(&main_path, &project_root));
-        assert!(SourceFiles::is_test_only_path(&broken_path, &project_root));
+        assert!(!SourceFiles::is_test_only_path(&main_path, &project_root).unwrap());
+        assert!(SourceFiles::is_test_only_path(&broken_path, &project_root).unwrap());
         std::fs::remove_dir_all(temp_root).unwrap();
     }
 }

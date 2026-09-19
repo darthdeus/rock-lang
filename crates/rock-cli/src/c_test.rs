@@ -337,7 +337,13 @@ fn check_project(
             },
         )?;
     let sources = if game_project {
-        sources.production_only(std::path::Path::new(dir))
+        sources
+            .production_only(std::path::Path::new(dir))
+            .map_err(|error| FileCheckError {
+                reason: "cannot classify production sources".to_string(),
+                rendered: error.to_string(),
+                expected_failure_tests: None,
+            })?
     } else {
         sources
     };

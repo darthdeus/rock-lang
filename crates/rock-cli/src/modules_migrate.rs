@@ -518,7 +518,18 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                     .get(&from_file)
                     .map(|package_id| c.graph.package(PackageId(*package_id)).root.as_path())
                     .unwrap_or(c.root.as_path());
-                let u = if SourceFiles::is_test_only_path(from_file.as_str(), from_root) {
+                let test_only = match SourceFiles::is_test_only_path(from_file.as_str(), from_root) {
+                    Ok(test_only) => test_only,
+                    Err(error) => {
+                        plan.blockers.push(format!(
+                            "{}: cannot classify reference source: {}",
+                            c.name(),
+                            error
+                        ));
+                        continue;
+                    }
+                };
+                let u = if test_only {
                     plan.test_uses.entry(di).or_default().entry(c.name().to_string()).or_default()
                 } else {
                     plan.exports.entry(di).or_default().consumers.entry(c.name().to_string()).or_default()
