@@ -181,6 +181,8 @@ mod nobox_column_threshold;
 mod nobox_wide_strided;
 #[path = "nobox_materialize_gc_tier.rs"]
 mod nobox_materialize_gc_tier;
+#[path = "wide_value_abi.rs"]
+mod wide_value_abi;
 #[path = "wide_value_slot_budget.rs"]
 mod wide_value_slot_budget;
 #[path = "nobox_fn_value_nullable_return_sentinel.rs"]
