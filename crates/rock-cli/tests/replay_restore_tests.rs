@@ -982,6 +982,10 @@ fn mag_cast_seek_restores_scheduler_owner() {
             ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout_s),
             ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
             ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
+            ("STONE_PHYSICAL_KEY_PRESS_AT", "6"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT", "7"),
+            ("STONE_PHYSICAL_KEY", "1"),
+            ("STONE_PHYSICAL_SCANCODE", "1"),
         ],
     );
     let mut tick = 0;
@@ -995,9 +999,8 @@ fn mag_cast_seek_restores_scheduler_owner() {
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 10, "v9 tick shape changed: {line}");
+            assert_eq!(fields.len(), 10, "tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-5";
-            fields[6] = if tick == 6 { "1" } else { "-" };
             tick += 1;
             fields.join(" ")
         })
