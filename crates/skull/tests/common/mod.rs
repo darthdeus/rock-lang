@@ -202,6 +202,50 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
+/// Like [`try_emit_module`] but with LuaJIT's frame-limit rejection OFF, so the
+/// emitted Lua of a body the check rejects is still produced. The
+/// boundary-agreement test needs it: without the Lua there is nothing to ask
+/// `loadfile` about, and "the compiler rejected it" would be unfalsifiable.
+pub fn emit_module_without_frame_limits(src: &str) -> String {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_full_with_shapes(
+        &ws,
+        mid,
+        skull::mir_emit::ShapeOverrides {
+            frame_limits: Some(false),
+            ..Default::default()
+        },
+    )
+    .map(|(emit, _cache)| emit.lua)
+    .expect("emit with the frame-limit check off")
+}
+
+/// Whether the bundled LuaJIT can LOAD `prog` (parse only -- the chunk is never
+/// run), and the parse error when it cannot. This is the oracle the frame-limit
+/// model is measured against.
+pub fn luajit_loads(prog: &str, tag: &str) -> Result<(), String> {
+    use std::process::Command;
+    let path = std::env::temp_dir().join(format!("skull_load_{}_{tag}.lua", std::process::id()));
+    std::fs::write(&path, prog).expect("write program");
+    let out = Command::new("luajit")
+        .arg("-e")
+        .arg(format!(
+            "local f, e = loadfile({:?}); if not f then io.stderr:write(e) os.exit(1) end",
+            path.to_string_lossy()
+        ))
+        .output()
+        .expect("spawn luajit");
+    let _ = std::fs::remove_file(&path);
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
 /// The body of the emitted definition named (or prefixed by) `name`. `name` is
 /// the rock identifier; the emitted definition is mangled
 /// (`hot_int_int_int_ret_float`), so the prefix is resolved against the

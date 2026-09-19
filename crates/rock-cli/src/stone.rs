@@ -604,19 +604,15 @@ struct FlightRecorder {
 
 const REPLAY_USAGE_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Live desync cadence for the flight recorder: one minute of play at 60fps.
+/// Live desync cadence for the always-on flight recorder.
 ///
 /// A checkpoint canonically serializes and hashes every world-included global,
-/// and that is not cheap at MAG's scale: measured on this machine, one MAG
-/// checkpoint costs ~67ms 60 ticks into a session and ~270-330ms once the world
-/// has grown (900-tick headless recording, `p` rows at ticks 300 and 600 versus
-/// their neighbours). It is a real stall, and it lands in the recorded frame
-/// timing, so the cadence buys drift localization at the price of one visible
-/// hitch per interval. 3600 keeps that under ~0.5% of wall time while still
-/// stamping several checkpoints into any session long enough to benchmark;
-/// STONE_CHECKPOINT_INTERVAL overrides it (0 disables) for a session that must
-/// not be perturbed at all.
-const FLIGHT_CHECKPOINT_INTERVAL: usize = 3600;
+/// and its cost grows with MAG's live world. A populated session measured a
+/// 2.0-second stall and 130 MiB heap spike at the former 3600-tick default.
+/// Always-on recording must not perturb ordinary play, so checkpoints default
+/// off. Set STONE_CHECKPOINT_INTERVAL to a positive tick cadence for a session
+/// whose replay needs a desync oracle.
+const FLIGHT_CHECKPOINT_INTERVAL: usize = 0;
 
 fn parse_checkpoint_interval(raw: Option<&str>) -> usize {
     let Some(raw) = raw else { return FLIGHT_CHECKPOINT_INTERVAL };
@@ -1818,19 +1814,18 @@ mod tests {
         assert_eq!(first_path.parent(), second_path.parent(), "one logical source owns one archive");
     }
 
-    /// The flight recorder ships a desync oracle by default; an explicit
-    /// STONE_CHECKPOINT_INTERVAL still wins, including 0 for a session that
-    /// must not pay the checkpoint stall at all.
+    /// The flight recorder must not synchronously hash the whole world during
+    /// ordinary play. Desync checkpoints remain an explicit opt-in.
     #[test]
-    fn flight_checkpoint_cadence_is_on_by_default_and_overridable() {
+    fn flight_checkpoint_cadence_is_off_by_default_and_overridable() {
         assert_eq!(parse_checkpoint_interval(None), FLIGHT_CHECKPOINT_INTERVAL);
-        assert!(FLIGHT_CHECKPOINT_INTERVAL > 0, "recordings must carry a desync oracle");
+        assert_eq!(FLIGHT_CHECKPOINT_INTERVAL, 0, "ordinary play must not pay a periodic checkpoint stall");
         assert_eq!(parse_checkpoint_interval(Some("0")), 0);
         assert_eq!(parse_checkpoint_interval(Some(" 120 ")), 120);
         assert_eq!(
             parse_checkpoint_interval(Some("often")),
             FLIGHT_CHECKPOINT_INTERVAL,
-            "an unparseable cadence falls back to the default rather than disabling the oracle"
+            "an unparseable cadence falls back to the non-perturbing default"
         );
     }
 

@@ -169,7 +169,28 @@ impl ContainerPlan {
                 } => crate::lower::dense_flat_enum_vec_eligible(ws, *name),
                 _ => false,
             };
+        // A wide `nobox` value struct stores row-major in one table: a column
+        // per leaf costs a table lookup, bounds check and barrier per leaf on
+        // every push and read, which is what made a 50-leaf push end hot traces
+        // at LuaJIT's constant limit (docs/nobox-wide-trace-plan.md). Only a
+        // non-generic struct: reflection finds a row's layout by struct name
+        // (`__ROCK_STRIDED_ROWS`), which names one layout only without params.
+        let wide_nobox_struct = matches!(family, ContainerFamily::Vec)
+            && !nullable
+            && column_eligible
+            && arena.get(element_rep).nobox()
+            && matches!(
+                &element,
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    params,
+                } if params.is_empty() && ws.struct_by_name.contains_key(name)
+            )
+            && shape
+                .as_ref()
+                .is_some_and(|shape| shape.leaf_count() > crate::lower::MAX_COLUMN_LEAVES);
         let columns = match (family, shape.as_ref()) {
+            (ContainerFamily::Vec, _) if wide_nobox_struct => false,
             (ContainerFamily::Vec, Some(shape)) if column_eligible => {
                 let paths = crate::lower::value_leaf_paths(shape);
                 (paths.len() + usize::from(nullable) <= crate::lower::MAX_COLUMN_LEAVES
@@ -196,7 +217,7 @@ impl ContainerPlan {
         let leaf_addressed = leaf_addresses.is_some();
         let storage = if columns {
             ContainerStorage::Columns { element: element_rep }
-        } else if dense_strided {
+        } else if dense_strided || wide_nobox_struct {
             ContainerStorage::Strided { element: element_rep }
         } else if leaf_addressed {
             ContainerStorage::LeafAddressed { element: element_rep }
@@ -204,6 +225,35 @@ impl ContainerPlan {
             ContainerStorage::Boxed { element: element_rep }
         };
         Ok(Self { target, family, storage, leaf_addresses })
+    }
+
+    /// Leaf path -> 1-based row offset for a `[name]` whose element is a
+    /// non-generic struct stored as strided rows, or `None` for any other
+    /// storage. Reflection reads rows through this; it is the plan lowering
+    /// stores by, not a restatement of it.
+    pub fn strided_struct_row_offsets(
+        ws: &bone_semantic::inference::Workspace,
+        target: bone_semantic::hir::FnBackend,
+        name: ustr::Ustr,
+    ) -> Option<Vec<(ustr::Ustr, usize)>> {
+        use crate::monoty::{MonoCtor, MonoTy};
+        if !ws.struct_by_name.contains_key(&name) {
+            return None;
+        }
+        let ty = MonoTy::App {
+            ctor: MonoCtor::Array,
+            params: vec![MonoTy::App { ctor: MonoCtor::Nominal(name), params: Vec::new() }],
+        };
+        let arena = RepArena::default();
+        let plan = Self::for_type(ws, target, &arena, ContainerFamily::Vec, &ty).ok()?;
+        let shape = arena.value_shape(plan.strided_elem(&arena)?.representation())?;
+        Some(
+            crate::lower::value_leaf_paths(&shape)
+                .into_iter()
+                .enumerate()
+                .map(|(i, path)| (path, i + 1))
+                .collect(),
+        )
     }
 
     pub fn target(&self) -> bone_semantic::hir::FnBackend {

@@ -777,6 +777,38 @@ pub(crate) fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) ->
         .map(|p| p as i64)
 }
 
+/// Whether a box a pack mints is the ordinary implicit one or the box
+/// `materialize(v)` asked for. The two RENDER identically; only the `nobox`
+/// guarantee distinguishes them, and it does so through the instruction the
+/// ctor lands in. Carried through the whole tree, so the nested boxes an
+/// explicit box has to build to exist are authorized with it.
+///
+/// This is the mint-time half of the authorization; `authorize_nobox_box` is the
+/// after-the-fact half, for a boundary (`@gpu_only`) whose arguments are already
+/// lowered by the time the compiler decides to sanction their box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoxKind {
+    Implicit,
+    Explicit,
+}
+
+impl BoxKind {
+    pub(crate) fn value_ctor(
+        self,
+        name: Ustr,
+        representation: RepId,
+        form: ValueCtorForm,
+        fields: Vec<(Ustr, Idx<Inst>)>,
+    ) -> Inst {
+        match self {
+            BoxKind::Implicit => Inst::MakeValueStruct { name, representation, form, fields },
+            BoxKind::Explicit => {
+                Inst::MaterializeValueStruct { name, representation, form, fields }
+            }
+        }
+    }
+}
+
 /// The runtime carrier threaded through lowering: a value struct lives as an
 /// unboxed `Group` of per-field reprs (recursive); everything else is a `Scalar`
 /// (one already-lowered value — a primitive, or a boxed cdata).

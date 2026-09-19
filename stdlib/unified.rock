@@ -1856,6 +1856,27 @@ inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     for i = 1, n * stride do data[i] = sorted[i] end
 """
 
+// The strided twin of `__rock_col_sort_leaves`: a key fn over a `nobox` row
+// takes the row's leaves, in row order, so no element is built. Leaves are
+// copied with explicit bounds because a raw row may hold nil.
+@nomangle inline(lua) fn __rock_stride_sort_leaves(vec: any, key_fn: any, stride: int) = """
+    local n, data = vec.len or 0, vec._data
+    local order = {}
+    for i = 1, n do order[i] = i end
+    local function key_at(row)
+        local base = (row - 1) * stride
+        return key_fn(unpack(data, base + 1, base + stride))
+    end
+    table.sort(order, function(a, b) return key_at(a) < key_at(b) end)
+    local sorted = {}
+    for row = 1, n do
+        local source = (order[row] - 1) * stride
+        local target = (row - 1) * stride
+        for j = 1, stride do sorted[target + j] = data[source + j] end
+    end
+    for i = 1, n * stride do data[i] = sorted[i] end
+"""
+
 // Whether `v` is a column-stored Vec.
 @nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
     if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
@@ -1881,6 +1902,21 @@ inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
         if value ~= false then out[j - 1] = value end
     end
     return out
+"""
+
+// A read-only view of a strided `nobox` struct row Vec in column form:
+// `view[path][index]` reads that leaf of element `index`. `offsets` maps each
+// leaf path to its 1-based offset in the row (`__ROCK_STRIDED_ROWS`, emitted
+// from the same plan the lowering stores by). Reflection-only: it builds tables.
+@nomangle inline(lua) fn __rock_strided_column_view(vec: any, offsets: any) -> any = """
+    local stride, data = rawget(vec, "@vec").stride, vec._data
+    return setmetatable({}, {__index = function(_, path)
+        local offset = offsets[path]
+        if offset == nil then return nil end
+        return setmetatable({}, {__index = function(_, index)
+            return data[(index - 1) * stride + offset]
+        end})
+    end})
 """
 
 @nomangle inline(lua) fn __rock_vec_strided_elements(vec: any) -> any = """
