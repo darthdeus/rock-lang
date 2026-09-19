@@ -297,6 +297,11 @@ fn a_wide_nobox_value_keeps_its_scalar_lanes() {
 /// never a candidate and keeps its lanes.
 const BUDGET_SRC: &str = r#"
 nobox value NB8 { a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float }
+nobox value NB20 {
+    a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float,
+    i: float, j: float, k: float, l: float, m: float, n: float, o: float, p: float,
+    q: float, r: float, s: float, t: float
+}
 value M16 {
     m0: float, m1: float, m2: float, m3: float, m4: float, m5: float, m6: float, m7: float,
     m8: float, m9: float, m10: float, m11: float, m12: float, m13: float, m14: float, m15: float
@@ -321,6 +326,12 @@ fn budget_five(a: M16, b: M16, c: M16, d: M16, e: M16) -> float {
 
 fn budget_mixed(a: M16, b: M16, c: M16, n: NB8, d: M12) -> float {
     return a.m0 + b.m1 + c.m2 + n.a + d.m3
+}
+
+// The `nobox` member is the WIDEST thing in this signature, so a budget that
+// ranked candidates by lanes without excluding `nobox` would box it first.
+fn budget_nobox_widest(n: NB20, a: M16, b: M16, c: M16) -> float {
+    return n.a + a.m0 + b.m1 + c.m2
 }
 
 fn main() {
@@ -365,6 +376,16 @@ fn the_budget_never_boxes_a_nobox_member() {
         1 + 16 + 16 + 8 + 12,
         "exactly one ordinary value must box, and the nobox member must keep its lanes:\n{}",
         function_body(&lua, "budget_mixed")
+    );
+    // 20 + 16 + 16 + 16 = 68 lanes plus one return lane, and the WIDEST member
+    // is the 20-leaf `nobox` value. Ranking candidates without excluding
+    // `nobox` would box it and stop; the budget must box an `M16` instead.
+    let widest = emitted_params(&lua, "budget_nobox_widest");
+    assert_eq!(
+        widest.len(),
+        20 + 16 + 16 + 1,
+        "the budget boxed the nobox member instead of the widest ORDINARY value:\n{}",
+        function_body(&lua, "budget_nobox_widest")
     );
 }
 
