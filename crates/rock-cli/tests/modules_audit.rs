@@ -120,7 +120,7 @@ fn chesslings_is_not_closed_and_names_every_legacy_package() {
     assert_eq!(v["closed"]["root_is_legacy"], true);
     let mut offending = names(&v["closed"]["offending"]);
     offending.sort();
-    assert_eq!(offending, vec!["chess-game", "chess-render", "chess-sfx", "chesslings", "stone"]);
+    assert_eq!(offending, vec!["chess-game", "chess-render", "chess-sfx", "chesslings", "stone", "stone-core"]);
     // Every offending package carries a reach path from the root.
     for row in v["closed"]["offending"].as_array().unwrap() {
         let paths = row["paths"].as_array().expect("paths");

@@ -315,7 +315,7 @@ fn a_package_that_does_not_check_is_an_analysis_failure() {
 /// into `dest`, keeping the repository layout so manifest paths resolve.
 fn copy_chess_graph(dest: &Path) {
     let root = repo_root();
-    for rel in ["stone", "libs/chess-core", "libs/chess-game", "libs/chess-render", "libs/chess-sfx", "games/chess", "games/chesslings"] {
+    for rel in ["stone", "stone-core", "libs/chess-core", "libs/chess-game", "libs/chess-render", "libs/chess-sfx", "games/chess", "games/chesslings"] {
         copy_sources(&root.join(rel), &dest.join(rel));
     }
 }
