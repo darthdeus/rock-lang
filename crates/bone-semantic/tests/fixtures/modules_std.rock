@@ -179,6 +179,8 @@
 // prelude: __rock_stride_copy
 // prelude: __rock_stride_insert
 // prelude: __rock_stride_sort
+// prelude: __rock_stride_sort_leaves
+// prelude: __rock_strided_column_view
 // prelude: __rock_vec_column_elements
 // prelude: __rock_vec_from_lua_array
 // prelude: __rock_vec_oob
