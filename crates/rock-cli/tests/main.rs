@@ -115,6 +115,8 @@ mod run_exit_status;
 mod shader_pipeline_cli;
 #[path = "shader_validate_gate.rs"]
 mod shader_validate_gate;
+#[path = "shader_modules_v1.rs"]
+mod shader_modules_v1;
 #[path = "stone_test_comptime.rs"]
 mod stone_test_comptime;
 #[path = "stone_test_debounce.rs"]

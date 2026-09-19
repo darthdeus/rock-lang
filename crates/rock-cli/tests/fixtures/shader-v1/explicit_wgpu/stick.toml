@@ -1,0 +1,14 @@
+[package]
+name = "shader_probe"
+version = "0.1.0"
+type = "bin"
+
+[language]
+modules = "v1"
+
+[renderer]
+backend = "wgpu"
+
+[build]
+channels = ["dev"]
+default_channel = "dev"
