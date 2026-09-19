@@ -268,6 +268,117 @@ fn sim_output_dir() -> Result<TempDir> {
     Ok(dir)
 }
 
+/// Optional parent-side preparation timing for the serial worker/differential
+/// lane. The value is a JSONL path; each phase is one self-contained record so
+/// an interrupted nextest process still leaves the completed phases behind.
+/// This is deliberately separate from the child lifecycle log: it measures
+/// work owned by `rock`, not the fresh game process, and is silent by default.
+fn record_sim_compile_phase(
+    operation: &str,
+    phase: &str,
+    project: &Path,
+    output: Option<&Path>,
+    started: std::time::Instant,
+    success: bool,
+) {
+    let Some(path) = std::env::var_os("ROCK_SIM_COMPILE_TIMING")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+    else {
+        return;
+    };
+    let record = serde_json::json!({
+        "schema_version": 1,
+        "event": "sim_compile_timing",
+        "operation": operation,
+        "phase": phase,
+        "project": project.to_string_lossy(),
+        "output": output.map(|path| path.to_string_lossy().into_owned()),
+        "duration_ms": started.elapsed().as_secs_f64() * 1000.0,
+        "success": success,
+        "pid": std::process::id(),
+    });
+    let mut bytes = match serde_json::to_vec(&record) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::warn!(target: "SIM", "cannot serialize compile timing: {error}");
+            return;
+        }
+    };
+    bytes.push(b'\n');
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            log::warn!(target: "SIM", "cannot create compile timing directory {}: {error}", parent.display());
+            return;
+        }
+    }
+    let result = append_sim_compile_timing(&path, &bytes);
+    if let Err(error) = result {
+        log::warn!(target: "SIM", "cannot write compile timing {}: {error}", path.display());
+    }
+}
+
+fn append_sim_compile_timing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let write_result = std::io::Write::write_all(&mut file, bytes);
+        let unlock_result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        if let Err(error) = write_result {
+            return Err(error);
+        }
+        if unlock_result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    std::io::Write::write_all(&mut file, bytes)
+}
+
+fn timed_sim_compile_phase<T>(
+    operation: &str,
+    phase: &str,
+    project: &Path,
+    output: Option<&Path>,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let started = std::time::Instant::now();
+    let result = action();
+    record_sim_compile_phase(
+        operation,
+        phase,
+        project,
+        output,
+        started,
+        result.is_ok(),
+    );
+    result
+}
+
+fn timed_sim_output_dir(operation: &str, project: &Path) -> Result<TempDir> {
+    let started = std::time::Instant::now();
+    let result = sim_output_dir();
+    let output = result.as_ref().ok().map(|dir| dir.path().to_path_buf());
+    record_sim_compile_phase(
+        operation,
+        "output_dir",
+        project,
+        output.as_deref(),
+        started,
+        result.is_ok(),
+    );
+    result
+}
+
 fn sim_spawn_barrier() {
     let Some(gate) = std::env::var_os("ROCK_SIM_SPAWN_BARRIER") else {
         return;
@@ -344,15 +455,29 @@ fn compile_sims_with(
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
     // same build. The returned SkullStone serves mid-sim `reload_edit` ops.
-    crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
+    timed_sim_compile_phase(
+        "compile_sims",
+        "sound_bank",
+        &project_path,
+        Some(&output_path),
+        || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
+    )?;
     match backend {
         crate::Backend::Skull => {
             let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
-            crate::skull_backend::skull_compile_game_and_collect_sims_with_allocation(
-                &project_path.to_string_lossy(),
-                &main_path,
-                allocation_manifest,
-                callee_binding,
+            timed_sim_compile_phase(
+                "compile_sims",
+                "skull_compile_emit",
+                &project_path,
+                Some(&output_path),
+                || {
+                    crate::skull_backend::skull_compile_game_and_collect_sims_with_allocation(
+                        &project_path.to_string_lossy(),
+                        &main_path,
+                        allocation_manifest,
+                        callee_binding,
+                    )
+                },
             )
         }
         other => panic!(
@@ -5135,16 +5260,34 @@ pub fn run_worker_suite(
     entry_specs: &[String],
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
     rock_host::project::ensure_workspace_root()?;
-    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project_arg = Path::new(project);
+    let project_path = timed_sim_compile_phase(
+        "run_worker_suite",
+        "resolve_project",
+        project_arg,
+        None,
+        || rock_host::project::resolve_project_dir(project),
+    )?;
     let project = project_path.to_string_lossy().into_owned();
-    rock_host::engine_build::build_engine_libs(&project)?;
+    timed_sim_compile_phase(
+        "run_worker_suite",
+        "engine_build",
+        &project_path,
+        None,
+        || rock_host::engine_build::build_engine_libs(&project),
+    )?;
 
-    let out_dir = sim_output_dir()?;
+    let out_dir = timed_sim_output_dir("run_worker_suite", &project_path)?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
+    let (_, env_by_wire, _stone) = compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
 
-    let results =
-        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None, None)?;
+    let results = timed_sim_compile_phase(
+        "run_worker_suite",
+        "child_execution",
+        &project_path,
+        Some(Path::new(&output)),
+        || run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None, None),
+    )?;
     Ok(results
         .into_iter()
         .enumerate()
@@ -5174,31 +5317,52 @@ pub fn run_differential(
     plan: &DifferentialPlan,
 ) -> Result<(crate::sim_record::SimRecord, crate::sim_record::SimRecord)> {
     rock_host::project::ensure_workspace_root()?;
-    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project_arg = Path::new(project);
+    let project_path = timed_sim_compile_phase(
+        "run_differential",
+        "resolve_project",
+        project_arg,
+        None,
+        || rock_host::project::resolve_project_dir(project),
+    )?;
     let project = project_path.to_string_lossy().into_owned();
-    rock_host::engine_build::build_engine_libs(&project)?;
+    timed_sim_compile_phase(
+        "run_differential",
+        "engine_build",
+        &project_path,
+        None,
+        || rock_host::engine_build::build_engine_libs(&project),
+    )?;
 
-    let out_dir = sim_output_dir()?;
+    let out_dir = timed_sim_output_dir("run_differential", &project_path)?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
+    let (_, env_by_wire, _stone) = compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
 
-    let isolated = run_entries(
-        &project,
-        &output,
-        &env_by_wire,
-        std::slice::from_ref(&plan.target),
-        Grouping::PerPart,
+    let isolated = timed_sim_compile_phase(
+        "run_differential",
+        "child_execution_isolated",
+        &project_path,
+        Some(Path::new(&output)),
+        || {
+            run_entries(
+                &project,
+                &output,
+                &env_by_wire,
+                std::slice::from_ref(&plan.target),
+                Grouping::PerPart,
+            )
+        },
     )?
     .remove(0);
 
     let mut worker_specs = plan.predecessors.clone();
     worker_specs.push(plan.target.clone());
-    let mut worker = run_entries(
-        &project,
-        &output,
-        &env_by_wire,
-        &worker_specs,
-        Grouping::Shared,
+    let mut worker = timed_sim_compile_phase(
+        "run_differential",
+        "child_execution_worker",
+        &project_path,
+        Some(Path::new(&output)),
+        || run_entries(&project, &output, &env_by_wire, &worker_specs, Grouping::Shared),
     )?;
     let worker = worker.remove(worker.len() - 1);
 
