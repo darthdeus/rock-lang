@@ -1087,7 +1087,7 @@ fn mag_tick_intent_is_overwritten_before_the_live_tick_consumes_it() {
     for filler in [
         "mag_target_intent_fill_from_input(player)",
         "mag_cast_intent_fill_from_input(player)",
-        "mag_movement_intent_fill_from_input()",
+        "mag_movement_intent_fill_from_input(player)",
         "mag_consumable_intent_fill_from_input()",
         "mag_equipment_intent_fill_from_input()",
         "mag_summon_intent_fill_from_input()",
