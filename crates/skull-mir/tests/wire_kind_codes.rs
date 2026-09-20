@@ -96,11 +96,17 @@ fn the_rock_constants_match_the_compilers_codes() {
     }
 }
 
-/// `global <NAME>: int = <n>` in Rock source.
+/// `global <NAME>: int = <n>` or `const <NAME>: int = <n>` in Rock source.
+/// Both spellings declare the same wire code; a memory class makes the choice,
+/// so matching only one makes the negative half of this test vacuous.
 fn rock_global(src: &str, name: &str) -> Option<i64> {
-    let needle = format!("global {name}: int = ");
-    let line = src.lines().find(|l| l.trim_start().starts_with(&needle))?;
-    line.trim().strip_prefix(&needle)?.split_whitespace().next()?.parse().ok()
+    for keyword in ["global", "const"] {
+        let needle = format!("{keyword} {name}: int = ");
+        if let Some(line) = src.lines().find(|l| l.trim_start().starts_with(&needle)) {
+            return line.trim().strip_prefix(&needle)?.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
 }
 
 fn engine_source() -> std::path::PathBuf {
