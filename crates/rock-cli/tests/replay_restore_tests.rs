@@ -1118,32 +1118,22 @@ fn mag_cast_seek_restores_scheduler_owner() {
             ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
             ("MAG_BINDINGS_PATH_OVERRIDE", &bindings_s),
             ("STONE_ASSET_STUB", "1"),
+            ("PERF_MODE", "1"),
+            ("PERF_DT", "0.05"),
             ("STONE_PHYSICAL_KEY_PRESS_AT", "6"),
             ("STONE_PHYSICAL_KEY_RELEASE_AT", "7"),
             ("STONE_PHYSICAL_KEY", "1"),
             ("STONE_PHYSICAL_SCANCODE", "1"),
         ],
     );
-    let mut tick = 0;
     let fixture_text = std::fs::read_to_string(&fixture).expect("current Mag replay fixture");
     assert!(fixture_text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
         "fixture must use the exact-Artifact replay format");
-    let fixture_text = fixture_text
-        .lines()
-        .map(|line| {
-            if !line.starts_with("t ") {
-                return line.to_string();
-            }
-            let mut fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.len(), 10, "tick shape changed: {line}");
-            fields[1] = "0x1.999999999999ap-5";
-            tick += 1;
-            fields.join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(tick, 40, "fixture must rewrite every recorded tick");
-    std::fs::write(&fixture, fixture_text + "\n").expect("write deterministic Mag cast replay");
+    assert_eq!(recorded_tick_lines(&fixture_s), 40, "fixture must record every requested tick");
+    for line in fixture_text.lines().filter(|line| line.starts_with("t ")) {
+        assert_eq!(line.split_whitespace().nth(1), Some("0x1.999999999999ap-5"),
+            "the cast fixture must record its fixed dt instead of rewriting a wall-clock run: {line}");
+    }
 
     let target = 12;
     let common_env = [
