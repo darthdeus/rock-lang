@@ -45,6 +45,9 @@ pub struct PackageNode {
     /// `name = "Mag"` yields `Mag`, never an invented `mag`.
     pub self_name: String,
     pub dialect: Dialect,
+    /// The package's declared memory class (`[language] memory`), which every
+    /// file it owns inherits as the default for an unannotated `global`.
+    pub memory_class: rock_core::source_code::MemoryClass,
     /// Channel-filtered edges, sorted by declared key.
     pub dependencies: Vec<PackageEdge>,
 }
@@ -155,6 +158,7 @@ impl Builder {
             manifest_name: config.package.name.clone(),
             self_name: config.package.name.replace('-', "_"),
             dialect,
+            memory_class: config.memory_class(),
             dependencies,
         });
         Ok(id)

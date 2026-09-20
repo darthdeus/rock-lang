@@ -180,6 +180,7 @@ pub const KNOWN_LINTS: &[&str] = &[
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
+    REDUNDANT_STATE_ANNOTATION,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -2744,6 +2745,14 @@ fn flat_findings_with(
                 .map(Finding::of),
         );
     }
+    if sel.enabled(REDUNDANT_STATE_ANNOTATION) {
+        let found = redundant_state_annotations_in_module(module);
+        out.extend(
+            filter_suppressed_census(found, src, census.as_deref_mut())
+                .iter()
+                .map(Finding::of),
+        );
+    }
     if sel.enabled(RAW_INPUT_MIGRATION) {
         let found = raw_input_sites_in_module(module);
         out.extend(
@@ -4705,4 +4714,68 @@ pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
         }
     }
     out
+}
+
+/// A `global` whose `@state` resolves to exactly what its unit's memory class
+/// already gives it (`docs/state-ownership-plan.md` R2/R3). The line is
+/// harmless -- it emits the same StateImagePlan entry either way -- which is
+/// why this is a `Warning` and not an error: branches in flight still write
+/// the 87-character line by habit and merge it in, and they should get a named
+/// message rather than a broken build.
+#[derive(Clone, Debug)]
+pub struct RedundantStateAnnotation {
+    pub global: Ustr,
+    pub found: bone_core::hir::RedundantStateAnnotation,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(redundant_state_annotation)`.
+pub const REDUNDANT_STATE_ANNOTATION: &str = "redundant_state_annotation";
+
+/// Every `@state` in the module that only repeats its unit's memory class.
+///
+/// This does NOT re-derive the comparison: `lower_state_metadata` makes it,
+/// with the annotation's resolved triple and the unit default both in hand,
+/// and records the verdict on the declaration. A restatement here would be
+/// free to drift and would eventually ask for a deletion the compiler
+/// disagrees with.
+pub fn redundant_state_annotations_in_module(module: &Module) -> Vec<RedundantStateAnnotation> {
+    module
+        .globals
+        .iter()
+        .filter_map(|(_, g)| {
+            g.redundant_state
+                .map(|found| RedundantStateAnnotation { global: g.name, found })
+        })
+        .collect()
+}
+
+impl LintFinding for RedundantStateAnnotation {
+    const LINT: &'static str = REDUNDANT_STATE_ANNOTATION;
+    fn line(&self) -> usize {
+        self.found.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        use bone_core::hir::MemoryClassSite;
+        let class = self.found.class.as_str();
+        let where_ = match self.found.site {
+            MemoryClassSite::Header(_) => {
+                format!("this file's `@memory({class})` header")
+            }
+            MemoryClassSite::Package(pkg) => {
+                format!("package `{pkg}` (`[language] memory` in its stick.toml)")
+            }
+            MemoryClassSite::LanguageDefault => {
+                format!("the `{class}` language default for a file with no package")
+            }
+        };
+        CompilerError::new_with_label(
+            self.found.span,
+            format!(
+                "redundant `@state` on `{}`: it resolves to the `{class}` memory class \
+                 that {where_} already gives every global here; delete the line",
+                self.global
+            ),
+        )
+        .with_level(CompilerErrorLevel::Warning)
+    }
 }

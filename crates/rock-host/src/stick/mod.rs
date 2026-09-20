@@ -10,14 +10,23 @@ pub mod graph;
 /// today's flat compilation behavior; `modules = "v1"` opts the package into
 /// the modules-v1 grammar and scoping rules. Any other value is a load error
 /// rather than a silent legacy fallback.
+///
+/// `memory` declares the package's memory class
+/// (`docs/state-ownership-plan.md` R2): which store an unannotated `global`
+/// belongs to. Absent = `"game"`, today's Session default, so every package
+/// that does not say otherwise is unchanged.
 #[derive(Debug, Clone)]
 pub struct LanguageConfig {
     pub modules: rock_core::source_code::Dialect,
+    pub memory: rock_core::source_code::MemoryClass,
 }
 
 impl Default for LanguageConfig {
     fn default() -> Self {
-        Self { modules: rock_core::source_code::Dialect::Legacy }
+        Self {
+            modules: rock_core::source_code::Dialect::Legacy,
+            memory: rock_core::source_code::MemoryClass::Game,
+        }
     }
 }
 
@@ -27,10 +36,11 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = LanguageConfig;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a table with a modules key (\"legacy\" or \"v1\")")
+                write!(f, "a table with a modules key (\"legacy\" or \"v1\") and/or a memory key")
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LanguageConfig, A::Error> {
                 let mut modules = rock_core::source_code::Dialect::Legacy;
+                let mut memory = rock_core::source_code::MemoryClass::Game;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "modules" => {
@@ -45,14 +55,23 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                                 }
                             };
                         }
+                        "memory" => {
+                            let value = map.next_value::<String>()?;
+                            memory = rock_core::source_code::MemoryClass::parse(&value).ok_or_else(|| {
+                                serde::de::Error::custom(format!(
+                                    "unknown memory class `{value}` in `[language] memory`; known values: {}",
+                                    rock_core::source_code::MemoryClass::NAMES.join(", ")
+                                ))
+                            })?;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [language]; known keys: modules"
+                                "unknown key `{other}` in [language]; known keys: modules, memory"
                             )));
                         }
                     }
                 }
-                Ok(LanguageConfig { modules })
+                Ok(LanguageConfig { modules, memory })
             }
         }
         d.deserialize_map(Vis)
@@ -92,6 +111,15 @@ pub struct StickConfig {
 }
 
 impl StickConfig {
+    /// This package's declared memory class. Missing `[language]` is `game`,
+    /// which is today's behavior for every unannotated global.
+    pub fn memory_class(&self) -> rock_core::source_code::MemoryClass {
+        self.language
+            .as_ref()
+            .map(|l| l.memory)
+            .unwrap_or(rock_core::source_code::MemoryClass::Game)
+    }
+
     /// This package's source dialect. Missing `[language]` is legacy.
     pub fn dialect(&self) -> rock_core::source_code::Dialect {
         self.language

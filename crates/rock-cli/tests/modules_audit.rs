@@ -120,7 +120,18 @@ fn chesslings_is_not_closed_and_names_every_legacy_package() {
     assert_eq!(v["closed"]["root_is_legacy"], true);
     let mut offending = names(&v["closed"]["offending"]);
     offending.sort();
-    assert_eq!(offending, vec!["chess-game", "chess-render", "chess-sfx", "chesslings", "stone", "stone-core"]);
+    // chess-game is v1 since `c1c607dc5`, so it is reachable but not offending;
+    // chess-core never was. The rest of the graph is still legacy.
+    assert_eq!(offending, vec!["chess-render", "chess-sfx", "chesslings", "stone", "stone-core"]);
+    let reached = v["legacy_boundaries"]["reachable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["package"] == "chess-game")
+        .expect("chess-game is still reached, as v1")
+        .clone();
+    assert_eq!(reached["legacy"], false, "{reached}");
+    assert_eq!(reached["dialect"], "v1", "{reached}");
     // Every offending package carries a reach path from the root.
     for row in v["closed"]["offending"].as_array().unwrap() {
         let paths = row["paths"].as_array().expect("paths");

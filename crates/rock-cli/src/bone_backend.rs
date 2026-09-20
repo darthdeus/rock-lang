@@ -291,6 +291,7 @@ pub(crate) fn aliases_for_session(
             ast.file = ustr::Ustr::from(f.path.as_str());
             ast.dialect = f.dialect;
             ast.package = f.package.clone();
+            ast.memory_class = f.memory_class;
             ast
         })
         .collect();
@@ -311,6 +312,7 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
                 text: source.contents.clone(),
                 dialect: source.dialect,
                 package: source.package.clone(),
+                memory_class: source.memory_class,
             }
         })
         .collect()
@@ -385,6 +387,7 @@ pub(crate) fn parse_user_modules(
                 skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect)
                     .map_err(|e| vec![e])?;
             module.package = f.package.clone();
+            module.memory_class = f.memory_class;
             Ok((module, id))
         })
         .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;

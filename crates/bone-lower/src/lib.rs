@@ -3175,7 +3175,7 @@ pub fn lower_global(
 ) -> Result<(), CompilerError> {
     let name = reg_key;
     let mut body = Body::default();
-    let state_metadata = lower_state_metadata(ctx, a, annotations)?;
+    let (state_metadata, redundant_state) = lower_state_metadata(ctx, a, annotations)?;
 
     let ty = match &g.ty {
         Some(te) => lower_type_expr(ctx, a, &mut body, a.te(te))?,
@@ -3204,6 +3204,7 @@ pub fn lower_global(
         span: g.span,
         is_const: g.is_const,
         state_metadata,
+        redundant_state,
     });
 
     if ctx.module.global_by_name.insert(name, idx).is_some() {
@@ -3221,14 +3222,40 @@ pub fn lower_global(
     Ok(())
 }
 
+/// The default ownership of a `global` that says nothing itself: the file's
+/// `@memory(<class>)` header, else the owning package's `[language] memory`
+/// (`docs/state-ownership-plan.md` R2). `game` is today's behavior, so a
+/// package that declares nothing is unchanged.
+fn metadata_for_memory_class(class: skull_parser::MemoryClass) -> StateMetadata {
+    StateMetadata::for_memory_class(class)
+}
+
+/// The class this file's globals default to, and where it was declared. The
+/// header wins over the package exactly as `lower_state_metadata` resolves it.
+fn memory_class_of(a: &Ast) -> (skull_parser::MemoryClass, bone_core::hir::MemoryClassSite) {
+    use bone_core::hir::MemoryClassSite;
+    match a.memory_header {
+        Some(header) => (header.class, MemoryClassSite::Header(header.span)),
+        None => {
+            let site = match &a.package {
+                Some(tag) => MemoryClassSite::Package(Ustr::from(&tag.self_name)),
+                None => MemoryClassSite::LanguageDefault,
+            };
+            (a.memory_class, site)
+        }
+    }
+}
+
 fn lower_state_metadata(
     ctx: &LowerCtx,
     ast: &Ast,
     annotations: &[skull_parser::Annotation],
-) -> Result<StateMetadata, CompilerError> {
+) -> Result<(StateMetadata, Option<bone_core::hir::RedundantStateAnnotation>), CompilerError> {
+    let (class, site) = memory_class_of(ast);
+    let unit_default = metadata_for_memory_class(class);
     let annotations = lower_annotations_with_ctx(ctx, ast, annotations);
     let Some(annotation) = annotations.iter().find(|annotation| annotation.is_builtin("state")) else {
-        return Ok(StateMetadata::default());
+        return Ok((unit_default, None));
     };
     if annotations
         .iter()
@@ -3308,7 +3335,15 @@ fn lower_state_metadata(
             StateOwnership::Unsupported => StateRealization::Reject,
         };
     }
-    Ok(metadata)
+    // The comparison is made HERE because this is the only place that holds
+    // both the annotation's resolved triple and the unit default it was
+    // measured against; the lint reports what lowering decided.
+    let redundant = (metadata == unit_default).then(|| bone_core::hir::RedundantStateAnnotation {
+        span: annotation.span,
+        class,
+        site,
+    });
+    Ok((metadata, redundant))
 }
 
 fn lower_pattern_value(

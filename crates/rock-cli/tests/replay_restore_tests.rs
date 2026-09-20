@@ -166,6 +166,74 @@ fn mag_panel_draw_plan_is_derived_not_world_image() {
     assert_mag_panel_plan_census(&names);
 }
 
+/// The sfx browser's replay handle is the HOST's, not the simulation's.
+/// `SFX_REPLAY_VOICE` holds a live `Voice` minted by a tool button, so a
+/// WorldImage that captured it would carry a native handle and the desync
+/// hash would compare two allocation counters. Its `SFX_LOG_*` neighbours
+/// are already `host_projection`; testbed boots the engine without a game
+/// that plays anything, so the census reaches the declaration alone.
+#[test]
+fn sfx_browser_replay_voice_is_not_world_image_state() {
+    let names = sim_state_names("testbed", 3);
+    assert!(names.contains("dt"), "the census must reach Stone's own globals: {names:?}");
+    assert!(
+        !names.contains("SFX_REPLAY_VOICE"),
+        "SFX_REPLAY_VOICE is a tool-owned native voice handle, not WorldImage state: {names:?}"
+    );
+    assert!(
+        !names.contains("SFX_LOG_SUPPRESS"),
+        "the sfx log's own state is host projection: {names:?}"
+    );
+}
+
+/// The five Stone globals whose class CHANGES when the package declares
+/// `[language] memory = "platform"` (`docs/state-ownership-plan.md` S3).
+///
+/// Each was an unannotated world member sitting among annotated
+/// `host_projection` neighbours -- the same shape as `SFX_REPLAY_VOICE` in S0,
+/// found by reading the class change out instead of by a later divergence:
+///
+///  - `REBIND_INPUT_CONSUMED` -- one bool among twelve `host_projection`
+///    siblings in `input/rebind.rock`, reset every frame by `ui/mouse.rock`.
+///  - `SCREENSHOT_PENDING` -- the request queue, whose seven neighbours carry
+///    a comment saying they are deliberately host-classified.
+///  - `EXACT_FILE_WATCHES` -- dev-mode watch registrations holding `fn`
+///    callbacks, among 22 `host_projection` neighbours in `debug/watcher.rock`.
+///  - `UI_BAKE_EPOCH` -- the UI bake cache's invalidation epoch, which is only
+///    meaningful against the host-side bake records it is compared with.
+///  - `UI_LAYOUT_OVERFLOW` -- an overflow diagnostic beside the already-host
+///    `UI_TEXT_OVERFLOW_N`.
+#[test]
+fn stones_platform_class_keeps_its_unannotated_host_state_out_of_the_world_image() {
+    let names = sim_state_names("testbed", 3);
+    assert!(names.contains("dt"), "the census must reach Stone's own globals: {names:?}");
+    for name in [
+        "REBIND_INPUT_CONSUMED",
+        "SCREENSHOT_PENDING",
+        "EXACT_FILE_WATCHES",
+        "UI_BAKE_EPOCH",
+        "UI_LAYOUT_OVERFLOW",
+    ] {
+        assert!(
+            !names.contains(name),
+            "{name} is host state Stone's package class owns, not WorldImage state: {names:?}"
+        );
+    }
+}
+
+/// The package class is a DEFAULT, not an override: Stone's explicitly
+/// `session` globals stay in the world image after the declaration.
+#[test]
+fn stones_platform_class_does_not_swallow_its_explicit_session_globals() {
+    let names = sim_state_names("testbed", 3);
+    for name in ["dt", "time", "TIME_SCALE", "WORLD_MODE"] {
+        assert!(
+            names.contains(name),
+            "{name} carries an explicit @state(ownership=session) and must stay WorldImage state: {names:?}"
+        );
+    }
+}
+
 /// `rock frame <game> -n N --dump-state [env]` -> parsed JSON, with NEITHER
 /// --record nor --replay: ordinary play, the mode a shipped build runs in.
 fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::Value {
