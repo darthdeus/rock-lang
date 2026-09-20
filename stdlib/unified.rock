@@ -636,6 +636,78 @@ value SceneBuilder {
     return obj.__ty
 """
 
+// --- weak-keyed caches beside an owner ---------------------------------------
+//
+// A value a struct can rebuild from the state beside it, parked next to the
+// owner instead of inside it. A plain field would be captured with the rest of
+// the object; these entries are captured nowhere.
+//
+// The backing tables live in `_G`, never in a Rock global, and that is the
+// point: a Rock global would be Session state, imaged into every keyframe and
+// mixed into the replay desync hash, which is exactly what a rebuildable value
+// must stay out of. `name` selects one cache's own table and is a constant at
+// each call site, never built at the call.
+//
+// Owner keys are WEAK, so an entry dies with its owner and never keeps one
+// alive. Two consequences the caller owns: a restore that replaces the owner
+// object reads as a MISS, which is the rebuild every accessor here already
+// does; and the stored value must hold no reference back to its owner, or the
+// pair survives for the life of the process.
+//
+// `weak_cache_builds` counts stores, so it is the rebuild witness a test reads.
+// A cache that rebuilds its value in place stores it again to record that.
+// `weak_cache_live` counts entries still held, which is what makes the weak
+// keying observable.
+inline(lua) fn weak_cache_get<K, V>(name: string, owner: K) -> V? = """
+    local caches = _G.__rock_weak_caches
+    if not caches then return nil end
+    local cache = caches[name]
+    if not cache then return nil end
+    return cache[owner]
+"""
+
+inline(lua) fn weak_cache_put<K, V>(name: string, owner: K, value: V) = """
+    local caches = _G.__rock_weak_caches
+    if not caches then
+        caches = {}
+        _G.__rock_weak_caches = caches
+    end
+    local cache = caches[name]
+    if not cache then
+        cache = setmetatable({}, { __mode = "k" })
+        caches[name] = cache
+    end
+    cache[owner] = value
+    local counts = _G.__rock_weak_cache_builds
+    if not counts then
+        counts = {}
+        _G.__rock_weak_cache_builds = counts
+    end
+    counts[name] = (counts[name] or 0) + 1
+"""
+
+inline(lua) fn weak_cache_drop<K>(name: string, owner: K) = """
+    local caches = _G.__rock_weak_caches
+    if not caches then return end
+    local cache = caches[name]
+    if cache then cache[owner] = nil end
+"""
+
+inline(lua) fn weak_cache_builds(name: string) -> int = """
+    local counts = _G.__rock_weak_cache_builds
+    return counts and counts[name] or 0
+"""
+
+inline(lua) fn weak_cache_live(name: string) -> int = """
+    local caches = _G.__rock_weak_caches
+    if not caches then return 0 end
+    local cache = caches[name]
+    if not cache then return 0 end
+    local n = 0
+    for _ in pairs(cache) do n = n + 1 end
+    return n
+"""
+
 // A Rock CodeRef slot or env record is the callable value in skull output.
 // Every generic table-walker (__op_eq, inspect, serialize) must treat it as an
 // opaque callable LEAF, not a data table. The classification itself lives in
