@@ -40,6 +40,34 @@ fn rock_function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 }
 
 #[test]
+fn mag_run_readiness_predicate_has_no_replay_or_upload_side_effects() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    let predicate = rock_function_body(&run, "fn run_ready() -> bool {");
+    for forbidden in ["replay_job_ready", "stone_flush_image_uploads"] {
+        assert!(
+            !predicate.contains(forbidden),
+            "run_ready is a predicate and must not call `{forbidden}`:\n{predicate}"
+        );
+    }
+
+    let transition = rock_function_body(&run, "fn run_admission_try_finish() {");
+    assert_eq!(
+        transition.matches("replay_job_ready(\"admission\", 1,").count(),
+        1,
+        "one admission transition authority must record readiness exactly once per attempt"
+    );
+    assert_eq!(
+        run.matches("replay_job_ready(\"admission\", 1,").count(),
+        1,
+        "admission replay publication must have one production call site"
+    );
+}
+
+#[test]
 fn mag_has_no_aggregate_projection_bridge_names() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -427,7 +455,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "quest_tracker_scroll: float",
         "quest_giver_open_id: string",
         "quest_giver_confirm_id: string",
-        "quest_giver_open_npc: Entity<Npc>?",
+        "quest_giver_open_npc: Entity<Mob>?",
         "menu_open: bool",
         "combat_report_open: bool",
         "combat_report_details: bool",
@@ -536,7 +564,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for method in [
         "fn Player.bandage_heal_left(player)",
         "fn Player.summon_slot_pet(player",
-        "fn Player.summon_slot_pet_in_space(player",
         "fn Player.max_pets(player)",
         "fn Player.summon_label_spans(player",
         "fn Player.party_any_pet(player)",

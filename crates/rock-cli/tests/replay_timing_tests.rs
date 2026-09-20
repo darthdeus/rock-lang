@@ -422,15 +422,11 @@ fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("image-load.replay");
     let log_s = log.to_string_lossy().into_owned();
-    let recorded = record_raw(
-        "bitgun",
-        6,
-        &log_s,
-        &[
-            ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "3"),
-            ("STONE_TEST_IMAGE_LOAD_PATH", "assets/Sprites/error.png"),
-        ],
-    );
+    let image_env = [
+        ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "3"),
+        ("STONE_TEST_IMAGE_LOAD_PATH", "assets/Sprites/error.png"),
+    ];
+    let recorded = record_raw("bitgun", 6, &log_s, &image_env);
     assert!(
         recorded.status.success(),
         "record failed: {}",
@@ -447,7 +443,7 @@ fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
     assert_eq!(rows[0][11], "1", "the row must carry one exact path");
     assert_eq!(decode_hex_string(rows[0][13]), "assets/Sprites/error.png");
 
-    let playback = replay_dump("bitgun", 6, &log_s, &[]);
+    let playback = replay_dump("bitgun", 6, &log_s, &image_env);
     assert_eq!(
         playback["__stone_diag"]["STONE_REPLAY_RECORDED_IMAGE_RESOURCE_COUNT"],
         1,

@@ -19,6 +19,18 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
+fn configure_game_fixture(command: &mut Command, game: &str) {
+    if game != "mag" {
+        return;
+    }
+    let vault = crate::stone_harness::art_vault_env();
+    let overlay = Path::new(&vault.1).join("mag");
+    command
+        .env(vault.0, vault.1)
+        .env("ROCK_ASSET_OVERLAYS", overlay)
+        .env("STONE_ASSET_STUB", "1");
+}
+
 /// Run `rock frame <game> -n N [extra…]` without asserting success; returns
 /// the raw Output so tests can inspect exit status + stderr.
 fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Output {
@@ -28,7 +40,8 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
     let frames_s = frames.to_string();
     let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
     args.extend_from_slice(extra);
-    Command::new(rock_bin)
+    let mut command = Command::new(rock_bin);
+    command
         .args(&args)
         // The default 3s Stone watchdog is too tight for a HEAVY game (mag)
         // under nextest's parallel process load: init + cargo-lock waits can
@@ -37,8 +50,9 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
         // divergence). This was the note-6 flake; the game records fine given
         // wall-clock. 60s absorbs the contention without hiding a real hang.
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
+        .current_dir(workspace_root());
+    configure_game_fixture(&mut command, game);
+    command.output()
         .expect("failed to spawn rock frame")
 }
 
@@ -202,13 +216,16 @@ fn assert_seek_across_checkpoints_clean(game: &str) {
     // render-skipped seek must reach the same SIMULATION state the recording
     // hashed, so no divergence fires.
     let scratch = tempfile::tempdir().expect("scratch");
-    let rep = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command
         .args(["frame", game, "-n", "30", "--replay", &log_s,
                "--output", &scratch.path().to_string_lossy()])
-        .env("STONE_RUN_TO_TICK", "25")
+        .env("STONE_TIMELINE_SEEK_AT_FRAME", "1")
+        .env("STONE_TIMELINE_SEEK_TO_TICK", "25")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
+        .current_dir(workspace_root());
+    configure_game_fixture(&mut command, game);
+    let rep = command.output()
         .expect("spawn seek replay");
     assert!(
         rep.status.success(),

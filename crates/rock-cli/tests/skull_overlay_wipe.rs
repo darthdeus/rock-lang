@@ -1,20 +1,16 @@
-//! A non-stone game command must never load a stale hot-reload overlay.
+//! A full frame compile must remove a stale hot-reload overlay.
 //!
-//! The engine's per-frame hot-reload watcher (`stone/engine/hot_reload.rock`)
-//! runs in every command's frame loop and `dofile`s `tmp/incremental.lua` on
-//! its first appearance. Only `rock stone` wipes that overlay on a full build,
-//! so a stale `incremental.lua` left by a prior stone session used to be loaded
-//! over the fresh `main.lua` by `rock sim`/`run` -- shadowing functions with
-//! pre-edit definitions (e.g. a 1-arg call to a now-2-arg fn -> nil param).
+//! The live engine can `dofile` an `incremental.lua` beside its active
+//! `main.lua`. Every full artifact therefore removes a stale sibling overlay,
+//! even when the command producing it does not itself enable hot reload.
 //!
 //! Fix: every full-`main.lua` writer routes through `write_full_main`, which
 //! wipes the sibling overlay. This guards the `frame` entry end to end.
 //!
-//! Driven through `rock frame` rather than `rock sim`: sim invocations compile
-//! into a private per-invocation directory, so their overlay is a sibling of
-//! THAT `main.lua` and a workspace `tmp/incremental.lua` can never reach them
-//! (`tests/sim_concurrent_invocations.rs`). `frame` still writes the shared
-//! `tmp/`, so it is where this gap remains open and worth guarding.
+//! Driven through `rock frame` rather than `rock sim`, with the production hot
+//! reload gate explicitly enabled. The second frame would therefore load a
+//! surviving overlay and print its marker. A private output keeps parallel
+//! full-lane processes from replacing this test's artifacts while it starts.
 //!
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
@@ -34,16 +30,25 @@ fn repo_root() -> &'static Path {
 #[test]
 fn frame_wipes_stale_overlay() {
     let root = repo_root();
-    let tmp = root.join("tmp");
-    std::fs::create_dir_all(&tmp).expect("mkdir tmp");
-    let overlay = tmp.join("incremental.lua");
+    let output = tempfile::tempdir().expect("frame output");
+    let overlay = output.path().join("incremental.lua");
 
-    // Poison: if the watcher loads it, the print proves the leak; either way a
-    // fresh-main write must remove it first.
+    // Plant a stale sibling that the fresh-main write must remove.
     std::fs::write(&overlay, "print('STALE_OVERLAY_LOADED')\n").expect("plant overlay");
 
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["frame", "-n", "2", "mag"])
+        .arg("--output")
+        .arg(output.path())
+        .env("STONE_SCREENSHOT_PATH", output.path().join("frame.png"))
+        // `frame` normally leaves hot reload disabled. Opt in so this launch
+        // exercises the same overlay loader as `rock stone`: frame one records
+        // main.lua's modtime, frame two loads any surviving incremental.lua.
+        .env("STONE_HOT_RELOAD", "1")
+        // MAG startup can exceed the CLI's interactive five-second watchdog
+        // when the full lane is also running other native GL children. This
+        // gate is about the overlay contents, not cold-start latency.
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(root)
         .output()
         .expect("run rock frame");
@@ -55,12 +60,12 @@ fn frame_wipes_stale_overlay() {
     );
 
     assert!(
-        !combined.contains("STALE_OVERLAY_LOADED"),
-        "stale overlay was loaded by `rock frame` (must be wiped before the run)\n{combined}"
-    );
-    assert!(
         !overlay.exists(),
         "writing a fresh main.lua must wipe the sibling incremental.lua"
+    );
+    assert!(
+        !combined.contains("STALE_OVERLAY_LOADED"),
+        "the hot-reload-capable launch loaded the stale overlay\n{combined}"
     );
     assert!(
         combined.contains("frames executed successfully"),

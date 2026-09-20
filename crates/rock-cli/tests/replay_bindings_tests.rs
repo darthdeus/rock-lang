@@ -1,4 +1,4 @@
-//! Phase 4: a v9 recording carries the normalized binding overlay before its
+//! Phase 4: a recording carries the normalized binding overlay before its
 //! first tick, so replay startup can select it independently of disk state.
 
 use std::path::Path;
@@ -55,6 +55,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     let dir = tempfile::tempdir().expect("record dir");
     let log = dir.path().join("bindings-input.replay");
     let bindings_path = data.join("darth.games").join("mag").join("bindings.json");
+    let settings_path = dir.path().join("settings.json");
     std::fs::create_dir_all(bindings_path.parent().unwrap()).expect("pref directory");
     let recorded = serde_json::json!({
         "version": 1,
@@ -76,6 +77,11 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .env("MAG_BOOT_PLAYING", "1")
         .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
+        .env("MAG_SETTINGS_PATH_OVERRIDE", &settings_path)
+        .env("STONE_PHYSICAL_KEY_PRESS_AT", "3")
+        .env("STONE_PHYSICAL_KEY_RELEASE_AT", "4")
+        .env("STONE_PHYSICAL_KEY", "x")
+        .env("STONE_PHYSICAL_SCANCODE", "x")
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
         .env(vault.0, &vault.1)
@@ -85,17 +91,10 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     assert!(record.status.success(), "record failed: {}", String::from_utf8_lossy(&record.stderr));
 
     let text = std::fs::read_to_string(&log).expect("read replay");
-    let mut ticks = 0;
-    let rewritten = text.lines().map(|line| {
-        if !line.starts_with("t ") { return line.to_string(); }
-        let mut fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields.len(), 10, "v9 tick must have ten fields: {line}");
-        if ticks == 3 { fields[6] = "x"; }
-        ticks += 1;
-        fields.join(" ")
-    }).collect::<Vec<_>>().join("\n") + "\n";
-    assert!(ticks > 3, "rewritten log must have a non-zero tick population");
-    std::fs::write(&log, rewritten).expect("rewrite input tick");
+    assert!(text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "fixture must use the exact-Artifact replay format");
+    let ticks = text.lines().filter(|line| line.starts_with("t ")).count();
+    assert!(ticks > 3, "recorded log must have a non-zero tick population");
 
     let changed = serde_json::json!({
         "version": 1,
@@ -117,6 +116,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .env("MAG_BOOT_PLAYING", "1")
         .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
+        .env("MAG_SETTINGS_PATH_OVERRIDE", &settings_path)
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
         .env(vault.0, &vault.1)
@@ -136,6 +136,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .env("MAG_BOOT_PLAYING", "1")
         .env("MAG_BINDINGS_PATH_OVERRIDE", &bindings_path)
+        .env("MAG_SETTINGS_PATH_OVERRIDE", &settings_path)
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", &data)
         .env(vault.0, &vault.1)
@@ -145,9 +146,9 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     assert!(clean_run.status.success(), "clean replay failed: {}", String::from_utf8_lossy(&clean_run.stderr));
     let clean_state: serde_json::Value = serde_json::from_slice(&clean_run.stdout).expect("clean replay state");
     let changed_spellbook_open =
-        &changed_state["mag"]["spell_panel_open"];
+        &changed_state["mag"]["MAG_RUN_UI"]["spells_open"];
     let clean_spellbook_open =
-        &clean_state["mag"]["spell_panel_open"];
+        &clean_state["mag"]["MAG_RUN_UI"]["spells_open"];
     assert_eq!(changed_spellbook_open, &serde_json::Value::Bool(true),
         "the recorded x binding must open the initially closed spell panel");
     assert_eq!(changed_spellbook_open, clean_spellbook_open,
