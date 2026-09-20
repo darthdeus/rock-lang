@@ -15,6 +15,42 @@ fn rock_sources(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn rock_fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    source
+        .split_once(signature)
+        .and_then(|(_, tail)| tail.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("missing Rock function `{signature}`"))
+}
+
+#[test]
+fn mag_run_readiness_predicate_has_no_replay_or_upload_side_effects() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    let predicate = rock_fn_body(&run, "fn run_ready() -> bool {");
+    for forbidden in ["replay_job_ready", "stone_flush_image_uploads"] {
+        assert!(
+            !predicate.contains(forbidden),
+            "run_ready is a predicate and must not call `{forbidden}`:\n{predicate}"
+        );
+    }
+
+    let transition = rock_fn_body(&run, "fn run_admission_try_finish() {");
+    assert_eq!(
+        transition.matches("replay_job_ready(\"admission\", 1,").count(),
+        1,
+        "one admission transition authority must record readiness exactly once per attempt"
+    );
+    assert_eq!(
+        run.matches("replay_job_ready(\"admission\", 1,").count(),
+        1,
+        "admission replay publication must have one production call site"
+    );
+}
+
 #[test]
 fn mag_has_no_aggregate_projection_bridge_names() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
