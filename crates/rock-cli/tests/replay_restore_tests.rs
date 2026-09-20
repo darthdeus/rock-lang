@@ -985,10 +985,7 @@ fn mag_seek_equivalence_state_names(
         "MENU_LOGO_REFLECTION_LAST_GENERATION",
         "MENU_LOGO_REFLECTION_LAST_SOURCE_HANDLE",
         "MENU_LOGO_REFLECTION_MATERIAL_CALLS",
-        "MENU_LOGO_TEXT_ART",
-        "MENU_LOGO_TEXT_STATE",
         "MENU_LOGO_TEXT_OUTPUT_CALLS",
-        "MENU_OUTPUT_TEXT_ART",
         "MENU_OUTPUT_TEXT_TARGET_RECT",
     ] {
         assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
