@@ -181,6 +181,7 @@ fn create_source_file(
         used_packages,
         package: None,
         dialect,
+        memory_class: rock_core::source_code::MemoryClass::Game,
     })
 }
 

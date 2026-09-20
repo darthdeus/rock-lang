@@ -52,6 +52,7 @@ fn project_files(path: &str) -> Vec<bone_incremental::session::SessionFile> {
                 text: f.contents.clone(),
                 dialect: f.dialect,
                 package: f.package.clone(),
+                memory_class: f.memory_class,
             }
         })
         .collect()

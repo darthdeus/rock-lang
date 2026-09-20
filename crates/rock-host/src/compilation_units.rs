@@ -203,11 +203,16 @@ pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Resul
 pub fn source_facts(
     graph: &crate::stick::graph::PackageGraph,
     path: &Path,
-) -> Option<(rock_core::source_code::PackageTag, rock_core::source_code::Dialect)> {
+) -> Option<(
+    rock_core::source_code::PackageTag,
+    rock_core::source_code::Dialect,
+    rock_core::source_code::MemoryClass,
+)> {
     let node = graph.package(graph.package_of_file(path)?);
     Some((
         rock_core::source_code::PackageTag { id: node.id.0, self_name: node.self_name.clone() },
         node.dialect,
+        node.memory_class,
     ))
 }
 
@@ -273,10 +278,11 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                 );
                 for file in &sources.files {
                     let path = file.borrow().file.to_id_path();
-                    if let Some((package, dialect)) = source_facts(graph, Path::new(&path)) {
+                    if let Some((package, dialect, memory_class)) = source_facts(graph, Path::new(&path)) {
                         let mut f = file.borrow_mut();
                         f.package = Some(package);
                         f.dialect = dialect;
+                        f.memory_class = memory_class;
                     }
                 }
             }

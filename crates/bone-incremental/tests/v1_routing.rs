@@ -8,7 +8,7 @@
 
 use bone_core::modules::NsAliases;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
-use skull_parser::{Dialect, PackageTag};
+use skull_parser::{Dialect, MemoryClass, PackageTag};
 
 fn v1(path: &str, text: &str) -> SessionFile {
     SessionFile {
@@ -16,6 +16,7 @@ fn v1(path: &str, text: &str) -> SessionFile {
         text: text.into(),
         dialect: Dialect::V1,
         package: Some(PackageTag { id: 1, self_name: "livev1".into() }),
+        memory_class: MemoryClass::Game,
     }
 }
 
@@ -266,6 +267,7 @@ fn v1_in(package: u32, name: &str, path: &str, text: &str) -> SessionFile {
         text: text.into(),
         dialect: Dialect::V1,
         package: Some(PackageTag { id: package, self_name: name.into() }),
+        memory_class: MemoryClass::Game,
     }
 }
 
@@ -417,6 +419,7 @@ fn in_package(dialect: Dialect, package: u32, name: &str, path: &str, text: &str
         text: text.into(),
         dialect,
         package: Some(PackageTag { id: package, self_name: name.into() }),
+        memory_class: MemoryClass::Game,
     }
 }
 
@@ -579,7 +582,7 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
     let extra = "mod extra;\n\npub fn more() -> int {\n    super::a::bump(2)\n}\n";
     let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
     session
-        .declare_file_facts("extra.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }))
+        .declare_file_facts("extra.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }), MemoryClass::Game)
         .expect("an unheld file takes declared facts");
     session.update_file("extra.rock", extra).expect("a v1 fragment enters as v1");
 
@@ -594,9 +597,9 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
 #[test]
 fn a_held_file_refuses_different_facts() {
     let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
-    assert!(session.declare_file_facts("a.rock", Dialect::Legacy, None).is_err());
+    assert!(session.declare_file_facts("a.rock", Dialect::Legacy, None, MemoryClass::Game).is_err());
     assert!(session
-        .declare_file_facts("a.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }))
+        .declare_file_facts("a.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }), MemoryClass::Game)
         .is_ok());
 }
 

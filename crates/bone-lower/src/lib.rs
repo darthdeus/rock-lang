@@ -3221,14 +3221,42 @@ pub fn lower_global(
     Ok(())
 }
 
+/// The default ownership of a `global` that says nothing itself: the file's
+/// `@memory(<class>)` header, else the owning package's `[language] memory`
+/// (`docs/state-ownership-plan.md` R2). `game` is today's behavior, so a
+/// package that declares nothing is unchanged.
+fn metadata_for_memory_class(class: skull_parser::MemoryClass) -> StateMetadata {
+    use skull_parser::MemoryClass;
+    let ownership = match class {
+        MemoryClass::Game => StateOwnership::Session,
+        MemoryClass::Platform => StateOwnership::HostProjection,
+        MemoryClass::Debug => StateOwnership::RunnerDiagnostic,
+    };
+    let (world, realization) = match ownership {
+        StateOwnership::Session => (StateWorldPolicy::Include, StateRealization::FreshSession),
+        StateOwnership::HostProjection => (
+            StateWorldPolicy::Exclude,
+            StateRealization::RebuildHostProjection,
+        ),
+        StateOwnership::RunnerDiagnostic => {
+            (StateWorldPolicy::Exclude, StateRealization::RunnerRebind)
+        }
+        StateOwnership::Unsupported => (StateWorldPolicy::Exclude, StateRealization::Reject),
+    };
+    StateMetadata { ownership, world, realization }
+}
+
 fn lower_state_metadata(
     ctx: &LowerCtx,
     ast: &Ast,
     annotations: &[skull_parser::Annotation],
 ) -> Result<StateMetadata, CompilerError> {
+    let unit_default = metadata_for_memory_class(
+        ast.memory_header.map(|h| h.class).unwrap_or(ast.memory_class),
+    );
     let annotations = lower_annotations_with_ctx(ctx, ast, annotations);
     let Some(annotation) = annotations.iter().find(|annotation| annotation.is_builtin("state")) else {
-        return Ok(StateMetadata::default());
+        return Ok(unit_default);
     };
     if annotations
         .iter()
