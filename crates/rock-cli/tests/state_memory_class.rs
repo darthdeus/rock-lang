@@ -125,6 +125,48 @@ fn compile_ok(files: &[(&str, &str)]) -> String {
     compile(files).unwrap_or_else(|err| panic!("fixture must compile:\n{err}"))
 }
 
+/// Compile and keep the compiler's own output. A lint at `Warning` does not
+/// fail the build, so [`compile`]'s error-only capture cannot see one: the
+/// whole point of the level is that the package still builds.
+fn compile_diagnostics(files: &[(&str, &str)]) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_package(dir.path(), files);
+    let out = dir.path().join("out.lua");
+    let result = Command::new(rock_bin())
+        .arg("compile")
+        .arg(dir.path())
+        .arg("--output")
+        .arg(&out)
+        .output()
+        .expect("run rock compile");
+    let mut combined = String::from_utf8_lossy(&result.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&result.stderr));
+    assert!(
+        result.status.success(),
+        "a redundant annotation must stay a WARNING -- other branches merge these \
+         lines in and must get a named message, not a broken build:\n{combined}"
+    );
+    combined
+}
+
+/// Run `rock lint` over a package, selecting exactly `lint`. The rendered
+/// warning carries the MESSAGE; only `rock lint`'s summary names the lint, and
+/// an unknown name rejects -- so this is what proves the name is real,
+/// selectable, and therefore suppressible with an `allow` comment.
+fn lint_output(files: &[(&str, &str)], lint: &str) -> String {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_package(dir.path(), files);
+    let result = Command::new(rock_bin())
+        .arg("lint")
+        .arg(dir.path())
+        .arg(format!("--lints={lint}"))
+        .output()
+        .expect("run rock lint");
+    let mut combined = String::from_utf8_lossy(&result.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&result.stderr));
+    combined
+}
+
 #[test]
 fn an_undeclared_package_still_defaults_every_global_to_game_memory() {
     let lua = compile_ok(&[
@@ -285,5 +327,130 @@ fn a_module_memory_header_must_be_the_files_first_item() {
     assert!(
         err.contains("@memory") && err.contains("first item"),
         "the rejection must say the header comes first, got:\n{err}"
+    );
+}
+
+// -- R3: an `@state` that only repeats its unit's class ----------------------
+//
+// The class model only stays clean if a redundant line is NAMED. Stone's 616
+// deletions were a one-off sweep; every other branch in flight still writes the
+// 87-character line by habit and merges it back in. `redundant_state_annotation`
+// is a default-on Warning for exactly that: visible in any gate that compiles,
+// never an error, and quiet on a declaration that says something the class does
+// not (2 findings tree-wide when it landed).
+
+#[test]
+fn an_at_state_that_only_repeats_the_package_class_is_diagnosed() {
+    let diags = compile_diagnostics(&[
+        ("stick.toml", &stick("memclass-redundant-pkg", Some("platform"))),
+        (
+            "main.rock",
+            "@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)\n\
+             global HANDLE: int = 0\n\
+             fn main() { HANDLE = HANDLE + 1 }\n",
+        ),
+    ]);
+    assert!(
+        diags.contains("redundant `@state`"),
+        "an ordinary compile must SHOW the finding -- that is the gate workers run:\n{diags}"
+    );
+    assert!(
+        diags.contains("HANDLE"),
+        "the finding must name the declaration:\n{diags}"
+    );
+    assert!(
+        diags.contains("platform"),
+        "the finding must name the class that already said it:\n{diags}"
+    );
+    assert!(
+        // `self_name`, with `-` normalized to `_` (spec 4.1) -- the same
+        // spelling every other package-naming diagnostic uses.
+        diags.contains("memclass_redundant_pkg") && diags.contains("stick.toml"),
+        "the finding must say WHERE the class is declared:\n{diags}"
+    );
+
+    let named = lint_output(
+        &[
+            ("stick.toml", &stick("memclass-redundant-pkg", Some("platform"))),
+            (
+                "main.rock",
+                "@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)\n\
+                 global HANDLE: int = 0\n\
+                 fn main() { HANDLE = HANDLE + 1 }\n",
+            ),
+        ],
+        "redundant_state_annotation",
+    );
+    assert!(
+        named.contains("1 redundant_state_annotation"),
+        "the lint must be selectable by name, so it can be allowed and searched:\n{named}"
+    );
+}
+
+#[test]
+fn an_at_state_equal_to_the_game_default_is_diagnosed_too() {
+    let diags = compile_diagnostics(&[
+        ("stick.toml", &stick("memclass-redundant-game", None)),
+        (
+            "main.rock",
+            "@state(ownership=session, world=include, realization=fresh_session)\n\
+             global TICKS: int = 0\n\
+             fn main() { TICKS = TICKS + 1 }\n",
+        ),
+    ]);
+    assert!(
+        diags.contains("redundant `@state`") && diags.contains("TICKS"),
+        "an undeclared package is `game`, so a session/include/fresh_session line \
+         is just as redundant as a platform one:\n{diags}"
+    );
+    assert!(
+        diags.contains("game"),
+        "the finding must name the `game` class:\n{diags}"
+    );
+}
+
+#[test]
+fn an_at_state_that_differs_from_its_unit_class_is_silent() {
+    let diags = compile_diagnostics(&[
+        ("stick.toml", &stick("memclass-differs", Some("platform"))),
+        (
+            "main.rock",
+            "@state(ownership=session)\nglobal TICKS: int = 0\n\
+             @state(ownership=host_projection, world=exclude, realization=font)\n\
+             global ATLAS: int = 0\n\
+             global HANDLE: int = 0\n\
+             fn main() { TICKS = TICKS + 1; ATLAS = ATLAS + 1; HANDLE = HANDLE + 1 }\n",
+        ),
+    ]);
+    assert!(
+        !diags.contains("redundant `@state`"),
+        "`session` in a platform package and a `font` realization both say \
+         something the class cannot; neither is redundant:\n{diags}"
+    );
+}
+
+#[test]
+fn a_module_header_is_what_a_redundant_line_is_measured_against() {
+    let diags = compile_diagnostics(&[
+        ("stick.toml", &stick("memclass-redundant-hdr", Some("platform"))),
+        (
+            "main.rock",
+            "global HANDLE: int = 0\nfn main() { HANDLE = HANDLE + 1; bump() }\n",
+        ),
+        (
+            "sim.rock",
+            "@memory(game)\n\n\
+             @state(ownership=session, world=include, realization=fresh_session)\n\
+             global TICKS: int = 0\n\
+             fn bump() { TICKS = TICKS + 1 }\n",
+        ),
+    ]);
+    assert!(
+        diags.contains("redundant `@state`") && diags.contains("TICKS"),
+        "the file header, not the package key, is this module's class:\n{diags}"
+    );
+    assert!(
+        diags.contains("@memory"),
+        "the finding must point at the header that already said it:\n{diags}"
     );
 }
