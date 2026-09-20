@@ -554,6 +554,21 @@ fn assert_mag_seek_census_owners(sim: &std::collections::HashSet<String>) {
         !sim.contains("player"),
         "Player ownership must remain inside MAG_ACTIVE_WORLD, not a duplicate global"
     );
+    assert!(
+        !sim.contains("MAG_TICK_INTENT"),
+        "the consumed per-frame input record is host projection state, not WorldImage state"
+    );
+    for name in [
+        "MAG_PENDING_CAST_KIND",
+        "MAG_PENDING_TARGET_JUMP",
+        "MAG_PENDING_TARGET_SELECTION",
+        "MAG_PENDING_INVENTORY_COMMAND",
+    ] {
+        assert!(
+            sim.contains(name),
+            "pending semantic input command {name} must remain checkpointed"
+        );
+    }
 }
 
 fn assert_mag_seek_state_matches(

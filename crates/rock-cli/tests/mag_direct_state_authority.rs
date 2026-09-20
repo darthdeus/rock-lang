@@ -1067,3 +1067,56 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "the host must admit the canonical tick exactly once"
     );
 }
+
+#[test]
+fn mag_tick_intent_is_overwritten_before_the_live_tick_consumes_it() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let input = fs::read_to_string(repo.join("mag/input_intent.rock"))
+        .expect("read MAG input adapter source");
+    assert_eq!(
+        input
+            .matches("@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)\nglobal MAG_TICK_INTENT")
+            .count(),
+        1,
+        "the retained per-frame input record must be host projection state"
+    );
+    let adapter = rock_function_body(&input, "fn mag_tick_intent_from_input(");
+    for filler in [
+        "mag_target_intent_fill_from_input(player)",
+        "mag_cast_intent_fill_from_input(player)",
+        "mag_movement_intent_fill_from_input()",
+        "mag_consumable_intent_fill_from_input()",
+        "mag_equipment_intent_fill_from_input()",
+        "mag_summon_intent_fill_from_input()",
+        "mag_inventory_command_fill_from_input()",
+    ] {
+        assert_eq!(
+            adapter.matches(filler).count(),
+            1,
+            "the live input adapter must overwrite lane `{filler}` before returning"
+        );
+    }
+    assert_eq!(
+        adapter.matches("return MAG_TICK_INTENT").count(),
+        1,
+        "the adapter must return the one overwritten record"
+    );
+
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    let tick = rock_function_body(&run, "fn mag_simulation_tick(");
+    assert!(
+        !tick.contains("MAG_TICK_INTENT"),
+        "the canonical tick must consume its argument, not the host input buffer"
+    );
+    let update = rock_function_body(&run, "fn mag_run_update()");
+    let fill = update
+        .find("let tick_intent = mag_tick_intent_from_input(player)")
+        .expect("host input adapter call");
+    let consume = update
+        .find("mag_simulation_tick(world, tick_intent, dt)")
+        .expect("canonical tick call");
+    assert!(fill < consume, "input must be filled before the live tick consumes it");
+}
