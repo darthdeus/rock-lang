@@ -645,8 +645,10 @@ value SceneBuilder {
 // The backing tables live in `_G`, never in a Rock global, and that is the
 // point: a Rock global would be Session state, imaged into every keyframe and
 // mixed into the replay desync hash, which is exactly what a rebuildable value
-// must stay out of. `name` selects one cache's own table and is a constant at
-// each call site, never built at the call.
+// must stay out of. `name` IS the `_G` key of one cache's own table, and it is
+// a constant at each call site, never built at the call -- so a hit is the same
+// two table reads a hand-written shim does. Namespace it with a dot
+// (`mag.blocker_index`), which no identifier-shaped global can collide with.
 //
 // Owner keys are WEAK, so an entry dies with its owner and never keeps one
 // alive. Two consequences the caller owns: a restore that replaces the owner
@@ -659,23 +661,16 @@ value SceneBuilder {
 // `weak_cache_live` counts entries still held, which is what makes the weak
 // keying observable.
 inline(lua) fn weak_cache_get<K, V>(name: string, owner: K) -> V? = """
-    local caches = _G.__rock_weak_caches
-    if not caches then return nil end
-    local cache = caches[name]
+    local cache = _G[name]
     if not cache then return nil end
     return cache[owner]
 """
 
 inline(lua) fn weak_cache_put<K, V>(name: string, owner: K, value: V) = """
-    local caches = _G.__rock_weak_caches
-    if not caches then
-        caches = {}
-        _G.__rock_weak_caches = caches
-    end
-    local cache = caches[name]
+    local cache = _G[name]
     if not cache then
         cache = setmetatable({}, { __mode = "k" })
-        caches[name] = cache
+        _G[name] = cache
     end
     cache[owner] = value
     local counts = _G.__rock_weak_cache_builds
@@ -687,9 +682,7 @@ inline(lua) fn weak_cache_put<K, V>(name: string, owner: K, value: V) = """
 """
 
 inline(lua) fn weak_cache_drop<K>(name: string, owner: K) = """
-    local caches = _G.__rock_weak_caches
-    if not caches then return end
-    local cache = caches[name]
+    local cache = _G[name]
     if cache then cache[owner] = nil end
 """
 
@@ -699,9 +692,7 @@ inline(lua) fn weak_cache_builds(name: string) -> int = """
 """
 
 inline(lua) fn weak_cache_live(name: string) -> int = """
-    local caches = _G.__rock_weak_caches
-    if not caches then return 0 end
-    local cache = caches[name]
+    local cache = _G[name]
     if not cache then return 0 end
     local n = 0
     for _ in pairs(cache) do n = n + 1 end
