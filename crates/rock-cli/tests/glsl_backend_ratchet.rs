@@ -5,9 +5,13 @@
 //! readback regression that silently shrinks coverage goes red. Emitter growth
 //! (A1 fn-emission work) raises the floor.
 //!
-//! No GL context (headless, runner exit 2) FAILS unless `ROCK_ALLOW_NO_GL=1`
-//! acknowledges it: an early `return` here read as PASS in nextest's summary
-//! while enforcing nothing, which is the same swallow the gate exists to catch.
+//! No required GL context (headless, runner exit 2) FAILS unless
+//! `ROCK_ALLOW_NO_GL=1` acknowledges it: an early `return` here read as PASS in
+//! nextest's summary while enforcing nothing, which is the same swallow the
+//! gate exists to catch. macOS is the one platform exception: Apple's desktop
+//! OpenGL framework cannot create the GLES 3 context needed by `300es`, so the
+//! runnable floor there is `330core`; the ES emitter remains covered by its
+//! structural and validator tests.
 //! A missing `stone-glsl-runner` binary is a hard error from `glsl_test_run` --
 //! the gate must not read as green when its executor was never built. The runner is
 //! located as a sibling of the test binary (`target/<profile>/stone-glsl-runner`);
@@ -32,6 +36,10 @@ fn allow_no_gl() -> bool {
     std::env::var("ROCK_ALLOW_NO_GL").as_deref() == Ok("1")
 }
 
+fn profile_is_required(profile: &str) -> bool {
+    !(cfg!(target_os = "macos") && profile == "300es")
+}
+
 #[test]
 fn glsl_runnable_coverage_ratchet() {
     let summary = rock_cli::glsl_test::glsl_test_run(&corpus(), false)
@@ -42,15 +50,20 @@ fn glsl_runnable_coverage_ratchet() {
     // count, indistinguishable from real enforcement. So it fails by default and
     // the escape hatch is explicit: a box that genuinely cannot make a GL context
     // sets ROCK_ALLOW_NO_GL=1 and gets a loud skip line instead.
-    if summary.per_profile.iter().all(|p| !p.gl_available) {
+    if summary
+        .per_profile
+        .iter()
+        .filter(|p| profile_is_required(p.profile))
+        .all(|p| !p.gl_available)
+    {
         assert!(
             allow_no_gl(),
-            "no GL context on any profile, so this ratchet enforced NOTHING. \
+            "no GL context on any required profile, so this ratchet enforced NOTHING. \
              Ensure a display/driver the `stone-glsl-runner` can use, or set \
              ROCK_ALLOW_NO_GL=1 to acknowledge an unenforced run."
         );
         eprintln!(
-            "SKIP glsl_runnable_coverage_ratchet: ROCK_ALLOW_NO_GL=1 and no GL context \
+            "SKIP glsl_runnable_coverage_ratchet: ROCK_ALLOW_NO_GL=1 and no required GL context \
              -- GLSL runnable coverage was NOT enforced"
         );
         return;
@@ -74,6 +87,14 @@ fn glsl_runnable_coverage_ratchet() {
     const FLOOR: usize = 45;
     for p in &summary.per_profile {
         if !p.gl_available {
+            if !profile_is_required(p.profile) {
+                eprintln!(
+                    "UNAVAILABLE profile [{}]: macOS exposes desktop OpenGL, not GLES; \
+                     the runnable floor is enforced by [330core]",
+                    p.profile
+                );
+                continue;
+            }
             // One profile short is still a coverage hole, so it needs the same
             // acknowledgement as the all-profiles case above.
             assert!(
