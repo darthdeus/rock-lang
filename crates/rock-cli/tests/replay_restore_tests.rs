@@ -105,6 +105,92 @@ const MAG_PRESENTATION_WORLD_EXCLUDED: &[&str] = &[
     "WORLD_EQUIPMENT_SURFACES",
 ];
 
+const MAG_S3_PLATFORM_WORLD_EXCLUDED: &[&str] = &[
+    "UI_PANEL_BG",
+    "UI_TEXT",
+    "UI_TEXT_BRIGHT",
+    "UI_TITLE",
+    "UI_TEXT_DIM",
+    "UI_ACCENT",
+    "UI_SELECTED",
+    "PAUSE_DIM",
+    "SKIN_BUTTON_SQUARE",
+    "SKIN_BUTTON_VERT",
+    "SKIN_BUTTON_LITTLE",
+    "SKIN_BUTTON_LONG",
+    "SKIN_BUTTON_ROUND",
+    "SKIN_BUTTON_MEDIUM",
+    "SKIN_MENU_FRAME",
+    "SKIN_POPUP_WINDOW",
+    "SKIN_MAIN_UI_BAR",
+    "SKIN_LOGIN_BAR",
+    "SKIN_BOSS_HP",
+    "SKIN_ROUND_FRAME",
+    "SKIN_EPIC_TITLE",
+    "SKIN_WIN",
+    "SKIN_DEFEAT",
+    "SKIN_HERO_BAR",
+    "SKIN_FLAG_BAR",
+    "SKIN_FLAG_BIG",
+    "SKIN_SCROLL",
+    "SKIN_LOADING_LINE",
+    "SKIN_ICON",
+    "MAG_VISUAL_BANK",
+    "MAG_VISUALS",
+    "MAG_PLAYER_VISUALS",
+    "MAG_CHARACTER_RELIGHT_SURFACES",
+    "MAG_WORLD_VISUAL_ASSETS",
+    "MAG_RESIDENT_VISUALS",
+    "MAG_EDITOR_VISUAL_THUMBNAILS",
+    "MAG_EDITOR_VISUAL_ATLAS",
+    "MAG_RUN_VISUAL_CHARACTERS",
+    "MAG_WALL_ARCHITECTURE",
+    "MAG_WALL_ARCHITECTURE_SURFACES",
+    "tile_architecture_atlas",
+    "MAG_RUN_VISUAL_RESIDENCY_HANDLES",
+    "MAG_RUN_VISUAL_RESIDENCY_CURSOR",
+    "DUNGEON_MATERIAL_STUDY",
+    "DUNGEON_MATERIAL_PBR",
+    "DUNGEON_MATERIAL_ROUGHNESS",
+    "DUNGEON_PROP_ROUGHNESS",
+    "DUNGEON_MATERIAL_AUTHORED",
+    "DUNGEON_MATERIAL_WORN",
+    "DUNGEON_MATERIAL_METALLIC",
+    "DUNGEON_MATERIAL_CHANNELS",
+    "DUNGEON_MATERIAL_CHANNELS_KEY",
+    "DUNGEON_MATERIAL_WALL_CHANNELS",
+    "DUNGEON_MATERIAL_WALL_CHANNELS_KEY",
+    "DUNGEON_FLOOR_REPEAT",
+    "DUNGEON_WALL_REPEAT",
+    "DUNGEON_MATERIAL_MINIFY",
+    "DUNGEON_MATERIAL_GEOMETRIC",
+    "DUNGEON_WALL_FLOOR_MATERIAL",
+    "DUNGEON_WALL_FLOOR_STRIP",
+    "DUNGEON_WALL_FLOOR_STRIP_KEY",
+    "DUNGEON_MATERIAL_NORMAL_STRENGTH",
+    "DUNGEON_MATERIAL_COLOR",
+    "DUNGEON_MATERIAL_NORMAL",
+    "DUNGEON_MATERIAL_REFLECTANCE_KEY",
+    "DUNGEON_MATERIAL_COLOR_KEY",
+    "DUNGEON_MATERIAL_NORMAL_KEY",
+    "DUNGEON_MATERIAL_WALL_COLOR",
+    "DUNGEON_MATERIAL_WALL_NORMAL",
+    "DUNGEON_MATERIAL_WALL_COLOR_KEY",
+    "DUNGEON_MATERIAL_WALL_NORMAL_KEY",
+    "DUNGEON_MATERIAL_RESOURCES_READY",
+    "DUNGEON_MATERIAL_UI",
+    "DUNGEON_MATERIAL_UI_SIZED",
+    "DUNGEON_MATERIAL_RETIRED",
+    "MINIMAP_LEVEL",
+    "MINIMAP_LEVEL_READY",
+    "MINIMAP_WORLD_CARDS",
+    "GAME_MINIMAP_PANEL",
+    "GAME_MINIMAP_PANEL_RECT",
+    "editor_minimap_sized",
+    "editor_world_sized",
+    "editor_world_focus_left",
+];
+
 #[test]
 fn replay_snapshot_oracle_includes_effective_pad_state_only() {
     let names = sim_state_names("bitgun", 3);
@@ -188,6 +274,18 @@ fn mag_presentation_registries_are_not_world_image_state() {
         assert!(
             !names.contains(*name),
             "presentation/resource registry {name} must be explicit world-excluded state: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn mag_s3_presentation_globals_are_not_world_image_state() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag S3 census must examine a nonzero population");
+    for name in MAG_S3_PLATFORM_WORLD_EXCLUDED {
+        assert!(
+            !names.contains(*name),
+            "S3 presentation global {name} was captured in WorldImage: {names:?}"
         );
     }
 }
