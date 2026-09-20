@@ -840,9 +840,84 @@ fn mag_world_presentation_state_has_explicit_owners() {
     let world = fs::read_to_string(repo.join("mag/world_levels.rock")).expect("read world source");
     assert!(world.contains("decals: [WorldMark]"));
     assert!(world.contains("decal_head: int"));
-    assert!(world.contains("drop_particle_seq: int"));
+    let presentation = fs::read_to_string(repo.join("mag/world_presentation.rock"))
+        .expect("read MAG world presentation source");
+    assert!(presentation.contains(
+        "@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)\n\
+         global MAG_WORLD_PRESENTATION: MagWorldPresentation"
+    ));
+
+    let world_state = world
+        .split_once("struct WorldState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read WorldState body");
+    let presentation_state = presentation
+        .split_once("struct MagWorldPresentation {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read MagWorldPresentation body");
+    let presentation_fields = [
+        ("tasks", "presentation_tasks"),
+        ("projectiles", "projectiles"),
+        ("bolts", "bolts"),
+        ("strikes", "strikes"),
+        ("glyphs", "glyphs"),
+        ("fractures", "fractures"),
+        ("embers", "embers"),
+        ("sparks", "sparks"),
+        ("flashes", "flashes"),
+        ("drop_particles", "drop_particles"),
+        ("ritual_acquisition_motes", "ritual_acquisition_motes"),
+        ("greater_heal_release_pulses", "greater_heal_release_pulses"),
+        ("cast_hand_vfx", "cast_hand_vfx"),
+        ("drop_particle_seq", "drop_particle_seq"),
+    ];
+    for (field, former_world_field) in presentation_fields {
+        assert!(
+            !world_state
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{former_world_field}:"))),
+            "presentation field `{former_world_field}` remains in WorldState"
+        );
+        assert_eq!(
+            presentation_state
+                .lines()
+                .filter(|line| line.trim_start().starts_with(&format!("{field}:")))
+                .count(),
+            1,
+            "MagWorldPresentation must own `{field}` exactly once"
+        );
+    }
+
+    let digest = fs::read_to_string(repo.join("mag/simulation_digest.rock"))
+        .expect("read MAG simulation digest");
+    let fields: Vec<_> = world_state
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with("//") || line.is_empty() {
+                return None;
+            }
+            line.split_once(':').map(|(field, _)| field.trim())
+        })
+        .collect();
+    assert_eq!(fields.len(), 14, "WorldState field census changed: {fields:?}");
+    for field in fields {
+        let digested = digest.contains(&format!("world.{field}"));
+        let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
+        assert!(
+            digested || excluded,
+            "WorldState field `{field}` is neither digested nor explicitly excluded"
+        );
+        assert!(
+            !(digested && excluded),
+            "WorldState field `{field}` is both digested and explicitly excluded"
+        );
+    }
+
     let blood = fs::read_to_string(repo.join("mag/blood.rock")).expect("read blood source");
     assert!(blood.contains("world_space_index(world, space)"));
     assert!(blood.contains("world.spaces[index].decals"));
-    assert!(blood.contains("world.drop_particle_seq"));
+    assert!(blood.contains("presentation.drop_particle_seq"));
 }
