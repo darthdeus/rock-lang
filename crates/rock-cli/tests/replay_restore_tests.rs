@@ -166,6 +166,26 @@ fn mag_panel_draw_plan_is_derived_not_world_image() {
     assert_mag_panel_plan_census(&names);
 }
 
+/// The sfx browser's replay handle is the HOST's, not the simulation's.
+/// `SFX_REPLAY_VOICE` holds a live `Voice` minted by a tool button, so a
+/// WorldImage that captured it would carry a native handle and the desync
+/// hash would compare two allocation counters. Its `SFX_LOG_*` neighbours
+/// are already `host_projection`; testbed boots the engine without a game
+/// that plays anything, so the census reaches the declaration alone.
+#[test]
+fn sfx_browser_replay_voice_is_not_world_image_state() {
+    let names = sim_state_names("testbed", 3);
+    assert!(names.contains("dt"), "the census must reach Stone's own globals: {names:?}");
+    assert!(
+        !names.contains("SFX_REPLAY_VOICE"),
+        "SFX_REPLAY_VOICE is a tool-owned native voice handle, not WorldImage state: {names:?}"
+    );
+    assert!(
+        !names.contains("SFX_LOG_SUPPRESS"),
+        "the sfx log's own state is host projection: {names:?}"
+    );
+}
+
 /// `rock frame <game> -n N --dump-state [env]` -> parsed JSON, with NEITHER
 /// --record nor --replay: ordinary play, the mode a shipped build runs in.
 fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::Value {
