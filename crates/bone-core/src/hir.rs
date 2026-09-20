@@ -1104,6 +1104,26 @@ pub struct StructDef {
     pub span: Span,
     pub generics: Vec<TyId>,
     pub fields: Vec<StructFieldDef>,
+    /// `@host_resource` -- see [`HostResource`].
+    pub host_resource: Option<HostResource>,
+}
+
+/// A type declared `@host_resource`: it NAMES something the host owns rather
+/// than holding the thing itself, so its value is meaningless to a process
+/// that did not mint it.
+///
+/// One declaration, on the type, with two consumers that used to keep their
+/// own lists: the `host_resource_in_game_memory` lint, which rejects such a
+/// type reachable from a `game`-memory global
+/// (`docs/state-ownership-plan.md` R4), and
+/// `__stone_host_projection_class`, which reads `ledger_class` back out of
+/// `__ROCK_TYPE_TABLE` at runtime.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct HostResource {
+    /// The native ledger class (`stone-rs`'s `native_ledger`) whose registry
+    /// can be asked whether one of these handles is still live, or empty for
+    /// a host resource the ledger does not track.
+    pub ledger_class: Ustr,
 }
 
 #[derive(Clone, Debug)]
@@ -1138,6 +1158,8 @@ pub struct EnumDef {
     pub span: Span,
     pub generics: Vec<TyId>,
     pub variants: Vec<EnumVariantDef>,
+    /// `@host_resource` -- see [`HostResource`].
+    pub host_resource: Option<HostResource>,
 }
 
 #[derive(Clone, Debug)]

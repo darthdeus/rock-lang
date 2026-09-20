@@ -2196,6 +2196,26 @@ fn reuse_body(
     }
 }
 
+/// `@host_resource` / `@host_resource(<class>)` on a nominal type declaration.
+///
+/// Read here, at forward-declaration time, because the flag is a property of
+/// the DECLARATION and every consumer (the memory-class check, the type-table
+/// emission) wants it from the definition rather than from a use site.
+/// Argument shape is validated by the annotation registry; this reads what it
+/// admitted and falls back to the classless form.
+fn host_resource_of(
+    a: &Ast,
+    annotations: &[skull_parser::Annotation],
+) -> Option<hir::HostResource> {
+    let lowered = bone_lower::lower_annotations(a, annotations);
+    let anno = lowered.iter().find(|anno| anno.is_builtin("host_resource"))?;
+    let ledger_class = match anno.args.first().map(|arg| &arg.value) {
+        Some(bone_core::hir::AnnoValue::Ident(class)) => class.name,
+        _ => ustr::Ustr::from(""),
+    };
+    Some(hir::HostResource { ledger_class })
+}
+
 pub fn pass_register_forward_decls(
     rock_module: &Ast,
     module: &mut Module,
@@ -2237,6 +2257,7 @@ pub fn pass_register_forward_decls(
                 span: item.span,
                 generics: Vec::new(),
                 fields: Vec::new(),
+                host_resource: host_resource_of(rock_module, &item.annotations),
             });
 
             if module
@@ -2254,6 +2275,7 @@ pub fn pass_register_forward_decls(
                 span: item.span,
                 generics: Vec::new(),
                 variants: Vec::new(),
+                host_resource: host_resource_of(rock_module, &item.annotations),
             });
 
             if module.enums_by_name.insert(reg_name, idx).is_some() {
@@ -2272,6 +2294,7 @@ pub fn pass_register_forward_decls(
                 span: item.span,
                 generics: Vec::new(),
                 wrapped,
+                host_resource: host_resource_of(rock_module, &item.annotations),
             });
 
             if module.newtypes_by_name.insert(reg_name, idx).is_some() {

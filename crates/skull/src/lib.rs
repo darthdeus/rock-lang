@@ -1905,6 +1905,23 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 /// message, an FFI tag. If that day comes, derive the number from a sorted,
 /// order-independent key the way `StateSchema` already does with
 /// `(kind, identity)`, rather than from module order.
+/// The `host_resource` key of a type-table entry, or nothing.
+///
+/// `@host_resource(<class>)` on the declaration is the ONE place a type is
+/// named a host resource; `__stone_host_projection_class`
+/// (`stone/engine/host_projection.rock`) reads this key instead of keeping its
+/// own list of type names, which is what stops the two drifting and reporting
+/// every handle of a forgotten type as a missing one. A host resource the
+/// native ledger does not track publishes the empty class, which reads as
+/// "ordinary state" to the projection walk while still being a compile error
+/// in game memory.
+fn host_resource_key(hr: Option<bone_semantic::hir::HostResource>) -> String {
+    match hr {
+        Some(hr) => format!(", host_resource = \"{}\"", hr.ledger_class),
+        None => String::new(),
+    }
+}
+
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
@@ -1966,19 +1983,21 @@ fn type_table_defs(
                 ));
             }
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}, fields = {{ {f} }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}{hr}, fields = {{ {f} }} }}\n",
                 n = type_symbol(s.name),
                 k = kind,
                 id = type_id,
+                hr = host_resource_key(s.host_resource),
                 f = fields.join(", ")
             ));
             type_id += 1;
         }
         for (_, nt) in module.newtypes.iter() {
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}, fields = {{ }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}{hr}, fields = {{ }} }}\n",
                 n = type_symbol(nt.name),
-                id = type_id
+                id = type_id,
+                hr = host_resource_key(nt.host_resource)
             ));
             type_id += 1;
         }

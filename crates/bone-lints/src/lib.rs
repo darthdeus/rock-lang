@@ -181,6 +181,7 @@ pub const KNOWN_LINTS: &[&str] = &[
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
     REDUNDANT_STATE_ANNOTATION,
+    HOST_RESOURCE_IN_GAME_MEMORY,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -2753,6 +2754,14 @@ fn flat_findings_with(
                 .map(Finding::of),
         );
     }
+    if sel.enabled(HOST_RESOURCE_IN_GAME_MEMORY) {
+        let found = host_resources_in_game_memory_in_module(ws, module);
+        out.extend(
+            filter_suppressed_census(found, src, census.as_deref_mut())
+                .iter()
+                .map(Finding::of),
+        );
+    }
     if sel.enabled(RAW_INPUT_MIGRATION) {
         let found = raw_input_sites_in_module(module);
         out.extend(
@@ -4774,6 +4783,238 @@ impl LintFinding for RedundantStateAnnotation {
                 "redundant `@state` on `{}`: it resolves to the `{class}` memory class \
                  that {where_} already gives every global here; delete the line",
                 self.global
+            ),
+        )
+        .with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+/// A `game`-memory global whose declared type is, or structurally contains, a
+/// type declared `@host_resource` (`docs/state-ownership-plan.md` R4).
+///
+/// A host resource is a NAME for something the host owns. Game memory is
+/// captured into a WorldImage, hashed into the replay desync digest, and
+/// handed across a sim-worker boundary -- three things that all assume the
+/// value means the same to whoever reads it next. A handle does not: the id is
+/// a process-local allocation counter, so two identical runs are free to
+/// disagree on it, and a restore hands back a name for something that is gone.
+/// Every instance of this found so far (`SFX_REPLAY_VOICE`, and the five the
+/// `platform` class caught) was a live defect found by divergence rather than
+/// by a check.
+///
+/// **Level: `Warning`, and that is a measurement, not a preference.** Run
+/// over every project in the tree with the seven Stone handle newtypes
+/// annotated, this finds 251 declarations in 15 projects (MAG 105, testbed 43,
+/// wgpu_renderer 39, bitgun 22, ...), so an `Error` would stop every build in
+/// the repository on day one. Most are presentation caches -- a loaded
+/// `Image`, a `Canvas` -- whose real fix is a per-declaration marker or a
+/// `@memory(platform)` header on a whole presentation file, and a few sit
+/// inside real simulation records where the fix is a game-side id. The census
+/// is the deliverable; `docs/state-ownership-plan.md` S2 carries the list and
+/// the author decides the order. Raising the level is a one-line change once
+/// the population is worked down.
+#[derive(Clone, Debug)]
+pub struct HostResourceInGameMemory {
+    pub global: Ustr,
+    pub span: Span,
+    /// The `@host_resource` type reached.
+    pub host_type: Ustr,
+    /// How it is reached from the global's declared type, outermost first.
+    /// One element means the global's own type is the host resource.
+    pub path: Vec<String>,
+}
+
+/// Canonical lint name for suppression:
+/// `// rock: allow(host_resource_in_game_memory)`.
+pub const HOST_RESOURCE_IN_GAME_MEMORY: &str = "host_resource_in_game_memory";
+
+/// Every `game`-memory global in the module that can reach a `@host_resource`
+/// type through its declared type.
+///
+/// Scope is GLOBALS. A handle in a function local, a parameter or a coroutine
+/// frame is out of this arc; a global is what the StateImagePlan is built from,
+/// and a field reachable from a global (a `WorldState` field, say) is covered
+/// here by the transitive walk rather than by a separate rule.
+///
+/// `const` is exempt because a `const` never enters the StateSchema
+/// (`crates/skull-mir/src/state_schema.rs`, `!g.is_const`), and `platform` /
+/// `debug` are exempt because neither is captured or hashed -- which is
+/// exactly what the two ways out offer.
+pub fn host_resources_in_game_memory_in_module(
+    ws: &Workspace,
+    module: &Module,
+) -> Vec<HostResourceInGameMemory> {
+    let mut out = Vec::new();
+    for (_, g) in module.globals.iter() {
+        if g.is_const || g.state_metadata.ownership != bone_core::hir::StateOwnership::Session {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut seen = FxHashSet::default();
+        if let Some(host_type) = reach_host_resource(ws, g.ty, &mut seen, &mut path) {
+            out.push(HostResourceInGameMemory {
+                global: g.name,
+                span: g.name_span,
+                host_type,
+                path,
+            });
+        }
+    }
+    out
+}
+
+/// The `@host_resource` declaration on a nominal type, whichever of the three
+/// kinds it is.
+fn nominal_host_resource(ws: &Workspace, name: Ustr) -> Option<bone_core::hir::HostResource> {
+    if let Some(id) = ws.struct_by_name.get(&name) {
+        return ws.module(id.module).structs[id.def].host_resource;
+    }
+    if let Some(id) = ws.newtypes_by_name.get(&name) {
+        return ws.module(id.module).newtypes[id.def].host_resource;
+    }
+    if let Some(id) = ws.enums_by_name.get(&name) {
+        return ws.module(id.module).enums[id.def].host_resource;
+    }
+    None
+}
+
+/// Depth-first search for a `@host_resource` type reachable from `ty`,
+/// recording the path as it goes.
+///
+/// `seen` holds the nominal names whose DEFINITIONS are already on the stack,
+/// which is what makes a recursive struct terminate; the same name reached
+/// again under different generic arguments is not re-expanded, because the
+/// question asked here is about declared types and a nominal's fields are the
+/// same fields either way.
+///
+/// A function type is not descended into: its type says nothing about what a
+/// capturing lambda closed over, so a claim either way would be made up. See
+/// `docs/state-ownership-plan.md` S2 for what covering that would need.
+fn reach_host_resource(
+    ws: &Workspace,
+    ty: TyId,
+    seen: &mut FxHashSet<Ustr>,
+    path: &mut Vec<String>,
+) -> Option<Ustr> {
+    let te = match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        // A declared global's type and a struct field's type are both lowered
+        // into their module's arena; a body-local type cannot be reached from
+        // here, and guessing at one without its BodyInference would be wrong.
+        TyId::Local(_) => return None,
+    };
+    match te {
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
+        TypeExpr::Function { .. } => None,
+        TypeExpr::Nullable(inner) => reach_host_resource(ws, ty.with_idx(inner), seen, path),
+        TypeExpr::Tuple { elements } => elements
+            .into_iter()
+            .find_map(|e| reach_host_resource(ws, ty.with_idx(e), seen, path)),
+        TypeExpr::App { ctor, params } => {
+            if let TypeCtor::Nominal(name) = ctor {
+                if nominal_host_resource(ws, name).is_some() {
+                    path.push(name.to_string());
+                    return Some(name);
+                }
+            }
+            // Element, key and value types of a container, and every generic
+            // argument of a nominal, are reached through the same list.
+            for p in params {
+                if let Some(hit) = reach_host_resource(ws, ty.with_idx(p), seen, path) {
+                    if let TypeCtor::Nominal(name) = ctor {
+                        path.insert(0, format!("{name}<..>"));
+                    } else {
+                        path.insert(0, ws.render(None, ty));
+                    }
+                    return Some(hit);
+                }
+            }
+            let TypeCtor::Nominal(name) = ctor else { return None };
+            if !seen.insert(name) {
+                return None;
+            }
+            let hit = reach_nominal_body(ws, name, seen, path);
+            seen.remove(&name);
+            hit
+        }
+    }
+}
+
+/// The declaration side of [`reach_host_resource`]: a struct's fields, an
+/// enum's variant payloads, a newtype's wrapped type.
+fn reach_nominal_body(
+    ws: &Workspace,
+    name: Ustr,
+    seen: &mut FxHashSet<Ustr>,
+    path: &mut Vec<String>,
+) -> Option<Ustr> {
+    if let Some(id) = ws.struct_by_name.get(&name).copied() {
+        let def = &ws.module(id.module).structs[id.def];
+        for field in &def.fields {
+            if let Some(hit) = reach_host_resource(ws, field.ty, seen, path) {
+                path.insert(0, format!("{}.{}", short_name(name), field.name));
+                return Some(hit);
+            }
+        }
+        return None;
+    }
+    if let Some(id) = ws.newtypes_by_name.get(&name).copied() {
+        let wrapped = ws.module(id.module).newtypes[id.def].wrapped;
+        if let Some(hit) = reach_host_resource(ws, wrapped, seen, path) {
+            path.insert(0, format!("{}(..)", short_name(name)));
+            return Some(hit);
+        }
+        return None;
+    }
+    let id = ws.enums_by_name.get(&name).copied()?;
+    let def = &ws.module(id.module).enums[id.def];
+    for variant in &def.variants {
+        let hit = match &variant.payload {
+            bone_core::hir::VariantPayload::Unit => None,
+            bone_core::hir::VariantPayload::Tuple(tys) => tys
+                .iter()
+                .find_map(|&t| reach_host_resource(ws, t, seen, path)),
+            bone_core::hir::VariantPayload::Record(fields) => fields
+                .iter()
+                .find_map(|f| reach_host_resource(ws, f.ty, seen, path)),
+        };
+        if let Some(hit) = hit {
+            path.insert(0, format!("{}::{}", short_name(name), variant.name));
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// A modules-v1 definition is registered under its DefKey, which is a path. A
+/// diagnostic wants the bare name the author wrote.
+fn short_name(name: Ustr) -> String {
+    name.as_str().rsplit("::").next().unwrap_or(name.as_str()).to_string()
+}
+
+impl LintFinding for HostResourceInGameMemory {
+    const LINT: &'static str = HOST_RESOURCE_IN_GAME_MEMORY;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let through = if self.path.len() > 1 {
+            format!(" through `{}`", self.path.join(" -> "))
+        } else {
+            String::new()
+        };
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "`{}` is game memory and reaches the host resource `{}`{}; game memory is \
+                 captured, hashed and handed across a worker boundary, none of which a \
+                 host handle survives. Move it to platform memory \
+                 (`@state(ownership=host_projection, world=exclude, \
+                 realization=rebuild_host_projection)`, or an `@memory(platform)` file \
+                 header), or store a game-side id and look the handle up from it.",
+                self.global,
+                short_name(self.host_type),
+                through
             ),
         )
         .with_level(CompilerErrorLevel::Warning)

@@ -143,7 +143,7 @@ fn compile_diagnostics(files: &[(&str, &str)]) -> String {
     combined.push_str(&String::from_utf8_lossy(&result.stderr));
     assert!(
         result.status.success(),
-        "a redundant annotation must stay a WARNING -- other branches merge these \
+        "a Warning-level finding must not fail the build -- other branches merge these \
          lines in and must get a named message, not a broken build:\n{combined}"
     );
     combined
@@ -452,5 +452,113 @@ fn a_module_header_is_what_a_redundant_line_is_measured_against() {
     assert!(
         diags.contains("@memory"),
         "the finding must point at the header that already said it:\n{diags}"
+    );
+}
+
+/// The R4 half of the class: a `game`-memory global that can reach a
+/// `@host_resource` type FAILS THE BUILD, and the two documented ways out --
+/// declaring the package `platform`, or an explicit `@state` on the
+/// declaration -- both accept the identical source.
+///
+/// This goes through the real `rock` binary rather than the lint API, because
+/// the claim is "the build stops", and only a build can make that claim.
+const HANDLE_SOURCE: &str = "@host_resource(voice)\nnewtype Voice(int)\n\
+                             struct SfxSlot {\n    voice: Voice,\n    gain: float\n}\n";
+
+#[test]
+fn a_host_handle_reachable_from_game_memory_is_diagnosed_with_its_path() {
+    let diagnostics = compile_diagnostics(&[
+        ("stick.toml", &stick("memclass-handle", None)),
+        (
+            "main.rock",
+            &format!(
+                "{HANDLE_SOURCE}global SFX_SLOTS: [SfxSlot] = []\n\
+                 fn main() {{ print(\"{{SFX_SLOTS.len()}}\") }}\n"
+            ),
+        ),
+    ]);
+    assert!(
+        diagnostics.contains("SFX_SLOTS") && diagnostics.contains("Voice"),
+        "the finding must name the global and the host type:\n{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("SfxSlot.voice"),
+        "the finding must name the path it was reached through -- a bare \
+         \"somewhere in here\" is not actionable:\n{diagnostics}"
+    );
+}
+
+#[test]
+fn a_platform_package_accepts_the_same_host_handle_declaration() {
+    let lua = compile_ok(&[
+        ("stick.toml", &stick("memclass-handle-platform", Some("platform"))),
+        (
+            "main.rock",
+            &format!(
+                "{HANDLE_SOURCE}global SFX_SLOTS: [SfxSlot] = []\n\
+                 fn main() {{ print(\"{{SFX_SLOTS.len()}}\") }}\n"
+            ),
+        ),
+    ]);
+    assert_eq!(plan_entry(&lua, "SFX_SLOTS"), platform());
+}
+
+#[test]
+fn an_explicit_host_projection_state_line_accepts_one_declaration() {
+    let lua = compile_ok(&[
+        ("stick.toml", &stick("memclass-handle-marked", None)),
+        (
+            "main.rock",
+            &format!(
+                "{HANDLE_SOURCE}@state(ownership=host_projection, world=exclude, \
+                 realization=rebuild_host_projection)\n\
+                 global SFX_SLOTS: [SfxSlot] = []\n\
+                 fn main() {{ print(\"{{SFX_SLOTS.len()}}\") }}\n"
+            ),
+        ),
+    ]);
+    assert_eq!(plan_entry(&lua, "SFX_SLOTS"), platform());
+}
+
+#[test]
+fn a_const_of_a_host_handle_type_is_outside_the_state_system_and_accepted() {
+    let lua = compile_ok(&[
+        ("stick.toml", &stick("memclass-handle-const", None)),
+        (
+            "main.rock",
+            &format!(
+                "{HANDLE_SOURCE}const NO_SLOT: SfxSlot = SfxSlot {{ voice: Voice(0), gain: 0.0 }}\n\
+                 fn main() {{ print(\"{{NO_SLOT.gain}}\") }}\n"
+            ),
+        ),
+    ]);
+    assert!(
+        !lua.lines()
+            .find(|line| line.starts_with("_G.__ROCK_STATE_IMAGE_PLAN = {"))
+            .expect("plan")
+            .contains("::NO_SLOT\""),
+        "a const never enters the StateImagePlan, so the check has nothing to say about it"
+    );
+}
+
+#[test]
+fn the_host_resource_rejection_is_selectable_and_therefore_suppressible_by_name() {
+    let files = [
+        ("stick.toml", stick("memclass-handle-named", None)),
+        (
+            "main.rock",
+            format!(
+                "{HANDLE_SOURCE}global SFX_SLOTS: [SfxSlot] = []\n\
+                 fn main() {{ print(\"{{SFX_SLOTS.len()}}\") }}\n"
+            ),
+        ),
+    ];
+    let borrowed: Vec<(&str, &str)> =
+        files.iter().map(|(n, c)| (*n, c.as_str())).collect();
+    let named = lint_output(&borrowed, "host_resource_in_game_memory");
+    assert!(
+        named.contains("host_resource_in_game_memory"),
+        "`rock lint --lints=<name>` rejects an unknown name, so this run proves the \
+         name is real and an `allow` comment can carry it:\n{named}"
     );
 }

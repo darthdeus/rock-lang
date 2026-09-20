@@ -180,6 +180,31 @@ fn validate_one(
             at(anno, pos, AnnoPos::StructItem)?;
             no_args(anno)
         }
+        // `@host_resource` marks a TYPE as a name for something the host owns:
+        // a GL object, a canvas, a shader, a mesh upload, a playing voice, an
+        // FFI pointer. One declaration, on the type, is what makes both
+        // consumers agree -- the compile-time rejection of such a type in game
+        // memory (`docs/state-ownership-plan.md` R4) and the runtime
+        // host-projection classification, which reads the flag out of
+        // `__ROCK_TYPE_TABLE` instead of keeping its own list of names.
+        //
+        // The optional bare identifier is the NATIVE LEDGER class
+        // (`stone-rs`'s `native_ledger`), for the types the ledger tracks. A
+        // host resource the ledger does not track -- an FFI pointer, a
+        // `NativeBuffer` -- carries the annotation with no class: the compile
+        // check still applies, and the runtime has nothing to ask about it.
+        "host_resource" => {
+            at_type_item(anno, pos)?;
+            match &anno.args[..] {
+                [] => Ok(()),
+                [a] if a.name.is_none() && matches!(a.value, AnnoValue::Ident(_)) => Ok(()),
+                _ => comp_error!(
+                    anno.span,
+                    "`@host_resource` takes nothing, or one bare native ledger class: \
+                     @host_resource(voice)"
+                ),
+            }
+        }
         "size" => {
             at(anno, pos, AnnoPos::Param)?;
             let ok = anno.args.len() == 1
@@ -351,6 +376,21 @@ pub fn validate_param_repr_against_body(
         }
     }
     Ok(())
+}
+
+/// An annotation that decorates any NOMINAL TYPE declaration. Separate from
+/// [`at`] because that one names a single position in its message, and
+/// "applies to a struct" would be wrong for three.
+fn at_type_item(anno: &Annotation, pos: AnnoPos) -> Result<(), CompilerError> {
+    match pos {
+        AnnoPos::StructItem | AnnoPos::EnumItem | AnnoPos::NewtypeItem => Ok(()),
+        _ => comp_error!(
+            anno.span,
+            "annotation `@{}` is not allowed on {} -- it applies to a struct, an enum or a newtype",
+            anno.name.name,
+            pos.describe()
+        ),
+    }
 }
 
 fn at(anno: &Annotation, pos: AnnoPos, allowed: AnnoPos) -> Result<(), CompilerError> {
