@@ -245,6 +245,48 @@ fn sfx_browser_replay_voice_is_not_world_image_state() {
     );
 }
 
+#[test]
+fn skin_gallery_seed_is_platform_state_outside_world_image() {
+    let names = sim_state_names("testbed", 3);
+    assert!(names.contains("dt"), "the census must reach Stone's own globals: {names:?}");
+    assert!(
+        !names.contains("SKIN_GALLERY_SEED"),
+        "the seeded gallery map must not be WorldImage state: {names:?}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("testbed.lua");
+    let compiled = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["compile", "games/testbed", "--output", &output.to_string_lossy()])
+        .current_dir(workspace_root())
+        .output()
+        .expect("compile testbed");
+    assert!(
+        compiled.status.success(),
+        "testbed compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let lua = std::fs::read_to_string(output).expect("read testbed artifact");
+    let plan = lua
+        .lines()
+        .find(|line| line.starts_with("_G.__ROCK_STATE_IMAGE_PLAN = {"))
+        .expect("the emitter publishes a StateImagePlan");
+    let entry = plan
+        .split("{identity=\"")
+        .find(|chunk| chunk.starts_with("global:") && chunk.contains("::SKIN_GALLERY_SEED\""))
+        .expect("the gallery seed must have a StateImagePlan entry");
+    assert!(
+        entry.contains("kind=\"host_projection\""),
+        "SKIN_GALLERY_SEED must be host-owned so boot seeds survive a worker boundary: {entry}"
+    );
+    assert!(
+        entry.contains("capture_policy=\"host-owned\"")
+            && entry.contains("realization_policy=\"rebuild-host-projection\"")
+            && entry.contains("world_policy=\"exclude\""),
+        "SKIN_GALLERY_SEED must remain live across WorldImage restore: {entry}"
+    );
+}
+
 /// The five Stone globals whose class CHANGES when the package declares
 /// `[language] memory = "platform"` (`docs/state-ownership-plan.md` S3).
 ///
