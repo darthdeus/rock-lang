@@ -7,9 +7,10 @@
 //! Fix: every full-`main.lua` writer routes through `write_full_main`, which
 //! wipes the sibling overlay. This guards the `frame` entry end to end.
 //!
-//! Driven through `rock frame` rather than `rock sim`, using a private output so
-//! parallel full-lane processes cannot replace this test's `main.lua`, overlay,
-//! or screenshot while the child is starting.
+//! Driven through `rock frame` rather than `rock sim`, with the production hot
+//! reload gate explicitly enabled. The second frame would therefore load a
+//! surviving overlay and print its marker. A private output keeps parallel
+//! full-lane processes from replacing this test's artifacts while it starts.
 //!
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
@@ -40,6 +41,10 @@ fn frame_wipes_stale_overlay() {
         .arg("--output")
         .arg(output.path())
         .env("STONE_SCREENSHOT_PATH", output.path().join("frame.png"))
+        // `frame` normally leaves hot reload disabled. Opt in so this launch
+        // exercises the same overlay loader as `rock stone`: frame one records
+        // main.lua's modtime, frame two loads any surviving incremental.lua.
+        .env("STONE_HOT_RELOAD", "1")
         // MAG startup can exceed the CLI's interactive five-second watchdog
         // when the full lane is also running other native GL children. This
         // gate is about the overlay contents, not cold-start latency.
@@ -57,6 +62,10 @@ fn frame_wipes_stale_overlay() {
     assert!(
         !overlay.exists(),
         "writing a fresh main.lua must wipe the sibling incremental.lua"
+    );
+    assert!(
+        !combined.contains("STALE_OVERLAY_LOADED"),
+        "the hot-reload-capable launch loaded the stale overlay\n{combined}"
     );
     assert!(
         combined.contains("frames executed successfully"),
