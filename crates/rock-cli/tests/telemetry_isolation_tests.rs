@@ -10,7 +10,13 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
-fn boot_mag(home: &Path, data: &Path, vault: &(&str, String), settings_override: Option<&Path>) {
+fn boot_mag(
+    home: &Path,
+    data: &Path,
+    vault: &(&str, String),
+    telemetry_root: Option<&Path>,
+    settings_override: Option<&Path>,
+) {
     let scratch = tempfile::tempdir().expect("frame scratch");
     let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
     command
@@ -20,6 +26,11 @@ fn boot_mag(home: &Path, data: &Path, vault: &(&str, String), settings_override:
         .env("XDG_DATA_HOME", data)
         .env(vault.0, &vault.1)
         .current_dir(workspace_root());
+    if let Some(path) = telemetry_root {
+        command.env("MAG_TELEMETRY_ROOT", path);
+    } else {
+        command.env_remove("MAG_TELEMETRY_ROOT");
+    }
     if let Some(path) = settings_override {
         command.env("MAG_SETTINGS_PATH_OVERRIDE", path);
     }
@@ -35,10 +46,13 @@ fn overridden_settings_never_withdraw_the_players_telemetry_consent() {
     let data = home.path().join("data");
     let pref = data.join("darth.games").join("mag");
     std::fs::create_dir_all(&pref).expect("pref directory");
-    std::fs::write(pref.join("settings.json"), r#"{"privacy": {"analytics": 2, "analytics_version": 3}}"#)
+    let player_settings = pref.join("settings.json");
+    std::fs::write(&player_settings, r#"{"privacy": {"analytics": 2, "analytics_version": 3}}"#)
         .expect("consenting settings");
 
-    boot_mag(home.path(), &data, &vault, None);
+    // Native preference discovery is platform-owned, so establish the
+    // player's durable queue explicitly inside this hermetic fixture.
+    boot_mag(home.path(), &data, &vault, Some(&pref), Some(&player_settings));
     let ledger_path = pref.join("reports").join(".telemetry-consent");
     let ledger = std::fs::read_to_string(&ledger_path).expect("a consenting boot records consent");
     assert!(ledger.lines().last().is_some_and(|line| line.starts_with("on ")),
@@ -46,7 +60,7 @@ fn overridden_settings_never_withdraw_the_players_telemetry_consent() {
 
     let other = home.path().join("other-settings.json");
     std::fs::write(&other, "{}").expect("undecided settings");
-    boot_mag(home.path(), &data, &vault, Some(&other));
+    boot_mag(home.path(), &data, &vault, None, Some(&other));
 
     assert!(!pref.join("reports").join(".telemetry-revoked").exists(),
         "a run with its own settings file recorded a withdrawal in the player's root");

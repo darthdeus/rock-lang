@@ -99,6 +99,8 @@ fn shipping_package_of_mag_excludes_the_agent_bridge() {
             "mag",
             "--channel",
             "steam",
+            "--var",
+            "TELEMETRY_TOKEN=",
             "--output",
             out_dir.path().to_str().unwrap(),
         ])

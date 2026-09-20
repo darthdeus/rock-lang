@@ -330,11 +330,11 @@ fn global_initializer_observes_imgui_before_game_code() {
     let emitted = std::fs::read_to_string(&main).expect("read emitted testbed");
     let ready = emitted
         .find("__skull_ginit___IMGUI_PRELUDE_READY())")
-        .or_else(|| emitted.find("then __IMGUI_PRELUDE_READY = __skull_ginit___IMGUI_PRELUDE_READY()"))
+        .or_else(|| emitted.find("__IMGUI_PRELUDE_READY = __skull_ginit___IMGUI_PRELUDE_READY()"))
         .expect("Rock cimgui initializer must be emitted");
     let game_init = emitted
         .find("__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION())")
-        .or_else(|| emitted.find("then CIMG_UI_GLOBAL_INIT_VERSION = __skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION()"))
+        .or_else(|| emitted.find("CIMG_UI_GLOBAL_INIT_VERSION = __skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION()"))
         .expect("fixture global initializer must be emitted");
     assert!(
         ready < game_init,

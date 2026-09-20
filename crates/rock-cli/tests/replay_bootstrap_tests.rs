@@ -223,7 +223,6 @@ fn add_world_damage_snapshot_fixture(progress: &Path) -> PathBuf {
         &std::fs::read(progress).expect("read generated current progress"),
     )
     .expect("generated progress must be JSON");
-    root["version"] = serde_json::json!(6);
     root["world_damage"] = serde_json::json!([{
         "level": {"namespace": "official", "name": "crypt"},
         "chunks": [{"x": 1, "y": 0, "face": 0, "generation": 1, "tail": []}],

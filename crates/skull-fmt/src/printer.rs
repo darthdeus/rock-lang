@@ -697,9 +697,18 @@ impl<'a> Printer<'a> {
             }
             Doc::concat(parts)
         };
-        // A param trailing comment (`ox: float,  // offset x`) forces the comment-
-        // preserving multi-line layout.
-        if params
+        // A param trailing comment (`ox: float,  // offset x`) or a standalone
+        // comment between parameters forces the comment-preserving multi-line
+        // layout. The parser drops the standalone form, so recover it from the
+        // source interval spanned by the parameter list.
+        let first_line = params.first().unwrap().span.line_range.0;
+        let last_line = params.last().unwrap().span.line_range.1;
+        let has_standalone_comments = !self
+            .trivia
+            .standalone_comments_between(first_line.saturating_sub(1), last_line)
+            .is_empty();
+        if has_standalone_comments
+            || params
             .iter()
             .any(|p| self.claimed_trailing_comment(p.span).is_some())
         {
@@ -708,7 +717,9 @@ impl<'a> Printer<'a> {
                 .enumerate()
                 .map(|(i, p)| (param_doc(p, bare_first && i == 0), p.span.line_range.0, p.span))
                 .collect();
-            return self.comma_block(entries, None, "(", ")");
+            let body_span = has_standalone_comments
+                .then_some((first_line.saturating_sub(1), last_line + 1));
+            return self.comma_block(entries, body_span, "(", ")");
         }
         let items = params
             .iter()
@@ -1643,6 +1654,10 @@ impl<'a> Printer<'a> {
                 head.push(self.expr(e));
                 return Doc::concat(head);
             }
+        }
+        if self.ast.b(&body).statements.is_empty() {
+            head.push(Doc::text("{}"));
+            return Doc::concat(head);
         }
         head.push(self.block(body));
         Doc::concat(head)

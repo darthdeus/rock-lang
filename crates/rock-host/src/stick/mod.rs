@@ -1852,12 +1852,13 @@ mod tests {
     #[test]
     fn asset_overlay_defaults_resolve_relative_and_home_paths() {
         let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().canonicalize().unwrap();
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[assets]\noverlays = [\"../shared\", \"~/rock-assets\"]\n",
         )
         .unwrap();
         let resolved = cfg.asset_overlay_defaults(project.path()).unwrap();
-        assert_eq!(resolved[0], project.path().join("../shared"));
+        assert_eq!(resolved[0], project_path.join("../shared"));
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap();
         assert_eq!(resolved[1], PathBuf::from(home).join("rock-assets"));
     }

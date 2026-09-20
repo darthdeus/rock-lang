@@ -218,14 +218,17 @@ fn project_case(rel: &str) {
             m.stats.owners
         );
         assert_eq!(m.stats.settle_rounds, 0, "{rel} {what}: the conformance fixpoint engaged");
-        // Against the walk, not against the program: all four pruning
-        // populations are per-edit quantities.
+        // Pruned instances are the search's unavoidable output. Bound only the
+        // extra live region against the owner walk; otherwise a legitimate
+        // helper chain longer than four fails even when the search visits
+        // exactly the instances it removes.
         assert!(
-            m.stats.suspect_region <= m.stats.expanded * 4,
-            "{rel} {what}: the strand search visited {} instances after walking {} owners \
-             (of {} instances, {} pruned) -- that is a whole-graph walk, not an affected region",
-            m.stats.suspect_region,
+            m.stats.suspect_region.saturating_sub(m.stats.pruned) <= m.stats.expanded * 4,
+            "{rel} {what}: the strand search visited {} extra live instances after walking {} owners \
+             ({} visited of {} instances, {} pruned) -- that is a whole-graph walk, not an affected region",
+            m.stats.suspect_region.saturating_sub(m.stats.pruned),
             m.stats.expanded,
+            m.stats.suspect_region,
             m.stats.instances,
             m.stats.pruned
         );

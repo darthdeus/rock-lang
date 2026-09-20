@@ -15,6 +15,58 @@ fn rock_sources(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn rock_function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing Rock function {signature}"));
+    let open = start
+        + source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("missing body for Rock function {signature}"));
+    let mut depth = 0;
+    for (offset, ch) in source[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[open + 1..open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body for Rock function {signature}");
+}
+
+#[test]
+fn mag_run_readiness_predicate_has_no_replay_or_upload_side_effects() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    let predicate = rock_function_body(&run, "fn run_ready() -> bool {");
+    for forbidden in ["replay_job_ready", "stone_flush_image_uploads"] {
+        assert!(
+            !predicate.contains(forbidden),
+            "run_ready is a predicate and must not call `{forbidden}`:\n{predicate}"
+        );
+    }
+
+    let transition = rock_function_body(&run, "fn run_admission_try_finish() {");
+    assert_eq!(
+        transition.matches("replay_job_ready(\"admission\", 1,").count(),
+        1,
+        "one admission transition authority must record readiness exactly once per attempt"
+    );
+    assert_eq!(
+        run.matches("replay_job_ready(\"admission\", 1,").count(),
+        1,
+        "admission replay publication must have one production call site"
+    );
+}
+
 #[test]
 fn mag_has_no_aggregate_projection_bridge_names() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -403,7 +455,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "quest_tracker_scroll: float",
         "quest_giver_open_id: string",
         "quest_giver_confirm_id: string",
-        "quest_giver_open_npc: Entity<Npc>?",
+        "quest_giver_open_npc: Entity<Mob>?",
         "menu_open: bool",
         "combat_report_open: bool",
         "combat_report_details: bool",
@@ -512,7 +564,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for method in [
         "fn Player.bandage_heal_left(player)",
         "fn Player.summon_slot_pet(player",
-        "fn Player.summon_slot_pet_in_space(player",
         "fn Player.max_pets(player)",
         "fn Player.summon_label_spans(player",
         "fn Player.party_any_pet(player)",
@@ -920,4 +971,152 @@ fn mag_world_presentation_state_has_explicit_owners() {
     assert!(blood.contains("world_space_index(world, space)"));
     assert!(blood.contains("world.spaces[index].decals"));
     assert!(blood.contains("presentation.drop_particle_seq"));
+}
+
+#[test]
+fn mag_has_one_canonical_simulation_tick_boundary() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+
+    assert_eq!(
+        run.matches("fn mag_simulation_tick(").count(),
+        1,
+        "MAG must define exactly one canonical simulation tick"
+    );
+    let tick = rock_function_body(&run, "fn mag_simulation_tick(");
+    for call in [
+        "coroutine_poller_update(actor.tasks)",
+        "flow_frame_reset()",
+        "world_tick_all(world)",
+        "actor.update_casting(intents.cast)",
+        "player.apply_target_intent(intents.target)",
+        "player.update_movement(intents.movement)",
+        "player.apply_inventory_command(intents.inventory)",
+        "player.apply_bandage_intent(intents.consumables)",
+        "player.update_walls()",
+        "actor.cull_dead_mobs()",
+        "player.tick_wisp_intent()",
+        "wisp_motes_tick()",
+    ] {
+        assert!(tick.contains(call), "canonical tick is missing authoritative call `{call}`");
+    }
+    for presentation in [
+        "update_projectiles()",
+        "update_bolts()",
+        "world_damage_canvas_blood_query_tick(player)",
+        "present_wall_effects()",
+        "update_world_ambient_fx()",
+        "update_drop_particles()",
+        "update_forked_ritual_presentation()",
+        "player.update_wisp_intent()",
+        "mag_present_outcomes(world)",
+        "cast_glyphs_present(world)",
+        "cast_hand_vfx_present(world)",
+    ] {
+        assert!(
+            !tick.contains(presentation),
+            "presentation call `{presentation}` must remain outside the canonical tick"
+        );
+    }
+    let status_owner = tick
+        .find("update_player_statuses(player)")
+        .expect("status owner in canonical tick");
+    let status_presenter = tick
+        .find("mag_present_status_effects(world)")
+        .expect("status presenter in canonical tick");
+    let late_wall_contact = tick
+        .find("player.update_walls()")
+        .expect("late wall contact in canonical tick");
+    assert!(
+        status_owner < status_presenter && status_presenter < late_wall_contact,
+        "status presentation must stay between its owner tick and late wall contact"
+    );
+    let wisp_intent = tick
+        .find("player.tick_wisp_intent()")
+        .expect("authoritative wisp intent in canonical tick");
+    let wisp_tick = tick
+        .find("wisp_motes_tick()")
+        .expect("authoritative wisp integration in canonical tick");
+    assert!(wisp_intent < wisp_tick,
+        "wisp effectors must be prepared before authoritative integration");
+
+    let update = rock_function_body(&run, "fn mag_run_update()");
+    assert_eq!(
+        update.matches("let tick_intent = mag_tick_intent_from_input(player)").count(),
+        1,
+        "the host must construct the retained tick intent once"
+    );
+    assert_eq!(
+        update.matches("mag_present_status_effects(world)").count(),
+        0,
+        "status presentation belongs to the tick's established owner/contact seam"
+    );
+    assert_eq!(
+        update.matches("mag_simulation_tick(world, tick_intent, dt)").count(),
+        1,
+        "the host must consume the canonical tick exactly once"
+    );
+    assert_eq!(
+        update
+            .matches("if !world_frozen() {\n        mag_simulation_tick(world, tick_intent, dt)\n    }")
+            .count(),
+        1,
+        "the host must admit the canonical tick exactly once"
+    );
+}
+
+#[test]
+fn mag_tick_intent_is_overwritten_before_the_live_tick_consumes_it() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("rock workspace root");
+    let input = fs::read_to_string(repo.join("mag/input_intent.rock"))
+        .expect("read MAG input adapter source");
+    assert_eq!(
+        input
+            .matches("@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)\nglobal MAG_TICK_INTENT")
+            .count(),
+        1,
+        "the retained per-frame input record must be host projection state"
+    );
+    let adapter = rock_function_body(&input, "fn mag_tick_intent_from_input(");
+    for filler in [
+        "mag_target_intent_fill_from_input(player)",
+        "mag_cast_intent_fill_from_input(player)",
+        "mag_movement_intent_fill_from_input(player)",
+        "mag_consumable_intent_fill_from_input()",
+        "mag_equipment_intent_fill_from_input()",
+        "mag_summon_intent_fill_from_input()",
+        "mag_inventory_command_fill_from_input()",
+    ] {
+        assert_eq!(
+            adapter.matches(filler).count(),
+            1,
+            "the live input adapter must overwrite lane `{filler}` before returning"
+        );
+    }
+    assert_eq!(
+        adapter.matches("return MAG_TICK_INTENT").count(),
+        1,
+        "the adapter must return the one overwritten record"
+    );
+
+    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    let tick = rock_function_body(&run, "fn mag_simulation_tick(");
+    assert!(
+        !tick.contains("MAG_TICK_INTENT"),
+        "the canonical tick must consume its argument, not the host input buffer"
+    );
+    let update = rock_function_body(&run, "fn mag_run_update()");
+    let fill = update
+        .find("let tick_intent = mag_tick_intent_from_input(player)")
+        .expect("host input adapter call");
+    let consume = update
+        .find("mag_simulation_tick(world, tick_intent, dt)")
+        .expect("canonical tick call");
+    assert!(fill < consume, "input must be filled before the live tick consumes it");
 }
