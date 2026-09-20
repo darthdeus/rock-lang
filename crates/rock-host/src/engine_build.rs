@@ -125,11 +125,30 @@ pub fn game_engine_libs(game_path: &str) -> Result<Vec<&'static EngineLib>> {
         .collect())
 }
 
+/// The Cargo target directory for `rock_root`. Cargo resolves a relative
+/// `CARGO_TARGET_DIR` against the directory it was invoked from, and
+/// `run_cargo` runs cargo with `current_dir(crate::rock_dir())`; resolve it the
+/// same way here. Without the override Cargo uses `<rock_root>/target`.
+fn cargo_target_dir(rock_root: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty()) {
+        Some(value) => {
+            let dir = PathBuf::from(value);
+            if dir.is_absolute() {
+                dir
+            } else {
+                rock_root.join(dir)
+            }
+        }
+        None => rock_root.join("target"),
+    }
+}
+
 fn dep_info_path(root: &Path, src_stem: &str) -> PathBuf {
+    let debug = cargo_target_dir(root).join("debug");
     #[cfg(target_os = "windows")]
-    return root.join("target/debug").join(format!("{src_stem}.d"));
+    return debug.join(format!("{src_stem}.d"));
     #[cfg(not(target_os = "windows"))]
-    root.join("target/debug").join(format!("lib{src_stem}.d"))
+    debug.join(format!("lib{src_stem}.d"))
 }
 
 fn staged_cdylib_path(root: &Path, dst_stem: &str) -> PathBuf {
@@ -527,7 +546,7 @@ fn cargo_build_and_stage_lib(
 /// or the new fully-signed file but never a torn or mid-resign one.
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     let rock_root = PathBuf::from(crate::rock_dir());
-    let target_debug = rock_root.join("target/debug");
+    let target_debug = cargo_target_dir(&rock_root).join("debug");
     let dev_tmp = rock_root.join("tmp");
     fs_err::create_dir_all(&dev_tmp)?;
     let pid = std::process::id();
@@ -563,11 +582,11 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
         let pkg = src_stem.replace('_', "-");
         anyhow::bail!(
             "cargo build reported success but the cdylib was not produced at `{src}`.\n\
-             Likely: a stale/cleaned/foreign `target/` dir (worktrees sharing a \
-             target), `{pkg}` `crate-type` missing `cdylib`, or the build only \
-             touched dependents.\n\
-             Recover: `cargo build -p {pkg}` from this worktree and confirm \
-             `{src}` exists, then re-run.",
+             Likely: `CARGO_TARGET_DIR` selects a stale/cleaned/foreign target \
+             dir (worktrees sharing a target), `{pkg}` `crate-type` missing \
+             `cdylib`, or the build only touched dependents.\n\
+             Recover: `cargo build -p {pkg}` from this worktree (with the same \
+             `CARGO_TARGET_DIR`, if set) and confirm `{src}` exists, then re-run.",
             src = src.display(),
             pkg = pkg,
         );
@@ -631,7 +650,7 @@ pub fn build_libstone() -> Result<()> {
         validate_receipt_lib(&root, core)?;
         return Ok(());
     }
-    cargo_build_and_stage_lib("stone-rs", &["build", "--lib"], "stone_rs", "stone")?;
+    cargo_build_and_stage_lib("stone-rs", &["build", "-p", "stone-rs"], "stone_rs", "stone")?;
     Ok(())
 }
 
@@ -682,7 +701,7 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
         anyhow::bail!("engine build receipts are only meaningful in a source workspace");
     }
     let root = fs_err::canonicalize(crate::rock_dir())?;
-    cargo_build_and_stage_lib("stone-rs", &["build", "--lib"], "stone_rs", "stone")?;
+    cargo_build_and_stage_lib("stone-rs", &["build", "-p", "stone-rs"], "stone_rs", "stone")?;
 
     let mut optional = BTreeSet::new();
     for game_path in game_paths {
