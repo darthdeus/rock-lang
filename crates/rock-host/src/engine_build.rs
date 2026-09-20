@@ -631,7 +631,7 @@ pub fn build_libstone() -> Result<()> {
         validate_receipt_lib(&root, core)?;
         return Ok(());
     }
-    cargo_build_and_stage_lib("stone-rs", &["build", "--lib"], "stone_rs", "stone")?;
+    cargo_build_and_stage_lib("stone-rs", &["build", "-p", "stone-rs"], "stone_rs", "stone")?;
     Ok(())
 }
 
@@ -682,7 +682,7 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
         anyhow::bail!("engine build receipts are only meaningful in a source workspace");
     }
     let root = fs_err::canonicalize(crate::rock_dir())?;
-    cargo_build_and_stage_lib("stone-rs", &["build", "--lib"], "stone_rs", "stone")?;
+    cargo_build_and_stage_lib("stone-rs", &["build", "-p", "stone-rs"], "stone_rs", "stone")?;
 
     let mut optional = BTreeSet::new();
     for game_path in game_paths {

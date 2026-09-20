@@ -79,3 +79,6 @@ mod graph_update_projects;
 
 #[path = "sim_presentation_differential.rs"]
 mod sim_presentation_differential;
+
+#[path = "engine_build_scope_gate.rs"]
+mod engine_build_scope_gate;
