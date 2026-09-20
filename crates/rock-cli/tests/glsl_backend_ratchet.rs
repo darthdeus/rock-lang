@@ -10,8 +10,10 @@
 //! nextest's summary while enforcing nothing, which is the same swallow the
 //! gate exists to catch. macOS is the one platform exception: Apple's desktop
 //! OpenGL framework cannot create the GLES 3 context needed by `300es`, so the
-//! runnable floor there is `330core`; the ES emitter remains covered by its
-//! structural and validator tests.
+//! runnable floor there is `330core`. The ES emitter remains covered by the
+//! structural corpus oracle, but macOS has no real-driver ES execution gate.
+//! Every other host still requires the `300es` profile unless the run uses the
+//! explicit `ROCK_ALLOW_NO_GL=1` acknowledgement.
 //! A missing `stone-glsl-runner` binary is a hard error from `glsl_test_run` --
 //! the gate must not read as green when its executor was never built. The runner is
 //! located as a sibling of the test binary (`target/<profile>/stone-glsl-runner`);
@@ -38,6 +40,12 @@ fn allow_no_gl() -> bool {
 
 fn profile_is_required(profile: &str) -> bool {
     !(cfg!(target_os = "macos") && profile == "300es")
+}
+
+#[test]
+fn only_macos_exempts_the_es_real_driver_profile() {
+    assert!(profile_is_required("330core"));
+    assert_eq!(profile_is_required("300es"), !cfg!(target_os = "macos"));
 }
 
 #[test]
