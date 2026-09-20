@@ -82,3 +82,6 @@ mod sim_presentation_differential;
 
 #[path = "engine_build_scope_gate.rs"]
 mod engine_build_scope_gate;
+
+#[path = "engine_cdylib_target_dir_gate.rs"]
+mod engine_cdylib_target_dir_gate;
