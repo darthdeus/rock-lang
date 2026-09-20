@@ -9,7 +9,7 @@
 //! reports coverage honestly rather than silently parsing less.
 
 use crate::ast::*;
-use rock_core::source_code::Dialect;
+use rock_core::source_code::{Dialect, MemoryClass};
 use rock_core::{CompilerError, Span};
 use rock_tokenizer::{interp, Token, TokenKind, Tokenizer};
 use ustr::Ustr;
@@ -243,6 +243,48 @@ impl<'a> Parser<'a> {
             self.skip_comments_as_items();
             if self.at_end() {
                 break;
+            }
+            // The `@memory(<class>)` file header: every dialect, first
+            // non-comment item. It names the memory class of this file's
+            // globals, overriding the package's `[language] memory`
+            // (docs/state-ownership-plan.md R2). Parsed here rather than as an
+            // item annotation because it decorates the FILE, not a declaration;
+            // an unknown class rejects instead of falling back to `game`.
+            if self.kind() == TokenKind::At
+                && matches!(self.peek_kind(), TokenKind::Ident(n) if n.as_str() == "memory")
+            {
+                let start = self.span();
+                self.advance(); // `@`
+                self.advance(); // `memory`
+                self.expect(TokenKind::OpenParen)?;
+                let name = self.expect_ident()?;
+                self.expect(TokenKind::CloseParen)?;
+                let span = self.span_from(start);
+                let Some(class) = MemoryClass::parse(name.name.as_str()) else {
+                    return Err(CompilerError::new_with_label(
+                        span,
+                        format!(
+                            "unknown memory class `{}`; known classes: {}",
+                            name.name,
+                            MemoryClass::NAMES.join(", ")
+                        ),
+                    ));
+                };
+                if seen_item {
+                    return Err(CompilerError::new_with_label(
+                        span,
+                        "`@memory(<class>)` is a file header and must be the file's first item; it governs every global in the file"
+                            .to_string(),
+                    ));
+                }
+                if self.ast.memory_header.is_some() {
+                    return Err(CompilerError::new_with_label(
+                        span,
+                        "a file has one `@memory(<class>)` header".to_string(),
+                    ));
+                }
+                self.ast.memory_header = Some(MemoryHeader { class, span });
+                continue;
             }
             // The `mod a::b;` file header: v1-only, first non-comment item,
             // `;`-terminated. A later one is a misplaced header, not a

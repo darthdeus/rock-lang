@@ -141,3 +141,5 @@ mod sim_observability;
 mod sim_report_tests;
 #[path = "content_boundary.rs"]
 mod content_boundary;
+#[path = "state_memory_class.rs"]
+mod state_memory_class;

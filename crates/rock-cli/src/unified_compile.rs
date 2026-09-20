@@ -17,6 +17,7 @@ fn stamp_package(file: &Arc<AtomicRefCell<SourceFile>>, node: &PackageNode) {
         self_name: node.self_name.clone(),
     });
     f.dialect = node.dialect;
+    f.memory_class = node.memory_class;
 }
 
 /// Discover sources based on source specification

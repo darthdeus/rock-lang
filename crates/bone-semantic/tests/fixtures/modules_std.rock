@@ -618,6 +618,11 @@
 // prelude: vec_set
 // prelude: vertex_id
 // prelude: wall_clock_ms
+// prelude: weak_cache_builds
+// prelude: weak_cache_drop
+// prelude: weak_cache_get
+// prelude: weak_cache_live
+// prelude: weak_cache_put
 // prelude: wiggle
 // prelude: workgroup_array
 // prelude: workgroup_barrier

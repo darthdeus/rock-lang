@@ -340,6 +340,13 @@ fn copy_sources(from: &Path, to: &Path) {
 /// hand conversion also exported `ch_is_black` and `ch_parse_square`, which
 /// only consumer tests and sims call; a definition a consumer's tests use is
 /// exported like any other use (author decision), and reported as test-only.
+///
+/// One consumer, chess-game, is v1 itself since `c1c607dc5`, so de-migrating
+/// chess-core turns its declared dependency into a legacy boundary. The copy
+/// marks it `allow_legacy = true`, which is what the graph would have to say
+/// for the pre-migration world to be well formed -- without it the planner
+/// refuses at the consumer stage, correctly. So the round trip now also covers
+/// a v1 consumer of the package being migrated.
 #[test]
 fn chess_core_migrates_to_the_committed_hand_conversion() {
     let dir = scratch("chess_core");
@@ -362,6 +369,15 @@ fn chess_core_migrates_to_the_committed_hand_conversion() {
         assert_ne!(&legacy, text, "{f} must change when de-migrated");
         write(&core.join(f), &legacy);
     }
+    let game_manifest_path = dir.join("libs/chess-game/stick.toml");
+    let game_manifest = read(&game_manifest_path);
+    let allow_legacy = game_manifest.replace(
+        "chess-core = { path = \"../chess-core\" }",
+        "chess-core = { path = \"../chess-core\", allow_legacy = true }",
+    );
+    assert_ne!(allow_legacy, game_manifest, "the v1 consumer's chess-core edge must change");
+    write(&game_manifest_path, &allow_legacy);
+
     let consumers = ["--consumer", "libs/chess-game", "--consumer", "libs/chess-render", "--consumer", "games/chess", "--consumer", "games/chesslings"];
 
     let mut args = vec!["--check", "--format", "json"];

@@ -1169,6 +1169,10 @@ pub struct GlobalDef {
     pub span: Span,
     pub is_const: bool,
     pub state_metadata: StateMetadata,
+    /// Set when this declaration carries an `@state` that resolves to its
+    /// unit's class anyway. `state_metadata` alone cannot say so: it is the
+    /// same value whether the annotation or the class produced it.
+    pub redundant_state: Option<RedundantStateAnnotation>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -1259,6 +1263,64 @@ impl Default for StateMetadata {
             realization: StateRealization::FreshSession,
         }
     }
+}
+
+impl StateMetadata {
+    /// What a memory class gives every `global` in its unit that says nothing
+    /// itself (`docs/state-ownership-plan.md` R2). ONE oracle: lowering builds
+    /// the unit default from this, and `redundant_state_annotation` asks
+    /// lowering rather than restating the table -- a second copy is free to
+    /// drift and would report a deletion the compiler does not agree with.
+    pub fn for_memory_class(class: skull_parser::MemoryClass) -> Self {
+        use skull_parser::MemoryClass;
+        match class {
+            MemoryClass::Game => Self {
+                ownership: StateOwnership::Session,
+                world: StateWorldPolicy::Include,
+                realization: StateRealization::FreshSession,
+            },
+            MemoryClass::Platform => Self {
+                ownership: StateOwnership::HostProjection,
+                world: StateWorldPolicy::Exclude,
+                realization: StateRealization::RebuildHostProjection,
+            },
+            MemoryClass::Debug => Self {
+                ownership: StateOwnership::RunnerDiagnostic,
+                world: StateWorldPolicy::Exclude,
+                realization: StateRealization::RunnerRebind,
+            },
+        }
+    }
+}
+
+/// Where the memory class a declaration was measured against was declared.
+/// A diagnostic that asks for a line to be deleted has to point at the thing
+/// that already says it, and in modules-v1 several FILES contribute to one
+/// logical module -- each with its own possible `@memory` header -- so this
+/// belongs to the declaration, not to the module.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MemoryClassSite {
+    /// A `@memory(<class>)` file header, at this span.
+    Header(Span),
+    /// The owning package's class, from its `stick.toml`. Carries the package's
+    /// `self_name`; a package that declares no `[language] memory` is `game`,
+    /// which is still the package's class.
+    Package(Ustr),
+    /// No package owns this file (a standalone or editor source), so `game` is
+    /// the language default.
+    LanguageDefault,
+}
+
+/// A `global` whose `@state` resolves to exactly what its unit's memory class
+/// already gives it. Recorded by lowering, which is the only place that holds
+/// both sides of the comparison, and reported by the `redundant_state_annotation`
+/// lint.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RedundantStateAnnotation {
+    /// The `@state` annotation itself -- what the author deletes.
+    pub span: Span,
+    pub class: skull_parser::MemoryClass,
+    pub site: MemoryClassSite,
 }
 
 #[derive(Copy, Clone, Debug)]
