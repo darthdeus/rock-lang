@@ -51,12 +51,59 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
     let text = std::fs::read_to_string(&log).unwrap();
-    text.lines()
-        .filter_map(|l| l.strip_prefix("c "))
-        .filter_map(|rest| rest.split(' ').nth(1))
-        .map(|identity| identity.rsplit_once("::").map_or(identity, |(_, name)| name).to_string())
-        .collect()
+    let mut by_tick: std::collections::BTreeMap<u32, std::collections::HashSet<String>> =
+        std::collections::BTreeMap::new();
+    for line in text.lines().filter_map(|line| line.strip_prefix("c ")) {
+        let mut fields = line.split(' ');
+        let tick = fields.next().expect("checkpoint tick").parse().expect("numeric checkpoint tick");
+        let identity = fields.next().expect("checkpoint identity");
+        let name = identity.rsplit_once("::").map_or(identity, |(_, name)| name).to_string();
+        by_tick.entry(tick).or_default().insert(name);
+    }
+    let mut checkpoints = by_tick.into_iter();
+    let (first_tick, first) = checkpoints.next().expect("at least one checkpoint census");
+    // The recorder walks every statically declared WorldImage member at every
+    // checkpoint. Prove that contract here so a three-frame census cannot hide
+    // a global that would appear only in a longer replay.
+    for (tick, names) in checkpoints {
+        assert_eq!(
+            names, first,
+            "checkpoint {tick} must have the same complete member census as checkpoint {first_tick}"
+        );
+    }
+    first
 }
+
+const MAG_PRESENTATION_WORLD_EXCLUDED: &[&str] = &[
+    "CAST_GLYPHS",
+    "CAST_GLYPHS_WORLD",
+    "CAST_GLYPH_CHILD_POLLER",
+    "DUNGEON_MATERIAL_CHANNELS",
+    "DUNGEON_MATERIAL_CHANNELS_KEY",
+    "DUNGEON_MATERIAL_WALL_CHANNELS",
+    "DUNGEON_MATERIAL_WALL_CHANNELS_KEY",
+    "DUNGEON_WALL_FLOOR_STRIP",
+    "DUNGEON_WALL_FLOOR_STRIP_KEY",
+    "DUNGEON_MATERIAL_COLOR",
+    "DUNGEON_MATERIAL_NORMAL",
+    "DUNGEON_MATERIAL_REFLECTANCE_KEY",
+    "DUNGEON_MATERIAL_COLOR_KEY",
+    "DUNGEON_MATERIAL_NORMAL_KEY",
+    "DUNGEON_MATERIAL_WALL_COLOR",
+    "DUNGEON_MATERIAL_WALL_NORMAL",
+    "DUNGEON_MATERIAL_WALL_COLOR_KEY",
+    "DUNGEON_MATERIAL_WALL_NORMAL_KEY",
+    "DUNGEON_MATERIAL_RETIRED",
+    "DUNGEON_RELIGHT_OUTPUT",
+    "DUNGEON_RELIGHT_CACHES",
+    "DUNGEON_SPRITE_ASSETS",
+    "DUNGEON_SPRITE_DRAWS",
+    "FLOOR_MATERIAL_VISUALS",
+    "MAG_CHARACTER_RELIGHT_SURFACES",
+    "MAG_PLAYER_VISUALS",
+    "MAG_WORLD_VISUAL_ASSETS",
+    "WORLD_EQUIPMENT_SURFACES",
+];
 
 #[test]
 fn replay_snapshot_oracle_includes_effective_pad_state_only() {
@@ -131,6 +178,18 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
         !names.contains("TEXT_MISSING_GLYPH_POLICY"),
         "process-derived TEXT_MISSING_GLYPH_POLICY leaked into WorldImage: {names:?}"
     );
+}
+
+#[test]
+fn mag_presentation_registries_are_not_world_image_state() {
+    let names = sim_state_names("mag", 3);
+    assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
+    for name in MAG_PRESENTATION_WORLD_EXCLUDED {
+        assert!(
+            !names.contains(*name),
+            "presentation/resource registry {name} must be explicit world-excluded state: {names:?}"
+        );
+    }
 }
 
 #[test]
@@ -562,6 +621,12 @@ fn mag_seek_equivalence_state_names(
     }
     assert_mag_seek_census_owners(&sim);
     assert_mag_panel_plan_census(&sim);
+    for name in MAG_PRESENTATION_WORLD_EXCLUDED {
+        assert!(
+            !sim.contains(*name),
+            "presentation/resource registry {name} must be explicit world-excluded state"
+        );
+    }
     for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
@@ -633,47 +698,6 @@ fn mag_seek_equivalence_state_names(
         "MAG_RESURRECTION_UI_DRAWS",
         "MAG_RUN_STARTS",
         "MAG_RUN_STOPS",
-        // Cast-glyph tasks and their world anchor are one presentation domain.
-        // Keeping both in WorldImage preserves task ownership; exact entity
-        // arena ids are process-local realization details.
-        "CAST_GLYPHS",
-        "CAST_GLYPHS_WORLD",
-        // Resource registries anchor identities shared by semantic draw
-        // descriptors. WorldImage must carry those graphs even though their
-        // contents are presentation lifecycle state.
-        "DUNGEON_MATERIAL_CHANNELS",
-        "DUNGEON_MATERIAL_CHANNELS_KEY",
-        "DUNGEON_MATERIAL_WALL_CHANNELS",
-        "DUNGEON_MATERIAL_WALL_CHANNELS_KEY",
-        "DUNGEON_WALL_FLOOR_STRIP",
-        "DUNGEON_WALL_FLOOR_STRIP_KEY",
-        "DUNGEON_MATERIAL_COLOR",
-        "DUNGEON_MATERIAL_NORMAL",
-        "DUNGEON_MATERIAL_REFLECTANCE_KEY",
-        "DUNGEON_MATERIAL_COLOR_KEY",
-        "DUNGEON_MATERIAL_NORMAL_KEY",
-        "DUNGEON_MATERIAL_WALL_COLOR",
-        "DUNGEON_MATERIAL_WALL_NORMAL",
-        "DUNGEON_MATERIAL_WALL_COLOR_KEY",
-        "DUNGEON_MATERIAL_WALL_NORMAL_KEY",
-        "DUNGEON_MATERIAL_RETIRED",
-        "DUNGEON_RELIGHT_OUTPUT",
-        "DUNGEON_RELIGHT_CACHES",
-        "DUNGEON_SPRITE_ASSETS",
-        "DUNGEON_SPRITE_DRAWS",
-        "FLOOR_MATERIAL_VISUALS",
-        // This registry anchors the DungeonRelightSurface identities shared by
-        // semantic SpriteAnim values. It must stay in WorldImage even though
-        // its residency and draw fields are presentation lifecycle state.
-        "MAG_CHARACTER_RELIGHT_SURFACES",
-        "MAG_PLAYER_VISUALS",
-        // Refcount ownership list for the installed visual bank. Its insertion
-        // order follows map iteration and is not gameplay state, but carrying
-        // it through WorldImage keeps later bank replacement balanced.
-        "MAG_WORLD_VISUAL_ASSETS",
-        // The installed equipment relight catalog is another presentation
-        // ownership root. Its LRU touches follow draws omitted by hidden seek.
-        "WORLD_EQUIPMENT_SURFACES",
         "UI_MOUSE",
         "MENU_ATMOSPHERE_BATCHES",
         "MENU_ATMOSPHERE_SUBMISSIONS",
@@ -1167,8 +1191,10 @@ fn mag_cast_seek_restores_scheduler_owner() {
     assert!(cast_timer > 0.0 && cast_timer < cast_duration,
         "ordinary arm must observe a progressing cast: {ordinary_probe}");
     assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK"], 1, "ordinary arm must own a casting Task: {ordinary_probe}");
-    assert!(ordinary_probe["MAG_CAST_PROBE_POLLER_ROWS"].as_i64().is_some_and(|n| n > 0),
-        "ordinary arm must have a nonempty POLLER: {ordinary_probe}");
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_POLLER_ROWS"], 0,
+        "cast presentation children must not leak into semantic POLLER: {ordinary_probe}");
+    assert!(ordinary_probe["MAG_CAST_PROBE_PRESENTATION_POLLER_ROWS"].as_i64().is_some_and(|n| n > 0),
+        "ordinary arm must have live cast presentation children: {ordinary_probe}");
     assert!(ordinary_probe["MAG_CAST_PROBE_GLYPHS"].as_i64().is_some_and(|n| n > 0),
         "ordinary arm must have active cast presentation: {ordinary_probe}");
     assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
@@ -1193,7 +1219,8 @@ fn mag_cast_seek_restores_scheduler_owner() {
     for key in [
         "MAG_CAST_PROBE_DIRECT_STATE", "MAG_CAST_PROBE_SCENE", "MAG_CAST_PROBE_CASTING",
         "MAG_CAST_PROBE_LIGHTNING", "MAG_CAST_PROBE_TIMER", "MAG_CAST_PROBE_DURATION",
-        "MAG_CAST_PROBE_TASK", "MAG_CAST_PROBE_POLLER_ROWS", "MAG_CAST_PROBE_GLYPHS", "MAG_CAST_PROBE_MANA",
+        "MAG_CAST_PROBE_TASK", "MAG_CAST_PROBE_POLLER_ROWS",
+        "MAG_CAST_PROBE_PRESENTATION_POLLER_ROWS", "MAG_CAST_PROBE_GLYPHS", "MAG_CAST_PROBE_MANA",
         "MAG_CAST_PROBE_REAGENT_1", "MAG_CAST_PROBE_REAGENT_4",
     ] {
         assert_eq!(sought_probe[key], ordinary_probe[key],
@@ -1201,13 +1228,11 @@ fn mag_cast_seek_restores_scheduler_owner() {
     }
     assert!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"].as_i64().unwrap() > 30,
         "the restored task must be pumped after the seek, not left at its keyframe frame");
-    // This is a scheduler-ownership test, not the whole-MAG state oracle.
-    // Presentation coroutines legitimately carry different sub-frame brush
-    // coordinates after a seek; the probes above guard the coupled owner,
-    // global poller and active-glyph populations without comparing those
-    // renderer details. The general MAG seek test covers semantic state.
+    // Keep the targeted scheduler probes above for diagnosis, then require the
+    // same full semantic-state equivalence as the general MAG seek oracle.
     let sim = mag_seek_equivalence_state_names("mag", 3);
     assert!(sim.contains("POLLER"), "POLLER must be in the admitted sim-state oracle");
+    assert_mag_seek_state_matches(&sought, &ordinary, &sim, "Mag scheduler seek");
 }
 
 /// P4 item 2: scrub to an ARBITRARY earlier tick. Cadence keyframes (every
