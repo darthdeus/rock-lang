@@ -811,7 +811,6 @@ deco init on_reload {
             and key ~= "__stone_image_code_env"
             and not (views and views[key])
     end
-    if mode == "equality" then return key ~= "__ty" end
     if mode == "map" then return type(key) == "string" end
     if mode == "json" then
         return type(key) == "string"
@@ -842,19 +841,13 @@ deco init on_reload {
     return type(name) == "string" and types and types[name] or nil
 """
 
-@nomangle inline(lua) fn __rock_next_equality_field(obj: any, previous: any) -> any = """
-    local key, value = next(obj, previous)
-    while key ~= nil do
-        if __rock_field_selected(obj, key, "equality", nil) then
-            return key, value
-        end
-        key, value = next(obj, key)
-    end
+@nomangle inline(lua) fn __rock_field_reserved_key(mode: string) -> any = """
+    if mode == "equality" then return "__ty" end
+    error("unknown Rock reserved field mode: " .. tostring(mode), 0)
 """
 
 @nomangle inline(lua) fn __rock_field_pairs(obj: any, mode: string) -> any = """
     if mode == "copy" then return pairs(obj) end
-    if mode == "equality" then return __rock_next_equality_field, obj, nil end
     error("unknown unsorted Rock field walk mode: " .. tostring(mode), 0)
 """
 
@@ -964,11 +957,12 @@ deco init on_reload {
     -- structs, enums, newtypes, tuples, and anonymous Lua tables alike; cdata
     -- `value` structs never reach here (they hit the primitive `==` fast path
     -- above -- a byte-value compare).
-    for k, v in __rock_field_pairs(a, "equality") do
-        if not __op_eq(v, b[k]) then return false end
+    local skip_key = __rock_field_reserved_key("equality")
+    for k, v in pairs(a) do
+        if k ~= skip_key and not __op_eq(v, b[k]) then return false end
     end
-    for k, v in __rock_field_pairs(b, "equality") do
-        if a[k] == nil then return false end
+    for k, v in pairs(b) do
+        if k ~= skip_key and a[k] == nil then return false end
     end
     return true
 """
