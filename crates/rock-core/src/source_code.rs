@@ -61,6 +61,37 @@ impl MemoryClass {
     pub const NAMES: [&'static str; 3] = ["game", "platform", "debug"];
 }
 
+/// Whether a package may declare mutable global storage. The default keeps
+/// today's language behavior; `none` is the package boundary used by a
+/// simulation library whose state must be reachable from its explicit root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GlobalPolicy {
+    #[default]
+    Any,
+    None,
+}
+
+impl GlobalPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::None => "none",
+        }
+    }
+
+    /// Parse a declared policy. Unknown values are rejected by the manifest
+    /// loader instead of silently restoring the permissive default.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "any" => Some(Self::Any),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub const NAMES: [&'static str; 2] = ["any", "none"];
+}
+
 /// The package a file belongs to, minted by the host's PackageGraph.
 /// `id` is dense and stable within one graph build; `self_name` is the
 /// manifest name with `-` normalized to `_`, case preserved.
@@ -88,6 +119,9 @@ pub struct SourceFile {
     /// that stamps `package`/`dialect`. `Game` for files loaded outside a
     /// package, which keeps a standalone script on today's default.
     pub memory_class: MemoryClass,
+    /// The owning package's mutable-global policy, stamped by the same loader
+    /// as `package`, `dialect` and `memory_class`.
+    pub global_policy: GlobalPolicy,
 }
 
 /// Build a `SourceFile` from an on-disk path + already-read contents. The
@@ -110,6 +144,7 @@ pub fn source_file_from_path_and_contents(
         package: None,
         dialect: Dialect::Legacy,
         memory_class: MemoryClass::Game,
+        global_policy: GlobalPolicy::Any,
     }
 }
 
@@ -350,4 +385,3 @@ impl LineCol {
         }
     }
 }
-

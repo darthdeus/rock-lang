@@ -802,6 +802,62 @@ deco init on_reload {
 """
 
 // Generic operator functions using different names to avoid compiler conflicts
+// Physical field selection shared by the copy, image, JSON, census, inspect,
+// and equality walkers. Their value operations and ordering remain local.
+@nomangle inline(lua) fn __rock_field_selected(obj: any, key: any, mode: string, views: any) -> bool = """
+    if mode == "copy" or mode == "census" then return true end
+    if mode == "image" then
+        return key ~= "__stone_image_storage_shape"
+            and key ~= "__stone_image_code_env"
+            and not (views and views[key])
+    end
+    if mode == "equality" then return key ~= "__ty" end
+    if mode == "map" then return type(key) == "string" end
+    if mode == "json" then
+        return type(key) == "string"
+            and key ~= "__ty" and key ~= "__variant"
+            and not (_G.__ROCK_LEAF_VIEWS and _G.__ROCK_LEAF_VIEWS[key])
+    end
+    if mode == "inspect" then
+        return key ~= "__ty" and key ~= "__variant"
+            and not (_G.__ROCK_LEAF_VIEWS and _G.__ROCK_LEAF_VIEWS[key])
+            and not (type(key) == "string" and string.find(key, ".", 1, true))
+    end
+    error("unknown Rock field walk mode: " .. tostring(mode), 0)
+"""
+
+@nomangle inline(lua) fn __rock_field_keys(obj: any, mode: string) -> any = """
+    local keys = {}
+    for key in pairs(obj) do
+        if __rock_field_selected(obj, key, mode, nil) then
+            keys[#keys + 1] = key
+        end
+    end
+    return keys
+"""
+
+@nomangle inline(lua) fn __rock_field_declaration(obj: any) -> any = """
+    local name = obj.__ty
+    local types = _G.__ROCK_TYPE_TABLE
+    return type(name) == "string" and types and types[name] or nil
+"""
+
+@nomangle inline(lua) fn __rock_next_equality_field(obj: any, previous: any) -> any = """
+    local key, value = next(obj, previous)
+    while key ~= nil do
+        if __rock_field_selected(obj, key, "equality", nil) then
+            return key, value
+        end
+        key, value = next(obj, key)
+    end
+"""
+
+@nomangle inline(lua) fn __rock_field_pairs(obj: any, mode: string) -> any = """
+    if mode == "copy" then return pairs(obj) end
+    if mode == "equality" then return __rock_next_equality_field, obj, nil end
+    error("unknown unsorted Rock field walk mode: " .. tostring(mode), 0)
+"""
+
 @nomangle inline(lua) fn __op_eq(a: any, b: any) -> bool = """
     -- Primitive fast path
     if type(a) ~= "table" or type(b) ~= "table" then
@@ -908,17 +964,11 @@ deco init on_reload {
     -- structs, enums, newtypes, tuples, and anonymous Lua tables alike; cdata
     -- `value` structs never reach here (they hit the primitive `==` fast path
     -- above -- a byte-value compare).
-    for k, v in pairs(a) do
-        if k ~= "__ty" then
-            if not __op_eq(v, b[k]) then
-                return false
-            end
-        end
+    for k, v in __rock_field_pairs(a, "equality") do
+        if not __op_eq(v, b[k]) then return false end
     end
-    for k, v in pairs(b) do
-        if k ~= "__ty" and a[k] == nil then
-            return false
-        end
+    for k, v in __rock_field_pairs(b, "equality") do
+        if a[k] == nil then return false end
     end
     return true
 """
@@ -1572,7 +1622,7 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
     local copy = {}
     seen[obj] = copy
-    for k, v in pairs(obj) do
+    for k, v in __rock_field_pairs(obj, "copy") do
         -- copy *both* key and value, in case either is a table.
         copy[__rock_deepcopy_value(k, seen)] = __rock_deepcopy_value(v, seen)
     end
@@ -2220,26 +2270,14 @@ const EPSILON: float = 0.0000001
         result = "{ " .. table.concat(parts, ", ") .. " }"
     else
         -- Collect and sort keys, skipping metadata
-        local keys = {}
+        local keys = __rock_field_keys(t, "inspect")
         local seen = {}
-        for k, _ in pairs(t) do
-            -- A dotted key is a compiler-minted PHYSICAL slot (an `embed` leaf,
-            -- a flattened enum's discriminant/payload). It has no source-level
-            -- name, so it is never shown; the declared field it belongs to is
-            -- rendered from the leaves instead. A leaf VIEW is likewise derived
-            -- -- an ffi.cast pointer over the buffer's own storage -- and would
-            -- render as a run-varying address, so it is skipped for the same
-            -- reason serialization skips it (`__ROCK_LEAF_VIEWS`).
-            if k ~= "__variant" and k ~= "__ty"
-               and not _G.__ROCK_LEAF_VIEWS[k]
-               and not (type(k) == "string" and string.find(k, ".", 1, true)) then
-                keys[#keys + 1] = k
-                seen[k] = true
-            end
+        for _, k in ipairs(keys) do
+            seen[k] = true
         end
         -- A null field is an ABSENT key, so `pairs` alone under-reports a
         -- struct's shape. Declared fields come from the type table instead.
-        local decl = type_name and _G.__ROCK_TYPE_TABLE[type_name]
+        local decl = type_name and __rock_field_declaration(t)
         local embed_vals = nil
         if decl and not t.__variant then
             for i = 1, #decl.fields do

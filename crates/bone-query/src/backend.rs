@@ -710,6 +710,7 @@ impl BoneWorkspace {
                 dialect: f.dialect,
                 package: f.package.clone(),
                 memory_class: f.memory_class,
+                global_policy: f.global_policy,
             });
         }
         Some(out)
@@ -773,11 +774,21 @@ impl BoneWorkspace {
                 .graph
                 .as_ref()
                 .and_then(|g| rock_host::compilation_units::source_facts(g, Path::new(path)));
-            let (package, dialect, memory_class) = match facts {
-                Some((package, dialect, memory_class)) => (Some(package), dialect, memory_class),
-                None => (None, skull_parser::Dialect::Legacy, skull_parser::MemoryClass::Game),
+            let (package, dialect, memory_class, global_policy) = match facts {
+                Some((package, dialect, memory_class, global_policy)) => {
+                    (Some(package), dialect, memory_class, global_policy)
+                }
+                None => (
+                    None,
+                    skull_parser::Dialect::Legacy,
+                    skull_parser::MemoryClass::Game,
+                    skull_parser::GlobalPolicy::Any,
+                ),
             };
-            if let Err(e) = proj.session.declare_file_facts(path, dialect, package, memory_class) {
+            if let Err(e) = proj
+                .session
+                .declare_file_facts(path, dialect, package, memory_class, global_policy)
+            {
                 log::error!("bone LSP: {}", e.message);
             }
         }

@@ -292,6 +292,7 @@ pub(crate) fn aliases_for_session(
             ast.dialect = f.dialect;
             ast.package = f.package.clone();
             ast.memory_class = f.memory_class;
+            ast.global_policy = f.global_policy;
             ast
         })
         .collect();
@@ -313,6 +314,7 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
                 dialect: source.dialect,
                 package: source.package.clone(),
                 memory_class: source.memory_class,
+                global_policy: source.global_policy,
             }
         })
         .collect()
@@ -388,6 +390,7 @@ pub(crate) fn parse_user_modules(
                     .map_err(|e| vec![e])?;
             module.package = f.package.clone();
             module.memory_class = f.memory_class;
+            module.global_policy = f.global_policy;
             Ok((module, id))
         })
         .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;

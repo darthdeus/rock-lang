@@ -15,10 +15,13 @@ pub mod graph;
 /// (`docs/state-ownership-plan.md` R2): which store an unannotated `global`
 /// belongs to. Absent = `"game"`, today's Session default, so every package
 /// that does not say otherwise is unchanged.
+/// `globals` declares whether the package may own mutable global storage.
+/// Absent = `"any"`; `"none"` is the simulation-package boundary from R5.
 #[derive(Debug, Clone)]
 pub struct LanguageConfig {
     pub modules: rock_core::source_code::Dialect,
     pub memory: rock_core::source_code::MemoryClass,
+    pub globals: rock_core::source_code::GlobalPolicy,
 }
 
 impl Default for LanguageConfig {
@@ -26,6 +29,7 @@ impl Default for LanguageConfig {
         Self {
             modules: rock_core::source_code::Dialect::Legacy,
             memory: rock_core::source_code::MemoryClass::Game,
+            globals: rock_core::source_code::GlobalPolicy::Any,
         }
     }
 }
@@ -36,11 +40,12 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = LanguageConfig;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a table with a modules key (\"legacy\" or \"v1\") and/or a memory key")
+                write!(f, "a table with modules, memory and/or globals keys")
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LanguageConfig, A::Error> {
                 let mut modules = rock_core::source_code::Dialect::Legacy;
                 let mut memory = rock_core::source_code::MemoryClass::Game;
+                let mut globals = rock_core::source_code::GlobalPolicy::Any;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "modules" => {
@@ -64,14 +69,23 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                                 ))
                             })?;
                         }
+                        "globals" => {
+                            let value = map.next_value::<String>()?;
+                            globals = rock_core::source_code::GlobalPolicy::parse(&value).ok_or_else(|| {
+                                serde::de::Error::custom(format!(
+                                    "unknown globals policy `{value}` in `[language] globals`; known values: {}",
+                                    rock_core::source_code::GlobalPolicy::NAMES.join(", ")
+                                ))
+                            })?;
+                        }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [language]; known keys: modules, memory"
+                                "unknown key `{other}` in [language]; known keys: modules, memory, globals"
                             )));
                         }
                     }
                 }
-                Ok(LanguageConfig { modules, memory })
+                Ok(LanguageConfig { modules, memory, globals })
             }
         }
         d.deserialize_map(Vis)
@@ -118,6 +132,15 @@ impl StickConfig {
             .as_ref()
             .map(|l| l.memory)
             .unwrap_or(rock_core::source_code::MemoryClass::Game)
+    }
+
+    /// This package's mutable-global policy. Missing `[language]` or missing
+    /// `globals` keeps today's permissive behavior.
+    pub fn global_policy(&self) -> rock_core::source_code::GlobalPolicy {
+        self.language
+            .as_ref()
+            .map(|l| l.globals)
+            .unwrap_or(rock_core::source_code::GlobalPolicy::Any)
     }
 
     /// This package's source dialect. Missing `[language]` is legacy.

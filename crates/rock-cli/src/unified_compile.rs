@@ -18,6 +18,7 @@ fn stamp_package(file: &Arc<AtomicRefCell<SourceFile>>, node: &PackageNode) {
     });
     f.dialect = node.dialect;
     f.memory_class = node.memory_class;
+    f.global_policy = node.global_policy;
 }
 
 /// Discover sources based on source specification
@@ -51,6 +52,10 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                     };
                     let package_sources = SourceFiles::from_dir_preprocessed(&load_dir)?;
                     for file in package_sources.files {
+                        let path = file.borrow().file.to_id_path();
+                        if !graph.owns_file(*id, std::path::Path::new(&path)) {
+                            continue;
+                        }
                         // Skip files with #script directive (test/example files in library dependencies)
                         if !file.borrow().is_script || *id == graph.root() {
                             stamp_package(&file, node);

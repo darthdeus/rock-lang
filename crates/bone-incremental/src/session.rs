@@ -1,5 +1,5 @@
 use skull_parser::{
-    Ast, Dialect, FunctionBody, ItemKind, MacroRegistry, MemoryClass, PackageTag,
+    Ast, Dialect, FunctionBody, GlobalPolicy, ItemKind, MacroRegistry, MemoryClass, PackageTag,
     check_macro_call_labels,
     check_macro_call_labels_in, check_macro_name_uniqueness, collect_registry, cook_one,
 };
@@ -306,7 +306,7 @@ pub struct Session {
     /// keeps its facts on its `UserFile`; these are read when the file enters
     /// through `update_file` or `with_file_variant`, and survive a refused
     /// entry, so the next attempt parses the same way.
-    declared_facts: FxHashMap<String, (Dialect, Option<PackageTag>, MemoryClass)>,
+    declared_facts: FxHashMap<String, (Dialect, Option<PackageTag>, MemoryClass, GlobalPolicy)>,
 }
 
 /// A file entering a session, carrying the facts its package supplies.
@@ -328,6 +328,8 @@ pub struct SessionFile {
     /// the same reason it keeps the dialect: it decides what an unannotated
     /// `global` in this file means.
     pub memory_class: MemoryClass,
+    /// The owning package's mutable-global policy, which every re-parse keeps.
+    pub global_policy: GlobalPolicy,
 }
 
 impl SessionFile {
@@ -339,6 +341,7 @@ impl SessionFile {
             dialect: Dialect::Legacy,
             package: None,
             memory_class: MemoryClass::Game,
+            global_policy: GlobalPolicy::Any,
         }
     }
 }
@@ -369,6 +372,8 @@ pub struct UserFile {
     pub package: Option<PackageTag>,
     /// The owning package's memory class, kept for the same reason.
     pub memory_class: MemoryClass,
+    /// The owning package's mutable-global policy, kept for the same reason.
+    pub global_policy: GlobalPolicy,
     /// Recovered syntax errors from this file's last parse. The parse is total
     /// (best-effort tree + recovery errors), so these are kept here and surfaced
     /// via `diagnostics()` -- a broken file still type-checks its valid parts AND
@@ -704,10 +709,12 @@ fn parse_with_facts(
     dialect: Dialect,
     package: Option<PackageTag>,
     memory_class: MemoryClass,
+    global_policy: GlobalPolicy,
 ) -> Result<Ast, CompilerError> {
     let mut module = skull_parser::parse_module_with_dialect(text, file, dialect)?;
     module.package = package;
     module.memory_class = memory_class;
+    module.global_policy = global_policy;
     Ok(module)
 }
 
@@ -777,7 +784,7 @@ impl Session {
         // lowering directly -- avoids a second parse via `combined_unexpanded`,
         // which re-parses (the AST is transient and not persisted).
         let mut user_modules: Vec<Ast> = Vec::new();
-        for SessionFile { path, text, dialect, package, memory_class } in files {
+        for SessionFile { path, text, dialect, package, memory_class, global_policy } in files {
             if session.files.contains_key(&path) {
                 comp_error!(
                     Span::unknown(),
@@ -787,7 +794,14 @@ impl Session {
             }
 
             let module =
-                parse_with_facts(&text, ustr(path.as_str()), dialect, package.clone(), memory_class)?;
+                parse_with_facts(
+                    &text,
+                    ustr(path.as_str()),
+                    dialect,
+                    package.clone(),
+                    memory_class,
+                    global_policy,
+                )?;
 
             // Looked up, not interned: user modules take their ids when they
             // lower, after the warm modules, so a warm-alone build
@@ -813,6 +827,7 @@ impl Session {
                     dialect,
                     package,
                     memory_class,
+                    global_policy,
                     syntax_errors: module.recovery_errors.clone(),
                     scope_hash: scope,
                     contribution: contribute(&module),
@@ -856,14 +871,14 @@ impl Session {
     /// standalone source: legacy, unowned. A caller that knows better supplies
     /// the facts up front, through [`SessionFile`] or
     /// [`Session::declare_file_facts`].
-    fn facts_of(&self, path: &str) -> (Dialect, Option<PackageTag>, MemoryClass) {
+    fn facts_of(&self, path: &str) -> (Dialect, Option<PackageTag>, MemoryClass, GlobalPolicy) {
         match self.files.get(path) {
-            Some(f) => (f.dialect, f.package.clone(), f.memory_class),
+            Some(f) => (f.dialect, f.package.clone(), f.memory_class, f.global_policy),
             None => self
                 .declared_facts
                 .get(path)
                 .cloned()
-                .unwrap_or((Dialect::Legacy, None, MemoryClass::Game)),
+                .unwrap_or((Dialect::Legacy, None, MemoryClass::Game, GlobalPolicy::Any)),
         }
     }
 
@@ -879,11 +894,13 @@ impl Session {
         dialect: Dialect,
         package: Option<PackageTag>,
         memory_class: MemoryClass,
+        global_policy: GlobalPolicy,
     ) -> Result<(), CompilerError> {
         if let Some(held) = self.files.get(path)
             && (held.dialect != dialect
                 || held.package != package
-                || held.memory_class != memory_class)
+                || held.memory_class != memory_class
+                || held.global_policy != global_policy)
         {
             comp_error!(
                 Span::unknown(),
@@ -895,14 +912,21 @@ impl Session {
                 package
             );
         }
-        self.declared_facts.insert(path.to_string(), (dialect, package, memory_class));
+        self.declared_facts.insert(path.to_string(), (dialect, package, memory_class, global_policy));
         Ok(())
     }
 
     /// Re-parse `path` from its stored text with its own facts.
     fn parse_stored(&self, path: Ustr) -> Result<Ast, CompilerError> {
-        let (dialect, package, memory_class) = self.facts_of(path.as_str());
-        parse_with_facts(&self.files[path.as_str()].text, path, dialect, package, memory_class)
+        let (dialect, package, memory_class, global_policy) = self.facts_of(path.as_str());
+        parse_with_facts(
+            &self.files[path.as_str()].text,
+            path,
+            dialect,
+            package,
+            memory_class,
+            global_policy,
+        )
     }
 
     pub fn workspace(&self) -> &Workspace {
@@ -980,8 +1004,15 @@ impl Session {
             return Ok(result);
         }
 
-        let (dialect, package, memory_class) = self.facts_of(path);
-        let module = parse_with_facts(text, ustr(path), dialect, package.clone(), memory_class)?;
+        let (dialect, package, memory_class, global_policy) = self.facts_of(path);
+        let module = parse_with_facts(
+            text,
+            ustr(path),
+            dialect,
+            package.clone(),
+            memory_class,
+            global_policy,
+        )?;
         let syntax_errors = module.recovery_errors.clone();
         let mid = self.ws.intern_module(module.file);
         if self.warm_mids.contains(&mid) {
@@ -1045,6 +1076,7 @@ impl Session {
                 dialect,
                 package,
                 memory_class,
+                global_policy,
                 syntax_errors,
                 scope_hash: new_scope,
                 contribution: new_contribution,
@@ -1855,7 +1887,7 @@ impl Session {
             return Ok(None);
         }
         // --- locate (non-mutating; releases the files borrow before any change) ---
-        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors, old_dialect, old_package, old_memory_class, old_scope_hash, old_contribution) = {
+        let (es, oe, delta, idx, so, eo, line, col, old_iface, old_name, old_text, old_prints, old_macros, old_syntax_errors, old_dialect, old_package, old_memory_class, old_global_policy, old_scope_hash, old_contribution) = {
             let Some(old) = self.files.get(path) else { return Ok(None) };
             let (es, oe, delta) = byte_diff(&old.text, new_text);
             let Some(idx) = locate_body_edit(&old.item_prints, es, oe) else { return Ok(None) };
@@ -1866,7 +1898,7 @@ impl Session {
                 p.item_span.line_range.0, p.item_span.col_range.0,
                 p.iface_hash, p.name,
                 old.text.clone(), old.item_prints.clone(), old.macros.clone(), old.syntax_errors.clone(),
-                old.dialect, old.package.clone(), old.memory_class, old.scope_hash, old.contribution.clone(),
+                old.dialect, old.package.clone(), old.memory_class, old.global_policy, old.scope_hash, old.contribution.clone(),
             )
         };
         let _ = (es, oe);
@@ -1888,6 +1920,7 @@ impl Session {
         // would be a trap the day that changes.
         mini.package = old_package.clone();
         mini.memory_class = old_memory_class;
+        mini.global_policy = old_global_policy;
         // The parse is total now; a recovered (partial) item must NOT be installed
         // in place. Bail to the full reparse, which keeps the best-effort tree and
         // records the recovery error as a diagnostic.
@@ -1943,6 +1976,7 @@ impl Session {
                 dialect: old_dialect,
                 package: old_package,
                 memory_class: old_memory_class,
+                global_policy: old_global_policy,
                 // The fast path only re-parses ONE clean body (it bails to the
                 // full path on any recovery error), so the file's syntax errors
                 // are unchanged by this localized edit.

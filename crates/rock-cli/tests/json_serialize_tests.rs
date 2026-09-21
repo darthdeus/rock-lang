@@ -15,7 +15,7 @@
 //
 // All assertions run against a single `rock frame match3 --dump-state`
 // invocation. match3 has IVec2 globals (anim_swap_a etc.) and stone
-// exports Vec2 pivot constants, covering both cdata types without needing
+// exports a live Vec2 window size, covering both cdata types without needing
 // the heavier mag game.
 
 use std::path::Path;
@@ -76,13 +76,13 @@ fn serializer_branch_coverage() {
     assert!(extra.is_empty(), "IVec2 has unexpected fields: {extra:?}");
 
     // ── cdata value-struct: two distinct types in one dump ───────────────
-    // stone exports Vec2 pivot constants alongside match3's IVec2 globals.
+    // stone exports a live Vec2 window size alongside match3's IVec2 globals.
     // The cdata branch iterates __ROCK_C_STRUCT with ffi.istype; if two
     // types alias the same C layout the wrong name could win.
-    let pivot = &state["stone"]["PIVOT_CENTER"];
-    assert_eq!(pivot["__ty"], "Vec2", "PIVOT_CENTER.__ty must be Vec2; got: {pivot}");
+    let window_size = &state["stone"]["WINDOW_SIZE"];
+    assert_eq!(window_size["__ty"], "Vec2", "WINDOW_SIZE.__ty must be Vec2; got: {window_size}");
     assert_ne!(
-        swap["__ty"], pivot["__ty"],
+        swap["__ty"], window_size["__ty"],
         "IVec2 and Vec2 must have distinct __ty values"
     );
 

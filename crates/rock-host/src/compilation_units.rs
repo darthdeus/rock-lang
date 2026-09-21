@@ -195,7 +195,7 @@ pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Resul
     }
 }
 
-/// The owning package and dialect `graph` gives the file at the canonical
+/// The owning package and source facts `graph` gives the file at the canonical
 /// `path`: what the loader stamps on every file it loads, and what a host
 /// declares for a file that enters an incremental session after its load
 /// (the editor opening a new file). `None` when no package owns the path: a
@@ -207,12 +207,14 @@ pub fn source_facts(
     rock_core::source_code::PackageTag,
     rock_core::source_code::Dialect,
     rock_core::source_code::MemoryClass,
+    rock_core::source_code::GlobalPolicy,
 )> {
     let node = graph.package(graph.package_of_file(path)?);
     Some((
         rock_core::source_code::PackageTag { id: node.id.0, self_name: node.self_name.clone() },
         node.dialect,
         node.memory_class,
+        node.global_policy,
     ))
 }
 
@@ -278,11 +280,12 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                 );
                 for file in &sources.files {
                     let path = file.borrow().file.to_id_path();
-                    if let Some((package, dialect, memory_class)) = source_facts(graph, Path::new(&path)) {
+                    if let Some((package, dialect, memory_class, global_policy)) = source_facts(graph, Path::new(&path)) {
                         let mut f = file.borrow_mut();
                         f.package = Some(package);
                         f.dialect = dialect;
                         f.memory_class = memory_class;
+                        f.global_policy = global_policy;
                     }
                 }
             }
