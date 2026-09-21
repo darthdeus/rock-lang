@@ -235,11 +235,190 @@ struct Envelope {
     start_ms: i64,
     end_ms: i64,
     frame_count: Option<i64>,
+    frame_timing: Option<FrameTiming>,
+    frame_timing_invalid: bool,
+    boundary_timing: Option<BoundaryTiming>,
+    boundary_timing_invalid: bool,
 }
 
 impl Envelope {
     fn duration_ms(&self) -> i64 {
         self.end_ms - self.start_ms
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FrameTiming {
+    frames: i64,
+    draw_frames: i64,
+    submitted_frames: i64,
+    logic_us: i64,
+    render_cpu_us: i64,
+    present_us: i64,
+}
+
+impl FrameTiming {
+    fn parse(value: Option<&Value>, frame_count: Option<i64>) -> (Option<Self>, bool) {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return (None, false);
+        };
+        let number = |name: &str| value.get(name).and_then(Value::as_i64);
+        let Some(frames) = number("frames") else { return (None, true); };
+        let Some(draw_frames) = number("draw_frames") else { return (None, true); };
+        let Some(submitted_frames) = number("submitted_frames") else { return (None, true); };
+        let Some(logic_us) = number("logic_us") else { return (None, true); };
+        let Some(render_cpu_us) = number("render_cpu_us") else { return (None, true); };
+        let Some(present_us) = number("present_us") else { return (None, true); };
+        if [frames, draw_frames, submitted_frames, logic_us, render_cpu_us, present_us]
+            .iter()
+            .any(|value| *value < 0)
+            || frame_count.is_some_and(|count| count != frames)
+            || draw_frames > frames
+            || submitted_frames > draw_frames
+        {
+            return (None, true);
+        }
+        (Some(Self { frames, draw_frames, submitted_frames, logic_us, render_cpu_us, present_us }), false)
+    }
+
+    fn value(&self) -> Value {
+        json!({
+            "frames": self.frames,
+            "draw_frames": self.draw_frames,
+            "submitted_frames": self.submitted_frames,
+            "logic_us": self.logic_us,
+            "render_cpu_us": self.render_cpu_us,
+            "present_us": self.present_us,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundaryTiming {
+    native_reset_us: i64,
+    teardown_us: i64,
+    boot_restore_us: Option<i64>,
+}
+
+impl BoundaryTiming {
+    fn parse(value: Option<&Value>) -> (Option<Self>, bool) {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return (None, false);
+        };
+        let Some(native_reset_us) = value.get("native_reset_us").and_then(Value::as_i64) else {
+            return (None, true);
+        };
+        let Some(teardown_us) = value.get("teardown_us").and_then(Value::as_i64) else {
+            return (None, true);
+        };
+        let Some(restore) = value.get("boot_restore_us") else {
+            return (None, true);
+        };
+        let boot_restore_us = if restore.is_null() {
+            None
+        } else {
+            let Some(value) = restore.as_i64() else { return (None, true); };
+            Some(value)
+        };
+        if native_reset_us < 0 || teardown_us < 0 || boot_restore_us.is_some_and(|value| value < 0) {
+            return (None, true);
+        }
+        (Some(Self { native_reset_us, teardown_us, boot_restore_us }), false)
+    }
+
+    fn value(&self) -> Value {
+        json!({
+            "native_reset_us": self.native_reset_us,
+            "teardown_us": self.teardown_us,
+            "boot_restore_us": self.boot_restore_us,
+        })
+    }
+}
+
+struct FrameTimingStats {
+    known: usize,
+    missing: usize,
+    invalid: usize,
+    frames: i64,
+    draw_frames: i64,
+    submitted_frames: i64,
+    logic_us: i64,
+    render_cpu_us: i64,
+    present_us: i64,
+}
+
+struct BoundaryTimingStats {
+    known: usize,
+    missing: usize,
+    invalid: usize,
+    restore_missing: usize,
+    native_reset_us: i64,
+    teardown_us: i64,
+    boot_restore_us: i64,
+}
+
+impl BoundaryTimingStats {
+    fn from_envelopes(envelopes: &[Envelope]) -> Self {
+        let mut stats = Self {
+            known: 0,
+            missing: 0,
+            invalid: 0,
+            restore_missing: 0,
+            native_reset_us: 0,
+            teardown_us: 0,
+            boot_restore_us: 0,
+        };
+        for envelope in envelopes {
+            if envelope.boundary_timing_invalid {
+                stats.invalid += 1;
+            } else if let Some(timing) = &envelope.boundary_timing {
+                stats.known += 1;
+                stats.native_reset_us =
+                    stats.native_reset_us.saturating_add(timing.native_reset_us);
+                stats.teardown_us = stats.teardown_us.saturating_add(timing.teardown_us);
+                if let Some(restore_us) = timing.boot_restore_us {
+                    stats.boot_restore_us = stats.boot_restore_us.saturating_add(restore_us);
+                } else {
+                    stats.restore_missing += 1;
+                }
+            } else {
+                stats.missing += 1;
+            }
+        }
+        stats
+    }
+}
+
+impl FrameTimingStats {
+    fn from_envelopes(envelopes: &[Envelope]) -> Self {
+        let mut stats = Self {
+            known: 0,
+            missing: 0,
+            invalid: 0,
+            frames: 0,
+            draw_frames: 0,
+            submitted_frames: 0,
+            logic_us: 0,
+            render_cpu_us: 0,
+            present_us: 0,
+        };
+        for envelope in envelopes {
+            if envelope.frame_timing_invalid {
+                stats.invalid += 1;
+            } else if let Some(timing) = &envelope.frame_timing {
+                stats.known += 1;
+                stats.frames = stats.frames.saturating_add(timing.frames);
+                stats.draw_frames = stats.draw_frames.saturating_add(timing.draw_frames);
+                stats.submitted_frames =
+                    stats.submitted_frames.saturating_add(timing.submitted_frames);
+                stats.logic_us = stats.logic_us.saturating_add(timing.logic_us);
+                stats.render_cpu_us = stats.render_cpu_us.saturating_add(timing.render_cpu_us);
+                stats.present_us = stats.present_us.saturating_add(timing.present_us);
+            } else {
+                stats.missing += 1;
+            }
+        }
+        stats
     }
 }
 
@@ -472,6 +651,8 @@ pub struct SimRunAnalysis {
 
     occupancy: Occupancy,
     frame_counts: FrameCountStats,
+    frame_timing: FrameTimingStats,
+    boundary_timing: BoundaryTimingStats,
     timings: Option<TimingsView>,
 }
 
@@ -558,6 +739,11 @@ pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
         if closed.insert(key, ()).is_some() {
             continue;
         }
+        let frame_count = int(end, "frame_count");
+        let (frame_timing, frame_timing_invalid) =
+            FrameTiming::parse(end.get("frame_timing"), frame_count);
+        let (boundary_timing, boundary_timing_invalid) =
+            BoundaryTiming::parse(end.get("boundary_timing"));
         envelopes.push(Envelope {
             name: text(end, "name")
                 .or_else(|| text(start, "name"))
@@ -568,7 +754,11 @@ pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
             worker_attempt: key.1,
             start_ms: ms(start),
             end_ms: ms(end),
-            frame_count: int(end, "frame_count"),
+            frame_count,
+            frame_timing,
+            frame_timing_invalid,
+            boundary_timing,
+            boundary_timing_invalid,
         });
     }
     envelopes.sort_by_key(|envelope| (envelope.start_ms, envelope.occurrence_id));
@@ -716,6 +906,8 @@ pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
     let jobs = effective_jobs.or(requested_jobs).unwrap_or(0);
     let occupancy = occupancy(&workers, base_ms, jobs);
     let frame_counts = FrameCountStats::from_envelopes(&envelopes);
+    let frame_timing = FrameTimingStats::from_envelopes(&envelopes);
+    let boundary_timing = BoundaryTimingStats::from_envelopes(&envelopes);
 
     // timings.json ---------------------------------------------------------
     let envelope_by_key: HashMap<(i64, i64), i64> = envelopes
@@ -813,6 +1005,8 @@ pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
         recoveries,
         occupancy,
         frame_counts,
+        frame_timing,
+        boundary_timing,
         timings,
         envelopes,
         workers,
@@ -927,6 +1121,26 @@ impl SimRunAnalysis {
                 "median": self.frame_counts.median,
                 "max": self.frame_counts.max,
             },
+            "frame_timing": {
+                "known_entries": self.frame_timing.known,
+                "missing_entries": self.frame_timing.missing,
+                "invalid_entries": self.frame_timing.invalid,
+                "frames": self.frame_timing.frames,
+                "draw_frames": self.frame_timing.draw_frames,
+                "submitted_frames": self.frame_timing.submitted_frames,
+                "logic_us": self.frame_timing.logic_us,
+                "render_cpu_us": self.frame_timing.render_cpu_us,
+                "present_us": self.frame_timing.present_us,
+            },
+            "boundary_timing": {
+                "known_entries": self.boundary_timing.known,
+                "missing_entries": self.boundary_timing.missing,
+                "invalid_entries": self.boundary_timing.invalid,
+                "restore_missing_entries": self.boundary_timing.restore_missing,
+                "native_reset_us": self.boundary_timing.native_reset_us,
+                "teardown_us": self.boundary_timing.teardown_us,
+                "boot_restore_us": self.boundary_timing.boot_restore_us,
+            },
         });
 
         let slowest: Vec<Value> = self
@@ -942,6 +1156,11 @@ impl SimRunAnalysis {
                     "end_ms": envelope.end_ms,
                     "duration_ms": envelope.duration_ms(),
                     "frame_count": envelope.frame_count,
+                    "frame_timing": envelope.frame_timing.as_ref().map(FrameTiming::value),
+                    "boundary_timing": envelope
+                        .boundary_timing
+                        .as_ref()
+                        .map(BoundaryTiming::value),
                 })
             })
             .collect();
@@ -1256,6 +1475,66 @@ impl SimRunAnalysis {
                     .unwrap_or_else(|| "n/a".into())
             ),
         );
+        let frame_timing_entries = self.frame_timing.known
+            + self.frame_timing.missing
+            + self.frame_timing.invalid;
+        push(
+            &mut out,
+            format!(
+                "  frame phases    {}/{} known, {} frames, {} draw, {} submitted; logic {:.3}s, render CPU {:.3}s, present {:.3}s",
+                self.frame_timing.known,
+                frame_timing_entries,
+                self.frame_timing.frames,
+                self.frame_timing.draw_frames,
+                self.frame_timing.submitted_frames,
+                self.frame_timing.logic_us as f64 / 1_000_000.0,
+                self.frame_timing.render_cpu_us as f64 / 1_000_000.0,
+                self.frame_timing.present_us as f64 / 1_000_000.0,
+            ),
+        );
+        if self.frame_timing.invalid > 0 {
+            push(
+                &mut out,
+                format!(
+                    "  frame phases    {} invalid entry timing record(s); totals exclude them",
+                    self.frame_timing.invalid
+                ),
+            );
+        }
+        push(
+            &mut out,
+            "  note: render CPU ends before swap; it is not GPU time, and present may include sync wait."
+                .to_string(),
+        );
+        let boundary_timing_entries = self.boundary_timing.known
+            + self.boundary_timing.missing
+            + self.boundary_timing.invalid;
+        push(
+            &mut out,
+            format!(
+                "  boundaries      {}/{} known; native reset {:.3}s, boot restore {:.3}s",
+                self.boundary_timing.known,
+                boundary_timing_entries,
+                self.boundary_timing.native_reset_us as f64 / 1_000_000.0,
+                self.boundary_timing.boot_restore_us as f64 / 1_000_000.0,
+            ),
+        );
+        push(
+            &mut out,
+            format!(
+                "  boundaries      subprocess teardown {:.3}s; stop finalization remains in envelope residual",
+                self.boundary_timing.teardown_us as f64 / 1_000_000.0,
+            ),
+        );
+        if self.boundary_timing.restore_missing > 0 || self.boundary_timing.invalid > 0 {
+            push(
+                &mut out,
+                format!(
+                    "  boundaries      {} restore(s) unavailable, {} invalid record(s)",
+                    self.boundary_timing.restore_missing, self.boundary_timing.invalid
+                ),
+            );
+        }
 
         push(&mut out, String::new());
         push(
@@ -1697,5 +1976,86 @@ mod tests {
         let line = r#"{"elapsed_ms":170,"event":"run_start","run_id":"x","schema_version":1}"#;
         assert_eq!(peek_event(line), Some("run_start"));
         assert_eq!(peek_event("not json"), None);
+    }
+
+    #[test]
+    fn report_retains_per_entry_frame_timing() {
+        let record = RunRecord {
+            run_id: "fixture".into(),
+            dir: PathBuf::from("/tmp/fixture"),
+            skipped_records: 0,
+            timings: None,
+            events: vec![
+                json!({ "event": "run_start", "elapsed_ms": 0,
+                    "source": { "status": "unavailable" } }),
+                json!({ "event": "run_config", "elapsed_ms": 0,
+                    "effective_jobs": 1, "project_path": "mag" }),
+                json!({ "event": "worker_spawn", "elapsed_ms": 0,
+                    "worker_attempt": 1, "kind": "shared", "entries": [{
+                        "occurrence_id": 1, "name": "fixture"
+                    }], "boot_signature": [] }),
+                json!({ "event": "worker_started", "elapsed_ms": 0,
+                    "worker_attempt": 1 }),
+                json!({ "event": "worker_first_entry", "elapsed_ms": 1,
+                    "worker_attempt": 1, "occurrence_id": 1,
+                    "name": "fixture", "part": 0 }),
+                json!({ "event": "entry_start", "elapsed_ms": 1,
+                    "worker_attempt": 1, "occurrence_id": 1,
+                    "name": "fixture", "part": 0 }),
+                json!({ "event": "entry_end", "elapsed_ms": 11,
+                    "worker_attempt": 1, "occurrence_id": 1,
+                    "name": "fixture", "part": 0, "frame_count": 3,
+                    "frame_timing": {
+                        "frames": 3, "draw_frames": 2, "submitted_frames": 1,
+                        "logic_us": 1000, "render_cpu_us": 2000,
+                        "present_us": 300
+                    },
+                    "boundary_timing": {
+                        "native_reset_us": 400,
+                        "teardown_us": 50,
+                        "boot_restore_us": 500
+                    } }),
+                json!({ "event": "entry_result", "elapsed_ms": 11,
+                    "worker_attempt": 1, "occurrence_id": 1,
+                    "verdict": "PASS", "timed_out": false }),
+                json!({ "event": "worker_end", "elapsed_ms": 12,
+                    "worker_attempt": 1 }),
+                json!({ "event": "run_end", "elapsed_ms": 12,
+                    "complete": true, "planned_entries": 1,
+                    "finalized_entries": 1, "status": "PASS" }),
+            ],
+        };
+        let rendered: Value = serde_json::from_str(&analyze(&record, 5).render_json().unwrap()).unwrap();
+        assert_eq!(rendered["time"]["frame_timing"]["known_entries"], 1);
+        assert_eq!(rendered["time"]["frame_timing"]["frames"], 3);
+        assert_eq!(rendered["time"]["frame_timing"]["draw_frames"], 2);
+        assert_eq!(rendered["time"]["frame_timing"]["render_cpu_us"], 2000);
+        assert_eq!(rendered["slowest_entries"][0]["frame_timing"]["present_us"], 300);
+        assert_eq!(rendered["time"]["boundary_timing"]["native_reset_us"], 400);
+        assert_eq!(rendered["slowest_entries"][0]["boundary_timing"]["teardown_us"], 50);
+    }
+
+    #[test]
+    fn old_envelopes_keep_new_timing_unknown() {
+        let record = RunRecord {
+            run_id: "old".into(),
+            dir: PathBuf::from("/tmp/old"),
+            skipped_records: 0,
+            timings: None,
+            events: vec![
+                json!({ "event": "entry_start", "elapsed_ms": 1,
+                    "worker_attempt": 1, "occurrence_id": 1,
+                    "name": "old", "part": 0 }),
+                json!({ "event": "entry_end", "elapsed_ms": 3,
+                    "worker_attempt": 1, "occurrence_id": 1,
+                    "name": "old", "part": 0, "frame_count": 2 }),
+            ],
+        };
+        let rendered: Value = serde_json::from_str(&analyze(&record, 5).render_json().unwrap()).unwrap();
+        assert_eq!(rendered["time"]["frame_timing"]["known_entries"], 0);
+        assert_eq!(rendered["time"]["frame_timing"]["missing_entries"], 1);
+        assert_eq!(rendered["time"]["frame_timing"]["invalid_entries"], 0);
+        assert_eq!(rendered["time"]["boundary_timing"]["known_entries"], 0);
+        assert_eq!(rendered["time"]["boundary_timing"]["missing_entries"], 1);
     }
 }

@@ -321,6 +321,8 @@ impl SimRunRecorder {
         name: &str,
         part: usize,
         frame_count: Option<usize>,
+        frame_timing: Option<Value>,
+        boundary_timing: Option<Value>,
     ) {
         self.event(
             "entry_end",
@@ -330,6 +332,8 @@ impl SimRunRecorder {
                 "name": name,
                 "part": part,
                 "frame_count": frame_count,
+                "frame_timing": frame_timing,
+                "boundary_timing": boundary_timing,
             }),
         );
     }

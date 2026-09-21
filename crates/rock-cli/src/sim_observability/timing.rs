@@ -289,6 +289,8 @@ impl Timings {
         now: u64,
         completed: bool,
         frame_count: Option<Value>,
+        frame_timing: Option<Value>,
+        boundary_timing: Option<Value>,
     ) -> Vec<TimingWarning> {
         let Some((start, name, identity)) = self.active.remove(&key) else { return Vec::new(); };
         let ms = now.saturating_sub(start);
@@ -296,6 +298,8 @@ impl Timings {
         let warnings = evaluate_entry(&name, ms, &self.policy, baseline);
         self.rows.push(json!({ "name": name, "occurrence_id": key.1, "part": key.2,
             "duration_ms": ms, "completed": completed, "frame_count": frame_count.unwrap_or(Value::Null),
+            "frame_timing": frame_timing.unwrap_or(Value::Null),
+            "boundary_timing": boundary_timing.unwrap_or(Value::Null),
             "identity": identity.map(|id| id.key()) }));
         warnings
     }
@@ -315,11 +319,15 @@ impl Timings {
                 let identity = self.identity(key);
                 self.active.insert(key, (now, fields["name"].as_str().unwrap_or("unknown").into(), identity));
             },
-            "entry_end" => return self.complete(key, now, true, fields.get("frame_count").cloned()),
+            "entry_end" => return self.complete(key, now, true,
+                fields.get("frame_count").cloned(), fields.get("frame_timing").cloned(),
+                fields.get("boundary_timing").cloned()),
             "entry_result" => {
                 self.results.insert(key.1, fields["verdict"] == "PASS" && fields["timed_out"] == false);
                 let unfinished = self.active.keys().filter(|entry| entry.1 == key.1).copied().collect::<Vec<_>>();
-                return unfinished.into_iter().flat_map(|entry| self.complete(entry, now, false, None)).collect();
+                return unfinished.into_iter()
+                    .flat_map(|entry| self.complete(entry, now, false, None, None, None))
+                    .collect();
             },
             "phase_start" => { if let Some(phase) = fields["phase"].as_str() { self.phases.insert(phase.into(), now); } },
             "phase_end" => {

@@ -3962,6 +3962,116 @@ struct WorkerPart {
     part_index: usize,
 }
 
+/// CPU timing accumulated by the child for one closed entry. The values are
+/// optional in the envelope so retained journals from before this probe remain
+/// readable. Microseconds keep the side channel integer-only and avoid
+/// formatting a floating point value in the Rock runner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EntryFrameTiming {
+    frames: usize,
+    draw_frames: usize,
+    submitted_frames: usize,
+    logic_us: u64,
+    render_cpu_us: u64,
+    present_us: u64,
+}
+
+impl EntryFrameTiming {
+    fn from_value(value: &serde_json::Value, frame_count: Option<usize>, line: &str) -> Result<Self> {
+        let number = |name: &str| -> Result<u64> {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("entry frame timing field `{name}` is not a nonnegative integer: {line}"))
+        };
+        let frames = usize::try_from(number("frames")?)
+            .map_err(|_| anyhow!("entry frame timing frames do not fit usize: {line}"))?;
+        let draw_frames = usize::try_from(number("draw_frames")?)
+            .map_err(|_| anyhow!("entry frame timing draw_frames do not fit usize: {line}"))?;
+        let submitted_frames = usize::try_from(number("submitted_frames")?)
+            .map_err(|_| anyhow!("entry frame timing submitted_frames do not fit usize: {line}"))?;
+        if let Some(frame_count) = frame_count {
+            if frames != frame_count {
+                return Err(anyhow!(
+                    "entry frame timing frames={frames} disagrees with frame_count={frame_count}: {line}"
+                ));
+            }
+        }
+        if draw_frames > frames {
+            return Err(anyhow!(
+                "entry frame timing draw_frames={draw_frames} exceeds frames={frames}: {line}"
+            ));
+        }
+        if submitted_frames > draw_frames {
+            return Err(anyhow!(
+                "entry frame timing submitted_frames={submitted_frames} exceeds draw_frames={draw_frames}: {line}"
+            ));
+        }
+        Ok(Self {
+            frames,
+            draw_frames,
+            submitted_frames,
+            logic_us: number("logic_us")?,
+            render_cpu_us: number("render_cpu_us")?,
+            present_us: number("present_us")?,
+        })
+    }
+
+    fn value(self) -> serde_json::Value {
+        serde_json::json!({
+            "frames": self.frames,
+            "draw_frames": self.draw_frames,
+            "submitted_frames": self.submitted_frames,
+            "logic_us": self.logic_us,
+            "render_cpu_us": self.render_cpu_us,
+            "present_us": self.present_us,
+        })
+    }
+}
+
+/// Native work done at a successful shared-worker entry boundary. A missing
+/// value means this journal predates the probe or the entry did not close
+/// cleanly. `boot_restore_us` is null when native reset made the worker
+/// ineligible before restore could run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EntryBoundaryTiming {
+    native_reset_us: u64,
+    teardown_us: u64,
+    boot_restore_us: Option<u64>,
+}
+
+impl EntryBoundaryTiming {
+    fn from_value(value: &serde_json::Value, line: &str) -> Result<Self> {
+        let native_reset_us = value
+            .get("native_reset_us")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow!("entry boundary timing native_reset_us is not a nonnegative integer: {line}"))?;
+        let teardown_us = value
+            .get("teardown_us")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow!("entry boundary timing teardown_us is not a nonnegative integer: {line}"))?;
+        let restore = value
+            .get("boot_restore_us")
+            .ok_or_else(|| anyhow!("entry boundary timing has no boot_restore_us: {line}"))?;
+        let boot_restore_us = if restore.is_null() {
+            None
+        } else {
+            Some(restore.as_u64().ok_or_else(|| {
+                anyhow!("entry boundary timing boot_restore_us is not a nonnegative integer or null: {line}")
+            })?)
+        };
+        Ok(Self { native_reset_us, teardown_us, boot_restore_us })
+    }
+
+    fn value(self) -> serde_json::Value {
+        serde_json::json!({
+            "native_reset_us": self.native_reset_us,
+            "teardown_us": self.teardown_us,
+            "boot_restore_us": self.boot_restore_us,
+        })
+    }
+}
+
 /// One part's `__SIM__` and raw stderr lines, carved out of the worker's single
 /// stream by the child's `entry_start`/`entry_end` envelope.
 #[derive(Default)]
@@ -4018,7 +4128,7 @@ fn split_worker_stream(lines: &[String], parts: &[WorkerPart]) -> Result<Vec<Ent
                 attribution = seq;
                 out[seq].started = true;
             }
-            EnvelopeStep::Ended(seq, frame_count) => {
+            EnvelopeStep::Ended(seq, frame_count, _, _) => {
                 out[seq].terminated = true;
                 out[seq].frame_count = frame_count;
             }
@@ -4060,7 +4170,12 @@ enum EnvelopeStep {
     /// A valid `entry_start` for the expected next entry -- the only step the
     /// deadline anchor may reset on.
     Started(usize),
-    Ended(usize, Option<usize>),
+    Ended(
+        usize,
+        Option<usize>,
+        Option<EntryFrameTiming>,
+        Option<EntryBoundaryTiming>,
+    ),
     /// A structured operation inside the open entry.
     Op(usize),
     /// A non-`__SIM__` line; `in_entry` says whether an envelope was open.
@@ -4158,8 +4273,15 @@ impl EnvelopeTracker {
                 }
                 envelope_name_matches(rest, &self.names[live], line)?;
                 let frame_count = envelope_frame_count(rest, line)?;
+                let frame_timing = envelope_frame_timing(rest, frame_count, line)?;
+                let boundary_timing = envelope_boundary_timing(rest, line)?;
                 self.open = None;
-                Ok(EnvelopeStep::Ended(live, frame_count))
+                Ok(EnvelopeStep::Ended(
+                    live,
+                    frame_count,
+                    frame_timing,
+                    boundary_timing,
+                ))
             }
             _ => {
                 let Some(live) = self.open else {
@@ -4186,6 +4308,31 @@ fn envelope_frame_count(rest: &str, line: &str) -> Result<Option<usize>> {
     raw.parse::<usize>()
         .map(Some)
         .map_err(|_| anyhow!("worker sent an invalid entry frame_count: {line}"))
+}
+
+fn envelope_frame_timing(
+    rest: &str,
+    frame_count: Option<usize>,
+    line: &str,
+) -> Result<Option<EntryFrameTiming>> {
+    let Some(raw) = extract_raw_field(rest, "frame_timing") else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| anyhow!("worker sent invalid entry frame_timing ({error}): {line}"))?;
+    EntryFrameTiming::from_value(&value, frame_count, line).map(Some)
+}
+
+fn envelope_boundary_timing(rest: &str, line: &str) -> Result<Option<EntryBoundaryTiming>> {
+    let Some(raw) = extract_raw_field(rest, "boundary_timing") else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| anyhow!("worker sent invalid entry boundary_timing ({error}): {line}"))?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    EntryBoundaryTiming::from_value(&value, line).map(Some)
 }
 
 fn envelope_name_matches(rest: &str, expected: &str, line: &str) -> Result<()> {
@@ -4522,7 +4669,12 @@ fn run_worker(
                                 );
                             }
                         }
-                        Some(EnvelopeStep::Ended(seq, frame_count)) => {
+                        Some(EnvelopeStep::Ended(
+                            seq,
+                            frame_count,
+                            frame_timing,
+                            boundary_timing,
+                        )) => {
                             if let Some((occurrence_id, name, part)) = entry_meta.get(seq) {
                                 recorder.entry_end(
                                     worker_attempt,
@@ -4530,6 +4682,8 @@ fn run_worker(
                                     name,
                                     *part,
                                     frame_count,
+                                    frame_timing.map(EntryFrameTiming::value),
+                                    boundary_timing.map(EntryBoundaryTiming::value),
                                 );
                             }
                         }
@@ -7698,10 +7852,16 @@ mod tests {
         assert!(t.observe(&start(0, "a")).is_err(), "duplicate of the open entry");
         assert!(t.observe(&start(1, "b")).is_err(), "the next entry cannot start while one is open");
 
-        assert!(matches!(t.observe(&end(0, "a")), Ok(EnvelopeStep::Ended(0, None))));
+        assert!(matches!(
+            t.observe(&end(0, "a")),
+            Ok(EnvelopeStep::Ended(0, None, None, None))
+        ));
         assert!(t.observe(&start(0, "a")).is_err(), "a closed entry cannot restart");
         assert!(started(&mut t, &start(1, "b")), "the valid NEXT start is Started");
-        assert!(matches!(t.observe(&end(1, "b")), Ok(EnvelopeStep::Ended(1, None))));
+        assert!(matches!(
+            t.observe(&end(1, "b")),
+            Ok(EnvelopeStep::Ended(1, None, None, None))
+        ));
         assert!(t.observe(&start(2, "c")).is_err(), "past the end of the queue");
 
         let mut t = EnvelopeTracker::for_parts(&parts);
@@ -7742,6 +7902,76 @@ mod tests {
         assert!(g.observe_resets(&start(1, "b")), "the valid next start resets");
     }
 
+    #[test]
+    fn entry_frame_timing_is_validated_and_retained() {
+        let parts = worker_parts(&["a"]);
+        let mut tracker = EnvelopeTracker::for_parts(&parts);
+        assert!(tracker.observe(&start(0, "a")).is_ok());
+        let valid = end_with_frame_timing_and_boundary(
+            0,
+            "a",
+            3,
+            r#"{"frames":3,"draw_frames":2,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
+            r#"{"native_reset_us":40,"teardown_us":5,"boot_restore_us":50}"#,
+        );
+        assert!(matches!(
+            tracker.observe(&valid),
+            Ok(EnvelopeStep::Ended(
+                0,
+                Some(3),
+                Some(EntryFrameTiming {
+                    frames: 3,
+                    draw_frames: 2,
+                    submitted_frames: 1,
+                    logic_us: 10,
+                    render_cpu_us: 20,
+                    present_us: 30,
+                }),
+                Some(EntryBoundaryTiming {
+                    native_reset_us: 40,
+                    teardown_us: 5,
+                    boot_restore_us: Some(50),
+                })
+            ))
+        ));
+
+        for timing in [
+            r#"{"frames":3,"draw_frames":4,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
+            r#"{"frames":2,"draw_frames":2,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
+            r#"{"frames":3,"draw_frames":2,"submitted_frames":1,"logic_us":-1,"render_cpu_us":20,"present_us":30}"#,
+        ] {
+            let mut tracker = EnvelopeTracker::for_parts(&parts);
+            assert!(tracker.observe(&start(0, "a")).is_ok());
+            assert!(
+                tracker
+                    .observe(&end_with_frame_timing(0, "a", 3, timing))
+                    .is_err(),
+                "invalid frame timing must reject: {timing}"
+            );
+        }
+
+        for boundary in [
+            r#"{"native_reset_us":40,"boot_restore_us":50}"#,
+            r#"{"native_reset_us":-1,"teardown_us":5,"boot_restore_us":50}"#,
+            r#"{"native_reset_us":40,"teardown_us":5,"boot_restore_us":-1}"#,
+        ] {
+            let mut tracker = EnvelopeTracker::for_parts(&parts);
+            assert!(tracker.observe(&start(0, "a")).is_ok());
+            assert!(
+                tracker
+                    .observe(&end_with_frame_timing_and_boundary(
+                        0,
+                        "a",
+                        3,
+                        r#"{"frames":3,"draw_frames":2,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
+                        boundary,
+                    ))
+                    .is_err(),
+                "invalid boundary timing must reject: {boundary}"
+            );
+        }
+    }
+
     fn start(seq: usize, name: &str) -> String {
         format!(r#"__SIM__ {{"op":"entry_start","name":"{name}","seq":{seq}}}"#)
     }
@@ -7756,6 +7986,24 @@ mod tests {
 
     fn end_with_raw_frame_count(seq: usize, name: &str, frame_count: &str) -> String {
         format!(r#"__SIM__ {{"op":"entry_end","name":"{name}","seq":{seq},"frame_count":{frame_count}}}"#)
+    }
+
+    fn end_with_frame_timing(seq: usize, name: &str, frame_count: usize, timing: &str) -> String {
+        format!(
+            r#"__SIM__ {{"op":"entry_end","name":"{name}","seq":{seq},"frame_count":{frame_count},"frame_timing":{timing}}}"#
+        )
+    }
+
+    fn end_with_frame_timing_and_boundary(
+        seq: usize,
+        name: &str,
+        frame_count: usize,
+        frame_timing: &str,
+        boundary_timing: &str,
+    ) -> String {
+        format!(
+            r#"__SIM__ {{"op":"entry_end","name":"{name}","seq":{seq},"frame_count":{frame_count},"frame_timing":{frame_timing},"boundary_timing":{boundary_timing}}}"#
+        )
     }
 
     fn expect_ok(msg: &str) -> String {
