@@ -1,7 +1,14 @@
-use bone_lints::{lint_workspace, Finding, LintOptions, HOST_RESOURCE_IN_GAME_MEMORY};
+use bone_lints::{
+    lint_workspace, Finding, LintOptions, HOST_RESOURCE_IN_GAME_MEMORY,
+    HOST_RESOURCE_SUPPRESSION_CENSUS,
+};
 use bone_semantic::prelude::*;
 
 fn findings(src: &str) -> Vec<Finding> {
+    findings_for(src, HOST_RESOURCE_IN_GAME_MEMORY)
+}
+
+fn findings_for(src: &str, lint: &str) -> Vec<Finding> {
     let file = "game/main.rock";
     let ast = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
     let ws = semantic_pass(&mut [ast]).expect("clean program typechecks");
@@ -12,7 +19,7 @@ fn findings(src: &str) -> Vec<Finding> {
         &FxHashSet::default(),
         true,
         &sources,
-        &LintOptions::only([HOST_RESOURCE_IN_GAME_MEMORY.to_owned()]),
+        &LintOptions::only([lint.to_owned()]),
     )
 }
 
@@ -26,9 +33,8 @@ fn a_bare_handle_global_in_game_memory_is_rejected() {
     assert!(found[0].error.message.contains("`Voice`"), "{}", found[0].error.message);
     assert_eq!(
         found[0].level(),
-        rock_core::errors::CompilerErrorLevel::Warning,
-        "Warning, not Error, because the tree-wide census is 251 declarations \
-         (docs/state-ownership-plan.md S2); raising it is one line once that is worked down"
+        rock_core::errors::CompilerErrorLevel::Error,
+        "game memory must reject a host handle after the finding census reaches zero"
     );
 }
 
@@ -116,4 +122,28 @@ fn an_allow_comment_is_the_documented_temporary_escape() {
          fn main() {{ print(\"{{LIVE.0}}\") }}"
     );
     assert!(findings(&src).is_empty(), "{:?}", findings(&src));
+}
+
+#[test]
+fn suppression_census_keeps_live_exceptions_visible() {
+    let src = format!(
+        "{HANDLE}// rock: allow(host_resource_in_game_memory, \"host-boundary fixture\")\n\
+         global INTENTIONAL: Voice = Voice(0)\n\
+         global UNCLASSIFIED: Voice = Voice(0)\n\
+         fn main() {{ print(\"{{INTENTIONAL.0 + UNCLASSIFIED.0}}\") }}"
+    );
+    let census = findings_for(&src, HOST_RESOURCE_SUPPRESSION_CENSUS);
+    assert_eq!(census.len(), 1, "{census:?}");
+    assert!(census[0].error.message.contains("INTENTIONAL"));
+    assert!(census[0].error.message.contains("host-boundary fixture"));
+    let active = findings(&src);
+    assert_eq!(active.len(), 1, "{active:?}");
+    assert!(active[0].error.message.contains("UNCLASSIFIED"));
+
+    let without_allow = src.replace(
+        "// rock: allow(host_resource_in_game_memory, \"host-boundary fixture\")\n",
+        "",
+    );
+    assert!(findings_for(&without_allow, HOST_RESOURCE_SUPPRESSION_CENSUS).is_empty());
+    assert_eq!(findings(&without_allow).len(), 2);
 }
