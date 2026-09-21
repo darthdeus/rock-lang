@@ -986,8 +986,6 @@ fn mag_seek_equivalence_state_names(
     assert!(!sim.contains("DROP_PARTICLES"), "WorldState owns drop-particle storage inside MAG_ACTIVE_WORLD");
     assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
     for name in [
-        "MAG_BUILD_INFO_DATE",
-        "MAG_BUILD_INFO_UNIX",
         "MAG_DEATH_AUDIO_WRITES",
         "MAG_DEATH_GRAYSCALE_PASSES",
         "MAG_GAMEPLAY_PANEL_DRAWS",
@@ -1001,18 +999,12 @@ fn mag_seek_equivalence_state_names(
         "MENU_ATMOSPHERE_SUBMISSIONS",
         "MENU_BOUNDED_FLOOR_SUBMISSIONS",
         "MENU_BOUNDED_GLYPH_SUBMISSIONS",
-        "MENU_LABEL_CACHE_KEYS",
-        "MENU_LABEL_OUTPUT_ANCHORS",
-        "MENU_LABEL_OUTPUT_CALLS",
-        "MENU_LABEL_ROUTES",
-        "MENU_LABEL_SCENE_CALLS",
         "MENU_LOGO_REFLECTION_ADDITIONAL_INPUTS",
         "MENU_LOGO_REFLECTION_FACE_PIXELS",
         "MENU_LOGO_REFLECTION_LAST_GENERATION",
         "MENU_LOGO_REFLECTION_LAST_SOURCE_HANDLE",
         "MENU_LOGO_REFLECTION_MATERIAL_CALLS",
         "MENU_LOGO_TEXT_OUTPUT_CALLS",
-        "MENU_OUTPUT_TEXT_TARGET_RECT",
     ] {
         assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
     }
