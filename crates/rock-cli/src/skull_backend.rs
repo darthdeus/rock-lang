@@ -1825,6 +1825,7 @@ fn build_state_nobox_accessors(
                 ty_name, paths, nullable, storage, ctor_suffix: suffix,
                 presence_path: _, unbuildable,
             } = acc;
+            let ty_symbol = skull_mir::mangle::symbol_of_key(ty_name);
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
             // The leaves are emitted symbols, matching the Session slot map.
@@ -1919,7 +1920,7 @@ fn build_state_nobox_accessors(
                 // behind would let a later read resurrect the old value.
                 Some(_) => (
                     format!(
-                        "if not __rock_state_get({}) then return nil end return {ty_name}{suffix}({args})",
+                        "if not __rock_state_get({}) then return nil end return {ty_symbol}{suffix}({args})",
                         present_key.as_ref().expect("nullable accessor has a presence key")
                     ),
                     format!(
@@ -1933,7 +1934,7 @@ fn build_state_nobox_accessors(
                             .join("; ")
                     ),
                 ),
-                None => (format!("return {ty_name}{suffix}({args})"), writes),
+                None => (format!("return {ty_symbol}{suffix}({args})"), writes),
             };
             rows.push(format!(
                 "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",

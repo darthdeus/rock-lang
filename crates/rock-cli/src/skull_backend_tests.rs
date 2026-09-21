@@ -83,6 +83,41 @@ fn main() {}
 }
 
 #[test]
+fn scoped_nobox_reflection_uses_the_emitted_type_symbol() {
+    let source = r#"
+pub nobox value Place { x: int, y: int }
+global LAST_PLACE: Place? = null
+fn main() {}
+"#;
+    let mut module = skull_parser::parse_module_with_dialect(
+        source,
+        ustr::Ustr::from("place.rock"),
+        skull_parser::Dialect::V1,
+    )
+    .expect("parse scoped nobox fixture");
+    module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "mag_simulation".to_string(),
+    });
+    let mut aliases = bone_core::modules::NsAliases::default();
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 1,
+        self_name: ustr::Ustr::from("mag_simulation"),
+        aliases: vec![],
+    });
+    let workspace = bone_semantic::semantic_passes::semantic_pass_with_aliases(
+        &mut [module], &aliases,
+    )
+    .expect("typecheck scoped nobox fixture");
+    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
+    let bridge = super::build_state_nobox_accessors(&workspace, &scalar)
+        .expect("build scoped nobox reflection bridge");
+    let symbol = skull_mir::mangle::symbol_of_key(ustr::Ustr::from("mag_simulation::Place"));
+    assert!(bridge.contains(&format!("return {symbol}_ct(")), "scoped ctor did not use its emitted symbol:\n{bridge}");
+    assert!(!bridge.contains("mag_simulation::Place_ct("), "logical type key leaked into Lua:\n{bridge}");
+}
+
+#[test]
 fn allocation_report_writer_is_explicit_and_writes_the_compiler_report() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("allocation-report.txt");
