@@ -145,14 +145,39 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         .expect("read SpaceState body");
     for field in [
         "restoration: RestorationState",
-        "harvest: HarvestState",
-        "hazards: HazardState",
-        "gates: GateObservationState",
+        "harvest: HarvestVisualState",
+        "simulation: SpaceSimulationState",
     ] {
         assert_eq!(
             space_state.matches(field).count(),
             1,
             "SpaceState must own `{field}` exactly once"
+        );
+    }
+    for field in ["hazards:", "gates:", "teleport_entry:", "ticks:"] {
+        assert!(
+            !space_state.lines().any(|line| line.trim_start().starts_with(field)),
+            "SpaceState must keep `{field}` under its package simulation state"
+        );
+    }
+    let simulation = fs::read_to_string(repo.join("mag-simulation/world_space.rock"))
+        .expect("read package space state");
+    let simulation_state = simulation
+        .split_once("pub struct SpaceSimulationState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read SpaceSimulationState body");
+    for field in [
+        "ticks: int",
+        "harvest_ready_at: Map<int, float>",
+        "hazards: HazardState",
+        "gates: GateObservationState",
+        "teleport_entry: TeleportEntryState",
+    ] {
+        assert_eq!(
+            simulation_state.matches(field).count(),
+            1,
+            "SpaceSimulationState must own `{field}` exactly once"
         );
     }
     assert!(
