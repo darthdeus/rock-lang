@@ -74,7 +74,30 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
     first
 }
 
-const MAG_PRESENTATION_WORLD_EXCLUDED: &[&str] = &[
+const MAG_HOST_PROJECTION_WORLD_EXCLUDED: &[&str] = &[
+    "AGENT_ACCESS_ENABLED",
+    "AGENT_SESSION_ID",
+    "AGENT_GENERATION",
+    "AGENT_REGISTERED",
+    "AGENT_CONNECTION_SEEN",
+    "AGENT_NEXT_RETRY_AT",
+    "AGENT_QUEUE",
+    "AGENT_METADATA_LEVEL",
+    "AGENT_METADATA_VISIBLE",
+    "AGENT_METADATA_FULLSCREEN",
+    "AGENT_METADATA_ACCESS",
+    "PENDING_CAPTURE",
+    "AGENT_SESSION_ID_SERIAL",
+    "AGENT_WINDOW_POS",
+    "AGENT_WINDOW_SIZE",
+    "AGENT_CHECKBOX_POS",
+    "AGENT_FORGIVE_BUTTON_POS",
+    "AGENT_RESURRECT_BUTTON_POS",
+    "AGENT_RESTORE_BUTTON_POS",
+    "AGENT_INVULNERABLE_BUTTON_POS",
+    "AGENT_GOLD_BUTTON_POS",
+    "AGENT_REAGENTS_BUTTON_POS",
+    "AGENT_STOP_REQUESTED",
     "CAST_GLYPHS",
     "CAST_GLYPHS_WORLD",
     "CAST_GLYPH_CHILD_POLLER",
@@ -96,6 +119,7 @@ const MAG_PRESENTATION_WORLD_EXCLUDED: &[&str] = &[
     "DUNGEON_MATERIAL_RETIRED",
     "DUNGEON_RELIGHT_OUTPUT",
     "DUNGEON_RELIGHT_CACHES",
+    "DUNGEON_GI_MATERIAL_VERSION",
     "DUNGEON_SPRITE_ASSETS",
     "DUNGEON_SPRITE_DRAWS",
     "FLOOR_MATERIAL_VISUALS",
@@ -316,13 +340,13 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
 }
 
 #[test]
-fn mag_presentation_registries_are_not_world_image_state() {
+fn mag_host_projections_are_not_world_image_state() {
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
-    for name in MAG_PRESENTATION_WORLD_EXCLUDED {
+    for name in MAG_HOST_PROJECTION_WORLD_EXCLUDED {
         assert!(
             !names.contains(*name),
-            "presentation/resource registry {name} must be explicit world-excluded state: {names:?}"
+            "host projection {name} must be explicit world-excluded state: {names:?}"
         );
     }
 }
@@ -845,6 +869,52 @@ fn assert_mag_seek_state_matches(
     assert_sim_state_matches(got, want, &exact, label);
 }
 
+fn assert_mag_menu_seek_state_matches(
+    got: &serde_json::Value,
+    want: &serde_json::Value,
+    sim: &std::collections::HashSet<String>,
+    label: &str,
+) {
+    let rat_path = "/mag/RATCATCHER_ENTITY";
+    let farmer_path = "/mag/DUNGEON_FARMING_ADVENTURERS/data/0/adventurer";
+    for state in [got, want] {
+        let rat = state.pointer(rat_path).expect("Ratcatcher reference in state dump");
+        let farmer = state.pointer(farmer_path).expect("farming reference in state dump");
+        assert_eq!(rat, farmer, "the route must refer to the live Ratcatcher");
+        let diag = &state["__stone_diag"];
+        assert_eq!(diag["MAG_REPLAY_RATCATCHER_NAME"], "Pip", "Ratcatcher must resolve live");
+        assert_eq!(diag["MAG_REPLAY_RATCATCHER_SLOT"], rat["_slot"]);
+        assert_eq!(diag["MAG_REPLAY_RATCATCHER_GEN"], rat["_generation"]);
+        assert_eq!(diag["MAG_PLAY_EFFECT_SCENE"], rat["_scene_id"]);
+        for field in ["_arena_id", "_scene_id"] {
+            assert!(rat[field].as_i64().is_some_and(|id| id > 0), "{field} must be live: {rat}");
+        }
+    }
+    for key in [
+        "MAG_REPLAY_RATCATCHER_NAME", "MAG_REPLAY_RATCATCHER_GRID_X",
+        "MAG_REPLAY_RATCATCHER_GRID_Y", "MAG_REPLAY_RATCATCHER_SLOT",
+        "MAG_REPLAY_RATCATCHER_GEN", "MAG_REPLAY_WORLD_DIGEST",
+    ] {
+        assert_eq!(got["__stone_diag"][key], want["__stone_diag"][key],
+            "live Ratcatcher/world {key} must match {label}");
+    }
+    assert!(got["__stone_diag"]["MAG_REPLAY_WORLD_DIGEST"].as_i64().is_some_and(|n| n != 0),
+        "the world digest must cover a populated world");
+
+    // WorldImage retains live registry identity ceilings, so resimulation may
+    // remint these two references while preserving their one live referent.
+    let mut got = got.clone();
+    let mut want = want.clone();
+    for state in [&mut got, &mut want] {
+        for path in [rat_path, farmer_path] {
+            let reference = state.pointer_mut(path).expect("Ratcatcher reference to normalize");
+            reference["_arena_id"] = serde_json::Value::Null;
+            reference["_scene_id"] = serde_json::Value::Null;
+        }
+    }
+    assert_mag_seek_state_matches(&got, &want, sim, label);
+}
+
 fn assert_mag_seek_populations_match(
     got: &serde_json::Value,
     want: &serde_json::Value,
@@ -893,17 +963,16 @@ fn mag_seek_equivalence_state_names(
     }
     assert_mag_seek_census_owners(&sim);
     assert_mag_panel_plan_census(&sim);
-    for name in MAG_PRESENTATION_WORLD_EXCLUDED {
+    for name in MAG_HOST_PROJECTION_WORLD_EXCLUDED {
         assert!(
             !sim.contains(*name),
-            "presentation/resource registry {name} must be explicit world-excluded state"
+            "host projection {name} must be explicit world-excluded state"
         );
     }
     for name in ["TELEMETRY_SESSION_OPEN", "TELEMETRY_LAST_FRAME_T"] {
         assert!(!sim.contains(name), "{name} is telemetry side-channel state");
     }
     for name in [
-        "AGENT_NEXT_RETRY_AT",
         "CURSOR_IDS",
         "CURSOR_HARDWARE_READY",
         "APPLIED_CURSOR_ID",
@@ -2267,7 +2336,7 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
     );
     assert_eq!(current_tick(&sought), i64::from(target));
     assert_eq!(sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(i64::from(target)));
-    assert_mag_seek_state_matches(&sought, &reference, &sim, "Mag from-boot state equivalence");
+    assert_mag_menu_seek_state_matches(&sought, &reference, &sim, "Mag from-boot state equivalence");
 
     let cadence_sought = run_replay_dump(
         game,
@@ -2287,7 +2356,7 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
         ],
     );
     assert_eq!(cadence_sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(10));
-    assert_mag_seek_state_matches(&cadence_sought, &reference, &sim, "Mag cadence state equivalence");
+    assert_mag_menu_seek_state_matches(&cadence_sought, &reference, &sim, "Mag cadence state equivalence");
 }
 
 #[test]
