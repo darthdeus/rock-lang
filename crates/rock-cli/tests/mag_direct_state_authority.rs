@@ -598,6 +598,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
 
     let quests = fs::read_to_string(repo.join("mag/quests.rock"))
         .expect("read MAG quest source");
+    let quest_state = fs::read_to_string(repo.join("mag-simulation/quest.rock"))
+        .expect("read simulation quest source");
     for field in [
         "pending_events: [string]",
         "event_subscribers: Map<string, [string]>",
@@ -607,7 +609,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "last_region_place: Place?",
     ] {
         assert_eq!(
-            quests.matches(field).count(),
+            quest_state.matches(field).count(),
             1,
             "QuestRuntimeState must contain `{field}` exactly once"
         );
@@ -632,8 +634,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "deferred Player feedback must re-resolve the Scene entity"
     );
 
-    let progress = fs::read_to_string(repo.join("mag/progress.rock"))
-        .expect("read MAG progress source");
+    let progress = &quest_state;
     for field in [
         "bank_gold: int",
         "events: Map<string, EventRecord>",
@@ -953,7 +954,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 14, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 15, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
@@ -1024,15 +1025,19 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let status_owner = tick
         .find("update_player_statuses(player)")
         .expect("status owner in canonical tick");
-    let status_presenter = tick
-        .find("mag_present_status_effects(world)")
-        .expect("status presenter in canonical tick");
+    assert!(
+        !tick.contains("mag_present_status_effects(world)"),
+        "simulation must not call the status presenter"
+    );
+    let status_sample = tick
+        .find("mag_capture_status_presentation(world)")
+        .expect("status sample in canonical tick");
     let late_wall_contact = tick
         .find("player.update_walls()")
         .expect("late wall contact in canonical tick");
     assert!(
-        status_owner < status_presenter && status_presenter < late_wall_contact,
-        "status presentation must stay between its owner tick and late wall contact"
+        status_owner < status_sample && status_sample < late_wall_contact,
+        "status sampling must stay between its owner tick and late wall contact"
     );
     let wisp_intent = tick
         .find("player.tick_wisp_intent()")
@@ -1051,8 +1056,8 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     );
     assert_eq!(
         update.matches("mag_present_status_effects(world)").count(),
-        0,
-        "status presentation belongs to the tick's established owner/contact seam"
+        1,
+        "the host must present the sampled status state once"
     );
     assert_eq!(
         update.matches("mag_simulation_tick(world, tick_intent, dt)").count(),
@@ -1066,6 +1071,10 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         1,
         "the host must admit the canonical tick exactly once"
     );
+    let host_tick = update.find("mag_simulation_tick(world, tick_intent, dt)").unwrap();
+    let host_presenter = update.find("mag_present_status_effects(world)").unwrap();
+    assert!(host_tick < host_presenter,
+        "the host must present the pre-contact sample after simulation returns");
 }
 
 #[test]

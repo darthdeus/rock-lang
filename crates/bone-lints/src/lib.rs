@@ -182,6 +182,7 @@ pub const KNOWN_LINTS: &[&str] = &[
     ACTION_CALLERS,
     REDUNDANT_STATE_ANNOTATION,
     HOST_RESOURCE_IN_GAME_MEMORY,
+    HOST_RESOURCE_SUPPRESSION_CENSUS,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -198,6 +199,7 @@ pub const OPT_IN_LINTS: &[&str] = &[
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
+    HOST_RESOURCE_SUPPRESSION_CENSUS,
 ];
 
 /// What an invocation asks of the lint engine: which lints run, and the knobs
@@ -2762,6 +2764,37 @@ fn flat_findings_with(
                 .map(Finding::of),
         );
     }
+    if sel.enabled(HOST_RESOURCE_SUPPRESSION_CENSUS) {
+        let lines: Vec<&str> = src.lines().collect();
+        for found in host_resources_in_game_memory_in_module(ws, module) {
+            let line = found.span.line_range.0;
+            let marker = lines
+                .get(line)
+                .copied()
+                .filter(|s| parse_allow_comment(s, HOST_RESOURCE_IN_GAME_MEMORY))
+                .or_else(|| {
+                    line.checked_sub(1)
+                        .and_then(|n| lines.get(n).copied())
+                        .filter(|s| parse_allow_comment(s, HOST_RESOURCE_IN_GAME_MEMORY))
+                });
+            let Some(marker) = marker else { continue };
+            let reason = marker
+                .split_once("//")
+                .and_then(|(_, comment)| comment.split_once('"'))
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(reason, _)| format!("; reason: {reason}"))
+                .unwrap_or_default();
+            out.push(Finding {
+                lint: HOST_RESOURCE_SUPPRESSION_CENSUS,
+                error: CompilerError::new_with_label(
+                    found.span,
+                    format!("suppressed host-resource finding on `{}`{reason}", found.global),
+                )
+                .with_level(CompilerErrorLevel::Warning),
+                line,
+            });
+        }
+    }
     if sel.enabled(RAW_INPUT_MIGRATION) {
         let found = raw_input_sites_in_module(module);
         out.extend(
@@ -4802,17 +4835,11 @@ impl LintFinding for RedundantStateAnnotation {
 /// `platform` class caught) was a live defect found by divergence rather than
 /// by a check.
 ///
-/// **Level: `Warning`, and that is a measurement, not a preference.** Run
-/// over every project in the tree with the seven Stone handle newtypes
-/// annotated, this finds 251 declarations in 15 projects (MAG 105, testbed 43,
-/// wgpu_renderer 39, bitgun 22, ...), so an `Error` would stop every build in
-/// the repository on day one. Most are presentation caches -- a loaded
-/// `Image`, a `Canvas` -- whose real fix is a per-declaration marker or a
-/// `@memory(platform)` header on a whole presentation file, and a few sit
-/// inside real simulation records where the fix is a game-side id. The census
-/// is the deliverable; `docs/state-ownership-plan.md` S2 carries the list and
-/// the author decides the order. Raising the level is a one-line change once
-/// the population is worked down.
+/// The seven original Stone handle types found 251 declarations in 15
+/// projects. After presentation roots were classified, intentional sim cases
+/// gained reasoned allow comments, and the world-held cases moved to logical
+/// keys, all 15 projects had zero unsuppressed findings. The lint is `Error`;
+/// `host_resource_suppression_census` keeps the allowed population visible.
 #[derive(Clone, Debug)]
 pub struct HostResourceInGameMemory {
     pub global: Ustr,
@@ -4827,6 +4854,11 @@ pub struct HostResourceInGameMemory {
 /// Canonical lint name for suppression:
 /// `// rock: allow(host_resource_in_game_memory)`.
 pub const HOST_RESOURCE_IN_GAME_MEMORY: &str = "host_resource_in_game_memory";
+
+/// Opt-in live census of `host_resource_in_game_memory` findings hidden by an
+/// allow comment. It reports the suppressed declaration while the main lint
+/// remains quiet, so raising the main lint to Error cannot hide exceptions.
+pub const HOST_RESOURCE_SUPPRESSION_CENSUS: &str = "host_resource_suppression_census";
 
 /// Every `game`-memory global in the module that can reach a `@host_resource`
 /// type through its declared type.
@@ -5017,6 +5049,6 @@ impl LintFinding for HostResourceInGameMemory {
                 through
             ),
         )
-        .with_level(CompilerErrorLevel::Warning)
+        .with_level(CompilerErrorLevel::Error)
     }
 }
