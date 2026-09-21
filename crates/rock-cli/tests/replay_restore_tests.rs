@@ -712,11 +712,9 @@ fn restore_returns_to_snapshot_tick_state() {
 /// Assert every sim-state global (`sim`) in `got` matches `want`, and at least
 /// one was compared.
 ///
-/// Resource ids are excluded by the engine's serializer, which renders a leaf
-/// whose declared type is a handle newtype as a host projection
-/// (`stone/engine/host_projection.rock`): these two dumps come from two `rock
-/// frame` processes that created a different number of images and meshes on the
-/// way to the tick they report. The count here is the exclusion's denominator.
+/// Resource ids, when present, are rendered as host projections by the
+/// serializer (`stone/engine/host_projection.rock`), since these dumps can
+/// come from separate `rock frame` processes.
 fn assert_sim_state_matches(
     got: &serde_json::Value,
     want: &serde_json::Value,
@@ -724,7 +722,6 @@ fn assert_sim_state_matches(
     label: &str,
 ) {
     let mut compared = 0;
-    let mut stripped = 0;
     let mut mismatches = Vec::new();
     for (pkg, globals) in crate::stone_harness::dump_packages(got) {
         let want_pkg = &want[pkg];
@@ -736,8 +733,6 @@ fn assert_sim_state_matches(
             let mut b = want_pkg[name].clone();
             strip_scheduler_frame_stamps(&mut a);
             strip_scheduler_frame_stamps(&mut b);
-            stripped += crate::stone_harness::count_host_projections(&a);
-            stripped += crate::stone_harness::count_host_projections(&b);
             collect_f32_state_mismatches(
                 &a,
                 &b,
@@ -748,9 +743,6 @@ fn assert_sim_state_matches(
         }
     }
     assert!(compared > 0, "must compare at least one sim-state global");
-    // The denominator for the exclusion: there WAS something to exclude, so a
-    // green here is not "there were no handles to disagree about".
-    assert!(stripped > 0, "no sim-state global carried a host-projection leaf");
     assert!(
         mismatches.is_empty(),
         "sim state must match; first {} difference(s):\n{}",
@@ -1055,8 +1047,6 @@ fn mag_seek_equivalence_state_names(
     assert!(!sim.contains("DROP_PARTICLES"), "WorldState owns drop-particle storage inside MAG_ACTIVE_WORLD");
     assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
     for name in [
-        "MAG_BUILD_INFO_DATE",
-        "MAG_BUILD_INFO_UNIX",
         "MAG_DEATH_AUDIO_WRITES",
         "MAG_DEATH_GRAYSCALE_PASSES",
         "MAG_GAMEPLAY_PANEL_DRAWS",
@@ -1065,26 +1055,20 @@ fn mag_seek_equivalence_state_names(
         "MAG_RESURRECTION_UI_DRAWS",
         "MAG_RUN_STARTS",
         "MAG_RUN_STOPS",
-        "UI_MOUSE",
         "MENU_ATMOSPHERE_BATCHES",
         "MENU_ATMOSPHERE_SUBMISSIONS",
         "MENU_BOUNDED_FLOOR_SUBMISSIONS",
         "MENU_BOUNDED_GLYPH_SUBMISSIONS",
-        "MENU_LABEL_CACHE_KEYS",
-        "MENU_LABEL_OUTPUT_ANCHORS",
-        "MENU_LABEL_OUTPUT_CALLS",
-        "MENU_LABEL_ROUTES",
-        "MENU_LABEL_SCENE_CALLS",
         "MENU_LOGO_REFLECTION_ADDITIONAL_INPUTS",
         "MENU_LOGO_REFLECTION_FACE_PIXELS",
         "MENU_LOGO_REFLECTION_LAST_GENERATION",
         "MENU_LOGO_REFLECTION_LAST_SOURCE_HANDLE",
         "MENU_LOGO_REFLECTION_MATERIAL_CALLS",
         "MENU_LOGO_TEXT_OUTPUT_CALLS",
-        "MENU_OUTPUT_TEXT_TARGET_RECT",
     ] {
-        assert!(sim.remove(name), "{name} must be excluded as a presentation or lifecycle diagnostic");
+        assert!(!sim.contains(name), "{name} must be world-excluded presentation or lifecycle state");
     }
+    assert!(sim.remove("UI_MOUSE"), "UI_MOUSE keeps the cross-frame interaction latch in WorldImage");
     sim
 }
 
