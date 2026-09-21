@@ -46,6 +46,19 @@ fn mag_world_state_has_no_host_resources() {
     assert!(text.contains("[LINT] mag: no findings"), "MAG still captures a host resource: {text}");
 }
 
+#[test]
+fn bitgun_world_props_have_no_host_resources() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["lint", "bitgun", "--lints=host_resource_in_game_memory"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run Bitgun host-resource lint");
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "Bitgun host-resource lint failed: {text}");
+    assert!(text.contains("[LINT] bitgun: no findings"), "Bitgun still captures a host resource: {text}");
+}
+
 /// Sim-state global names = the engine predicate's output, resolved to the
 /// logical names used by dump-state rather than re-listed in Rust.
 fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String> {
