@@ -598,6 +598,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
 
     let quests = fs::read_to_string(repo.join("mag/quests.rock"))
         .expect("read MAG quest source");
+    let quest_state = fs::read_to_string(repo.join("mag-simulation/quest.rock"))
+        .expect("read simulation quest source");
     for field in [
         "pending_events: [string]",
         "event_subscribers: Map<string, [string]>",
@@ -607,7 +609,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "last_region_place: Place?",
     ] {
         assert_eq!(
-            quests.matches(field).count(),
+            quest_state.matches(field).count(),
             1,
             "QuestRuntimeState must contain `{field}` exactly once"
         );
@@ -632,8 +634,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "deferred Player feedback must re-resolve the Scene entity"
     );
 
-    let progress = fs::read_to_string(repo.join("mag/progress.rock"))
-        .expect("read MAG progress source");
+    let progress = &quest_state;
     for field in [
         "bank_gold: int",
         "events: Map<string, EventRecord>",
