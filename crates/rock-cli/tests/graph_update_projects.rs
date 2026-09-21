@@ -129,7 +129,9 @@ fn project_case(rel: &str) {
     let dir = project_dir(rel);
     let files = project_files(&dir);
     assert!(files.len() > 1, "{rel} should have several modules");
-    let mut session = Session::new(warm_stdlib(), files.clone(), &bone_core::modules::NsAliases::default())
+    let aliases = bone_query::package_aliases::for_manifest_dir(std::path::Path::new(&dir))
+        .expect("project dependency aliases");
+    let mut session = Session::new(warm_stdlib(), files.clone(), &aliases)
         .unwrap_or_else(|e| panic!("{rel} session warm failed: {}", e.message));
     assert!(
         session.diagnostics().is_empty(),
