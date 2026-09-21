@@ -28,20 +28,41 @@ pub enum TyPos {
     Body,
 }
 
-/// Record how each segment of a v1 fragment's top-level `use` items resolved
+/// Record how each segment of a v1 fragment's `use` items resolved
 /// ([`hir::PathSegmentRef`]), on the module; `use a::f as g` also records
 /// `g` as an alias of what `f` names. The targets are checked where they are
 /// declared (`validate_v1_use_targets`), so a segment that does not resolve
-/// here records nothing rather than a second diagnostic. `use` items inside
-/// inline `mod` blocks are not recorded yet.
+/// here records nothing rather than a second diagnostic. Inline `mod` blocks
+/// use a child fragment path while resolving their `use` items.
 pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
+    let Some(root) = ctx.v1_scope().cloned() else { return };
     let mut refs = Vec::new();
-    for item in &a.items {
-        if let skull_parser::ItemKind::Use(decl) = &item.kind {
-            ctx.use_tree_refs(&decl.tree, &[], false, &mut refs);
+    record_use_items(ctx, &a.items, &root.module_path, &root, &mut refs);
+    ctx.module.path_segments.extend(refs);
+}
+
+fn record_use_items(
+    ctx: &LowerCtx,
+    items: &[skull_parser::Item],
+    module_path: &[Ustr],
+    root: &bone_core::modules::FragmentScope,
+    out: &mut Vec<hir::PathSegmentRef>,
+) {
+    let mut frag = root.clone();
+    frag.module_path = module_path.to_vec();
+    for item in items {
+        match &item.kind {
+            skull_parser::ItemKind::Use(decl) => {
+                ctx.use_tree_refs(&frag, &decl.tree, &[], false, out);
+            }
+            skull_parser::ItemKind::Module(module) => {
+                let mut child = module_path.to_vec();
+                child.push(module.name.name);
+                record_use_items(ctx, &module.items, &child, root, out);
+            }
+            _ => {}
         }
     }
-    ctx.module.path_segments.extend(refs);
 }
 
 /// The segment record for what a member-wise path resolved to.
@@ -190,12 +211,12 @@ impl<'a> LowerCtx<'a> {
     /// [`record_use_paths`] for one use tree under `prefix`.
     fn use_tree_refs(
         &self,
+        frag: &bone_core::modules::FragmentScope,
         tree: &skull_parser::UseTree,
         prefix: &[Ustr],
         from_root: bool,
         out: &mut Vec<hir::PathSegmentRef>,
     ) {
-        let Some(frag) = self.v1_scope() else { return };
         let skull_parser::UseTree::Path { from_root: tree_root, segments, kind } = tree;
         let root = if prefix.is_empty() { *tree_root } else { from_root };
         let mut full = prefix.to_vec();
@@ -220,7 +241,7 @@ impl<'a> LowerCtx<'a> {
             }
             skull_parser::UseSuffix::Nested(children) => {
                 for child in children {
-                    self.use_tree_refs(child, &full, root, out);
+                    self.use_tree_refs(frag, child, &full, root, out);
                 }
             }
             skull_parser::UseSuffix::Bind | skull_parser::UseSuffix::Glob | skull_parser::UseSuffix::Operator { .. } => {}
@@ -2434,6 +2455,7 @@ pub fn build_function(
 ) -> Result<(Function, Option<Body>, Vec<CompilerError>), CompilerError> {
     ctx.generics_in_scope.clear();
     reject_generic_defaults("fn generics", &f.generics)?;
+    reject_inline_lua_if_forbidden(a, f)?;
     let generic_var_ids = ctx.declare_generics(&f.generics);
     let mut body = Body::default();
     let generic_bounds = lower_generic_bounds(ctx, a, &mut body, &f.generics)?;
@@ -3247,6 +3269,31 @@ fn reject_mutable_global_if_forbidden(
     comp_error!(
         span,
         "mutable {kind} `{name}` is not allowed in package `{package}` with [language] globals = \"none\"; declare immutable state as `const`"
+    );
+}
+
+/// A `globals = "none"` package cannot hide writes in a native Lua body. The
+/// body has no Rock expression arena from which the state checker can derive a
+/// write set, so the package boundary rejects the opaque declaration instead
+/// of pretending it is state-free. JavaScript inline bodies target a separate
+/// backend and are outside this Lua state boundary.
+fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), CompilerError> {
+    if f.is_synthetic
+        || !matches!(a.global_policy, skull_parser::GlobalPolicy::None)
+        || !matches!(&f.body, skull_parser::FunctionBody::Inline(skull_parser::FnBackend::Lua, _))
+    {
+        return Ok(());
+    }
+    let package = a
+        .package
+        .as_ref()
+        .map(|tag| tag.self_name.as_str())
+        .unwrap_or("<standalone>");
+    comp_error!(
+        f.name.span,
+        "inline(lua) function `{}` is not allowed in package `{}` with [language] globals = \"none\"; move the host operation to a package with an explicit native-state boundary",
+        f.name.name,
+        package
     );
 }
 

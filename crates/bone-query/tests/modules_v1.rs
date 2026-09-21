@@ -28,7 +28,8 @@ fn main() {
 
 fn sizes(b: shapes::Box, c: Crate) -> int {
     let k = shapes::Kind::Round
-    b.w + c.w + shapes::LIMIT
+    let width = box_width(b)
+    b.w + c.w + shapes::LIMIT + width
 }
 ";
 
@@ -43,8 +44,21 @@ pub fn perimeter(w: int) -> int {
     w * 4
 }
 
+pub fn box_width(b: Box) -> int {
+    b.w
+}
+
+pub fn width_value(w: int) -> int {
+    w
+}
+
+fn hidden_width(b: Box) -> int {
+    b.w
+}
+
 pub struct Box {
     pub w: int,
+    private secret: int,
 }
 
 pub enum Kind {
@@ -53,6 +67,10 @@ pub enum Kind {
 }
 
 pub global LIMIT: int = 10
+
+pub global BOX: Box = Box { w: 2, secret: 3 }
+
+global SECRET_BOX: Box = Box { w: 4, secret: 5 }
 
 pub fn box_area(b: Box) -> int {
     b.w * b.w
@@ -309,6 +327,35 @@ fn a_use_item_segment_lands_on_what_it_names() {
 }
 
 #[test]
+fn an_inline_module_use_item_records_each_path_segment() {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let text = format!(
+        "{MAIN}\n\
+         pub mod inline {{\n\
+             use ::shapes::area as local_area;\n\
+             pub fn run() -> int {{ local_area(2) }}\n\
+         }}\n"
+    );
+    bone.update(&main, text.clone());
+    let loc = bone
+        .definition(&main, pos_of(&text, "::shapes::area as", 0, 11))
+        .expect("inline use path resolves");
+    let (path, covered) = located_text(&loc);
+    let file = file_name(&path).to_string();
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("area"), "inline import landed on {covered:?}");
+    let loc = bone
+        .definition(&main, pos_of(&text, "local_area;", 0, 1))
+        .expect("inline use alias resolves");
+    let (path, covered) = located_text(&loc);
+    let file = file_name(&path).to_string();
+    assert_eq!(file, "shapes.rock");
+    assert!(covered.contains("area"), "inline alias landed on {covered:?}");
+}
+
+#[test]
 fn a_qualified_type_lands_on_the_type() {
     let project = V1Project::new();
     let bone = project.open();
@@ -467,6 +514,18 @@ fn complete_in_main(typed: &str) -> Vec<lsp_types::CompletionItem> {
     items
 }
 
+fn complete_in_sizes(typed: &str) -> Vec<lsp_types::CompletionItem> {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let anchor = "    let width = box_width(b)\n";
+    let text = MAIN.replace(anchor, &format!("{anchor}    let q = {typed}\n"));
+    bone.update(&main, text.clone());
+    let marker = format!("let q = {typed}");
+    let pos = pos_of(&text, &marker, 0, marker.len());
+    bone.completion(&main, pos)
+}
+
 fn labels(items: &[lsp_types::CompletionItem]) -> Vec<String> {
     let mut out: Vec<String> = items.iter().map(|c| c.label.clone()).collect();
     out.sort();
@@ -477,7 +536,7 @@ fn labels(items: &[lsp_types::CompletionItem]) -> Vec<String> {
 #[test]
 fn completion_after_a_module_path_offers_its_accessible_members() {
     let items = complete_in_main("shapes::");
-    assert_eq!(labels(&items), ["Box", "Kind", "LIMIT", "area", "box_area", "inner", "perimeter"]);
+    assert_eq!(labels(&items), ["BOX", "Box", "Kind", "LIMIT", "area", "box_area", "box_width", "inner", "perimeter", "width_value"]);
 }
 
 #[test]
@@ -544,6 +603,58 @@ fn bare_completion_of_a_bound_name_carries_no_import_edit() {
     let items = complete_in_main("let q = perim");
     let perimeter = items.iter().find(|c| c.label == "perimeter").expect("globbed name offered");
     assert!(perimeter.additional_text_edits.is_none(), "a glob already binds it");
+}
+
+#[test]
+fn v1_call_through_uses_bound_spelling_and_hides_private_globals() {
+    let items = complete_in_main("let q = boxwidthb");
+    let labels = labels(&items);
+    assert!(labels.iter().any(|label| label == "box_width(BOX)"), "public v1 call-through: {labels:?}");
+    assert!(!labels.iter().any(|label| label.contains("SECRET_BOX")), "private global leaked: {labels:?}");
+    assert!(!labels.iter().any(|label| label.contains("app::shapes::")), "DefKey leaked: {labels:?}");
+}
+
+#[test]
+fn v1_reach_completion_uses_bound_spelling_and_field_visibility() {
+    let items = complete_in_sizes("widthvaluebw");
+    let labels = labels(&items);
+    assert!(labels.iter().any(|label| label == "width_value(BOX.w)"), "public field reach path: {labels:?}");
+    assert!(!labels.iter().any(|label| label.contains("b.secret")), "private field leaked: {labels:?}");
+    assert!(!labels.iter().any(|label| label.contains("app::shapes::")), "DefKey leaked: {labels:?}");
+}
+
+#[test]
+fn v1_call_through_filters_private_fields_on_public_global_roots() {
+    let items = complete_in_sizes("widthvalues");
+    let labels = labels(&items);
+    assert!(!labels.iter().any(|label| label == "width_value(BOX.secret)"), "private global field leaked: {labels:?}");
+    assert!(!labels.iter().any(|label| label.contains("app::shapes::")), "DefKey leaked: {labels:?}");
+}
+
+#[test]
+fn v1_call_through_hides_inaccessible_callable_members() {
+    let items = complete_in_main("let q = hiddenwidthb");
+    let labels = labels(&items);
+    assert!(!labels.iter().any(|label| label == "hidden_width(BOX)"), "private callable leaked: {labels:?}");
+}
+
+#[test]
+fn changing_v1_visibility_invalidates_synthesis_cache() {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let shapes = project.path("shapes.rock");
+    let anchor = "    let a = shapes::inner::depth()\n";
+    let text = MAIN.replace(anchor, &format!("{anchor}    let q = boxwidthb\n"));
+    bone.update(&main, text.clone());
+    let pos = pos_of(&text, "let q = boxwidthb", 0, "let q = boxwidthb".len());
+    let before = labels(&bone.completion(&main, pos));
+    assert!(before.iter().any(|label| label == "box_width(BOX)"), "fixture did not seed cache: {before:?}");
+
+    let changed = SHAPES.replace("pub global BOX", "global BOX");
+    bone.update(&shapes, changed);
+    let after = labels(&bone.completion(&main, pos));
+    assert!(!after.iter().any(|label| label == "box_width(BOX)"), "private global survived synthesis cache: {after:?}");
 }
 
 #[test]

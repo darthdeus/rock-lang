@@ -50,6 +50,176 @@ fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
     names
 }
 
+/// Names that a v1 fragment can write for each canonical definition of one
+/// kind. Completion indexes are workspace-wide and therefore store DefKeys;
+/// this map is the request-site view that turns those keys back into names the
+/// fragment's resolver actually accepts. Callable families are resolved in
+/// callee position so composed imports contribute every member key.
+pub fn spellings_by_key(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    kind: DefKind,
+) -> std::collections::HashMap<Ustr, Vec<Ustr>> {
+    let mut out: std::collections::HashMap<Ustr, Vec<Ustr>> = std::collections::HashMap::new();
+    for name in tier_names(ws, frag) {
+        if kind == DefKind::Callable {
+            let Ok(family) = resolve::resolve_v1_callee(ws, frag, name) else { continue };
+            match family {
+                CalleeFamily::Single(resolved) if resolved.kind == ResolvedKind::Callable => {
+                    out.entry(resolved.key).or_default().push(name);
+                }
+                CalleeFamily::Merged { members, .. } => {
+                    for member in members {
+                        out.entry(member.key).or_default().push(name);
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let Ok(resolved) = resolve::resolve_bare(ws, Some(frag), name) else { continue };
+        let matches = matches!(
+            (kind, resolved.kind),
+            (DefKind::Type, ResolvedKind::Type)
+                | (DefKind::Global, ResolvedKind::Global)
+                | (DefKind::Decorator, ResolvedKind::Decorator)
+        );
+        if matches {
+            out.entry(resolved.key).or_default().push(name);
+        }
+    }
+    for names in out.values_mut() {
+        names.sort_by(|a, b| a.as_str().len().cmp(&b.as_str().len()).then_with(|| a.as_str().cmp(b.as_str())));
+        names.dedup();
+    }
+    out
+}
+
+/// A global root together with the spelling and type that a fragment can use.
+/// The canonical key remains available for the cached reachability index.
+#[derive(Clone, Debug)]
+pub struct GlobalBinding {
+    pub name: Ustr,
+    pub key: Ustr,
+    pub ty: String,
+}
+
+/// Enumerate globals that the fragment can actually bind. This is used for
+/// reach roots as well as for the cached call-through argument source; walking
+/// Module::global_by_name directly would leak private globals and DefKeys.
+pub fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBinding> {
+    let names = spellings_by_key(ws, frag, DefKind::Global);
+    let mut out = Vec::new();
+    for (key, spellings) in names {
+        let Some(global) = ws.modules.iter().find_map(|m| {
+            m.global_by_name
+                .get(&key)
+                .map(|idx| m.globals[*idx])
+        }) else {
+            continue;
+        };
+        for name in spellings {
+            out.push(GlobalBinding {
+                name,
+                key,
+                ty: ws.render(None, global.ty),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()).then_with(|| a.key.as_str().cmp(b.key.as_str())));
+    out.dedup_by(|a, b| a.name == b.name && a.key == b.key);
+    out
+}
+
+/// Render a nominal type at a v1 query site. Primitive and generic renderings
+/// are already source spellings; a DefKey nominal gets the shortest visible
+/// bare spelling when one exists.
+pub fn display_type(ws: &Workspace, frag: &FragmentScope, rendered: &str) -> String {
+    let spellings = spellings_by_key(ws, frag, DefKind::Type);
+    display_type_with_names(ws, rendered, &spellings)
+}
+
+pub(crate) fn display_type_with_names(
+    ws: &Workspace,
+    rendered: &str,
+    spellings: &std::collections::HashMap<Ustr, Vec<Ustr>>,
+) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    let bytes = rendered.as_bytes();
+    let mut start = 0;
+    while start < bytes.len() {
+        if !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
+            out.push(bytes[start] as char);
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b':')
+        {
+            end += 1;
+        }
+        let token = &rendered[start..end];
+        let key = Ustr::from(token);
+        let spelling = spellings
+            .get(&key)
+            .and_then(|names| names.first())
+            .map(Ustr::as_str)
+            .or_else(|| ws.defs.get(&key).map(|meta| meta.name.as_str()))
+            .unwrap_or_else(|| token.rsplit("::").next().unwrap_or(token));
+        out.push_str(spelling);
+        start = end;
+    }
+    out
+}
+
+/// Rewrite canonical method names in a reachability suffix into names admitted
+/// by frag. A missing spelling means the path cannot be written at this site,
+/// so the caller should omit it rather than emit a DefKey.
+pub fn display_reach_suffix(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    path: &crate::reachability::ReachPath,
+) -> Option<String> {
+    let callable_names = spellings_by_key(ws, frag, DefKind::Callable);
+    display_method_suffix_with_names(
+        path.suffix.as_str(),
+        path.is_method,
+        &path.method_members,
+        &callable_names,
+    )
+}
+
+pub(crate) fn display_method_suffix_with_names(
+    suffix: &str,
+    final_method: bool,
+    methods: &[crate::reachability::MethodRef],
+    callable_names: &std::collections::HashMap<Ustr, Vec<Ustr>>,
+) -> Option<String> {
+    let segments: Vec<&str> = suffix.split('.').collect();
+    let mut methods = methods.iter();
+    let mut rendered = Vec::with_capacity(segments.len());
+    for (i, segment) in segments.iter().enumerate() {
+        let is_method = segment.ends_with("()") || (final_method && i + 1 == segments.len());
+        if !is_method {
+            rendered.push((*segment).to_string());
+            continue;
+        }
+        let method = methods.next()?;
+        let name = callable_names.get(&method.0)?.first()?;
+        let final_hop = final_method && i + 1 == segments.len();
+        rendered.push(if final_hop {
+            name.to_string()
+        } else {
+            format!("{name}()")
+        });
+    }
+    if methods.next().is_some() {
+        return None;
+    }
+    Some(rendered.join("."))
+}
+
 /// Every bare name the fragment's tiers bind that `admit` accepts, with the
 /// definition the resolver binds it to. A name whose binding is broken (an
 /// ambiguous glob, imports that do not compose) is left out; a composed
