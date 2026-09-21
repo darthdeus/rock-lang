@@ -33,6 +33,19 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
+#[test]
+fn mag_world_state_has_no_host_resources() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["lint", "mag", "--lints=host_resource_in_game_memory"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run MAG host-resource lint");
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "MAG host-resource lint failed: {text}");
+    assert!(text.contains("[LINT] mag: no findings"), "MAG still captures a host resource: {text}");
+}
+
 /// Sim-state global names = the engine predicate's output, resolved to the
 /// logical names used by dump-state rather than re-listed in Rust.
 fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String> {
