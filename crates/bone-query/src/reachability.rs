@@ -15,7 +15,7 @@
 //! cycle guard (no depth cap) and a UX result cap. Design:
 //! `docs/completion-reachability-plan.md`.
 
-use bone_core::modules::FragmentScope;
+use bone_core::modules::{FragmentScope, NsVisibility};
 use bone_semantic::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -37,9 +37,16 @@ struct Edge {
     /// The callable family member behind a method edge. Fields have no member
     /// identity and therefore carry `None`.
     method: Option<MethodRef>,
+    field: Option<FieldRef>,
 }
 
 pub(crate) type MethodRef = (Ustr, ModuleId, Idx<bone_semantic::hir::Function>);
+
+#[derive(Clone)]
+pub(crate) struct FieldRef {
+    owner: Ustr,
+    vis: NsVisibility,
+}
 
 /// One completed path from a root variable to a value of the expected type.
 /// `suffix` is the dotted access RELATIVE to the root variable, with `()` baked
@@ -58,6 +65,7 @@ pub struct ReachPath {
     pub via_call: bool,
     pub dist: u16,
     pub(crate) method_members: Vec<MethodRef>,
+    pub(crate) field_members: Vec<FieldRef>,
 }
 
 pub struct ReachResult {
@@ -109,6 +117,7 @@ impl ReachabilityIndex {
                         kind: EdgeKind::Field,
                         target: type_key(ws, f.ty),
                         method: None,
+                        field: Some(FieldRef { owner: src, vis: f.read_vis.clone() }),
                     });
                 }
             }
@@ -137,6 +146,7 @@ impl ReachabilityIndex {
                     },
                     target: type_key(ws, ret),
                     method: Some((f.name, m.id, fid)),
+                    field: None,
                 });
             }
         }
@@ -172,7 +182,7 @@ impl ReachabilityIndex {
             let mut paths = Vec::new();
             let mut on_path: HashSet<Ustr> = HashSet::new();
             on_path.insert(src);
-            enumerate_arg_paths(&edges, src, "", 0, false, &mut on_path, &mut paths, &[]);
+            enumerate_arg_paths(&edges, src, "", 0, false, &mut on_path, &mut paths, &[], &[]);
             if !paths.is_empty() {
                 arg_paths.insert(src, paths);
             }
@@ -269,6 +279,7 @@ impl ReachabilityIndex {
             &mut on_path,
             &mut out,
             &[],
+            &[],
             visibility,
         );
 
@@ -288,6 +299,7 @@ impl ReachabilityIndex {
         on_path: &mut HashSet<Ustr>,
         out: &mut Vec<ReachPath>,
         method_members: &[MethodRef],
+        field_members: &[FieldRef],
         visibility: Option<(&Workspace, &FragmentScope)>,
     ) {
         let Some(outs) = self.edges.get(&cur) else { return };
@@ -296,10 +308,16 @@ impl ReachabilityIndex {
             if let Some(method) = e.method {
                 next_methods.push(method);
             }
-            if let Some((ws, frag)) = visibility
-                && !methods_admitted(ws, frag, &next_methods)
-            {
-                continue;
+            let mut next_fields = field_members.to_vec();
+            if let Some(field) = &e.field {
+                next_fields.push(field.clone());
+            }
+            if let Some((ws, frag)) = visibility {
+                if !methods_admitted(ws, frag, &next_methods)
+                    || !fields_admitted(ws, frag, &next_fields)
+                {
+                    continue;
+                }
             }
             // Simple-path cycle guard: never re-enter a type already on this
             // path. Finiteness comes from here, not a depth cap.
@@ -327,6 +345,7 @@ impl ReachabilityIndex {
                     via_call: prefix_call || is_method,
                     dist: depth + 1,
                     method_members: next_methods.clone(),
+                    field_members: next_fields.clone(),
                 });
             }
 
@@ -348,6 +367,7 @@ impl ReachabilityIndex {
                     on_path,
                     out,
                     &next_methods,
+                    &next_fields,
                     visibility,
                 );
                 on_path.remove(&e.target);
@@ -371,6 +391,7 @@ fn enumerate_arg_paths(
     on_path: &mut HashSet<Ustr>,
     out: &mut Vec<ReachPath>,
     method_members: &[MethodRef],
+    field_members: &[FieldRef],
 ) {
     let Some(outs) = edges.get(&cur) else { return };
     for e in outs {
@@ -381,6 +402,10 @@ fn enumerate_arg_paths(
         let mut next_methods = method_members.to_vec();
         if let Some(method) = e.method {
             next_methods.push(method);
+        }
+        let mut next_fields = field_members.to_vec();
+        if let Some(field) = &e.field {
+            next_fields.push(field.clone());
         }
         let leaf_suffix =
             if prefix.is_empty() { e.label.clone() } else { format!("{prefix}.{}", e.label) };
@@ -396,6 +421,7 @@ fn enumerate_arg_paths(
             via_call: prefix_call || is_method,
             dist: depth + 1,
             method_members: next_methods.clone(),
+            field_members: next_fields.clone(),
         });
         // Descend through traversable edges (fields + no-arg methods) until the
         // depth cap. An args-taking method ends the path (can't chain through it).
@@ -417,6 +443,7 @@ fn enumerate_arg_paths(
                 on_path,
                 out,
                 &next_methods,
+                &next_fields,
             );
             on_path.remove(&e.target);
         }
@@ -431,6 +458,22 @@ pub(crate) fn methods_admitted(ws: &Workspace, frag: &FragmentScope, methods: &[
 
 pub(crate) fn path_admitted(ws: &Workspace, frag: &FragmentScope, path: &ReachPath) -> bool {
     methods_admitted(ws, frag, &path.method_members)
+        && fields_admitted(ws, frag, &path.field_members)
+}
+
+pub(crate) fn fields_admitted(ws: &Workspace, frag: &FragmentScope, fields: &[FieldRef]) -> bool {
+    fields.iter().all(|field| {
+        let Some(meta) = ws.defs.get(&field.owner) else {
+            return true;
+        };
+        ws.ns.can_access(
+            &field.vis,
+            meta.package,
+            &meta.module,
+            frag.package,
+            &frag.module_path,
+        )
+    })
 }
 
 /// Canonical graph-node key for a type: its bare nominal name when it is a
