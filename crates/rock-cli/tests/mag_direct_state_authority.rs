@@ -167,8 +167,8 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         1,
         "per-Space harvest state must not pack SpaceId into local tile keys"
     );
-    let hazards = fs::read_to_string(repo.join("mag/hazards.rock"))
-        .expect("read MAG hazards source");
+    let hazards = fs::read_to_string(repo.join("mag-simulation/hazards.rock"))
+        .expect("read simulation hazards source");
     assert_eq!(
         hazards.matches("fn hazard_ready_key(grid: IVec2)").count(),
         1,
@@ -178,9 +178,14 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
     let player = fs::read_to_string(repo.join("mag/player.rock"))
         .expect("read MAG player source");
     assert_eq!(
-        player.matches("hazard_last_settled_place: Place?").count(),
+        player.matches("hazard_entry: HazardEntryState = HazardEntryState {}").count(),
         1,
-        "Player must own its previous settled hazard tile"
+        "Player must own its package hazard entry state"
+    );
+    assert_eq!(
+        hazards.matches("last_settled_place: Place? = null").count(),
+        1,
+        "the package must own the previous settled hazard tile"
     );
 
     let run = fs::read_to_string(repo.join("mag/run.rock"))
@@ -192,7 +197,7 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         "harvest_node_spaces =",
         "harvest_scan_t =",
         "hazard_ready_at =",
-        "hazard_last_settled_place =",
+        "hazard_entry =",
         "hazard_hits =",
         "gate_lock_seen =",
     ] {
@@ -520,7 +525,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "cast_acceleration: PlayerCastAcceleration",
         "ritual_acquisition_event_seq: int",
         "notoriety: PlayerNotoriety",
-        "combat_last_contact: float",
+        "combat_latch: CombatLatchState",
         "potion_ready_at: float",
         "bandage_slips: int",
         "summon_slots: [Entity<Mob>?]",
@@ -533,6 +538,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         );
     }
     for field in [
+        "combat_latch: CombatLatchState = CombatLatchState {}",
         "potion_ready_at: float = 0.0",
         "bandage_slips: int = 0",
         "summon_slots: [Entity<Mob>?] = [null, null, null, null]",
@@ -544,6 +550,13 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "scene-owned Player must initialize `{field}` exactly once"
         );
     }
+    let combat_latch = fs::read_to_string(repo.join("mag-simulation/combat_latch.rock"))
+        .expect("read simulation combat latch source");
+    assert_eq!(
+        combat_latch.matches("last_contact: float = -1.0").count(),
+        1,
+        "the package must own the combat contact timer"
+    );
     let cast_outline = player
         .split_once("struct PlayerCastOutline {")
         .and_then(|(_, rest)| rest.split_once("\n}"))
