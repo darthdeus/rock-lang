@@ -234,11 +234,36 @@ struct Envelope {
     worker_attempt: i64,
     start_ms: i64,
     end_ms: i64,
+    frame_count: Option<i64>,
 }
 
 impl Envelope {
     fn duration_ms(&self) -> i64 {
         self.end_ms - self.start_ms
+    }
+}
+
+struct FrameCountStats {
+    known: usize,
+    missing: usize,
+    total: i64,
+    min: Option<i64>,
+    median: Option<i64>,
+    max: Option<i64>,
+}
+
+impl FrameCountStats {
+    fn from_envelopes(envelopes: &[Envelope]) -> Self {
+        let mut counts: Vec<i64> = envelopes.iter().filter_map(|e| e.frame_count).collect();
+        counts.sort_unstable();
+        Self {
+            known: counts.len(),
+            missing: envelopes.len().saturating_sub(counts.len()),
+            total: counts.iter().copied().sum(),
+            min: counts.first().copied(),
+            median: upper_median(&counts),
+            max: counts.last().copied(),
+        }
     }
 }
 
@@ -446,6 +471,7 @@ pub struct SimRunAnalysis {
     recoveries: Vec<(String, String)>,
 
     occupancy: Occupancy,
+    frame_counts: FrameCountStats,
     timings: Option<TimingsView>,
 }
 
@@ -542,6 +568,7 @@ pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
             worker_attempt: key.1,
             start_ms: ms(start),
             end_ms: ms(end),
+            frame_count: int(end, "frame_count"),
         });
     }
     envelopes.sort_by_key(|envelope| (envelope.start_ms, envelope.occurrence_id));
@@ -688,6 +715,7 @@ pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
     let base_ms = wall_ms.unwrap_or(observed_span_ms);
     let jobs = effective_jobs.or(requested_jobs).unwrap_or(0);
     let occupancy = occupancy(&workers, base_ms, jobs);
+    let frame_counts = FrameCountStats::from_envelopes(&envelopes);
 
     // timings.json ---------------------------------------------------------
     let envelope_by_key: HashMap<(i64, i64), i64> = envelopes
@@ -784,6 +812,7 @@ pub fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
         by_isolation_class,
         recoveries,
         occupancy,
+        frame_counts,
         timings,
         envelopes,
         workers,
@@ -890,6 +919,14 @@ impl SimRunAnalysis {
             "wall_ms": self.wall_ms,
             "ideal_ms_at_effective_jobs": self.ideal_ms_at_effective_jobs(),
             "envelope_qualifier": ENVELOPE_QUALIFIER,
+            "frame_counts": {
+                "known_entries": self.frame_counts.known,
+                "missing_entries": self.frame_counts.missing,
+                "total": self.frame_counts.total,
+                "min": self.frame_counts.min,
+                "median": self.frame_counts.median,
+                "max": self.frame_counts.max,
+            },
         });
 
         let slowest: Vec<Value> = self
@@ -904,6 +941,7 @@ impl SimRunAnalysis {
                     "start_ms": envelope.start_ms,
                     "end_ms": envelope.end_ms,
                     "duration_ms": envelope.duration_ms(),
+                    "frame_count": envelope.frame_count,
                 })
             })
             .collect();
@@ -1197,6 +1235,27 @@ impl SimRunAnalysis {
             &mut out,
             "  note: worker_started -> worker_first_entry is startup latency.".to_string(),
         );
+        push(
+            &mut out,
+            format!(
+                "  frames          {}/{} known, total {}, min {}, median {}, max {}",
+                self.frame_counts.known,
+                self.frame_counts.known + self.frame_counts.missing,
+                self.frame_counts.total,
+                self.frame_counts
+                    .min
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into()),
+                self.frame_counts
+                    .median
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into()),
+                self.frame_counts
+                    .max
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into())
+            ),
+        );
 
         push(&mut out, String::new());
         push(
@@ -1207,11 +1266,15 @@ impl SimRunAnalysis {
             push(
                 &mut out,
                 format!(
-                    "  {:>9}  {}  (occurrence {}, worker {})",
+                    "  {:>9}  {}  (occurrence {}, worker {}, frames {})",
                     secs(envelope.duration_ms()),
                     envelope.name,
                     envelope.occurrence_id,
-                    envelope.worker_attempt
+                    envelope.worker_attempt,
+                    envelope
+                        .frame_count
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "n/a".into())
                 ),
             );
         }

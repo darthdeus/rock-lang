@@ -59,14 +59,14 @@ fn complete_events() -> Vec<String> {
         line(id, "\"elapsed_ms\":600,\"event\":\"entry_start\",\"name\":\"alpha\",\"occurrence_id\":1,\"part\":0,\"worker_attempt\":1"),
         line(id, "\"elapsed_ms\":1150,\"event\":\"worker_first_entry\",\"name\":\"gamma\",\"occurrence_id\":3,\"part\":0,\"worker_attempt\":2"),
         line(id, "\"elapsed_ms\":1150,\"event\":\"entry_start\",\"name\":\"gamma\",\"occurrence_id\":3,\"part\":0,\"worker_attempt\":2"),
-        line(id, "\"elapsed_ms\":1350,\"event\":\"entry_end\",\"name\":\"gamma\",\"occurrence_id\":3,\"part\":0,\"worker_attempt\":2"),
-        line(id, "\"elapsed_ms\":1360,\"event\":\"entry_result\",\"exit_code\":null,\"expects_pass\":1,\"frame_count\":null,\"occurrence_id\":3,\"timed_out\":false,\"verdict\":\"PASS\",\"worker_attempt\":2"),
+        line(id, "\"elapsed_ms\":1350,\"event\":\"entry_end\",\"frame_count\":8,\"name\":\"gamma\",\"occurrence_id\":3,\"part\":0,\"worker_attempt\":2"),
+        line(id, "\"elapsed_ms\":1360,\"event\":\"entry_result\",\"exit_code\":null,\"expects_pass\":1,\"frame_count\":8,\"occurrence_id\":3,\"timed_out\":false,\"verdict\":\"PASS\",\"worker_attempt\":2"),
         line(id, "\"elapsed_ms\":1400,\"event\":\"worker_end\",\"exit_code\":0,\"signal\":null,\"status\":\"success\",\"timed_out\":false,\"worker_attempt\":2"),
-        line(id, "\"elapsed_ms\":1600,\"event\":\"entry_end\",\"name\":\"alpha\",\"occurrence_id\":1,\"part\":0,\"worker_attempt\":1"),
-        line(id, "\"elapsed_ms\":1610,\"event\":\"entry_result\",\"exit_code\":null,\"expects_pass\":1,\"frame_count\":null,\"occurrence_id\":1,\"timed_out\":false,\"verdict\":\"PASS\",\"worker_attempt\":1"),
+        line(id, "\"elapsed_ms\":1600,\"event\":\"entry_end\",\"frame_count\":20,\"name\":\"alpha\",\"occurrence_id\":1,\"part\":0,\"worker_attempt\":1"),
+        line(id, "\"elapsed_ms\":1610,\"event\":\"entry_result\",\"exit_code\":null,\"expects_pass\":1,\"frame_count\":20,\"occurrence_id\":1,\"timed_out\":false,\"verdict\":\"PASS\",\"worker_attempt\":1"),
         line(id, "\"elapsed_ms\":1700,\"event\":\"entry_start\",\"name\":\"beta\",\"occurrence_id\":2,\"part\":0,\"worker_attempt\":1"),
-        line(id, "\"elapsed_ms\":2200,\"event\":\"entry_end\",\"name\":\"beta\",\"occurrence_id\":2,\"part\":0,\"worker_attempt\":1"),
-        line(id, "\"elapsed_ms\":2210,\"event\":\"entry_result\",\"exit_code\":null,\"expects_pass\":0,\"frame_count\":null,\"occurrence_id\":2,\"timed_out\":false,\"verdict\":\"FAIL\",\"worker_attempt\":1"),
+        line(id, "\"elapsed_ms\":2200,\"event\":\"entry_end\",\"frame_count\":6,\"name\":\"beta\",\"occurrence_id\":2,\"part\":0,\"worker_attempt\":1"),
+        line(id, "\"elapsed_ms\":2210,\"event\":\"entry_result\",\"exit_code\":null,\"expects_pass\":0,\"frame_count\":6,\"occurrence_id\":2,\"timed_out\":false,\"verdict\":\"FAIL\",\"worker_attempt\":1"),
         line(id, "\"elapsed_ms\":2300,\"event\":\"worker_end\",\"exit_code\":0,\"signal\":null,\"status\":\"success\",\"timed_out\":false,\"worker_attempt\":1"),
         line(id, "\"complete\":true,\"elapsed_ms\":2500,\"error\":\"1 of 3 sims failed in `mag`\",\"event\":\"run_end\",\"finalized_entries\":3,\"planned_entries\":3,\"status\":\"FAIL\""),
     ]
@@ -229,6 +229,12 @@ fn sim_report_decomposes_a_complete_run_into_envelopes_startup_and_remainder() {
     assert_eq!(time["drain_overhang_ms"], 0);
     // 1700 / 2 jobs is the perfect-packing floor for the envelope work.
     assert_eq!(time["ideal_ms_at_effective_jobs"], 850);
+    assert_eq!(time["frame_counts"]["known_entries"], 3);
+    assert_eq!(time["frame_counts"]["missing_entries"], 0);
+    assert_eq!(time["frame_counts"]["total"], 34);
+    assert_eq!(time["frame_counts"]["min"], 6);
+    assert_eq!(time["frame_counts"]["median"], 8);
+    assert_eq!(time["frame_counts"]["max"], 20);
     // The envelope is never described as pure sim-body time.
     assert!(
         time["envelope_qualifier"]
@@ -241,6 +247,7 @@ fn sim_report_decomposes_a_complete_run_into_envelopes_startup_and_remainder() {
     let slowest = value["slowest_entries"].as_array().unwrap();
     assert_eq!(slowest[0]["name"], "alpha");
     assert_eq!(slowest[0]["duration_ms"], 1000);
+    assert_eq!(slowest[0]["frame_count"], 20);
     assert_eq!(slowest[1]["name"], "beta");
     assert_eq!(slowest[2]["name"], "gamma");
 }

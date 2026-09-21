@@ -20,7 +20,7 @@ fn persistent_records_keep_runs_and_validated_occurrences() {
     let worker = first.worker_spawn(&[(ids[0], "a".into())], &[], "shared");
     first.worker_started(worker, 123);
     first.entry_start(worker, ids[0], "a", 0);
-    first.entry_end(worker, ids[0], "a", 0);
+    first.entry_end(worker, ids[0], "a", 0, Some(7));
     first.entry_result(ids[0], worker, "PASS", Some(1), 1, false, None);
     first.finish(true, None);
 
@@ -34,6 +34,13 @@ fn persistent_records_keep_runs_and_validated_occurrences() {
     );
     assert!(first_events.iter().any(|e| e["event"] == "entry_start"));
     assert!(first_events.iter().any(|e| e["event"] == "entry_end"));
+    assert_eq!(
+        first_events
+            .iter()
+            .find(|e| e["event"] == "entry_end")
+            .and_then(|e| e["frame_count"].as_u64()),
+        Some(7)
+    );
     assert_eq!(first_events.last().and_then(|e| e["event"].as_str()), Some("run_end"));
     assert_eq!(first_events.last().and_then(|e| e["status"].as_str()), Some("INCOMPLETE"));
     assert_eq!(first_events.last().and_then(|e| e["complete"].as_bool()), Some(false));
