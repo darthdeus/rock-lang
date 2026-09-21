@@ -31,6 +31,10 @@ fn content_dir() -> PathBuf {
     workspace_root().join("mag-content")
 }
 
+fn simulation_dir() -> PathBuf {
+    workspace_root().join("mag-simulation")
+}
+
 fn stone_core_dir() -> PathBuf {
     workspace_root().join("stone-core")
 }
@@ -108,6 +112,27 @@ fn mag_content_does_not_depend_on_the_game() {
         deps.iter().any(|d| d == "stone-core"),
         "mag-content is expected to reach its value types through stone-core; if that \
          edge is gone, the test above no longer means what it says. Declared: {deps:?}"
+    );
+}
+
+#[test]
+fn mag_simulation_has_a_renderer_free_package_closure() {
+    let manifest_path = simulation_dir().join("stick.toml");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
+    let mut deps = stick_dependencies(&manifest);
+    deps.sort();
+    assert_eq!(
+        deps,
+        ["mag-content", "stone-core"],
+        "each new simulation dependency needs a renderer-free closure review"
+    );
+
+    let game_manifest = std::fs::read_to_string(workspace_root().join("mag/stick.toml"))
+        .expect("read MAG manifest");
+    assert!(
+        stick_dependencies(&game_manifest).iter().any(|d| d == "mag-simulation"),
+        "MAG must consume the simulation package"
     );
 }
 
