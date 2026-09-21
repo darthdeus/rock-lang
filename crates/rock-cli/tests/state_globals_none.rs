@@ -138,6 +138,61 @@ fn const_global_is_accepted_in_a_globals_none_package() {
 }
 
 #[test]
+fn inline_lua_is_rejected_in_a_globals_none_package() {
+    let root = tempfile::tempdir().expect("tempdir");
+    write_file(
+        root.path(),
+        "stick.toml",
+        &manifest("globals-none-inline-lua", Some("none"), None),
+    );
+    write_file(
+        root.path(),
+        "main.rock",
+        "inline(lua) fn host_tick() = \"return nil\"\nfn main() { host_tick() }\n",
+    );
+
+    let err = compile(root.path()).expect_err("inline(lua) must not escape globals = none");
+    assert!(
+        err.contains("host_tick") && err.contains("globals = \"none\""),
+        "diagnostic must name the opaque declaration and owning policy:\n{err}"
+    );
+}
+
+#[test]
+fn inline_js_remains_allowed_in_a_globals_none_package() {
+    let root = tempfile::tempdir().expect("tempdir");
+    write_file(
+        root.path(),
+        "stick.toml",
+        &manifest("globals-none-inline-js", Some("none"), None),
+    );
+    write_file(
+        root.path(),
+        "main.rock",
+        "inline(js) fn host_tick() = \"return null;\"\nfn main() {}\n",
+    );
+
+    compile(root.path()).expect("the package rule is specific to inline(lua)");
+}
+
+#[test]
+fn derived_newtype_operators_remain_allowed_in_a_globals_none_package() {
+    let root = tempfile::tempdir().expect("tempdir");
+    write_file(
+        root.path(),
+        "stick.toml",
+        &manifest("globals-none-derived-operators", Some("none"), None),
+    );
+    write_file(
+        root.path(),
+        "main.rock",
+        "newtype UserId(int)\nfn main() { let id = UserId(42) }\n",
+    );
+
+    compile(root.path()).expect("compiler-generated newtype operators are not user Lua");
+}
+
+#[test]
 fn static_local_is_rejected_in_a_globals_none_package() {
     let root = tempfile::tempdir().expect("tempdir");
     write_file(

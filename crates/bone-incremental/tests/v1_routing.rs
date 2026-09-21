@@ -644,6 +644,44 @@ fn globals_none_fact_reaches_incremental_reparse_and_update() {
     );
 }
 
+/// The same package fact gates opaque Lua bodies on both the initial check and
+/// a later edit. JavaScript inline bodies are a separate backend and remain a
+/// valid control.
+#[test]
+fn globals_none_fact_reaches_inline_lua_reparse_and_update() {
+    let mut invalid_file = v1(
+        "sim.rock",
+        "inline(lua) fn host_tick() = \"return nil\"\nfn tick() { host_tick() }\n",
+    );
+    invalid_file.global_policy = GlobalPolicy::None;
+    let initial_error = Session::new(vec![], vec![invalid_file], &NsAliases::default())
+        .expect_err("the initial inline Lua body must be rejected");
+    assert!(
+        initial_error.message.contains("host_tick")
+            && initial_error.message.contains("globals = \"none\""),
+        "the owning package policy must reject the opaque body: {initial_error:?}"
+    );
+
+    let mut valid_file = v1(
+        "sim.rock",
+        "inline(js) fn host_tick() = \"return null;\"\nfn tick() {}\n",
+    );
+    valid_file.global_policy = GlobalPolicy::None;
+    let mut session = Session::new(vec![], vec![valid_file], &NsAliases::default())
+        .expect("the separate backend control must be accepted");
+    let update_error = session
+        .update_file(
+            "sim.rock",
+            "inline(lua) fn host_tick() = \"return nil\"\nfn tick() {}\n",
+        )
+        .expect_err("the same package policy must reject a Lua edit");
+    assert!(
+        update_error.message.contains("host_tick")
+            && update_error.message.contains("globals = \"none\""),
+        "the reparse must retain the owning policy: {update_error:?}"
+    );
+}
+
 /// A module alias of a dependency's module is a `use` edit (scope path):
 /// adding it anchors `s::pick`, and removing it leaves the path unresolved,
 /// each as a fresh session decides.

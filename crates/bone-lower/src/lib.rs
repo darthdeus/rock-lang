@@ -2455,6 +2455,7 @@ pub fn build_function(
 ) -> Result<(Function, Option<Body>, Vec<CompilerError>), CompilerError> {
     ctx.generics_in_scope.clear();
     reject_generic_defaults("fn generics", &f.generics)?;
+    reject_inline_lua_if_forbidden(a, f)?;
     let generic_var_ids = ctx.declare_generics(&f.generics);
     let mut body = Body::default();
     let generic_bounds = lower_generic_bounds(ctx, a, &mut body, &f.generics)?;
@@ -3268,6 +3269,31 @@ fn reject_mutable_global_if_forbidden(
     comp_error!(
         span,
         "mutable {kind} `{name}` is not allowed in package `{package}` with [language] globals = \"none\"; declare immutable state as `const`"
+    );
+}
+
+/// A `globals = "none"` package cannot hide writes in a native Lua body. The
+/// body has no Rock expression arena from which the state checker can derive a
+/// write set, so the package boundary rejects the opaque declaration instead
+/// of pretending it is state-free. JavaScript inline bodies target a separate
+/// backend and are outside this Lua state boundary.
+fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), CompilerError> {
+    if f.is_synthetic
+        || !matches!(a.global_policy, skull_parser::GlobalPolicy::None)
+        || !matches!(&f.body, skull_parser::FunctionBody::Inline(skull_parser::FnBackend::Lua, _))
+    {
+        return Ok(());
+    }
+    let package = a
+        .package
+        .as_ref()
+        .map(|tag| tag.self_name.as_str())
+        .unwrap_or("<standalone>");
+    comp_error!(
+        f.name.span,
+        "inline(lua) function `{}` is not allowed in package `{}` with [language] globals = \"none\"; move the host operation to a package with an explicit native-state boundary",
+        f.name.name,
+        package
     );
 }
 
