@@ -143,3 +143,5 @@ mod sim_report_tests;
 mod content_boundary;
 #[path = "state_memory_class.rs"]
 mod state_memory_class;
+#[path = "state_globals_none.rs"]
+mod state_globals_none;

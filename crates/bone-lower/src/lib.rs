@@ -1101,6 +1101,7 @@ pub fn lower_statement_value(
         }
 
         StatementKind::Static(st) => {
+            reject_mutable_global_if_forbidden(a, st.name.span, st.name.name, "static")?;
             let value_idx = lower_expr(ctx, a, body, scope, a.e(&st.value))?;
 
             let declared_ty = if let Some(te) = &st.ty {
@@ -3173,6 +3174,9 @@ pub fn lower_global(
     annotations: &[skull_parser::Annotation],
     reg_key: Ustr,
 ) -> Result<(), CompilerError> {
+    if !g.is_const {
+        reject_mutable_global_if_forbidden(a, g.name.span, g.name.name, "global")?;
+    }
     let name = reg_key;
     let mut body = Body::default();
     let (state_metadata, redundant_state) = lower_state_metadata(ctx, a, annotations)?;
@@ -3220,6 +3224,30 @@ pub fn lower_global(
     );
 
     Ok(())
+}
+
+/// A `globals = "none"` package may still use immutable `const` declarations,
+/// but mutable package-level storage would make its explicit simulation root
+/// incomplete. The owning file supplies this fact, so declaration annotations
+/// such as `@state` or `@memory` cannot override it.
+fn reject_mutable_global_if_forbidden(
+    a: &Ast,
+    span: Span,
+    name: ustr::Ustr,
+    kind: &str,
+) -> Result<(), CompilerError> {
+    if !matches!(a.global_policy, skull_parser::GlobalPolicy::None) {
+        return Ok(());
+    }
+    let package = a
+        .package
+        .as_ref()
+        .map(|tag| tag.self_name.as_str())
+        .unwrap_or("<standalone>");
+    comp_error!(
+        span,
+        "mutable {kind} `{name}` is not allowed in package `{package}` with [language] globals = \"none\"; declare immutable state as `const`"
+    );
 }
 
 /// The default ownership of a `global` that says nothing itself: the file's

@@ -182,6 +182,7 @@ fn create_source_file(
         package: None,
         dialect,
         memory_class: rock_core::source_code::MemoryClass::Game,
+        global_policy: rock_core::source_code::GlobalPolicy::Any,
     })
 }
 

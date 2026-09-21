@@ -8,7 +8,7 @@
 
 use bone_core::modules::NsAliases;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
-use skull_parser::{Dialect, MemoryClass, PackageTag};
+use skull_parser::{Dialect, GlobalPolicy, MemoryClass, PackageTag};
 
 fn v1(path: &str, text: &str) -> SessionFile {
     SessionFile {
@@ -17,6 +17,7 @@ fn v1(path: &str, text: &str) -> SessionFile {
         dialect: Dialect::V1,
         package: Some(PackageTag { id: 1, self_name: "livev1".into() }),
         memory_class: MemoryClass::Game,
+        global_policy: GlobalPolicy::Any,
     }
 }
 
@@ -268,6 +269,7 @@ fn v1_in(package: u32, name: &str, path: &str, text: &str) -> SessionFile {
         dialect: Dialect::V1,
         package: Some(PackageTag { id: package, self_name: name.into() }),
         memory_class: MemoryClass::Game,
+        global_policy: GlobalPolicy::Any,
     }
 }
 
@@ -420,6 +422,7 @@ fn in_package(dialect: Dialect, package: u32, name: &str, path: &str, text: &str
         dialect,
         package: Some(PackageTag { id: package, self_name: name.into() }),
         memory_class: MemoryClass::Game,
+        global_policy: GlobalPolicy::Any,
     }
 }
 
@@ -582,7 +585,7 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
     let extra = "mod extra;\n\npub fn more() -> int {\n    super::a::bump(2)\n}\n";
     let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
     session
-        .declare_file_facts("extra.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }), MemoryClass::Game)
+        .declare_file_facts("extra.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }), MemoryClass::Game, GlobalPolicy::Any)
         .expect("an unheld file takes declared facts");
     session.update_file("extra.rock", extra).expect("a v1 fragment enters as v1");
 
@@ -597,10 +600,48 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
 #[test]
 fn a_held_file_refuses_different_facts() {
     let mut session = Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
-    assert!(session.declare_file_facts("a.rock", Dialect::Legacy, None, MemoryClass::Game).is_err());
+    assert!(session.declare_file_facts("a.rock", Dialect::Legacy, None, MemoryClass::Game, GlobalPolicy::Any).is_err());
     assert!(session
-        .declare_file_facts("a.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }), MemoryClass::Game)
+        .declare_file_facts("a.rock", Dialect::V1, Some(PackageTag { id: 1, self_name: "livev1".into() }), MemoryClass::Game, GlobalPolicy::Any)
         .is_ok());
+}
+
+/// The incremental session re-parses from `SessionFile` facts rather than the
+/// batch `SourceFile`. A `globals = "none"` package must therefore reject its
+/// mutable global on the initial load and keep the same policy when the file
+/// is edited into an accepted `const` declaration.
+#[test]
+fn globals_none_fact_reaches_incremental_reparse_and_update() {
+    let mut invalid_file = v1(
+        "sim.rock",
+        "global COUNT: int = 0\n\nfn tick() { COUNT = COUNT + 1 }\n",
+    );
+    invalid_file.global_policy = GlobalPolicy::None;
+    let initial_error = Session::new(vec![], vec![invalid_file], &NsAliases::default())
+        .expect_err("the initial mutable global must be rejected");
+    assert!(
+        initial_error.message.contains("COUNT")
+            && initial_error.message.contains("globals = \"none\""),
+        "the owning package policy must reject the initial mutable global: {initial_error:?}"
+    );
+
+    let mut valid_file = v1(
+        "sim.rock",
+        "const COUNT: int = 0\n\nfn tick() { print(\"{COUNT}\") }\n",
+    );
+    valid_file.global_policy = GlobalPolicy::None;
+    let mut session = Session::new(vec![], vec![valid_file], &NsAliases::default()).expect("const session builds");
+    let update_error = session
+        .update_file(
+            "sim.rock",
+            "global COUNT: int = 0\n\nfn tick() { COUNT = COUNT + 1 }\n",
+        )
+        .expect_err("the same package policy must reject a mutable update");
+    assert!(
+        update_error.message.contains("COUNT")
+            && update_error.message.contains("globals = \"none\""),
+        "the reparse must retain the owning policy: {update_error:?}"
+    );
 }
 
 /// A module alias of a dependency's module is a `use` edit (scope path):

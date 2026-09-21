@@ -910,6 +910,10 @@ pub struct Ast {
     /// package graph exactly as `package`/`dialect` are. The default for an
     /// unannotated `global` in this file, unless `memory_header` overrides it.
     pub memory_class: rock_core::source_code::MemoryClass,
+    /// The owning package's mutable-global policy, stamped by the loader with
+    /// the other package facts. `Any` keeps standalone sources and packages
+    /// without the key on today's behavior.
+    pub global_policy: rock_core::source_code::GlobalPolicy,
     /// The file's `@memory(<class>)` header, if the first non-comment item was
     /// one: this module's class, overriding the package's.
     pub memory_header: Option<MemoryHeader>,

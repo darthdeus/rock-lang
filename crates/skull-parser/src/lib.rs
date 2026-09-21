@@ -15,7 +15,7 @@ pub use ast::*;
 pub use parser::Parser;
 
 pub use rock_core::errors::CompilerErrorKind;
-pub use rock_core::source_code::{Dialect, MemoryClass, PackageTag};
+pub use rock_core::source_code::{Dialect, GlobalPolicy, MemoryClass, PackageTag};
 pub use rock_core::{CompilerError, SourceFiles, Span, source_file_from_path_and_contents};
 pub use ordered_float::OrderedFloat;
 pub use rock_tokenizer::TokenKind;
