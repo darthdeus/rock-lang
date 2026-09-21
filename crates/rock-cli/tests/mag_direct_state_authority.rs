@@ -144,7 +144,6 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         .map(|(body, _)| body)
         .expect("read SpaceState body");
     for field in [
-        "restoration: RestorationState",
         "harvest: HarvestVisualState",
         "simulation: SpaceSimulationState",
     ] {
@@ -154,7 +153,7 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
             "SpaceState must own `{field}` exactly once"
         );
     }
-    for field in ["hazards:", "gates:", "teleport_entry:", "ticks:"] {
+    for field in ["restoration:", "hazards:", "gates:", "teleport_entry:", "ticks:"] {
         assert!(
             !space_state.lines().any(|line| line.trim_start().starts_with(field)),
             "SpaceState must keep `{field}` under its package simulation state"
@@ -170,6 +169,7 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
     for field in [
         "ticks: int",
         "harvest_ready_at: Map<int, float>",
+        "restoration: RestorationState",
         "hazards: HazardState",
         "gates: GateObservationState",
         "teleport_entry: TeleportEntryState",
@@ -180,11 +180,6 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
             "SpaceSimulationState must own `{field}` exactly once"
         );
     }
-    assert!(
-        world.contains("struct SpaceState {") && world.contains("restoration: RestorationState"),
-        "SpaceState must be the constructed owner, not a parallel cache registry"
-    );
-
     let harvest = fs::read_to_string(repo.join("mag/harvest.rock"))
         .expect("read MAG harvest source");
     assert_eq!(
