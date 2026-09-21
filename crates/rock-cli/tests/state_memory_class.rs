@@ -467,7 +467,7 @@ const HANDLE_SOURCE: &str = "@host_resource(voice)\nnewtype Voice(int)\n\
 
 #[test]
 fn a_host_handle_reachable_from_game_memory_is_diagnosed_with_its_path() {
-    let diagnostics = compile_diagnostics(&[
+    let diagnostics = compile(&[
         ("stick.toml", &stick("memclass-handle", None)),
         (
             "main.rock",
@@ -476,7 +476,8 @@ fn a_host_handle_reachable_from_game_memory_is_diagnosed_with_its_path() {
                  fn main() {{ print(\"{{SFX_SLOTS.len()}}\") }}\n"
             ),
         ),
-    ]);
+    ])
+    .expect_err("a game-memory host handle must stop the build");
     assert!(
         diagnostics.contains("SFX_SLOTS") && diagnostics.contains("Voice"),
         "the finding must name the global and the host type:\n{diagnostics}"
