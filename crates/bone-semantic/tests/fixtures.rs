@@ -158,6 +158,7 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
         }
         return Ok(());
     }
+    let mut failures = Vec::new();
     for section in sections {
         // `@fail` expects any rejection; `@fail=<text>` also pins the reason,
         // so a case cannot pass by failing for an unrelated reason, and a
@@ -177,25 +178,30 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
             bone_semantic::test_support::check_types_embedded_with_stdlib(&files, STDLIB_FILES),
             expect_fail,
         ) {
-            (Ok(_), true) => panic!("section `{name}` was marked @fail but passed"),
-            (Err(e), false) => panic!("section `{name}` failed:\n{e}"),
+            (Ok(_), true) => failures.push(format!("section `{name}` was marked @fail but passed")),
+            (Err(e), false) => failures.push(format!("section `{name}` failed:\n{e}")),
             (Err(e), true) => {
                 if let Some(want) = want {
-                    assert!(
-                        e.contains(&want),
-                        "section `{name}` failed for the wrong reason: \
-                         expected the error to contain `{want}`, got:\n{e}"
-                    );
+                    if !e.contains(&want) {
+                        failures.push(format!(
+                            "section `{name}` failed for the wrong reason: \
+                             expected the error to contain `{want}`, got:\n{e}"
+                        ));
+                    }
                 }
                 if let Some(unwanted) = unwanted {
-                    assert!(
-                        !e.contains(&unwanted),
-                        "section `{name}` failed with text it must not contain: `{unwanted}`, got:\n{e}"
-                    );
+                    if e.contains(&unwanted) {
+                        failures.push(format!(
+                            "section `{name}` failed with text it must not contain: `{unwanted}`, got:\n{e}"
+                        ));
+                    }
                 }
             }
             _ => {}
         }
+    }
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n\n"));
     }
     Ok(())
 }
