@@ -131,3 +131,41 @@ fn declaration_index_preserves_parameter_defaults() {
     assert_eq!(signature("marker"), "decorator marker(stage: int = 100, mode: string = \"presentation\")");
     assert_eq!(signature("multiline"), "fn multiline(value: int = (\n    2 + // keep this comment\n    3\n)) -> ()");
 }
+
+/// Each source parses in its own package's dialect, as the compiler parses it:
+/// a `modules = "v1"` package's `pub` items and a legacy sibling in one index.
+#[test]
+fn declaration_index_parses_each_package_in_its_dialect() {
+    let repo = root();
+    let scratch = tempfile::tempdir_in(repo.join("tmp")).expect("dialect scratch");
+    let v1 = scratch.path().join("v1pkg");
+    let legacy = scratch.path().join("legacypkg");
+    for (dir, name, language, src) in [
+        (&v1, "v1pkg", "[language]\nmodules = \"v1\"\n", "pub fn exported(x: int) -> int { return x }\n"),
+        (&legacy, "legacypkg", "", "fn plain(x: int) -> int { return x }\n"),
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("stick.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ntype = \"lib\"\n\n{language}\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("lib.rock"), src).unwrap();
+    }
+    let output = scratch.path().join("dialects.json");
+    let result = Command::new(rock_bin())
+        .current_dir(&repo)
+        .args(["docs-index", v1.to_str().unwrap(), legacy.to_str().unwrap(), "--output", output.to_str().unwrap()])
+        .output()
+        .expect("index both dialects");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let index: serde_json::Value = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    let mut names: Vec<&str> = index["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|declaration| declaration["name"].as_str())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["exported", "plain"]);
+}

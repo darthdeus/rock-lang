@@ -38,7 +38,8 @@ pub fn run(inputs: &[String], output: Option<&str>) -> Result<()> {
         let text = std::str::from_utf8(&raw)
             .with_context(|| format!("declaration source is not UTF-8: '{}'", path.display()))?;
         let file_id = ustr::Ustr::from(path.to_string_lossy().as_ref());
-        let ast = skull_parser::parse_module_clean(text, file_id)
+        let dialect = crate::formatting::dialect_for_file(&path)?;
+        let ast = skull_parser::parse_module_clean_with_dialect(text, file_id, dialect)
             .map_err(|error| anyhow::anyhow!("parse '{}': {error}", path.display()))?;
         let display_path = display_path(&path, &cwd)?;
         sources.push(SourceInput {
