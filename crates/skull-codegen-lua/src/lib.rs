@@ -2620,6 +2620,11 @@ fn try_match_loop(
     }
     let (hi, inclusive) = match_header(func, h, cond, slot)?;
     let region = compute_region(all_preds, then_bb, h, latch)?;
+    // The post-for edge must leave the loop. A short-circuit condition can
+    // route the false arm through a join that is still inside the body.
+    if else_bb == h || else_bb == latch || region.contains(&else_bb) {
+        return None;
+    }
     if !slot_sound(func, slot, h, latch, &region) {
         return None;
     }
