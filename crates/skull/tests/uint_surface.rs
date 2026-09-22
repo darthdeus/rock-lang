@@ -1,7 +1,7 @@
 //! Direct runtime evidence for the uint surfaces promised by the unified
 //! standard library and skull's reflection/serialization boundary.
 
-use crate::common::{run_luajit, try_emit_with_stdlib_module};
+use crate::common::{run_luajit, try_emit_with_package_module};
 
 const SERIALIZATION: &str = include_str!("../../../stone/engine/serialization.rock");
 const SERIALIZATION_STUBS: &str = r#"
@@ -56,7 +56,7 @@ fn main() {
 #[test]
 fn uint_format_reflect_serialize_and_aggregate_surfaces() {
     let module = format!("{SERIALIZATION_STUBS}\n{SERIALIZATION}");
-    let lua = try_emit_with_stdlib_module(&module, SURFACE).expect("uint surface emits");
+    let lua = try_emit_with_package_module("stone", &module, SURFACE).expect("uint surface emits");
     let descriptor = "__ROCK_TYPE_TABLE[\"UintRecord\"]";
     assert!(lua.contains(descriptor), "missing reflection descriptor: {lua}");
     assert!(lua.contains("type = \"uint\""), "uint field was not reflected as uint: {lua}");
