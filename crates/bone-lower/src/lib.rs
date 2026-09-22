@@ -3432,7 +3432,8 @@ fn lower_pattern_value(
     // lower exactly like the legacy two-segment forms.
     if let skull_parser::Pattern::PathVariant { path, args } = pat {
         let Some(frag) = ctx.v1_scope() else {
-            return Err(CompilerError::new_no_location(
+            return Err(CompilerError::new_with_label(
+                path.span(),
                 "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
             ));
         };
@@ -3441,7 +3442,7 @@ fn lower_pattern_value(
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
         let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
-            .map_err(|msg| CompilerError::new_no_location(msg))?;
+            .map_err(|msg| CompilerError::new_with_label(path.span(), msg))?;
         ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Variant { enum_key, variant });
         let sub = match args {
             None => IdxRange::new_empty(),
@@ -3463,7 +3464,8 @@ fn lower_pattern_value(
     }
     if let skull_parser::Pattern::PathRecord { path, fields, rest } = pat {
         let Some(frag) = ctx.v1_scope() else {
-            return Err(CompilerError::new_no_location(
+            return Err(CompilerError::new_with_label(
+                path.span(),
                 "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
             ));
         };
@@ -3472,7 +3474,7 @@ fn lower_pattern_value(
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
         let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
-            .map_err(|msg| CompilerError::new_no_location(msg))?;
+            .map_err(|msg| CompilerError::new_with_label(path.span(), msg))?;
         ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Variant { enum_key, variant });
         let mut entries = Vec::with_capacity(fields.len());
         for (fname, subpat) in fields.iter() {

@@ -1516,7 +1516,9 @@ fn walk_module_path(
 }
 
 /// Resolve a pattern path `prefix::Variant` where the LAST segment is the
-/// variant and the prefix lands on an enum type.
+/// variant and the prefix lands on an enum type. The whole path resolves
+/// exactly like the value `prefix::Variant`, so a bare enum prefix binds
+/// through every scope tier (imports, globs, std), not only own members.
 pub fn resolve_variant_pattern(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1525,27 +1527,11 @@ pub fn resolve_variant_pattern(
     if path.segments.len() < 2 {
         return Err("a qualified pattern needs a type and a variant".to_string());
     }
-    let variant = last_of(&path.segments);
-    let prefix = UsePathRef {
-        from_root: path.from_root,
-        segments: path.segments[..path.segments.len() - 1].to_vec(),
-    };
-    match resolve_member_path(ws, frag, &prefix)? {
-        MemberTarget::Type(enum_key) => {
-            if !ws.enums_by_name.contains_key(&enum_key) {
-                return Err(format!("`{enum_key}` is not an enum"));
-            }
-            Ok((enum_key, variant))
-        }
-        MemberTarget::EnumVariant { enum_key, variant: v } => {
-            if v == variant {
-                Ok((enum_key, variant))
-            } else {
-                Err("mismatched variant path".to_string())
-            }
-        }
+    match resolve_member_path(ws, frag, path)? {
+        MemberTarget::EnumVariant { enum_key, variant } => Ok((enum_key, variant)),
+        MemberTarget::Type(key) => Err(format!("`{key}` names a type, not an enum variant")),
         MemberTarget::Global(key) | MemberTarget::Callable { key, .. } => {
-            Err(format!("`{key}` is not an enum type"))
+            Err(format!("`{key}` is not an enum variant"))
         }
     }
 }
