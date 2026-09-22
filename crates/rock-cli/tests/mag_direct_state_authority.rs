@@ -1025,17 +1025,17 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "coroutine_poller_update(actor.tasks)",
         "flow_frame_reset()",
         "world_tick_all(world)",
-        "actor.update_casting(intents.cast)",
-        "player.apply_target_intent(intents.target)",
-        "player.update_movement(intents.movement)",
-        "player.apply_inventory_command(intents.inventory)",
-        "player.apply_bandage_intent(intents.consumables)",
-        "player.update_walls()",
+        "actor.update_casting_in(world, intents.cast)",
+        "player.apply_target_intent_in(world, intents.target)",
+        "player.update_movement_in(world, intents.movement, dt)",
+        "player.apply_inventory_command_in(world, intents.inventory)",
+        "player.apply_bandage_intent_in(world, intents.consumables)",
+        "player.update_walls_in(world, dt)",
         "actor.update_ground_pickup(world)",
         "actor.cull_dead_mobs(world)",
         "tick_corpses(world)",
-        "player.tick_wisp_intent()",
-        "wisp_motes_tick()",
+        "player.tick_wisp_intent_in(world, dt)",
+        "wisp_motes_tick_in(world)",
     ] {
         assert!(tick.contains(call), "canonical tick is missing authoritative call `{call}`");
     }
@@ -1058,7 +1058,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         );
     }
     let status_owner = tick
-        .find("update_player_statuses(player)")
+        .find("player.update_player_statuses_in(world, dt)")
         .expect("status owner in canonical tick");
     assert!(
         !tick.contains("mag_present_status_effects(world)"),
@@ -1068,17 +1068,17 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         .find("mag_capture_status_presentation(world)")
         .expect("status sample in canonical tick");
     let late_wall_contact = tick
-        .find("player.update_walls()")
+        .find("player.update_walls_in(world, dt)")
         .expect("late wall contact in canonical tick");
     assert!(
         status_owner < status_sample && status_sample < late_wall_contact,
         "status sampling must stay between its owner tick and late wall contact"
     );
     let wisp_intent = tick
-        .find("player.tick_wisp_intent()")
+        .find("player.tick_wisp_intent_in(world, dt)")
         .expect("authoritative wisp intent in canonical tick");
     let wisp_tick = tick
-        .find("wisp_motes_tick()")
+        .find("wisp_motes_tick_in(world)")
         .expect("authoritative wisp integration in canonical tick");
     assert!(wisp_intent < wisp_tick,
         "wisp effectors must be prepared before authoritative integration");
