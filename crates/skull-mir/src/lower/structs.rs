@@ -348,31 +348,12 @@ impl Builder<'_> {
         )
     }
 
-    /// The fn-typed field a call with first argument `recv` goes through, if
-    /// any. The field is named as the method was WRITTEN (`Body::
-    /// method_names`): a v1 callee's name is a DefKey or an alias target,
-    /// never the field. A call written by name keeps its callee name.
-    pub(crate) fn fn_field_of_call(&self, recv: Idx<Expr>, callee: Ustr) -> Option<Ustr> {
-        let field = self.body.method_names.get(&recv).copied().unwrap_or(callee);
-        self.struct_field_is_fn(recv, field).then_some(field)
-    }
-
-    /// Whether `recv`'s static type is a struct with a fn-typed field named
-    /// `field` — recovers a `recv.field(args)` UFCS call that bone left as an
-    /// unresolved call `field` (it's really an indirect call through the field).
-    pub(crate) fn struct_field_is_fn(&self, recv: Idx<Expr>, field: Ustr) -> bool {
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(recv) else {
-            return false;
-        };
-        let Some(sid) = self.ws.struct_by_name.get(&sname) else {
-            return false;
-        };
-        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        sd.fields
-            .iter()
-            .find(|f| f.name == field)
-            .map(|f| matches!(self.resolve_ty(f.ty), Some(TypeExpr::Function { .. })))
-            .unwrap_or(false)
+    /// The fn-typed field call `e` goes through, if inference resolved it to
+    /// one (`BodyInference::fn_field_calls`): only method syntax does, so a
+    /// call written by name reaches the function even when its first
+    /// argument has a fn-typed field of that name.
+    pub(crate) fn fn_field_of_call(&self, e: Idx<Expr>) -> Option<Ustr> {
+        self.inf?.fn_field_calls.get(&e).copied()
     }
 
     /// Whether `name` is a module-level global of fn type — recovers `g(args)`
