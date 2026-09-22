@@ -555,13 +555,6 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                 short_path(&plan.files[d.file].id),
                 d.line
             )),
-            DefKind::Decorator => plan.notes.push(format!(
-                "decorator `{}` ({}:{}): `@{}` uses are not derived by this analysis; review whether a consumer needs it exported",
-                d.name,
-                short_path(&plan.files[d.file].id),
-                d.line,
-                d.name
-            )),
             _ => {}
         }
     }
@@ -764,6 +757,11 @@ fn p_def_spans(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>, p_id: 
                         if *fm == m {
                             out.push((module.file, module.functions[*fid].span.offset_range.0));
                         }
+                    }
+                }
+                for (_, d) in module.decorators.iter() {
+                    if d.def_key == *key {
+                        out.push((module.file, d.span.offset_range.0));
                     }
                 }
             }
