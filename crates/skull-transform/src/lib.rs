@@ -864,7 +864,7 @@ enum FieldSrc {
 ///
 /// `enum_hint` is the cell's enum name (from its `MakeEnum` stores). A unit
 /// variant of a MIXED enum is stored as a reference to a shared singleton GLOBAL
-/// `__rock_enum_<E>_<V>` (not a `MakeEnum`); given `enum_hint = E` we recognize it
+/// `__rock_enum_<symbol(E)>_<V>` (not a `MakeEnum`); given `enum_hint = E` we recognize it
 /// as the same enum's ctor with fields `{__variant=V, __ty=E}` (no payload), so a
 /// cell mixing payload + unit variants stays uniform and splits. The hint is what
 /// disambiguates `V` from `E` in the underscore-joined global name.
@@ -888,7 +888,7 @@ fn ctor_fields(
         Inst::MakeEnum { tag, ty, positional, named } => {
             let mut f = vec![
                 (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(*tag)),
-                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(*ty)),
+                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty))),
             ];
             for (i, p) in positional.iter().enumerate() {
                 f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
@@ -901,7 +901,7 @@ fn ctor_fields(
         Inst::MakeEnumDyn { tag, ty, positional, named } => {
             let mut f = vec![
                 (ustr::Ustr::from("__variant"), FieldSrc::Operand(*tag)),
-                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(*ty)),
+                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty))),
             ];
             for (i, p) in positional.iter().enumerate() {
                 f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
@@ -914,12 +914,16 @@ fn ctor_fields(
         // A unit-variant singleton ref of the cell's enum: `__rock_enum_<E>_<V>`.
         Inst::Global(g) => {
             let e = enum_hint?;
-            let variant = g.as_str().strip_prefix(&format!("__rock_enum_{e}_"))?;
+            // The singleton and the `__ty` leaf carry the minted type symbol, as
+            // the emitted global and every constructed box do; for a v1 enum that
+            // differs from its DefKey.
+            let symbol = skull_mir::mangle::symbol_of_key(e);
+            let variant = g.as_str().strip_prefix(&format!("__rock_enum_{symbol}_"))?;
             Some((
                 StructId::Enum(e),
                 vec![
                     (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(ustr::Ustr::from(variant))),
-                    (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(e)),
+                    (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(symbol)),
                 ],
             ))
         }

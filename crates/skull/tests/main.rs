@@ -47,6 +47,8 @@ mod coroutine_hook_hoist;
 mod dead_lambda_scope;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
+#[path = "v1_enum_join_scalarize.rs"]
+mod v1_enum_join_scalarize;
 #[path = "expansion_admission.rs"]
 mod expansion_admission;
 #[path = "concrete_expansion.rs"]
