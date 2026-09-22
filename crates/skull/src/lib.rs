@@ -701,14 +701,22 @@ end
 _G.__rock_bind_state_cells = function(body)
   local session = _G.__rock_active_session
   local sink = _G.__rock_state_cell_sink
+  -- Initial full-chunk factories already share these cells. Avoid a redundant
+  -- join there; overlays and later full chunks still join their distinct cells.
+  local state_id = debug.upvalueid(sink, 1)
+  local initialized_id = debug.upvalueid(sink, 2)
   local i = 1
   while true do
     local name, value = debug.getupvalue(body, i)
     if name == nil then break end
     if value == session.__rock_state then
-      debug.upvaluejoin(body, i, sink, 1)
+      if debug.upvalueid(body, i) ~= state_id then
+        debug.upvaluejoin(body, i, sink, 1)
+      end
     elseif value == session.__rock_initialized then
-      debug.upvaluejoin(body, i, sink, 2)
+      if debug.upvalueid(body, i) ~= initialized_id then
+        debug.upvaluejoin(body, i, sink, 2)
+      end
     end
     i = i + 1
   end

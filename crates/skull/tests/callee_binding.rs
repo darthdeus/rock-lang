@@ -254,12 +254,17 @@ fn repeated_stripped_overlays_keep_one_session_sink_and_old_closures_live() {
 local function stripped(code)
   return assert(loadstring(string.dump(assert(loadstring(code)), true)))
 end
+local real_join = debug.upvaluejoin
+local joins = 0
+debug.upvaluejoin = function(...) joins = joins + 1; return real_join(...) end
 stripped({full})()
+assert(joins == 0, 'initial full chunk redundantly joined its own state cells')
 local old_bump = bump
 local sinks_before = __rock_state_cell_sinks and #__rock_state_cell_sinks or 1
 local patch = stripped({overlay})
 local first_sink = __rock_state_cell_sink
 for i = 1, 25 do patch() end
+assert(joins > 0, 'overlay did not join its independent state cells')
 local sinks_after = __rock_state_cell_sinks and #__rock_state_cell_sinks or 1
 assert(sinks_after == sinks_before, 'Session sinks grew across body edits')
 assert(__rock_state_cell_sink == first_sink)
