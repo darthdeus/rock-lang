@@ -46,6 +46,43 @@ pub(crate) fn structs_with_field(gamma: &Gamma, field: Ustr) -> Vec<StructId> {
     matches
 }
 
+/// Keeps interface conformance decisions independent of diagnostic wording.
+#[derive(Debug)]
+pub(crate) enum StructFieldError {
+    MissingField {
+        struct_name: Option<Ustr>,
+        field: Ustr,
+        span: Span,
+    },
+    AccessDenied {
+        denied: AccessDenied,
+        span: Span,
+    },
+    Other(CompilerError),
+}
+
+impl From<CompilerError> for StructFieldError {
+    fn from(error: CompilerError) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<StructFieldError> for CompilerError {
+    fn from(error: StructFieldError) -> Self {
+        match error {
+            StructFieldError::MissingField { struct_name, field, span } => {
+                let message = match struct_name {
+                    Some(struct_name) => format!("struct `{struct_name}` has no field `{field}`"),
+                    None => format!("no struct has a field `{field}`"),
+                };
+                CompilerError::new_with_label(span, message)
+            }
+            StructFieldError::AccessDenied { denied, span } => denied.to_compiler_error(span),
+            StructFieldError::Other(error) => error,
+        }
+    }
+}
+
 // Resolve the type of `field` on a nominal struct, with generic subst.
 // `base_ty` must be resolved and peeled nullable for safe nav.
 pub(crate) fn struct_field_ty(
@@ -53,7 +90,7 @@ pub(crate) fn struct_field_ty(
     base_ty: TyId,
     field: Ustr,
     span: Span,
-) -> Result<TyId, CompilerError> {
+) -> Result<TyId, StructFieldError> {
     let base_ty = match *gamma.get(base_ty) {
         TypeExpr::App {
             ctor: TypeCtor::Ref,
@@ -61,7 +98,10 @@ pub(crate) fn struct_field_ty(
         } => {
             let mut params = params;
             let Some(inner) = params.next() else {
-                comp_error!(span, "malformed `ref` type has no target");
+                return Err(StructFieldError::Other(CompilerError::new_with_label(
+                    span,
+                    "malformed `ref` type has no target".to_string(),
+                )));
             };
             base_ty.with_idx(inner)
         }
@@ -86,12 +126,22 @@ pub(crate) fn struct_field_ty(
 
             let sid = match matches.as_slice() {
                 [one] => *one,
-                [] => comp_error!(span, "no struct has a field `{}`", field),
-                _ => comp_error!(
-                    span,
-                    "ambiguous field `{}`: multiple structs define it; annotate the parameter",
-                    field
-                ),
+                [] => {
+                    return Err(StructFieldError::MissingField {
+                        struct_name: None,
+                        field,
+                        span,
+                    })
+                }
+                _ => {
+                    return Err(StructFieldError::Other(CompilerError::new_with_label(
+                        span,
+                        format!(
+                            "ambiguous field `{}`: multiple structs define it; annotate the parameter",
+                            field
+                        ),
+                    )))
+                }
             };
 
             let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
@@ -107,22 +157,25 @@ pub(crate) fn struct_field_ty(
                 .fields
                 .iter()
                 .find(|f| f.name == field)
-                .ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        span,
-                        format!("struct `{}` has no field `{}`", def.name, field),
-                    )
+                .ok_or_else(|| StructFieldError::MissingField {
+                    struct_name: Some(def.name),
+                    field,
+                    span,
                 })?
                 .ty;
-            return substitute(gamma, fty, &subs, span);
+            return substitute(gamma, fty, &subs, span).map_err(StructFieldError::from);
         }
 
-        _ => comp_error!(
-            span,
-            "cannot access field `{}` on non-struct type {}",
-            field,
-            gamma.workspace.render(Some(&gamma.out), base_ty)
-        ),
+        _ => {
+            return Err(StructFieldError::Other(CompilerError::new_with_label(
+                span,
+                format!(
+                    "cannot access field `{}` on non-struct type {}",
+                    field,
+                    gamma.workspace.render(Some(&gamma.out), base_ty)
+                ),
+            )))
+        }
     };
 
     let sid = resolve_struct(gamma, struct_name).ok_or_else(|| {
@@ -135,19 +188,20 @@ pub(crate) fn struct_field_ty(
 
     let Some(field_ty) = field_ty else {
         if let Some(res) = vec_swizzle_ty(gamma, struct_name, field, span) {
-            return res;
+            return res.map_err(StructFieldError::from);
         }
-        return Err(CompilerError::new_with_label(
+        return Err(StructFieldError::MissingField {
+            struct_name: Some(struct_name),
+            field,
             span,
-            format!("struct `{}` has no field `{}`", struct_name, field),
-        ));
+        });
     };
 
     let site = gamma.access_site();
     field_access(gamma, struct_name, field, site, FieldAccessNeed::Read)
-        .map_err(|e| e.to_compiler_error(span))?;
+        .map_err(|denied| StructFieldError::AccessDenied { denied, span })?;
 
-    substitute(gamma, field_ty, &subs, span)
+    substitute(gamma, field_ty, &subs, span).map_err(StructFieldError::from)
 }
 
 /// GLSL-style swizzle read on the float vec structs (docs/vec-swizzles-plan.md):

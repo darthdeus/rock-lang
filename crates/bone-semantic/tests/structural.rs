@@ -2112,6 +2112,7 @@ fn structural_interface_conformance_rejects_private_set_field_for_writable_inter
 pub struct Actor {
     pub health: int,
     pub private(set) mana: int,
+    private secret: int,
 }
 "#;
     let mut lib_mod = parse_module_with_dialect(lib_src, ustr("lib.rock"), Dialect::V1)
@@ -2127,6 +2128,12 @@ pub struct WritableMana {
 }
 pub struct WritableHealth {
     pub health: int,
+}
+pub struct MissingField {
+    pub missing: int,
+}
+pub struct ReadableSecret {
+    pub secret: int,
 }
 "#;
     let mut consumer_mod = parse_module_with_dialect(consumer_src, ustr("consumer.rock"), Dialect::V1)
@@ -2153,8 +2160,12 @@ pub struct WritableHealth {
 
     let iface_mana = ustr("consumer::WritableMana");
     let iface_health = ustr("consumer::WritableHealth");
+    let iface_missing = ustr("consumer::MissingField");
+    let iface_secret = ustr("consumer::ReadableSecret");
     ws.interface_names.insert(iface_mana);
     ws.interface_names.insert(iface_health);
+    ws.interface_names.insert(iface_missing);
+    ws.interface_names.insert(iface_secret);
 
     let consumer_mid = ws.modules.iter().find(|m| m.file == ustr("consumer.rock")).unwrap().id;
     let body = bone_core::hir::Body::default();
@@ -2176,5 +2187,21 @@ pub struct WritableHealth {
     assert_eq!(
         err.message,
         "field `mana` on struct `Actor` is not writable from this module"
+    );
+
+    // A genuinely absent source field gets the interface-specific diagnostic.
+    let missing_err = coerce_to_interface(&mut gamma, actor_ty, iface_missing, Span::unknown())
+        .expect_err("coercing Actor to an interface with a missing field must fail");
+    assert_eq!(
+        missing_err.message,
+        "type game::Actor does not have required field `missing` of interface `consumer::MissingField`"
+    );
+
+    // A present but inaccessible source field keeps the access diagnostic.
+    let secret_err = coerce_to_interface(&mut gamma, actor_ty, iface_secret, Span::unknown())
+        .expect_err("coercing Actor to an interface with a private field must fail");
+    assert_eq!(
+        secret_err.message,
+        "field `secret` on struct `Actor` is not accessible from this module"
     );
 }
