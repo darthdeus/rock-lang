@@ -51,7 +51,7 @@ pub use mem2reg::{Mem2RegCensus, Mem2RegPromotion, mem2reg_census, promote_direc
 
 pub const STATE: &str = "__state";
 
-/// Every implicit `nobox` materialization in `func`, in block order -- EVERY
+/// Every emitted implicit `nobox` materialization in `func` -- EVERY
 /// one, not the first. A body with two sinks is two findings: reporting one
 /// makes the second invisible until the first is fixed, so any "N sinks left"
 /// count read off this check would be a floor rather than a total (the
@@ -62,7 +62,10 @@ pub fn nobox_materialization_violations(
     func: &MirFunc,
 ) -> Vec<(String, Option<bone_semantic::prelude::Span>)> {
     let mut out = Vec::new();
-    for (_, block) in func.blocks.iter() {
+    // Closure conversion retains cloned, unreachable parent/sibling blocks.
+    // Follow the emission oracle, including unhoisted coroutine lambdas/hooks.
+    for bid in skull_mir::reach::emitted_blocks(func) {
+        let block = &func.blocks[bid];
         for &iid in &block.insts {
             let Inst::MakeValueStruct { name, .. } = &func.insts[iid] else {
                 continue;

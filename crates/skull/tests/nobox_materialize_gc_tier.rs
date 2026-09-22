@@ -289,3 +289,74 @@ fn an_implicit_box_under_a_gc_tier_parent_is_rejected_with_a_span() {
     );
     assert!(err.location.line > 0, "the rejection lost its span: {err:?}");
 }
+
+#[test]
+fn hoisted_closure_does_not_validate_discarded_parent_blocks() {
+    let source = r#"
+nobox value Tint { r: float, g: float, b: float, a: float }
+value Row { key: string, count: int, color: Tint }
+fn row(index: int) -> Row {
+    return Row { key: "item", count: index, color: Tint { r: 1.0, g: 2.0, b: 3.0, a: 4.0 } }
+}
+fn with_check(check: fn() -> ()) { check() }
+fn main() {
+    let offset = 7
+    with_check(() => {
+        with_check(() => {
+            let total = offset
+            for index in 0..3 {
+                let item = row(index)
+                total += item.count
+            }
+            print(total)
+        })
+    })
+}
+"#;
+    let lua = try_emit_module(source).expect("a scalarized closure local must emit");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_closure_local"), "10");
+}
+
+#[test]
+fn live_implicit_materialization_in_a_hoisted_closure_is_rejected() {
+    let source = r#"
+nobox value NV2 { x: float, y: float }
+value Outer { label: string, pos: NV2 }
+global G: Outer
+fn with_check(check: fn() -> ()) { check() }
+fn main() {
+    with_check(() => {
+        G = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } }
+    })
+    print(G.label)
+}
+"#;
+    let err = try_emit_module(source).expect_err("live closure boxes must still reject");
+    assert!(err.message.contains("survived lowering as an implicit materialization"), "{err:?}");
+    assert!(err.message.contains("lambda"), "the rejection must name the live body: {err:?}");
+    assert!(err.location.line > 0, "the rejection lost its span: {err:?}");
+}
+
+#[test]
+fn live_implicit_materialization_in_a_coroutine_hook_is_rejected() {
+    let source = r#"
+nobox value NV2 { x: float, y: float }
+value Outer { label: string, pos: NV2 }
+global G: Outer
+co fn worker() -> Coroutine<int> {
+    on_killed(() => {
+        G = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } }
+    })
+    yield 1
+}
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+    c.kill()
+    print(G.label)
+}
+"#;
+    let err = try_emit_module(source).expect_err("live coroutine hook boxes must still reject");
+    assert!(err.message.contains("survived lowering as an implicit materialization"), "{err:?}");
+    assert!(err.location.line > 0, "the rejection lost its span: {err:?}");
+}

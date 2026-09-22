@@ -1168,3 +1168,33 @@ fn changed_call_graph_reuses_the_maintained_scalar_context() {
     let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh emit").0;
     assert_eq!(incremental.lua, fresh.lua);
 }
+
+#[test]
+fn coroutine_frame_nil_stores_share_full_incremental_and_overlay_emission() {
+    let v1 = r#"
+enum FrameYield { Empty, Pair(int, int) }
+co fn stream() -> Coroutine<FrameYield> {
+    yield FrameYield::Pair(1, 2)
+    yield FrameYield::Empty
+}
+inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
+    return c.__y1 == nil and c.__y2 == nil
+"""
+@nomangle fn sample(expected: int) -> bool {
+    let c = stream()
+    let first = c.resume() == FrameYield::Pair(expected, 2)
+    let second = c.resume() == FrameYield::Empty
+    return first && second && slots_empty(c)
+}
+"#;
+    let v2 = v1.replace("Pair(1, 2)", "Pair(3, 2)");
+    check_edit_with(ws_with_stdlib, v1, &v2, &["stream"]);
+    let ws1 = ws_with_stdlib(v1);
+    let (full, mut cache) = emit_full_global(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "stream")]);
+    assert!(full.lua.contains(" ~= nil or "), "full frame stores must guard absent nil writes");
+    assert!(overlay.lua.contains(" ~= nil or "), "overlay frame stores must use the same guard");
+    let run = format!("{}\nprint(sample(1))\n{}\nprint(sample(3))\n", full.lua, overlay.lua);
+    assert_eq!(crate::common::run_luajit(&run, "overlay_frame_nil_stores"), "true\ntrue");
+}
