@@ -943,7 +943,7 @@ fn prepend_package_preamble(lua: String, dir: &str) -> std::result::Result<Strin
             ),
         })?;
         let preamble =
-            skull_game_preamble_for(dir, skull::callee_binding_mode()).map_err(|error| {
+            skull_game_preamble(dir).map_err(|error| {
                 SkullFailure {
                     reason: "game preamble resolution failed".to_string(),
                     rendered: error.to_string(),
@@ -2001,18 +2001,13 @@ pub fn skull_compile_game_and_collect_sims(
     dir: &str,
     main_path: &std::path::Path,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
-    skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None, None)
+    skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None)
 }
 
-/// `callee_binding` overrides the emitted callee shape for THIS session only;
-/// `None` reads the process shape. The sim runner's hot-reload lane compiles a
-/// second session with `Some(CalleeBindingMode::Global)` so its `reload_edit`
-/// injection still produces an `incremental.lua` overlay.
 pub fn skull_compile_game_and_collect_sims_with_allocation(
     dir: &str,
     main_path: &std::path::Path,
     allocation_manifest: Option<&std::path::Path>,
-    callee_binding: Option<skull::CalleeBindingMode>,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
     // Session-based build (same machinery as `rock stone`, tests included so the
     // `@sim` bodies are in the program). The live SkullStone is returned so the
@@ -2026,12 +2021,7 @@ pub fn skull_compile_game_and_collect_sims_with_allocation(
             &incremental_path,
             path,
         ),
-        None => SkullStone::init_with_tests_and_callee_binding(
-            dir,
-            main_path,
-            &incremental_path,
-            callee_binding,
-        ),
+        None => SkullStone::init_with_tests(dir, main_path, &incremental_path),
     }
     .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
 
@@ -3052,13 +3042,8 @@ fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {
 /// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
 /// asset resolution. cimgui is initialized by stone's global initializer.
 /// Factored so `skull_run_project` and the stone two-file path build it
-/// identically. `callee_binding` is the shape the chunk beneath it was emitted
-/// with -- the SESSION's, not the process's, because one process can hold two
-/// sessions of different shapes.
-fn skull_game_preamble_for(
-    dir: &str,
-    callee_binding: skull::CalleeBindingMode,
-) -> Result<String> {
+/// identically.
+fn skull_game_preamble(dir: &str) -> Result<String> {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
@@ -3076,13 +3061,6 @@ fn skull_game_preamble_for(
         skull::mir_emit::RendererTarget::Wgpu => "wgpu",
     };
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
-    // The emitted callee shape, for the engine's one-line boot notice about
-    // reload granularity (`check_hot_reload` in `stone/engine/hot_reload.rock`).
-    // Line 1 stays the source dir -- `read_chunk_source_dir` reads exactly that
-    // line to decide whether a chunk may be loaded over the running game.
-    if callee_binding == skull::CalleeBindingMode::Upvalue {
-        full.push_str("__ROCK_CALLEE_BINDING = \"upvalue\"\n");
-    }
     if let Some(stone_dir) = configured_stone_dir(&abs)? {
         let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
         full.push_str(&format!("__ROCK_STONE_DIR = \"{escaped_stone}\"\n"));
@@ -3109,12 +3087,6 @@ fn skull_game_preamble_for(
         full.push('\n');
     }
     Ok(full)
-}
-
-/// [`skull_game_preamble_for`] at the PROCESS shape, for the one-shot paths
-/// (`rock run`, `rock compile`) that emit and exit without a build session.
-fn skull_game_preamble(dir: &str) -> Result<String> {
-    skull_game_preamble_for(dir, skull::callee_binding_mode())
 }
 
 pub(crate) fn ensure_renderer_feature(dir: &str) -> Result<()> {
@@ -3198,14 +3170,8 @@ fn write_full_main(
 /// signal for the overlay-size question.
 #[derive(Debug)]
 pub enum SkullReload {
-    /// Full rebuild: `main.lua` rewritten, `incremental.lua` wiped (interface/
-    /// structural edit, or initial build). `body_only` marks the one case the
-    /// running process can absorb WITHOUT a restart: a body-tier edit the bound
-    /// callee shape forced onto this path (see [`SkullStone::route_and_emit`]).
-    /// Nothing structural moved, so the engine's `check_hot_reload` full reload
-    /// keeps live state; an interface edit (`body_only: false`) still needs the
-    /// clean restart.
-    Full { bytes: usize, body_only: bool, cook_ms: f64, emit_ms: f64, write_ms: f64 },
+    /// Full rebuild after an interface or structural edit.
+    Full { bytes: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
     /// Body edit: only `incremental.lua` rewritten (the overlay). `reinferred` is
     /// the number of bodies this edit re-inferred (the edit's churn). `emit_ms` is
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
@@ -3340,11 +3306,7 @@ pub struct SkullStone {
     /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing
     /// (docs/hot-reload-schema-drift-plan.md).
     shape_hashes: skull::ShapeHashes,
-    /// The emitted callee shape THIS session builds with. Read instead of the
-    /// process shape everywhere a decision has to agree with the bodies already
-    /// on disk: the sim runner holds two sessions of different shapes in one
-    /// process (the hot-reload lane needs the global-lookup spelling so its
-    /// overlay can rebind), and the process pin is one-way and cannot say so.
+    /// Full rebuilds retain the emitted shape of the original artifact.
     callee_binding: skull::CalleeBindingMode,
     route_profile_enabled: bool,
     last_route_profile: Option<SkullRouteProfile>,
@@ -3357,36 +3319,14 @@ impl SkullStone {
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
     /// can't break the running game. See `docs/sim-layering.md`.
     pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, false, None, None)
+        Self::init_impl(dir, main_path, incremental_path, false, None)
     }
 
     /// Sim-runner build: same as [`SkullStone::init`] but discovery KEEPS
     /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
     /// of the emitted program.
     pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, true, None, None)
-    }
-
-    /// [`SkullStone::init_with_tests`] under an explicit emitted callee shape.
-    ///
-    /// The seam the sim runner's hot-reload lane uses. `reload_edit` injection
-    /// republishes through [`SkullStone::apply_edit`], which can only produce an
-    /// `incremental.lua` overlay under the global-lookup shape, so that lane
-    /// compiles its own session with `Some(CalleeBindingMode::Global)` into its
-    /// own output directory while every other sim boots the shipped shape from
-    /// the shared one. `None` reads the process shape.
-    pub fn init_with_tests_and_callee_binding(
-        dir: &str,
-        main_path: &std::path::Path,
-        incremental_path: &std::path::Path,
-        callee_binding: Option<skull::CalleeBindingMode>,
-    ) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, true, None, callee_binding)
-    }
-
-    /// The emitted callee shape this session builds with.
-    pub fn callee_binding(&self) -> skull::CalleeBindingMode {
-        self.callee_binding
+        Self::init_impl(dir, main_path, incremental_path, true, None)
     }
 
     pub fn init_with_tests_and_allocation_report(
@@ -3402,7 +3342,6 @@ impl SkullStone {
             incremental_path,
             true,
             Some(allocation_manifest),
-            None,
         )
     }
 
@@ -3412,7 +3351,6 @@ impl SkullStone {
         incremental_path: &std::path::Path,
         include_tests: bool,
         explicit_allocation_report: Option<&std::path::Path>,
-        callee_binding: Option<skull::CalleeBindingMode>,
     ) -> Result<SkullStone> {
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
@@ -3425,7 +3363,7 @@ impl SkullStone {
                 mid,
                 Some(dir),
                 renderer_target,
-                callee_binding,
+                None,
             )
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             let allocation_report_path = allocation_report_path_from_env();
@@ -3446,11 +3384,9 @@ impl SkullStone {
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
-        // The cache answers, not the argument: `None` means "whatever the
-        // process resolved", and the preamble stamp plus every reload decision
-        // below must name the shape the chunks were actually emitted with.
+        // Full rebuilds retain the shape of the session's original artifact.
         let callee_binding = cache.callee_binding();
-        let preamble = skull_game_preamble_for(dir, callee_binding)?;
+        let preamble = skull_game_preamble(dir)?;
         write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
@@ -3659,6 +3595,11 @@ impl SkullStone {
         self.project.source_text(path)
     }
 
+    /// Package roots retained by the source discovery used by this session.
+    pub fn package_roots(&self) -> &[(u32, std::path::PathBuf)] {
+        &self.project.sources().package_roots
+    }
+
     /// Absolute paths of every `embed_string` input baked into the current
     /// program -- files the stone watcher must treat as sources: an edit to
     /// one routes as a changed non-source path, which forces the full rebuild
@@ -3685,7 +3626,7 @@ impl SkullStone {
         mut profile: Option<&mut SkullRouteProfile>,
     ) -> Result<SkullReload> {
         use std::path::PathBuf;
-        let (mut full, reinferred, span_edits, cook_ms) = match update {
+        let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
             crate::live_project::LiveUpdate::BodyOnly { reinferred, span_edits, cook_ms } => {
                 (false, reinferred, span_edits, cook_ms)
@@ -3694,19 +3635,6 @@ impl SkullStone {
                 (true, Vec::new(), Vec::new(), cook_ms)
             }
         };
-        // THE hot-reload rule, read off THIS SESSION's shape rather than the
-        // process's -- the sim runner holds two sessions of different shapes at
-        // once. A bound caller holds its callee as an immutable upvalue, so an
-        // overlay that redefines the callee's GLOBAL would never reach it.
-        // Publish the whole chunk instead: both emission passes rerun,
-        // `write_full_main` wipes any overlay, and the engine sees a `main.lua`
-        // change -- its full reload, which keeps live state. Slower per edit;
-        // correct. `assemble_overlay` still rejects a bound body, and under this
-        // routing never sees one.
-        let bound_body_edit = !full
-            && self.callee_binding == skull::CalleeBindingMode::Upvalue;
-        full |= bound_body_edit;
-
         let t_emit = Instant::now();
         let shape_started = profile.is_some().then(Instant::now);
         let old_shader_contracts = self.cache.shader_registration_contracts();
@@ -3791,7 +3719,7 @@ impl SkullStone {
                     .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
                 ((lua, emits_main), c)
             };
-            self.preamble = skull_game_preamble_for(self.project.dir(), self.callee_binding)?;
+            self.preamble = skull_game_preamble(self.project.dir())?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             let ((lua, emits_main), staged_cache) = lua;
@@ -3804,7 +3732,7 @@ impl SkullStone {
                 .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))?
                 .to_string();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
-            Ok(SkullReload::Full { bytes, body_only: bound_body_edit, cook_ms, emit_ms, write_ms })
+            Ok(SkullReload::Full { bytes, cook_ms, emit_ms, write_ms })
         } else {
             if let (Some(started), Some(profile)) = (shape_started, profile.as_deref_mut()) {
                 profile.publication_shape_checks_ns += started.elapsed().as_nanos();
@@ -3926,7 +3854,7 @@ impl SkullStone {
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
-        self.preamble = skull_game_preamble_for(self.project.dir(), self.callee_binding)?;
+        self.preamble = skull_game_preamble(self.project.dir())?;
         write_full_main(&self.preamble, &lua, emits_main, main_path, incremental_path)?;
         self.artifact_fingerprint = artifact_fingerprint;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in

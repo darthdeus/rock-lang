@@ -8,6 +8,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 type DebouncerCacheType = notify_debouncer_full::RecommendedCache;
+pub(crate) type WatchHandle = notify_debouncer_full::Debouncer<notify::RecommendedWatcher, DebouncerCacheType>;
 
 /// True for files inside a project's *own* `tmp/` output directory
 /// (compiler scratch: `main.lua`, etc.), excluding the `restart.txt`
@@ -43,6 +44,9 @@ pub struct FileWatcherConfig {
     pub filter_metadata: bool,
     /// Whether to enable restart trigger file support (tmp/restart.txt)
     pub restart_trigger_enabled: bool,
+    /// Exact restart files outside the source roots; their parents are watched
+    /// non-recursively so scratch output never becomes a source root.
+    pub restart_files: Vec<PathBuf>,
     /// File extensions to watch (e.g., ["rock"])
     pub watch_extensions: Vec<String>,
     pub watch_all_files: bool,
@@ -63,6 +67,7 @@ impl Default for FileWatcherConfig {
             debounce_ms: 5,
             filter_metadata: false,
             restart_trigger_enabled: false,
+            restart_files: Vec::new(),
             watch_extensions: vec!["rock".to_string()],
             watch_all_files: false,
             ignored_roots: Vec::new(),
@@ -131,6 +136,11 @@ impl FileWatcher {
         self
     }
 
+    pub fn with_restart_files(mut self, files: Vec<PathBuf>) -> Self {
+        self.config.restart_files = files;
+        self
+    }
+
     /// Set file extensions to watch
     pub fn with_extensions(mut self, extensions: Vec<String>) -> Self {
         self.config.watch_extensions = extensions;
@@ -170,6 +180,23 @@ impl FileWatcher {
             .iter()
             .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
             .collect();
+        let restart_files: HashSet<PathBuf> = config.restart_files.iter().map(|path| {
+            // The trigger need not exist yet, but its parent must be watchable.
+            path.parent().and_then(|parent| parent.canonicalize().ok())
+                .map(|parent| parent.join(path.file_name().expect("restart file name")))
+                .unwrap_or_else(|| path.clone())
+        }).collect();
+        let mut input_parents: HashSet<PathBuf> = restart_files.iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf)).collect();
+        if let Some(extra) = &config.extra_files {
+            input_parents.extend(extra.lock().iter()
+                .filter_map(|path| path.parent().map(Path::to_path_buf)));
+        }
+        let directory_roots: Vec<PathBuf> = scratch_roots.iter()
+            .filter(|path| path.is_dir()).cloned().collect();
+        input_parents.extend(scratch_roots.iter().filter(|path| path.is_file())
+            .filter_map(|path| path.parent().map(Path::to_path_buf)));
+        input_parents.retain(|parent| !directory_roots.iter().any(|root| parent.starts_with(root)));
         let ignored_roots: Vec<PathBuf> = config
             .ignored_roots
             .iter()
@@ -197,6 +224,9 @@ impl FileWatcher {
                                 .iter()
                                 .filter(|path| {
                                     !ignored_roots.iter().any(|root| path.starts_with(root))
+                                        && (scratch_roots.iter().any(|root| path.starts_with(root))
+                                            || restart_files.contains(path.as_path())
+                                            || config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path.as_path())))
                                 })
                                 .collect();
                             if event_paths.is_empty() {
@@ -325,7 +355,7 @@ impl FileWatcher {
                             }
                         }
 
-                        if has_relevant_changes {
+                        if has_relevant_changes && !affected_paths.is_empty() {
                             let event = FileChangeEvent {
                                 paths: affected_paths,
                                 is_restart_trigger,
@@ -343,16 +373,16 @@ impl FileWatcher {
             },
         )?;
 
-        // Add all paths to watch
-        for path in paths {
-            if path.exists() {
-                let recursive = if path.is_dir() {
-                    RecursiveMode::Recursive
-                } else {
-                    RecursiveMode::NonRecursive
-                };
-                debouncer.watch(&path, recursive)?;
+        // Watch parents, not input inodes: editors replace the inode on save.
+        // The callback admits only exact inputs outside the source roots.
+        for parent in input_parents {
+            if parent.exists() {
+                debouncer.watch(&parent, RecursiveMode::NonRecursive)?;
             }
+        }
+
+        for root in directory_roots {
+            debouncer.watch(&root, RecursiveMode::Recursive)?;
         }
 
         Ok(debouncer)
