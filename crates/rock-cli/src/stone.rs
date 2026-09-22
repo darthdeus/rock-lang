@@ -1215,7 +1215,8 @@ pub fn do_perf(
         seconds
     };
 
-    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
+    let mut cmd =
+        crate::headless_scope::headless_command(rock_host::project::build_luajit_command(lua_file, app_args));
     apply_perf_env(&mut cmd);
     cmd.env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1381,7 +1382,8 @@ pub fn do_one_frame(
     }
 
     // Run the compiled Lua with luajit (stone handles window creation)
-    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
+    let mut cmd =
+        crate::headless_scope::headless_command(rock_host::project::build_luajit_command(lua_file, app_args));
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1")  // No visible window for frame runs
@@ -1546,7 +1548,8 @@ pub fn do_replay_window(
     info!("Replaying {} in a window (close the window to exit)", replay_file);
 
     let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
-    if std::env::var("STONE_HEADLESS").as_deref() == Ok("1") {
+    if crate::headless_scope::inherits_headless() {
+        cmd = crate::headless_scope::headless_command(cmd);
         apply_headless_audio_env(&mut cmd);
     }
     cmd.env("STONE_REPLAY", replay_file)

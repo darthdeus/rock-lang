@@ -1,0 +1,25 @@
+// Read at load, so a `rock frame --dump-state` run reports where it ran.
+global WORKER_CGROUP: string = (io_read_text_file("/proc/self/cgroup") ?? "<unreadable>").trim()
+
+fn main() {
+    stone_run_game(GameConfig {
+        title: "headless-scope",
+        width: 640,
+        height: 360,
+        vsync: 0,
+        clear_color: color(0.0, 0.0, 0.0, 1.0),
+        esc_quits: true,
+        cap_height_fonts: true,
+    })
+}
+
+// The runner must start this worker inside rock-headless.slice, the budget
+// every concurrent headless run shares.
+@sim
+co fn sim_worker_runs_in_the_sim_slice() -> Coroutine<Wait> {
+    start_game "headless-scope"
+    await frame(1)
+    let cgroup = (stone_file_read("/proc/self/cgroup") ?? "<unreadable>").trim()
+    sim_eq_bool(cgroup.contains("/rock-headless.slice/"), true, "worker cgroup: " + cgroup)
+    stop_sim()
+}

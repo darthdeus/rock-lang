@@ -11,6 +11,11 @@ pub(crate) fn exec_luajit_file(
     app_args: &[String],
 ) -> Result<()> {
     let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
+    // `rock run --agent-headless` (mag-cli launch) reaches here with
+    // STONE_HEADLESS=1 in the inherited environment.
+    if crate::headless_scope::inherits_headless() {
+        cmd = crate::headless_scope::headless_command(cmd);
+    }
     cmd.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());

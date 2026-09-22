@@ -75,6 +75,7 @@ mod replay_profile;
 mod replay_profile_report;
 mod image_video;
 pub mod run_sim;
+mod headless_scope;
 pub mod sim_record;
 pub mod sim_observability;
 pub mod sim_report;
