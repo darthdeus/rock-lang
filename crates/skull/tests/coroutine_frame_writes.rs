@@ -59,3 +59,32 @@ fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
     assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "frame_nil_writes"),
         "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2");
 }
+
+/// A v1 enum has one runtime tag. The erased `resume()` rebuilds the yielded
+/// value from the frame slots, and that box must carry the same `__ty` as a
+/// constructed value (the spelling `__ROCK_TYPE_TABLE` is keyed on), not the
+/// enum's definition key.
+#[test]
+fn a_resumed_v1_enum_box_carries_the_types_runtime_tag() {
+    let emitted = common::emit_v1_package(
+        "v1yield",
+        &[common::V1Fragment {
+            file: "main.rock",
+            src: r#"
+enum Step { Go(string), Done }
+co fn steps() -> Coroutine<Step> { yield Step::Go("one") }
+inline(lua) fn erased_resume_tag(c: Coroutine<Step>) -> string = "return c.__resume(c).__ty"
+inline(lua) fn unit_tag(v: Step) -> string = "return v.__ty"
+pub fn probe() -> string {
+    return "{erased_resume_tag(steps())} {unit_tag(Step::Done)}"
+}
+fn main() {}
+"#,
+        }],
+    );
+    let probe = common::mangled_name(&emitted.lua, "probe");
+    let out = common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua), "v1_resume_tag");
+    let (resumed, built) = out.split_once(' ').expect("two tags");
+    assert_eq!(resumed, built, "the erased resume box and a constructed value disagree on the tag");
+    assert!(!resumed.contains("::"), "a runtime tag is the minted symbol, not the DefKey: {resumed}");
+}
