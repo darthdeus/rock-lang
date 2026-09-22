@@ -210,7 +210,8 @@ fn call_names(source: &str) -> Vec<String> {
             next += 1;
         }
         if next < bytes.len() && bytes[next] == b'('
-            && !matches!(name, "if" | "for" | "while" | "match" | "fn" | "return")
+            && !matches!(name, "if" | "for" | "while" | "match" | "fn" | "return"
+                | "space_point" | "world_point")
         {
             result.push(name.to_string());
         }
