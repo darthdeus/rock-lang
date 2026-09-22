@@ -7,33 +7,41 @@ fn is_compiler_crate_dir(name: &str) -> bool {
         || name.starts_with("bone-")
 }
 
-fn resolve_stone_watch_path(project: &str) -> PathBuf {
-    let project_path = Path::new(project);
-    if let Ok(Some((config_path, _config))) = rock_host::stick::StickConfig::find_from_dir(project_path) {
-        if let Ok(graph) = rock_host::stick::graph::PackageGraph::build(&
-            config_path.parent().unwrap_or(&config_path),
-        ) {
-            // The dependency key "stone" as written in this project's
-            // manifest, resolved through the same graph every loader uses.
-            if let Some(edge) = graph
-                .package(graph.root())
-                .dependencies
-                .iter()
-                .find(|e| e.declared_key == "stone")
-            {
-                return graph.package(edge.target).root.clone();
-            }
-        }
+pub(crate) fn loaded_source_watch_paths(project: &str, roots: &[(u32, PathBuf)]) -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from(project), rock_host::stdlib_loader::stdlib_dir()];
+    for (id, root) in roots {
+        // Discovery loads only the invoked directory for package zero.
+        paths.push(if *id == 0 { root.join("stick.toml") } else { root.clone() });
     }
-    PathBuf::from(rock_host::rock_dir()).join("stone")
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 pub(crate) fn project_engine_watch_paths(project: &str) -> Vec<PathBuf> {
-    vec![
-        PathBuf::from(project),
-        rock_host::stdlib_loader::stdlib_dir(),
-        resolve_stone_watch_path(project),
-    ]
+    // Compilation may have failed before it retained a graph. Resolve the same
+    // channel-filtered graph so edits to a broken dependency can repair it.
+    let graph = (|| -> Result<Option<rock_host::stick::graph::PackageGraph>> {
+        let Some((config_path, config)) = rock_host::stick::StickConfig::find_from_dir(Path::new(project))? else {
+            return Ok(None);
+        };
+        Ok(Some(rock_host::stick::graph::PackageGraph::build_with_channel(
+            config_path.parent().unwrap_or(&config_path),
+            &config,
+            &rock_host::stick::resolved_channel_for(&config),
+        )?))
+    })();
+    let roots = match graph {
+        Ok(Some(graph)) => graph.packages().iter()
+            .map(|package| (package.id.0, package.root.clone())).collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            log::error!(target: "WATCH",
+                "cannot resolve dependency watch roots: {error}; watching the project until its manifest is repaired");
+            Vec::new()
+        }
+    };
+    loaded_source_watch_paths(project, &roots)
 }
 
 pub(crate) fn compiler_watch_paths() -> Vec<PathBuf> {

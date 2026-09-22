@@ -52,6 +52,11 @@ pub trait GameCompiler {
         Vec::new()
     }
 
+    /// Source roots retained by the successful loaded package graph.
+    fn package_roots(&self) -> Option<&[(u32, PathBuf)]> {
+        None
+    }
+
     /// The exact compiler-owned identity of the Artifact the next process
     /// would execute. A missing value is an error at every replay/recording
     /// launch boundary; callers must not invent a development identity.
@@ -164,6 +169,10 @@ impl GameCompiler for SkullGameCompiler {
 
     fn comptime_watch_files(&self) -> Vec<PathBuf> {
         self.stone.as_ref().map(|st| st.comptime_watch_files()).unwrap_or_default()
+    }
+
+    fn package_roots(&self) -> Option<&[(u32, PathBuf)]> {
+        self.stone.as_ref().map(|stone| stone.package_roots())
     }
 
     fn artifact_fingerprint(&self) -> Result<String> {

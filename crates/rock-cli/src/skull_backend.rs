@@ -3659,6 +3659,11 @@ impl SkullStone {
         self.project.source_text(path)
     }
 
+    /// Package roots retained by the source discovery used by this session.
+    pub fn package_roots(&self) -> &[(u32, std::path::PathBuf)] {
+        &self.project.sources().package_roots
+    }
+
     /// Absolute paths of every `embed_string` input baked into the current
     /// program -- files the stone watcher must treat as sources: an edit to
     /// one routes as a changed non-source path, which forces the full rebuild

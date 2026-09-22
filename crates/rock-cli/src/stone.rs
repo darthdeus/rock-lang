@@ -136,6 +136,118 @@ fn callee_binding_notice() -> Option<&'static str> {
     )
 }
 
+#[derive(Default)]
+struct StoneChanges {
+    needs_libstone_rebuild: bool,
+    needs_compiler_rebuild: bool,
+    sound_dirty: bool,
+    changed_libstone: Vec<String>,
+    changed_compiler: Vec<String>,
+    changed_paths: std::collections::HashSet<PathBuf>,
+}
+
+fn categorize_stone_changes(
+    event: &FileChangeEvent,
+    sound_watch: &crate::file_watcher::SharedWatchSet,
+    comptime_watch: &crate::file_watcher::SharedWatchSet,
+) -> StoneChanges {
+    let mut changes = StoneChanges::default();
+    for path in &event.paths {
+        // Normalize separators once so the substring checks below work
+        // identically on Windows (`stone-rs\src\foo.rs`) and Unix
+        // (`stone-rs/src/foo.rs`). All match strings use `/`.
+        let path_str = path.to_string_lossy().replace('\\', "/");
+
+        if sound_watch.lock().contains(path.as_path()) {
+            changes.sound_dirty = true;
+            continue;
+        }
+
+        let filename = path.file_name().map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        // Match the engine crates BEFORE the generic "Cargo." check below:
+        // `stone-rs/Cargo.toml` would otherwise be routed to the
+        // compiler-rebuild branch and never trigger a libstone rebuild.
+        // Optional crates come from the build table, so a new one is
+        // routed here without a second edit.
+        let is_engine_crate = path_str.contains("stone-rs/")
+            || rock_host::engine_build::OPTIONAL_ENGINE_LIBS
+                .iter()
+                .any(|l| path_str.contains(&format!("{}/", l.crate_name)));
+        if is_engine_crate {
+            changes.needs_libstone_rebuild = true;
+            changes.changed_libstone.push(filename);
+        } else if crate::watch::is_compiler_source(path) {
+            changes.needs_compiler_rebuild = true;
+            changes.changed_compiler.push(filename);
+        } else if path_str.ends_with(".rock") {
+            changes.changed_paths.insert(path.clone());
+        } else if comptime_watch.lock().contains(path.as_path()) {
+            // An embedded input is a source: routing it as a changed
+            // non-source path makes LiveProject take the full-rebuild arm,
+            // which re-reads the file (docs/comptime-plan.md).
+            changes.changed_paths.insert(path.clone());
+        } else if filename == "stick.toml" {
+            // A [build.vars]/[engine]/[assets]/[release] edit mid-session: route as
+            // a changed non-source path so LiveProject takes the
+            // full-rebuild arm, whose session rebuild re-resolves declared
+            // inputs. Dropping it here left stale vars until the next
+            // structural edit.
+            changes.changed_paths.insert(path.clone());
+        }
+    }
+
+    changes
+}
+
+fn stone_source_watch_paths(
+    project: &str,
+    compiler: &dyn crate::game_runtime::GameCompiler,
+) -> Vec<PathBuf> {
+    match compiler.package_roots() {
+        Some(roots) => crate::watch::loaded_source_watch_paths(project, roots),
+        None => crate::watch::project_engine_watch_paths(project),
+    }
+}
+
+struct StoneWatcher {
+    handle: Option<crate::file_watcher::WatchHandle>,
+    paths: Vec<PathBuf>,
+    inputs: std::collections::HashSet<PathBuf>,
+    extra_files: crate::file_watcher::SharedWatchSet,
+    restart_files: Vec<PathBuf>,
+    tx: std::sync::mpsc::Sender<FileChangeEvent>,
+}
+
+impl StoneWatcher {
+    fn new(
+        extra_files: crate::file_watcher::SharedWatchSet,
+        restart_files: Vec<PathBuf>,
+        tx: std::sync::mpsc::Sender<FileChangeEvent>,
+    ) -> Self {
+        Self { handle: None, paths: Vec::new(), inputs: Default::default(), extra_files, restart_files, tx }
+    }
+
+    fn refresh(&mut self, paths: Vec<PathBuf>) -> Result<()> {
+        let inputs = self.extra_files.lock().clone();
+        if self.handle.is_some() && self.paths == paths && self.inputs == inputs {
+            return Ok(());
+        }
+        // Arm new roots and input parents before dropping the previous watches.
+        let handle = FileWatcher::default_for_rock_sources()
+            .with_restart_trigger(true)
+            .with_restart_files(self.restart_files.clone())
+            .with_extensions(vec!["rock".to_string(), "rs".to_string(), "c".to_string(), "h".to_string(), "toml".to_string()])
+            .with_shared_extra_files(self.extra_files.clone())
+            .watch(paths.clone(), self.tx.clone())?;
+        self.handle = Some(handle);
+        self.paths = paths;
+        self.inputs = inputs;
+        Ok(())
+    }
+}
+
 pub fn do_stone_watch(
     path: &str,
     quiet: bool,
@@ -244,25 +356,24 @@ pub fn do_stone_watch(
     // nonexistent paths, so listing the optional crates is safe on machines
     // where they aren't checked out.
     let rock_root = PathBuf::from(rock_host::rock_dir());
-    let mut watch_paths = crate::watch::project_engine_watch_paths(path);
-    watch_paths.extend([
+    let mut engine_watch_paths = vec![
         rock_root.join("stone-rs/src"),
         rock_root.join("stone-rs/Cargo.toml"),
         rock_root.join("stone-rs/build.rs"),
-        rock_root.join("tmp"),  // Watch tmp/ for restart.txt trigger
-        PathBuf::from("tmp"),
-    ]);
+    ];
     // Every optional lib, from the build table: a crate that can be BUILT on an
     // edit but is not WATCHED for one is a hot-reload hole that looks like the
     // edit did nothing.
     for lib in rock_host::engine_build::OPTIONAL_ENGINE_LIBS {
-        watch_paths.extend([
+        engine_watch_paths.extend([
             rock_root.join(format!("{}/src", lib.crate_name)),
             rock_root.join(format!("{}/Cargo.toml", lib.crate_name)),
             rock_root.join(format!("{}/build.rs", lib.crate_name)),
         ]);
     }
-    watch_paths.extend(crate::watch::compiler_watch_paths());
+    engine_watch_paths.extend(crate::watch::compiler_watch_paths());
+    let mut watch_paths = stone_source_watch_paths(path, compiler.as_ref());
+    watch_paths.extend(engine_watch_paths.iter().cloned());
 
     // Create channel for file change events
     let (change_tx, change_rx) = channel::<FileChangeEvent>();
@@ -270,11 +381,9 @@ pub fn do_stone_watch(
     // Canonical rock-source watcher + stone-only opt-ins: manual
     // restart via `touch tmp/restart.txt`, and engine-rebuild
     // extensions (stone-rs / C / stick.toml changes rebuild libstone).
-    let _watcher = FileWatcher::default_for_rock_sources()
-        .with_restart_trigger(true)
-        .with_extensions(vec!["rock".to_string(), "rs".to_string(), "c".to_string(), "h".to_string(), "toml".to_string()])
-        .with_shared_extra_files(comptime_watch.clone())
-        .watch(watch_paths, change_tx)?;
+    let restart_files = vec![rock_root.join("tmp/restart.txt"), PathBuf::from("tmp/restart.txt")];
+    let mut watcher = StoneWatcher::new(comptime_watch.clone(), restart_files, change_tx);
+    watcher.refresh(watch_paths)?;
 
     info!("Watching for changes...");
 
@@ -292,64 +401,13 @@ pub fn do_stone_watch(
             manual_restart_requested = true;
         }
 
-        // Categorize the changed files (skip tmp/ files that aren't restart triggers)
-        let mut changed_libstone = Vec::new();
-        let mut changed_compiler = Vec::new();
-        let mut changed_game = Vec::new();
-
-        for path in &event.paths {
-            // Normalize separators once so the substring checks below work
-            // identically on Windows (`stone-rs\src\foo.rs`) and Unix
-            // (`stone-rs/src/foo.rs`). All match strings use `/`.
-            let path_str = path.to_string_lossy().replace('\\', "/");
-
-            // Skip tmp/ directory files (they're only for restart trigger which we already handled)
-            if path_str.contains("tmp/") {
-                continue;
-            }
-
-            if sound_watch.lock().contains(path.as_path()) {
-                sound_dirty = true;
-                continue;
-            }
-
-            let filename = path.file_name().map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-
-            // Match the engine crates BEFORE the generic "Cargo." check below:
-            // `stone-rs/Cargo.toml` would otherwise be routed to the
-            // compiler-rebuild branch and never trigger a libstone rebuild.
-            // Optional crates come from the build table, so a new one is
-            // routed here without a second edit.
-            let is_engine_crate = path_str.contains("stone-rs/")
-                || rock_host::engine_build::OPTIONAL_ENGINE_LIBS
-                    .iter()
-                    .any(|l| path_str.contains(&format!("{}/", l.crate_name)));
-            if is_engine_crate {
-                needs_libstone_rebuild = true;
-                changed_libstone.push(filename);
-            } else if crate::watch::is_compiler_source(path) {
-                needs_compiler_rebuild = true;
-                changed_compiler.push(filename);
-            } else if path_str.ends_with(".rock") {
-                changed_paths.insert(path.clone());
-                changed_game.push(filename);
-            } else if comptime_watch.lock().contains(path.as_path()) {
-                // An embedded input is a source: routing it as a changed
-                // non-source path makes LiveProject take the full-rebuild arm,
-                // which re-reads the file (docs/comptime-plan.md).
-                changed_paths.insert(path.clone());
-                changed_game.push(filename);
-            } else if filename == "stick.toml" {
-                // A [build.vars]/[engine]/[assets]/[release] edit mid-session: route as
-                // a changed non-source path so LiveProject takes the
-                // full-rebuild arm, whose session rebuild re-resolves declared
-                // inputs. Dropping it here left stale vars until the next
-                // structural edit.
-                changed_paths.insert(path.clone());
-                changed_game.push(filename);
-            }
-        }
+        let changes = categorize_stone_changes(&event, &sound_watch, &comptime_watch);
+        needs_libstone_rebuild |= changes.needs_libstone_rebuild;
+        needs_compiler_rebuild |= changes.needs_compiler_rebuild;
+        sound_dirty |= changes.sound_dirty;
+        changed_paths.extend(changes.changed_paths);
+        let changed_libstone = changes.changed_libstone;
+        let changed_compiler = changes.changed_compiler;
 
         // Print change summary only for libstone/compiler changes (game changes
         // are already visible in the "Recompiling N module (foo.rock)..." line)
@@ -458,7 +516,10 @@ pub fn do_stone_watch(
                     let mut watched: std::collections::HashSet<PathBuf> =
                         compiler.comptime_watch_files().into_iter().collect();
                     watched.extend(sound_watch.lock().iter().cloned());
-                    *comptime_watch.lock() = watched;
+                    *comptime_watch.lock() = watched.clone();
+                    let mut next_paths = stone_source_watch_paths(path, compiler.as_ref());
+                    next_paths.extend(engine_watch_paths.iter().cloned());
+                    watcher.refresh(next_paths)?;
                     if full_reload_requires_restart(&outcome.restart_reasons) {
                         info!(
                             "live reload requires a process restart ({})",
@@ -1890,4 +1951,228 @@ mod tests {
         assert_eq!(override_config.inactivity, Duration::from_secs(60));
         assert_eq!(override_config.override_secs, Some(60));
     }
+}
+
+#[cfg(test)]
+mod watch_reload_tests {
+    use super::{categorize_stone_changes, stone_source_watch_paths, StoneWatcher};
+    use crate::game_runtime::{GameCompiler, SkullGameCompiler};
+    use crate::FileChangeEvent;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::mpsc::{channel, Receiver};
+    use std::time::{Duration, Instant};
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        edited: PathBuf,
+        main: PathBuf,
+        compiler: SkullGameCompiler,
+    }
+
+    impl Fixture {
+        fn new(sibling: bool) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("tmp/game");
+            std::fs::create_dir_all(root.join("tmp")).unwrap();
+            let root = root.canonicalize().unwrap();
+            let manifest = if sibling {
+                "[package]\nname = \"watch-game\"\n[dependencies]\nhelper = { path = \"../helper\" }\n"
+            } else {
+                "[package]\nname = \"watch-game\"\n"
+            };
+            std::fs::write(root.join("stick.toml"), manifest).unwrap();
+            let caller = "global SCORE: int = 0\n@nomangle fn bump() { SCORE = leaf(SCORE) }\n";
+            let leaf = "fn leaf(a: int) -> int { a + 1 }\n";
+            let edited = if sibling {
+                let helper = root.parent().unwrap().join("helper");
+                std::fs::create_dir_all(&helper).unwrap();
+                std::fs::write(helper.join("stick.toml"), "[package]\nname = \"helper\"\n").unwrap();
+                std::fs::write(root.join("main.rock"), caller).unwrap();
+                helper.join("lib.rock")
+            } else {
+                root.join("main.rock")
+            };
+            std::fs::write(&edited, if sibling { leaf.to_string() } else { format!("{caller}{leaf}") }).unwrap();
+            let main = root.join("tmp/main.lua");
+            let mut compiler = SkullGameCompiler::new(root.to_str().unwrap(), main.clone(), root.join("tmp/incremental.lua"));
+            compiler.compile(&HashSet::new(), false).expect("initial compile");
+            Self { _dir: dir, root, edited, main, compiler }
+        }
+
+        fn assert_reload(mut self, atomic: bool) {
+            let before = std::fs::read_to_string(&self.main).unwrap();
+            let roots = stone_source_watch_paths(self.root.to_str().unwrap(), &self.compiler);
+            let (tx, rx) = channel();
+            let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
+            watcher.refresh(roots).unwrap();
+            let text = std::fs::read_to_string(&self.edited).unwrap().replace("a + 1", "a + 10");
+            if atomic {
+                let temporary = self.edited.with_extension("saving");
+                std::fs::write(&temporary, text).unwrap();
+                std::fs::rename(temporary, &self.edited).unwrap();
+            } else {
+                std::fs::write(&self.edited, text).unwrap();
+            }
+            let event = receive_path(&rx, &self.edited);
+            let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+            assert!(changes.changed_paths.contains(&self.edited), "Stone dropped source edit: {:?}", event.paths);
+            assert!(!changes.needs_compiler_rebuild && !changes.needs_libstone_rebuild);
+            let outcome = self.compiler.compile(&changes.changed_paths, false).expect("reload compile");
+            assert!(outcome.restart_reasons.is_empty(), "body edit must preserve live state");
+            let after = std::fs::read_to_string(&self.main).unwrap();
+            let script = format!("HOT_RELOAD = false\n{before}\nbump()\nHOT_RELOAD = true\n{after}\nHOT_RELOAD = false\nbump()\nassert(SCORE == 11, tostring(SCORE))\nprint('WATCH_RELOAD_PASS')\n");
+            let output = rock_host::lua_runner::run_lua_code(&script).expect("run reloaded Lua");
+            assert!(output.stdout.contains("WATCH_RELOAD_PASS"), "{}", output.combined());
+        }
+    }
+
+    fn receive_path(rx: &Receiver<FileChangeEvent>, expected: &PathBuf) -> FileChangeEvent {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while let Ok(event) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            if event.paths.contains(expected) {
+                return event;
+            }
+        }
+        panic!("watcher never reported {}", expected.display());
+    }
+
+    #[test]
+    fn stone_direct_save_under_tmp_ancestor_reloads_live_state() {
+        Fixture::new(false).assert_reload(false);
+    }
+
+    #[test]
+    fn stone_atomic_save_under_tmp_ancestor_reloads_live_state() {
+        Fixture::new(false).assert_reload(true);
+    }
+
+    #[test]
+    fn stone_sibling_dependency_edit_reloads_live_state() {
+        Fixture::new(true).assert_reload(false);
+    }
+
+    #[test]
+    fn stone_scratch_and_unrelated_files_do_not_reload_but_restart_does() {
+        let fixture = Fixture::new(false);
+        let scratch = fixture.root.join("tmp/generated.rock");
+        let restart_dir = fixture.root.parent().unwrap().join("tmp");
+        std::fs::create_dir_all(&restart_dir).unwrap();
+        let restart = restart_dir.join("restart.txt");
+        let (tx, rx) = channel();
+        let mut watcher = StoneWatcher::new(Default::default(), vec![restart.clone()], tx);
+        watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
+        std::fs::write(&scratch, "fn scratch() {}\n").unwrap();
+        std::fs::write(restart_dir.join("unrelated.rock"), "fn unrelated() {}\n").unwrap();
+        std::fs::write(&restart, "restart").unwrap();
+        let event = receive_path(&rx, &restart);
+        assert!(event.is_restart_trigger);
+        assert_eq!(event.paths, HashSet::from([restart]));
+        let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+        assert!(changes.changed_paths.is_empty());
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "scratch caused another event");
+    }
+
+    #[test]
+    fn stone_embedded_inputs_follow_recompilation_and_atomic_saves() {
+        // Invoking a package subdirectory loads its sources, but its legal
+        // embedded inputs can still live elsewhere inside the package root.
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("tmp/package");
+        let source_root = package.join("src");
+        std::fs::create_dir_all(&source_root).unwrap();
+        let package = package.canonicalize().unwrap();
+        let source_root = source_root.canonicalize().unwrap();
+        std::fs::create_dir_all(package.join("data")).unwrap();
+        std::fs::create_dir_all(package.join("other")).unwrap();
+        std::fs::create_dir_all(package.join("tmp")).unwrap();
+        std::fs::write(package.join("stick.toml"), "[package]\nname = \"embed-watch\"\n").unwrap();
+        let source = source_root.join("main.rock");
+        std::fs::write(&source, "@nomangle fn banner() -> string { embed_string(\"data/value.txt\") }\n").unwrap();
+        let input = package.join("data/value.txt");
+        let next_input = package.join("other/value.txt");
+        std::fs::write(&input, "watch-value-one").unwrap();
+        std::fs::write(&next_input, "watch-value-two").unwrap();
+        let main = package.join("tmp/main.lua");
+        let mut compiler = SkullGameCompiler::new(source_root.to_str().unwrap(), main.clone(), package.join("tmp/incremental.lua"));
+        compiler.compile(&HashSet::new(), false).unwrap();
+        let extra: crate::file_watcher::SharedWatchSet = Default::default();
+        *extra.lock() = compiler.comptime_watch_files().into_iter().collect();
+        assert!(extra.lock().contains(&input));
+        let (tx, rx) = channel();
+        let mut watcher = StoneWatcher::new(extra.clone(), Vec::new(), tx);
+        watcher.refresh(stone_source_watch_paths(source_root.to_str().unwrap(), &compiler)).unwrap();
+        // An input-parent watch must not admit even a Rock source beside it.
+        std::fs::write(package.join("data/unrelated.rock"), "fn unrelated() {}\n").unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+
+        for (text, atomic) in [("watch-direct", false), ("watch-atomic", true)] {
+            if atomic {
+                let temporary = input.with_extension("saving");
+                std::fs::write(&temporary, text).unwrap();
+                std::fs::rename(temporary, &input).unwrap();
+            } else {
+                std::fs::write(&input, text).unwrap();
+            }
+            let event = receive_path(&rx, &input);
+            let changes = categorize_stone_changes(&event, &Default::default(), &extra);
+            assert_eq!(changes.changed_paths, HashSet::from([input.clone()]));
+            compiler.compile(&changes.changed_paths, false).unwrap();
+            compiler.canonicalize_for_restart().unwrap();
+            let lua = std::fs::read_to_string(&main).unwrap();
+            let output = rock_host::lua_runner::run_lua_code(&format!("{lua}\nprint(banner())")).unwrap();
+            assert_eq!(output.stdout.trim(), text, "{}", output.combined());
+        }
+
+        std::fs::write(&source, "@nomangle fn banner() -> string { embed_string(\"other/value.txt\") }\n").unwrap();
+        let event = receive_path(&rx, &source);
+        let changes = categorize_stone_changes(&event, &Default::default(), &extra);
+        compiler.compile(&changes.changed_paths, false).unwrap();
+        compiler.canonicalize_for_restart().unwrap();
+        *extra.lock() = compiler.comptime_watch_files().into_iter().collect();
+        assert!(!extra.lock().contains(&input));
+        assert!(extra.lock().contains(&next_input));
+        watcher.refresh(stone_source_watch_paths(source_root.to_str().unwrap(), &compiler)).unwrap();
+        std::fs::write(&input, "unused input").unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+        std::fs::write(&next_input, "watch-refreshed").unwrap();
+        let event = receive_path(&rx, &next_input);
+        let changes = categorize_stone_changes(&event, &Default::default(), &extra);
+        compiler.compile(&changes.changed_paths, false).unwrap();
+        compiler.canonicalize_for_restart().unwrap();
+        let lua = std::fs::read_to_string(main).unwrap();
+        let output = rock_host::lua_runner::run_lua_code(&format!("{lua}\nprint(banner())")).unwrap();
+        assert_eq!(output.stdout.trim(), "watch-refreshed", "{}", output.combined());
+    }
+
+
+    #[test]
+    fn stone_added_dependency_is_watched_after_manifest_reload() {
+        let mut fixture = Fixture::new(false);
+        let helper = fixture.root.parent().unwrap().join("new-helper");
+        std::fs::create_dir_all(&helper).unwrap();
+        std::fs::write(helper.join("stick.toml"), "[package]\nname = \"new-helper\"\n").unwrap();
+        let source = helper.join("lib.rock");
+        std::fs::write(&source, "@nomangle fn library_banner() -> int { 7 }\n").unwrap();
+        let (tx, rx) = channel();
+        let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
+        watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
+        let manifest = fixture.root.join("stick.toml");
+        std::fs::write(&manifest, "[package]\nname = \"watch-game\"\n[dependencies]\nhelper = { path = \"../new-helper\" }\n").unwrap();
+        let event = receive_path(&rx, &manifest);
+        let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+        fixture.compiler.compile(&changes.changed_paths, false).unwrap();
+        fixture.compiler.canonicalize_for_restart().unwrap();
+        watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
+        std::fs::write(&source, "@nomangle fn library_banner() -> int { 8 }\n").unwrap();
+        let event = receive_path(&rx, &source);
+        let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+        let outcome = fixture.compiler.compile(&changes.changed_paths, false).unwrap();
+        assert!(outcome.restart_reasons.is_empty());
+        let lua = std::fs::read_to_string(fixture.main).unwrap();
+        let output = rock_host::lua_runner::run_lua_code(&format!("{lua}\nprint(library_banner())")).unwrap();
+        assert_eq!(output.stdout.trim(), "8", "{}", output.combined());
+    }
+
 }
