@@ -98,6 +98,38 @@ fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
 }
 
 #[test]
+fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let src = "fn f(n: int) -> int {\n    match n {\n        Nope::A => 1,\n        _ => 0,\n    }\n}";
+    let mut module = parse_module_with_dialect(src, Ustr::from("app.rock"), Dialect::V1).expect("parse v1 module");
+    module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "app".to_string(),
+    });
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: Ustr::from("app"),
+            aliases: vec![],
+        }],
+    };
+
+    let ws = semantic_pass_with_aliases(&mut [module], &aliases).expect("semantic pass");
+    let err = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.lowering_errors.values().flatten())
+        .find(|e| e.message.contains("did not resolve"))
+        .expect("the unbound pattern prefix is a lowering error");
+    let label = err.labels.first().expect("the unresolved pattern is labeled");
+    assert_eq!(label.span.file, Ustr::from("app.rock"));
+    let covered = &src[label.span.offset_range.0..label.span.offset_range.1];
+    assert_eq!(covered, "Nope::A");
+}
+
+#[test]
 fn legacy_only_workspace_keeps_the_std_namespace() {
     use skull_parser::Dialect;
 
