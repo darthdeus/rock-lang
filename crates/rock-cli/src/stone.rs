@@ -1987,7 +1987,8 @@ mod watch_reload_tests {
             assert!(!changes.needs_compiler_rebuild && !changes.needs_libstone_rebuild);
             let outcome = self.compiler.compile(&changes.changed_paths, false).expect("reload compile");
             assert!(outcome.restart_reasons.is_empty(), "body edit must preserve live state");
-            let after = std::fs::read_to_string(&self.main).unwrap();
+            assert!(before == std::fs::read_to_string(&self.main).unwrap(), "body edit must preserve main.lua");
+            let after = std::fs::read_to_string(self.main.with_file_name("incremental.lua")).expect("body-edit overlay");
             let script = format!("HOT_RELOAD = false\n{before}\nbump()\nHOT_RELOAD = true\n{after}\nHOT_RELOAD = false\nbump()\nassert(SCORE == 11, tostring(SCORE))\nprint('WATCH_RELOAD_PASS')\n");
             let output = rock_host::lua_runner::run_lua_code(&script).expect("run reloaded Lua");
             assert!(output.stdout.contains("WATCH_RELOAD_PASS"), "{}", output.combined());
@@ -2131,13 +2132,16 @@ mod watch_reload_tests {
         fixture.compiler.compile(&changes.changed_paths, false).unwrap();
         fixture.compiler.canonicalize_for_restart().unwrap();
         watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
+        let before = std::fs::read_to_string(&fixture.main).unwrap();
         std::fs::write(&source, "@nomangle fn library_banner() -> int { 8 }\n").unwrap();
         let event = receive_path(&rx, &source);
         let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
         let outcome = fixture.compiler.compile(&changes.changed_paths, false).unwrap();
         assert!(outcome.restart_reasons.is_empty());
-        let lua = std::fs::read_to_string(fixture.main).unwrap();
-        let output = rock_host::lua_runner::run_lua_code(&format!("{lua}\nprint(library_banner())")).unwrap();
+        assert!(before == std::fs::read_to_string(&fixture.main).unwrap(), "body edit must preserve main.lua");
+        let after = std::fs::read_to_string(fixture.main.with_file_name("incremental.lua")).expect("dependency body-edit overlay");
+        let script = format!("HOT_RELOAD = false\n{before}\nassert(library_banner() == 7)\nHOT_RELOAD = true\n{after}\nHOT_RELOAD = false\nprint(library_banner())");
+        let output = rock_host::lua_runner::run_lua_code(&script).unwrap();
         assert_eq!(output.stdout.trim(), "8", "{}", output.combined());
     }
 
