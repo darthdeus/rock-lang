@@ -468,7 +468,6 @@ pub(crate) fn select_overload_with_generics(
         }
     }
 
-
     if best_set.len() > 1 {
         keep_nearest_tier(gamma, family, &mut best_set);
     }
