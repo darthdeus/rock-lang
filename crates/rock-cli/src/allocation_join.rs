@@ -1,4 +1,5 @@
 use crate::Result;
+use skull::emitted_body_name;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 
@@ -85,12 +86,6 @@ struct JitEvidence<'a> {
     retained_object: bool,
     retained_string: bool,
     ops: HashSet<&'a str>,
-}
-
-fn emitted_body_name(line: &str) -> Option<&str> {
-    line.strip_prefix("function ")?
-        .split_once('(')
-        .map(|(name, _)| name)
 }
 
 fn parse_jit_trace<'a>(
@@ -922,6 +917,17 @@ end
             .expect("joined allocation report with generated Lua");
 
         assert!(report.contains("draw_leaf\t2\t3\tdraw_root -> draw_leaf"));
+    }
+
+    #[test]
+    fn join_resolves_callee_bound_body_and_jit_lines() {
+        let lua = "-- runtime preamble\n__rock_mk_draw_leaf = function(callee) return function()\n  local v = __rock_alloc_hit(\"bbbbbbbbbbbbbbbb\", callee())\nend end\ndraw_leaf = __rock_mk_draw_leaf(callee)\n";
+        let trace = "rock.jit-allocation-trace.v1\nartifact\t/generated/main.lua\ntrace\tir\tstate\top\tbody_start\tlua_line\n1\t4\tsunk\tTNEW\t2\t3\n";
+        let report = render_joined_report_with_jit(
+            MANIFEST, ACTIVATION, Some("draw"), Some(lua), Some(trace),
+        ).expect("callee-bound allocation join");
+        assert!(report.contains("draw_leaf\t2\t3\tdraw_root -> draw_leaf"), "{report}");
+        assert!(report.contains("sunk\tnone\t1\t1\tTNEW"), "{report}");
     }
 
     #[test]

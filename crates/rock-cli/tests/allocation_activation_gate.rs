@@ -107,6 +107,9 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
         lua.clone()
     };
     assert!(lua_artifact.is_file(), "generated Lua artifact is missing");
+    let emitted = std::fs::read_to_string(&lua_artifact).expect("emitted Lua");
+    assert!(emitted.lines().any(|line| line.starts_with("__rock_mk_")
+        && line.contains(" return function(")), "default callee-bound emission is required");
     let joined = Command::new(env!("CARGO_BIN_EXE_rock"))
         .current_dir(repo_root())
         .args(["allocation-join"])

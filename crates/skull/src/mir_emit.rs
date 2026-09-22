@@ -2591,20 +2591,10 @@ struct LuaDefinitionBuffer {
     definition_count: usize,
 }
 
-/// Whether `line` opens a top-level definition, in either emitted shape: the
-/// global-lookup `function <name>(..)` or the callee-bound factory
-/// `__rock_mk_<name> = function(..) return function(..)`. Both cost the
-/// enclosing LuaJIT proto one child proto, so both count against the split.
-fn opens_a_definition(line: &str) -> bool {
-    line.starts_with("function ")
-        || (line.starts_with(skull_codegen_lua::CALLEE_FACTORY_PREFIX)
-            && line.contains(" = function("))
-}
-
 impl LuaDefinitionBuffer {
     fn push_str(&mut self, lua: &str) {
         let start = self.lua.len();
-        let count = lua.lines().filter(|line| opens_a_definition(line)).count();
+        let count = lua.lines().filter(|line| skull_codegen_lua::emitted_body_name(line).is_some()).count();
         self.lua.push_str(lua);
         self.units.push((start, self.lua.len(), count));
         self.definition_count += count;
