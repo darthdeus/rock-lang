@@ -1,0 +1,21 @@
+[package]
+name = "enum_json_v1"
+version = "0.1.0"
+type = "bin"
+
+[language]
+modules = "v1"
+
+[dependencies]
+stone = { path = "../../../../../stone", allow_legacy = true }
+
+[build]
+channels = ["dev"]
+default_channel = "dev"
+
+[build.vars]
+GIT_SHA = { builtin = "source_revision" }
+BUILD_UNIX = { cmd = "date +%s" }
+BUILD_DATE = { cmd = "date -u '+%Y-%m-%d %H:%M'" }
+CHANNEL = { builtin = "channel" }
+PLATFORM = { builtin = "platform" }
