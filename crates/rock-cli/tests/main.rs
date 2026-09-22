@@ -105,6 +105,8 @@ mod production_sources_test;
 mod launcher_engine_commands;
 #[path = "mag_direct_state_authority.rs"]
 mod mag_direct_state_authority;
+#[path = "mag_world_root_census.rs"]
+mod mag_world_root_census;
 #[path = "directory_listing_api.rs"]
 mod directory_listing_api;
 #[path = "editor_inspector_position.rs"]
