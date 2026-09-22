@@ -353,6 +353,33 @@ fn blockers_are_reported_and_nothing_is_written() {
     assert!(!read(&dir.join("lib/stick.toml")).contains("[language]"));
 }
 
+/// The raw-ABI remedy depends on what the named definition is: `@nomangle`
+/// is accepted on a fn, while a global or a type must be reached through
+/// Rock (the compiler rejects `@nomangle` on a global).
+#[test]
+fn raw_abi_advice_matches_the_definition_kind() {
+    let fixture = scratch("raw_abi_advice");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("adv-lib", ""));
+    write(
+        &dir.join("lib/lib.rock"),
+        "global COUNTER: int = 0\n\nstruct Slot {\n    n: int,\n}\n\nfn bump() -> int {\n    1\n}\n\n\
+         inline(lua) fn read_counter() -> int = \"\"\"return COUNTER\"\"\"\n\n\
+         inline(lua) fn slot_table() -> int = \"\"\"return _G.Slot\"\"\"\n\n\
+         inline(lua) fn call_bump() -> int = \"\"\"return bump()\"\"\"\n",
+    );
+    let v = json(&migrate(dir, "lib", &["--check", "--format", "json"]));
+    let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
+    let about = |name: &str| blockers.iter().find(|b| b.contains(&format!("`{name}`"))).unwrap_or_else(|| panic!("{name}: {blockers:#?}"));
+    for name in ["COUNTER", "Slot"] {
+        let b = about(name);
+        assert!(!b.contains("mark the definition `@nomangle`"), "{b}");
+        assert!(b.contains("reach it through Rock"), "{b}");
+    }
+    assert!(about("COUNTER").contains("accessor fn"), "{blockers:#?}");
+    assert!(about("bump").contains("mark the fn `@nomangle`"), "{blockers:#?}");
+}
+
 /// The raw-ABI census counts only an inline Lua body's real references to a
 /// renamed symbol, as LuaJIT compiles the body: a free global read or write,
 /// or a resolved field of `_G`. A local, a parameter,
