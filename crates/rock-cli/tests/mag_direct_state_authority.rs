@@ -1031,7 +1031,9 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "player.apply_inventory_command(intents.inventory)",
         "player.apply_bandage_intent(intents.consumables)",
         "player.update_walls()",
-        "actor.cull_dead_mobs()",
+        "actor.update_ground_pickup(world)",
+        "actor.cull_dead_mobs(world)",
+        "tick_corpses(world)",
         "player.tick_wisp_intent()",
         "wisp_motes_tick()",
     ] {
