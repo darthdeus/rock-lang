@@ -205,11 +205,10 @@ fn is_order_only(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod incremental_watch_tests {
-    //! End-to-end check that a real `bone_semantic::Session`'s `reinferred` list drives
-    //! `emit_incremental` to the same Lua a fresh full build produces — the watch
-    //! loop's correctness, minus the file-watching. Mirrors the in-skull oracle
-    //! (`skull/tests/incremental_emit.rs`) but through the actual Session edit
-    //! path used by `skull_watch`, so it also covers "is `reinferred` enough".
+    //! Session edit oracles for `emit_incremental`: byte identity with fresh builds
+    //! under global calls, and runtime values under bound calls whose cached ranks
+    //! can differ from a fresh build. Mirrors `skull/tests/incremental_emit.rs`
+    //! through the actual Session edit path, covering whether `reinferred` is enough.
 
     use crate::bone_backend::bone_session;
 
@@ -364,7 +363,7 @@ mod incremental_watch_tests {
     // type-valid by construction: every fn is `-> int`, every callee is a
     // lower-indexed fn so the graph is a DAG, no recursion), driving the REAL
     // `Session.update_file` -> `emit_incremental` path. After each edit it asserts
-    // the incremental assembly is byte-identical to `emit_full` of the SAME
+    // the global-shape assembly is byte-identical to `emit_full` of the SAME
     // (edited) workspace — the fresh build is the ground truth. A divergence means
     // a chunk that should have re-emitted (an inline-dependent caller) didn't.
 
@@ -416,7 +415,14 @@ mod incremental_watch_tests {
         i
     }
 
-    fn run_fuzz(seed: u64, n_fns: usize, steps: usize) {
+    fn assert_fuzz_values(lua: &str, calls: &str, expected: &str, context: &str) {
+        match super::exec_lua(&format!("{lua}\n{calls}")) {
+            super::ExecOutcome::Output(output) => assert_eq!(output.trim(), expected, "{context}"),
+            super::ExecOutcome::Errored(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, binding: skull::CalleeBindingMode) -> usize {
         let mut rng = Rng(seed.max(1));
         // Start: a mix of consts and call edges so inlining is exercised from step 0.
         let mut bodies: Vec<Body> = (0..n_fns)
@@ -431,8 +437,18 @@ mod incremental_watch_tests {
 
         let mut session = bone_session(files(&render(&bodies))).expect("fuzz session init");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_init, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("fuzz emit_full init");
+        let (_init, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
+            session.workspace(), mid, binding,
+        ).expect("fuzz emit_full init");
+        let calls = (0..n_fns).map(|i| {
+            let name = format!("f{i}");
+            let (_, function) = session.workspace().modules.iter()
+                .flat_map(|module| module.functions.iter())
+                .find(|(_, function)| function.name.as_str() == name)
+                .expect("fuzz function");
+            format!("print({}())\n", skull_mir::mangle::mangle_fn(session.workspace(), function))
+        }).collect::<String>();
+        let mut shape_differences = 0;
 
         for step in 0..steps {
             let changed = mutate(&mut bodies, &mut rng);
@@ -452,17 +468,36 @@ mod incremental_watch_tests {
             let incremental =
                 skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
                     .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_incremental failed: {}", e.message));
-            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            let fresh = skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_full failed: {}", e.message))
                 .0;
-
-            assert_eq!(
-                incremental.lua, fresh.lua,
-                "seed {seed} step {step}: incremental != fresh after editing f{changed} \
-                 (reinferred={} bodies)\n--- program ---\n{text}",
-                result.reinferred.len()
-            );
+            let context = format!("seed {seed} step {step}: edited f{changed}");
+            match binding {
+                skull::CalleeBindingMode::Global => assert!(
+                    incremental.lua == fresh.lua,
+                    "{context}: incremental != fresh (reinferred={} bodies): {}\n{text}",
+                    result.reinferred.len(),
+                    super::first_diff_line(&incremental.lua, &fresh.lua),
+                ),
+                skull::CalleeBindingMode::Upvalue => {
+                    // Reload keeps cached SCC ranks; fresh builds recompute them.
+                    // New edges can therefore differ in factory captures while
+                    // executing the same calls (docs/backends.md, Callee binding).
+                    shape_differences += usize::from(incremental.lua != fresh.lua);
+                    let mut values = Vec::<i64>::with_capacity(n_fns);
+                    for body in &bodies {
+                        values.push(match body {
+                            Body::Const(value) => *value,
+                            Body::Call(callee) => values[*callee],
+                        });
+                    }
+                    let expected = values.iter().map(i64::to_string).collect::<Vec<_>>().join("\n");
+                    assert_fuzz_values(&incremental.lua, &calls, &expected, &format!("{context}: incremental"));
+                    assert_fuzz_values(&fresh.lua, &calls, &expected, &format!("{context}: fresh"));
+                }
+            }
         }
+        shape_differences
     }
 
     #[test]
@@ -473,8 +508,21 @@ mod incremental_watch_tests {
         let steps: usize = std::env::var("SKULL_FUZZ_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
         let seeds: u64 = std::env::var("SKULL_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         for seed in 1..=seeds {
-            run_fuzz(seed.wrapping_mul(2654435761), 16, steps);
+            run_fuzz(seed.wrapping_mul(2654435761), 16, steps, skull::CalleeBindingMode::Global);
         }
+    }
+
+    #[test]
+    fn fuzz_incremental_bound_calls_match_values() {
+        // Keep the original failing seed and graph size; execution is bounded
+        // because each edit launches LuaJIT for both incremental and fresh output.
+        let mut shape_differences = 0;
+        for seed in 1_u64..=2 {
+            shape_differences += run_fuzz(
+                seed.wrapping_mul(2654435761), 16, 12, skull::CalleeBindingMode::Upvalue,
+            );
+        }
+        assert!(shape_differences > 0, "fixture must exercise changed binding ranks");
     }
 }
 
@@ -1132,7 +1180,7 @@ mod overlay_runtime_tests {
     // --- runtime accumulation fuzz: frozen v0 baseline + cumulative overlay -----
     //
     // The byte-identical fuzz (`incremental_watch_tests::fuzz_incremental_matches_fresh`)
-    // proves `emit_incremental` (full reassembly) == fresh. This one RUNS the
+    // proves global-shape `emit_incremental` (full reassembly) == fresh. This one RUNS the
     // OVERLAY: a single frozen `main.lua` (v0) plus an overlay that accumulates
     // EVERY change from v0 through vk -- never a full rebuild in between, the
     // worst case for the accumulation rule. After each edit, `frozen ++ overlay`
