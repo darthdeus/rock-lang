@@ -3910,15 +3910,24 @@ pub fn lower_annotations_with_ctx(
         return lowered;
     };
     for anno in &mut lowered {
+        // Only a decorator claims an annotation spelling; a same-named fn or
+        // global leaves the builtin in force.
         if let Ok(resolved) = ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), anno.name.name)) {
-            anno.resolved_name = Some(resolved.key);
+            let is_decorator = ctx
+                .workspace
+                .defs
+                .get(&resolved.key)
+                .is_some_and(|meta| meta.kind == bone_core::modules::DefKind::Decorator);
+            if is_decorator {
+                anno.resolved_name = Some(resolved.key);
+            }
         }
         let is_wire_role = anno.name.name.as_str() == "wire"
             || anno.resolved_name.is_some_and(|key| {
                 ctx.workspace
                     .defs
                     .get(&key)
-                    .is_some_and(|meta| meta.kind == bone_core::modules::DefKind::Decorator && meta.name.as_str() == "wire")
+                    .is_some_and(|meta| meta.name.as_str() == "wire")
             });
         if !is_wire_role {
             continue;

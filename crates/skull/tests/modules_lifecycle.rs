@@ -152,3 +152,29 @@ fn main() {}
     let error = skull_mir::lifecycle::collect(&ws).expect_err("ordinary functions are not const identities");
     assert!(error.message.contains("wire_functions::helper"), "{}", error.message);
 }
+
+/// Only a decorator claims an annotation spelling. A v1 fn that shares a
+/// builtin's name (Stone defines `fn shader`, `fn uniform`, `fn size`) must
+/// leave the builtin in force rather than making it an unknown annotation.
+#[test]
+fn v1_fn_named_like_a_builtin_annotation_keeps_the_builtin() {
+    let fragments = [V1Fragment {
+        file: "main.rock",
+        src: r#"
+fn pure(x: int) -> int { return x }
+fn test(x: int) -> int { return x }
+
+@pure
+fn twice(x: int) -> int { return x * 2 }
+
+@test
+fn doubles() { assert(twice(pure(test(3))) == 6, "doubled") }
+
+fn main() {}
+"#,
+    }];
+    let ws = ws_v1_package("v1builtin", &fragments);
+    let mid = *ws.module_ids.get(&Ustr::from("main.rock")).expect("module id");
+    let tests = skull::module_tests(&ws, mid).expect("test discovery");
+    assert_eq!(tests.len(), 1, "builtin @test must still discover `doubles`");
+}
