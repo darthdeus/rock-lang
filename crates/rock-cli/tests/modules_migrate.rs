@@ -748,3 +748,56 @@ fn chess_core_migrates_to_the_committed_hand_conversion() {
         assert_eq!(&read(&core.join(f)), text, "{f} differs from the committed hand conversion");
     }
 }
+
+/// Hand-written LuaJIT FFI spells a C type by its emitted name, and a v1 owner
+/// hashes the name of every nominal type: the typedef of a `value` (`Stats` ->
+/// `Stats_<hash>`) and the `__ty` tag of any struct or enum. A cdef, an
+/// `ffi.new`/`sizeof`/`typeof`/`cast`/`istype`/`offsetof` type string, and a
+/// string that IS a type's tag (`x.__ty == "Font"`) name the old spelling.
+/// A type the cdef declares itself, and a message that merely mentions a
+/// type, are not references.
+#[test]
+fn raw_abi_census_reports_type_names_inside_lua_strings() {
+    let fixture = scratch("raw_type_strings");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("t-lib", ""));
+    write(&dir.join("lib/lib.rock"), r#"
+value Stats { n: int }
+value Vert { x: float }
+struct Font { h: int }
+struct Local { a: int }
+struct Quiet { a: int }
+
+inline(lua) fn declare() = """
+    ffi.cdef [[
+        typedef struct { int a; } Local;
+        void get_stats(Stats* s);
+        void use_local(Local* l);
+    ]]
+"""
+
+inline(lua) fn new_local() -> any = """
+    return ffi.new("Local")
+"""
+
+inline(lua) fn verts(n: int) -> int = """
+    local b = ffi.new("Vert[?]", n)
+    return ffi.sizeof('Vert') * n
+"""
+
+inline(lua) fn is_font(x: any) -> bool = """
+    if x.__ty == "Font" then return true end
+    error("unknown Font or Quiet handle", 0)
+"""
+"#);
+    let run = migrate(dir, "lib", &["--check", "--format", "json"]);
+    let v = json(&run);
+    let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
+    let about = |name: &str| blockers.iter().filter(|b| b.contains(&format!("`{name}`"))).count();
+    assert_eq!(about("Stats"), 1, "{blockers:#?}");
+    assert_eq!(about("Vert"), 1, "{blockers:#?}");
+    assert_eq!(about("Font"), 1, "{blockers:#?}");
+    assert_eq!(about("Local"), 0, "a type a cdef declares itself is not a reference, in any body: {blockers:#?}");
+    assert_eq!(about("Quiet"), 0, "a message mentioning a type is not a reference: {blockers:#?}");
+    assert_eq!(run.code, Some(3), "{}", shown(&run));
+}
