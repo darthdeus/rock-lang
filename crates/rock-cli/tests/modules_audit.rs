@@ -120,8 +120,8 @@ fn chesslings_is_not_closed_and_names_every_legacy_package() {
     assert_eq!(v["closed"]["root_is_legacy"], true);
     let mut offending = names(&v["closed"]["offending"]);
     offending.sort();
-    assert_eq!(offending, vec!["chesslings", "stone"]);
-    for package in ["chess-core", "chess-game", "chess-render", "chess-sfx", "stone-core"] {
+    assert_eq!(offending, vec!["chesslings"]);
+    for package in ["chess-core", "chess-game", "chess-render", "chess-sfx", "stone", "stone-core"] {
         let reached = v["legacy_boundaries"]["reachable"]
             .as_array()
             .unwrap()
@@ -138,15 +138,6 @@ fn chesslings_is_not_closed_and_names_every_legacy_package() {
         assert!(!paths.is_empty(), "{row}");
         assert_eq!(paths[0][0], "chesslings", "{row}");
     }
-    // stone is reached three ways: directly, through chess-sfx and chess-render.
-    let stone = v["closed"]["offending"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["package"] == "stone")
-        .unwrap()
-        .clone();
-    assert_eq!(stone["path_count"], 3, "{stone}");
 }
 
 #[test]
@@ -172,6 +163,37 @@ fn a_v1_root_reaching_a_legacy_package_is_not_closed() {
     let v = json(&audit(&dir.join("app"), &["--closed", "--format", "json"]));
     assert_eq!(v["closed"]["root_is_legacy"], false);
     assert_eq!(names(&v["closed"]["offending"]), vec!["old-lib"]);
+}
+
+/// A legacy package reached along several dependency paths reports every one:
+/// here directly and through each of two v1 libraries, as stone was reached
+/// from chesslings before it converted.
+#[test]
+fn a_legacy_package_reached_three_ways_counts_every_path() {
+    let fixture = scratch("legacy_diamond");
+    let dir = fixture.path();
+    write(&dir.join("old/stick.toml"), &manifest("old-lib", false, ""));
+    write(&dir.join("old/lib.rock"), "fn old_answer() -> int {\n    42\n}\n");
+    for name in ["left", "right"] {
+        write(
+            &dir.join(format!("{name}/stick.toml")),
+            &manifest(&format!("{name}-lib"), true, "[dependencies]\nold-lib = { path = \"../old\", allow_legacy = true }\n"),
+        );
+        write(&dir.join(format!("{name}/lib.rock")), &format!("pub fn {name}_answer() -> int {{\n    1\n}}\n"));
+    }
+    write(
+        &dir.join("app/stick.toml"),
+        &manifest(
+            "app",
+            true,
+            "[dependencies]\nleft-lib = { path = \"../left\" }\nright-lib = { path = \"../right\" }\nold-lib = { path = \"../old\", allow_legacy = true }\n",
+        ),
+    );
+    write(&dir.join("app/lib.rock"), "pub fn app_answer() -> int {\n    left_lib::left_answer() + right_lib::right_answer()\n}\n");
+
+    let v = json(&audit(&dir.join("app"), &["--closed", "--format", "json"]));
+    assert_eq!(names(&v["closed"]["offending"]), vec!["old-lib"], "{v}");
+    assert_eq!(v["closed"]["offending"][0]["path_count"], 3, "{v}");
 }
 
 #[test]
