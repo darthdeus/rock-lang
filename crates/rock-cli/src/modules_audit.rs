@@ -87,7 +87,7 @@ impl Counts {
 }
 
 /// The counted kinds, in report order.
-const KINDS: [RefKind; 7] = [
+const KINDS: [RefKind; 8] = [
     RefKind::Call,
     RefKind::Value,
     RefKind::Construction,
@@ -95,6 +95,7 @@ const KINDS: [RefKind; 7] = [
     RefKind::Protocol,
     RefKind::Type,
     RefKind::Pattern,
+    RefKind::Annotation,
 ];
 
 /// References whose target key the analysis cannot attribute to exactly one

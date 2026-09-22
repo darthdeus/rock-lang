@@ -555,13 +555,6 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                 short_path(&plan.files[d.file].id),
                 d.line
             )),
-            DefKind::Decorator => plan.notes.push(format!(
-                "decorator `{}` ({}:{}): `@{}` uses are not derived by this analysis; review whether a consumer needs it exported",
-                d.name,
-                short_path(&plan.files[d.file].id),
-                d.line,
-                d.name
-            )),
             _ => {}
         }
     }
@@ -764,6 +757,11 @@ fn p_def_spans(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>, p_id: 
                         if *fm == m {
                             out.push((module.file, module.functions[*fid].span.offset_range.0));
                         }
+                    }
+                }
+                for (_, d) in module.decorators.iter() {
+                    if d.def_key == *key {
+                        out.push((module.file, d.span.offset_range.0));
                     }
                 }
             }
@@ -999,18 +997,18 @@ fn repair_for(
 /// Lua references from conservative reflection candidates and reports unknown
 /// dynamic names. Paused JavaScript bodies are counted, not gated.
 fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::result::Result<(), String> {
-    let moved: BTreeSet<&str> = plan
-        .defs
-        .iter()
-        .filter(|d| !d.exempt_symbol && matches!(d.kind, DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype))
-        .map(|d| d.name.as_str())
-        .collect();
+    let mut moved: BTreeMap<&str, BTreeSet<DefKind>> = BTreeMap::new();
+    for d in &plan.defs {
+        if !d.exempt_symbol && matches!(d.kind, DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype) {
+            moved.entry(d.name.as_str()).or_default().insert(d.kind);
+        }
+    }
     // A legacy symbol is the declared name or the name plus a mangled
     // signature suffix (`name__ret_T`).
     let moved_names = |words: &mut dyn Iterator<Item = &str>| -> BTreeSet<String> {
         words
             .map(|w| w.split("__").next().unwrap_or(w))
-            .filter(|stem| moved.contains(stem))
+            .filter(|stem| moved.contains_key(stem))
             .map(str::to_string)
             .collect()
     };
@@ -1051,8 +1049,33 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
         ));
     }
     let refs = modules_analysis::lua_references(&bodies)?;
-    let tail = "whose emitted symbol changes when the package becomes v1; mark the definition `@nomangle` or reach it through Rock before migrating";
     let listed = |names: &BTreeSet<String>| names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+    // `@nomangle` is accepted only on a fn (bone-core `validate_one`); a
+    // global or a type keeps its hashed symbol and must be reached through Rock.
+    let tail = |names: &BTreeSet<String>| -> String {
+        let (fns, others): (BTreeSet<String>, BTreeSet<String>) =
+            names.iter().cloned().partition(|n| moved[n.as_str()].iter().all(|k| *k == DefKind::Fn));
+        let kinds: BTreeSet<&str> = others
+            .iter()
+            .flat_map(|n| moved[n.as_str()].iter())
+            .filter(|k| **k != DefKind::Fn)
+            .map(|k| if k.is_type() { "type" } else { k.as_str() })
+            .collect();
+        let mixed = !fns.is_empty() && !others.is_empty();
+        let mut remedies = Vec::new();
+        if !fns.is_empty() {
+            let who = if mixed { format!("for {}, ", listed(&fns)) } else { String::new() };
+            remedies.push(format!("{who}mark the fn `@nomangle` or reach it through Rock before migrating"));
+        }
+        if !others.is_empty() {
+            let who = if mixed { format!("for {}, ", listed(&others)) } else { String::new() };
+            remedies.push(format!(
+                "{who}reach it through Rock before migrating (an accessor fn, or a `@nomangle` fn wrapper; `@nomangle` is not accepted on a {})",
+                kinds.into_iter().collect::<Vec<_>>().join(" or ")
+            ));
+        }
+        format!("whose emitted symbol changes when the package becomes v1; {}", remedies.join("; "))
+    };
     for (site, r) in sites.iter().zip(refs) {
         if let Some(error) = r.error {
             plan.blockers.push(format!(
@@ -1068,20 +1091,22 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
             let possible = moved_names(&mut r.conservative.iter().map(String::as_str));
             if !possible.is_empty() {
                 plan.blockers.push(format!(
-                    "raw ABI review [conservative]: the inline body at {site} may name {} through unresolved `_G` flow, {tail}",
-                    listed(&possible)
+                    "raw ABI review [conservative]: the inline body at {site} may name {} through unresolved `_G` flow, {}",
+                    listed(&possible),
+                    tail(&possible)
                 ));
             }
         }
         let globals = moved_names(&mut r.globals.iter().map(String::as_str));
         if !globals.is_empty() {
-            plan.blockers.push(format!("raw ABI review [exact]: the inline body at {site} names {}, {tail}", listed(&globals)));
+            plan.blockers.push(format!("raw ABI review [exact]: the inline body at {site} names {}, {}", listed(&globals), tail(&globals)));
         }
         let via_g = moved_names(&mut r.via_g.iter().map(String::as_str));
         if !via_g.is_empty() {
             plan.blockers.push(format!(
-                "raw ABI review [exact]: the inline body at {site} can name {} through `_G`, {tail}",
-                listed(&via_g)
+                "raw ABI review [exact]: the inline body at {site} can name {} through `_G`, {}",
+                listed(&via_g),
+                tail(&via_g)
             ));
         }
     }

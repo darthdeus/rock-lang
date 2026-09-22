@@ -211,6 +211,8 @@ pub(crate) enum RefKind {
     Type,
     /// An enum or record named in a match pattern.
     Pattern,
+    /// A decorator applied to a function (`@name`).
+    Annotation,
 }
 
 impl RefKind {
@@ -223,7 +225,13 @@ impl RefKind {
             RefKind::Protocol => "protocol",
             RefKind::Type => "types",
             RefKind::Pattern => "patterns",
+            RefKind::Annotation => "annotations",
         }
+    }
+
+    /// Compared per file rather than by site (`sites`).
+    fn per_file(self) -> bool {
+        matches!(self, RefKind::Type | RefKind::Pattern | RefKind::Annotation)
     }
 }
 
@@ -266,6 +274,12 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
             global_modules.entry(*key).or_default().push(m.id);
         }
     }
+    let mut decorator_modules: HashMap<Ustr, Vec<ModuleId>> = HashMap::new();
+    for m in &ws.modules {
+        for (_, d) in m.decorators.iter() {
+            decorator_modules.entry(d.def_key).or_default().push(m.id);
+        }
+    }
     let type_modules = |key: Ustr| -> Vec<ModuleId> {
         let mut out = Vec::new();
         if let Some(s) = ws.struct_by_name.get(&key) {
@@ -296,6 +310,21 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                     span: m.ty_spans.get(idx).copied(),
                     kind: RefKind::Type,
                     target: Target::Key { key: name, modules: type_modules(name) },
+                    callee: None,
+                });
+            }
+        }
+        // An application names its decorator by the identity lifecycle
+        // discovery keys on; a name no decorator defines is compiler metadata.
+        for (_, f) in m.functions.iter() {
+            for a in &f.annotations {
+                let key = a.resolved_name.unwrap_or(a.name.name);
+                let Some(modules) = decorator_modules.get(&key) else { continue };
+                out.push(Ref {
+                    from: m.id,
+                    span: Some(a.span),
+                    kind: RefKind::Annotation,
+                    target: Target::Key { key, modules: modules.clone() },
                     callee: None,
                 });
             }
@@ -652,11 +681,12 @@ pub(crate) struct SiteKey {
 pub(crate) type Sites = BTreeMap<SiteKey, Vec<TargetId>>;
 
 /// Every package-file reference site; `edits` maps a baseline site into
-/// candidate coordinates (empty for a candidate). Types and patterns are
-/// compared per file as a multiset rather than by site: a v1 signature type
-/// records no span (`span_recordable` tests the spelled name against maps
-/// keyed by DefKey), and a type name cannot be overloaded, so a per-file
-/// count is as strict.
+/// candidate coordinates (empty for a candidate). Types, patterns and
+/// decorator applications are compared per file as a multiset rather than by
+/// site: a v1 signature type records no span (`span_recordable` tests the
+/// spelled name against maps keyed by DefKey), an application leads an item
+/// that `pub ` is inserted before, and neither name can be overloaded, so a
+/// per-file count is as strict.
 pub(crate) fn sites(ws: &Workspace, refs: &[Ref], file_pkg: &HashMap<Ustr, u32>, edits: &HashMap<Ustr, Vec<Edit>>) -> Sites {
     let mut out: Sites = BTreeMap::new();
     for r in refs {
@@ -664,7 +694,7 @@ pub(crate) fn sites(ws: &Workspace, refs: &[Ref], file_pkg: &HashMap<Ustr, u32>,
         if !file_pkg.contains_key(&file) {
             continue;
         }
-        if matches!(r.kind, RefKind::Type | RefKind::Pattern) {
+        if r.kind.per_file() {
             out.entry(SiteKey { file, start: 0, end: 0, kind: r.kind })
                 .or_default()
                 .push(target_id(ws, &r.target));
@@ -692,7 +722,7 @@ pub(crate) fn map_sites(base: &Sites, edits: &HashMap<Ustr, Vec<Edit>>) -> Sites
     base.iter()
         .map(|(k, v)| {
             let key = match edits.get(&k.file) {
-                Some(_) if matches!(k.kind, RefKind::Type | RefKind::Pattern) => k.clone(),
+                Some(_) if k.kind.per_file() => k.clone(),
                 Some(e) => SiteKey { file: k.file, start: map_offset(e, k.start), end: map_offset(e, k.end), kind: k.kind },
                 None => k.clone(),
             };

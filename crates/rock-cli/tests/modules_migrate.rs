@@ -159,6 +159,70 @@ fn a_legacy_library_migrates_with_its_exports_closure_and_ascriptions() {
     assert!(again.stdout.contains("already modules-v1"), "{}", shown(&again));
 }
 
+/// A consumer that applies one of the package's decorators uses it, as it
+/// uses a function it calls: the plan exports it and the consumer's
+/// annotation still resolves. A decorator only the package applies, and one
+/// nobody applies, stay private. This consumer is v1; the next test is
+/// the legacy one.
+#[test]
+fn a_decorator_a_consumer_applies_is_exported() {
+    let fixture = scratch("decorator_use");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("deco-lib", ""));
+    write(
+        &dir.join("lib/lib.rock"),
+        "@lifecycle(phase=\"update\", owner=\"session\")\ndeco init tick {}\n\n\
+         @lifecycle(phase=\"draw\", owner=\"session\")\ndeco init own_hook {}\n\n\
+         @lifecycle(phase=\"wire\", owner=\"session\")\ndeco init idle_hook {}\n\n\
+         @own_hook\nfn lib_draw() {}\n",
+    );
+    write(
+        &dir.join("app/stick.toml"),
+        &manifest("deco-app", "[language]\nmodules = \"v1\"\n\n[dependencies]\ndeco-lib = { path = \"../lib\", allow_legacy = true }\n"),
+    );
+    write(&dir.join("app/app.rock"), "use deco_lib::tick;\n\n@tick\nfn app_tick() {}\n");
+
+    let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert_eq!(names(&v["exports"]["pub"]), vec!["tick"], "{v}");
+    let tick = &v["exports"]["pub"][0];
+    assert_eq!(tick["consumers"][0]["package"], "deco-app", "{tick}");
+    assert_eq!(names(&v["exports"]["private"]), vec!["idle_hook", "lib_draw", "own_hook"], "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+
+    let apply = migrate(dir, "lib", &["--apply", "--consumer", "app"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    let lib = read(&dir.join("lib/lib.rock"));
+    assert!(lib.starts_with("pub @lifecycle(phase=\"update\", owner=\"session\")\ndeco init tick {}\n"), "{lib}");
+    assert!(lib.contains("\n@lifecycle(phase=\"draw\", owner=\"session\")\ndeco init own_hook"), "{lib}");
+}
+
+/// The Stone case: a legacy consumer applies the decorator, and after the
+/// conversion reaches it through its root projection. `update` also names a
+/// legacy stdlib fn, as Stone's `@update` does.
+#[test]
+fn a_decorator_a_legacy_consumer_applies_is_exported() {
+    let fixture = scratch("decorator_legacy_consumer");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("deco-lib", ""));
+    write(&dir.join("lib/lib.rock"), "@lifecycle(phase=\"update\", owner=\"session\")\ndeco init update {}\n");
+    write(&dir.join("app/stick.toml"), &manifest("deco-app", "[dependencies]\ndeco-lib = { path = \"../lib\" }\n"));
+    write(&dir.join("app/app.rock"), "@update\nfn app_update() {}\n");
+
+    let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert_eq!(names(&v["exports"]["pub"]), vec!["update"], "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+    let apply = migrate(dir, "lib", &["--apply", "--consumer", "app"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+}
+
 /// Spec 8.3: in v1 an own `min(Foo, Foo)` hides the std family for the bare
 /// name, where legacy merged them. The planner finds the call that would stop
 /// resolving and qualifies it, and the result selects the same body.
@@ -284,6 +348,33 @@ fn blockers_are_reported_and_nothing_is_written() {
     assert!(!read(&dir.join("lib/stick.toml")).contains("[language]"));
 }
 
+/// The raw-ABI remedy depends on what the named definition is: `@nomangle`
+/// is accepted on a fn, while a global or a type must be reached through
+/// Rock (the compiler rejects `@nomangle` on a global).
+#[test]
+fn raw_abi_advice_matches_the_definition_kind() {
+    let fixture = scratch("raw_abi_advice");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("adv-lib", ""));
+    write(
+        &dir.join("lib/lib.rock"),
+        "global COUNTER: int = 0\n\nstruct Slot {\n    n: int,\n}\n\nfn bump() -> int {\n    1\n}\n\n\
+         inline(lua) fn read_counter() -> int = \"\"\"return COUNTER\"\"\"\n\n\
+         inline(lua) fn slot_table() -> int = \"\"\"return _G.Slot\"\"\"\n\n\
+         inline(lua) fn call_bump() -> int = \"\"\"return bump()\"\"\"\n",
+    );
+    let v = json(&migrate(dir, "lib", &["--check", "--format", "json"]));
+    let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
+    let about = |name: &str| blockers.iter().find(|b| b.contains(&format!("`{name}`"))).unwrap_or_else(|| panic!("{name}: {blockers:#?}"));
+    for name in ["COUNTER", "Slot"] {
+        let b = about(name);
+        assert!(!b.contains("mark the definition `@nomangle`"), "{b}");
+        assert!(b.contains("reach it through Rock"), "{b}");
+    }
+    assert!(about("COUNTER").contains("accessor fn"), "{blockers:#?}");
+    assert!(about("bump").contains("mark the fn `@nomangle`"), "{blockers:#?}");
+}
+
 /// The raw-ABI census counts only an inline Lua body's real references to a
 /// renamed symbol, as LuaJIT compiles the body: a free global read or write,
 /// or a resolved field of `_G`. A local, a parameter,
@@ -404,6 +495,55 @@ fn raw_abi_census_keeps_real_and_conservative_environment_candidates_blocked() {
         }), "{body}: {v}");
         assert!(!read(&dir.join("lib/stick.toml")).contains("modules ="));
     }
+}
+
+/// Unresolved environment flow keeps only the strings that could be an
+/// environment key. A closure that captures no environment alias, a
+/// `rawget(_G, "K")` with a constant key, and a dynamic `_G[...]` index do not
+/// let the environment escape, so a field key on another table (`row.pc`,
+/// `{ pc = 1 }`) cannot name a global there; the Stone bodies at
+/// serialization.rock:187, snapshot.rock:59, state_image.rock:660 and
+/// c_struct_dispatch.rock:10 have these shapes. A string value that may reach
+/// a dynamic index, and every string once the environment escapes, still
+/// count.
+#[test]
+fn raw_abi_census_ignores_field_keys_when_the_environment_does_not_escape() {
+    let fixture = scratch("raw_field_keys");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn pc() -> int { 3 }\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    let run_body = |body: &str| {
+        write(&dir.join("app/app.rock"), &format!(
+            "fn app_value() -> int {{ pc() }}\ninline(lua) fn probe(flag: bool, key: string) -> int = \"\"\"{body}\"\"\"\n"
+        ));
+        json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]))
+    };
+    for body in [
+        "_G.__probe_seen = true; local function f(row) return row.pc end; return f({ pc = 1 })",
+        "local names = _G[\"__probe_\" .. key]; local t = { pc = 1 }; t.pc = 2; return names and t.pc or 0",
+        "local reg = rawget(_G, \"__PROBE_REG\"); return reg and reg.pc or 0",
+    ] {
+        let v = run_body(body);
+        assert_eq!(v["verdict"], "migration_needed", "{body}: {v}");
+        assert!(v["blockers"].as_array().unwrap().is_empty(), "{body}: {v}");
+    }
+    for body in [
+        "local t = { k = \"pc\" }; return _G[t.k]()",
+        "local names = _G[key]; local s = \"pc\"; return names and #s or 0",
+        "local env = _G; local function f(row) return env[row] end; return f(\"x\").pc",
+        "local k = \"pc\"; if flag then k = key end; return rawget(_G, k)()",
+        "local n = 0; for k in pairs({ pc = 1 }) do n = n + _G[k]() end; return n",
+    ] {
+        let v = run_body(body);
+        assert_eq!(v["verdict"], "blocked", "{body}: {v}");
+        assert!(v["blockers"].as_array().unwrap().iter().any(|b| b.as_str().unwrap().contains("`pc`")), "{body}: {v}");
+    }
+    let v = run_body("return rawget(_G, \"pc\")()");
+    assert!(v["blockers"].as_array().unwrap().iter().any(|b| {
+        let b = b.as_str().unwrap();
+        b.contains("[exact]") && b.contains("`pc` through `_G`")
+    }), "a constant rawget key is an exact environment field: {v}");
 }
 
 #[test]

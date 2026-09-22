@@ -3899,29 +3899,31 @@ pub fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hi
         .collect()
 }
 
-/// Lower annotation syntax and resolve v1 decorator names through the current
-/// fragment. Compiler-owned metadata intentionally stays unresolved so its
-/// raw spelling remains the source of builtin behavior.
+/// Lower annotation syntax and resolve v1 decorator names: through the
+/// current fragment, or through a legacy file's compatibility views.
+/// Compiler-owned metadata intentionally stays unresolved so its raw spelling
+/// remains the source of builtin behavior.
 pub fn lower_annotations_with_ctx(
     ctx: &LowerCtx,
     ast: &Ast,
     anns: &[skull_parser::Annotation],
 ) -> Vec<hir::Annotation> {
     let mut lowered = lower_annotations(ast, anns);
-    let Some(frag) = ctx.v1_scope() else {
-        return lowered;
-    };
     for anno in &mut lowered {
         // Only a decorator claims an annotation spelling; a same-named fn or
         // global leaves the builtin in force.
-        if let Ok(resolved) = ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), anno.name.name)) {
+        let resolved = match ctx.v1_scope() {
+            Some(_) => ctx.resolve_bare(anno.name.name, anno.span).ok().map(|r| r.key),
+            None => legacy_projected_decorator(ctx, anno.name.name),
+        };
+        if let Some(key) = resolved {
             let is_decorator = ctx
                 .workspace
                 .defs
-                .get(&resolved.key)
+                .get(&key)
                 .is_some_and(|meta| meta.kind == bone_core::modules::DefKind::Decorator);
             if is_decorator {
-                anno.resolved_name = Some(resolved.key);
+                anno.resolved_name = Some(key);
             }
         }
         let is_wire_role = anno.name.name.as_str() == "wire"
@@ -3931,9 +3933,9 @@ pub fn lower_annotations_with_ctx(
                     .get(&key)
                     .is_some_and(|meta| meta.name.as_str() == "wire")
             });
-        if !is_wire_role {
+        let Some(frag) = ctx.v1_scope().filter(|_| is_wire_role) else {
             continue;
-        }
+        };
         let Some(names) = anno.args.iter().find_map(|arg| {
             (arg.name.as_ref().is_some_and(|name| name.name.as_str() == "onchange"))
                 .then(|| match &arg.value {
@@ -3957,6 +3959,37 @@ pub fn lower_annotations_with_ctx(
         }
     }
     lowered
+}
+
+/// The v1 decorator a legacy file's annotation `name` reaches through its
+/// compatibility views (`legacy_name`). Only decorators compete for an
+/// annotation spelling, so a same-named legacy or projected fn (the stdlib's
+/// `update`) does not make it ambiguous. A legacy decorator of that name, or
+/// several v1 ones, keep the bare spelling.
+fn legacy_projected_decorator(ctx: &LowerCtx, name: Ustr) -> Option<Ustr> {
+    use bone_core::modules::{legacy_name, DefKind, LegacyName};
+    ctx.probe_legacy(name);
+    let ws = ctx.workspace;
+    let keys: Vec<Ustr> = match legacy_name(ws, ctx.module.file, name) {
+        LegacyName::Bare => return None,
+        LegacyName::Projected(entries) => entries.into_iter().map(|e| e.key).collect(),
+        LegacyName::Family(keys) => keys,
+        LegacyName::Collision { owners, foreign } => {
+            let legacy_decorator = owners.iter().any(|file| {
+                ws.ns.legacy_owned.names_defined_by(*file).iter().any(|(n, k)| *n == name && *k == DefKind::Decorator)
+            });
+            if legacy_decorator {
+                return None;
+            }
+            foreign
+        }
+    };
+    let mut decorators =
+        keys.into_iter().filter(|key| ws.defs.get(key).is_some_and(|meta| meta.kind == DefKind::Decorator));
+    match (decorators.next(), decorators.next()) {
+        (Some(key), None) => Some(key),
+        _ => None,
+    }
 }
 
 fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
