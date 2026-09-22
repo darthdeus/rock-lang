@@ -1,0 +1,14 @@
+[package]
+name = "sim-scope"
+version = "0.1.0"
+type = "bin"
+
+[dependencies]
+stone = { path = "../../../../stone" }
+
+[build.vars]
+GIT_SHA = "sim-scope"
+BUILD_UNIX = "0"
+BUILD_DATE = "test"
+CHANNEL = { builtin = "channel" }
+PLATFORM = { builtin = "platform" }
