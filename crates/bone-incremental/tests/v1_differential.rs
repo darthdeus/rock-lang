@@ -23,7 +23,7 @@ use std::sync::atomic::Ordering;
 
 use bone_core::modules::NsAliases;
 use bone_incremental::session::{BodyId, Session, SessionFile, UpdateResult, UpdateTier};
-use bone_semantic::hir::{BodyOwner, Expr, TypeCtor, TypeExpr};
+use bone_semantic::hir::{BodyOwner, CallFamily, Expr, Module, TypeCtor, TypeExpr};
 use bone_semantic::prelude::*;
 use skull_parser::{Ast, Dialect, GlobalPolicy, MemoryClass, PackageTag};
 
@@ -108,9 +108,9 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
         let file = module.file.to_string();
         for body in module.bodies.values() {
             for (idx, expr) in body.expr_arena.iter() {
-                let Some((kind, key, hidden)) = expr_reference(expr) else { continue };
+                let Some((kind, key, members)) = expr_reference(module, expr) else { continue };
                 let (s, e) = body.expr_spans[idx].offset_range;
-                references.insert((file.clone(), s, e, kind, key.to_string(), hidden.map(|h| h.to_string())));
+                references.insert((file.clone(), s, e, kind, key.to_string(), members));
             }
             for (idx, te) in body.lowered_tys.iter() {
                 if let TypeExpr::App { ctor: TypeCtor::Nominal(key), .. } = te {
@@ -152,10 +152,21 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
     Snapshot { diagnostics, references, signature_keys, types }
 }
 
-fn expr_reference(expr: &Expr) -> Option<(&'static str, Ustr, Option<Ustr>)> {
+/// A reference an expression makes: its kind, key, and for a merged call
+/// family the members lowering recorded, with their lookup tiers.
+fn expr_reference(module: &Module, expr: &Expr) -> Option<(&'static str, Ustr, Option<String>)> {
+    let members = |family: &CallFamily| match family {
+        CallFamily::Merged { name, .. } => module.call_families.get(name).map(|members| {
+            let mut shown: Vec<String> =
+                members.iter().map(|m| format!("{}/{:?}/{:?}", m.key, m.owner, m.tier)).collect();
+            shown.sort();
+            shown.join(",")
+        }),
+        _ => None,
+    };
     match expr {
-        Expr::Call { family, .. } => Some(("call", family.key(), family.hidden())),
-        Expr::SafeNavCall { family, .. } => Some(("safe-nav-call", family.key(), family.hidden())),
+        Expr::Call { family, .. } => Some(("call", family.key(), members(family))),
+        Expr::SafeNavCall { family, .. } => Some(("safe-nav-call", family.key(), members(family))),
         Expr::Global(key) => Some(("global", *key, None)),
         Expr::StructLiteral { name, .. } => Some(("struct", *name, None)),
         Expr::EnumVariant { enum_name, .. } => Some(("enum", *enum_name, None)),
@@ -313,6 +324,24 @@ impl V1Harness {
     fn diagnostics(&self) -> Vec<String> {
         self.session.diagnostics().iter().map(|d| d.message.clone()).collect()
     }
+
+    /// The definitions the overloaded calls in `path` selected, by name.
+    fn selected(&self, path: &str) -> Vec<String> {
+        snapshot(self.session.workspace(), &self.files)
+            .references
+            .into_iter()
+            .filter(|r| r.0 == path && r.3 == "selects")
+            .map(|r| {
+                let (_, rest) = r.4.split_once("::").expect("file::name@offset");
+                rest.split('@').next().expect("name").to_string()
+            })
+            .collect()
+    }
+}
+
+/// The members of a merged v1 family as `call_keys` renders them.
+fn family(members: &[(&str, &str)]) -> Option<String> {
+    Some(members.iter().map(|(key, tier)| format!("{key}/None/{tier}")).collect::<Vec<_>>().join(","))
 }
 
 fn per_file(list: &[(&str, usize)]) -> BTreeMap<String, usize> {
@@ -401,8 +430,9 @@ fn control_a_body_edit_on_a_gate_fixture_reads_narrow() {
     assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("d.rock", 1)]));
 }
 
-/// Gate (a): an explicit `use` added to one fragment shadows the glob it
-/// used to resolve through (spec 8.3: tier 3 beats tier 4).
+/// Gate (a): an explicit `use` added to one fragment joins the glob family
+/// it used to resolve through, and wins the exact tie (spec 8.3: tier 3 is
+/// nearer than tier 4).
 ///
 /// c's 2 bodies re-lower and re-infer, nothing else: the import is
 /// fragment-local (spec 8.2), so only c's own fragment scope changed.
@@ -415,16 +445,18 @@ fn gate_a_use_added_to_one_fragment() {
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
 
     let r = h.edit("c.rock", c1).expect("accepted");
-    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), Some(key("b::bump")))]);
+    let both = family(&[(&key("a::bump"), "Imports"), (&key("b::bump"), "Globs")]);
+    assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
+    assert_eq!(h.selected("c.rock"), vec![key("a::bump")]);
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.reinferred_body_count(), 2);
     assert_eq!(h.relowered_body_count(), 2);
     assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("c.rock", 2)]));
 }
 
-/// Gate (b): the same `use` removed, exposing the lower-tier glob candidate
-/// it shadowed (spec 14.3: "removing an import may expose a previously
-/// shadowed lower-tier family").
+/// Gate (b): the same `use` removed, leaving the lower-tier glob candidate
+/// that lost the exact tie to it (spec 14.3: removing an import removes its
+/// callables from every family it contributed to).
 ///
 /// c's 2 bodies re-lower and re-infer, nothing else. Per-body: `pick` only.
 #[test]
@@ -432,7 +464,9 @@ fn gate_b_use_removed_from_one_fragment() {
     let c0 = "mod c;\n\nuse super::b::*;\nuse super::a::bump;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
     let c1 = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    bump(1)\n}\n\nfn other() -> int {\n    2\n}\n";
     let mut h = V1Harness::new(vec![v1("a.rock", A_BUMP), v1("b.rock", B_BUMP), v1("c.rock", c0), v1("d.rock", UNRELATED)]);
-    assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), Some(key("b::bump")))]);
+    let both = family(&[(&key("a::bump"), "Imports"), (&key("b::bump"), "Globs")]);
+    assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
+    assert_eq!(h.selected("c.rock"), vec![key("a::bump")]);
 
     let r = h.edit("c.rock", c1).expect("accepted");
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::bump"), None)]);
@@ -443,8 +477,9 @@ fn gate_b_use_removed_from_one_fragment() {
 }
 
 /// Gate (c): a `pub fn` added to a module another fragment globs. Here the
-/// new member shadows a prelude name the globber was already calling (spec
-/// 8.3: tier 4 beats tier 5), so the globber's resolution really moves.
+/// new member joins the prelude family the globber was already calling and
+/// wins the exact tie (spec 8.3: tier 4 is nearer than tier 5), so the
+/// globber's selection really moves.
 ///
 /// b (edited, 2 bodies after the edit) and c (its bare lookup of `warm_one`
 /// probed b through the glob and missed) -- 3; d and the warm stdlib 0.
@@ -458,11 +493,38 @@ fn gate_c_glob_member_added() {
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
 
     let r = h.edit("b.rock", b1).expect("accepted");
-    assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), Some("std::warm_one".to_string()))]);
+    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), warm_one_family())]);
+    assert_eq!(h.selected("c.rock"), vec![key("b::warm_one")]);
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.reinferred_body_count(), 3);
     assert_eq!(h.relowered_body_count(), 3);
     assert_eq!(h.functions_per_file(&r.relowered), per_file(&[("b.rock", 2), ("c.rock", 1)]));
+}
+
+/// A lower-tier overload added and removed (spec 8.3, 14.3): c's own
+/// `bump(string)` binds the name first, and b's `bump(int)`, added to a
+/// module c globs, joins its family and is the only fit for `bump(1)`. The
+/// caller re-lowers on both edits, as a fresh build of each text agrees.
+#[test]
+fn a_lower_tier_overload_added_joins_the_callers_family() {
+    let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
+    let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\npub fn bump(n: int) -> int {\n    n\n}\n";
+    let c = "mod c;\n\nuse super::b::*;\n\nfn bump(s: string) -> string {\n    s\n}\n\nfn pick() -> int {\n    bump(1)\n}\n";
+    let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("type mismatch")), "{:?}", h.diagnostics());
+
+    let r = h.edit("b.rock", b1).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    let both = family(&[(&key("b::bump"), "Globs"), (&key("c::bump"), "Own")]);
+    assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
+    assert_eq!(h.selected("c.rock"), vec![key("b::bump")]);
+    assert!(h.functions_per_file(&r.relowered).get("c.rock").is_some_and(|&n| n >= 1), "{:?}", r.relowered);
+
+    let r = h.edit("b.rock", b0).expect("accepted");
+    assert_eq!(r.tier, UpdateTier::Scope);
+    assert_eq!(h.call_keys("c.rock"), vec![(key("c::bump"), None)]);
+    assert!(h.diagnostics().iter().any(|d| d.contains("type mismatch")), "{:?}", h.diagnostics());
 }
 
 /// Gate (d): a private helper added in a module nothing else names. A glob
@@ -633,15 +695,20 @@ fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
 // that the case exercises the scope path rather than the full rebuild.
 // ---------------------------------------------------------------------------
 
-/// A glob member that shadowed a std name is removed again: the globber falls
-/// back to tier 5.
+/// The glob `warm_one` joined with the std prelude's (spec 8.3).
+fn warm_one_family() -> Option<String> {
+    Some(format!("{}/None/Globs,warm_one/Some({})/Std", key("b::warm_one"), bone_core::modules::STD_PACKAGE_ID))
+}
+
+/// A glob member that won an exact tie against a std name is removed again:
+/// the globber's family is the std one alone.
 #[test]
 fn a_glob_member_that_shadowed_std_is_removed() {
     let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n\npub fn warm_one() -> int {\n    5\n}\n";
     let b1 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
     let c = "mod c;\n\nuse super::b::*;\n\nfn pick() -> int {\n    warm_one()\n}\n";
     let mut h = V1Harness::new(vec![v1("b.rock", b0), v1("c.rock", c), v1("d.rock", UNRELATED)]);
-    assert_eq!(h.call_keys("c.rock"), vec![(key("b::warm_one"), Some("std::warm_one".to_string()))]);
+    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), warm_one_family())]);
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);

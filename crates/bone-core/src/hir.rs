@@ -866,6 +866,20 @@ pub enum Callee {
 pub struct FamilyMember {
     pub key: Ustr,
     pub owner: Option<crate::modules::PackageId>,
+    pub tier: FamilyTier,
+}
+
+/// The lookup tier that contributed a family member (spec 8.3 tiers 2-5).
+/// A v1 callee family spans every tier from the first one that binds the
+/// name; fit ranks the whole family and the tier breaks only an exact
+/// best-fit tie, nearer tier first. A legacy family is one flat tier.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FamilyTier {
+    Legacy,
+    Own,
+    Imports,
+    Globs,
+    Std,
 }
 
 /// Overload family selected by the resolver (plan 2.3 / M2 step 5).
@@ -874,21 +888,18 @@ pub struct FamilyMember {
 pub enum CallFamily {
     /// Legacy compilation unit: workspace-map lookup by bare name.
     Legacy(Ustr),
-    /// v1: canonical DefKey plus ONE hidden-origin key from a losing tier
-    /// (spec 8.3). `Expr` is `Copy`, so the family cannot carry a list; when
-    /// several candidates lose, the lowest key is kept so the diagnostic does
-    /// not depend on import order. `owner` is as for [`FamilyMember`].
-    Resolved { key: Ustr, owner: Option<crate::modules::PackageId>, hidden: Option<Ustr> },
+    /// v1: the one definition the tiers bind, by canonical DefKey. `owner`
+    /// is as for [`FamilyMember`].
+    Resolved { key: Ustr, owner: Option<crate::modules::PackageId> },
     /// A bare name whose overload family spans several definitions, in
     /// either dialect: legacy callables merged with projected or imported v1
-    /// ones (spec 3.2), v1 explicit imports of different callables (spec
-    /// 8.3), or a declared operator with the built-in operator family (spec
+    /// ones (spec 3.2), or a v1 family spanning the lookup tiers (spec 8.3,
     /// 8.5). Lowering decides the member keys and records them under `name`
     /// in `Module::call_families` of the module lowered from `file`; `Expr`
-    /// is `Copy`, so the family carries only that address. `hidden` is as
-    /// for `Resolved`. A v1 unary operator no tier binds is a family with no
-    /// members: a scalar operand never reads it, any other has no overload.
-    Merged { name: Ustr, file: Ustr, hidden: Option<Ustr> },
+    /// is `Copy`, so the family carries only that address. A v1 unary
+    /// operator no tier binds is a family with no members: a scalar operand
+    /// never reads it, any other has no overload.
+    Merged { name: Ustr, file: Ustr },
 }
 
 impl CallFamily {
@@ -902,28 +913,17 @@ impl CallFamily {
         }
     }
 
-    pub fn hidden(&self) -> Option<Ustr> {
-        match self {
-            CallFamily::Legacy(_) => None,
-            CallFamily::Resolved { hidden, .. } | CallFamily::Merged { hidden, .. } => *hidden,
-        }
-    }
-
     pub fn from_name(name: Ustr) -> Self {
         CallFamily::Legacy(name)
     }
 
-    pub fn resolved(key: Ustr, owner: Option<crate::modules::PackageId>, hidden: &[Ustr]) -> Self {
-        CallFamily::Resolved { key, owner, hidden: lowest(hidden) }
+    pub fn resolved(key: Ustr, owner: Option<crate::modules::PackageId>) -> Self {
+        CallFamily::Resolved { key, owner }
     }
 
-    pub fn merged(name: Ustr, file: Ustr, hidden: &[Ustr]) -> Self {
-        CallFamily::Merged { name, file, hidden: lowest(hidden) }
+    pub fn merged(name: Ustr, file: Ustr) -> Self {
+        CallFamily::Merged { name, file }
     }
-}
-
-fn lowest(keys: &[Ustr]) -> Option<Ustr> {
-    keys.iter().min_by_key(|k| k.as_str()).copied()
 }
 
 #[derive(Copy, Clone, Debug)]

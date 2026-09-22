@@ -8,8 +8,9 @@
 //! re-exports for the dependencies the package's bodies actually reference,
 //! `pub` on the definitions the named consumers reference plus the API type
 //! closure the compiler demands on top of them, the contextual-ascription
-//! rewrite (`x :: T` to `(x : T)`), and qualified-call repairs where a v1 tier
-//! would hide the definition a legacy call selected.
+//! rewrite (`x :: T` to `(x : T)`), and qualified-call repairs where a newly
+//! visible overload would win over the definition a legacy call selected
+//! (spec 15.2).
 //!
 //! Every fact is compiler-derived: what a consumer uses and what a fragment
 //! needs imported come from the resolved references of checked workspaces
@@ -939,7 +940,10 @@ fn candidate_file_pkg(c: &Ctx, plan: &Plan) -> HashMap<Ustr, u32> {
 
 /// A changed site the plan can repair: a named, non-method call in one of the
 /// package's files whose baseline target is a single function of std or of an
-/// imported v1 dependency. The repair qualifies the callee.
+/// imported v1 dependency. The repair qualifies the callee. Callables
+/// accumulate across the v1 lookup tiers (spec 8.3), so a call moves only
+/// when a newly visible overload outranks the legacy selection or wins its
+/// exact tie by tier.
 fn repair_for(
     plan: &Plan,
     file_index: &HashMap<Ustr, usize>,
@@ -985,7 +989,7 @@ fn repair_for(
         name: site.name.to_string(),
         qualifier: qualifier.clone(),
         reason: format!(
-            "a v1 tier would hide the `{}` this call selected from `{}` (spec 8.3); qualifying keeps the target",
+            "in v1 another overload of `{}` would win over the one this call selected from `{}` (spec 8.3); qualifying keeps the target",
             site.name,
             if qualifier == "std" { "std".to_string() } else { qualifier }
         ),

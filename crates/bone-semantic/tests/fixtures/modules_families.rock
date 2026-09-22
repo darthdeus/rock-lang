@@ -239,7 +239,7 @@ fn use_it() -> int {
     n
 }
 
-//- an_own_definition_hides_the_composed_imports @fail=type mismatch: expected `bool`, found `int`
+//- an_own_definition_joins_the_composed_imports
 //-- a.rock @pkg=lib_a,1 @v1
 pub fn pick(n: int) -> int {
     n
@@ -259,7 +259,11 @@ fn pick(b: bool) -> bool {
 }
 
 fn use_it() -> int {
-    pick(1)
+    let n = pick(1)
+      //^ int
+    let b = pick(true)
+      //^ bool
+    n
 }
 
 //- a_composed_import_family_is_not_a_single_value @fail=`pick` names an overload family of several imports (lib_a::pick, lib_b::pick), not a single definition
@@ -540,7 +544,7 @@ fn use_it() -> int {
     Pick(1)
 }
 
-//- an_explicit_import_hides_the_composed_glob_family @fail=type mismatch: expected `int`, found `string`
+//- an_explicit_import_joins_the_composed_glob_family
 //-- a.rock @pkg=lib_a,1 @v1
 pub fn pick(n: int) -> int {
     n
@@ -557,10 +561,12 @@ use lib_a::*;
 use lib_b::*;
 
 fn use_it() -> string {
-    pick("v1")
+    let s = pick("v1")
+      //^ string
+    s
 }
 
-//- an_own_definition_hides_the_composed_glob_family @fail=type mismatch: expected `bool`, found `int`
+//- an_own_definition_joins_the_composed_glob_family
 //-- a.rock @pkg=lib_a,1 @v1
 pub fn pick(n: int) -> int {
     n
@@ -580,7 +586,9 @@ fn pick(b: bool) -> bool {
 }
 
 fn use_it() -> int {
-    pick(1)
+    let n = pick(1)
+      //^ int
+    n
 }
 
 //- globbed_operators_of_two_modules_compose_with_builtin_arithmetic

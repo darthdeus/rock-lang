@@ -189,7 +189,7 @@ fn pick() -> int {
     width()
 }
 
-//- shadowed_glob_candidate_is_named_in_the_call_error @fail=shadowed candidate `chess::util::width`
+//- an_own_global_shadows_a_glob_function_in_a_call @fail=`width` binds to global `app::width` here
 //-- lib.rock @pkg=chess,1 @v1
 pub mod util;
 

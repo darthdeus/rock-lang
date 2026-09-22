@@ -68,7 +68,7 @@ pub fn spellings_by_key(
                 CalleeFamily::Single(resolved) if resolved.kind == ResolvedKind::Callable => {
                     out.entry(resolved.key).or_default().push(name);
                 }
-                CalleeFamily::Merged { members, .. } => {
+                CalleeFamily::Merged { members } => {
                     for member in members {
                         out.entry(member.key).or_default().push(name);
                     }
@@ -238,7 +238,7 @@ fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
         Ok(r) if r.kind != ResolvedKind::Module => Some(r.key),
         Ok(_) => None,
         Err(_) => match resolve::resolve_v1_callee(ws, frag, name) {
-            Ok(CalleeFamily::Merged { members, .. }) => members.first().map(|m| m.key),
+            Ok(CalleeFamily::Merged { members }) => members.first().map(|m| m.key),
             Ok(CalleeFamily::Single(r)) => Some(r.key),
             Err(_) => None,
         },

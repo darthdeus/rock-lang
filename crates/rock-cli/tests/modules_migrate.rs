@@ -223,14 +223,14 @@ fn a_decorator_a_legacy_consumer_applies_is_exported() {
     assert_eq!(apply.code, Some(0), "{}", shown(&apply));
 }
 
-/// Spec 8.3: in v1 an own `min(Foo, Foo)` hides the std family for the bare
-/// name, where legacy merged them. The planner finds the call that would stop
-/// resolving and qualifies it, and the result selects the same body.
+/// Spec 8.3: in v1 an own `min(Foo, Foo)` and std's `min` are one family,
+/// as legacy merged them, so the call keeps its std target and needs no
+/// repair.
 #[test]
-fn a_std_call_an_own_family_would_hide_is_qualified() {
-    let fixture = scratch("hidden_std");
+fn a_std_call_beside_an_own_family_of_its_name_needs_no_repair() {
+    let fixture = scratch("own_family_beside_std");
     let dir = fixture.path();
-    write(&dir.join("lib/stick.toml"), &manifest("hide-lib", ""));
+    write(&dir.join("lib/stick.toml"), &manifest("family-lib", ""));
     write(
         &dir.join("lib/lib.rock"),
         "struct Foo {\n    v: int,\n}\n\nfn min(a: Foo, b: Foo) -> Foo {\n    a\n}\n\nfn smaller(a: int, b: int) -> int {\n    min(a, b)\n}\n",
@@ -238,14 +238,15 @@ fn a_std_call_an_own_family_would_hide_is_qualified() {
     write(&dir.join("lib/tests/t.rock"), "@test\nfn picks_the_smaller() {\n    assert(smaller(7, 3) == 3)\n}\n");
 
     let v = json(&migrate(&dir, "lib", &["--check", "--format", "json"]));
-    let repairs = v["repairs"].as_array().expect("repairs");
-    assert_eq!(repairs.len(), 1, "{v}");
-    assert_eq!(repairs[0]["qualifier"], "std", "{v}");
-    assert_eq!(repairs[0]["name"], "min", "{v}");
+    assert!(v["repairs"].as_array().expect("repairs").is_empty(), "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
 
     let apply = migrate(&dir, "lib", &["--apply"]);
     assert_eq!(apply.code, Some(0), "{}", shown(&apply));
-    assert!(read(&dir.join("lib/lib.rock")).contains("    std::min(a, b)\n"));
+    assert!(read(&dir.join("lib/lib.rock")).contains("    min(a, b)\n"));
     let tests = rock(&dir, &["test", "lib"]);
     assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
 }

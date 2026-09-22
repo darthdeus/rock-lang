@@ -160,7 +160,7 @@ fn g() -> string {
     blend("s")
 }
 
-//- a_providers_family_hides_the_std_family @fail=expected `P`, found `float`
+//- a_providers_family_joins_the_std_family
 //-- xlib.rock @pkg=x_lib,1
 struct P {
     x: float,
@@ -174,7 +174,9 @@ fn lerp(a: P, b: P, t: float) -> P {
 use x_lib::*;
 
 fn g() -> float {
-    lerp(1.0, 2.0, 0.5)
+    let x = lerp(1.0, 2.0, 0.5)
+      //^ float
+    x
 }
 
 //- imports_of_a_providers_family_and_the_std_family_compose

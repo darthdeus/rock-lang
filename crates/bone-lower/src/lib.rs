@@ -391,7 +391,7 @@ impl<'a> LowerCtx<'a> {
             }
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))?;
-        let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { members: Vec::new(), hidden: Vec::new() });
+        let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { members: Vec::new() });
         Ok(self.record_family(name, resolved))
     }
 
@@ -401,12 +401,12 @@ impl<'a> LowerCtx<'a> {
         let file = self.module.file;
         match resolved {
             resolve::CalleeFamily::Single(r) if self.v1_scope().is_some() => {
-                (r.key, hir::CallFamily::resolved(r.key, r.owner, &r.hidden))
+                (r.key, hir::CallFamily::resolved(r.key, r.owner))
             }
             resolve::CalleeFamily::Single(r) => (r.key, hir::CallFamily::from_name(r.key)),
-            resolve::CalleeFamily::Merged { members, hidden } => {
+            resolve::CalleeFamily::Merged { members } => {
                 self.module.call_families.insert(name, members);
-                (name, hir::CallFamily::merged(name, file, &hidden))
+                (name, hir::CallFamily::merged(name, file))
             }
         }
     }
@@ -1407,15 +1407,14 @@ pub fn lower_expr_value(
 
                 // A local fn-typed binding is called through its value, everything else
                 // resolves at a top-level by name. A v1 fragment resolves the
-                // name through the namespace tiers to CallFamily::Resolved
-                // (DefKey + hidden origins, spec 8.3).
+                // name through the namespace tiers (spec 8.3).
                 // A local is called through its value, and inference never asks
                 // its family for a name, so a local resolves nothing further.
                 let local = lookup_local(body, scope, name.name);
                 let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
                     ctx.resolve_callee_family(name.name, name.span)?
                 } else if ctx.v1_scope().is_some() {
-                    (name.name, hir::CallFamily::resolved(name.name, None, &[]))
+                    (name.name, hir::CallFamily::resolved(name.name, None))
                 } else {
                     (name.name, hir::CallFamily::from_name(name.name))
                 };
@@ -1493,7 +1492,7 @@ pub fn lower_expr_value(
                     },
                     args: args_range,
                     generic_args,
-                    family: hir::CallFamily::resolved(key, owner, &[]),
+                    family: hir::CallFamily::resolved(key, owner),
                 }
             }
 

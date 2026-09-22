@@ -13,11 +13,13 @@
 //!   4. glob bindings visible to the fragment, including what the globbed
 //!      modules re-export;
 //!   5. the compiler-owned std view (the standard library's own members).
-//! There is no fallthrough: the first tier that binds the name decides.
-//! Losers at earlier tiers are recorded as `hidden` so a failing overload
-//! match can name what it would have found (the hidden-origin diagnostic).
+//! Values shadow; callables accumulate: the first tier that binds the name
+//! decides, except that in callee position a first tier that binds callables
+//! opens one family with the callables of every lower tier, which overload
+//! resolution ranks by fit with the tier as the tie-breaker. Lower-tier
+//! non-callables neither join nor block.
 
-use bone_core::hir::FamilyMember;
+use bone_core::hir::{FamilyMember, FamilyTier};
 use bone_core::modules::{
     legacy_name, DefKind, FragmentScope, LegacyName, NsPackage, NsVisibility, PackageId, ScopeProbe,
     UsePathRef,
@@ -91,20 +93,18 @@ pub enum ResolvedKind {
     Binding,
 }
 
-/// A resolution result: the canonical key every workspace map is keyed by,
-/// the view that owns a legacy callable's key ([`FamilyMember::owner`]),
-/// plus the origin tier's hidden candidates (spec 8.3 hidden-origin).
+/// A resolution result: the canonical key every workspace map is keyed by
+/// and the view that owns a legacy callable's key ([`FamilyMember::owner`]).
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub key: Ustr,
     pub kind: ResolvedKind,
     pub owner: Option<PackageId>,
-    pub hidden: Vec<Ustr>,
 }
 
 impl Resolved {
-    fn of(hit: Hit, hidden: Vec<Ustr>) -> Self {
-        Resolved { key: hit.key, kind: hit.kind, owner: hit.owner, hidden }
+    fn of(hit: Hit) -> Self {
+        Resolved { key: hit.key, kind: hit.kind, owner: hit.owner }
     }
 }
 
@@ -121,8 +121,12 @@ pub struct Hit {
 }
 
 impl Hit {
-    fn member(&self) -> FamilyMember {
-        FamilyMember { key: self.key, owner: self.owner }
+    fn of(resolved: &Resolved) -> Self {
+        Hit { key: resolved.key, kind: resolved.kind, owner: resolved.owner }
+    }
+
+    fn member(&self, tier: FamilyTier) -> FamilyMember {
+        FamilyMember { key: self.key, owner: self.owner, tier }
     }
 
     fn sort_key(&self) -> (String, Option<PackageId>) {
@@ -138,11 +142,6 @@ fn hit_display(ws: &Workspace, hit: &Hit) -> String {
         None if hit.owner == Some(STD_PACKAGE_ID) => format!("std::{}", hit.key),
         None => hit.key.to_string(),
     }
-}
-
-fn hit_display_key(ws: &Workspace, hit: &Hit) -> Ustr {
-    let display = hit_display(ws, hit);
-    Ustr::from(display.as_str())
 }
 
 /// The owner of a callable found in module node `pkg_id`: a definition with
@@ -192,20 +191,20 @@ pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Res
 /// operator), in either dialect: a single definition, or one overload family
 /// spanning several definitions, among which overload resolution picks by
 /// argument types. Legacy merges legacy callables with projected or imported
-/// v1 ones (spec 3.2); v1 composes explicit imports of different callables
-/// (spec 8.3) and keeps the built-in operator family beside a declared or
-/// imported operator (spec 8.5).
+/// v1 ones (spec 3.2); v1 spans the lookup tiers (spec 8.3, 8.5).
 pub enum CalleeFamily {
     Single(Resolved),
-    /// Every member, deduplicated, plus the losing tiers' candidates.
-    Merged { members: Vec<FamilyMember>, hidden: Vec<Ustr> },
+    /// Every member, deduplicated, with the tier that contributed it.
+    Merged { members: Vec<FamilyMember> },
 }
 
 pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<CalleeFamily, String> {
     match legacy_name(ws, file, name) {
         LegacyName::Family(keys) => Ok(CalleeFamily::Merged {
-            members: keys.into_iter().map(|key| FamilyMember { key, owner: None }).collect(),
-            hidden: Vec::new(),
+            members: keys
+                .into_iter()
+                .map(|key| FamilyMember { key, owner: None, tier: FamilyTier::Legacy })
+                .collect(),
         }),
         LegacyName::Bare => Ok(CalleeFamily::Single(plain(name))),
         LegacyName::Projected(entries) => projected(name, &entries).map(CalleeFamily::Single),
@@ -215,7 +214,7 @@ pub fn resolve_legacy_callee(ws: &Workspace, file: Ustr, name: Ustr) -> Result<C
 
 fn projected(name: Ustr, entries: &[bone_core::modules::LegacyProjectionEntry]) -> Result<Resolved, String> {
     if let [entry] = entries {
-        return Ok(Resolved { key: entry.key, kind: resolved_kind(entry.kind), owner: None, hidden: Vec::new() });
+        return Ok(Resolved { key: entry.key, kind: resolved_kind(entry.kind), owner: None });
     }
     Err(legacy_candidates(name, &entries.iter().map(|e| e.key).collect::<Vec<_>>()))
 }
@@ -255,20 +254,19 @@ pub fn resolve_bare(
     let Some(frag) = frag else {
         return Ok(plain(name));
     };
-    match bind_bare(ws, frag, name)? {
+    match bind_tiers(ws, frag, name, false)?.first {
         Bound::One(resolved, _) => Ok(resolved),
-        Bound::Several(hits, _, via) => Err(several(ws, name, &hits, via)),
+        Bound::Several(hits, via, _) => Err(several(ws, name, &hits, via)),
         Bound::Unbound => Err(unbound(name)),
     }
 }
 
-/// A bare name in callee position in a v1 fragment (spec 8.3, 8.5). Explicit
-/// imports of different callables compose into one family, and so do glob
-/// candidates of different callables when no higher tier binds the name; a
-/// composition that is not all callables is a diagnostic. A declared,
-/// imported or globbed operator keeps the std prelude's operator family
-/// beside it, so a module's own `operator +` does not hide built-in
-/// arithmetic.
+/// A bare name in callee position in a v1 fragment (spec 8.3, 8.5). When the
+/// first tier that binds the name binds callables, the family is those and
+/// the callables of every lower tier, each member tagged with its tier for
+/// the exact-tie break; that tier's composition must be all callables. A
+/// first tier that binds a non-callable wins alone. Operators are no
+/// different: a module's own `operator +` and std's are one family.
 pub fn resolve_v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<CalleeFamily, String> {
     v1_callee(ws, frag, name)?.ok_or_else(|| unbound(name))
 }
@@ -281,49 +279,35 @@ pub fn resolve_v1_unary(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Res
 }
 
 fn v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Option<CalleeFamily>, String> {
-    let operator = bone_core::hir::operator_entry(name.as_str()).is_some_and(|(_, overloadable)| overloadable)
-        || bone_core::hir::unary_operator_entry(name.as_str()).is_some();
-    let (mut hits, hidden) = match bind_bare(ws, frag, name)? {
+    let Tiers { first, lower } = bind_tiers(ws, frag, name, true)?;
+    let mut members: Vec<(Hit, FamilyTier)> = match first {
         Bound::Unbound => return Ok(None),
-        Bound::One(resolved, Tier::Std) => return Ok(Some(CalleeFamily::Single(resolved))),
-        Bound::One(resolved, Tier::Scope) if !operator => return Ok(Some(CalleeFamily::Single(resolved))),
-        Bound::One(resolved, Tier::Scope) => {
-            (vec![Hit { key: resolved.key, kind: resolved.kind, owner: resolved.owner }], resolved.hidden)
+        Bound::One(resolved, _) if resolved.kind != ResolvedKind::Callable => {
+            return Ok(Some(CalleeFamily::Single(resolved)))
         }
-        Bound::Several(hits, hidden, via) => {
-            if hits.iter().any(|hit| hit.kind != ResolvedKind::Callable) {
-                return Err(several(ws, name, &hits, via));
-            }
-            (hits, hidden)
+        Bound::One(resolved, tier) => vec![(Hit::of(&resolved), tier)],
+        Bound::Several(hits, via, _) if hits.iter().any(|hit| hit.kind != ResolvedKind::Callable) => {
+            return Err(several(ws, name, &hits, via))
         }
+        Bound::Several(hits, _, tier) => hits.into_iter().map(|hit| (hit, tier)).collect(),
     };
-    if operator {
-        if let Some(std) = std_definition(ws, name).filter(|r| r.kind == ResolvedKind::Callable) {
-            hits.push(Hit { key: std.key, kind: std.kind, owner: std.owner });
-        }
+    members.extend(lower);
+    // One definition reached through several tiers is one member, at the
+    // nearest of them.
+    members.sort_by_key(|(hit, tier)| (hit.sort_key(), *tier));
+    members.dedup_by_key(|(hit, _)| (hit.key, hit.owner));
+    if let [(hit, _)] = members[..] {
+        return Ok(Some(CalleeFamily::Single(Resolved::of(hit))));
     }
-    hits.sort_by_key(Hit::sort_key);
-    hits.dedup();
-    if let [hit] = hits[..] {
-        return Ok(Some(CalleeFamily::Single(Resolved::of(hit, hidden))));
-    }
-    Ok(Some(CalleeFamily::Merged { members: hits.iter().map(Hit::member).collect(), hidden }))
-}
-
-/// Which tier bound a name: the fragment's own scope (tiers 2-4) or the std
-/// prelude (tier 5).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tier {
-    Scope,
-    Std,
+    Ok(Some(CalleeFamily::Merged { members: members.iter().map(|(hit, tier)| hit.member(*tier)).collect() }))
 }
 
 /// What the tiers bind a bare name to in a v1 fragment.
 enum Bound {
-    One(Resolved, Tier),
-    /// Several distinct definitions at one tier, sorted by key, the lower
-    /// tier's candidates they hide, and which tier bound them.
-    Several(Vec<Hit>, Vec<Ustr>, Via),
+    One(Resolved, FamilyTier),
+    /// Several distinct definitions at one tier, sorted by key, and which
+    /// tier bound them.
+    Several(Vec<Hit>, Via, FamilyTier),
     /// No tier binds the name.
     Unbound,
 }
@@ -335,12 +319,46 @@ enum Via {
     Globs,
 }
 
-fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, String> {
+/// The first tier's binding of a name, and in callee position, when that
+/// binding is all callables, the callables every lower tier offers.
+struct Tiers {
+    first: Bound,
+    lower: Vec<(Hit, FamilyTier)>,
+}
+
+impl Tiers {
+    /// Whether the next tier is consulted: until one binds the name, and
+    /// past it only to accumulate callables behind a callable binding.
+    fn wants_more(&self, callee: bool) -> bool {
+        match &self.first {
+            Bound::Unbound => true,
+            Bound::One(resolved, _) => callee && resolved.kind == ResolvedKind::Callable,
+            Bound::Several(hits, ..) => callee && hits.iter().all(|hit| hit.kind == ResolvedKind::Callable),
+        }
+    }
+
+    fn bind(&mut self, mut hits: Vec<Hit>, tier: FamilyTier, via: Via) {
+        if let Bound::Unbound = self.first {
+            self.first = match hits[..] {
+                [hit] => Bound::One(Resolved::of(hit), tier),
+                _ => Bound::Several(hits, via, tier),
+            };
+            return;
+        }
+        hits.retain(|hit| hit.kind == ResolvedKind::Callable);
+        self.lower.extend(hits.into_iter().map(|hit| (hit, tier)));
+    }
+}
+
+fn bind_tiers(ws: &Workspace, frag: &FragmentScope, name: Ustr, callee: bool) -> Result<Tiers, String> {
+    let mut tiers = Tiers { first: Bound::Unbound, lower: Vec::new() };
     if ws.ns.package(frag.package).is_none() {
-        return Ok(std_bound(ws, name));
+        if let Some(std) = std_definition(ws, name) {
+            tiers.bind(vec![Hit::of(&std)], FamilyTier::Std, Via::Imports);
+        }
+        return Ok(tiers);
     }
     let viewers = [Viewer::Fragment(frag)];
-    let glob_hits = glob_candidates(ws, frag, name)?;
 
     // Tier 2: the current logical module's own definitions and explicit
     // export bindings.
@@ -348,25 +366,58 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
     if let Some(own) = own {
         let not_found = || format!("`{name}` did not resolve to any definition");
         let hit = collapse(ws, own, name, not_found, "definitions")?;
-        let hidden = hidden_for_scope(ws, name, &glob_hits);
-        return Ok(Bound::One(Resolved::of(hit, hidden), Tier::Scope));
+        tiers.bind(vec![hit], FamilyTier::Own, Via::Imports);
     }
 
     // Tier 3: the fragment's explicit imports. A bound name does not fall
-    // through, even if a target is missing or a module. Several routes to
-    // one definition are that definition once.
+    // through, even if a target is missing or a module; below a callable
+    // binding, an import that lands on a module is a non-callable and adds
+    // nothing.
+    if tiers.wants_more(callee) {
+        let below = !matches!(tiers.first, Bound::Unbound);
+        if let Some(hits) = import_tier(ws, frag, name, below)? {
+            tiers.bind(hits, FamilyTier::Imports, Via::Imports);
+        }
+    }
+
+    // Tier 4: glob bindings. Several candidates are one family only in
+    // callee position; anywhere else they are ambiguous at use, never a
+    // HashMap-order pick (spec 8.3 / 8.7).
+    if tiers.wants_more(callee) {
+        let glob_hits = glob_candidates(ws, frag, name)?;
+        if !glob_hits.is_empty() {
+            tiers.bind(glob_hits, FamilyTier::Globs, Via::Globs);
+        }
+    }
+
+    // Tier 5: the compiler-owned std export view. There is no legacy
+    // workspace-map fall-through for v1 names.
+    if tiers.wants_more(callee) {
+        if let Some(std) = std_definition(ws, name) {
+            tiers.bind(vec![Hit::of(&std)], FamilyTier::Std, Via::Imports);
+        }
+    }
+    Ok(tiers)
+}
+
+/// The definitions the fragment's explicit imports bind `name` to, sorted by
+/// key and deduplicated (several routes to one definition are that
+/// definition once), or `None` when no import binds it. `below` is set when a
+/// nearer tier already bound callables: an import landing on a module is
+/// then left out instead of rejected.
+fn import_tier(ws: &Workspace, frag: &FragmentScope, name: Ustr, below: bool) -> Result<Option<Vec<Hit>>, String> {
     if let Some(targets) = frag.named.get(&name) {
-        let hidden = hidden_for_scope(ws, name, &glob_hits);
         let mut hits: Vec<Hit> = Vec::new();
         for target in targets {
-            hits.extend(resolve_import_target(ws, frag, name, target)?);
+            match resolve_import_target(ws, frag, name, target)? {
+                Some(found) => hits.extend(found),
+                None if below => {}
+                None => return Err(format!("`{name}` names a module, not a definition")),
+            }
         }
         hits.sort_by_key(Hit::sort_key);
         hits.dedup();
-        return Ok(match hits[..] {
-            [hit] => Bound::One(Resolved::of(hit, hidden), Tier::Scope),
-            _ => Bound::Several(hits, hidden, Via::Imports),
-        });
+        return Ok((!hits.is_empty()).then_some(hits));
     }
 
     // An unaliased `operator(-)` selector binds the binary spelling
@@ -382,11 +433,7 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
                     continue;
                 };
                 match walk_optional_definition(ws, frag, &[], &unary, &mut Vec::new()) {
-                    Ok(Some(resolved)) => hits.push(Hit {
-                        key: resolved.key,
-                        kind: resolved.kind,
-                        owner: resolved.owner,
-                    }),
+                    Ok(Some(resolved)) => hits.push(Hit::of(&resolved)),
                     Ok(None) => {}
                     Err(message) => return Err(operator_family_error(&unary, message)),
                 }
@@ -394,27 +441,11 @@ fn bind_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Bound, 
             hits.sort_by_key(Hit::sort_key);
             hits.dedup();
             if !hits.is_empty() {
-                let hidden = hidden_for_scope(ws, name, &glob_hits);
-                return Ok(match hits[..] {
-                    [hit] => Bound::One(Resolved::of(hit, hidden), Tier::Scope),
-                    _ => Bound::Several(hits, hidden, Via::Imports),
-                });
+                return Ok(Some(hits));
             }
         }
     }
-
-    // Tier 4: glob bindings. Several candidates are one family only in
-    // callee position; anywhere else they are ambiguous at use, never a
-    // HashMap-order pick (spec 8.3 / 8.7).
-    match glob_hits[..] {
-        [] => {}
-        [hit] => return Ok(Bound::One(Resolved::of(hit, hidden_for_scope(ws, name, &[])), Tier::Scope)),
-        _ => return Ok(Bound::Several(glob_hits, hidden_for_scope(ws, name, &[]), Via::Globs)),
-    }
-
-    // Tier 5: the compiler-owned std export view. There is no legacy
-    // workspace-map fall-through for v1 names.
-    Ok(std_bound(ws, name))
+    Ok(None)
 }
 
 /// `operator(-)` is recorded under the binary family name because binary
@@ -432,37 +463,34 @@ fn operator_family_paths(path: &UsePathRef) -> impl Iterator<Item = UsePathRef> 
     paths.into_iter()
 }
 
+/// What one explicit import of `name` binds: its definitions, or `None` when
+/// the target is a module.
 fn resolve_import_target(
     ws: &Workspace,
     frag: &FragmentScope,
     name: Ustr,
     path: &UsePathRef,
-) -> Result<Vec<Hit>, String> {
+) -> Result<Option<Vec<Hit>>, String> {
     let candidates = operator_family_paths(path).collect::<Vec<_>>();
     let mut hits = Vec::new();
     if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
         for candidate in &candidates {
             match walk_optional_definition(ws, frag, &[], candidate, &mut Vec::new()) {
-                Ok(Some(resolved)) => hits.push(Hit {
-                    key: resolved.key,
-                    kind: resolved.kind,
-                    owner: resolved.owner,
-                }),
+                Ok(Some(resolved)) => hits.push(Hit::of(&resolved)),
                 Ok(None) => {}
                 Err(message) => return Err(operator_family_error(candidate, message)),
             }
         }
     } else {
-        match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new()) {
-            Ok(Landing::Def(r)) => hits.push(Hit { key: r.key, kind: r.kind, owner: r.owner }),
-            Ok(Landing::Module(..)) => return Err(format!("`{name}` names a module, not a definition")),
-            Err(message) => return Err(message),
+        match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new())? {
+            Landing::Def(r) => hits.push(Hit::of(&r)),
+            Landing::Module(..) => return Ok(None),
         }
     }
     if hits.is_empty() {
         Err(format!("`{name}` did not resolve to any definition"))
     } else {
-        Ok(hits)
+        Ok(Some(hits))
     }
 }
 
@@ -482,21 +510,6 @@ fn operator_family_error(path: &UsePathRef, message: String) -> String {
     } else {
         message.replace(internal, symbol)
     }
-}
-
-fn hidden_for_scope(ws: &Workspace, name: Ustr, lower: &[Hit]) -> Vec<Ustr> {
-    let mut hidden = lower.iter().map(|hit| hit_display_key(ws, hit)).collect::<Vec<_>>();
-    if let Some(std) = std_definition(ws, name).filter(|resolved| resolved.kind == ResolvedKind::Callable) {
-        hidden.push(hit_display_key(
-            ws,
-            &Hit { key: std.key, kind: std.kind, owner: std.owner },
-        ));
-    }
-    hidden
-}
-
-fn std_bound(ws: &Workspace, name: Ustr) -> Bound {
-    std_definition(ws, name).map_or(Bound::Unbound, |r| Bound::One(r, Tier::Std))
 }
 
 fn unbound(name: Ustr) -> String {
@@ -528,16 +541,11 @@ fn several(ws: &Workspace, name: Ustr, hits: &[Hit], via: Via) -> String {
 /// own overloads belong to it (spec 5).
 fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     if bone_core::modules::is_intrinsic_key_in(name, &["Map", "Coroutine", "Iterator"]) {
-        return Some(Resolved {
-            key: name,
-            kind: ResolvedKind::Type,
-            owner: None,
-            hidden: Vec::new(),
-        });
+        return Some(Resolved { key: name, kind: ResolvedKind::Type, owner: None });
     }
     let (key, kind) = ws.ns.std_definition(name)?;
     let kind = resolved_kind(kind);
-    Some(Resolved { key, kind, owner: view_owner(ws, STD_PACKAGE_ID, key, kind), hidden: Vec::new() })
+    Some(Resolved { key, kind, owner: view_owner(ws, STD_PACKAGE_ID, key, kind) })
 }
 
 /// Tier 4 candidates for `name`, deduplicated and sorted by key: what every
@@ -1412,7 +1420,7 @@ fn walk_path(
             let members = walk_members(ws, frag, outer, path, visiting)?;
             let not_found = || format!("`{}` did not resolve to any definition", joined(&path.segments));
             let hit = collapse(ws, members, last_of(&path.segments), not_found, "glob re-exports")?;
-            Ok(Landing::Def(Resolved::of(hit, Vec::new())))
+            Ok(Landing::Def(Resolved::of(hit)))
         }
     }
 }
@@ -1430,7 +1438,7 @@ fn walk_optional_definition(
     let members = walk_members(ws, frag, outer, path, visiting)?;
     let name = last_of(&path.segments);
     match members.found.as_slice() {
-        [single] => Ok(Some(Resolved::of(*single, Vec::new()))),
+        [single] => Ok(Some(Resolved::of(*single))),
         [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
         [] if members.denied => Err(format!("`{name}` is not accessible from this module")),
         [] if members.module => Err(format!("`{name}` names a module, not a definition")),
@@ -1541,7 +1549,7 @@ fn last_of(segments: &[Ustr]) -> Ustr {
 }
 
 fn plain(name: Ustr) -> Resolved {
-    Resolved { key: name, kind: ResolvedKind::Binding, owner: None, hidden: Vec::new() }
+    Resolved { key: name, kind: ResolvedKind::Binding, owner: None }
 }
 
 fn owned_kind(node: &bone_core::modules::NsNode, name: Ustr) -> Option<ResolvedKind> {
