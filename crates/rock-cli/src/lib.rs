@@ -669,7 +669,7 @@ pub struct Args {
     pub dump_state: bool,
     pub update_snapshots: bool,
     /// For `rock sim`: how many sim children may run at once. `None` uses the
-    /// conservative default in `run_sim::resolve_jobs`.
+    /// GPU-memory budget in `run_sim::sim_job_budget`.
     pub jobs: Option<usize>,
     /// For `rock sim`: how many of those children may hold FULL-SIZE assets
     /// at once (real assets with the image cap declined). `None` takes the
@@ -912,10 +912,10 @@ impl Args {
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
             .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: run up to N sim children concurrently (default: the machine's core count, 1 = serial). Applies to the whole-suite and multi-name forms."))
+                .help("For `rock sim`: run up to N sim children concurrently (default: as many as the free GPU memory less a 6 GiB reserve affords at 2 GiB each, at most the core count; 1 = serial). Applies to the whole-suite and multi-name forms."))
             .arg(Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
                 .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other lanes. Default 2, sized for a 16 GB GPU budget. Bounded by --jobs."))
+                .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other lanes. Default 2. Bounded by --jobs."))
             .arg(Arg::new("isolated").long("isolated").action(ArgAction::SetTrue)
                 .conflicts_with("workers")
                 .help("For `rock sim`: force one fresh process per entry -- the permanent fresh-process reference oracle. The default uses eligible boot-checkpoint workers, including rendered sims."))
