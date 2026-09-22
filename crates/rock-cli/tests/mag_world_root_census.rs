@@ -35,7 +35,6 @@ struct Function {
     name: String,
     file: String,
     body: String,
-    surface: String,
 }
 
 fn repo_root() -> PathBuf {
@@ -180,7 +179,6 @@ fn function_declarations(source: &str, path: &Path) -> Vec<Function> {
                     name: name.to_string(),
                     file: path.strip_prefix(repo_root()).unwrap().display().to_string(),
                     body: source[open + 1..close].to_string(),
-                    surface: source[line_start..close].to_string(),
                 });
             }
         }
@@ -292,64 +290,21 @@ fn census() -> (BTreeMap<String, Counts>, usize) {
     for index in reachable.iter().copied() {
         let function = &functions[index];
         let entry = counts.entry(function.file.clone()).or_default();
-        entry.world_state += call_count(&function.surface, "mag_world_state");
-        entry.active_scene += call_count(&function.surface, "active_world_scene");
-        entry.active_world += token_count(&function.surface, "MAG_ACTIVE_WORLD");
+        entry.world_state += call_count(&function.body, "mag_world_state");
+        entry.active_scene += call_count(&function.body, "active_world_scene");
+        entry.active_world += token_count(&function.body, "MAG_ACTIVE_WORLD");
         for accessor in ARENA_ACCESSORS {
-            entry.arena += call_count(&function.surface, accessor);
+            entry.arena += call_count(&function.body, accessor);
         }
     }
     (counts, reachable.len())
 }
 
 fn baseline_bounds() -> BTreeMap<&'static str, Counts> {
-    // Filled from the RED census run. These are upper bounds, never equality
-    // expectations, so a production migration can only make them smaller.
-    // The world-state allowances below are the intentional floor-object
-    // sentinel: their paths cross the protected ground-item/corpse slice.
-    BTreeMap::from([
-        ("mag/aggressors.rock", Counts { arena: 2, ..Counts::default() }),
-        ("mag/blocker_index.rock", Counts { world_state: 3, arena: 1, ..Counts::default() }),
-        ("mag/combat.rock", Counts { world_state: 1, arena: 1, ..Counts::default() }),
-        ("mag/combat_text.rock", Counts { world_state: 3, ..Counts::default() }),
-        ("mag/corpses.rock", Counts { world_state: 1, arena: 3, ..Counts::default() }),
-        ("mag/doors.rock", Counts { world_state: 1, arena: 3, ..Counts::default() }),
-        ("mag/editor_layout.rock", Counts { world_state: 6, ..Counts::default() }),
-        ("mag/field.rock", Counts { world_state: 13, arena: 2, ..Counts::default() }),
-        ("mag/flow.rock", Counts { world_state: 13, ..Counts::default() }),
-        ("mag/fuses.rock", Counts { arena: 4, ..Counts::default() }),
-        ("mag/ground_items.rock", Counts { arena: 2, ..Counts::default() }),
-        ("mag/harvest.rock", Counts { world_state: 3, ..Counts::default() }),
-        ("mag/hazards.rock", Counts { world_state: 2, ..Counts::default() }),
-        ("mag/lighting_semantics.rock", Counts { world_state: 2, ..Counts::default() }),
-        ("mag/los.rock", Counts { world_state: 2, ..Counts::default() }),
-        ("mag/magic.rock", Counts { arena: 1, ..Counts::default() }),
-        ("mag/magic_trials.rock", Counts { arena: 2, ..Counts::default() }),
-        ("mag/main.rock", Counts { world_state: 2, ..Counts::default() }),
-        ("mag/mob_spatial.rock", Counts { world_state: 8, ..Counts::default() }),
-        ("mag/mobs.rock", Counts { world_state: 2, arena: 2, ..Counts::default() }),
-        ("mag/notoriety.rock", Counts { world_state: 1, ..Counts::default() }),
-        ("mag/npc.rock", Counts { arena: 2, ..Counts::default() }),
-        ("mag/outcomes.rock", Counts { world_state: 1, ..Counts::default() }),
-        ("mag/player.rock", Counts { world_state: 1, ..Counts::default() }),
-        ("mag/procgen/dungeon_runner.rock", Counts { arena: 1, ..Counts::default() }),
-        ("mag/props.rock", Counts { world_state: 1, ..Counts::default() }),
-        ("mag/quest_catalog.rock", Counts { world_state: 2, ..Counts::default() }),
-        ("mag/quests.rock", Counts { world_state: 2, arena: 1, ..Counts::default() }),
-        ("mag/restoration.rock", Counts { world_state: 1, ..Counts::default() }),
-        ("mag/searchable_props.rock", Counts { world_state: 2, ..Counts::default() }),
-        ("mag/sfx.rock", Counts { world_state: 2, ..Counts::default() }),
-        ("mag/spawners.rock", Counts { arena: 4, ..Counts::default() }),
-        ("mag/spells.rock", Counts { arena: 1, ..Counts::default() }),
-        ("mag/summons.rock", Counts { arena: 3, ..Counts::default() }),
-        ("mag/targetting.rock", Counts { arena: 1, ..Counts::default() }),
-        ("mag/town_guards.rock", Counts { world_state: 1, arena: 2, ..Counts::default() }),
-        ("mag/tutorial.rock", Counts { world_state: 1, arena: 1, ..Counts::default() }),
-        ("mag/walls.rock", Counts { world_state: 1, arena: 8, ..Counts::default() }),
-        ("mag/wisp_intent.rock", Counts { arena: 2, ..Counts::default() }),
-        ("mag/world_address.rock", Counts { world_state: 1, ..Counts::default() }),
-        ("mag/world_levels.rock", Counts { world_state: 23, arena: 7, active_scene: 2, ..Counts::default() }),
-    ])
+    // Keep this empty once the census measures function bodies. Any new
+    // tick-reachable implicit access must fail the gate until it is threaded
+    // through the explicit world root.
+    BTreeMap::new()
 }
 
 #[test]
