@@ -107,6 +107,40 @@ fn compiler_owned_state_schema_is_total_for_a_nondegenerate_fixture() {
 }
 
 #[test]
+fn host_projection_storage_scan_policy_follows_declared_nested_types() {
+    let emit = emit_mir(
+        r#"
+struct SafeLeaf { count: int, label: string }
+struct SafeBranch { leaves: [SafeLeaf] }
+struct UnsafeBranch { pointer: Ptr<int>, storage: NativeBuffer<int> }
+
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
+global SAFE: Map<string, SafeBranch> = map_new()
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
+global UNSAFE: UnsafeBranch
+@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)
+global OPAQUE: [any] = []
+
+fn main() {}
+"#,
+    );
+    for (name, expected) in [("SAFE", true), ("UNSAFE", false), ("OPAQUE", false)] {
+        let entry = emit
+            .state_schema
+            .entries
+            .iter()
+            .find(|entry| entry.identity.ends_with(&format!("::{name}")))
+            .expect("fixture global in StateSchema");
+        assert_eq!(entry.storage_free, expected, "{name} declared storage policy");
+        let marker = format!("identity={:?},fingerprint={:?}", entry.identity, entry.fingerprint);
+        let start = emit.lua.find(&marker).expect("fixture entry in emitted StateSchema");
+        let emitted = emit.lua[start..].split("}},").next().expect("complete emitted entry");
+        assert!(emitted.contains(&format!("storage_free={expected}")),
+            "{name} emitted storage policy absent or wrong: {emitted}");
+    }
+}
+
+#[test]
 fn state_schema_identity_ignores_body_and_source_order_but_tracks_membership_and_layout() {
     let baseline = emit_mir(FIXTURE).state_schema;
     let body_edit = FIXTURE.replace("live + 1", "live + 2");
@@ -163,6 +197,7 @@ fn state_schema_rejects_omissions_duplicates_and_incomplete_entries() {
         owner: None,
         initializer_identity: None,
         metadata: Some(bone_semantic::hir::StateMetadata::default()),
+        storage_free: false,
     };
     assert!(matches!(
         StateSchema::from_entries(vec![entry("", "shape", &["g"])]),
