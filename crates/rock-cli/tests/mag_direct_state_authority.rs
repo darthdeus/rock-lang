@@ -831,9 +831,12 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     );
     let async_save = fs::read_to_string(repo.join("mag/save_async.rock"))
         .expect("read MAG asynchronous save source");
-    assert!(
-        async_save.contains("save_async_metadata(player, MAG_PROGRESS"),
-        "the persistence boundary must pass the authoritative progress domain"
+    assert_eq!(
+        async_save
+            .matches("save_async_metadata(world, player, MAG_PROGRESS")
+            .count(),
+        2,
+        "both persistence paths must pass the owning world and progress domain"
     );
     assert!(
         save.contains("fn Player.save_progress_migration(player, progress: ProgressState,"),
