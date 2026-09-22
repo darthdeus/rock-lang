@@ -214,3 +214,57 @@ fn body_id(
     }
     panic!("no fn named {name}");
 }
+
+
+#[test]
+fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
+    let v1 = format!("{SRC}\n@nomangle fn saved() -> fn(int) -> int {{ top }}\n");
+    let ws1 = ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let v2 = v1.replace("a * 3 + 1", "a * 3 + 2");
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
+    let script = format!(
+        "{}\nlocal saved_top = saved()\nassert(top_int_ret_int(3) == 33)\n{}\nassert(top_int_ret_int(3) == 36)\nassert(saved_top(3) == 36)\nprint('PASS')\n",
+        full.lua, overlay.lua,
+    );
+    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}
+
+
+#[test]
+fn bound_overlay_cells_follow_session_activation() {
+    let v1 = "global COUNT: int = 0\n@nomangle fn bump() { COUNT = COUNT + 1 }\n";
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let ws2 = ws_with_stdlib(&v1.replace("COUNT + 1", "COUNT + 2"));
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
+    let script = format!(
+        "{}\nbump()\n{}\nbump()\nassert(COUNT == 3)\nlocal old = __rock_session_current()\nlocal fresh = __rock_session_new(old.__rock_schema_id)\n__rock_session_activate(fresh)\nCOUNT = 20\nbump()\nassert(COUNT == 22)\n__rock_session_activate(old)\nbump()\nassert(COUNT == 5)\nprint('PASS')\n",
+        full.lua, overlay.lua,
+    );
+    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}
+
+#[test]
+fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
+    let v1 = "fn leaf(n: int) -> int { n }\nfn top(n: int) -> int { leaf(n) }\n@nomangle fn answer() -> int { top(3) }\n";
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let ws2 = ws_with_stdlib(&v1.replace("{ n }", "{ if n == 0 { return 10 }\n top(n - 1) }"));
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
+    let script = format!("{}\n{}\nassert(answer() == 10)\nprint('PASS')\n", full.lua, overlay.lua);
+    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}

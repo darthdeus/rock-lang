@@ -154,3 +154,22 @@ fn a_body_edit_reaches_its_caller_through_the_full_reload() {
         out.combined(),
     );
 }
+
+
+#[test]
+fn a_bound_body_edit_publishes_an_overlay_that_preserves_live_state() {
+    let f = fixture();
+    let mut stone = SkullStone::init(&f.dir, &f.main, &f.incremental).expect("init");
+    let before = std::fs::read_to_string(&f.main).expect("main.lua");
+    std::fs::write(&f.source, V2).expect("edit");
+    let reload = stone.recompile(&[f.source.clone()], &f.main, &f.incremental).expect("reload");
+    assert!(matches!(reload, SkullReload::Incremental { .. }), "{reload:?}");
+    assert_eq!(before, std::fs::read_to_string(&f.main).unwrap());
+    let overlay = std::fs::read_to_string(&f.incremental).expect("incremental.lua");
+    let script = format!(
+        "{before}\nbump()\n{overlay}\nbump()\nassert(SCORE == 11)\nprint('PASS')\n"
+    );
+    let out = run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}
