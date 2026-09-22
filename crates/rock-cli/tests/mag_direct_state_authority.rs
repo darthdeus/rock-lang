@@ -432,6 +432,12 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "players: Arena<Player>",
         "player: Entity<Player>",
         "tasks: CoroutinePoller",
+        "wisp_motes: Arena<Mote>",
+        "wisps: [MagicWisp]",
+        "wisp_scatter_t: float",
+        "wisp_rush_t: float",
+        "wisp_effectors: [MoteEffector]",
+        "wisp_mood: MoteMood",
         "tutorial: TutorialState",
     ] {
         assert!(world.contains(field), "WorldState is missing Scene-owned `{field}`");
@@ -1005,7 +1011,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 15, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 21, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
@@ -1053,7 +1059,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "actor.cull_dead_mobs(world)",
         "tick_corpses(world)",
         "player.tick_wisp_intent_in(world, dt)",
-        "wisp_motes_tick_in(world)",
+        "wisp_motes_tick_in(world, dt)",
     ] {
         assert!(tick.contains(call), "canonical tick is missing authoritative call `{call}`");
     }
@@ -1096,7 +1102,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         .find("player.tick_wisp_intent_in(world, dt)")
         .expect("authoritative wisp intent in canonical tick");
     let wisp_tick = tick
-        .find("wisp_motes_tick_in(world)")
+        .find("wisp_motes_tick_in(world, dt)")
         .expect("authoritative wisp integration in canonical tick");
     assert!(wisp_intent < wisp_tick,
         "wisp effectors must be prepared before authoritative integration");
@@ -1119,7 +1125,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     );
     assert_eq!(
         update
-            .matches("if !world_frozen() {\n        mag_simulation_tick(world, tick_intent, dt)\n    }")
+            .matches("if !world_frozen() {\n        mag_simulation_tick(world, tick_intent, dt)\n        wisp_stage_presentation_in(world)\n    }")
             .count(),
         1,
         "the host must admit the canonical tick exactly once"

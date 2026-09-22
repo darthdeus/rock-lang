@@ -878,11 +878,6 @@ fn assert_mag_seek_state_matches(
 ) {
     assert_mag_seek_census_owners(sim);
     let mut exact = sim.clone();
-    assert!(
-        exact.remove("WISPS"),
-        "WISPS must be admitted as simulation state"
-    );
-    assert_f32_state_matches(&got["mag"]["WISPS"], &want["mag"]["WISPS"], "mag.WISPS");
     assert_mag_seek_populations_match(got, want, label);
     assert_sim_state_matches(got, want, &exact, label);
 }
@@ -976,9 +971,17 @@ fn mag_seek_equivalence_state_names(
     frames: u32,
 ) -> std::collections::HashSet<String> {
     let mut sim = sim_state_names(game, frames);
-    for name in ["WORLD_MODE", "MOTES", "WISPS"] {
+    for name in ["WORLD_MODE", "MOTES"] {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
+    assert!(
+        sim.contains("MAG_ACTIVE_WORLD"),
+        "world-owned wisps must be admitted through MAG_ACTIVE_WORLD"
+    );
+    assert!(
+        !sim.contains("WISPS"),
+        "WISPS must not remain a process-global simulation state"
+    );
     assert_mag_seek_census_owners(&sim);
     assert_mag_panel_plan_census(&sim);
     for name in MAG_HOST_PROJECTION_WORLD_EXCLUDED {
