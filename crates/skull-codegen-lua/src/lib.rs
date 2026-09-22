@@ -822,10 +822,8 @@ impl CodegenCtx {
     }
 
     /// Override the emitted callee-binding shape this context was built with.
-    /// The production path takes it from `ROCK_SKULL_CALLEE_BINDING`; `rock
-    /// stone` forces [`CalleeBindingMode::Global`] because the incremental
-    /// overlay redefines a global that bound callers would never re-read, and a
-    /// test uses this so one process can emit both shapes.
+    /// Production reads `ROCK_SKULL_CALLEE_BINDING`; tests use this override
+    /// to compare both shapes in one process.
     pub fn set_callee_binding(&mut self, mode: CalleeBindingMode) {
         self.callee_binding = mode;
     }
@@ -842,11 +840,8 @@ impl CodegenCtx {
     }
 
     /// Whether mutable-global accesses are emitted through the Session cells
-    /// (`__rock_state_cell[k]`) rather than the `_G` walk. Requires the bound
-    /// callee shape: an incremental overlay is a separate chunk that cannot see
-    /// main.lua's chunk-level locals, and the overlay path already pins
-    /// [`CalleeBindingMode::Global`], so tying the cell to that shape keeps the
-    /// two mutually exclusive by the same rule (`docs/backends.md`).
+    /// (`__rock_state_cell[k]`) rather than the `_G` walk. This optimization is
+    /// enabled together with bound callees; overlays retain both optimizations.
     pub fn state_cell(&self) -> bool {
         self.state_cell && self.callee_binding == CalleeBindingMode::Upvalue
     }
@@ -1293,9 +1288,6 @@ pub enum CalleeBindingMode {
 /// emitted function: `global` or `upvalue`. An unset or unrecognized value is
 /// the shipped default, so the switch can only be entered deliberately.
 pub fn callee_binding_mode() -> CalleeBindingMode {
-    if FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed) {
-        return CalleeBindingMode::Global;
-    }
     static MODE: std::sync::OnceLock<CalleeBindingMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("ROCK_SKULL_CALLEE_BINDING").as_deref() {
         Ok("upvalue") => CalleeBindingMode::Upvalue,
@@ -1486,35 +1478,7 @@ pub fn value_struct_metatable_name(name: &str) -> String {
     format!("__rock_vt_{name}")
 }
 
-static FORCE_GLOBAL_CALLEE_BINDING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Pin this PROCESS to [`CalleeBindingMode::Global`], whatever
-/// `ROCK_SKULL_CALLEE_BINDING` says.
-///
-/// THE hot-reload rule. An incremental overlay redefines one global `F`; a
-/// caller that captured `F` as an upvalue holds the previous closure and would
-/// never see the edited body, so a body edit would silently not reach its
-/// callers. The two shapes are therefore mutually exclusive for a whole build
-/// session. `rock stone` no longer calls this: it publishes a full `main.lua`
-/// per edit instead (see `SkullStone::route_and_emit`). The commands that drive
-/// `emit_overlay` ITSELF -- `rock stone-test` and `rock iter-incremental` --
-/// still do, so the overlay path keeps its coverage and its profiler.
-/// `assemble_overlay` rejects rather than trusting the caller to have done so.
-pub fn force_global_callee_binding() {
-    FORCE_GLOBAL_CALLEE_BINDING.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// True once [`force_global_callee_binding`] has pinned this process.
-pub fn global_callee_binding_forced() -> bool {
-    FORCE_GLOBAL_CALLEE_BINDING.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Whether this process emits the BOUND shape, so a consumer that would
-/// otherwise redefine one global function (an `incremental.lua` overlay) has to
-/// take the full-chunk path instead. The one predicate every such consumer
-/// reads -- `callee_binding_mode()` already folds in
-/// [`force_global_callee_binding`] and `ROCK_SKULL_CALLEE_BINDING`.
+/// Whether this process emits callees as bound upvalues.
 pub fn callee_binding_is_bound() -> bool {
     callee_binding_mode() == CalleeBindingMode::Upvalue
 }
@@ -1522,9 +1486,7 @@ pub fn callee_binding_is_bound() -> bool {
 /// The shipped emitted shape. See **Callee binding** in `docs/backends.md`:
 /// the measurement (mean frame 5.73 ms -> 4.99 ms, "trace too long" aborts
 /// 1339 -> 386) settled `AUTHOR DECISION -- CALLEE BINDING DEFAULT` in favour
-/// of [`CalleeBindingMode::Upvalue`] on 2026-09-11. `rock stone` keeps hot
-/// reload by publishing a full `main.lua` per edit instead of an overlay;
-/// `ROCK_SKULL_CALLEE_BINDING=global` restores the overlay shape.
+/// of [`CalleeBindingMode::Upvalue`] on 2026-09-11.
 pub const DEFAULT_CALLEE_BINDING: CalleeBindingMode = CalleeBindingMode::Upvalue;
 
 /// LuaJIT's hard limit on upvalues per function prototype (`LJ_MAX_UPVAL`).
@@ -1636,8 +1598,10 @@ pub fn callee_binding_plan(
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
             _ => continue,
         };
+        // Ranks remain fixed through body edits. New backedges must stay
+        // global so the retained factory order remains acyclic.
         match ctx.scc_of(callee) {
-            Some(theirs) if theirs != rank => {}
+            Some(theirs) if theirs < rank => {}
             _ => continue,
         }
         let decl = func_of(ws, callee);

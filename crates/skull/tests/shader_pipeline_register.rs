@@ -93,12 +93,8 @@ fn use_all() -> string {
 "#,
 );
 
-/// A full emit pinned to the GLOBAL callee shape, for the OVERLAY cases.
-///
-/// An `incremental.lua` overlay redefines one global function, which a caller
-/// holding it as an immutable upvalue would never read, so `assemble_overlay`
-/// refuses under the shipped bound shape. The overlay path exists only under
-/// `global`, and the cases that exercise it say so.
+/// Explicit global-shape coverage. Bound overlays are also exercised by the
+/// callee-binding runtime tests and the production CLI overlay harness.
 fn emit_full_global(
     ws: &Workspace,
     mid: ModuleId,

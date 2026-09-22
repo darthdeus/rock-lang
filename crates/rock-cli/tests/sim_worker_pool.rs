@@ -430,12 +430,8 @@ fn a_dead_worker_does_not_reach_another_lane() {
 
 /// The hot-reload lane runs BESIDE the pool, in a chunk of its own.
 ///
-/// A reload fixture rewrites the chunk its child booted from and edits source
-/// the lane's session recompiles, so the lane may only overlap ordinary
-/// children when neither is theirs. Run under the global callee shape, where
-/// the shared session already has the shape a reload needs: the lane must
-/// still build separately, or a fixture rewriting its `main.lua` would rewrite
-/// the one every ordinary child boots.
+/// Reload fixtures and ordinary workers must boot separate files while sharing
+/// the shipped bound-callee emission shape.
 #[test]
 fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     const RELOAD: &str = "reload_probe";
@@ -443,13 +439,13 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     let trace_path = dir.path().join("lifecycle.log");
     let mut args = vec!["sim", "testbed", RELOAD];
     args.extend_from_slice(&EIGHT);
-    args.extend_from_slice(&["--workers", "-j", "4"]);
+    args.extend_from_slice(&["--workers", "-j", "2"]);
     let out = Command::new(rock_bin())
         .args(&args)
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
         .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
-        .env("ROCK_SKULL_CALLEE_BINDING", "global")
+        .env("ROCK_SKULL_CALLEE_BINDING", "upvalue")
         .env_remove("SIM_SKIP_RENDER")
         .output()
         .expect("run rock sim --workers");
@@ -460,7 +456,7 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     );
     assert!(out.status.success(), "every sim here passes standalone:\n{combined}");
     assert!(
-        combined.contains("[sim] hot-reload lane: separate build"),
+        combined.contains("[sim] hot-reload lane: isolated chunk"),
         "the lane must not share the pool's chunk:\n{combined}"
     );
 

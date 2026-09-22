@@ -127,15 +127,6 @@ fn full_reload_requires_restart(restart_reasons: &[String]) -> bool {
     !restart_reasons.is_empty()
 }
 
-/// The one-line session notice for the shipped callee-binding shape, or `None`
-/// under `ROCK_SKULL_CALLEE_BINDING=global`. Logged once at startup, never per
-/// reload: the granularity is a property of the session, not of an edit.
-fn callee_binding_notice() -> Option<&'static str> {
-    skull::callee_binding_is_bound().then_some(
-        "callee binding is on: every reload rewrites the whole main.lua instead of an incremental overlay, so a reload is slower but still preserves live state. Set ROCK_SKULL_CALLEE_BINDING=global for incremental reloads.",
-    )
-}
-
 #[derive(Default)]
 struct StoneChanges {
     needs_libstone_rebuild: bool,
@@ -264,9 +255,6 @@ pub fn do_stone_watch(
         info!("Watching: {}, stdlib/, stone/, compiler", path);
         info!("Game will hot reload on code changes");
         info!("Process will restart on stone-rs/compiler changes");
-        if let Some(notice) = callee_binding_notice() {
-            info!("{notice}");
-        }
     }
 
     // Build engine cdylibs (stone-rs + optional stone-video per game's
@@ -1581,7 +1569,7 @@ pub fn do_replay_window(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_perf_env, apply_run_env, callee_binding_notice, consume_request_file,
+        apply_perf_env, apply_run_env, consume_request_file,
         flight_recorder_for, frame_exit_result, frame_watchdog_config,
         full_reload_requires_restart, parse_checkpoint_interval, prepare_flight_recorder,
         replay_usage, replay_usage_warning, session_usage, session_usage_warning,
@@ -1590,28 +1578,6 @@ mod tests {
     };
     use crate::watch::is_compiler_source;
     use std::time::Duration;
-
-    /// The session notice tracks the emitted shape and names the escape hatch:
-    /// a user who wants incremental reloads back has to be told how.
-    #[test]
-    fn the_callee_binding_notice_tracks_the_emitted_shape() {
-        match callee_binding_notice() {
-            Some(notice) => {
-                assert!(
-                    skull::callee_binding_is_bound(),
-                    "a notice was produced under the global-lookup shape"
-                );
-                assert!(
-                    notice.contains("ROCK_SKULL_CALLEE_BINDING=global"),
-                    "the notice must name the escape hatch: {notice}"
-                );
-            }
-            None => assert!(
-                !skull::callee_binding_is_bound(),
-                "the bound shape must announce that reloads are full"
-            ),
-        }
-    }
 
     #[test]
     fn structural_reload_requests_clean_restart() {

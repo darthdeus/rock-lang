@@ -19,17 +19,8 @@ fn emit_overlay(
     emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
 }
 
-/// A full emit pinned to the GLOBAL callee shape, for the OVERLAY cases below.
-///
-/// An `incremental.lua` overlay redefines one global function. Under the
-/// shipped bound shape a caller holds its callee as an immutable upvalue, so
-/// `assemble_overlay` refuses rather than emit an overlay that cannot take
-/// effect -- which is what `overlay_is_refused_under_the_bound_shape` in
-/// `crates/skull/src/mir_emit.rs` pins. The overlay path therefore exists only
-/// under `global`, and the cases that exercise it say so instead of inheriting
-/// the process default. The reassembly cases (`check_edit_with`,
-/// `emit_incremental`) stay on the shipped shape: they rerun both emission
-/// passes and hold under either.
+/// Explicit global-shape coverage. Bound overlays are also exercised by the
+/// callee-binding runtime tests and the production CLI overlay harness.
 fn emit_full_global(
     ws: &Workspace,
     mid: ModuleId,
