@@ -3561,7 +3561,7 @@ fn state_schema_js(
             .initializer_identity
             .map_or_else(|| "null".to_string(), |identity| identity.to_string());
         out.push_str(&format!(
-            "{{kind:{},name:{},identity:{},fingerprint:{},physical:[{}],session_keys:[{}],owner:{},initializer_identity:{}}},",
+            "{{kind:{},name:{},identity:{},fingerprint:{},physical:[{}],session_keys:[{}],owner:{},initializer_identity:{},storage_free:{}}},",
             js_string_lit(kind)?,
             js_string_lit(name)?,
             js_string_lit(&entry.identity)?,
@@ -3570,6 +3570,7 @@ fn state_schema_js(
             session_keys,
             owner,
             initializer_identity,
+            entry.storage_free,
         ));
     }
     out.push_str("];\nvar __ROCK_STATE_IMAGE_PLAN = {schema_id:");

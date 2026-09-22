@@ -1828,8 +1828,8 @@ fn state_schema_lua(
             .next()
             .unwrap_or(&entry.identity);
         out.push_str(&format!(
-            "{{kind={kind:?},name={name:?},identity={:?},fingerprint={:?},physical={{{physical}}},session_keys={{{keys}}},owner={owner},initializer_identity={initializer_identity}}},",
-            entry.identity, entry.fingerprint
+            "{{kind={kind:?},name={name:?},identity={:?},fingerprint={:?},physical={{{physical}}},session_keys={{{keys}}},owner={owner},initializer_identity={initializer_identity},storage_free={}}},",
+            entry.identity, entry.fingerprint, entry.storage_free
         ));
     }
     out.push_str("}\n");
