@@ -4,7 +4,7 @@
 //! diagnostic carries no information about WHICH site was at fault.
 //!
 //! The other half of the original defect -- a rejection landing in stdlib losing
-//! its snippet and labels, because `<bone-stdlib:NAME>` is in no project source
+//! its snippet and labels, because the stdlib module is in no project source
 //! set -- is covered at the RENDERER level by
 //! `bone_backend::tests::a_diagnostic_spanned_into_stdlib_renders_its_snippet`.
 //! It cannot be covered from here: where a rejection lands is a property of

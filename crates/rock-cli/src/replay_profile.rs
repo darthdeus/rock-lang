@@ -247,7 +247,10 @@ pub(crate) fn run(
     let mut any_failure = false;
 
     for run_index in 1..=runs {
-        let mut cmd = rock_host::project::build_luajit_command(&compiled.lua_file, app_args);
+        let mut cmd = crate::headless_scope::headless_command(rock_host::project::build_luajit_command(
+            &compiled.lua_file,
+            app_args,
+        ));
         cmd.env("FRAME_COUNT", (to + 1).to_string())
             .env("STONE_HEADLESS", "1")
             .env("STONE_REPLAY", replay_path)
