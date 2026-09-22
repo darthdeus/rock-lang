@@ -1600,6 +1600,20 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     if type(obj) == "cdata" then
         local info = __rock_c_struct_of(obj)
         if info then return info.copy(obj) end
+        local storage = _G.__ROCK_NB_STORAGE
+        local desc = storage and storage[tostring(ffi.typeof(obj))]
+        if desc then
+            if seen[obj] then return seen[obj] end
+            local bytes = ffi.sizeof(obj)
+            if bytes % desc.elem_size ~= 0 then
+                error("deepcopy: described storage has incomplete elements", 0)
+            end
+            local copy = ffi.new(desc.ctype .. "[?]", bytes / desc.elem_size)
+            seen[obj] = copy
+            ffi.copy(copy, obj, bytes)
+            return copy
+        end
+        -- Foreign pointers have no owned storage description to copy.
         return obj
     end
     if type(obj) ~= "table" then
@@ -1611,9 +1625,32 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
     local copy = {}
     seen[obj] = copy
+    local storage_views
+    local storage = _G.__ROCK_NB_STORAGE
     for k, v in __rock_field_pairs(obj, "copy") do
         -- copy *both* key and value, in case either is a table.
-        copy[__rock_deepcopy_value(k, seen)] = __rock_deepcopy_value(v, seen)
+        local copied_key = __rock_deepcopy_value(k, seen)
+        local copied_value = __rock_deepcopy_value(v, seen)
+        copy[copied_key] = copied_value
+        if storage and type(v) == "cdata" then
+            local desc = storage[tostring(ffi.typeof(v))]
+            if desc and next(desc.views) then
+                storage_views = storage_views or {}
+                storage_views[#storage_views + 1] = { source = v, target = copied_value, views = desc.views }
+            end
+        end
+    end
+    if storage_views then
+        for _, shape in ipairs(storage_views) do
+            local base = ffi.cast("uintptr_t", shape.source)
+            for field, cast_ty in pairs(shape.views) do
+                local view = rawget(obj, field)
+                if type(view) == "cdata" and ffi.istype(cast_ty, view)
+                    and ffi.cast("uintptr_t", view) == base then
+                    copy[field] = ffi.cast(cast_ty, shape.target)
+                end
+            end
+        end
     end
     -- Preserve the metatable: a capturing lambda is an env record carrying
     -- `__rock_fn_mt` (its `__call` is what makes it invokable) -- a copy that
