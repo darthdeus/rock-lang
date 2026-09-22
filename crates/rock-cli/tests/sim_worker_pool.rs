@@ -439,7 +439,7 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     let trace_path = dir.path().join("lifecycle.log");
     let mut args = vec!["sim", "testbed", RELOAD];
     args.extend_from_slice(&EIGHT);
-    args.extend_from_slice(&["--workers", "-j", "4"]);
+    args.extend_from_slice(&["--workers", "-j", "2"]);
     let out = Command::new(rock_bin())
         .args(&args)
         .current_dir(workspace_root())

@@ -2869,10 +2869,8 @@ fn run_specs_worker_mode(
         for (i, reason) in poolable.iter() {
             println!("[sim] {}: isolated ({reason})", specs[*i]);
         }
-        // The hot-reload lane also reports the SHAPE its own chunk carries; its
-        // reload path only works under that one.
         for (i, reason) in exclusive.iter() {
-            println!("[sim] {}: isolated ({reason}; callee binding `global`)", specs[*i]);
+            println!("[sim] {}: isolated ({reason})", specs[*i]);
         }
     }
 
