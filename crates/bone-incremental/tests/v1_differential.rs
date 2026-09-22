@@ -65,7 +65,7 @@ fn warm() -> Vec<Ast> {
 
 /// One reference a body resolved, anchored by source text so an incremental
 /// workspace and a fresh one compare despite different arena indices and
-/// module ids: (file, start, end, kind, key, hidden-origin key).
+/// module ids: (file, start, end, kind, key, merged-family members).
 type Reference = (String, usize, usize, &'static str, String, Option<String>);
 
 #[derive(Debug, PartialEq, Eq)]

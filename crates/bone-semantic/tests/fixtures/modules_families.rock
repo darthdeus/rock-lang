@@ -1,7 +1,8 @@
 //! Modules-v1 overload families that span more than one definition (spec 8.3,
-//! 8.5): a declared or imported operator keeps the built-in operator family,
+//! 8.5): a declared or imported operator joins the built-in operator family,
 //! explicit imports of different callables compose at their tier, glob-tier
-//! callables of different modules compose at theirs, and
+//! callables of different modules compose at theirs, a nearer tier's
+//! callables join the lower tiers' (see `modules_callable_families.rock`), and
 //! compound assignment reads the family its binary operator reads. Unary
 //! `-x` / `!x` (`__unm` / `__not`) read a family lowering decides the same way.
 //!
