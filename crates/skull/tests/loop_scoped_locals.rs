@@ -10,7 +10,7 @@
 //! ABOVE the loop control slots and get pruned, collapsing the inherited set to
 //! the genuinely-live values. Standalone repro + in-game abort sites:
 //! `benchmarks/nyicoal/`, `docs/gc-pressure-reduction-plan.md` item 1.
-use crate::common::{emit_module, function_body};
+use crate::common::{emit_module, function_body, run_luajit};
 
 /// Multi-use loop-body temps (`t1`/`t2` below are used twice, so they are not
 /// tree-folded and need real `r<N>` registers) get their `local` declaration
@@ -89,4 +89,65 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
             );
         }
     }
+}
+
+#[test]
+fn compound_while_loop_carried_field_loads_and_runs() {
+    let src = r#"
+struct Selection { count: int }
+fn select(c: Selection, capacity: int, budget: int) -> int {
+    let slot = 0
+    while slot < capacity && c.count < budget {
+        if slot % 2 == 0 { c.count += 1 }
+        slot += 1
+    }
+    return c.count
+}
+fn main() {
+    print("{select(Selection { count: 0 }, 8, 2)}")
+    print("{select(Selection { count: 0 }, 3, 9)}")
+    print("{select(Selection { count: 0 }, 0, 9)}")
+    print("{select(Selection { count: 0 }, 8, 0)}")
+}
+"#;
+    let lua = emit_module(src);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "compound_while_loop_carried"), "2\n2\n0\n0");
+}
+
+#[test]
+fn compound_while_preserves_short_circuit_effects_inside_for() {
+    let src = r#"
+struct Probe { count: int, checks: int }
+fn below(p: Probe, budget: int) -> bool {
+    p.checks += 1
+    return p.count < budget
+}
+fn scan(p: Probe, capacity: int, budget: int) {
+    for round in 0..2 {
+        let slot = 0
+        while slot < capacity && below(p, budget) {
+            p.count += 1
+            slot += 1
+        }
+    }
+}
+fn either(p: Probe, capacity: int, budget: int) {
+    let slot = 0
+    while slot < capacity || below(p, budget) {
+        p.count += 1
+        slot += 1
+    }
+}
+fn main() {
+    let p = Probe { count: 0, checks: 0 }
+    scan(p, 0, 9)
+    print("{p.count} {p.checks}")
+    scan(p, 4, 2)
+    print("{p.count} {p.checks}")
+    either(p, 3, 6)
+    print("{p.count} {p.checks}")
+}
+"#;
+    let lua = emit_module(src);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "compound_while_effects"), "0 0\n2 4\n6 6");
 }
