@@ -241,6 +241,23 @@ fn a_sibling_glob_is_used_unless_it_moves_a_site() {
     assert!(run.stdout.contains("3 5 0.5"), "{}", shown(&run));
 }
 
+/// The baseline cannot lower a body that names the unresolved name, so it
+/// has no sites there to compare; a glob that wins another call's exact tie
+/// by tier (spec 8.3) in that same body is caught against the explicit
+/// import instead, and falls back to it.
+#[test]
+fn a_sibling_glob_that_moves_a_site_in_the_unresolved_body_falls_back() {
+    let dir = scratch("glob-same-body");
+    geo(&dir, "\npub fn smoothstep(a: float, b: float, t: float) -> float {\n    9.0\n}\n");
+    let main = "use geo::shapes::*;\n\nfn main() {\n    print(\"{depth()} {volume()} {smoothstep(0.0, 1.0, 0.5)}\")\n}\n";
+    app(&dir, "geo = { path = \"../geo\" }\n", main);
+    let apply = fix(&dir, "app", &["--apply", "--format", "json"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    assert_eq!(fixes(&json(&apply)), [("volume".to_string(), "geo::solids::volume".to_string())]);
+    let run = rock(&dir, &["run", "app"]);
+    assert!(run.stdout.contains("3 5 0.5"), "{}", shown(&run));
+}
+
 /// A package that does not parse is an analysis failure (exit 4).
 #[test]
 fn a_package_that_does_not_parse_is_an_analysis_failure() {

@@ -230,7 +230,7 @@ impl RefKind {
     }
 
     /// Compared per file rather than by site (`sites`).
-    fn per_file(self) -> bool {
+    pub(crate) fn per_file(self) -> bool {
         matches!(self, RefKind::Type | RefKind::Pattern | RefKind::Annotation)
     }
 }

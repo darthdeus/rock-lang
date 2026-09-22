@@ -22,7 +22,9 @@
 //! resolved must resolve to the same target in the candidate, and the
 //! candidate may have no error the baseline lacked. An explicit import of a
 //! name no tier binds cannot rebind another name, so when the baseline does
-//! not check at all, only explicit imports are planned.
+//! not check at all, only explicit imports are planned, and a glob plan is
+//! also compared site by site with the same fixes as explicit imports, which
+//! covers the bodies the baseline could not lower.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write as _;
@@ -101,6 +103,9 @@ struct Fix {
     /// The path after `use`, without the `;`.
     path: String,
     glob: bool,
+    /// The explicit import of the definition, which `path` equals unless
+    /// `glob`.
+    explicit: String,
     /// The definition the import names.
     origin: String,
 }
@@ -401,7 +406,7 @@ fn classify(ws: &Workspace, frag: &FragmentScope, site: Site, allow_globs: bool,
             } else {
                 one.path.clone()
             };
-            plan.fixes.push(Fix { site, path, glob, origin: origin(ws, one) });
+            plan.fixes.push(Fix { site, path, glob, explicit: one.path.clone(), origin: origin(ws, one) });
         }
         [] => {
             let reasons = unavailable(ws, frag, site.name);
@@ -521,6 +526,7 @@ fn verify(ctx: &Ctx, files: &[FixFile], baseline: &Round, last: &Round, edits: &
                 base.len(),
                 last.errors.len()
             );
+            problems.extend(glob_moves(ctx, files, edits, &file_pkg, (cws, crefs), plan));
         }
         (None, _) => {
             plan.verification = format!(
@@ -537,6 +543,60 @@ fn verify(ctx: &Ctx, files: &[FixFile], baseline: &Round, last: &Round, edits: &
     if !problems.is_empty() {
         plan.refused = Some(problems);
     }
+}
+
+/// A body that names an unresolved name has no baseline sites, yet a glob
+/// can rebind another call there by winning its exact tie by tier (spec
+/// 8.3). The same fixes as explicit imports bind only the names they fix,
+/// each of which no tier bound, so that candidate is the reference for every
+/// site of a glob plan.
+fn glob_moves(
+    ctx: &Ctx,
+    files: &[FixFile],
+    edits: &BTreeMap<usize, Vec<Edit>>,
+    file_pkg: &HashMap<Ustr, u32>,
+    (cws, crefs): (&Workspace, &[modules_analysis::Ref]),
+    plan: &Plan,
+) -> Vec<String> {
+    if !plan.fixes.iter().any(|f| f.glob) {
+        return Vec::new();
+    }
+    let explicit_fixes: Vec<Fix> = plan
+        .fixes
+        .iter()
+        .map(|f| Fix { site: f.site.clone(), path: f.explicit.clone(), glob: false, explicit: f.explicit.clone(), origin: f.origin.clone() })
+        .collect();
+    let explicit_edits = edits_for(files, &explicit_fixes);
+    let reference = match Round::check(ctx, files, &explicit_edits) {
+        Ok(r) => r,
+        Err((stage, m)) => return vec![format!("the explicit-import check failed in its {stage}: {m}")],
+    };
+    let Some((rws, rrefs)) = &reference.resolved else {
+        return vec![format!(
+            "the explicit-import check stops in its {}, so the globs cannot be verified",
+            reference.stopped.as_deref().unwrap_or("check")
+        )];
+    };
+    let to_base = |sites: Sites, edits: &BTreeMap<usize, Vec<Edit>>| -> Sites {
+        let by_id: HashMap<Ustr, &[Edit]> = edits.iter().map(|(fi, e)| (files[*fi].id, e.as_slice())).collect();
+        sites
+            .into_iter()
+            .map(|(mut k, v)| {
+                if let (Some(e), false) = (by_id.get(&k.file), k.kind.per_file()) {
+                    k.start = unmap(e, k.start);
+                    k.end = unmap(e, k.end);
+                }
+                (k, v)
+            })
+            .collect()
+    };
+    let with_globs = to_base(sites(cws, crefs, file_pkg, &HashMap::new()), edits);
+    let explicit = to_base(sites(rws, rrefs, file_pkg, &HashMap::new()), &explicit_edits);
+    explicit
+        .iter()
+        .filter(|(k, targets)| with_globs.get(*k) != Some(*targets))
+        .map(|(k, targets)| modules_analysis::describe_change(k, targets, with_globs.get(k).map(Vec::as_slice).unwrap_or(&[])))
+        .collect()
 }
 
 /// Write the planned imports, refusing a file that changed since it was read,
