@@ -975,6 +975,24 @@ fn mag_world_presentation_state_has_explicit_owners() {
         );
     }
 
+    for (field, record, projection) in [
+        ("ground_items", "Arena<GroundItem>", "[[GroundItemPresentation]?]"),
+        ("corpses", "Arena<Corpse>", "[[CorpsePresentation]?]"),
+    ] {
+        assert!(
+            world_state
+                .lines()
+                .any(|line| line.trim() == format!("{field}: {record},")),
+            "WorldState must own the authoritative {field} arena"
+        );
+        assert!(
+            presentation_state
+                .lines()
+                .any(|line| line.trim() == format!("{field}: {projection} = [],")),
+            "MagWorldPresentation must own the {field} host projection"
+        );
+    }
+
     let digest = fs::read_to_string(repo.join("mag/simulation_digest.rock"))
         .expect("read MAG simulation digest");
     let fields: Vec<_> = world_state
