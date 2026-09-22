@@ -63,8 +63,8 @@ mod sim_worker_differential;
 mod mag_worker_product_tests;
 #[path = "sim_memory_cap.rs"]
 mod sim_memory_cap;
-#[path = "sim_scope.rs"]
-mod sim_scope;
+#[path = "headless_scope.rs"]
+mod headless_scope;
 #[path = "sim_reload_lane.rs"]
 mod sim_reload_lane;
 #[path = "sim_worker_pool.rs"]

@@ -1,5 +1,5 @@
 [package]
-name = "sim-scope"
+name = "headless-scope"
 version = "0.1.0"
 type = "bin"
 
@@ -7,7 +7,7 @@ type = "bin"
 stone = { path = "../../../../stone" }
 
 [build.vars]
-GIT_SHA = "sim-scope"
+GIT_SHA = "headless-scope"
 BUILD_UNIX = "0"
 BUILD_DATE = "test"
 CHANNEL = { builtin = "channel" }

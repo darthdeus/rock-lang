@@ -4474,7 +4474,7 @@ fn run_worker(
     let reload = parts.iter().any(|p| is_reload_lane(&p.env));
     let lua_file = worker_chunk_path(Path::new(output), reload);
     let mut cmd =
-        crate::sim_scope::worker_command(rock_host::project::build_luajit_command(&lua_file, &[]));
+        crate::headless_scope::headless_command(rock_host::project::build_luajit_command(&lua_file, &[]));
     // `ROCK_RUN_SIM` / `OUT` / `FRAME_COUNT` carry the FIRST entry: they are read
     // during boot (`sim_mode_active()` gates audio, the screenshot helper reads
     // the budget) before the queue starts, and the child re-publishes them
@@ -5049,7 +5049,7 @@ fn run_worker(
         if i == blamed {
             summary.errors.extend(std::mem::take(&mut reload_errors));
             summary.errors.extend(memory_error.take());
-            if let Some(note) = crate::sim_scope::outside_kill_note(&status, runner_killed) {
+            if let Some(note) = crate::headless_scope::outside_kill_note(&status, runner_killed) {
                 summary.errors.push(SiteMessage { message: note, site: String::new() });
             }
             if reload_summary.requests > 0 {
