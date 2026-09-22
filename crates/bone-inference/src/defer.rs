@@ -241,7 +241,7 @@ pub(crate) fn field_ty_or_defer(
             }
         }
     }
-    struct_field_ty(gamma, base_ty, field, span)
+    Ok(struct_field_ty(gamma, base_ty, field, span)?)
 }
 
 /// End of body: drain what the body tail pinned, then report anything still

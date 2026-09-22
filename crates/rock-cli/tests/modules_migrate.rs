@@ -19,11 +19,22 @@ fn repo_root() -> PathBuf {
     p
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rock_modules_migrate_{tag}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.canonicalize().unwrap()
+fn scratch(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("rock_modules_migrate_{tag}_"))
+        .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
+        .expect("create isolated module fixture")
+}
+
+#[test]
+fn scratch_invocations_do_not_replace_each_others_graph() {
+    let first_fixture = scratch("concurrent_graph");
+    let first = first_fixture.path();
+    write(&first.join("owner.txt"), "first invocation");
+    let second_fixture = scratch("concurrent_graph");
+    let second = second_fixture.path();
+    assert_ne!(first, second, "independent migration fixtures must not share a directory");
+    assert_eq!(read(&first.join("owner.txt")), "first invocation");
 }
 
 fn write(path: &Path, body: &str) {
@@ -91,7 +102,8 @@ fn names(list: &serde_json::Value) -> Vec<String> {
 /// consumer still build and run, and a second run has nothing to do.
 #[test]
 fn a_legacy_library_migrates_with_its_exports_closure_and_ascriptions() {
-    let dir = scratch("leaf");
+    let fixture = scratch("leaf");
+    let dir = fixture.path();
     write(&dir.join("lib/stick.toml"), &manifest("leaf-lib", ""));
     write(
         &dir.join("lib/lib.rock"),
@@ -152,7 +164,8 @@ fn a_legacy_library_migrates_with_its_exports_closure_and_ascriptions() {
 /// resolving and qualifies it, and the result selects the same body.
 #[test]
 fn a_std_call_an_own_family_would_hide_is_qualified() {
-    let dir = scratch("hidden_std");
+    let fixture = scratch("hidden_std");
+    let dir = fixture.path();
     write(&dir.join("lib/stick.toml"), &manifest("hide-lib", ""));
     write(
         &dir.join("lib/lib.rock"),
@@ -178,7 +191,8 @@ fn a_std_call_an_own_family_would_hide_is_qualified() {
 /// dependency gets no line.
 #[test]
 fn a_used_v1_dependency_is_imported_through_the_facade() {
-    let dir = scratch("facade");
+    let fixture = scratch("facade");
+    let dir = fixture.path();
     let v1 = "[package]\nname = \"base-lib\"\nversion = \"0.1.0\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n";
     write(&dir.join("base/stick.toml"), v1);
     write(&dir.join("base/base.rock"), "pub fn base_value() -> int {\n    40\n}\n");
@@ -211,7 +225,8 @@ fn a_used_v1_dependency_is_imported_through_the_facade() {
 /// `imports.rock`, and the migrated package's tests run.
 #[test]
 fn an_allow_legacy_dependency_is_imported_through_its_view() {
-    let dir = scratch("legacy_view");
+    let fixture = scratch("legacy_view");
+    let dir = fixture.path();
     write(&dir.join("old/stick.toml"), &manifest("old-lib", ""));
     write(&dir.join("old/old.rock"), "fn old_value() -> int {\n    40\n}\n");
     write(
@@ -241,7 +256,8 @@ fn an_allow_legacy_dependency_is_imported_through_its_view() {
 /// and listed as test-only.
 #[test]
 fn blockers_are_reported_and_nothing_is_written() {
-    let dir = scratch("blocked");
+    let fixture = scratch("blocked");
+    let dir = fixture.path();
     write(&dir.join("old/stick.toml"), &manifest("old-lib", ""));
     write(&dir.join("old/old.rock"), "fn old_value() -> int {\n    1\n}\n");
     write(&dir.join("lib/stick.toml"), &manifest("b-lib", "[dependencies]\nold-lib = { path = \"../old\" }\n"));
@@ -276,7 +292,8 @@ fn blockers_are_reported_and_nothing_is_written() {
 /// against stone's Lua local `pc`).
 #[test]
 fn raw_abi_census_counts_only_real_references() {
-    let dir = scratch("raw_abi_exact");
+    let fixture = scratch("raw_abi_exact");
+    let dir = fixture.path();
     write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
     write(&dir.join("lib/lib.rock"), "fn pc() -> int {\n    3\n}\n");
     write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
@@ -303,7 +320,8 @@ fn raw_abi_census_counts_only_real_references() {
 /// (exit 4), never a plan.
 #[test]
 fn a_package_that_does_not_check_is_an_analysis_failure() {
-    let dir = scratch("broken");
+    let fixture = scratch("broken");
+    let dir = fixture.path();
     write(&dir.join("lib/stick.toml"), &manifest("broken-lib", ""));
     write(&dir.join("lib/lib.rock"), "fn wrong() -> int {\n    \"not an int\"\n}\n");
     let run = migrate(&dir, "lib", &["--check", "--format", "json"]);
@@ -341,7 +359,7 @@ fn copy_sources(from: &Path, to: &Path) {
 /// only consumer tests and sims call; a definition a consumer's tests use is
 /// exported like any other use (author decision), and reported as test-only.
 ///
-/// One consumer, chess-game, is v1 itself since `c1c607dc5`, so de-migrating
+/// The chess-game and chess-render consumers are v1, so de-migrating
 /// chess-core turns its declared dependency into a legacy boundary. The copy
 /// marks it `allow_legacy = true`, which is what the graph would have to say
 /// for the pre-migration world to be well formed -- without it the planner
@@ -349,7 +367,8 @@ fn copy_sources(from: &Path, to: &Path) {
 /// a v1 consumer of the package being migrated.
 #[test]
 fn chess_core_migrates_to_the_committed_hand_conversion() {
-    let dir = scratch("chess_core");
+    let fixture = scratch("chess_core");
+    let dir = fixture.path();
     copy_chess_graph(&dir);
     let core = dir.join("libs/chess-core");
     let committed: Vec<(String, String)> = ["chess_board.rock", "chess_moves.rock", "stick.toml"]
@@ -369,20 +388,23 @@ fn chess_core_migrates_to_the_committed_hand_conversion() {
         assert_ne!(&legacy, text, "{f} must change when de-migrated");
         write(&core.join(f), &legacy);
     }
-    let game_manifest_path = dir.join("libs/chess-game/stick.toml");
-    let game_manifest = read(&game_manifest_path);
-    let allow_legacy = game_manifest.replace(
-        "chess-core = { path = \"../chess-core\" }",
-        "chess-core = { path = \"../chess-core\", allow_legacy = true }",
-    );
-    assert_ne!(allow_legacy, game_manifest, "the v1 consumer's chess-core edge must change");
-    write(&game_manifest_path, &allow_legacy);
+    for consumer in ["chess-game", "chess-render"] {
+        let game_manifest_path = dir.join(format!("libs/{consumer}/stick.toml"));
+        let game_manifest = read(&game_manifest_path);
+        let allow_legacy = game_manifest.replace(
+            "chess-core = { path = \"../chess-core\" }",
+            "chess-core = { path = \"../chess-core\", allow_legacy = true }",
+        );
+        assert_ne!(allow_legacy, game_manifest, "the v1 consumer's chess-core edge must change");
+        write(&game_manifest_path, &allow_legacy);
+    }
 
     let consumers = ["--consumer", "libs/chess-game", "--consumer", "libs/chess-render", "--consumer", "games/chess", "--consumer", "games/chesslings"];
 
     let mut args = vec!["--check", "--format", "json"];
     args.extend_from_slice(&consumers);
     let v = json(&migrate(&dir, "libs/chess-core", &args));
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
     assert_eq!(v["blockers"].as_array().unwrap().len(), 0, "{v}");
     let mut test_only: Vec<&str> =
         v["test_only_uses"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();

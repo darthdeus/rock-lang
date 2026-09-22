@@ -1535,6 +1535,49 @@ pub const MAX_BOUND_CALLEES: usize = 60;
 /// The factory holding the only copy of a bound function's body.
 pub const CALLEE_FACTORY_PREFIX: &str = "__rock_mk_";
 
+/// Recover the body symbol from a top-level emitted definition header.
+/// Factories return the body on the same line, preserving body-local offsets.
+pub fn emitted_body_name(line: &str) -> Option<&str> {
+    let name = if let Some(rest) = line.strip_prefix("function ") {
+        rest.split_once('(')?.0
+    } else {
+        let rest = line.strip_prefix(CALLEE_FACTORY_PREFIX)?;
+        let (name, signature) = rest.split_once(" = function(")?;
+        let (_, body) = signature.split_once(')')?;
+        body.strip_prefix(" return function(")?;
+        name
+    };
+    is_lua_ident(name).then_some(name)
+}
+
+#[cfg(test)]
+mod emitted_body_header_tests {
+    use super::emitted_body_name;
+
+    #[test]
+    fn recognizes_both_emitted_definition_shapes() {
+        assert_eq!(emitted_body_name("function leaf_int(c0)"), Some("leaf_int"));
+        assert_eq!(emitted_body_name("__rock_mk_leaf_int = function(callee) return function(c0)"), Some("leaf_int"));
+    }
+
+    #[test]
+    fn rejects_non_headers_and_malformed_factory_shapes() {
+        for line in [
+            "leaf = __rock_mk_leaf(callee)",
+            "__rock_mk_leaf = function(callee)",
+            "__rock_mk_leaf = function(callee) return callee()",
+            "__rock_mk_ = function() return function()",
+            "__rock_mk_bad-name = function() return function()",
+            "function ()", "function bad.name()", "function 1bad()",
+            "  function nested()", "-- function commented()",
+            "local function nested()",
+        ] {
+            assert_eq!(emitted_body_name(line), None, "{line}");
+        }
+    }
+}
+
+
 /// The callees one body binds as immutable upvalues, and the rank its binding
 /// line must sort at. Built by [`callee_binding_plan`]; consumed by the emitter
 /// (which names the factory parameters) and by the assembler (which emits the

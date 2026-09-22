@@ -192,7 +192,7 @@ fn collect_stats(
     let mut fns = Vec::new();
     for module in ws.modules.iter() {
         let file = module.file.as_str().to_string();
-        if file.starts_with("<bone-stdlib:") || !file.contains(proj_marker) {
+        if session.warm_mids.contains(&module.id) || !file.contains(proj_marker) {
             continue;
         }
         let text = read_survey_source(&file)?;

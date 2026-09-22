@@ -143,8 +143,8 @@ fn cargo_target_dir(rock_root: &Path) -> PathBuf {
     }
 }
 
-fn dep_info_path(root: &Path, src_stem: &str) -> PathBuf {
-    let debug = cargo_target_dir(root).join("debug");
+fn dep_info_path(target_dir: &Path, src_stem: &str) -> PathBuf {
+    let debug = target_dir.join("debug");
     #[cfg(target_os = "windows")]
     return debug.join(format!("{src_stem}.d"));
     #[cfg(not(target_os = "windows"))]
@@ -188,9 +188,9 @@ fn makefile_words(text: &str) -> Vec<String> {
     words
 }
 
-fn local_dep_inputs(root: &Path, src_stem: &str) -> Result<Vec<String>> {
+fn local_dep_inputs(root: &Path, target_dir: &Path, src_stem: &str) -> Result<Vec<String>> {
     let root = fs_err::canonicalize(root)?;
-    let dep_info = dep_info_path(&root, src_stem);
+    let dep_info = dep_info_path(target_dir, src_stem);
     let text = fs_err::read_to_string(&dep_info).map_err(|error| {
         anyhow::anyhow!(
             "engine build receipt cannot read Cargo dep-info `{}`: {error}",
@@ -267,9 +267,14 @@ fn inputs_sha1(root: &Path, inputs: &[String]) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn capture_receipt_lib(root: &Path, src_stem: &str, dst_stem: &str) -> Result<ReceiptLib> {
+fn capture_receipt_lib(
+    root: &Path,
+    target_dir: &Path,
+    src_stem: &str,
+    dst_stem: &str,
+) -> Result<ReceiptLib> {
     let root = fs_err::canonicalize(root)?;
-    let inputs = local_dep_inputs(&root, src_stem)?;
+    let inputs = local_dep_inputs(&root, target_dir, src_stem)?;
     let inputs_sha1 = inputs_sha1(&root, &inputs)?;
     let staged = staged_cdylib_path(&root, dst_stem);
     let staged_sha1 = sha1_file(&staged).map_err(|error| {
@@ -453,21 +458,38 @@ mod tests {
 
     fn receipt_fixture() -> (tempfile::TempDir, ReceiptLib) {
         let root = tempfile::tempdir().expect("tempdir");
+        let target_dir = root.path().join("target");
         let source = root.path().join("stone-rs/src/lib.rs");
         fs_err::create_dir_all(source.parent().unwrap()).expect("source dir");
-        fs_err::create_dir_all(root.path().join("target/debug")).expect("target dir");
+        fs_err::create_dir_all(target_dir.join("debug")).expect("target dir");
         fs_err::create_dir_all(root.path().join("tmp")).expect("stage dir");
         fs_err::write(&source, "pub fn version() -> u32 { 1 }\n").expect("source");
         fs_err::write(root.path().join("Cargo.toml"), "[workspace]\n").expect("manifest");
         fs_err::write(
-            dep_info_path(root.path(), "probe"),
+            dep_info_path(&target_dir, "probe"),
             format!("target/debug/libprobe.rlib: {}\n", source.display()),
         )
         .expect("dep info");
         fs_err::write(staged_cdylib_path(root.path(), "probe"), b"built artifact")
             .expect("staged dylib");
-        let receipt = capture_receipt_lib(root.path(), "probe", "probe").expect("capture");
+        let receipt =
+            capture_receipt_lib(root.path(), &target_dir, "probe", "probe").expect("capture");
         (root, receipt)
+    }
+
+    #[test]
+    fn receipt_fixture_writes_dep_info_under_its_workspace_root() {
+        let (root, _) = receipt_fixture();
+        let debug = root.path().join("target/debug");
+        #[cfg(target_os = "windows")]
+        let dep_info = debug.join("probe.d");
+        #[cfg(not(target_os = "windows"))]
+        let dep_info = debug.join("libprobe.d");
+        assert!(
+            dep_info.is_file(),
+            "receipt fixture dep-info escaped `{}`",
+            root.path().display()
+        );
     }
 
     #[test]
@@ -713,9 +735,15 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
         build_optional_engine_lib_fresh(lib)?;
     }
 
-    let mut libs = vec![capture_receipt_lib(&root, "stone_rs", "stone")?];
+    let target_dir = cargo_target_dir(&root);
+    let mut libs = vec![capture_receipt_lib(&root, &target_dir, "stone_rs", "stone")?];
     for lib in OPTIONAL_ENGINE_LIBS.iter().filter(|lib| optional.contains(lib.need)) {
-        libs.push(capture_receipt_lib(&root, lib.src_stem, lib.dst_stem)?);
+        libs.push(capture_receipt_lib(
+            &root,
+            &target_dir,
+            lib.src_stem,
+            lib.dst_stem,
+        )?);
     }
     let receipt = EngineBuildReceipt {
         version: ENGINE_BUILD_RECEIPT_VERSION,

@@ -947,8 +947,12 @@ pub fn coerce_to_interface(
 
     for (fname, fty, fwrite_vis) in ifields {
         let actual = struct_field_ty(gamma, from, fname, span).map_err(|e| {
-            if e.message.contains("has no field") || e.message.contains("no struct has a field") {
-                CompilerError::new_with_label(
+            match e {
+                StructFieldError::MissingField { .. }
+                | StructFieldError::AccessDenied {
+                    denied: AccessDenied::NoSuchField { .. },
+                    ..
+                } => CompilerError::new_with_label(
                     span,
                     format!(
                         "type {} does not have required field `{}` of interface `{}`",
@@ -956,9 +960,8 @@ pub fn coerce_to_interface(
                         fname,
                         iname
                     ),
-                )
-            } else {
-                e
+                ),
+                other => other.into(),
             }
         })?;
 

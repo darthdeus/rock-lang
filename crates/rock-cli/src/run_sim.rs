@@ -4473,7 +4473,8 @@ fn run_worker(
 
     let reload = parts.iter().any(|p| is_reload_lane(&p.env));
     let lua_file = worker_chunk_path(Path::new(output), reload);
-    let mut cmd = rock_host::project::build_luajit_command(&lua_file, &[]);
+    let mut cmd =
+        crate::headless_scope::headless_command(rock_host::project::build_luajit_command(&lua_file, &[]));
     // `ROCK_RUN_SIM` / `OUT` / `FRAME_COUNT` carry the FIRST entry: they are read
     // during boot (`sim_mode_active()` gates audio, the screenshot helper reads
     // the budget) before the queue starts, and the child re-publishes them
@@ -4756,6 +4757,7 @@ fn run_worker(
     let timeout = Duration::from_secs(sim_timeout_secs());
     let memory_cap_mb = sim_memory_cap_mb();
     let mut memory_error: Option<SiteMessage> = None;
+    let mut runner_killed = false;
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
     let mut reload_ledger = ReloadLedger::default();
@@ -4775,6 +4777,7 @@ fn run_worker(
             }
         }
         if completion_protocol_error {
+            runner_killed = true;
             break (terminate_reload_child(&mut child)?, false);
         }
         match child.try_wait()? {
@@ -4782,12 +4785,14 @@ fn run_worker(
             None => {
                 let since_anchor = deadline_anchor.lock().unwrap().elapsed();
                 if since_anchor > timeout {
+                    runner_killed = true;
                     let _ = child.kill();
                     let s = child.wait()?;
                     break (s, true);
                 }
                 if let (Some(cap), Some(used)) = (memory_cap_mb, process_memory_mb(child.id())) {
                     if used > cap {
+                        runner_killed = true;
                         let _ = child.kill();
                         let s = child.wait()?;
                         memory_error = Some(SiteMessage {
@@ -5044,6 +5049,9 @@ fn run_worker(
         if i == blamed {
             summary.errors.extend(std::mem::take(&mut reload_errors));
             summary.errors.extend(memory_error.take());
+            if let Some(note) = crate::headless_scope::outside_kill_note(&status, runner_killed) {
+                summary.errors.push(SiteMessage { message: note, site: String::new() });
+            }
             if reload_summary.requests > 0 {
                 summary.reload_ledger = Some(reload_summary);
             }

@@ -7,17 +7,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use bone_semantic::hir::{FnBackend, StateMetadata};
+use bone_semantic::hir::{FnBackend, StateMetadata, StateOwnership, TypeExpr, VariantPayload};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
+use rustc_hash::FxHashSet;
 
 use crate::code_identity::{logical_def_key, CodeArtifact, CodeIdentity, FrameSchema};
 use crate::lifecycle::LifecyclePlan;
 use crate::mangle::symbol_of_key;
 use crate::lower::{GlobalPlan, NB_PRIM_ELEMS, ScalarCtx, ValueStorage};
 use crate::mir::{MirFunc, StaticCell};
-use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy};
+use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy, TyEnv};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateKind {
@@ -41,6 +42,8 @@ pub struct StateEntry {
     pub owner: Option<String>,
     pub initializer_identity: Option<u64>,
     pub metadata: Option<StateMetadata>,
+    /// The declared host graph cannot contain NativeBuffer storage or raw pointers.
+    pub storage_free: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -297,6 +300,8 @@ impl StateSchema {
                     owner: Some(global_owner(module.file, global.name)),
                     initializer_identity: None,
                     metadata: Some(global.state_metadata),
+                    storage_free: global.state_metadata.ownership == StateOwnership::HostProjection
+                        && declared_storage_free(ws, global.ty),
                 };
                 entries.push(entry);
             }
@@ -325,6 +330,7 @@ impl StateSchema {
                 owner: None,
                 initializer_identity: None,
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             };
             entries.push(entry);
         }
@@ -366,6 +372,7 @@ impl StateSchema {
                 owner: Some(name.to_string()),
                 initializer_identity: None,
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             };
             entries.push(entry);
         }
@@ -465,6 +472,90 @@ fn registry_role(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<&'s
     }
 }
 
+fn declared_storage_free(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
+    let Ok(ty) = convert_decl(ws, ty, &MonoSubst::default()) else { return false };
+    storage_free_type(ws, &ty, &mut FxHashSet::default(), 0)
+}
+
+fn nominal_subst(
+    ws: &Workspace,
+    generics: &[bone_semantic::prelude::TyId],
+    params: &[MonoTy],
+) -> Option<MonoSubst> {
+    if generics.len() != params.len() { return None }
+    let mut subst = MonoSubst::default();
+    for (generic, param) in generics.iter().zip(params) {
+        let TypeExpr::Generic(var, _) = TyEnv::Decl.decl_node(ws, *generic).ok()? else {
+            return None;
+        };
+        subst.insert(var, param.clone());
+    }
+    Some(subst)
+}
+
+fn storage_free_type(
+    ws: &Workspace,
+    ty: &MonoTy,
+    visiting: &mut FxHashSet<MonoTy>,
+    depth: usize,
+) -> bool {
+    if depth > 64 || !visiting.insert(ty.clone()) { return false }
+    let safe = match ty {
+        MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String
+        | MonoTy::Unit | MonoTy::Never => true,
+        MonoTy::Any | MonoTy::Function { .. } => false,
+        MonoTy::Nullable(inner) => storage_free_type(ws, inner, visiting, depth + 1),
+        MonoTy::Tuple(parts) => parts.iter().all(|part| storage_free_type(ws, part, visiting, depth + 1)),
+        MonoTy::App { ctor: MonoCtor::Array, params } =>
+            params.len() == 1 && storage_free_type(ws, &params[0], visiting, depth + 1),
+        MonoTy::App { ctor: MonoCtor::Map, params } =>
+            params.len() == 2 && params.iter().all(|part| storage_free_type(ws, part, visiting, depth + 1)),
+        MonoTy::App { ctor: MonoCtor::Ref, .. } => false,
+        MonoTy::App { ctor: MonoCtor::Nominal(name), params } => {
+            if bone_semantic::prelude::is_intrinsic_key_in(*name, &[
+                "Ptr", "PtrU8", "PtrI8", "PtrU16", "PtrI16", "PtrU32",
+                "NativeBuffer", "NativeBufferU8", "NativeBufferI8", "NativeBufferU16",
+                "NativeBufferI16", "NativeBufferU32", "FlatVec",
+            ]) {
+                false
+            } else if let Some(sid) = ws.struct_by_name.get(name) {
+                let def = &ws.module(sid.module).structs[sid.def];
+                nominal_subst(ws, &def.generics, params).is_some_and(|subst| {
+                    def.fields.iter().all(|field| {
+                        convert_decl(ws, field.ty, &subst).ok().is_some_and(|field_ty|
+                            storage_free_type(ws, &field_ty, visiting, depth + 1))
+                    })
+                })
+            } else if let Some(eid) = ws.enums_by_name.get(name) {
+                let def = &ws.module(eid.module).enums[eid.def];
+                nominal_subst(ws, &def.generics, params).is_some_and(|subst| {
+                    def.variants.iter().all(|variant| {
+                        let fields: Vec<_> = match &variant.payload {
+                            VariantPayload::Unit => Vec::new(),
+                            VariantPayload::Tuple(fields) => fields.to_vec(),
+                            VariantPayload::Record(fields) => fields.iter().map(|field| field.ty).collect(),
+                        };
+                        fields.iter().all(|field| {
+                            convert_decl(ws, *field, &subst).ok().is_some_and(|field_ty|
+                                storage_free_type(ws, &field_ty, visiting, depth + 1))
+                        })
+                    })
+                })
+            } else if let Some(nid) = ws.newtypes_by_name.get(name) {
+                let def = &ws.module(nid.module).newtypes[nid.def];
+                nominal_subst(ws, &def.generics, params).is_some_and(|subst| {
+                    convert_decl(ws, def.wrapped, &subst).ok().is_some_and(|wrapped|
+                        storage_free_type(ws, &wrapped, visiting, depth + 1))
+                })
+            } else {
+                false
+            }
+        }
+    };
+    visiting.remove(ty);
+    safe
+}
+
 fn collect_dynamic_entries(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -516,6 +607,7 @@ fn collect_dynamic_entries(
             owner: Some(owner_key),
             initializer_identity: Some(cell.init_hash),
             metadata: Some(StateMetadata::default()),
+            storage_free: false,
         });
     }
 
@@ -539,6 +631,7 @@ fn collect_dynamic_entries(
             owner: Some(logical),
             initializer_identity: None,
             metadata: Some(StateMetadata::default()),
+            storage_free: false,
         });
     }
 
