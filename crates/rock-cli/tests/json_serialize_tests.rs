@@ -52,11 +52,14 @@ fn serializer_branch_coverage() {
 
     // ── cdata value-struct: IVec2 ────────────────────────────────────────
     // match3 keeps anim_swap_a as a global IVec2. The cdata branch must
-    // find the type via ffi.istype + __ROCK_TYPE_TABLE and emit
-    // {"__ty":"IVec2","x":<int>,"y":<int>}.
+    // find the type via ffi.istype + __ROCK_TYPE_TABLE. The tag is the
+    // emitted nominal identity, including the v1 package.
     let swap = &state["match3"]["anim_swap_a"];
     assert!(swap.is_object(), "anim_swap_a should be a JSON object, got: {swap}");
-    assert_eq!(swap["__ty"], "IVec2", "anim_swap_a.__ty must be IVec2; got: {swap}");
+    assert_eq!(
+        swap["__ty"], skull_mir::mangle::ident_of_key("stone_core::IVec2").as_ref(),
+        "anim_swap_a.__ty must identify stone_core::IVec2; got: {swap}"
+    );
     assert!(
         swap["x"].is_i64() || swap["x"].is_u64(),
         "IVec2.x must be integer, got: {}",
