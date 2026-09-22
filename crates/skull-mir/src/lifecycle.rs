@@ -433,7 +433,7 @@ fn dependency_names_for_const(
             && ws.functions_by_name.get(&name).is_some_and(|functions| {
                 functions.iter().any(|(module, function)| {
                     *module != ModuleId::builtin()
-                        && bone_semantic::hir::operator_entry(name.as_str()).is_none()
+                        && bone_semantic::hir::operator_entry(crate::mangle::declared_name(name.as_str())).is_none()
                         && !crate::intrinsics::is_intrinsic(&ws.module(*module).functions[*function])
                 })
             })

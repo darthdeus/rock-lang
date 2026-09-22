@@ -111,3 +111,44 @@ pub use ::wire;
     assert_eq!(plan.entries.len(), 1);
     assert_eq!(plan.entries[0].qualification.dependencies().len(), 1);
 }
+
+#[test]
+fn v1_wire_const_arithmetic_admits_a_namespaced_operator_family() {
+    let fragments = [
+        V1Fragment { file: "main.rock", src: r#"
+use geometry::*;
+const BASE: int = 2
+const DEP: int = BASE + 1
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+@wire(onchange=[DEP])
+fn apply() {}
+fn main() { print(DEP) }
+"# },
+        V1Fragment { file: "geometry.rock", src: r#"
+mod geometry;
+pub struct Point { x: int }
+pub operator +(a: Point, b: Point) -> Point { Point { x: a.x + b.x } }
+"# },
+    ];
+    let emitted = emit_v1_package("wire_ops", &fragments);
+    assert_eq!(emitted.lifecycle_plan.entries.len(), 1);
+    assert_eq!(emitted.lifecycle_plan.entries[0].qualification.dependencies().len(), 2);
+    assert_eq!(run_luajit(&format!("{}\nmain()\n", emitted.lua), "wire_module_operator"), "3");
+}
+
+#[test]
+fn v1_wire_still_rejects_a_namespaced_ordinary_function_dependency() {
+    let fragments = [V1Fragment { file: "main.rock", src: r#"
+fn helper() -> int { 3 }
+const DEP: int = helper()
+@lifecycle(phase="wire", owner="session")
+deco init wire {}
+@wire(onchange=[DEP])
+fn apply() {}
+fn main() {}
+"# }];
+    let ws = ws_v1_package("wire_functions", &fragments);
+    let error = skull_mir::lifecycle::collect(&ws).expect_err("ordinary functions are not const identities");
+    assert!(error.message.contains("wire_functions::helper"), "{}", error.message);
+}
