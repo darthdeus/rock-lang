@@ -715,7 +715,7 @@ fn owners(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>) -> BTreeSet
     let mids: Vec<ModuleId> = match t {
         Target::Fn(mid, _) => vec![*mid],
         Target::Key { modules, .. } => modules.clone(),
-        Target::Unrecorded(_) => Vec::new(),
+        Target::Unrecorded(_) | Target::Field { .. } => Vec::new(),
     };
     mids.into_iter()
         .filter(|m| *m != ModuleId::builtin())
@@ -767,7 +767,7 @@ fn p_def_spans(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>, p_id: 
                 }
             }
         }
-        Target::Unrecorded(_) => {}
+        Target::Unrecorded(_) | Target::Field { .. } => {}
     }
     out.sort();
     out.dedup();
@@ -805,7 +805,7 @@ fn candidate_edits(plan: &Plan) -> std::result::Result<HashMap<usize, Vec<Edit>>
         if !text[at..].starts_with(|c: char| c == '@' || c.is_ascii_alphabetic()) {
             return Err(format!("{}:{}: unexpected item start for `{}`", short_path(&plan.files[d.file].id), d.line, d.name));
         }
-        edits.entry(d.file).or_default().push(Edit { range: (at, at), text: "pub ".to_string() });
+        edits.entry(d.file).or_default().push(Edit::new((at, at), "pub "));
     }
     for (fi, a, parenthesized) in &plan.ascriptions {
         let text = &plan.files[*fi].text;
@@ -820,15 +820,15 @@ fn candidate_edits(plan: &Plan) -> std::result::Result<HashMap<usize, Vec<Edit>>
         }
         let e = edits.entry(*fi).or_default();
         if !parenthesized {
-            e.push(Edit { range: (a.node.0, a.node.0), text: "(".to_string() });
+            e.push(Edit::new((a.node.0, a.node.0), "("));
         }
-        e.push(Edit { range: (a.operand.1, a.ty.0), text: " : ".to_string() });
+        e.push(Edit::new((a.operand.1, a.ty.0), " : "));
         if !parenthesized {
-            e.push(Edit { range: (a.node.1, a.node.1), text: ")".to_string() });
+            e.push(Edit { range: (a.node.1, a.node.1), text: ")".to_string(), closes: true });
         }
     }
     for r in &plan.repairs {
-        edits.entry(r.file).or_default().push(Edit { range: (r.offset, r.offset), text: format!("{}::", r.qualifier) });
+        edits.entry(r.file).or_default().push(Edit::new((r.offset, r.offset), format!("{}::", r.qualifier)));
     }
     for list in edits.values_mut() {
         list.sort_by_key(|e| e.range);

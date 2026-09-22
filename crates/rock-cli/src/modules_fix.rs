@@ -153,7 +153,7 @@ fn edits_for(files: &[FixFile], fixes: &[Fix]) -> BTreeMap<usize, Vec<Edit>> {
                 .into_iter()
                 .map(|path| {
                     let (at, text) = modules_scope::use_insertion(&file.contribution, &file.text, path);
-                    Edit { range: (at, at), text }
+                    Edit::new((at, at), text)
                 })
                 .collect();
             edits.sort_by(|a, b| a.range.cmp(&b.range).then(a.text.cmp(&b.text)));

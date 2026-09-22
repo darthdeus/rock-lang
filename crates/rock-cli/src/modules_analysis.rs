@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use bone_core::hir::{Callee, Expr, Function, Pattern, TypeCtor, TypeExpr};
+use bone_core::hir::{Body, Callee, Expr, Function, Pattern, TyId, TypeCtor, TypeExpr};
 use bone_core::prelude::{Idx, ModuleId};
-use bone_core::workspace::{BoundNext, BoundTree};
+use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use bone_semantic::inference::Workspace;
 use rock_core::errors::CompilerError;
 use rock_core::source_code::Span;
@@ -245,6 +245,9 @@ pub(crate) enum Target {
     Key { key: Ustr, modules: Vec<ModuleId> },
     /// A named call inference recorded no target for and nothing defines.
     Unrecorded(Ustr),
+    /// A method-syntax call through a fn-typed field of struct `strukt`
+    /// (defined in `module`), which wins over every function of the name.
+    Field { module: ModuleId, strukt: Ustr, field: Ustr },
 }
 
 /// The callee of a call written by name, for a repair that qualifies it.
@@ -371,6 +374,12 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                 // Every call inference bound, whatever its syntax (named, UFCS,
                 // operator, compound assignment, a callee that is a value).
                 let bound = bi.and_then(|bi| bi.resolved_overload_calls.get(&idx)).copied();
+                if let (None, Some(site), Some(bi)) = (bound, site, bi) {
+                    if let Some(target) = fn_field_call(ws, body, bi, expr, site) {
+                        out.push(Ref { from: m.id, span, kind: RefKind::Call, target, callee: Some(site) });
+                        continue;
+                    }
+                }
                 if let Some((mid, fid)) = bound {
                     out.push(Ref { from: m.id, span, kind: RefKind::Call, target: Target::Fn(mid, fid), callee: site });
                 }
@@ -432,6 +441,38 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
         }
     }
     out
+}
+
+/// The fn-typed field a method-syntax call goes through: inference tries the
+/// receiver's field before any function of the name, and lowering reads it the
+/// same way (skull-mir `struct_field_is_fn`), so neither records a function.
+fn fn_field_call(ws: &Workspace, body: &Body, bi: &BodyInference, expr: &Expr, site: CalleeSite) -> Option<Target> {
+    let Expr::Call { args, .. } = expr else { return None };
+    if !site.method {
+        return None;
+    }
+    let recv = args.start();
+    let field = body.method_names.get(&recv).copied().unwrap_or(site.name);
+    let TypeExpr::App { ctor: TypeCtor::Nominal(strukt), .. } = resolved_ty(ws, bi, *bi.expr_types.get(recv)?)? else {
+        return None;
+    };
+    let sid = ws.struct_by_name.get(&strukt)?;
+    let def = &ws.module(sid.module).structs[sid.def];
+    let fty = def.fields.iter().find(|f| f.name == field)?.ty;
+    matches!(resolved_ty(ws, bi, fty)?, TypeExpr::Function { .. }).then_some(Target::Field { module: sid.module, strukt, field })
+}
+
+/// `ty` with inference variables and nullability peeled.
+fn resolved_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<TypeExpr> {
+    let node = match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        TyId::Local(idx) => bi.ty_arena[idx],
+    };
+    match node {
+        TypeExpr::Infer(var, _) => resolved_ty(ws, bi, bi.substitutions.get(var)?),
+        TypeExpr::Nullable(inner) => resolved_ty(ws, bi, ty.with_idx(inner)),
+        other => Some(other),
+    }
 }
 
 fn bound_next_funcs(next: &BoundNext, out: &mut Vec<(ModuleId, Idx<Function>)>) {
@@ -589,6 +630,16 @@ fn lua_quote(text: &str) -> String {
 pub(crate) struct Edit {
     pub range: (usize, usize),
     pub text: String,
+    /// An insertion that ends the text before it (an ascription's `)`), so a
+    /// span ending there contains it. Any other insertion begins the text
+    /// after it (`pub `, a qualifier, a `use` line).
+    pub closes: bool,
+}
+
+impl Edit {
+    pub(crate) fn new(range: (usize, usize), text: impl Into<String>) -> Edit {
+        Edit { range, text: text.into(), closes: false }
+    }
 }
 
 /// Apply non-overlapping edits. Overlap is refused (spec 15.2).
@@ -612,15 +663,16 @@ pub(crate) fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<Str
     Ok(out)
 }
 
-/// Where a baseline byte offset lands after `edits`. An insertion AT an offset
-/// stays before it (a qualified call starts where its name started); a
-/// replaced range collapses onto its start.
+/// Where a baseline byte offset lands after `edits`. An offset AT an insertion
+/// stays before it (a qualified call starts where its name started) unless the
+/// insertion `closes` the text before it (an expression ending in a rewritten
+/// ascription ends after its `)`); a replaced range collapses onto its start.
 pub(crate) fn map_offset(edits: &[Edit], off: usize) -> usize {
     let mut shift: isize = 0;
     for e in edits {
         let (a, b) = e.range;
         if a == b {
-            if off > a {
+            if off > a || (off == a && e.closes) {
                 shift += e.text.len() as isize;
             }
         } else if off >= b {
@@ -641,6 +693,7 @@ pub(crate) enum TargetId {
     Def { file: Ustr, name: String },
     Family { files: Vec<Ustr>, name: String },
     Unrecorded(String),
+    Field { file: Ustr, strukt: String, field: String },
 }
 
 pub(crate) fn target_id(ws: &Workspace, t: &Target) -> TargetId {
@@ -666,6 +719,11 @@ pub(crate) fn target_id(ws: &Workspace, t: &Target) -> TargetId {
             }
         }
         Target::Unrecorded(name) => TargetId::Unrecorded(name.to_string()),
+        Target::Field { module, strukt, field } => TargetId::Field {
+            file: ws.module(*module).file,
+            strukt: declared_name(strukt.as_str()).to_string(),
+            field: field.to_string(),
+        },
     }
 }
 
@@ -742,6 +800,7 @@ pub(crate) fn describe_change(key: &SiteKey, before: &[TargetId], after: &[Targe
                 TargetId::Def { file, name } => format!("{name} in {}", short_path(file)),
                 TargetId::Family { files, name } => format!("{name} across {} file(s)", files.len()),
                 TargetId::Unrecorded(n) => format!("unrecorded {n}"),
+                TargetId::Field { file, strukt, field } => format!("field {strukt}.{field} in {}", short_path(file)),
             })
             .collect::<Vec<_>>()
             .join(" + ")
@@ -773,15 +832,17 @@ mod tests {
     #[test]
     fn offsets_map_through_insertions_and_replacements() {
         let edits = vec![
-            Edit { range: (0, 0), text: "pub ".into() },
-            Edit { range: (10, 10), text: "std::".into() },
-            Edit { range: (20, 24), text: " : ".into() },
+            Edit::new((0, 0), "pub "),
+            Edit::new((10, 10), "std::"),
+            Edit::new((20, 24), " : "),
+            Edit { range: (27, 27), text: ")".into(), closes: true },
         ];
         assert_eq!(map_offset(&edits, 0), 0);
         assert_eq!(map_offset(&edits, 5), 9);
         assert_eq!(map_offset(&edits, 10), 14);
         assert_eq!(map_offset(&edits, 11), 20);
         assert_eq!(map_offset(&edits, 24), 32);
-        assert_eq!(apply_edits("0123456789abcdefghij::  xyz", &edits).unwrap(), "pub 0123456789std::abcdefghij : xyz");
+        assert_eq!(map_offset(&edits, 27), 36);
+        assert_eq!(apply_edits("0123456789abcdefghij::  xyz", &edits).unwrap(), "pub 0123456789std::abcdefghij : xyz)");
     }
 }

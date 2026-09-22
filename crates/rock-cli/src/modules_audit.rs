@@ -349,7 +349,7 @@ fn count_references(
                     }
                 }
             }
-            Target::Unrecorded(_) => {}
+            Target::Unrecorded(_) | Target::Field { .. } => {}
         }
         if target_pkgs.len() == 1 {
             let to = *target_pkgs.iter().next().expect("one package");
@@ -366,7 +366,7 @@ fn count_references(
                     let (name, kind) = match &r.target {
                         Target::Fn(mid, fid) => (ws.module(*mid).functions[*fid].name.to_string(), "fn"),
                         Target::Key { key, .. } => (key.to_string(), key_kind(ws, *key)),
-                        Target::Unrecorded(_) => unreachable!("an unrecorded call has no owner"),
+                        Target::Unrecorded(_) | Target::Field { .. } => unreachable!("an unrecorded or field call has no owner"),
                     };
                     let name = modules_analysis::declared_name(&name).to_string();
                     let slot = table.legacy_exports.entry(to).or_default().entry((name, kind)).or_default();
@@ -377,6 +377,8 @@ fn count_references(
         }
         let to = match &r.target {
             Target::Fn(mid, _) => owner_of(*mid)?,
+            // A field call, like a field read, names no definition.
+            Target::Field { .. } => continue,
             Target::Unrecorded(name) => {
                 let bucket = table.unattributed.entry(from).or_default();
                 *bucket.unrecorded_calls.entry(name.to_string()).or_default() += 1;

@@ -251,6 +251,87 @@ fn a_std_call_beside_an_own_family_of_its_name_needs_no_repair() {
     assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
 }
 
+/// The `)` the ascription rewrite inserts at the end of `n :: float` belongs
+/// to every expression that ends there, so the division is compared at its
+/// candidate span and keeps its std operator.
+#[test]
+fn an_expression_ending_in_a_rewritten_ascription_keeps_its_site() {
+    let fixture = scratch("ascription_end");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("ratio-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn ratio(j: int, n: int) -> float {\n    j :: float / n :: float\n}\n");
+    write(&dir.join("lib/tests/t.rock"), "@test\nfn halves() {\n    assert(ratio(1, 2) == 0.5)\n}\n");
+
+    let v = json(&migrate(&dir, "lib", &["--check", "--format", "json"]));
+    assert_eq!(v["ascriptions"]["count"], 2, "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+    let apply = migrate(&dir, "lib", &["--apply"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    assert!(read(&dir.join("lib/lib.rock")).contains("    (j : float) / (n : float)\n"));
+    let tests = rock(&dir, &["test", "lib"]);
+    assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
+}
+
+/// `t.sprite()` calls `Tile`'s fn-typed field, which wins over free fns, so
+/// it references no definition even when the consumer's `sprite` family
+/// gains the package's `pub fn sprite` through the root projection.
+#[test]
+fn a_fn_field_call_is_not_a_reference_to_a_same_named_fn() {
+    let fixture = scratch("fn_field_call");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("field-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn sprite(n: int) -> int {\n    n + 1\n}\n");
+    write(&dir.join("app/stick.toml"), &manifest("field-app", "[dependencies]\nfield-lib = { path = \"../lib\" }\n"));
+    write(
+        &dir.join("app/app.rock"),
+        "struct Tile {\n    sprite: fn() -> int,\n}\n\nfn seven() -> int {\n    7\n}\n\n\
+         fn tile_sprite(t: Tile) -> int {\n    t.sprite() + sprite(1)\n}\n\n\
+         @test\nfn field_call_runs() {\n    assert(tile_sprite(Tile { sprite: seven }) == 9)\n}\n",
+    );
+
+    let v = json(&migrate(&dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(names(&v["exports"]["pub"]), vec!["sprite"], "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+    let apply = migrate(&dir, "lib", &["--apply", "--consumer", "app"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    let tests = rock(&dir, &["test", "app"]);
+    assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
+}
+
+/// A site that really moves is reported. Legacy collapses the package's
+/// `inline(lua) fn lerp` and std's Rock `lerp` of the same signature into one
+/// logical fn and selects std's; in v1 they are different definitions and
+/// the package's own tier wins the tie. A method call is not repaired.
+#[test]
+fn a_method_call_the_own_tier_moves_is_reported() {
+    let fixture = scratch("real_move");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("move-lib", ""));
+    let src = "inline(lua) fn lerp(a: float, b: float, t: float) -> float = \"return a\"\n\n\
+               fn use_it(x: float) -> float {\n    x.lerp(1.0, 0.5)\n}\n";
+    write(&dir.join("lib/lib.rock"), src);
+
+    let run = migrate(&dir, "lib", &["--apply", "--format", "json"]);
+    assert_eq!(run.code, Some(3), "{}", shown(&run));
+    let v = json(&run);
+    assert_eq!(v["verdict"], "blocked", "{v}");
+    let changed: Vec<String> = v["verification"][0]["changed_sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(changed.len(), 1, "{v}");
+    assert!(changed[0].contains("fn lerp#0 in <stdlib>/unified.rock -> fn lerp#0 in lib/lib.rock"), "{changed:#?}");
+    assert_eq!(read(&dir.join("lib/lib.rock")), src, "a blocked plan writes nothing");
+}
+
 /// A v1 dependency the package's bodies use arrives through one
 /// `imports.rock` of package-visible globs (spec 8.7, 15.2); an unused
 /// dependency gets no line.
