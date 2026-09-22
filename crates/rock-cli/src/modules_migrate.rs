@@ -1065,16 +1065,16 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
         let mut remedies = Vec::new();
         if !fns.is_empty() {
             let who = if mixed { format!("for {}, ", listed(&fns)) } else { String::new() };
-            remedies.push(format!("{who}mark the fn `@nomangle` or reach it through Rock"));
+            remedies.push(format!("{who}mark the fn `@nomangle` or reach it through Rock before migrating"));
         }
         if !others.is_empty() {
             let who = if mixed { format!("for {}, ", listed(&others)) } else { String::new() };
             remedies.push(format!(
-                "{who}reach it through Rock (an accessor fn, or a `@nomangle` fn wrapper): `@nomangle` is not accepted on a {}",
+                "{who}reach it through Rock before migrating (an accessor fn, or a `@nomangle` fn wrapper; `@nomangle` is not accepted on a {})",
                 kinds.into_iter().collect::<Vec<_>>().join(" or ")
             ));
         }
-        format!("whose emitted symbol changes when the package becomes v1; {} before migrating", remedies.join("; "))
+        format!("whose emitted symbol changes when the package becomes v1; {}", remedies.join("; "))
     };
     for (site, r) in sites.iter().zip(refs) {
         if let Some(error) = r.error {

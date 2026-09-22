@@ -502,6 +502,55 @@ fn raw_abi_census_keeps_real_and_conservative_environment_candidates_blocked() {
     }
 }
 
+/// Unresolved environment flow keeps only the strings that could be an
+/// environment key. A closure that captures no environment alias, a
+/// `rawget(_G, "K")` with a constant key, and a dynamic `_G[...]` index do not
+/// let the environment escape, so a field key on another table (`row.pc`,
+/// `{ pc = 1 }`) cannot name a global there; the Stone bodies at
+/// serialization.rock:187, snapshot.rock:59, state_image.rock:660 and
+/// c_struct_dispatch.rock:10 have these shapes. A string value that may reach
+/// a dynamic index, and every string once the environment escapes, still
+/// count.
+#[test]
+fn raw_abi_census_ignores_field_keys_when_the_environment_does_not_escape() {
+    let fixture = scratch("raw_field_keys");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn pc() -> int { 3 }\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    let run_body = |body: &str| {
+        write(&dir.join("app/app.rock"), &format!(
+            "fn app_value() -> int {{ pc() }}\ninline(lua) fn probe(flag: bool, key: string) -> int = \"\"\"{body}\"\"\"\n"
+        ));
+        json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]))
+    };
+    for body in [
+        "_G.__probe_seen = true; local function f(row) return row.pc end; return f({ pc = 1 })",
+        "local names = _G[\"__probe_\" .. key]; local t = { pc = 1 }; t.pc = 2; return names and t.pc or 0",
+        "local reg = rawget(_G, \"__PROBE_REG\"); return reg and reg.pc or 0",
+    ] {
+        let v = run_body(body);
+        assert_eq!(v["verdict"], "migration_needed", "{body}: {v}");
+        assert!(v["blockers"].as_array().unwrap().is_empty(), "{body}: {v}");
+    }
+    for body in [
+        "local t = { k = \"pc\" }; return _G[t.k]()",
+        "local names = _G[key]; local s = \"pc\"; return names and #s or 0",
+        "local env = _G; local function f(row) return env[row] end; return f(\"x\").pc",
+        "local k = \"pc\"; if flag then k = key end; return rawget(_G, k)()",
+        "local n = 0; for k in pairs({ pc = 1 }) do n = n + _G[k]() end; return n",
+    ] {
+        let v = run_body(body);
+        assert_eq!(v["verdict"], "blocked", "{body}: {v}");
+        assert!(v["blockers"].as_array().unwrap().iter().any(|b| b.as_str().unwrap().contains("`pc`")), "{body}: {v}");
+    }
+    let v = run_body("return rawget(_G, \"pc\")()");
+    assert!(v["blockers"].as_array().unwrap().iter().any(|b| {
+        let b = b.as_str().unwrap();
+        b.contains("[exact]") && b.contains("`pc` through `_G`")
+    }), "a constant rawget key is an exact environment field: {v}");
+}
+
 #[test]
 fn raw_abi_census_reports_dynamic_name_coverage_without_claiming_an_exact_reference() {
     let fixture = scratch("raw_dynamic_name");
