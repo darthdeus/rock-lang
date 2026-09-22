@@ -1947,7 +1947,7 @@ fn type_table_defs(
                     .map(|(path, offset)| format!("[\"{path}\"] = {offset}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", s.name));
+                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", type_symbol(s.name)));
             }
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
@@ -1972,7 +1972,7 @@ fn type_table_defs(
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
                 let nullable = plan.nullable();
                 let (tystr, embed) = match plan.inline_child() {
-                    Some(child) => (child.as_str().to_string(), ", embed = true"),
+                    Some(child) => (type_symbol(child).as_str().to_string(), ", embed = true"),
                     None => (tystr, ""),
                 };
                 let desc = match field_desc_lua(ws, f.ty) {
@@ -2015,7 +2015,7 @@ fn type_table_defs(
                     .collect::<Vec<_>>().join(", ");
                 out.push_str(&format!(
                     "_G.__ROCK_ENUM_FLAT_LAYOUT[\"{}\"] = {{ tuple_width = {}, record_fields = {{ {} }} }}\n",
-                    e.name, flat.tuple_width(), names,
+                    type_symbol(e.name), flat.tuple_width(), names,
                 ));
             }
             let Some(shape) = plan.and_then(|plan| plan.cdata().cloned())
