@@ -4968,6 +4968,38 @@ impl Emitter<'_> {
         }
     }
 
+    fn cell_is_frame_field(&self, cell: Idx<Cell>) -> bool {
+        self.frame.is_some_and(|frame| frame.fields.contains(&cell))
+    }
+
+    // Nil writes into absent Lua hash slots can repeatedly rehash a full frame.
+    // Only compiler-owned plain frame fields use this path; user stores retain
+    // their ordinary assignment and metamethod behavior. Scoped vN temporaries
+    // evaluate every RHS once before any destination changes.
+    fn write_frame_assignment(
+        &self,
+        out: &mut String,
+        targets: &[(String, bool)],
+        rhs: impl FnOnce(&mut String),
+    ) {
+        out.push_str("  do local ");
+        for i in 0..targets.len() {
+            if i > 0 { out.push_str(", "); }
+            write!(out, "v{i}").unwrap();
+        }
+        out.push_str(" = ");
+        rhs(out);
+        out.push('\n');
+        for (i, (target, frame)) in targets.iter().enumerate() {
+            if *frame {
+                writeln!(out, "    if v{i} ~= nil or {target} ~= nil then {target} = v{i} end").unwrap();
+            } else {
+                writeln!(out, "    {target} = v{i}").unwrap();
+            }
+        }
+        out.push_str("  end\n");
+    }
+
     fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         if let Some(site) = self.record_effect_allocation_site(id, inst, out.len()) {
             out.push_str("  __rock_alloc_hit_effect(\"");
@@ -4976,6 +5008,11 @@ impl Emitter<'_> {
         }
         match inst {
             Inst::Store { cell, value } => {
+                if self.cell_is_frame_field(*cell) {
+                    let target = cellname(self.func, self.frame, self.cell_colors, *cell);
+                    self.write_frame_assignment(out, &[(target, true)], |out| self.write_opnd(out, *value));
+                    return;
+                }
                 out.push_str("  ");
                 write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 out.push_str(" = ");
@@ -4983,6 +5020,14 @@ impl Emitter<'_> {
                 out.push('\n');
             }
             Inst::StoreField { base, field, value } => {
+                if let Some(frame) = self.frame {
+                    if matches!(self.func.insts[*base], Inst::Load(cell) if cell == frame.s_cell) {
+                        let mut target = cellname(self.func, None, self.cell_colors, frame.s_cell);
+                        write_field_key(&mut target, field.as_str());
+                        self.write_frame_assignment(out, &[(target, true)], |out| self.write_opnd(out, *value));
+                        return;
+                    }
+                }
                 out.push_str("  ");
                 self.write_opnd(out, *base);
                 write_field_key(out, field.as_str());
@@ -5100,6 +5145,17 @@ impl Emitter<'_> {
                 val_cell,
                 table,
             } => {
+                if self.cell_is_frame_field(*key_cell) || self.cell_is_frame_field(*val_cell) {
+                    let targets: Vec<_> = [*key_cell, *val_cell].iter().map(|c| (
+                        cellname(self.func, self.frame, self.cell_colors, *c), self.cell_is_frame_field(*c),
+                    )).collect();
+                    self.write_frame_assignment(out, &targets, |out| {
+                        out.push_str("next(");
+                        self.write_opnd(out, *table);
+                        write!(out, ", {})", targets[0].0).unwrap();
+                    });
+                    return;
+                }
                 // `key_cell` is referenced twice; render it once.
                 let k = cellname(self.func, self.frame, self.cell_colors, *key_cell);
                 let _ = write!(out, "  {k}, ");
@@ -5111,6 +5167,17 @@ impl Emitter<'_> {
             // Scalar-ABI multi-return: `d0, d1, ... = callee(args)`. The callee is
             // a value-returning fn whose return is scalarized to N leaf values.
             Inst::CallMulti { dests, func, args } => {
+                if dests.iter().any(|c| self.cell_is_frame_field(*c)) {
+                    let targets: Vec<_> = dests.iter().map(|c| (
+                        cellname(self.func, self.frame, self.cell_colors, *c), self.cell_is_frame_field(*c),
+                    )).collect();
+                    self.write_frame_assignment(out, &targets, |out| {
+                        write!(out, "{}(", self.callee_name(id, *func)).unwrap();
+                        self.write_csv(out, args);
+                        out.push(')');
+                    });
+                    return;
+                }
                 out.push_str("  ");
                 for (i, c) in dests.iter().enumerate() {
                     if i > 0 {
@@ -5126,6 +5193,18 @@ impl Emitter<'_> {
             // Indirect multi-return: `d0, d1, ... = callee(args)` -- a tuple
             // returned through a fn-value. Multi-assign so Lua doesn't truncate.
             Inst::CallValueMulti { dests, callee, args } => {
+                if dests.iter().any(|c| self.cell_is_frame_field(*c)) {
+                    let targets: Vec<_> = dests.iter().map(|c| (
+                        cellname(self.func, self.frame, self.cell_colors, *c), self.cell_is_frame_field(*c),
+                    )).collect();
+                    self.write_frame_assignment(out, &targets, |out| {
+                        self.write_opnd(out, *callee);
+                        out.push('(');
+                        self.write_csv(out, args);
+                        out.push(')');
+                    });
+                    return;
+                }
                 out.push_str("  ");
                 for (i, c) in dests.iter().enumerate() {
                     if i > 0 {
