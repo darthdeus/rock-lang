@@ -93,9 +93,13 @@ pub enum ResolvedKind {
     Binding,
 }
 
-/// A resolution result: the canonical key every workspace map is keyed by
-/// and the view that owns a legacy callable's key ([`FamilyMember::owner`]).
-#[derive(Debug, Clone)]
+/// A resolution result, or one definition a lookup found: the canonical key
+/// every workspace map is keyed by, its kind, and for a callable of the std
+/// view or a legacy provider's view, the view's package
+/// ([`FamilyMember::owner`]). A legacy key is the bare name every legacy file
+/// defining it shares, so the key alone does not say whose overloads a v1
+/// fragment reached; two views offering one bare name are two definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolved {
     pub key: Ustr,
     pub kind: ResolvedKind,
@@ -103,28 +107,6 @@ pub struct Resolved {
 }
 
 impl Resolved {
-    fn of(hit: Hit) -> Self {
-        Resolved { key: hit.key, kind: hit.kind, owner: hit.owner }
-    }
-}
-
-/// One definition a lookup found: its key, kind, and for a callable of the
-/// std view or a legacy provider's view, the view's package. A legacy key is
-/// the bare name every legacy file defining it shares, so the key alone
-/// does not say whose overloads a v1 fragment reached; two views offering
-/// one bare name are two definitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hit {
-    pub key: Ustr,
-    pub kind: ResolvedKind,
-    pub owner: Option<PackageId>,
-}
-
-impl Hit {
-    fn of(resolved: &Resolved) -> Self {
-        Hit { key: resolved.key, kind: resolved.kind, owner: resolved.owner }
-    }
-
     fn member(&self, tier: FamilyTier) -> FamilyMember {
         FamilyMember { key: self.key, owner: self.owner, tier }
     }
@@ -136,7 +118,7 @@ impl Hit {
 
 /// How a diagnostic names a hit: a view member by its view's package, since
 /// its bare key alone does not say which.
-fn hit_display(ws: &Workspace, hit: &Hit) -> String {
+fn hit_display(ws: &Workspace, hit: &Resolved) -> String {
     match hit.owner.and_then(|owner| ws.ns.package(owner)) {
         Some(pkg) => format!("{}::{}", pkg.self_name, hit.key),
         None if hit.owner == Some(STD_PACKAGE_ID) => format!("std::{}", hit.key),
@@ -280,12 +262,12 @@ pub fn resolve_v1_unary(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Res
 
 fn v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Option<CalleeFamily>, String> {
     let Tiers { first, lower } = bind_tiers(ws, frag, name, true)?;
-    let mut members: Vec<(Hit, FamilyTier)> = match first {
+    let mut members: Vec<(Resolved, FamilyTier)> = match first {
         Bound::Unbound => return Ok(None),
         Bound::One(resolved, _) if resolved.kind != ResolvedKind::Callable => {
             return Ok(Some(CalleeFamily::Single(resolved)))
         }
-        Bound::One(resolved, tier) => vec![(Hit::of(&resolved), tier)],
+        Bound::One(resolved, tier) => vec![(resolved, tier)],
         Bound::Several(hits, via, _) if hits.iter().any(|hit| hit.kind != ResolvedKind::Callable) => {
             return Err(several(ws, name, &hits, via))
         }
@@ -297,7 +279,7 @@ fn v1_callee(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Option<
     members.sort_by_key(|(hit, tier)| (hit.sort_key(), *tier));
     members.dedup_by_key(|(hit, _)| (hit.key, hit.owner));
     if let [(hit, _)] = members[..] {
-        return Ok(Some(CalleeFamily::Single(Resolved::of(hit))));
+        return Ok(Some(CalleeFamily::Single(hit)));
     }
     Ok(Some(CalleeFamily::Merged { members: members.iter().map(|(hit, tier)| hit.member(*tier)).collect() }))
 }
@@ -307,7 +289,7 @@ enum Bound {
     One(Resolved, FamilyTier),
     /// Several distinct definitions at one tier, sorted by key, and which
     /// tier bound them.
-    Several(Vec<Hit>, Via, FamilyTier),
+    Several(Vec<Resolved>, Via, FamilyTier),
     /// No tier binds the name.
     Unbound,
 }
@@ -323,7 +305,7 @@ enum Via {
 /// binding is all callables, the callables every lower tier offers.
 struct Tiers {
     first: Bound,
-    lower: Vec<(Hit, FamilyTier)>,
+    lower: Vec<(Resolved, FamilyTier)>,
 }
 
 impl Tiers {
@@ -337,10 +319,10 @@ impl Tiers {
         }
     }
 
-    fn bind(&mut self, mut hits: Vec<Hit>, tier: FamilyTier, via: Via) {
+    fn bind(&mut self, mut hits: Vec<Resolved>, tier: FamilyTier, via: Via) {
         if let Bound::Unbound = self.first {
             self.first = match hits[..] {
-                [hit] => Bound::One(Resolved::of(hit), tier),
+                [hit] => Bound::One(hit, tier),
                 _ => Bound::Several(hits, via, tier),
             };
             return;
@@ -354,7 +336,7 @@ fn bind_tiers(ws: &Workspace, frag: &FragmentScope, name: Ustr, callee: bool) ->
     let mut tiers = Tiers { first: Bound::Unbound, lower: Vec::new() };
     if ws.ns.package(frag.package).is_none() {
         if let Some(std) = std_definition(ws, name) {
-            tiers.bind(vec![Hit::of(&std)], FamilyTier::Std, Via::Imports);
+            tiers.bind(vec![std], FamilyTier::Std, Via::Imports);
         }
         return Ok(tiers);
     }
@@ -394,7 +376,7 @@ fn bind_tiers(ws: &Workspace, frag: &FragmentScope, name: Ustr, callee: bool) ->
     // workspace-map fall-through for v1 names.
     if tiers.wants_more(callee) {
         if let Some(std) = std_definition(ws, name) {
-            tiers.bind(vec![Hit::of(&std)], FamilyTier::Std, Via::Imports);
+            tiers.bind(vec![std], FamilyTier::Std, Via::Imports);
         }
     }
     Ok(tiers)
@@ -405,9 +387,9 @@ fn bind_tiers(ws: &Workspace, frag: &FragmentScope, name: Ustr, callee: bool) ->
 /// definition once), or `None` when no import binds it. `below` is set when a
 /// nearer tier already bound callables: an import landing on a module is
 /// then left out instead of rejected.
-fn import_tier(ws: &Workspace, frag: &FragmentScope, name: Ustr, below: bool) -> Result<Option<Vec<Hit>>, String> {
+fn import_tier(ws: &Workspace, frag: &FragmentScope, name: Ustr, below: bool) -> Result<Option<Vec<Resolved>>, String> {
     if let Some(targets) = frag.named.get(&name) {
-        let mut hits: Vec<Hit> = Vec::new();
+        let mut hits: Vec<Resolved> = Vec::new();
         for target in targets {
             match resolve_import_target(ws, frag, name, target)? {
                 Some(found) => hits.extend(found),
@@ -415,7 +397,7 @@ fn import_tier(ws: &Workspace, frag: &FragmentScope, name: Ustr, below: bool) ->
                 None => return Err(format!("`{name}` names a module, not a definition")),
             }
         }
-        hits.sort_by_key(Hit::sort_key);
+        hits.sort_by_key(Resolved::sort_key);
         hits.dedup();
         return Ok((!hits.is_empty()).then_some(hits));
     }
@@ -433,12 +415,12 @@ fn import_tier(ws: &Workspace, frag: &FragmentScope, name: Ustr, below: bool) ->
                     continue;
                 };
                 match walk_optional_definition(ws, frag, &[], &unary, &mut Vec::new()) {
-                    Ok(Some(resolved)) => hits.push(Hit::of(&resolved)),
+                    Ok(Some(resolved)) => hits.push(resolved),
                     Ok(None) => {}
                     Err(message) => return Err(operator_family_error(&unary, message)),
                 }
             }
-            hits.sort_by_key(Hit::sort_key);
+            hits.sort_by_key(Resolved::sort_key);
             hits.dedup();
             if !hits.is_empty() {
                 return Ok(Some(hits));
@@ -470,20 +452,20 @@ fn resolve_import_target(
     frag: &FragmentScope,
     name: Ustr,
     path: &UsePathRef,
-) -> Result<Option<Vec<Hit>>, String> {
+) -> Result<Option<Vec<Resolved>>, String> {
     let candidates = operator_family_paths(path).collect::<Vec<_>>();
     let mut hits = Vec::new();
     if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
         for candidate in &candidates {
             match walk_optional_definition(ws, frag, &[], candidate, &mut Vec::new()) {
-                Ok(Some(resolved)) => hits.push(Hit::of(&resolved)),
+                Ok(Some(resolved)) => hits.push(resolved),
                 Ok(None) => {}
                 Err(message) => return Err(operator_family_error(candidate, message)),
             }
         }
     } else {
         match walk_path(ws, frag, &[], path, WalkMode::Definition, &mut Vec::new())? {
-            Landing::Def(r) => hits.push(Hit::of(&r)),
+            Landing::Def(r) => hits.push(r),
             Landing::Module(..) => return Ok(None),
         }
     }
@@ -519,7 +501,7 @@ fn unbound(name: Ustr) -> String {
 /// Several imports or globs of `name` where one definition is wanted: a
 /// composed callable family used as a value, or definitions that cannot
 /// compose (spec 8.3).
-fn several(ws: &Workspace, name: Ustr, hits: &[Hit], via: Via) -> String {
+fn several(ws: &Workspace, name: Ustr, hits: &[Resolved], via: Via) -> String {
     let keys = hits.iter().map(|hit| hit_display(ws, hit)).collect::<Vec<_>>().join(", ");
     let callables = hits.iter().all(|hit| hit.kind == ResolvedKind::Callable);
     match (via, callables) {
@@ -558,7 +540,7 @@ fn glob_candidates(
     ws: &Workspace,
     frag: &FragmentScope,
     name: Ustr,
-) -> Result<Vec<Hit>, String> {
+) -> Result<Vec<Resolved>, String> {
     let viewers = [Viewer::Fragment(frag)];
     let mut visiting = Vec::new();
     let mut hits =
@@ -572,7 +554,7 @@ fn glob_candidates(
             hits.extend(members_of(ws, &viewers, pkg_id, &path, name, &mut visiting)?.found);
         }
     }
-    hits.sort_by_key(Hit::sort_key);
+    hits.sort_by_key(Resolved::sort_key);
     hits.dedup();
     Ok(hits)
 }
@@ -647,7 +629,7 @@ fn all_admit(ws: &Workspace, viewers: &[Viewer], vis: &NsVisibility, pkg: u32, p
 #[derive(Debug, Default)]
 pub struct Members {
     /// Distinct definitions the viewers may name, sorted by key.
-    pub found: Vec<Hit>,
+    pub found: Vec<Resolved>,
     /// Some binding of the name exists that a viewer may not name.
     pub denied: bool,
     /// An export chain came back to a binding it was already following.
@@ -666,7 +648,7 @@ impl Members {
     }
 
     fn finish(mut self) -> Self {
-        self.found.sort_by_key(Hit::sort_key);
+        self.found.sort_by_key(Resolved::sort_key);
         self.found.dedup();
         self
     }
@@ -740,7 +722,7 @@ fn explicit_members(
     if let Some(kind) = owned_kind(node, name) {
         let key = first_owned(node, name).expect("kind implies key");
         if all_admit_key(ws, viewers, key) {
-            out.found.push(Hit { key, kind, owner: view_owner(ws, pkg_id, key, kind) });
+            out.found.push(Resolved { key, kind, owner: view_owner(ws, pkg_id, key, kind) });
         } else {
             out.denied = true;
         }
@@ -901,7 +883,7 @@ fn collapse(
     name: Ustr,
     not_found: impl Fn() -> String,
     what: &str,
-) -> Result<Hit, String> {
+) -> Result<Resolved, String> {
     match members.found.as_slice() {
         [single] => Ok(*single),
         [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
@@ -1110,7 +1092,7 @@ pub enum MemberTarget {
     /// A global or constant: the DefKey.
     Global(Ustr),
     /// A callable family: the key the family is registered under and the
-    /// view that owns a legacy key ([`Hit::owner`]). A std family has no
+    /// view that owns a legacy key ([`Resolved::owner`]). A std family has no
     /// `DefMeta`, so the kind has to come from the member lookup rather than
     /// `ws.defs`.
     Callable { key: Ustr, owner: Option<PackageId> },
@@ -1177,7 +1159,7 @@ pub fn resolve_member_path(
         }
         let members = module_members(ws, &[Viewer::Fragment(frag)], pkg_id, &cur, seg)?;
         let not_found = || unresolved_value_path(ws, frag, segments);
-        let Hit { key, kind, owner } = collapse(ws, members, seg, not_found, "glob re-exports")?;
+        let Resolved { key, kind, owner } = collapse(ws, members, seg, not_found, "glob re-exports")?;
         if kind == ResolvedKind::Type {
             if is_last {
                 return Ok(MemberTarget::Type(key));
@@ -1420,7 +1402,7 @@ fn walk_path(
             let members = walk_members(ws, frag, outer, path, visiting)?;
             let not_found = || format!("`{}` did not resolve to any definition", joined(&path.segments));
             let hit = collapse(ws, members, last_of(&path.segments), not_found, "glob re-exports")?;
-            Ok(Landing::Def(Resolved::of(hit)))
+            Ok(Landing::Def(hit))
         }
     }
 }
@@ -1438,7 +1420,7 @@ fn walk_optional_definition(
     let members = walk_members(ws, frag, outer, path, visiting)?;
     let name = last_of(&path.segments);
     match members.found.as_slice() {
-        [single] => Ok(Some(Resolved::of(*single))),
+        [single] => Ok(Some(*single)),
         [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
         [] if members.denied => Err(format!("`{name}` is not accessible from this module")),
         [] if members.module => Err(format!("`{name}` names a module, not a definition")),
