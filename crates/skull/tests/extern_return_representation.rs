@@ -248,3 +248,31 @@ fn go() -> int { poll(-1) }
         "a direct omitted call must pass the literal default:\n{go}"
     );
 }
+
+/// A modules-v1 extern is registered under its DefKey, but its wrapper is the
+/// published surface name (call sites spell it that way) and its C symbol is
+/// the declared name. Spelling either with the key emits `function
+/// pkg::ret_int()`, which is not Lua.
+#[test]
+fn a_v1_extern_wrapper_uses_the_declared_symbol() {
+    let emitted = crate::common::emit_v1_package(
+        "v1extern",
+        &[crate::common::V1Fragment {
+            file: "main.rock",
+            src: r#"
+extern(ffi, "m") fn ret_int() -> int
+extern(ffi, "m") fn ret_bool() -> bool
+pub fn probe() -> string { return "{ret_int()} {ret_bool()}" }
+fn main() {}
+"#,
+        }],
+    );
+    let out = crate::common::run_luajit(
+        &format!(
+            "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
+            emitted.lua
+        ),
+        "v1_extern_wrapper",
+    );
+    assert_eq!(out, "7\ttrue");
+}

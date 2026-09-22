@@ -5530,7 +5530,7 @@ fn assemble(
                 // and this changes no output -- but an ungated write is a second
                 // population input, and one is the whole point of the cut.
                 if let Some(lib) = f.ffi_lib {
-                    let nm = f.name.as_str();
+                    let nm = mangle_fn(ws, f);
                     let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
                     let body = match extern_ret(ws, f)? {
                         // Returns an OWNING copy, never `__out[0]`. LuaJIT does
