@@ -1057,7 +1057,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "player.update_walls_in(world, dt)",
         "actor.update_ground_pickup(world)",
         "actor.cull_dead_mobs(world)",
-        "tick_corpses(world)",
+        "tick_corpses(world, dt)",
         "player.tick_wisp_intent_in(world, dt)",
         "wisp_motes_tick_in(world, dt)",
     ] {
