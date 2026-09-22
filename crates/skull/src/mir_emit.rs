@@ -2591,21 +2591,30 @@ struct LuaDefinitionBuffer {
     definition_count: usize,
 }
 
-/// Whether `line` opens a top-level definition, in either emitted shape: the
-/// global-lookup `function <name>(..)` or the callee-bound factory
-/// `__rock_mk_<name> = function(..) return function(..)`. Both cost the
-/// enclosing LuaJIT proto one child proto, so both count against the split.
-fn opens_a_definition(line: &str) -> bool {
-    line.starts_with("function ")
-        || (line.starts_with(skull_codegen_lua::CALLEE_FACTORY_PREFIX)
-            && line.contains(" = function("))
+/// The definition name in either emitted shape. Definition splitting and
+/// Session-cell binding consume the same top-level definition inventory.
+fn definition_name(line: &str) -> Option<&str> {
+    if let Some(rest) = line.strip_prefix("function ") {
+        return Some(rest.split_once('(').expect("emitted function header").0);
+    }
+    if line.starts_with(skull_codegen_lua::CALLEE_FACTORY_PREFIX) {
+        return line.split_once(" = function(").map(|(name, _)| name);
+    }
+    None
 }
 
 impl LuaDefinitionBuffer {
     fn push_str(&mut self, lua: &str) {
         let start = self.lua.len();
-        let count = lua.lines().filter(|line| opens_a_definition(line)).count();
+        let names: Vec<_> = lua.lines().filter_map(definition_name).collect();
+        let count = names.len();
         self.lua.push_str(lua);
+        if lua.contains(skull_codegen_lua::STATE_CELL) {
+            for name in names {
+                writeln!(self.lua, "__rock_bind_state_cells({name})")
+                    .expect("writing a String cannot fail");
+            }
+        }
         self.units.push((start, self.lua.len(), count));
         self.definition_count += count;
     }
@@ -8141,6 +8150,40 @@ pub fn emit_incremental(
     Ok(emit)
 }
 
+/// Recreate only factories whose captures changed, in the same order as a full
+/// build. Rebound callers must also publish their escaping CodeRef slots.
+fn overlay_callee_bindings(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    changed: &[Instance],
+) -> (Vec<skull_codegen_lua::CalleeBindingPlan>, FxHashSet<Instance>) {
+    let mut names: FxHashSet<String> = changed
+        .iter()
+        .map(|body| body.symbol(ws, cache.scx.interner()))
+        .collect();
+    for body in changed {
+        if let Some(Ok(chunk)) = cache.chunks.get(body) {
+            names.extend(chunk.binds.iter().map(|plan| plan.name.clone()));
+        }
+    }
+    let mut candidates: Vec<_> = cache.chunks.iter()
+        .filter(|(body, _)| cache.lua_view.instances.contains(*body))
+        .filter_map(|(body, chunk)| chunk.as_ref().ok().map(|chunk| (body, chunk)))
+        .flat_map(|(body, chunk)| chunk.binds.iter().map(move |plan| (body, plan)))
+        .collect();
+    candidates.sort_by(|(_, a), (_, b)| a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name)));
+    let mut bindings = Vec::new();
+    let mut bodies = FxHashSet::default();
+    for (body, plan) in candidates {
+        if names.contains(&plan.name) || plan.captures.iter().any(|name| names.contains(name)) {
+            names.insert(plan.name.clone());
+            bodies.insert(body.clone());
+            bindings.push(plan.clone());
+        }
+    }
+    (bindings, bodies)
+}
+
 /// Assemble the incremental OVERLAY (`incremental.lua`): the cached chunks of the
 /// functions changed since the last full build, then slot publication for their
 /// current CodeRefs. Registries retain those logical values across the overlay.
@@ -8151,13 +8194,14 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-    overlay_code_artifact: &skull_mir::code_identity::CodeArtifact,
 ) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let t_clone_artifact = Instant::now();
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut candidate_code_artifact = cache.code_artifact.clone();
     let d_clone_artifact = t_clone_artifact.elapsed();
+    out.push_str("do\nlocal __rock_state_cell, __rock_initialized_cell\n");
+    out.push_str(crate::SESSION_CELL_BINDING);
     out.push_str("__rock_state_transaction_begin()\n");
     let mut unit_reads = UnitComptimeReads::default();
 
@@ -8170,31 +8214,6 @@ fn assemble_overlay(
     for body in &order {
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => {
-                // THE hot-reload rule (`skull_codegen_lua::force_global_callee_binding`).
-                // A bound definition's body lives in a factory, so redefining it
-                // here would leave the global `F` holding main.lua's stale
-                // closure -- the edit would silently not reach ANY caller.
-                // Reject; do not emit an overlay that does not take effect.
-                if let Some(plan) = chunk.binds.first() {
-                    return Err(CompilerError::new_no_location(format!(
-                        "incremental overlay cannot redefine `{}`: this build bound its \
-                         callees as upvalues (ROCK_SKULL_CALLEE_BINDING=upvalue), and a \
-                         caller holding the old closure would never see the edited body -- \
-                         rebuild with ROCK_SKULL_CALLEE_BINDING=global",
-                        plan.name
-                    )));
-                }
-                // Same rule, second witness: a Session cell is a chunk-level
-                // local of main.lua, invisible to the overlay chunk.
-                if chunk.lua.contains(skull_codegen_lua::STATE_CELL) {
-                    return Err(CompilerError::new_no_location(format!(
-                        "incremental overlay cannot redefine `{}`: this build reads mutable \
-                         globals through main.lua's Session cell (ROCK_SKULL_STATE_CELL), \
-                         which a separate chunk cannot see -- rebuild with \
-                         ROCK_SKULL_CALLEE_BINDING=global",
-                        ws.module(body.func.module).functions[body.func.func].name
-                    )));
-                }
                 definitions.push_str(&chunk.lua)
             }
             Some(Err(err)) => {
@@ -8207,6 +8226,12 @@ fn assemble_overlay(
         }
     }
     definitions.append_to(&mut out);
+    let (mut bindings, rebound_bodies) = overlay_callee_bindings(ws, cache, &order);
+    out.push_str(&callee_binding_pass_lua(&mut bindings));
+    let mut published_bodies = order.clone();
+    published_bodies.extend(rebound_bodies);
+    let overlay_code_artifact = overlay_code_artifact(ws, cache, &published_bodies);
+
     let d_definitions = t_definitions.elapsed();
     let t_code_slot_stage = Instant::now();
     let has_code_slots = cache.code_artifact.entries.values().any(|entry| entry.escaping);
@@ -8439,6 +8464,7 @@ fn assemble_overlay(
         cache.renderer_target,
     )?;
     let d_fingerprint = t_fingerprint.elapsed();
+    out.push_str("end\n");
 
     Ok((
         MirEmit {
@@ -8661,11 +8687,9 @@ pub fn emit_overlay_with_span_edits(
     let d_stale = t_stale.elapsed();
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let changed_bodies: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
-    let changed_code_artifact = overlay_code_artifact(ws, cache, &changed_bodies);
     let published_code_artifact = cache.code_artifact.clone();
     let (mut emit, overlay_unit_reads) =
-        assemble_overlay(ws, cache, shader_changed, &changed_code_artifact)?;
+        assemble_overlay(ws, cache, shader_changed)?;
     cache.repair_stats.code_artifact_assembly_reused =
         std::sync::Arc::ptr_eq(&published_code_artifact, &emit.code_artifact);
     cache.code_artifact = emit.code_artifact.clone();
@@ -9195,18 +9219,8 @@ fn main() {
         );
     }
 
-    /// THE overlay rule, both directions in one case.
-    ///
-    /// The shipped callee shape binds a caller's callees as immutable upvalues,
-    /// so an `incremental.lua` overlay that redefines the callee's GLOBAL would
-    /// never reach it. `assemble_overlay` refuses rather than emit an overlay
-    /// that cannot take effect, and the refusal names the escape hatch. Under
-    /// `global` the same edit produces an overlay. This is why `rock stone`
-    /// publishes a whole `main.lua` per edit
-    /// (`crates/rock-cli/tests/stone_full_reload_binding.rs`), and why
-    /// `stone-test` and `iter-incremental` pin `global`.
     #[test]
-    fn an_overlay_is_refused_under_the_bound_shape_and_produced_under_global() {
+    fn overlays_are_produced_under_both_callee_shapes() {
         let parse = |source: &str| {
             skull_parser::parse_module_clean(source, Ustr::from("<overlay-binding-test>"))
                 .expect("parse")
@@ -9227,24 +9241,13 @@ fn main() {
             emit_overlay(&ws2, &mut cache, &[(top.module, BodyOwner::Function(top.func))])
         };
 
-        let refused = match overlay_for(skull_codegen_lua::CalleeBindingMode::Upvalue) {
-            Err(err) => err,
-            Ok(_) => panic!("a bound body must not be redefined by an overlay"),
-        };
-        assert!(
-            refused.message.contains("bound its callees as upvalues")
-                && refused.message.contains("ROCK_SKULL_CALLEE_BINDING=global"),
-            "the refusal must say what happened and how to get an overlay: {}",
-            refused.message
-        );
-
-        let produced = overlay_for(skull_codegen_lua::CalleeBindingMode::Global)
-            .expect("the global shape still produces an overlay");
-        assert!(
-            produced.lua.contains("function top_ret_int("),
-            "the overlay must redefine the edited body:\n{}",
-            produced.lua
-        );
+        for binding in [
+            skull_codegen_lua::CalleeBindingMode::Upvalue,
+            skull_codegen_lua::CalleeBindingMode::Global,
+        ] {
+            let produced = overlay_for(binding).expect("overlay under either callee shape");
+            assert!(produced.lua.contains("top_ret_int"));
+        }
     }
 
     fn ref_for(ws: &Workspace, name: &str) -> FuncRef {
@@ -10018,10 +10021,7 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<inline-census-incremental-test>"))
             .expect("module overlay base");
-        // The overlay leg only exists under the GLOBAL callee shape; the bound
-        // shape is refused by `assemble_overlay`, which
-        // `an_overlay_is_refused_under_the_bound_shape_and_produced_under_global`
-        // pins. The reassembly legs above stay on the shipped default.
+        // Compare the global overlay shape alongside bound full reassembly.
         let (_full_overlay, mut overlay_cache) = emit_full_with_callee_binding(
             &ws_overlay_base,
             mid_overlay,

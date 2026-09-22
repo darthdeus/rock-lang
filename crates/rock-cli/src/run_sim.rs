@@ -864,19 +864,6 @@ fn compile_sims_with_allocation(
     output_path: PathBuf,
     allocation_manifest: Option<&Path>,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
-    compile_sims_with(backend, project_path, output_path, allocation_manifest, None)
-}
-
-/// [`compile_sims`] under an explicit emitted callee shape. `None` reads the
-/// process shape; the hot-reload lane passes `Some(Global)` (see
-/// [`reload_lane_session`]).
-fn compile_sims_with(
-    backend: crate::Backend,
-    project_path: PathBuf,
-    output_path: PathBuf,
-    allocation_manifest: Option<&Path>,
-    callee_binding: Option<skull::CalleeBindingMode>,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
     // Only skull serves sims now (bone has no codegen, rock is gone): build the
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
@@ -901,7 +888,6 @@ fn compile_sims_with(
                         &project_path.to_string_lossy(),
                         &main_path,
                         allocation_manifest,
-                        callee_binding,
                     )
                 },
             )
@@ -913,33 +899,20 @@ fn compile_sims_with(
     }
 }
 
-/// The hot-reload lane's own compile session, and the output directory its
-/// children boot.
-///
-/// `reload_edit` injection (`docs/sim-reload-harness-plan.md`) republishes
-/// through `SkullStone::apply_edit`, which yields an `incremental.lua` overlay
-/// only under the GLOBAL callee shape: the shipped `upvalue` shape binds a
-/// caller's callees as immutable upvalues, and an overlay that redefines one
-/// global cannot rebind them. Reload fixtures also rewrite the chunk they booted
-/// from, so the lane never borrows the shared session or its directory, even
-/// when the shared one is already global-shaped: that separation is what lets
-/// the lane run beside the pool (`beside_reload_lane`).
+/// The reload lane owns the live compile session and an isolated copy of the
+/// emitted chunk, so its edits cannot change what ordinary workers boot.
 pub struct ReloadLaneSession {
     stone: crate::skull_backend::SkullStone,
     output: String,
-    /// Alive for the lane's whole run; dropping it removes the directory.
     _dir: TempDir,
 }
 
-/// The session (and output directory) the hot-reload lane uses, or `None` when
-/// the selection holds no reload sim.
-///
-/// Costs ONE extra whole-project emit, paid once per invocation and only when
-/// the selection actually contains a reload sim.
 fn reload_lane_session(
     backend: crate::Backend,
     project_path: &Path,
     lane_is_selected: bool,
+    shared_output: &Path,
+    prepared_stone: Option<crate::skull_backend::SkullStone>,
     quiet: bool,
 ) -> Result<Option<ReloadLaneSession>> {
     if !lane_is_selected {
@@ -947,22 +920,19 @@ fn reload_lane_session(
     }
     let dir = sim_output_dir()?;
     let output = dir.path().to_string_lossy().into_owned();
-    let started = std::time::Instant::now();
-    let (_, _, stone) = compile_sims_with(
-        backend,
-        project_path.to_path_buf(),
-        PathBuf::from(&output),
-        None,
-        Some(skull::CalleeBindingMode::Global),
-    )?;
-    let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
-    emit_bytecode_image(Path::new(&output));
+    let stone = match prepared_stone {
+        Some(stone) => {
+            fs_err::copy(
+                shared_output.join(rock_host::project::MAIN_LUA_FILENAME),
+                dir.path().join(rock_host::project::MAIN_LUA_FILENAME),
+            )?;
+            stone
+        }
+        // A receipt contains emitted code, but no editable compiler Session.
+        None => compile_sims(backend, project_path.to_path_buf(), dir.path().to_path_buf())?.2,
+    };
     if !quiet {
-        // Result output: says which of the two chunks this invocation built and
-        // why, so a reload sim's shape is never inferred from the default.
-        println!(
-            "[sim] hot-reload lane: separate build with callee binding `global` ({compile_ms:.0}ms) -- its fixtures rewrite their own chunk"
-        );
+        println!("[sim] hot-reload lane: isolated chunk with the shared callee shape");
     }
     Ok(Some(ReloadLaneSession { stone, output, _dir: dir }))
 }
@@ -1459,6 +1429,8 @@ fn do_run_named_sims_recorded(
         backend,
         &project_path,
         any_reload_lane_selected(names, &env_by_wire),
+        Path::new(&output),
+        prepared.stone,
         quiet,
     )?;
     if mode != SimExecMode::Isolated {
@@ -1518,9 +1490,7 @@ fn do_run_named_sims_recorded(
         (0..names.len()).partition(|&i| entry_is_reload_lane(&names[i], &env_by_wire));
 
     let report = Mutex::new(());
-    // The hot-reload lane brings its OWN session and output directory when the
-    // shipped shape is bound (`reload_lane_session`); everything else runs
-    // against this invocation's shared chunk with no session at all.
+    // Only the reload lane owns the Session and its isolated output copy.
     let run_at = |i: usize,
                   lane: Option<(&mut crate::skull_backend::SkullStone, &str)>|
      -> Result<(String, SimSummary)> {
@@ -1933,6 +1903,8 @@ fn do_run_all_sims_recorded(
         backend,
         &project_path,
         any_reload_lane_selected(&wire_names, &env_by_wire),
+        Path::new(&output),
+        prepared.stone,
         quiet,
     )?;
     if mode != SimExecMode::Isolated {
@@ -2025,8 +1997,7 @@ fn do_run_all_sims_recorded(
     // out to ffprobe/ffmpeg but ride the same pool, so they stay bounded by
     // `--jobs` rather than fanning out on their own.
     let report = Mutex::new(());
-    // The hot-reload lane brings its OWN session and output directory when the
-    // shipped shape is bound (`reload_lane_session`).
+    // Reload entries own the Session and an isolated copy of the boot chunk.
     let run_at = |i: usize, lane: Option<(&mut crate::skull_backend::SkullStone, &str)>| -> Result<SimSummary> {
         let (stone, entry_output) = match lane {
             Some((stone, out)) => (Some(stone), out),
@@ -2269,7 +2240,7 @@ pub fn do_run_allocation_census(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, _stone) =
+    let (wire_names, env_by_wire, stone) =
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
@@ -2303,12 +2274,13 @@ pub fn do_run_allocation_census(
         }
     }
     let jobs = resolve_jobs(jobs, false);
-    // The hot-reload lane brings its OWN session and output directory when the
-    // shipped shape is bound (`reload_lane_session`).
+    // Reload entries own the Session and an isolated copy of the boot chunk.
     let mut reload_lane = reload_lane_session(
         backend,
         &project_path,
         !reload_idx.is_empty(),
+        Path::new(&output),
+        Some(stone),
         false,
     )?;
     let run_at = |i: usize, lane: Option<(&mut crate::skull_backend::SkullStone, &str)>| {
@@ -6816,6 +6788,36 @@ mod tests {
         boot_signature(
             &pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(),
         )
+    }
+
+    #[test]
+    fn reload_lane_reuses_the_compiled_session_and_isolates_its_chunk() {
+        let project = tempfile::tempdir().expect("project");
+        let shared = tempfile::tempdir().expect("shared output");
+        let source = project.path().join("main.rock");
+        std::fs::write(&source, "@nomangle fn answer() -> int { 41 }\n").unwrap();
+        let main = shared.path().join(rock_host::project::MAIN_LUA_FILENAME);
+        let stone = crate::skull_backend::SkullStone::init_with_tests(
+            project.path().to_str().unwrap(),
+            &main,
+            &shared.path().join("incremental.lua"),
+        ).expect("compile once");
+        let original = std::fs::read(&main).unwrap();
+        let fingerprint = stone.artifact_fingerprint().to_string();
+        std::fs::remove_file(&source).unwrap();
+        let lane = reload_lane_session(
+            crate::Backend::Skull,
+            project.path(),
+            true,
+            shared.path(),
+            Some(stone),
+            true,
+        ).expect("reuse without reading source").expect("selected lane");
+        assert_eq!(lane.stone.artifact_fingerprint(), fingerprint);
+        let lane_main = Path::new(&lane.output).join(rock_host::project::MAIN_LUA_FILENAME);
+        assert_eq!(std::fs::read(&lane_main).unwrap(), original);
+        std::fs::write(&lane_main, "fixture rewrite").unwrap();
+        assert_eq!(std::fs::read(&main).unwrap(), original);
     }
 
     /// A declaration that RESTATES the runner's own baseline produces a

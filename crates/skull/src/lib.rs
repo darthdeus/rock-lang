@@ -22,14 +22,8 @@ pub mod shader_artifact;
 pub mod site_join;
 pub mod mir_emit;
 
-/// THE hot-reload rule for the emitted callee shape, re-exported so the CLI
-/// pins it, reads it, and names it per build SESSION without depending on the
-/// Lua printer directly. See [`skull_codegen_lua::force_global_callee_binding`],
-/// [`skull_codegen_lua::callee_binding_is_bound`] and
-/// [`skull_codegen_lua::CalleeBindingMode`].
-pub use skull_codegen_lua::{
-    callee_binding_is_bound, callee_binding_mode, force_global_callee_binding, CalleeBindingMode,
-};
+/// Emitted callee shape, shared by CLI sessions and the Lua printer.
+pub use skull_codegen_lua::{callee_binding_is_bound, callee_binding_mode, CalleeBindingMode};
 
 // The shared graph layer, re-exported under its original paths. It moved BELOW
 // the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
@@ -505,6 +499,7 @@ fn runtime_prelude() -> &'static str {
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", "")
+            .replace("{SESSION_CELL_BINDING}\n", SESSION_CELL_BINDING)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a
@@ -525,6 +520,20 @@ fn runtime_prelude() -> &'static str {
     });
     &PRELUDE
 }
+
+/// Session activation must reseat cells in full chunks and incremental overlays.
+pub(crate) const SESSION_CELL_BINDING: &str = r#"if not _G.__rock_state_cell_sink then
+  _G.__rock_state_cell_sink = function(session)
+    __rock_state_cell = session and session.__rock_state or nil
+    __rock_initialized_cell = session and session.__rock_initialized or nil
+  end
+end
+if not _G.__rock_active_session then
+  _G.__rock_session_activate(_G.__rock_session_new(nil))
+end
+__rock_state_cell = _G.__rock_active_session.__rock_state
+__rock_initialized_cell = _G.__rock_active_session.__rock_initialized
+"#;
 
 const PRELUDE_TEMPLATE: &str =
     r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
@@ -665,18 +674,14 @@ if not _G.__rock_session_new_defined_once then
     rawset(_G, "__rock_state_name_index", nil)
   end
 end
--- THE one writer of the active Session. Every swap -- activation, a state-image
--- candidate or release, a transaction abort -- publishes through here so the
--- chunk cells follow it; a function that read `_G.__rock_active_session` on
--- every access would not need this, a function reading the cell does. Defined
--- outside the define-once block above so a full reload with a newer artifact
--- never leaves an older publisher in place that skips this chunk's cells.
+-- Every Session swap publishes through the canonical pair of state cells,
+-- including state-image candidates and transaction aborts.
 _G.__rock_session_publish = function(session)
   rawset(_G, "__rock_active_session", session)
   rawset(_G, "__rock_active_state", session and session.__rock_state or nil)
   rawset(_G, "__rock_active_initialized", session and session.__rock_initialized or nil)
-  local sinks = rawget(_G, "__rock_state_cell_sinks")
-  if sinks then for i = 1, #sinks do sinks[i](session) end end
+  local sink = rawget(_G, "__rock_state_cell_sink")
+  if sink then sink(session) end
   return session
 end
 _G.__rock_session_activate = function(session)
@@ -690,20 +695,24 @@ _G.__rock_session_activate = function(session)
   end
   return _G.__rock_session_publish(session)
 end
--- One sink per loaded chunk: after a full reload the previous chunk's closures
--- may still be running, and they read their own cells.
-local __rock_state_cell_sinks = rawget(_G, "__rock_state_cell_sinks") or {}
-rawset(_G, "__rock_state_cell_sinks", __rock_state_cell_sinks)
-__rock_state_cell_sinks[#__rock_state_cell_sinks + 1] = function(session)
-  __rock_state_cell = session and session.__rock_state or nil
-  __rock_initialized_cell = session and session.__rock_initialized or nil
+{SESSION_CELL_BINDING}
+-- Join before a factory creates its body, so all later closures inherit these
+-- same two cells. Match table identity: stripped bytecode has no upvalue names.
+_G.__rock_bind_state_cells = function(body)
+  local session = _G.__rock_active_session
+  local sink = _G.__rock_state_cell_sink
+  local i = 1
+  while true do
+    local name, value = debug.getupvalue(body, i)
+    if name == nil then break end
+    if value == session.__rock_state then
+      debug.upvaluejoin(body, i, sink, 1)
+    elseif value == session.__rock_initialized then
+      debug.upvaluejoin(body, i, sink, 2)
+    end
+    i = i + 1
+  end
 end
-if not _G.__rock_active_session then
-  _G.__rock_session_activate(_G.__rock_session_new(nil))
-end
--- A reload with a live Session skips the activation above; seat the cells.
-__rock_state_cell = _G.__rock_active_session.__rock_state
-__rock_initialized_cell = _G.__rock_active_session.__rock_initialized
 _G.__rock_state_clear = function(key)
   local session = _G.__rock_session_current()
   session.__rock_state[key] = nil
