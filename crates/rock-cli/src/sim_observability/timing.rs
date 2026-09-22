@@ -283,13 +283,24 @@ impl Timings {
         id.comparable().then_some(id)
     }
 
-    fn complete(&mut self, key: EntryKey, now: u64, completed: bool) -> Vec<TimingWarning> {
+    fn complete(
+        &mut self,
+        key: EntryKey,
+        now: u64,
+        completed: bool,
+        frame_count: Option<Value>,
+        frame_timing: Option<Value>,
+        boundary_timing: Option<Value>,
+    ) -> Vec<TimingWarning> {
         let Some((start, name, identity)) = self.active.remove(&key) else { return Vec::new(); };
         let ms = now.saturating_sub(start);
         let baseline = identity.as_ref().map(|id| self.history.samples(&name, id)).unwrap_or(&[]);
         let warnings = evaluate_entry(&name, ms, &self.policy, baseline);
         self.rows.push(json!({ "name": name, "occurrence_id": key.1, "part": key.2,
-            "duration_ms": ms, "completed": completed, "identity": identity.map(|id| id.key()) }));
+            "duration_ms": ms, "completed": completed, "frame_count": frame_count.unwrap_or(Value::Null),
+            "frame_timing": frame_timing.unwrap_or(Value::Null),
+            "boundary_timing": boundary_timing.unwrap_or(Value::Null),
+            "identity": identity.map(|id| id.key()) }));
         warnings
     }
 
@@ -308,11 +319,15 @@ impl Timings {
                 let identity = self.identity(key);
                 self.active.insert(key, (now, fields["name"].as_str().unwrap_or("unknown").into(), identity));
             },
-            "entry_end" => return self.complete(key, now, true),
+            "entry_end" => return self.complete(key, now, true,
+                fields.get("frame_count").cloned(), fields.get("frame_timing").cloned(),
+                fields.get("boundary_timing").cloned()),
             "entry_result" => {
                 self.results.insert(key.1, fields["verdict"] == "PASS" && fields["timed_out"] == false);
                 let unfinished = self.active.keys().filter(|entry| entry.1 == key.1).copied().collect::<Vec<_>>();
-                return unfinished.into_iter().flat_map(|entry| self.complete(entry, now, false)).collect();
+                return unfinished.into_iter()
+                    .flat_map(|entry| self.complete(entry, now, false, None, None, None))
+                    .collect();
             },
             "phase_start" => { if let Some(phase) = fields["phase"].as_str() { self.phases.insert(phase.into(), now); } },
             "phase_end" => {
@@ -519,7 +534,7 @@ mod tests {
     }
 
     fn end(timings: &mut Timings, duration: u64, passed: bool) -> Vec<TimingWarning> {
-        let warnings = timings.observe("entry_end", &json!({ "worker_attempt": 1, "occurrence_id": 1, "part": 0 }), duration);
+        let warnings = timings.observe("entry_end", &json!({ "worker_attempt": 1, "occurrence_id": 1, "part": 0, "frame_count": 7 }), duration);
         timings.observe("entry_result", &json!({ "worker_attempt": 1, "occurrence_id": 1,
             "verdict": if passed { "PASS" } else { "FAIL" }, "timed_out": false }), duration);
         warnings

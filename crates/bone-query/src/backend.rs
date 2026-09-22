@@ -183,6 +183,9 @@ struct BoneProject {
     /// an O(types*globals) reachability expansion on EVERY keystroke (the
     /// 20-50ms per-keystroke stall). `None` until the first build (in `update`).
     call_through: Option<CallThroughIndex>,
+    /// Fragment-scoped spellings and visibility for `call_through`. Reused on
+    /// body edits and cleared with the type caches when a scope can change.
+    scoped_call_through: HashMap<Ustr, ScopedCallThroughIndex>,
     /// Whether this project is a `bin` (executable/game), from its `stick.toml`
     /// `type` (default `bin`). The `unused_fn` lint is closed-world -- a `lib`'s
     /// public API has no in-project caller yet isn't dead -- so it runs only
@@ -566,6 +569,7 @@ impl BoneWorkspace {
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
+                scoped_call_through: HashMap::new(),
                 is_bin,
                 root: root.to_path_buf(),
                 module_touched: HashMap::new(),
@@ -665,6 +669,7 @@ impl BoneWorkspace {
                     reach: None,
                     fn_sigs: None,
                     call_through: None,
+                    scoped_call_through: HashMap::new(),
                     is_bin,
                     root: root.clone(),
                     module_touched,
@@ -829,6 +834,7 @@ impl BoneWorkspace {
             Err(e) => this_file_parse_err = Some(e),
         }
         if rebuild_type_caches {
+            proj.scoped_call_through.clear();
             let t_reach = std::time::Instant::now();
             let idx = crate::reachability::ReachabilityIndex::build(proj.session.workspace());
             if prof {
@@ -995,7 +1001,21 @@ impl BoneWorkspace {
             proj.texts.remove(path);
             proj.hole_cache.remove(path);
             proj.lint_cache.invalidate_file(Ustr::from(path));
-            let _ = proj.session.remove_file(path);
+            match proj.session.remove_file(path) {
+                Ok(update) if !matches!(update.tier, UpdateTier::NoChange) => {
+                    // Removal changes the workspace interface just like an
+                    // interface edit. Drop every workspace-derived index,
+                    // including fragment-scoped spellings, before the next
+                    // completion request rebuilds them.
+                    proj.reach = None;
+                    proj.fn_sigs = None;
+                    proj.call_through = None;
+                    proj.scoped_call_through.clear();
+                    proj.freq = None;
+                }
+                Ok(_) => {}
+                Err(e) => log::error!("bone LSP: removing `{path}`: {}", e.message),
+            }
         }
     }
 
@@ -2386,12 +2406,9 @@ impl BoneWorkspace {
         // table, not the old per-root O(functions) `ufcs_methods` scan. Ranked
         // with the type-matching variables (rank 0), shortest paths first.
         let t_reach = std::time::Instant::now();
-        // The reach and call-through indexes spell every workspace function
-        // by its key, which in a modules-v1 fragment is a DefKey the file
-        // cannot write (`chess_core::ch_to_fen(pos)`), and they consult no
-        // tier or access. Until they spell what the fragment binds, a v1
-        // fragment gets neither synthesis -- no candidate beats a wrong one.
-        let synthesize = crate::modules_scope::fragment(ws, Ustr::from(path)).is_none();
+        // Reach and call-through indexes retain canonical DefKeys internally;
+        // their readers apply the fragment resolver before materializing names.
+        let synthesize = true;
         // A pattern head is not a value slot: a dotted reach path is not a
         // valid pattern, so the expansion is suppressed there.
         if synthesize && !expected_types.is_empty() && !pattern_pos {
@@ -2404,6 +2421,12 @@ impl BoneWorkspace {
                 }
             };
             let pfx = prefix.as_bytes();
+            let callable_spellings = frag.map(|frag| {
+                crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable)
+            });
+            let type_spellings = frag.map(|frag| {
+                crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type)
+            });
             // Roots: in-scope locals/params PLUS every global (Rock has one global
             // namespace across files, so `player.movable.grid` works where
             // `player` is a global from another file -- `locals_in_scope` omits
@@ -2417,9 +2440,17 @@ impl BoneWorkspace {
                 .into_iter()
                 .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty, 0))
                 .collect();
-            for m in ws.modules.iter() {
-                for (gname, gidx) in m.global_by_name.iter() {
-                    roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty), 1));
+            if let Some(frag) = frag {
+                roots.extend(
+                    crate::modules_scope::visible_globals(ws, frag)
+                        .into_iter()
+                        .map(|global| (global.name.to_string(), global.ty, 1)),
+                );
+            } else {
+                for m in ws.modules.iter() {
+                    for (gname, gidx) in m.global_by_name.iter() {
+                        roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty), 1));
+                    }
                 }
             }
             for (vname, vty, root_kind) in roots {
@@ -2439,7 +2470,23 @@ impl BoneWorkspace {
                     }
                     // Dedup / fuzzy-match / sort on the bare access form; the
                     // final hop's parens/snippet are rendered from the flags.
-                    let key = format!("{vname}.{}", p.suffix);
+                    let suffix = match (frag, callable_spellings.as_ref()) {
+                        (Some(_), Some(names)) => match crate::modules_scope::display_method_suffix_with_names(
+                            &p.suffix,
+                            p.is_method,
+                            &p.method_members,
+                            names,
+                        ) {
+                            Some(suffix) => suffix,
+                            None => continue,
+                        },
+                        _ => p.suffix.clone(),
+                    };
+                    let final_ty = match (frag, type_spellings.as_ref()) {
+                        (Some(_), Some(names)) => crate::modules_scope::display_type_with_names(ws, &p.final_ty, names),
+                        _ => p.final_ty.clone(),
+                    };
+                    let key = format!("{vname}.{suffix}");
                     // Require a CLEAN match (word-boundary / run), not a
                     // coincidental scatter, so `nog` doesn't drag in
                     // `necro_cast.ima(g)e_dims()...` reach paths.
@@ -2463,7 +2510,7 @@ impl BoneWorkspace {
                         rk,
                         CandName::Owned(key),
                         CandShape::Reach {
-                            final_ty: p.final_ty,
+                            final_ty,
                             is_method: p.is_method,
                             takes_args: p.takes_args,
                         },
@@ -2506,6 +2553,17 @@ impl BoneWorkspace {
                     &ct_owned
                 }
             };
+            let scoped_index = match frag {
+                Some(frag) => {
+                    let file = ws.module(mid).file;
+                    if !proj.scoped_call_through.contains_key(&file) {
+                        let scoped = build_scoped_call_through(ws, frag, ct);
+                        proj.scoped_call_through.insert(file, scoped);
+                    }
+                    proj.scoped_call_through.get(&file)
+                }
+                None => None,
+            };
             ct_counts = call_through_param_completions(
                 ws,
                 mid,
@@ -2513,6 +2571,7 @@ impl BoneWorkspace {
                 offset,
                 &prefix,
                 ct,
+                scoped_index,
                 reach,
                 score_leads,
                 expected.as_mut(),

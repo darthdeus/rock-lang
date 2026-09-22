@@ -175,7 +175,6 @@
 // prelude: __rock_materialize_column_type
 // prelude: __rock_materialize_strided_element
 // prelude: __rock_native_buffer_prefix_eq
-// prelude: __rock_next_equality_field
 // prelude: __rock_parse_float_at_setup
 // prelude: __rock_range
 // prelude: __rock_repeat

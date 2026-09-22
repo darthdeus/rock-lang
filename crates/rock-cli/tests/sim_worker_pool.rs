@@ -74,6 +74,38 @@ fn run_project_workers(project: &str, specs: &[&str], jobs: &str) -> Run {
     }
 }
 
+fn run_project_workers_with_history(project: &str, specs: &[&str], jobs: &str) -> (Run, PathBuf) {
+    let dir = tempfile::tempdir().expect("trace tempdir");
+    let trace_path = dir.path().join("lifecycle.log");
+    let history = dir.path().join("history");
+
+    let mut args = vec!["sim", project];
+    args.extend_from_slice(specs);
+    args.extend_from_slice(&["--workers", "-j", jobs]);
+
+    let out = Command::new(rock_bin())
+        .args(&args)
+        .current_dir(workspace_root())
+        .env("ROCK_SIM_TIMEOUT_SECS", "180")
+        .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
+        .env("ROCK_SIM_LOG_DIR", &history)
+        .env_remove("SIM_SKIP_RENDER")
+        .output()
+        .expect("run rock sim --workers");
+
+    let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
+    (
+        Run {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            success: out.status.success(),
+            trace,
+            _dir: dir,
+        },
+        history,
+    )
+}
+
 fn run_workers(specs: &[&str], jobs: &str) -> Run {
     run_project_workers("testbed", specs, jobs)
 }
@@ -294,6 +326,52 @@ fn mag_run_stop_preserves_successor_boot_assets() {
         run.trace
     );
 
+}
+
+#[test]
+fn shared_worker_records_each_entry_frame_count_before_restore() {
+    let (run, history) = run_project_workers_with_history(
+        "mag",
+        &["build_watermark_layout", "target_cycle_sim"],
+        "1",
+    );
+    assert!(run.success, "shared worker entries pass:\n{}", run.combined());
+    assert_eq!(peak_procs(&run.trace), (1, 1), "the entries must share one worker:\n{}", run.trace);
+
+    let entries = std::fs::read_dir(&history).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(entries.len(), 1, "one recorded run is expected");
+    let events = std::fs::read_to_string(entries[0].path().join("events.jsonl")).unwrap();
+    let events = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(events.iter().any(|event| event["event"] == "worker_spawn" && event["kind"] == "shared"));
+
+    let end_counts = events
+        .iter()
+        .filter(|event| event["event"] == "entry_end")
+        .map(|event| {
+            (
+                event["name"].as_str().unwrap().to_string(),
+                event["frame_count"].as_u64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        end_counts,
+        vec![
+            ("build_watermark_layout".into(), 2),
+            ("target_cycle_sim".into(), 18),
+        ],
+        "each shared entry must retain its own pre-restore frame count"
+    );
+
+    let result_counts = events
+        .iter()
+        .filter(|event| event["event"] == "entry_result")
+        .map(|event| event["frame_count"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(result_counts, vec![2, 18]);
 }
 
 /// `-j 1` is the serial path, and it has to STAY the serial path: the composed

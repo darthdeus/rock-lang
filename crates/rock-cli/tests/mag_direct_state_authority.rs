@@ -144,10 +144,8 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         .map(|(body, _)| body)
         .expect("read SpaceState body");
     for field in [
-        "restoration: RestorationState",
-        "harvest: HarvestState",
-        "hazards: HazardState",
-        "gates: GateObservationState",
+        "harvest: HarvestVisualState",
+        "simulation: SpaceSimulationState",
     ] {
         assert_eq!(
             space_state.matches(field).count(),
@@ -155,11 +153,33 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
             "SpaceState must own `{field}` exactly once"
         );
     }
-    assert!(
-        world.contains("struct SpaceState {") && world.contains("restoration: RestorationState"),
-        "SpaceState must be the constructed owner, not a parallel cache registry"
-    );
-
+    for field in ["restoration:", "hazards:", "gates:", "teleport_entry:", "ticks:"] {
+        assert!(
+            !space_state.lines().any(|line| line.trim_start().starts_with(field)),
+            "SpaceState must keep `{field}` under its package simulation state"
+        );
+    }
+    let simulation = fs::read_to_string(repo.join("mag-simulation/world_space.rock"))
+        .expect("read package space state");
+    let simulation_state = simulation
+        .split_once("pub struct SpaceSimulationState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read SpaceSimulationState body");
+    for field in [
+        "ticks: int",
+        "harvest_ready_at: Map<int, float>",
+        "restoration: RestorationState",
+        "hazards: HazardState",
+        "gates: GateObservationState",
+        "teleport_entry: TeleportEntryState",
+    ] {
+        assert_eq!(
+            simulation_state.matches(field).count(),
+            1,
+            "SpaceSimulationState must own `{field}` exactly once"
+        );
+    }
     let harvest = fs::read_to_string(repo.join("mag/harvest.rock"))
         .expect("read MAG harvest source");
     assert_eq!(
@@ -412,6 +432,12 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "players: Arena<Player>",
         "player: Entity<Player>",
         "tasks: CoroutinePoller",
+        "wisp_motes: Arena<Mote>",
+        "wisps: [MagicWisp]",
+        "wisp_scatter_t: float",
+        "wisp_rush_t: float",
+        "wisp_effectors: [MoteEffector]",
+        "wisp_mood: MoteMood",
         "tutorial: TutorialState",
     ] {
         assert!(world.contains(field), "WorldState is missing Scene-owned `{field}`");
@@ -955,6 +981,24 @@ fn mag_world_presentation_state_has_explicit_owners() {
         );
     }
 
+    for (field, record, projection) in [
+        ("ground_items", "Arena<GroundItem>", "[[GroundItemPresentation]?]"),
+        ("corpses", "Arena<Corpse>", "[[CorpsePresentation]?]"),
+    ] {
+        assert!(
+            world_state
+                .lines()
+                .any(|line| line.trim() == format!("{field}: {record},")),
+            "WorldState must own the authoritative {field} arena"
+        );
+        assert!(
+            presentation_state
+                .lines()
+                .any(|line| line.trim() == format!("{field}: {projection} = [],")),
+            "MagWorldPresentation must own the {field} host projection"
+        );
+    }
+
     let digest = fs::read_to_string(repo.join("mag/simulation_digest.rock"))
         .expect("read MAG simulation digest");
     let fields: Vec<_> = world_state
@@ -967,7 +1011,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 15, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 21, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
@@ -1005,15 +1049,17 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "coroutine_poller_update(actor.tasks)",
         "flow_frame_reset()",
         "world_tick_all(world)",
-        "actor.update_casting(intents.cast)",
-        "player.apply_target_intent(intents.target)",
-        "player.update_movement(intents.movement)",
-        "player.apply_inventory_command(intents.inventory)",
-        "player.apply_bandage_intent(intents.consumables)",
-        "player.update_walls()",
-        "actor.cull_dead_mobs()",
-        "player.tick_wisp_intent()",
-        "wisp_motes_tick()",
+        "actor.update_casting_in(world, intents.cast)",
+        "player.apply_target_intent_in(world, intents.target)",
+        "player.update_movement_in(world, intents.movement, dt)",
+        "player.apply_inventory_command_in(world, intents.inventory)",
+        "player.apply_bandage_intent_in(world, intents.consumables)",
+        "player.update_walls_in(world, dt)",
+        "actor.update_ground_pickup(world)",
+        "actor.cull_dead_mobs(world)",
+        "tick_corpses(world)",
+        "player.tick_wisp_intent_in(world, dt)",
+        "wisp_motes_tick_in(world, dt)",
     ] {
         assert!(tick.contains(call), "canonical tick is missing authoritative call `{call}`");
     }
@@ -1036,7 +1082,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         );
     }
     let status_owner = tick
-        .find("update_player_statuses(player)")
+        .find("player.update_player_statuses_in(world, dt)")
         .expect("status owner in canonical tick");
     assert!(
         !tick.contains("mag_present_status_effects(world)"),
@@ -1046,17 +1092,17 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         .find("mag_capture_status_presentation(world)")
         .expect("status sample in canonical tick");
     let late_wall_contact = tick
-        .find("player.update_walls()")
+        .find("player.update_walls_in(world, dt)")
         .expect("late wall contact in canonical tick");
     assert!(
         status_owner < status_sample && status_sample < late_wall_contact,
         "status sampling must stay between its owner tick and late wall contact"
     );
     let wisp_intent = tick
-        .find("player.tick_wisp_intent()")
+        .find("player.tick_wisp_intent_in(world, dt)")
         .expect("authoritative wisp intent in canonical tick");
     let wisp_tick = tick
-        .find("wisp_motes_tick()")
+        .find("wisp_motes_tick_in(world, dt)")
         .expect("authoritative wisp integration in canonical tick");
     assert!(wisp_intent < wisp_tick,
         "wisp effectors must be prepared before authoritative integration");
@@ -1079,7 +1125,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     );
     assert_eq!(
         update
-            .matches("if !world_frozen() {\n        mag_simulation_tick(world, tick_intent, dt)\n    }")
+            .matches("if !world_frozen() {\n        mag_simulation_tick(world, tick_intent, dt)\n        wisp_stage_presentation_in(world)\n    }")
             .count(),
         1,
         "the host must admit the canonical tick exactly once"

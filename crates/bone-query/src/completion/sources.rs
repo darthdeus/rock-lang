@@ -321,16 +321,26 @@ pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     qi == q.len()
 }
 
-/// One call-through-eligible function: name (+ precomputed lowercase so the
-/// per-keystroke noise guard doesn't re-lowercase ~1700 names every keystroke),
-/// its first-param type (rendered), and whether it has more than one param.
+/// One call-through-eligible function: its canonical key and legacy name, the
+/// first-param type (rendered), and whether it has more than one param. A
+/// request builds scoped spellings and their lowercase forms at read time.
 pub(crate) struct CtFn {
+    /// Canonical workspace key used for HIR lookup and type ranking.
+    pub(crate) key: ustr::Ustr,
+    /// Canonical name retained for the legacy view; v1 requests render a
+    /// fragment-visible spelling at query time.
     pub(crate) name: ustr::Ustr,
     pub(crate) mid: ModuleId,
     pub(crate) fid: Idx<bone_semantic::hir::Function>,
-    pub(crate) name_lc: String,
     pub(crate) first_param_ty: String,
     pub(crate) multiparam: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ScopedCtFn {
+    index: usize,
+    name: Ustr,
+    name_lc: String,
 }
 
 /// One candidate arg value for a call-through synth, with the structural
@@ -340,17 +350,45 @@ pub(crate) struct CtFn {
 #[derive(Clone)]
 pub(crate) struct CtArg {
     pub(crate) text: String,
+    /// Canonical global or nominal type root, when text starts at one. v1
+    /// requests rewrite this root through the fragment's visible spellings.
+    pub(crate) root_key: Option<ustr::Ustr>,
+    pub(crate) reach_suffix: Option<String>,
+    pub(crate) reach_is_method: bool,
     pub(crate) payload: ArgPayload,
     pub(crate) method: bool,
     pub(crate) method_members: Vec<crate::reachability::MethodRef>,
+    pub(crate) field_members: Vec<crate::reachability::FieldRef>,
 }
 
 impl CtArg {
     pub(crate) fn direct(text: String, payload: ArgPayload) -> Self {
-        CtArg { text, payload, method: false, method_members: Vec::new() }
+        CtArg {
+            text,
+            root_key: None,
+            reach_suffix: None,
+            reach_is_method: false,
+            payload,
+            method: false,
+            method_members: Vec::new(),
+            field_members: Vec::new(),
+        }
     }
 
-    pub(crate) fn reach(root: &str, p: &crate::reachability::ReachPath) -> Self {
+    pub(crate) fn keyed(key: ustr::Ustr, text: String, payload: ArgPayload) -> Self {
+        CtArg {
+            text,
+            root_key: Some(key),
+            reach_suffix: None,
+            reach_is_method: false,
+            payload,
+            method: false,
+            method_members: Vec::new(),
+            field_members: Vec::new(),
+        }
+    }
+
+    pub(crate) fn reach(key: ustr::Ustr, root: &str, p: &crate::reachability::ReachPath) -> Self {
         let text = if p.is_method {
             format!("{root}.{}()", p.suffix)
         } else {
@@ -358,9 +396,31 @@ impl CtArg {
         };
         CtArg {
             text,
+            root_key: Some(key),
+            reach_suffix: Some(p.suffix.clone()),
+            reach_is_method: p.is_method,
             payload: ArgPayload::None,
             method: p.via_call,
             method_members: p.method_members.clone(),
+            field_members: p.field_members.clone(),
+        }
+    }
+
+    pub(crate) fn reach_local(root: &str, p: &crate::reachability::ReachPath) -> Self {
+        let text = if p.is_method {
+            format!("{root}.{}()", p.suffix)
+        } else {
+            format!("{root}.{}", p.suffix)
+        };
+        CtArg {
+            text,
+            root_key: None,
+            reach_suffix: Some(p.suffix.clone()),
+            reach_is_method: p.is_method,
+            payload: ArgPayload::None,
+            method: p.via_call,
+            method_members: p.method_members.clone(),
+            field_members: p.field_members.clone(),
         }
     }
 }
@@ -374,12 +434,7 @@ impl CtArg {
 /// whole O(types*globals) reach expansion on EVERY keystroke (20-50ms stall).
 pub(crate) struct CallThroughIndex {
     pub(crate) fns: Vec<CtFn>,
-    /// `fns` indices bucketed by lowercase first byte of the fn name. The noise
-    /// guard requires `name_lc[0] == q[0]`, so the per-keystroke loop walks only
-    /// the `q[0]` bucket instead of every fn (and runs `prefix_subseq_len` only
-    /// for plausible candidates, not all ~1700). Built with the index (a pure
-    /// fn of the type graph).
-    pub(crate) fns_by_first_char: HashMap<u8, Vec<u32>>,
+    pub(crate) fns_by_first_char: HashMap<u8, Vec<usize>>,
     pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
 }
 
@@ -398,20 +453,20 @@ pub(crate) fn build_call_through(
             }
             let Some(p0) = f.param_decls.first() else { continue };
             fns.push(CtFn {
+                key: f.name,
                 name: f.name,
                 mid: m.id,
                 fid,
-                name_lc: f.name.as_str().to_lowercase(),
                 first_param_ty: ws.render(None, p0.ty),
                 multiparam: f.param_decls.len() > 1,
             });
         }
     }
     // Global roots (position-independent), each with its rendered type.
-    let mut groots: Vec<(String, String)> = Vec::new();
+    let mut groots: Vec<(ustr::Ustr, String, String)> = Vec::new();
     for m in ws.modules.iter() {
         for (gname, gidx) in m.global_by_name.iter() {
-            groots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty)));
+            groots.push((*gname, gname.to_string(), ws.render(None, m.globals[*gidx].ty)));
         }
     }
     // Static args per distinct first-param type. Seed each needed type with its
@@ -424,8 +479,8 @@ pub(crate) fn build_call_through(
     for t in &needed {
         let mut vals: Vec<CtArg> = groots
             .iter()
-            .filter(|(_, rt)| rt == t)
-            .map(|(n, _)| CtArg::direct(n.clone(), ArgPayload::None))
+            .filter(|(_, _, rt)| rt == t)
+            .map(|(key, n, _)| CtArg::keyed(*key, n.clone(), ArgPayload::None))
             .collect();
         for (vname, shape) in crate::query::enum_variants_with_shape(ws, t) {
             let payload = match shape {
@@ -433,11 +488,11 @@ pub(crate) fn build_call_through(
                 crate::query::VariantShape::Tuple => ArgPayload::Tuple,
                 crate::query::VariantShape::Record => ArgPayload::Record,
             };
-            vals.push(CtArg::direct(format!("{t}::{vname}"), payload));
+            vals.push(CtArg::keyed(Ustr::from(t), format!("{t}::{vname}"), payload));
         }
         global_type_args.insert(t.to_string(), vals);
     }
-    for (rn, rt) in &groots {
+    for (rkey, rn, rt) in &groots {
         for p in reach.arg_paths_from(rt) {
             if p.is_method && p.takes_args {
                 continue; // can't park a snippet hole inside the arg
@@ -445,18 +500,123 @@ pub(crate) fn build_call_through(
             let Some(vals) = global_type_args.get_mut(p.final_ty.as_str()) else {
                 continue; // not a first-param type any fn needs
             };
-            vals.push(CtArg::reach(rn, p));
+            vals.push(CtArg::reach(*rkey, rn, p));
         }
     }
-    // Bucket fn indices by lowercase first byte for the per-keystroke first-char
-    // lookup (the noise guard's `name_lc[0] == q[0]` condition).
-    let mut fns_by_first_char: HashMap<u8, Vec<u32>> = HashMap::new();
-    for (i, cf) in fns.iter().enumerate() {
-        if let Some(&b) = cf.name_lc.as_bytes().first() {
-            fns_by_first_char.entry(b).or_default().push(i as u32);
+    let mut fns_by_first_char: HashMap<u8, Vec<usize>> = HashMap::new();
+    for (index, cf) in fns.iter().enumerate() {
+        if let Some(&first) = cf.name.as_bytes().first() {
+            fns_by_first_char.entry(first.to_ascii_lowercase()).or_default().push(index);
         }
     }
     CallThroughIndex { fns, fns_by_first_char, global_type_args }
+}
+
+/// The fragment view of the workspace call-through index. Namespace spellings
+/// and member visibility are scope facts, so build this once per fragment after
+/// an interface/scope edit and reuse it for body-only completion requests.
+pub(crate) struct ScopedCallThroughIndex {
+    pub(crate) fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>>,
+    pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
+    pub(crate) callable_spellings: HashMap<Ustr, Vec<Ustr>>,
+}
+
+pub(crate) fn build_scoped_call_through(
+    ws: &Workspace,
+    frag: &bone_core::modules::FragmentScope,
+    index: &CallThroughIndex,
+) -> ScopedCallThroughIndex {
+    let globals = crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Global);
+    let types = crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
+    let callable_spellings =
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
+    let global_type_args = index
+        .global_type_args
+        .iter()
+        .map(|(ty, args)| (ty.clone(), global_args_in_scope(args, &globals, &types, &callable_spellings)))
+        .collect();
+    let mut fns_by_first_char: HashMap<u8, Vec<ScopedCtFn>> = HashMap::new();
+    for (index, cf) in index.fns.iter().enumerate() {
+        if !crate::modules_scope::callable_member_admitted(ws, frag, cf.key, cf.mid, cf.fid) {
+            continue;
+        }
+        let Some(names) = callable_spellings.get(&cf.key) else { continue };
+        for &name in names {
+            let name_lc = name.as_str().to_lowercase();
+            let Some(&first) = name_lc.as_bytes().first() else { continue };
+            fns_by_first_char
+                .entry(first)
+                .or_default()
+                .push(ScopedCtFn { index, name, name_lc });
+        }
+    }
+    ScopedCallThroughIndex { fns_by_first_char, global_type_args, callable_spellings }
+}
+
+fn global_args_in_scope(
+    args: &[CtArg],
+    globals: &HashMap<Ustr, Vec<Ustr>>,
+    types: &HashMap<Ustr, Vec<Ustr>>,
+    callable_names: &HashMap<Ustr, Vec<Ustr>>,
+) -> Vec<CtArg> {
+    let mut out = Vec::new();
+    for arg in args {
+        let Some(key) = arg.root_key else {
+            out.push(arg.clone());
+            continue;
+        };
+        let Some(names) = globals.get(&key).or_else(|| types.get(&key)) else {
+            continue;
+        };
+        for name in names {
+            let Some(suffix) = arg.text.strip_prefix(key.as_str()) else { continue };
+            let mut rendered = arg.clone();
+            rendered.text = format!("{name}{suffix}");
+            if let Some(reach_suffix) = &arg.reach_suffix {
+                let Some(reach_suffix) = crate::modules_scope::display_method_suffix_with_names(
+                    reach_suffix,
+                    arg.reach_is_method,
+                    &arg.method_members,
+                    callable_names,
+                ) else {
+                    continue;
+                };
+                rendered.text = if arg.reach_is_method {
+                    format!("{name}.{reach_suffix}()")
+                } else {
+                    format!("{name}.{reach_suffix}")
+                };
+            }
+            out.push(rendered);
+        }
+    }
+    out
+}
+
+fn local_args_in_scope(
+    callable_names: &HashMap<Ustr, Vec<Ustr>>,
+    args: Vec<CtArg>,
+) -> Vec<CtArg> {
+    args.into_iter()
+        .filter_map(|mut arg| {
+            let Some(reach_suffix) = &arg.reach_suffix else {
+                return Some(arg);
+            };
+            let reach_suffix = crate::modules_scope::display_method_suffix_with_names(
+                reach_suffix,
+                arg.reach_is_method,
+                &arg.method_members,
+                callable_names,
+            )?;
+            let root = arg.text.split('.').next()?;
+            arg.text = if arg.reach_is_method {
+                format!("{root}.{reach_suffix}()")
+            } else {
+                format!("{root}.{reach_suffix}")
+            };
+            Some(arg)
+        })
+        .collect()
 }
 
 pub(crate) fn call_through_param_completions(
@@ -466,6 +626,7 @@ pub(crate) fn call_through_param_completions(
     offset: usize,
     prefix: &str,
     index: &CallThroughIndex,
+    scoped_index: Option<&ScopedCallThroughIndex>,
     reach: &crate::reachability::ReachabilityIndex,
     score_leads: bool,
     mut expected: Option<&mut ExpectedArg>,
@@ -481,6 +642,27 @@ pub(crate) fn call_through_param_completions(
         return counts;
     }
     let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
+    let scoped_fns: Vec<ScopedCtFn>;
+    let global_type_args: &HashMap<String, Vec<CtArg>>;
+    let callable_spellings: Option<&HashMap<Ustr, Vec<Ustr>>>;
+    if let Some(scoped) = scoped_index {
+        scoped_fns = scoped.fns_by_first_char.get(&q[0]).cloned().unwrap_or_default();
+        global_type_args = &scoped.global_type_args;
+        callable_spellings = Some(&scoped.callable_spellings);
+    } else {
+        scoped_fns = index
+            .fns_by_first_char
+            .get(&q[0])
+            .into_iter()
+            .flatten()
+            .map(|&fn_index| {
+                let name = index.fns[fn_index].name;
+                ScopedCtFn { index: fn_index, name, name_lc: name.as_str().to_lowercase() }
+            })
+            .collect();
+        global_type_args = &index.global_type_args;
+        callable_spellings = None;
+    }
     // In-scope LOCAL roots only -- the position-dependent part. Globals + their
     // reach expansion are precomputed in `index` (the slow part, now cached).
     let locals: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
@@ -498,7 +680,6 @@ pub(crate) fn call_through_param_completions(
     // abbreviation -- arg completion needs a resolved callee to know the param
     // type, which `tilecen(` doesn't give -- so it must be browsable, not capped.
 
-
     // Pass 1: walk only the first-char bucket (lever (a)) and keep the fns that
     // clear the noise guard, recording `k` (how many leading query chars the
     // name absorbs) and the set of distinct first-param types seen. NOISE GUARD:
@@ -506,7 +687,6 @@ pub(crate) fn call_through_param_completions(
     // absorb >= half of the query but NOT all of it, and land its chars cleanly
     // (word boundaries / a run). `k` matters because the arg-side match tests the
     // RESIDUAL `q[k..]`, which depends only on `(param_type, k)` -- NOT the name.
-    let bucket: &[u32] = index.fns_by_first_char.get(&q[0]).map_or(&[], |v| v.as_slice());
     let mut passing: Vec<(usize, usize)> = Vec::new(); // (fn index, k)
     // Fns whose name FULLY covers the query (`k == q.len()`): normally suppressed
     // as fn-name browsing, but eligible for confident unique-arg autofill below.
@@ -531,24 +711,26 @@ pub(crate) fn call_through_param_completions(
             if p.is_method && p.takes_args {
                 continue;
             }
-            local_args.entry(p.final_ty.clone()).or_default().push(CtArg::reach(ln, p));
+            local_args.entry(p.final_ty.clone()).or_default().push(CtArg::reach_local(ln, p));
+        }
+    }
+    if let Some(callable_names) = callable_spellings {
+        for args in local_args.values_mut() {
+            let owned = std::mem::take(args);
+            *args = local_args_in_scope(callable_names, owned);
         }
     }
 
-    for &fi in bucket {
-        let cf = &index.fns[fi as usize];
-        if frag.is_some_and(|frag| {
-            !crate::modules_scope::callable_member_admitted(ws, frag, cf.name, cf.mid, cf.fid)
-        }) {
-            continue;
-        }
+    for si in 0..scoped_fns.len() {
+        let scoped = &scoped_fns[si];
+        let cf = &index.fns[scoped.index];
         // Never autofill a call to the fn being defined -- a recursive self-call
         // is not what completing its own body means (mag blood.rock:16:39).
-        if enclosing_fn == Some(cf.name.as_str()) {
+        if enclosing_fn == Some(cf.key.as_str()) {
             continue;
         }
-        let k = prefix_subseq_len(q, &cf.name_lc);
-        if !clean_match(cf.name_lc.as_bytes(), &q[..k.min(q.len())]) {
+        let k = prefix_subseq_len(q, &scoped.name_lc);
+        if !clean_match(scoped.name_lc.as_bytes(), &q[..k.min(q.len())]) {
             continue;
         }
         let local_arg_matches = || {
@@ -557,16 +739,16 @@ pub(crate) fn call_through_param_completions(
                 .is_some_and(|args| args.iter().any(|a| arg_matches_residual(q, k, &a.text)))
         };
         if k == q.len() {
-            committed.push(fi as usize);
+            committed.push(si);
         } else if k >= q.len().div_ceil(2) {
             counts.fns += 1;
-            passing.push((fi as usize, k));
+            passing.push((si, k));
         } else if local_arg_matches() {
             // Relaxed noise guard: the fn name absorbs < half the query, but the
             // residual matches a LOCAL arg of its param type -- a promoted
             // local-seeded call-through (`gmob` -> `give(mob)`), not fn-name noise.
             counts.fns += 1;
-            passing.push((fi as usize, k));
+            passing.push((si, k));
         }
     }
 
@@ -598,11 +780,11 @@ pub(crate) fn call_through_param_completions(
     // for, so it ranks among the direct locals, not below every candidate
     // (docs/completion-ranking-design.md, Divergence 3).
     let mut cands: Vec<(i32, usize, &CtArg, u8)> = Vec::new();
-    for (fi, k) in passing {
-        let cf = &index.fns[fi];
+    for (si, k) in passing {
+        let cf = &index.fns[scoped_fns[si].index];
         let t = cf.first_param_ty.as_str();
         let group = match_memo.entry((t, k)).or_insert_with(|| {
-            let gargs = index.global_type_args.get(t).unwrap_or(&empty);
+            let gargs = global_type_args.get(t).unwrap_or(&empty);
             let largs = local_args.get(t).unwrap_or(&empty);
             // Trailing `bool` = LOCAL-seeded: an arg drawn from an in-scope local
             // (or reachable from one), vs a global. Local-seeded partial matches
@@ -629,7 +811,7 @@ pub(crate) fn call_through_param_completions(
         counts.survivors += group.len();
         // Prefix scores for THIS fn's name (one forward DP, reused buffer), then
         // combine with each arg's shared suffix vector.
-        fuzzy_prefix_scores(cf.name.as_bytes(), q, &mut prefix_scores);
+        fuzzy_prefix_scores(scoped_fns[si].name.as_bytes(), q, &mut prefix_scores);
         let mut scored: Vec<(i32, &CtArg, bool)> = Vec::with_capacity(group.len());
         for (a, suffix, penalty, local) in group.iter() {
             // Bias toward simpler args: a direct value / clean field path beats a
@@ -653,7 +835,7 @@ pub(crate) fn call_through_param_completions(
             methods.truncate(PER_FN_METHOD_CAP);
         }
         for (score, a, local) in simple.into_iter().chain(methods) {
-            cands.push((score, fi, a, if local { 1 } else { 4 }));
+            cands.push((score, si, a, if local { 1 } else { 4 }));
         }
     }
     // CONFIDENT unique-arg autofill: for a committed (full-name-match) fn, the
@@ -663,8 +845,8 @@ pub(crate) fn call_through_param_completions(
     // types (many producers) stay quiet; distinctive ones (`can_cast(s)`,
     // `spell_hotkey_label(s.kind)`) autofill even though the name covers the whole
     // query. Method-chain args are excluded (not "the obvious value").
-    for fi in committed {
-        let cf = &index.fns[fi];
+    for si in committed {
+        let cf = &index.fns[scoped_fns[si].index];
         let t = cf.first_param_ty.as_str();
         let confident: Vec<&CtArg> = local_args
             .get(t)
@@ -676,8 +858,8 @@ pub(crate) fn call_through_param_completions(
             // type. type_rank 0 promotes it out of the bottom bucket to rank among
             // the direct locals (method bit still demotes it just below a plain
             // local), above coincidental partial (`passing`) matches.
-            let score = fuzzy_score(cf.name.as_bytes(), q) + 5000;
-            cands.push((score, fi, a, 0));
+            let score = fuzzy_score(scoped_fns[si].name.as_bytes(), q) + 5000;
+            cands.push((score, si, a, 0));
         }
     }
     // Global top `CALL_THROUGH_CAP` by score (then ci-arg tiebreak); materialize only those.
@@ -688,9 +870,10 @@ pub(crate) fn call_through_param_completions(
         cands.truncate(CALL_THROUGH_CAP);
     }
     let ct_start = sink.cands.len();
-    for (score, fi, a, type_rank) in cands {
-        let cf = &index.fns[fi];
-        let fname = cf.name;
+    for (score, si, a, type_rank) in cands {
+        let scoped = &scoped_fns[si];
+        let cf = &index.fns[scoped.index];
+        let fname = scoped.name;
         // A local-seeded promotion (0/1) holds only when the synth PRODUCES the
         // expected slot type -- a fn accepting your local but returning the
         // wrong type must not outrank type-directed candidates
@@ -698,7 +881,7 @@ pub(crate) fn call_through_param_completions(
         // promotion stands on the local seed alone.
         let type_rank = match expected.as_deref_mut() {
             Some(exp) if type_rank < 4 => {
-                if exp.accepts_fn_returning(ws, fname.as_str()) {
+                if exp.accepts_fn_returning(ws, cf.key.as_str()) {
                     type_rank
                 } else {
                     4
@@ -845,7 +1028,7 @@ fn arg_admitted(
     frag.is_none_or(|frag| {
         arg.method_members.iter().all(|(key, mid, fid)| {
             crate::modules_scope::callable_member_admitted(ws, frag, *key, *mid, *fid)
-        })
+        }) && crate::reachability::fields_admitted(ws, frag, &arg.field_members)
     })
 }
 

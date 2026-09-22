@@ -314,7 +314,16 @@ impl SimRunRecorder {
         );
     }
 
-    pub fn entry_end(&self, worker_id: u64, occurrence_id: u64, name: &str, part: usize) {
+    pub fn entry_end(
+        &self,
+        worker_id: u64,
+        occurrence_id: u64,
+        name: &str,
+        part: usize,
+        frame_count: Option<usize>,
+        frame_timing: Option<Value>,
+        boundary_timing: Option<Value>,
+    ) {
         self.event(
             "entry_end",
             json!({
@@ -322,6 +331,9 @@ impl SimRunRecorder {
                 "occurrence_id": occurrence_id,
                 "name": name,
                 "part": part,
+                "frame_count": frame_count,
+                "frame_timing": frame_timing,
+                "boundary_timing": boundary_timing,
             }),
         );
     }
