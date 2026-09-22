@@ -328,8 +328,9 @@ fn main() {
 
 /// A legacy root applies a v1 dependency's `pub` decorator through its root
 /// projection (spec 3.2), as it calls a projected fn: the application
-/// registers a lifecycle hook. A private v1 decorator is not projected, so
-/// applying it stays an unknown annotation.
+/// registers a lifecycle hook. `@update` also names a legacy stdlib fn, which
+/// does not compete for an annotation. A private v1 decorator is not
+/// projected, so applying it stays an unknown annotation.
 #[test]
 fn legacy_root_applies_a_projected_v1_decorator() {
     let root = std::env::temp_dir().join("rock_modules_emit_legacy_decorator");
@@ -346,6 +347,7 @@ fn legacy_root_applies_a_projected_v1_decorator() {
     std::fs::write(
         provider.join("lib.rock"),
         "pub @lifecycle(phase=\"update\", owner=\"session\")\ndeco init tick {}\n\n\
+         pub @lifecycle(phase=\"update\", owner=\"session\")\ndeco init update {}\n\n\
          @lifecycle(phase=\"draw\", owner=\"session\")\ndeco init hidden {}\n",
     )
     .unwrap();
@@ -357,14 +359,14 @@ fn legacy_root_applies_a_projected_v1_decorator() {
     let main = |hook: &str| {
         format!(
             "inline(lua) fn update_hooks() -> int = \"return _G.__ROCK_LIFECYCLE_PLAN.update.len\"\n\n\
-             @{hook}\nfn app_tick() {{}}\n\n\
+             @{hook}\nfn app_tick() {{}}\n\n@update\nfn app_update() {{}}\n\n\
              fn main() {{\n    print(\"hooks={{update_hooks()}}\")\n}}\n"
         )
     };
     std::fs::write(app.join("main.rock"), main("tick")).unwrap();
     let (stdout, stderr, ok) = run(&app);
     assert!(ok, "legacy root applying a v1 decorator failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    assert!(stdout.contains("hooks=1"), "the application should register one hook\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("hooks=2"), "both applications should register a hook\nstdout:\n{stdout}\nstderr:\n{stderr}");
 
     std::fs::write(app.join("main.rock"), main("hidden")).unwrap();
     let (stdout, stderr, ok) = run(&app);

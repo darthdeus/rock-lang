@@ -201,19 +201,20 @@ fn a_decorator_a_consumer_applies_is_exported() {
 }
 
 /// The Stone case: a legacy consumer applies the decorator, and after the
-/// conversion reaches it through its root projection.
+/// conversion reaches it through its root projection. `update` also names a
+/// legacy stdlib fn, as Stone's `@update` does.
 #[test]
 fn a_decorator_a_legacy_consumer_applies_is_exported() {
     let fixture = scratch("decorator_legacy_consumer");
     let dir = fixture.path();
     write(&dir.join("lib/stick.toml"), &manifest("deco-lib", ""));
-    write(&dir.join("lib/lib.rock"), "@lifecycle(phase=\"update\", owner=\"session\")\ndeco init tick {}\n");
+    write(&dir.join("lib/lib.rock"), "@lifecycle(phase=\"update\", owner=\"session\")\ndeco init update {}\n");
     write(&dir.join("app/stick.toml"), &manifest("deco-app", "[dependencies]\ndeco-lib = { path = \"../lib\" }\n"));
-    write(&dir.join("app/app.rock"), "@tick\nfn app_tick() {}\n");
+    write(&dir.join("app/app.rock"), "@update\nfn app_update() {}\n");
 
     let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
     assert_eq!(v["verdict"], "migration_needed", "{v}");
-    assert_eq!(names(&v["exports"]["pub"]), vec!["tick"], "{v}");
+    assert_eq!(names(&v["exports"]["pub"]), vec!["update"], "{v}");
     for ctx in v["verification"].as_array().unwrap() {
         assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
         assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
