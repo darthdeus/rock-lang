@@ -401,7 +401,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         }
     }
     for (field, qualified, declaration) in [
-        ("potion_ready_at", "player.potion_ready_at", "potion_ready_at:"),
+        ("potion_ready_at", "player.body.potion_ready_at", "potion_ready_at:"),
         ("bandage_slips", "player.bandage_slips", "bandage_slips:"),
         ("summon_slots", "player.summon_slots", "summon_slots:"),
     ] {
@@ -552,7 +552,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "ritual_acquisition_event_seq: int",
         "notoriety: PlayerNotoriety",
         "combat_latch: CombatLatchState",
-        "potion_ready_at: float",
         "bandage_slips: int",
         "summon_slots: [Entity<Mob>?]",
         "cast_outline: PlayerCastOutline",
@@ -568,14 +567,15 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for field in [
         "dead: bool", "invulnerable: bool", "status: [StatusEffect<DamageSource>]",
         "health_cur: float", "health_max: float", "mana_cur: float", "mana_max: float",
-        "stamina_cur: float", "stamina_max: float",
+        "stamina_cur: float", "stamina_max: float", "potion_ready_at: float",
     ] {
         assert_eq!(body.matches(field).count(), 1, "PlayerBody must own `{field}` exactly once");
         assert!(!player_state.contains(field), "Player must not duplicate `{field}`");
     }
+    assert_eq!(body.matches("potion_ready_at: float = 0.0").count(), 1,
+        "PlayerBody must initialize its potion deadline exactly once");
     for field in [
         "combat_latch: CombatLatchState = CombatLatchState {}",
-        "potion_ready_at: float = 0.0",
         "bandage_slips: int = 0",
         "summon_slots: [Entity<Mob>?] = [null, null, null, null]",
         "cast_outline: PlayerCastOutline = PlayerCastOutline {}",
