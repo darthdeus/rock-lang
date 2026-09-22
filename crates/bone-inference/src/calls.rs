@@ -142,6 +142,15 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
             TypeExpr::Builtin(BuiltinTy::Float),
         ) => Some(1),
         (_, TypeExpr::Builtin(BuiltinTy::Any)) => Some(2),
+        // Mirrors `coerce`'s nullable target: fit the inner types, so an `int`
+        // argument fits a `float?` param in selection as it does in binding.
+        (&from, &TypeExpr::Nullable(pi)) => {
+            let from_inner = match from {
+                TypeExpr::Nullable(fi) => a.with_idx(fi),
+                _ => a,
+            };
+            fit_cost(gamma, from_inner, p.with_idx(pi), span)
+        }
         _ => {
             let p_is_iface = match *gamma.get(p) {
                 TypeExpr::App {

@@ -71,3 +71,28 @@ fn f(a: int, b: int = 0, c: int = 0) -> int { a }
 fn caller() -> int {
     f(1, 2, b: 3)
 }
+
+// A named int literal for a defaulted `float?` param must coerce during
+// selection exactly as it does in single-candidate binding. Mirrors Stone's
+// `draw_text(text, pos, size, color, duration: 2)` beside a `draw_text(Font, ...)`.
+//- named_int_literal_coerces_to_nullable_float
+struct Font { id: int }
+struct V2 { x: float }
+fn label(font: Font, text: string, x: float) -> int { 0 }
+fn label(text: string, pos: V2, size: float = 1.0, duration: float? = null) -> int { 1 }
+fn caller(p: V2) -> int {
+    let r = label("hi", p, 8.0, duration: 2)
+      //^ int
+    r
+}
+
+// Fitting a nullable param through its inner type must not widen what fits:
+// a string still fits no `float?` candidate.
+//- string_does_not_fit_nullable_float_fail @fail
+struct Font { id: int }
+struct V2 { x: float }
+fn label(font: Font, text: string, x: float) -> int { 0 }
+fn label(text: string, pos: V2, size: float = 1.0, duration: float? = null) -> int { 1 }
+fn caller(p: V2) -> int {
+    label("hi", p, 8.0, duration: "soon")
+}
