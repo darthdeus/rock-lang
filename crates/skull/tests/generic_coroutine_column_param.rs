@@ -154,7 +154,7 @@ fn a_generic_coroutine_over_an_unmarked_value_column_iterates_identically() {
 #[test]
 fn a_non_generic_coroutine_over_the_same_column_vec_is_correct() {
     assert_eq!(
-        run(CONCRETE_CO_COLUMN, "concrete_co_col"),
+        run(CONCRETE_CO_COLUMN, "gen_param_concrete_co_col"),
         "2",
         "a NON-generic `co fn` over the same column vec must stay correct -- \
          this is half of what pins the defect to the generic x coroutine cell"
