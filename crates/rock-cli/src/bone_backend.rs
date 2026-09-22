@@ -73,12 +73,12 @@ pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<Compi
 /// fix-one-recompile-repeat loop.
 pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
-    // under `<bone-stdlib:NAME>` and appear in no caller's source set -- the
+    // under the loader's stdlib id and appear in no caller's source set -- the
     // span lookup then fails and the snippet plus every label is dropped. Added
     // here, the one sink all render paths share, rather than per caller.
     let mut sf = sources.clone();
     for f in rock_host::stdlib_loader::stdlib_files() {
-        let id = format!("<bone-stdlib:{}>", f.name);
+        let id = rock_host::stdlib_loader::stdlib_file_id(f.name);
         sf.add_or_update_file(source_file_from_path_and_contents(
             id.clone(),
             id,
@@ -498,16 +498,17 @@ pub(crate) fn bone_workspace_timed(
 /// its own subset. Parsed once and cloned per check.
 ///
 /// bone keys modules by file (`Ast.file`, interned to a dense `ModuleId`), so
-/// each stdlib file is parsed with a distinct `<bone-stdlib:NAME>` file id to
-/// avoid colliding with each other or with the test module. (Re-checked per file
-/// for now; caching a checked workspace is a later optimization.)
+/// each stdlib file uses the loader-owned id shared with the LSP. (Re-checked
+/// per file for now; caching a checked workspace is a later optimization.)
 pub(crate) fn bone_stdlib_modules() -> Vec<skull_parser::Ast> {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
             .map(|f| {
-                let id = ustr::Ustr::from(format!("<bone-stdlib:{}>", f.name).as_str());
+                let id = ustr::Ustr::from(
+                    rock_host::stdlib_loader::stdlib_file_id(f.name).as_str(),
+                );
                 skull_parser::parse_module(f.contents, id)
                     .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
             })
@@ -993,7 +994,7 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
         let mut best = (String::new(), 0usize);
         for module in session.ws.modules.iter() {
             let file = module.file.as_str();
-            if file.starts_with("<bone-stdlib:") || !file.contains(&proj_marker) {
+            if session.warm_mids.contains(&module.id) || !file.contains(&proj_marker) {
                 continue;
             }
             for name in module.struct_by_name.keys() {
@@ -1103,7 +1104,7 @@ pub fn bone_iter_reinfer(path: &str, iters: usize, warmup: usize) -> Result<()> 
         let mut best = (String::new(), 0usize);
         for module in session.ws.modules.iter() {
             let file = module.file.as_str();
-            if file.starts_with("<bone-stdlib:") || !file.contains(&proj_marker) {
+            if session.warm_mids.contains(&module.id) || !file.contains(&proj_marker) {
                 continue;
             }
             for name in module.functions_by_name.keys() {
@@ -1348,9 +1349,9 @@ mod tests {
     }
 
     // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
-    // under `<bone-stdlib:NAME>` and belong to no project's source set. Without
-    // the registration in `render_errs` the header still prints and the snippet
-    // plus every label is silently dropped. Renderer-level on purpose: a
+    // under the loader's stdlib id and belong to no project's source set.
+    // Without the registration in `render_errs` the header still prints and the
+    // snippet plus every label is silently dropped. Renderer-level on purpose: a
     // lowering change can move where a rejection LANDS -- which is how the
     // end-to-end fixture that used to cover this went vacuous -- but it cannot
     // move the span-to-source lookup this asserts.
@@ -1366,7 +1367,9 @@ mod tests {
         let line = head.matches('\n').count();
         let col = offset - head.rfind('\n').map_or(0, |i| i + 1);
         let span = rock_core::Span {
-            file: ustr::Ustr::from("<bone-stdlib:unified.rock>"),
+            file: ustr::Ustr::from(
+                rock_host::stdlib_loader::stdlib_file_id("unified.rock").as_str(),
+            ),
             line_range: (line, line),
             col_range: (col, col + NEEDLE.len()),
             offset_range: (offset, offset + NEEDLE.len()),
@@ -1379,5 +1382,22 @@ mod tests {
             "the stdlib source line must render, not be dropped:\n{rendered}"
         );
         assert!(rendered.contains("boxed here"), "the label must render:\n{rendered}");
+    }
+
+    #[test]
+    fn cli_warm_stdlib_uses_loader_file_ids() {
+        let expected: Vec<_> = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| rock_host::stdlib_loader::stdlib_file_id(f.name))
+            .collect();
+        let session = bone_session(Vec::new()).expect("CLI warm session must build");
+        let actual: Vec<_> = session
+            .ws
+            .modules
+            .iter()
+            .filter(|module| session.warm_mids.contains(&module.id))
+            .map(|module| module.file.as_str().to_owned())
+            .collect();
+        assert_eq!(actual, expected, "CLI and LSP must warm the same stdlib file ids");
     }
 }
