@@ -2565,7 +2565,11 @@ mod tests {
         // (killed is -1, errored -2), over an ordinary goto-CFG — NOT the
         // emit-time goto-into-block re-entry labels.
         assert!(lua.contains(".__state ="), "expected state-saving write, got:\n{lua}");
-        assert!(lua.contains("__state = (-3)"), "expected completed-terminal transition, got:\n{lua}");
+        exec_eq(
+            "co fn counter() -> Coroutine<int> {\n yield 1\n yield 2\n }",
+            "local c = counter(); c.__resume(c); c.__resume(c); c.__resume(c); print(c.__state)",
+            "-3",
+        );
         assert!(lua.contains("goto bb"), "expected ordinary goto CFG, got:\n{lua}");
         assert!(
             !lua.contains("__co_resume_"),

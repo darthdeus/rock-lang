@@ -537,7 +537,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "Player must carry its generation-safe Scene identity for deferred work"
     );
     for field in [
-        "dead: bool",
+        "body: PlayerBody",
         "attack_target: Entity<Mob>?",
         "gesture: PlayerGesture",
         "gesture_timer: float",
@@ -562,6 +562,16 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             1,
             "scene-owned Player must contain `{field}` exactly once"
         );
+    }
+    let body = fs::read_to_string(repo.join("mag-simulation/player_body.rock"))
+        .expect("read simulation player body source");
+    for field in [
+        "dead: bool", "invulnerable: bool", "status: [StatusEffect<DamageSource>]",
+        "health_cur: float", "health_max: float", "mana_cur: float", "mana_max: float",
+        "stamina_cur: float", "stamina_max: float",
+    ] {
+        assert_eq!(body.matches(field).count(), 1, "PlayerBody must own `{field}` exactly once");
+        assert!(!player_state.contains(field), "Player must not duplicate `{field}`");
     }
     for field in [
         "combat_latch: CombatLatchState = CombatLatchState {}",
