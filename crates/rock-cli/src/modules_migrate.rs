@@ -103,28 +103,6 @@ impl DefKind {
     }
 }
 
-/// An `inline(<backend>)` function body and what the census needs to compile
-/// it as the emitter does.
-#[derive(Clone)]
-struct InlineSource {
-    backend: skull_parser::FnBackend,
-    params: Vec<Ustr>,
-    returns_value: bool,
-    src: Ustr,
-}
-
-impl InlineSource {
-    fn of(fd: &skull_parser::FunctionDef) -> Option<Self> {
-        let skull_parser::FunctionBody::Inline(backend, src) = &fd.body else { return None };
-        Some(InlineSource {
-            backend: *backend,
-            params: fd.params.iter().map(|p| p.name.name).collect(),
-            returns_value: fd.return_ty.is_some(),
-            src: *src,
-        })
-    }
-}
-
 /// One top-level definition of the package, from its legacy parse tree.
 struct Def {
     file: usize,
@@ -134,8 +112,6 @@ struct Def {
     /// because a visibility leads the item (`parse_item`).
     span: (usize, usize),
     line: usize,
-    /// An `inline(<backend>)` body, for the raw-ABI census.
-    inline: Option<InlineSource>,
     /// Emitted under its declared name whatever its owner (`@nomangle`,
     /// `extern`, `main`, `test_*`), so a v1 owner does not move its symbol.
     exempt_symbol: bool,
@@ -153,7 +129,7 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
         }
         for item in &ast.items {
             let annotated = |n: &str| item.annotations.iter().any(|a| a.name.name.as_str() == n);
-            let (name, kind, inline, extern_body) = match &item.kind {
+            let (name, kind, extern_body) = match &item.kind {
                 skull_parser::ItemKind::Function(fd) => {
                     let kind = if fd.is_macro {
                         DefKind::Macro
@@ -163,13 +139,13 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
                         DefKind::Fn
                     };
                     let extern_body = !matches!(fd.body, skull_parser::FunctionBody::Rock(_) | skull_parser::FunctionBody::Inline(..));
-                    (fd.name.name, kind, InlineSource::of(fd), extern_body)
+                    (fd.name.name, kind, extern_body)
                 }
-                skull_parser::ItemKind::Struct(s) => (s.name.name, DefKind::Struct, None, false),
-                skull_parser::ItemKind::Enum(e) => (e.name.name, DefKind::Enum, None, false),
-                skull_parser::ItemKind::Newtype(n) => (n.name.name, DefKind::Newtype, None, false),
-                skull_parser::ItemKind::Global(g) => (g.name.name, DefKind::Global, None, false),
-                skull_parser::ItemKind::Decorator(d) => (d.name.name, DefKind::Decorator, None, false),
+                skull_parser::ItemKind::Struct(s) => (s.name.name, DefKind::Struct, false),
+                skull_parser::ItemKind::Enum(e) => (e.name.name, DefKind::Enum, false),
+                skull_parser::ItemKind::Newtype(n) => (n.name.name, DefKind::Newtype, false),
+                skull_parser::ItemKind::Global(g) => (g.name.name, DefKind::Global, false),
+                skull_parser::ItemKind::Decorator(d) => (d.name.name, DefKind::Decorator, false),
                 _ => continue,
             };
             let exempt_symbol = annotated("nomangle")
@@ -183,7 +159,6 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
                 kind,
                 span: item.span.offset_range,
                 line: item.span.line_range.0 + 1,
-                inline,
                 exempt_symbol,
             });
         }
@@ -590,7 +565,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
             _ => {}
         }
     }
-    if let Err(message) = raw_abi_scan(&mut plan, &ctxs, &file_index) {
+    if let Err(message) = raw_abi_scan(&mut plan, &ctxs, &baselines) {
         return Outcome::Failed { stage: "raw-ABI census".to_string(), message };
     }
 
@@ -1020,12 +995,10 @@ fn repair_for(
 }
 
 /// Raw backend sources that name a definition whose emitted symbol a v1 owner
-/// changes, in the package and in its consumers (spec 13, 15.2 "raw ABI
-/// ambiguities"). An `inline(lua)` body's references are exact
-/// (`modules_analysis::lua_references`): a free global it reads or writes,
-/// or a string it can look up through `_G`. An `inline(js)` body is still a
-/// text search, labelled as an estimate. `Err` when the census cannot run.
-fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], file_index: &HashMap<Ustr, usize>) -> std::result::Result<(), String> {
+/// changes, in the package and its consumers. The census distinguishes exact
+/// Lua references from conservative reflection candidates and reports unknown
+/// dynamic names. Paused JavaScript bodies are counted, not gated.
+fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::result::Result<(), String> {
     let moved: BTreeSet<&str> = plan
         .defs
         .iter()
@@ -1041,45 +1014,64 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], file_index: &HashMap<Ustr, usize>
             .map(str::to_string)
             .collect()
     };
-    let mut sites: Vec<(String, InlineSource)> = Vec::new();
-    for d in &plan.defs {
-        if let Some(inline) = &d.inline {
-            let site = format!("{}:{} `{}`", short_path(&plan.files[d.file].id), d.line, d.name);
-            sites.push((site, inline.clone()));
-        }
-    }
-    for c in &ctxs[1..] {
-        for f in &c.sources.files {
-            let f = f.borrow();
-            let id = Ustr::from(f.file.to_id_path().as_str());
-            if file_index.contains_key(&id) || c.file_pkg.get(&id).is_none() {
+    let mut sites = Vec::new();
+    let mut bodies = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut js_sites = BTreeSet::new();
+    for (c, checked) in ctxs.iter().zip(baselines) {
+        let ws = &checked.ws;
+        let scx = skull_mir::lower::ScalarCtx::new(ws);
+        for m in &ws.modules {
+            if !c.file_pkg.contains_key(&m.file) {
                 continue;
             }
-            let Ok(ast) = skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect) else { continue };
-            for item in &ast.items {
-                if let skull_parser::ItemKind::Function(fd) = &item.kind {
-                    if let Some(inline) = InlineSource::of(fd) {
-                        let site = format!("{}:{} `{}` ({})", short_path(&id), item.span.line_range.0 + 1, fd.name.name, c.name());
-                        sites.push((site, inline));
-                    }
+            for (fid, f) in m.functions.iter() {
+                let Some((backend, src)) = f.inline_body else { continue };
+                if backend == bone_core::hir::FnBackend::Js {
+                    js_sites.insert((m.file, f.span.offset_range));
+                    continue;
                 }
+                let fref = skull_mir::mir::FuncRef { module: m.id, func: fid };
+                let params: Vec<Ustr> = skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(ws, &scx, fref)
+                    .lua_param_names(ws)
+                    .map(|names| names.into_iter().map(|s| Ustr::from(&s)).collect())
+                    .unwrap_or_else(|| f.param_decls.iter().map(|p| p.name).collect());
+                if !seen.insert((m.file, f.span.offset_range, params.clone(), src)) {
+                    continue;
+                }
+                sites.push(format!("{}:{} `{}`", short_path(&m.file), f.span.line_range.0 + 1, f.name));
+                bodies.push(modules_analysis::LuaBody { params, returns_value: f.return_ty.is_some(), src });
             }
         }
     }
-    let (lua, js): (Vec<_>, Vec<_>) = sites.into_iter().partition(|(_, s)| s.backend != skull_parser::FnBackend::Js);
-    let bodies: Vec<modules_analysis::LuaBody> = lua
-        .iter()
-        .map(|(_, s)| modules_analysis::LuaBody { params: s.params.clone(), returns_value: s.returns_value, src: s.src })
-        .collect();
+    if !js_sites.is_empty() {
+        plan.notes.push(format!(
+            "native Lua audit: {} inline JavaScript body/bodies not checked; JS/web development is paused (docs/backends.md), so JavaScript ABI findings do not block this migration",
+            js_sites.len()
+        ));
+    }
     let refs = modules_analysis::lua_references(&bodies)?;
     let tail = "whose emitted symbol changes when the package becomes v1; mark the definition `@nomangle` or reach it through Rock before migrating";
     let listed = |names: &BTreeSet<String>| names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
-    for ((site, _), r) in lua.iter().zip(refs) {
+    for (site, r) in sites.iter().zip(refs) {
         if let Some(error) = r.error {
             plan.blockers.push(format!(
-                "raw ABI review [unknown]: the inline body at {site} does not compile as Lua ({error}), so its references to renamed symbols are unknown"
+                "raw ABI review [unknown]: the inline body at {site} cannot be fully analyzed as Lua ({error}), so its references to renamed symbols are unknown"
             ));
             continue;
+        }
+        if !r.unresolved.is_empty() {
+            plan.notes.push(format!(
+                "raw ABI coverage [unknown]: {site}: {}; retaining conservative string candidates; dynamically computed names require manual review",
+                r.unresolved.join("; ")
+            ));
+            let possible = moved_names(&mut r.conservative.iter().map(String::as_str));
+            if !possible.is_empty() {
+                plan.blockers.push(format!(
+                    "raw ABI review [conservative]: the inline body at {site} may name {} through unresolved `_G` flow, {tail}",
+                    listed(&possible)
+                ));
+            }
         }
         let globals = moved_names(&mut r.globals.iter().map(String::as_str));
         if !globals.is_empty() {
@@ -1093,17 +1085,7 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], file_index: &HashMap<Ustr, usize>
             ));
         }
     }
-    for (site, s) in &js {
-        let names = moved_names(&mut identifiers(s.src.as_str()));
-        if !names.is_empty() {
-            plan.blockers.push(format!("raw ABI review [text-search estimate]: the inline body at {site} names {}, {tail}", listed(&names)));
-        }
-    }
     Ok(())
-}
-
-fn identifiers(src: &str) -> impl Iterator<Item = &str> {
-    src.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).filter(|w| !w.is_empty() && !w.as_bytes()[0].is_ascii_digit())
 }
 
 /// `[language] modules = "v1"` added to a manifest, comment-preserving.

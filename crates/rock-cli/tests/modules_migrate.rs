@@ -286,8 +286,8 @@ fn blockers_are_reported_and_nothing_is_written() {
 
 /// The raw-ABI census counts only an inline Lua body's real references to a
 /// renamed symbol, as LuaJIT compiles the body: a free global read or write,
-/// or a string naming it in a body that reaches `_G`. A local, a parameter,
-/// a field, a table key, a string in a body that never reaches `_G` and a
+/// or a resolved field of `_G`. A local, a parameter,
+/// a field, a table key, an unrelated string and a
 /// comment spelling the name are not references (chess-render's `fn pc`
 /// against stone's Lua local `pc`).
 #[test]
@@ -314,6 +314,111 @@ fn raw_abi_census_counts_only_real_references() {
     assert!(blockers.is_empty(), "{blockers:#?}");
     assert_eq!(v["verdict"], "migration_needed", "{v}");
     assert_eq!(run.code, Some(3), "{}", shown(&run));
+}
+
+#[test]
+fn raw_abi_census_uses_the_foreign_scalar_parameter_abi() {
+    let fixture = scratch("raw_scalar_params");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn size() -> int { 3 }\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    write(&dir.join("app/app.rock"), r#"
+nobox value Point { x: float, y: float }
+@scalar_abi inline(lua) fn width(size: Point) -> float = "return size__x + size__y"
+fn app_value() -> int { size() }
+"#);
+    let run = migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]);
+    let v = json(&run);
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert!(v["blockers"].as_array().unwrap().is_empty(), "{v}");
+}
+
+#[test]
+fn raw_abi_census_distinguishes_global_table_fields_from_other_strings() {
+    let fixture = scratch("raw_global_fields");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn r() -> int { 3 }\nfn v(s: string) -> int { 4 }\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    write(&dir.join("app/app.rock"), r#"
+fn app_value() -> int { r() + v("witness") }
+inline(lua) fn record(path: string) -> int = """
+    local f = io.open(path, "r")
+    local rows = _G.audit_rows
+    if rows then
+        for _, row in pairs(rows) do row.v = row.v + 1 end
+    end
+    _G.audit_rows = { v = 1 }
+    if f then f:close() end
+    return 1
+"""
+"#);
+    let run = migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]);
+    let v = json(&run);
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert!(v["blockers"].as_array().unwrap().is_empty(), "{v}");
+}
+
+#[test]
+fn raw_abi_census_reports_paused_javascript_without_blocking_lua() {
+    let fixture = scratch("raw_paused_js");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn value() -> int { 3 }\ninline(js) fn raw() -> int = \"return value();\"\n");
+    let run = migrate(dir, "lib", &["--check", "--format", "json"]);
+    let v = json(&run);
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert!(v["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("JavaScript")), "{v}");
+}
+
+#[test]
+fn raw_abi_census_keeps_real_and_conservative_environment_candidates_blocked() {
+    let fixture = scratch("raw_environment_controls");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn pc() -> int { 3 }\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    for body in [
+        "return pc()",
+        "return _G.pc()",
+        "return _G[\"pc\"]()",
+        "local env = _G; return env.pc()",
+        "local env = {}; if flag then env = _G end; return env.pc()",
+        "local env = {}; while flag do env = _G; flag = false end; return env.pc()",
+        "local function f() return _G.pc() end; return f()",
+        "local env = _G; local function f() return env.pc() end; return f()",
+        "return rawget(_G, \"pc\")()",
+        "local key = flag and \"pc\" or key; return _G[key]()",
+        "local env = _G; return helper(env, \"pc\")",
+    ] {
+        write(&dir.join("app/app.rock"), &format!(
+            "fn app_value() -> int {{ pc() }}\ninline(lua) fn probe(flag: bool, key: string) -> int = \"\"\"{body}\"\"\"\n"
+        ));
+        let run = migrate(dir, "lib", &["--apply", "--consumer", "app", "--format", "json"]);
+        let v = json(&run);
+        assert_eq!(v["verdict"], "blocked", "{body}: {v}");
+        assert!(v["blockers"].as_array().unwrap().iter().any(|b| {
+            let b = b.as_str().unwrap();
+            b.contains("`pc`") || b.contains("unresolved _G flow")
+        }), "{body}: {v}");
+        assert!(!read(&dir.join("lib/stick.toml")).contains("modules ="));
+    }
+}
+
+#[test]
+fn raw_abi_census_reports_dynamic_name_coverage_without_claiming_an_exact_reference() {
+    let fixture = scratch("raw_dynamic_name");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn pc() -> int { 3 }\ninline(lua) fn lookup(key: string) -> int = \"return _G[key]()\"\n");
+    let run = migrate(dir, "lib", &["--check", "--format", "json"]);
+    let v = json(&run);
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert!(v["blockers"].as_array().unwrap().is_empty(), "{v}");
+    assert!(v["notes"].as_array().unwrap().iter().any(|n| {
+        n.as_str().unwrap().contains("dynamically computed names require manual review")
+    }), "{v}");
 }
 
 /// A package that does not check before migration is an analysis failure

@@ -458,30 +458,30 @@ pub(crate) struct LuaBody {
     pub src: Ustr,
 }
 
-/// What one inline Lua body references, as LuaJIT compiles it (spec 13: raw
-/// references to generated Rock names, `_G` accesses and reflection strings).
-/// Exact: a local, a parameter, a field, a table key, a comment or a string is
-/// not a free global, and the Lua compiler is the one deciding.
+/// References in an inline Lua body. Free globals and resolved `_G` fields
+/// are distinct from conservative candidates in unresolved reflection.
 #[derive(Debug, Default)]
 pub(crate) struct LuaRefs {
     /// Free globals the body (or a function nested in it) reads or writes.
     pub globals: Vec<String>,
-    /// String constants and constant field keys, when the body reaches `_G`:
-    /// a name it can look up there (`_G.x`, `_G["x"]`, `rawget(_G, "x")`).
+    /// Literal field accesses on the global environment, including aliases.
     pub via_g: Vec<String>,
+    /// String candidates retained when environment flow cannot be resolved.
+    pub conservative: Vec<String>,
+    /// Coverage limits; dynamic names are not proven safe by this census.
+    pub unresolved: Vec<String>,
     /// The body does not compile as Lua; its references are unknown.
     pub error: Option<String>,
 }
 
-/// Compile every body with the toolchain's LuaJIT and read its bytecode
-/// (`jit.bc`): GGET/GSET name the free globals, and a body that reads `_G`
-/// also reports its string constants. One LuaJIT process for all bodies. An
-/// `Err` means the census could not run at all.
+/// Compile bodies with the toolchain's LuaJIT and track environment registers
+/// over bytecode control flow. Unresolved reflection keeps the previous string
+/// census, explicitly conservative. One process serves all bodies.
 pub(crate) fn lua_references(bodies: &[LuaBody]) -> Result<Vec<LuaRefs>, String> {
     if bodies.is_empty() {
         return Ok(Vec::new());
     }
-    let mut script = String::from("local bc = require(\"jit.bc\")\nlocal bodies = {\n");
+    let mut script = String::from("local bodies = {\n");
     for b in bodies {
         let src = if b.returns_value && !b.src.as_str().contains("return") {
             format!("return {}", b.src.as_str().trim())
@@ -491,30 +491,14 @@ pub(crate) fn lua_references(bodies: &[LuaBody]) -> Result<Vec<LuaRefs>, String>
         let params = b.params.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ");
         script.push_str(&format!("  {},\n", lua_quote(&format!("return function({params})\n{src}\nend"))));
     }
-    script.push_str(
-        r#"}
-for i, text in ipairs(bodies) do
-  local chunk, err = loadstring(text, "=inline")
-  if not chunk then
-    io.write("E\t", i, "\t", (tostring(err):gsub("[\t\n]", " ")), "\n")
-  else
-    local out = {}
-    bc.dump(chunk(), { write = function(_, s) out[#out + 1] = s end, flush = function() end }, true)
-    for line in table.concat(out):gmatch("[^\n]+") do
-      io.write("L\t", i, "\t", line, "\n")
-    end
-  end
-end
-"#,
-    );
+    script.push_str("}\n");
+    script.push_str(include_str!("modules_lua_references.lua"));
     let run = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(std::time::Duration::from_secs(60)))
         .map_err(|e| format!("the raw-ABI census could not run LuaJIT: {}", e.message))?;
     if !run.success {
         return Err(format!("the raw-ABI census failed in LuaJIT: {}", run.stderr.trim()));
     }
     let mut refs: Vec<LuaRefs> = bodies.iter().map(|_| LuaRefs::default()).collect();
-    let mut strings: Vec<Vec<String>> = bodies.iter().map(|_| Vec::new()).collect();
-    let mut reaches_g = vec![false; bodies.len()];
     for line in run.stdout.lines() {
         let mut parts = line.splitn(3, '\t');
         let (Some(tag), Some(index), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
@@ -526,33 +510,28 @@ end
             .and_then(|n| n.checked_sub(1))
             .filter(|&n| n < bodies.len())
             .ok_or_else(|| format!("unexpected raw-ABI census output: {line}"))?;
-        if tag == "E" {
-            refs[i].error = Some(rest.to_string());
-            continue;
-        }
-        // `0003    GGET     4   1      ; "x"`, a jump target as `0014 => OP`.
-        let mut words = rest.split_whitespace().skip(1).skip_while(|w| *w == "=>");
-        let Some(op) = words.next() else { continue };
-        let Some(constant) = rest.split_once("; \"").and_then(|(_, k)| k.strip_suffix('"')) else { continue };
-        match op {
-            "GGET" | "GSET" => {
-                if constant == "_G" {
-                    reaches_g[i] = true;
-                }
-                refs[i].globals.push(constant.to_string());
+        match tag {
+            "E" => {
+                let message = refs[i].error.get_or_insert_with(String::new);
+                if !message.is_empty() { message.push_str("; "); }
+                message.push_str(rest);
             }
-            "KSTR" | "TGETS" | "TSETS" => strings[i].push(constant.to_string()),
-            _ => {}
+            "G" => refs[i].globals.push(rest.to_string()),
+            "K" => refs[i].via_g.push(rest.to_string()),
+            "C" => refs[i].conservative.push(rest.to_string()),
+            "U" => refs[i].unresolved.push(rest.to_string()),
+            _ => return Err(format!("unexpected raw-ABI census output: {line}")),
         }
     }
-    for (i, r) in refs.iter_mut().enumerate() {
+    for r in &mut refs {
         r.globals.sort();
         r.globals.dedup();
-        if reaches_g[i] {
-            r.via_g = std::mem::take(&mut strings[i]);
-            r.via_g.sort();
-            r.via_g.dedup();
-        }
+        r.via_g.sort();
+        r.via_g.dedup();
+        r.conservative.sort();
+        r.conservative.dedup();
+        r.unresolved.sort();
+        r.unresolved.dedup();
     }
     Ok(refs)
 }
