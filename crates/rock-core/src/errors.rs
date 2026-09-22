@@ -289,10 +289,16 @@ pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
     if errs.is_empty() {
         return String::new();
     }
-    // Errors in the stdlib render without source context (the stdlib is not in
-    // `sources`, and rendering it risks a circular to_string dependency).
+    // Unregistered stdlib errors render without source context. A caller that
+    // has the stdlib contents (the CLI does) gets the same source report as a
+    // user file; callers without it keep the compact fallback.
     let (stdlib, spanned): (Vec<&CompilerError>, Vec<&CompilerError>) =
-        errs.iter().partition(|e| e.location.file.to_string().contains("<stdlib>"));
+        errs.iter().partition(|e| {
+            e.location.file.to_string().contains("<stdlib>")
+                && !sources.files.iter().any(|source| {
+                    source.borrow().file.to_id_path() == e.location.file.as_str()
+                })
+        });
 
     let mut out: Vec<String> = stdlib.iter().map(|e| e.render_simple()).collect();
     if !spanned.is_empty() {
