@@ -1,6 +1,6 @@
 //! WGPU shader registration and projection tests.
 
-use bone_incremental::session::Session;
+use bone_incremental::session::{NsAliases, Session, SessionFile};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use crate::common::ws_with_stdlib;
@@ -239,7 +239,8 @@ fn wgpu_overlay_session(source: &str) -> Session {
             skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
         })
         .collect();
-    Session::new(stdlib, vec![("main.rock".to_string(), source.to_string())]).expect("session")
+    Session::new(stdlib, vec![SessionFile::legacy("main.rock", source)], &NsAliases::default())
+        .expect("session")
 }
 
 #[test]
@@ -273,16 +274,16 @@ fn a_failed_wgpu_overlay_cannot_publish_a_staged_coderef() {
 
     let script = format!(
         "function __rock_shader_register(...) end\n\
-         _G.PENDING_WGPU_SHADER_SRCS = {{}}\n\
          _G.FAIL_WGPU = false\n\
-         function stone_wgpu_renderer_register_pending()\n\
-             return not _G.PENDING_WGPU_SHADER_SRCS.failed\n\
+         _G.WGPU_PENDING_FAILED = false\n\
+         function __rock_wgpu_shader_publish_pending()\n\
+             return not _G.WGPU_PENDING_FAILED\n\
          end\n\
-         function stone_wgpu_renderer_publish_pending()\n\
-             return true\n\
+         function __rock_wgpu_shader_discard_pending()\n\
+             _G.WGPU_PENDING_FAILED = false\n\
          end\n\
          function __rock_wgpu_shader_register(_, _, _, _)\n\
-             if _G.FAIL_WGPU then _G.PENDING_WGPU_SHADER_SRCS.failed = true end\n\
+             if _G.FAIL_WGPU then _G.WGPU_PENDING_FAILED = true end\n\
          end\n\
          {}\n\
          run_callback()\n\

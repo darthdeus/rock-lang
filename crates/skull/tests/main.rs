@@ -167,6 +167,8 @@ mod mir_execution_oracle;
 mod modules_state_identity;
 #[path = "modules_lifecycle.rs"]
 mod modules_lifecycle;
+#[path = "wgpu_prelude_hooks.rs"]
+mod wgpu_prelude_hooks;
 #[path = "modules_type_emission.rs"]
 mod modules_type_emission;
 #[path = "multi_rejection.rs"]
