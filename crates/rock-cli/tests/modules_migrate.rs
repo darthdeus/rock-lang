@@ -162,8 +162,8 @@ fn a_legacy_library_migrates_with_its_exports_closure_and_ascriptions() {
 /// A consumer that applies one of the package's decorators uses it, as it
 /// uses a function it calls: the plan exports it and the consumer's
 /// annotation still resolves. A decorator only the package applies, and one
-/// nobody applies, stay private. The consumer is v1: a legacy consumer cannot
-/// apply a v1 decorator yet (the sentinel below).
+/// nobody applies, stay private. This consumer is v1; the next test is
+/// the legacy one.
 #[test]
 fn a_decorator_a_consumer_applies_is_exported() {
     let fixture = scratch("decorator_use");
@@ -200,15 +200,10 @@ fn a_decorator_a_consumer_applies_is_exported() {
     assert!(lib.contains("\n@lifecycle(phase=\"draw\", owner=\"session\")\ndeco init own_hook"), "{lib}");
 }
 
-/// SENTINEL (docs/test-sentinels.md). The plan exports the decorator a legacy
-/// consumer applies, but the compiler does not let a legacy file apply a v1
-/// decorator: `lower_annotations_with_ctx` (bone-lower) resolves annotation
-/// names only for a v1 fragment and never consults the legacy projection,
-/// which does carry `pub` decorators. The correct result is a clean
-/// verification in `deco-app`. When this fails because that error is gone,
-/// the compiler fix landed: flip the assertion and expect `migration_needed`.
+/// The Stone case: a legacy consumer applies the decorator, and after the
+/// conversion reaches it through its root projection.
 #[test]
-fn sentinel_a_legacy_consumer_cannot_apply_an_exported_v1_decorator() {
+fn a_decorator_a_legacy_consumer_applies_is_exported() {
     let fixture = scratch("decorator_legacy_consumer");
     let dir = fixture.path();
     write(&dir.join("lib/stick.toml"), &manifest("deco-lib", ""));
@@ -217,15 +212,14 @@ fn sentinel_a_legacy_consumer_cannot_apply_an_exported_v1_decorator() {
     write(&dir.join("app/app.rock"), "@tick\nfn app_tick() {}\n");
 
     let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
     assert_eq!(names(&v["exports"]["pub"]), vec!["tick"], "{v}");
-    let app = v["verification"].as_array().unwrap().iter().find(|c| c["context"] == "deco-app").unwrap();
-    let errors = app["errors"].as_array().unwrap();
-    assert!(
-        errors.len() == 1 && errors[0].as_str().unwrap().contains("unknown annotation `@tick`"),
-        "PINNED BEHAVIOR (BUG): a legacy consumer cannot apply a pub v1 decorator. \
-         If this error is gone, the compiler fix landed -- flip this sentinel.\n{app}"
-    );
-    assert_eq!(v["verdict"], "blocked", "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+    let apply = migrate(dir, "lib", &["--apply", "--consumer", "app"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
 }
 
 /// Spec 8.3: in v1 an own `min(Foo, Foo)` hides the std family for the bare

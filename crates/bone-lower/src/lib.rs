@@ -3897,22 +3897,21 @@ pub fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hi
         .collect()
 }
 
-/// Lower annotation syntax and resolve v1 decorator names through the current
-/// fragment. Compiler-owned metadata intentionally stays unresolved so its
-/// raw spelling remains the source of builtin behavior.
+/// Lower annotation syntax and resolve v1 decorator names: through the
+/// current fragment, or through a legacy file's compatibility views.
+/// Compiler-owned metadata intentionally stays unresolved so its raw spelling
+/// remains the source of builtin behavior.
 pub fn lower_annotations_with_ctx(
     ctx: &LowerCtx,
     ast: &Ast,
     anns: &[skull_parser::Annotation],
 ) -> Vec<hir::Annotation> {
     let mut lowered = lower_annotations(ast, anns);
-    let Some(frag) = ctx.v1_scope() else {
-        return lowered;
-    };
     for anno in &mut lowered {
         // Only a decorator claims an annotation spelling; a same-named fn or
-        // global leaves the builtin in force.
-        if let Ok(resolved) = ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), anno.name.name)) {
+        // global leaves the builtin in force. A legacy decorator records no
+        // DefMeta, so a legacy file keeps its bare spelling for it.
+        if let Ok(resolved) = ctx.resolve_bare(anno.name.name, anno.span) {
             let is_decorator = ctx
                 .workspace
                 .defs
@@ -3929,9 +3928,9 @@ pub fn lower_annotations_with_ctx(
                     .get(&key)
                     .is_some_and(|meta| meta.name.as_str() == "wire")
             });
-        if !is_wire_role {
+        let Some(frag) = ctx.v1_scope().filter(|_| is_wire_role) else {
             continue;
-        }
+        };
         let Some(names) = anno.args.iter().find_map(|arg| {
             (arg.name.as_ref().is_some_and(|name| name.name.as_str() == "onchange"))
                 .then(|| match &arg.value {

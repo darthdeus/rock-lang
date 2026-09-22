@@ -326,6 +326,56 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A legacy root applies a v1 dependency's `pub` decorator through its root
+/// projection (spec 3.2), as it calls a projected fn: the application
+/// registers a lifecycle hook. A private v1 decorator is not projected, so
+/// applying it stays an unknown annotation.
+#[test]
+fn legacy_root_applies_a_projected_v1_decorator() {
+    let root = std::env::temp_dir().join("rock_modules_emit_legacy_decorator");
+    let _ = std::fs::remove_dir_all(&root);
+    let provider = root.join("provider");
+    let app = root.join("app");
+    std::fs::create_dir_all(&provider).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        provider.join("stick.toml"),
+        "[package]\nname = \"provider\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        provider.join("lib.rock"),
+        "pub @lifecycle(phase=\"update\", owner=\"session\")\ndeco init tick {}\n\n\
+         @lifecycle(phase=\"draw\", owner=\"session\")\ndeco init hidden {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"legacyapp\"\ntype = \"bin\"\n\n[dependencies]\nprovider = { path = \"../provider\" }\n",
+    )
+    .unwrap();
+    let main = |hook: &str| {
+        format!(
+            "inline(lua) fn update_hooks() -> int = \"return _G.__ROCK_LIFECYCLE_PLAN.update.len\"\n\n\
+             @{hook}\nfn app_tick() {{}}\n\n\
+             fn main() {{\n    print(\"hooks={{update_hooks()}}\")\n}}\n"
+        )
+    };
+    std::fs::write(app.join("main.rock"), main("tick")).unwrap();
+    let (stdout, stderr, ok) = run(&app);
+    assert!(ok, "legacy root applying a v1 decorator failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(stdout.contains("hooks=1"), "the application should register one hook\nstdout:\n{stdout}\nstderr:\n{stderr}");
+
+    std::fs::write(app.join("main.rock"), main("hidden")).unwrap();
+    let (stdout, stderr, ok) = run(&app);
+    assert!(!ok, "a private v1 decorator must not be applicable\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        format!("{stdout}{stderr}").contains("unknown annotation `@hidden`"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A v1 manifest for a library package named `name`.
 fn v1_lib(dir: &Path, name: &str, lib: &str) {
     std::fs::create_dir_all(dir).unwrap();
