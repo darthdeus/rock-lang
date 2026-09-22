@@ -554,18 +554,14 @@ impl Builder<'_> {
         let any_named = arg_idxs
             .iter()
             .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
-        if let Callee::Unresolved { name, .. } = callee {
-            if !any_named {
-                if let Some(&recv_expr) = arg_idxs.first() {
-                    if let Some(field) = self.fn_field_of_call(recv_expr, name) {
-                        let arg_vals: Vec<Idx<Inst>> =
-                            arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                        let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field });
-                        let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec())?;
-                        return Ok(ValueRepr::Scalar(v));
-                    }
-                }
-            }
+        if let Callee::Unresolved { name, .. } = callee
+            && let Some(field) = self.fn_field_call(name, &arg_idxs)
+        {
+            let arg_vals: Vec<Idx<Inst>> =
+                arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
+            let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field });
+            let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec())?;
+            return Ok(ValueRepr::Scalar(v));
         }
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at

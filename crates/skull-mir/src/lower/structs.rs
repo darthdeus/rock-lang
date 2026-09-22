@@ -357,6 +357,23 @@ impl Builder<'_> {
         self.struct_field_is_fn(recv, field).then_some(field)
     }
 
+    /// The fn-typed field an unresolved call `name(recv, args..)` goes
+    /// through: the UFCS spelling of an indirect call `recv.name(args..)`.
+    /// Every reader of an unresolved call asks this before resolving `name`
+    /// as a function, since a same-named free function may also resolve.
+    /// Named or spread arguments address a function's parameters, never a
+    /// field call.
+    pub(crate) fn fn_field_call(&self, name: Ustr, arg_idxs: &[Idx<Expr>]) -> Option<Ustr> {
+        let &recv = arg_idxs.first()?;
+        let any_named = arg_idxs
+            .iter()
+            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
+        if any_named {
+            return None;
+        }
+        self.fn_field_of_call(recv, name)
+    }
+
     /// Whether `recv`'s static type is a struct with a fn-typed field named
     /// `field` — recovers a `recv.field(args)` UFCS call that bone left as an
     /// unresolved call `field` (it's really an indirect call through the field).
