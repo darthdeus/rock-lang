@@ -112,31 +112,61 @@ fn chess_scoped_is_closed_and_analyzed_with_its_production_population() {
 }
 
 #[test]
-fn chesslings_is_not_closed_and_names_every_legacy_package() {
+fn chesslings_is_closed_and_reaches_every_chess_library_as_v1() {
     let run = audit(&repo_root().join("games/chesslings"), &["--closed", "--format", "json"]);
-    assert_eq!(run.code, Some(3), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    assert_eq!(run.code, Some(0), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
     let v = json(&run);
-    assert_eq!(v["closed"]["verdict"], "fail");
-    assert_eq!(v["closed"]["root_is_legacy"], true);
-    let mut offending = names(&v["closed"]["offending"]);
-    offending.sort();
-    assert_eq!(offending, vec!["chesslings"]);
-    for package in ["chess-core", "chess-game", "chess-render", "chess-sfx", "stone", "stone-core"] {
+    assert_eq!(v["closed"]["verdict"], "pass");
+    for package in ["chesslings", "chess-core", "chess-game", "chess-render", "chess-sfx", "stone", "stone-core"] {
         let reached = v["legacy_boundaries"]["reachable"]
             .as_array()
             .unwrap()
             .iter()
             .find(|r| r["package"] == package)
-            .expect("converted library is still reached, as v1")
+            .unwrap_or_else(|| panic!("{package} is reached"))
             .clone();
         assert_eq!(reached["legacy"], false, "{reached}");
         assert_eq!(reached["dialect"], "v1", "{reached}");
     }
-    // Every offending package carries a reach path from the root.
+}
+
+/// A legacy root over v1 libraries: only the root is offending, and it
+/// carries its own reach path.
+#[test]
+fn a_legacy_root_over_v1_libraries_names_only_itself() {
+    let fixture = scratch("legacy_root");
+    let dir = fixture.path();
+    write(&dir.join("core/stick.toml"), &manifest("core-lib", true, ""));
+    write(&dir.join("core/lib.rock"), "pub fn core_answer() -> int {\n    41\n}\n");
+    write(&dir.join("game/stick.toml"), &manifest("game-lib", true, "[dependencies]\ncore-lib = { path = \"../core\" }\n"));
+    write(&dir.join("game/lib.rock"), "pub fn game_answer() -> int {\n    core_lib::core_answer() + 1\n}\n");
+    write(
+        &dir.join("app/stick.toml"),
+        &manifest("app", false, "[dependencies]\ncore-lib = { path = \"../core\" }\ngame-lib = { path = \"../game\" }\n"),
+    );
+    write(&dir.join("app/lib.rock"), "fn app_answer() -> int {\n    game_answer() + core_answer()\n}\n");
+
+    let run = audit(&dir.join("app"), &["--closed", "--format", "json"]);
+    assert_eq!(run.code, Some(3), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+    let v = json(&run);
+    assert_eq!(v["closed"]["verdict"], "fail");
+    assert_eq!(v["closed"]["root_is_legacy"], true);
+    assert_eq!(names(&v["closed"]["offending"]), vec!["app"]);
+    for package in ["core-lib", "game-lib"] {
+        let reached = v["legacy_boundaries"]["reachable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["package"] == package)
+            .unwrap_or_else(|| panic!("{package} is reached, as v1"))
+            .clone();
+        assert_eq!(reached["legacy"], false, "{reached}");
+        assert_eq!(reached["dialect"], "v1", "{reached}");
+    }
     for row in v["closed"]["offending"].as_array().unwrap() {
         let paths = row["paths"].as_array().expect("paths");
         assert!(!paths.is_empty(), "{row}");
-        assert_eq!(paths[0][0], "chesslings", "{row}");
+        assert_eq!(paths[0][0], "app", "{row}");
     }
 }
 
