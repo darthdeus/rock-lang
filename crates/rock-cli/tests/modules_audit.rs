@@ -261,6 +261,42 @@ fn cross_package_references_are_exact_counts() {
     assert_eq!(e["calls"], 1, "{e}");
 }
 
+/// Whether a call goes through a fn-typed field is inference's decision: a
+/// call written by name references the function even when its argument has a
+/// field of that name, and a method call through a field whose type is a
+/// generic parameter bound to a fn type references nothing.
+#[test]
+fn fn_field_calls_follow_inference() {
+    let fixture = scratch("fn_field");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("field-lib", true, ""));
+    write(
+        &dir.join("lib/lib.rock"),
+        "pub struct Tile {\n    pub sprite: fn() -> int,\n}\n\npub struct Holder<F> {\n    pub run: F,\n}\n\n\
+         pub fn sprite(t: Tile) -> int {\n    7\n}\n",
+    );
+    write(&dir.join("app/stick.toml"), &manifest("field-app", true, "[dependencies]\nfield-lib = { path = \"../lib\" }\n"));
+    write(
+        &dir.join("app/lib.rock"),
+        "use field_lib::{Holder, Tile, sprite};\n\npub fn by_name(t: Tile) -> int {\n    sprite(t)\n}\n\n\
+         pub fn by_field(t: Tile) -> int {\n    t.sprite()\n}\n\n\
+         pub fn generic_field(h: Holder<fn() -> int>) -> int {\n    h.run()\n}\n",
+    );
+
+    let v = json(&audit(&dir.join("app"), &["--format", "json"]));
+    let refs = &v["cross_package_references"];
+    assert_eq!(refs["status"], "exact", "{refs}");
+    let edges = refs["edges"].as_array().unwrap();
+    let e = edges
+        .iter()
+        .find(|e| e["from"] == "field-app" && e["to"] == "field-lib")
+        .unwrap_or_else(|| panic!("edge missing: {edges:?}"));
+    assert_eq!(e["calls"], 1, "only `sprite(t)` calls a definition: {e}");
+    for bucket in refs["unattributed"].as_array().unwrap() {
+        assert_eq!(bucket["unrecorded_calls"], serde_json::json!({}), "a field call is not unrecorded: {bucket}");
+    }
+}
+
 #[test]
 fn json_carries_a_status_for_every_section() {
     let v = json(&audit(&repo_root().join("libs/chess-core"), &["--format", "json"]));

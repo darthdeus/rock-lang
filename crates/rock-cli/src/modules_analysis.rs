@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use bone_core::hir::{Body, Callee, Expr, Function, Pattern, TyId, TypeCtor, TypeExpr};
+use bone_core::hir::{Callee, Expr, Function, Pattern, TyId, TypeCtor, TypeExpr};
 use bone_core::prelude::{Idx, ModuleId};
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use bone_semantic::inference::Workspace;
@@ -374,9 +374,10 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                 // Every call inference bound, whatever its syntax (named, UFCS,
                 // operator, compound assignment, a callee that is a value).
                 let bound = bi.and_then(|bi| bi.resolved_overload_calls.get(&idx)).copied();
-                if let (None, Some(site), Some(bi)) = (bound, site, bi) {
-                    if let Some(target) = fn_field_call(ws, body, bi, expr, site) {
-                        out.push(Ref { from: m.id, span, kind: RefKind::Call, target, callee: Some(site) });
+                if let Some(bi) = bi {
+                    if let Some(&field) = bi.fn_field_calls.get(&idx) {
+                        let target = fn_field_target(ws, bi, expr, field);
+                        out.push(Ref { from: m.id, span, kind: RefKind::Call, target, callee: site });
                         continue;
                     }
                 }
@@ -443,23 +444,26 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
     out
 }
 
-/// The fn-typed field a method-syntax call goes through: inference tries the
-/// receiver's field before any function of the name, and lowering reads it the
-/// same way (skull-mir `struct_field_is_fn`), so neither records a function.
-fn fn_field_call(ws: &Workspace, body: &Body, bi: &BodyInference, expr: &Expr, site: CalleeSite) -> Option<Target> {
-    let Expr::Call { args, .. } = expr else { return None };
-    if !site.method {
-        return None;
-    }
-    let recv = args.start();
-    let field = body.method_names.get(&recv).copied().unwrap_or(site.name);
-    let TypeExpr::App { ctor: TypeCtor::Nominal(strukt), .. } = resolved_ty(ws, bi, *bi.expr_types.get(recv)?)? else {
-        return None;
+/// The target of a call inference routed through the receiver's fn-typed
+/// `field` (`BodyInference::fn_field_calls`, which skull-mir lowers from). The
+/// receiver's type only names the field's owner; a receiver whose owner cannot
+/// be read is reported as an unrecorded call rather than attributed elsewhere.
+fn fn_field_target(ws: &Workspace, bi: &BodyInference, expr: &Expr, field: Ustr) -> Target {
+    let recv = match expr {
+        Expr::Call { args, .. } if !args.is_empty() => Some(args.start()),
+        Expr::SafeNavCall { receiver, .. } => Some(*receiver),
+        _ => None,
     };
-    let sid = ws.struct_by_name.get(&strukt)?;
-    let def = &ws.module(sid.module).structs[sid.def];
-    let fty = def.fields.iter().find(|f| f.name == field)?.ty;
-    matches!(resolved_ty(ws, bi, fty)?, TypeExpr::Function { .. }).then_some(Target::Field { module: sid.module, strukt, field })
+    let owner = recv
+        .and_then(|recv| resolved_ty(ws, bi, *bi.expr_types.get(recv)?))
+        .and_then(|ty| match ty {
+            TypeExpr::App { ctor: TypeCtor::Nominal(strukt), .. } => Some((ws.struct_by_name.get(&strukt)?.module, strukt)),
+            _ => None,
+        });
+    match owner {
+        Some((module, strukt)) => Target::Field { module, strukt, field },
+        None => Target::Unrecorded(field),
+    }
 }
 
 /// `ty` with inference variables and nullability peeled.
