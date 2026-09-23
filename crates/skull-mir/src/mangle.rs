@@ -95,9 +95,9 @@ pub fn declared_name(key: &str) -> &str {
 /// any identifier grammar, and the prefix is never flattened textually, so
 /// module `a::b` and a module literally named `a_b` cannot converge.
 ///
-/// The plan (2.1) spells this `<name>__<digest>`; a single `_` is used instead
-/// because this module's scheme forbids `__` ANYWHERE -- it is reserved in the
-/// GLSL ES identifier grammar, which the shared mangler must also satisfy.
+/// The separator is a single `_` because this module's scheme forbids `__`
+/// ANYWHERE -- it is reserved in the GLSL ES identifier grammar, which the
+/// shared mangler must also satisfy.
 /// [`collision_errors`] rejects a residual collision either way.
 pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
     match key.rfind("::") {
