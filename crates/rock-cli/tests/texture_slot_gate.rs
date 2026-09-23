@@ -192,7 +192,7 @@ fn a_required_texture_bind_rejects_an_unknown_sampler() {
         );
     }
     assert!(
-        out.contains("ERROR] [SHADER] `required_bind_no_texture_frag` declares no @textures group -- nothing can bind required sampler `uTexture`"),
+        out.contains("ERROR] [SHADER] `bitgun::required_bind_no_texture_frag` declares no @textures group -- nothing can bind required sampler `uTexture`"),
         "a required bind against a shader with no texture group must diagnose the missing group.\n{out}"
     );
 }

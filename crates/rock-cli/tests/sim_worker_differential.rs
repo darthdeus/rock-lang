@@ -1469,7 +1469,7 @@ fn a_predecessors_voice_on_a_boot_sound_does_not_reach_the_next_entry() {
     let records = run_worker_suite(
         Backend::Skull,
         "bitgun",
-        &["b3_voice_leak_seed".to_string(), "b3_voice_leak_probe".to_string()],
+        &["bitgun::b3_voice_leak_seed".to_string(), "bitgun::b3_voice_leak_probe".to_string()],
     )
     .expect("the suite call itself must not error");
     assert_eq!(records.len(), 2);
