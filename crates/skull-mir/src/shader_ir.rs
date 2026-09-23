@@ -42,6 +42,7 @@ pub enum GlslProfile {
 
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use crate::instance::Instance;
+use crate::mangle::symbol_of_key;
 use crate::mir::{FuncRef, Lit, MirFunc};
 use crate::monoty::MonoInterner;
 use bone_semantic::inference::Workspace;
@@ -584,6 +585,9 @@ impl ShaderInterfacePlan {
         )
     }
 
+    /// Type names are written as their emitted symbols: the runtime joins a
+    /// uniform group to its live physical block by name, and every target's
+    /// physical wire names blocks by symbol. Fingerprints keep the logical key.
     fn semantic_payload(&self, fullscreen: bool) -> String {
         let mut out = String::new();
         writeln!(out, "fullscreen {}", if fullscreen { 1 } else { 0 }).unwrap();
@@ -599,7 +603,7 @@ impl ShaderInterfacePlan {
                 VertexRate::PerVertex => "vertex",
                 VertexRate::PerInstance => "instance",
             };
-            writeln!(out, "vertex_input {} {} {}", input.struct_name, rate, input.attrs.len()).unwrap();
+            writeln!(out, "vertex_input {} {} {}", symbol_of_key(input.struct_name), rate, input.attrs.len()).unwrap();
             for (name, kind) in &input.attrs {
                 writeln!(out, "attr {} {}", name, attr_kind_code(*kind)).unwrap();
             }
@@ -612,7 +616,7 @@ impl ShaderInterfacePlan {
 
         writeln!(out, "groups {}", self.uniform_groups.len()).unwrap();
         for group in &self.uniform_groups {
-            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), group.struct_name, group.semantic_fingerprint(), group.members.len()).unwrap();
+            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), symbol_of_key(group.struct_name), group.semantic_fingerprint(), group.members.len()).unwrap();
             for (name, kind) in &group.members {
                 writeln!(out, "member {} {}", name, kind.code()).unwrap();
             }
@@ -657,7 +661,8 @@ impl ShaderInterfacePlan {
 
         match &self.textures {
             Some(group) => {
-                let struct_name = group.struct_name.map(|name| name.as_str()).unwrap_or("none");
+                let struct_name = group.struct_name.map(symbol_of_key);
+                let struct_name = struct_name.as_ref().map(|name| name.as_str()).unwrap_or("none");
                 writeln!(out, "textures {} {}", struct_name, group.samplers.len()).unwrap();
                 for (name, kind) in &group.samplers {
                     writeln!(out, "texture {} {}", name, sampler_kind_code(*kind)).unwrap();

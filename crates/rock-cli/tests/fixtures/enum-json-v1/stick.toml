@@ -7,7 +7,7 @@ type = "bin"
 modules = "v1"
 
 [dependencies]
-stone = { path = "../../../../../stone", allow_legacy = true }
+stone = { path = "../../../../../stone" }
 
 [build]
 channels = ["dev"]

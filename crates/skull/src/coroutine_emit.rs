@@ -448,7 +448,7 @@ fn emit_constructor(
         let mut box_fields = format!(
             "{{__variant = s.{tag}, __ty = {ty}",
             tag = skull_mir::lower::yield_slot(0),
-            ty = skull_codegen_lua::lua_string(ch.enum_name.as_str()),
+            ty = skull_codegen_lua::lua_string(skull_mir::mangle::symbol_of_key(ch.enum_name).as_str()),
         );
         for i in 0..ch.tuple_width {
             let _ = write!(box_fields, ", s.{}", skull_mir::lower::yield_slot(1 + i));

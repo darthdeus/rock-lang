@@ -315,6 +315,19 @@ io.write("C_STUB_OK\n")
     );
 }
 
+/// Offset of the first CALL of the global initializer `ginit` (optionally
+/// followed by a modules-v1 digest suffix `_<8 hex>`), not its definition.
+fn ginit_call(emitted: &str, ginit: &str) -> Option<usize> {
+    emitted.match_indices(ginit).map(|(at, _)| at).find(|&at| {
+        let rest = &emitted[at + ginit.len()..];
+        let rest = match rest.strip_prefix('_') {
+            Some(tail) if tail.len() > 8 && tail.as_bytes()[..8].iter().all(u8::is_ascii_hexdigit) => &tail[8..],
+            _ => rest,
+        };
+        rest.starts_with("()") && !emitted[..at].ends_with("function ")
+    })
+}
+
 #[test]
 fn global_initializer_observes_imgui_before_game_code() {
     let root = repo_root();
@@ -328,9 +341,9 @@ fn global_initializer_observes_imgui_before_game_code() {
     )
     .expect("testbed with the cimgui global-init fixture must compile");
     let emitted = std::fs::read_to_string(&main).expect("read emitted testbed");
-    let ready = emitted
-        .find("__skull_ginit___IMGUI_PRELUDE_READY())")
-        .or_else(|| emitted.find("__IMGUI_PRELUDE_READY = __skull_ginit___IMGUI_PRELUDE_READY()"))
+    // Stone's global is minted with its module digest under modules v1
+    // (`__IMGUI_PRELUDE_READY_<digest>`); the call is what orders.
+    let ready = ginit_call(&emitted, "__skull_ginit___IMGUI_PRELUDE_READY")
         .expect("Rock cimgui initializer must be emitted");
     let game_init = emitted
         .find("__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION())")

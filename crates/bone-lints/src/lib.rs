@@ -1235,8 +1235,10 @@ fn action_edges_in_body(
         BodyOwner::Function(fid) => {
             let function = &module.functions[fid];
             !has_annotation(function, "wire")
-                && function.name != "refresh_action_defaults"
-                && function.name != "action_new"
+                && !matches!(
+                    declared_name(function.name.as_str()),
+                    "refresh_action_defaults" | "action_new"
+                )
         }
         BodyOwner::Global(gid) => !is_action_name(module.globals[gid].name),
         _ => false,
@@ -4257,7 +4259,7 @@ fn is_production_mag_module(file: Ustr) -> bool {
 }
 
 fn is_action_name(name: Ustr) -> bool {
-    name.as_str().starts_with("ACT_")
+    declared_name(name.as_str()).starts_with("ACT_")
 }
 
 fn has_annotation(f: &Function, name: &str) -> bool {
@@ -4313,26 +4315,7 @@ pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<Act
     let mut callers: FxHashSet<Ustr> = FxHashSet::default();
     for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
         for (owner, body) in &module.bodies {
-            let production_read = match owner {
-                BodyOwner::Function(fid) => {
-                    let function = &module.functions[*fid];
-                    !has_annotation(function, "wire")
-                        && function.name != "refresh_action_defaults"
-                        && function.name != "action_new"
-                }
-                BodyOwner::Global(gid) => !is_action_name(module.globals[*gid].name),
-                _ => false,
-            };
-            if !production_read {
-                continue;
-            }
-            for expr in body.expr_arena.values() {
-                if let Expr::Global(name) = expr {
-                    if declared.contains(name) {
-                        callers.insert(*name);
-                    }
-                }
-            }
+            callers.extend(action_edges_in_body(module, *owner, body, &declared));
         }
     }
 

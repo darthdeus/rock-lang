@@ -1114,7 +1114,155 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
             ));
         }
     }
+    let moved_types: BTreeSet<&str> =
+        moved.iter().filter(|(_, kinds)| kinds.iter().any(|k| k.is_type())).map(|(n, _)| *n).collect();
+    // A C type any cdef declares is the hand-written ABI's own name, in whichever
+    // body the `ffi.new` or `sizeof` that spells it sits.
+    let scanned: Vec<LuaTypeStrings> = bodies.iter().map(|body| lua_type_strings(body.src.as_str())).collect();
+    let cdef_declared: BTreeSet<&String> = scanned.iter().flat_map(|s| &s.declared).collect();
+    for (site, found) in sites.iter().zip(&scanned) {
+        let named: BTreeSet<String> = found
+            .used
+            .iter()
+            .filter(|n| moved_types.contains(n.as_str()) && !cdef_declared.contains(n))
+            .cloned()
+            .collect();
+        if !named.is_empty() {
+            plan.blockers.push(format!(
+                "raw ABI review [exact]: the inline body at {site} spells type {} in an FFI type string or a `__ty` tag, and the type's emitted name changes when the package becomes v1; reach it through Rock before migrating",
+                listed(&named)
+            ));
+        }
+    }
     Ok(())
+}
+
+struct LuaTypeStrings {
+    /// Names a `typedef` in one of the body's cdefs declares.
+    declared: BTreeSet<String>,
+    /// Every C identifier of a cdef text or an `ffi.new`/`sizeof`/`typeof`/
+    /// `cast`/`istype`/`offsetof`/`metatype` type string, plus every literal
+    /// that is exactly one identifier (a `__ty` tag compared or constructed).
+    used: BTreeSet<String>,
+}
+
+/// The type names an inline Lua body spells inside string literals. Comments
+/// are skipped.
+fn lua_type_strings(src: &str) -> LuaTypeStrings {
+    const FFI_TYPE_FNS: &[&str] = &["new", "sizeof", "typeof", "cast", "istype", "offsetof", "metatype"];
+    let b = src.as_bytes();
+    let mut c_texts: Vec<&str> = Vec::new();
+    let mut tags = BTreeSet::new();
+    let mut i = 0;
+    // `[[`, `[=[` ... at `i`: the level, if it opens a long bracket.
+    let long_open = |i: usize| -> Option<usize> {
+        if b.get(i) != Some(&b'[') {
+            return None;
+        }
+        let mut j = i + 1;
+        while b.get(j) == Some(&b'=') {
+            j += 1;
+        }
+        (b.get(j) == Some(&b'[')).then_some(j - i - 1)
+    };
+    let long_body = |start: usize, level: usize| -> (usize, usize) {
+        let close = format!("]{}]", "=".repeat(level));
+        let open_len = level + 2;
+        let body_start = start + open_len;
+        match src[body_start..].find(&close) {
+            Some(k) => (body_start + k, body_start + k + close.len()),
+            None => (src.len(), src.len()),
+        }
+    };
+    while i < b.len() {
+        if b[i] == b'-' && b.get(i + 1) == Some(&b'-') {
+            if let Some(level) = long_open(i + 2) {
+                i = long_body(i + 2, level).1;
+            } else {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let literal = if b[i] == b'"' || b[i] == b'\'' {
+            let quote = b[i];
+            let start = i + 1;
+            let mut j = start;
+            while j < b.len() && b[j] != quote && b[j] != b'\n' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            let end = j.min(b.len());
+            Some((i, &src[start..end], (j + 1).min(b.len())))
+        } else if let Some(level) = long_open(i) {
+            let (end, next) = long_body(i, level);
+            Some((i, &src[i + level + 2..end], next))
+        } else {
+            None
+        };
+        let Some((at, text, next)) = literal else {
+            i += 1;
+            continue;
+        };
+        let before = src[..at].trim_end();
+        let before = before.strip_suffix('(').map(str::trim_end).unwrap_or(before);
+        let is_c = before.ends_with("ffi.cdef")
+            || FFI_TYPE_FNS.iter().any(|f| before.ends_with(&format!("ffi.{f}")));
+        if is_c {
+            c_texts.push(text);
+        } else if !text.is_empty()
+            && text.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+            && !text.as_bytes()[0].is_ascii_digit()
+        {
+            tags.insert(text.to_string());
+        }
+        i = next;
+    }
+    let mut declared = BTreeSet::new();
+    let mut used = BTreeSet::new();
+    for text in c_texts {
+        let text = strip_c_comments(text);
+        let mut depth = 0i32;
+        let stmts = text.split(|c: char| {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            c == ';' && depth == 0
+        });
+        for stmt in stmts {
+            let idents: Vec<&str> = stmt
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty() && !w.as_bytes()[0].is_ascii_digit())
+                .collect();
+            if idents.first() == Some(&"typedef") {
+                if let Some(last) = idents.last() {
+                    declared.insert(last.to_string());
+                }
+            }
+            used.extend(idents.into_iter().map(str::to_string));
+        }
+    }
+    used.extend(tags);
+    LuaTypeStrings { declared, used }
+}
+
+fn strip_c_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("//") {
+            rest = r.find('\n').map(|k| &r[k..]).unwrap_or("");
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            rest = r.find("*/").map(|k| &r[k + 2..]).unwrap_or("");
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
 }
 
 /// `[language] modules = "v1"` added to a manifest, comment-preserving.

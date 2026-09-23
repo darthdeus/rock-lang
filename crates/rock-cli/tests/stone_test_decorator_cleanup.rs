@@ -77,6 +77,24 @@ fn make_seed(main_rock: &str) -> Vec<(String, String)> {
     ]
 }
 
+/// The emitted global of Stone's `clear_all_systems`, read from the program the
+/// driver loads: its mangling carries Stone's module digest under modules v1.
+fn clear_all_systems_symbol(main_lua: &str) -> String {
+    let text = std::fs::read_to_string(main_lua).expect("read compiled main.lua");
+    let names: Vec<&str> = text
+        .lines()
+        .filter_map(|line| {
+            // Either callee binding: `name = __rock_mk_name(...)` or `function name(`.
+            line.split_once(" = __rock_mk_")
+                .map(|(name, _)| name)
+                .or_else(|| line.strip_prefix("function ").and_then(|rest| rest.split_once('(')).map(|(name, _)| name))
+        })
+        .filter(|name| name.starts_with("clear_all_systems_") && name.ends_with("_ret_unit"))
+        .collect();
+    assert_eq!(names.len(), 1, "one emitted clear_all_systems: {names:?}");
+    names[0].to_string()
+}
+
 /// Pin the lifecycle-plan behavior across a clear and reload: the immutable
 /// compiler-owned shutdown population remains one plan, rather than a mutable
 /// decorator registry that can accumulate duplicate entries.
@@ -124,7 +142,7 @@ fn shutdown_systems_clear_contract_via_real_engine() {
              os.exit(1)\n\
          end\n\n\
          -- Phase 2: engine's pre-dofile mutable-registry clear\n\
-         clear_all_systems_ret_unit()\n\
+         {clear}()\n\
          if _G.__ROCK_LIFECYCLE_PLAN.shutdown.len ~= len_after_load then\n\
              print(\"FAIL: post-clear lifecycle shutdown plan len = \" .. tostring(_G.__ROCK_LIFECYCLE_PLAN.shutdown.len) .. \", expected \" .. tostring(len_after_load) .. \"\")\n\
              os.exit(1)\n\
@@ -140,6 +158,7 @@ fn shutdown_systems_clear_contract_via_real_engine() {
          end\n\
          print(\"PASS\")\n",
         path = main_lua_path,
+        clear = clear_all_systems_symbol(&main_lua_path),
     );
 
     let _ = std::fs::write("/tmp/stone_decorator_cleanup_test.lua", &script);
@@ -203,7 +222,7 @@ fn sims_clear_contract_via_real_engine() {
              os.exit(1)\n\
          end\n\n\
          -- Phase 2: engine's pre-dofile clear\n\
-         clear_all_systems_ret_unit()\n\
+         {clear}()\n\
          local n2 = map_count(_G.SIMS)\n\
          if n2 ~= 0 then\n\
              print(\"FAIL: post-clear SIMS count = \" .. tostring(n2) .. \", expected 0 (clear must wipe SIMS — without SIMS.clear() this entry survives)\")\n\
@@ -221,6 +240,7 @@ fn sims_clear_contract_via_real_engine() {
          end\n\
          print(\"PASS\")\n",
         path = main_lua_path,
+        clear = clear_all_systems_symbol(&main_lua_path),
     );
 
     let _ = std::fs::write("/tmp/stone_sims_cleanup_test.lua", &script);

@@ -47,6 +47,8 @@ mod coroutine_hook_hoist;
 mod dead_lambda_scope;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
+#[path = "v1_enum_join_scalarize.rs"]
+mod v1_enum_join_scalarize;
 #[path = "expansion_admission.rs"]
 mod expansion_admission;
 #[path = "concrete_expansion.rs"]
@@ -67,6 +69,8 @@ mod env_param_shadow;
 mod env_record_hoist;
 #[path = "extern_return_representation.rs"]
 mod extern_return_representation;
+#[path = "nomangle_type_symbol.rs"]
+mod nomangle_type_symbol;
 #[path = "extern_value_return_ownership.rs"]
 mod extern_value_return_ownership;
 #[path = "flat_vec_value_shape.rs"]

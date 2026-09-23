@@ -383,6 +383,37 @@ pub fn try_emit_with_stdlib_module(
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
+/// The dialect the package at `dir` (relative to the repository root) declares
+/// in its stick.toml, as the host selects it for that package's files.
+pub fn package_dialect(dir: &str) -> skull_parser::Dialect {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir).join("stick.toml");
+    rock_host::stick::StickConfig::from_path(&manifest).expect("package manifest").dialect()
+}
+
+/// Like [`try_emit_with_stdlib_module`], but `lib` is a source of the package
+/// at `dir` (Stone, say), parsed in the dialect that package declares and, for
+/// a v1 package, tagged with its name the way the host's graph tags it.
+pub fn try_emit_with_package_module(
+    dir: &str,
+    lib: &str,
+    src: &str,
+) -> Result<String, skull_parser::CompilerError> {
+    let dialect = package_dialect(dir);
+    let mut modules = STDLIB.clone();
+    let file = format!("{dir}/probe.rock");
+    let mut module =
+        skull_parser::parse_module_clean_with_dialect(lib, Ustr::from(file.as_str()), dialect).expect("parse lib");
+    if dialect == skull_parser::Dialect::V1 {
+        module.package = Some(skull_parser::PackageTag { id: 0, self_name: dir.to_string() });
+    }
+    modules.push(module);
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// Like [`ws_with_stdlib`] but ALSO loads `lib` as an extra stdlib module, so a
 /// case needs a body the emission-root predicate classifies as LIBRARY (and
 /// therefore prunable) rather than as own-project source.

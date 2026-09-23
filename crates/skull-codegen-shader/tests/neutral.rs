@@ -4,7 +4,7 @@ use bone_semantic::prelude::ModuleId;
 use rock_host::stdlib_loader::stdlib_files;
 use skull_codegen_shader::{ShaderPlannerPolicy, plan_fullscreen_fragment, resolve_root};
 use skull_mir::intrinsics::is_intrinsic;
-use skull_parser::parse_module_clean;
+use skull_parser::{parse_module_clean, parse_module_clean_with_dialect, Dialect, PackageTag};
 use ustr::Ustr;
 
 static BLIT: &str = include_str!("../../../stone/engine/shaders/post_processing/blit_shader.rock");
@@ -33,7 +33,15 @@ fn workspace(source: &str) -> (Workspace, ModuleId) {
             .expect("stdlib parse")
         })
         .collect::<Vec<_>>();
-    modules.push(parse_module_clean(source, Ustr::from("<test>")).expect("shader parse"));
+    // The shader sources are Stone's, so they parse in the dialect Stone
+    // declares and, under v1, carry its package tag as the host would stamp.
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stone/stick.toml");
+    let dialect = rock_host::stick::StickConfig::from_path(&manifest).expect("stone manifest").dialect();
+    let mut shader = parse_module_clean_with_dialect(source, Ustr::from("<test>"), dialect).expect("shader parse");
+    if dialect == Dialect::V1 {
+        shader.package = Some(PackageTag { id: 0, self_name: "stone".to_string() });
+    }
+    modules.push(shader);
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass");
     let mid = *ws
         .module_ids
@@ -50,7 +58,15 @@ fn fullscreen_artifact_is_planned_without_a_glsl_backend() {
         BLIT
     );
     let (ws, mid) = workspace(&source);
-    let root = resolve_root(&ws, mid, "blit_frag").expect("root");
+    // A v1 root is named by its definition key (`rock shader` takes the same).
+    let key = ws
+        .module(mid)
+        .functions
+        .iter()
+        .map(|(_, f)| f.name)
+        .find(|name| name.as_str().rsplit("::").next() == Some("blit_frag"))
+        .expect("blit_frag is defined");
+    let root = resolve_root(&ws, mid, key.as_str()).expect("root");
     let artifact = plan_fullscreen_fragment(&ws, root, &NeutralPolicy).expect("neutral artifact");
 
     assert_eq!(artifact.interface.stages.len(), 1);
