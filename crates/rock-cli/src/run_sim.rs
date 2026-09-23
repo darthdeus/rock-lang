@@ -232,6 +232,45 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
     name.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
 }
 
+/// Map each part of each requested spec to its registered wire name. A v1
+/// package registers sims under canonical DefKeys (`game::module::name`); a
+/// trailing `::`-segment path such as the declared name selects the one sim it
+/// ends (spec sections 15 and 16). An exact wire name always wins. A name no
+/// sim has passes through unchanged so each route keeps its own unknown-name
+/// report.
+fn resolve_sim_specs(wire_names: &[String], specs: &[String]) -> Result<Vec<String>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let parts = parse_sim_chain(spec)
+                .into_iter()
+                .map(|part| resolve_sim_name(wire_names, part))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(parts.join(","))
+        })
+        .collect()
+}
+
+fn resolve_sim_name(wire_names: &[String], name: &str) -> Result<String> {
+    if wire_names.iter().any(|wire| wire == name) {
+        return Ok(name.to_string());
+    }
+    let suffix = format!("::{name}");
+    let candidates: Vec<&str> = wire_names
+        .iter()
+        .filter(|wire| wire.ends_with(&suffix))
+        .map(String::as_str)
+        .collect();
+    match candidates.as_slice() {
+        [] => Ok(name.to_string()),
+        [only] => Ok((*only).to_string()),
+        many => Err(anyhow!(
+            "sim name `{name}` is ambiguous; name one of: {}",
+            many.join(", ")
+        )),
+    }
+}
+
 /// Test-only barrier between compiling the sim build and spawning the first
 /// child. `ROCK_SIM_SPAWN_BARRIER=<path>` makes an invocation park here until
 /// `<path>` exists, so a test can deterministically interleave a second
@@ -1063,6 +1102,8 @@ fn do_run_sim_opts_recorded(
     let mut prepared = recorder.phase("compile_and_discover", || {
         prepare_sims(backend, project_path.clone(), output_path.clone())
     })?;
+    let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
+    let sim_name = sim_name.as_str();
     // Receipt consumers do not retain the compiler session. A reload entry is
     // the one exception: it edits that live session, so preserve the existing
     // fresh-compile behavior for that explicitly selected lane.
@@ -1435,6 +1476,7 @@ fn do_run_named_sims_recorded(
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
+    let names = &resolve_sim_specs(&wire_names, names)?;
     emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
     sim_spawn_barrier();
@@ -2277,7 +2319,7 @@ pub fn do_run_allocation_census(
     let selected = if names.is_empty() {
         wire_names.clone()
     } else {
-        names.to_vec()
+        resolve_sim_specs(&wire_names, names)?
     };
     if selected.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
@@ -2557,7 +2599,7 @@ pub fn do_run_allocation_sites(
     let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
     sim_spawn_barrier();
 
-    let selected = if names.is_empty() { wire_names.clone() } else { names.to_vec() };
+    let selected = if names.is_empty() { wire_names.clone() } else { resolve_sim_specs(&wire_names, names)? };
     if selected.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
@@ -5753,7 +5795,8 @@ pub fn run_multi_order_gate(
     // Selection happens BEFORE that partition so an explicitly named reload sim
     // is reported as excluded rather than silently missing from a corpus the
     // caller wrote out by hand.
-    let wire_names = select_gate_corpus(&wire_names, selected)?;
+    let selected = resolve_sim_specs(&wire_names, selected)?;
+    let wire_names = select_gate_corpus(&wire_names, &selected)?;
     let (wire_names, excluded): (Vec<String>, Vec<String>) = wire_names
         .into_iter()
         .partition(|name| !is_reload_lane(env_by_wire.get(name).map_or(&[][..], |v| v)));
@@ -8216,6 +8259,28 @@ mod tests {
         assert_eq!(
             extract_raw_field(line, "value"),
             Some(r#"{"msg":"abc}def"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn requested_sim_names_resolve_to_registered_wire_names() {
+        let wires: Vec<String> = ["game::boots", "game::ui::hover", "game::hover", "legacy_sim"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let resolve = |specs: &[&str]| {
+            resolve_sim_specs(&wires, &specs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(resolve(&["boots"]).unwrap(), ["game::boots"]);
+        assert_eq!(resolve(&["legacy_sim", "game::hover"]).unwrap(), ["legacy_sim", "game::hover"]);
+        assert_eq!(resolve(&["ui::hover"]).unwrap(), ["game::ui::hover"]);
+        assert_eq!(resolve(&["boots, ui::hover"]).unwrap(), ["game::boots,game::ui::hover"]);
+        assert_eq!(resolve(&["missing"]).unwrap(), ["missing"]);
+        assert_eq!(resolve(&["oots"]).unwrap(), ["oots"], "only whole segments match");
+        let error = resolve(&["hover"]).unwrap_err().to_string();
+        assert!(
+            error.contains("`hover` is ambiguous") && error.contains("game::ui::hover") && error.contains("game::hover"),
+            "{error}"
         );
     }
 
