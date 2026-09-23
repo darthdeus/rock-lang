@@ -1415,8 +1415,14 @@ impl Builder<'_> {
         r: ValueRepr,
         kind: BoxKind,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let ValueRepr::Group { name, parts, present: Some(present) } = r else {
-            return self.pack_boxed(r, kind);
+        let (present, value) = match r {
+            ValueRepr::Group { name, parts, present: Some(present) } => {
+                (present, ValueRepr::Group { name, parts, present: None })
+            }
+            ValueRepr::Tuple { parts, present: Some(present) } => {
+                (present, ValueRepr::Tuple { parts, present: None })
+            }
+            other => return self.pack_boxed(other, kind),
         };
         let result = self.f.new_cell(None);
         let absent_bb = self.f.new_block();
@@ -1436,7 +1442,7 @@ impl Builder<'_> {
         // The present arm is an ordinary whole-value box, so it goes through the
         // same tier dispatch: a leaf-table or flat-enum payload has no
         // declared-field ctor to take.
-        let boxed = self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
+        let boxed = self.pack_boxed(value, kind)?;
         self.emit_cur(Inst::Store { cell: result, value: boxed });
         self.f.set_term(self.cur, Term::Goto(join));
 
