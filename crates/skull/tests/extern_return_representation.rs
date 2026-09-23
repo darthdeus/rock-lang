@@ -276,3 +276,33 @@ fn main() {}
     );
     assert_eq!(out, "7\ttrue");
 }
+
+/// A v1 extern returning a value struct allocates its out-parameter by the
+/// struct's C typedef, which is the minted type symbol, not the DefKey
+/// (`ffi.new("pkg::Pair[1]")` is not a C declaration).
+#[test]
+fn a_v1_extern_value_return_allocates_by_the_type_symbol() {
+    let emitted = crate::common::emit_v1_package(
+        "v1extval",
+        &[crate::common::V1Fragment {
+            file: "main.rock",
+            src: r#"
+pub value Pair { a: float, b: float }
+extern(ffi, "m") fn get_pair() -> Pair
+pub @nomangle fn probe() -> string {
+    let p = get_pair()
+    return "{p.a + p.b}"
+}
+fn main() {}
+"#,
+        }],
+    );
+    let out = crate::common::run_luajit(
+        &format!(
+            "m = {{ get_pair = function(out) out[0].a = 3; out[0].b = 4 end }}\n{}\nprint(probe())\n",
+            emitted.lua
+        ),
+        "v1_extern_value_return",
+    );
+    assert_eq!(out, "7");
+}

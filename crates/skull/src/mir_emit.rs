@@ -5538,7 +5538,8 @@ fn assemble(
                         // into it, so handing one back is a use-after-free that
                         // reads fine until the memory is reused
                         // (`tests/extern_value_return_ownership.rs`).
-                        ExternRet::ValueStruct(sname) => {
+                        ExternRet::ValueStruct(key) => {
+                            let sname = skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(&key));
                             let call_args = if params.is_empty() {
                                 "__out".to_string()
                             } else {
