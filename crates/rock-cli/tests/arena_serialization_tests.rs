@@ -75,15 +75,15 @@ fn arena_globals_project_as_live_rows_and_replay_deterministically() {
     let mobs = pkg["MOBS"].as_array().expect("MOBS array");
     assert!(!mobs.is_empty(), "survivors has spawned mobs by frame 30; got an empty MOBS");
 
-    // Rows are the ELEMENT type, not an arena entry wrapper. A modules-v1
-    // game tags its types with the module digest (`Mob_<8 hex>`).
+    // Rows are the ELEMENT type, not an arena entry wrapper. survivors is
+    // modules-v1, so its type tag carries the module digest (`Mob_<8 hex>`).
     let row = &mobs[0];
     let ty = row["__ty"].as_str().unwrap_or("");
-    let declared = match ty.rsplit_once('_') {
-        Some((name, digest)) if digest.len() == 8 && digest.bytes().all(|b| b.is_ascii_hexdigit()) => name,
-        _ => ty,
-    };
-    assert_eq!(declared, "Mob", "an Arena row is the element itself; got: {row}");
+    assert!(
+        ty.strip_prefix("Mob_")
+            .is_some_and(|digest| digest.len() == 8 && digest.bytes().all(|b| b.is_ascii_hexdigit())),
+        "an Arena row is the element itself; got: {row}"
+    );
     assert!(row["health_cur"].is_i64(), "the row carries its own fields; got: {row}");
 
     // Holes are filtered: every emitted row is a real object, never a null
