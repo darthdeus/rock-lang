@@ -652,17 +652,6 @@ fn current_tick(s: &serde_json::Value) -> i64 {
     s["stone"]["current_tick"].as_i64().expect("current_tick")
 }
 
-fn strip_scheduler_frame_stamps(value: &mut serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::Array(values) => values.iter_mut().map(strip_scheduler_frame_stamps).sum(),
-        serde_json::Value::Object(fields) => {
-            let removed = usize::from(fields.remove("last_tick_frame").is_some());
-            removed + fields.values_mut().map(strip_scheduler_frame_stamps).sum::<usize>()
-        }
-        _ => 0,
-    }
-}
-
 #[test]
 fn restore_returns_to_snapshot_tick_state() {
     let game = "bitgun";
@@ -729,13 +718,9 @@ fn assert_sim_state_matches(
             if !sim.contains(name) {
                 continue;
             }
-            let mut a = val.clone();
-            let mut b = want_pkg[name].clone();
-            strip_scheduler_frame_stamps(&mut a);
-            strip_scheduler_frame_stamps(&mut b);
             collect_f32_state_mismatches(
-                &a,
-                &b,
+                val,
+                &want_pkg[name],
                 &format!("{pkg}.{name} ({label})"),
                 &mut mismatches,
             );
@@ -1577,8 +1562,8 @@ fn mag_cast_seek_restores_scheduler_owner() {
         assert_eq!(sought_probe[key], ordinary_probe[key],
             "seek landing must reproduce ordinary casting state for {key}");
     }
-    assert!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"].as_i64().unwrap() > 30,
-        "the restored task must be pumped after the seek, not left at its keyframe frame");
+    assert_eq!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
+        "the restored task must be pumped to the target, not left at its keyframe frame");
     // Keep the targeted scheduler probes above for diagnosis, then require the
     // same full semantic-state equivalence as the general MAG seek oracle.
     let sim = mag_seek_equivalence_state_names("mag", 3);
