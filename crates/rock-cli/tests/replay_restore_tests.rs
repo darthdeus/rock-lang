@@ -1060,18 +1060,18 @@ fn mag_seek_equivalence_state_names(
     sim
 }
 
-const MAG_RECOVERY_RECORDED_AT: &str = "1000";
-const MAG_RECOVERY_REPLAYED_AT: &str = "1004";
+const MAG_CLOCK_RECORDED_AT: &str = "1000";
+const MAG_CLOCK_REPLAYED_AT: &str = "1004";
 
-fn mag_recovery_last_observed_at(state: &serde_json::Value) -> i64 {
-    state["mag"]["RECOVERY_RESERVOIR"]["last_observed_at"]
+fn stone_dump_timestamp(state: &serde_json::Value) -> i64 {
+    state["__stone_diag"]["STONE_DUMP_TIMESTAMP"]
         .as_i64()
-        .expect("RECOVERY_RESERVOIR.last_observed_at")
+        .expect("STONE_DUMP_TIMESTAMP")
 }
 
-fn mag_recovery_record_replay_arms(progress: &serde_json::Value) -> (serde_json::Value, serde_json::Value) {
+fn mag_clock_record_replay_arms(progress: &serde_json::Value) -> (serde_json::Value, serde_json::Value) {
     let dir = tempfile::tempdir().unwrap();
-    let fixture = dir.path().join("recovery-clock.replay");
+    let fixture = dir.path().join("clock.replay");
     let fixture_s = fixture.to_string_lossy().into_owned();
     let progress_path = dir.path().join("progress.json");
     let progress_s = progress_path.to_string_lossy().into_owned();
@@ -1092,7 +1092,8 @@ fn mag_recovery_record_replay_arms(progress: &serde_json::Value) -> (serde_json:
         // make that a race against MAG's boot cost.
         ("PERF_MODE", "1"),
         ("PERF_DT", "0.01"),
-        ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
+        ("STONE_TEST_UNIX_SECONDS", MAG_CLOCK_RECORDED_AT),
+        ("STONE_TEST_CLOCK_PROBE", "1"),
     ];
     let recorded = run_record_dump("mag", 3, &fixture_s, &record_env);
 
@@ -1106,13 +1107,14 @@ fn mag_recovery_record_replay_arms(progress: &serde_json::Value) -> (serde_json:
             ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
             ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
             ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
-            ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_REPLAYED_AT),
+            ("STONE_TEST_UNIX_SECONDS", MAG_CLOCK_REPLAYED_AT),
+            ("STONE_TEST_CLOCK_PROBE", "1"),
         ],
     );
     (recorded, replayed)
 }
 
-fn mag_current_progress_with_recovery(measures: i64, last_observed_at: i64) -> serde_json::Value {
+fn mag_progress_for_clock_probe() -> serde_json::Value {
     serde_json::json!({
         "version": 4,
         "bank_gold": 0,
@@ -1130,8 +1132,8 @@ fn mag_current_progress_with_recovery(measures: i64, last_observed_at: i64) -> s
         },
         "spellbook": {"favorites": []},
         "recovery": {
-            "measures": measures,
-            "last_observed_at": last_observed_at,
+            "measures": 10,
+            "play_time_accumulator": 0.0,
             "packet_cursor": 0,
             "pending_measures": 0
         }
@@ -1139,17 +1141,16 @@ fn mag_current_progress_with_recovery(measures: i64, last_observed_at: i64) -> s
 }
 
 #[test]
-fn mag_full_recovery_replay_uses_recorded_session_clock() {
-    let (recorded, replayed) =
-        mag_recovery_record_replay_arms(&mag_current_progress_with_recovery(10, 100));
-    let recorded_at = mag_recovery_last_observed_at(&recorded);
-    let replayed_at = mag_recovery_last_observed_at(&replayed);
-    assert_eq!(recorded_at, 1000, "recorded reservoir last_observed_at={recorded_at}");
+fn mag_full_replay_uses_recorded_session_clock() {
+    let (recorded, replayed) = mag_clock_record_replay_arms(&mag_progress_for_clock_probe());
+    let recorded_at = stone_dump_timestamp(&recorded);
+    let replayed_at = stone_dump_timestamp(&replayed);
+    assert_eq!(recorded_at, 1000, "recorded timestamp={recorded_at}");
     // Replay reconstructs from the header's captured SESSION_START_UNIX plus the
     // dt-accumulated `time` global (stone/engine/serialization.rock), so it does
     // not read its own process clock. STONE_TEST_UNIX_SECONDS=1004 is set on the
     // replay process precisely to prove that value is ignored.
-    assert_eq!(replayed_at, 1000, "replayed reservoir last_observed_at={replayed_at}");
+    assert_eq!(replayed_at, 1000, "replayed timestamp={replayed_at}");
     assert_eq!(
         recorded_at, replayed_at,
         "replay must preserve the recorded wall clock (see get_timestamp() reconstruction)"
@@ -1159,7 +1160,7 @@ fn mag_full_recovery_replay_uses_recorded_session_clock() {
 // The STONE_TEST_UNIX_SECONDS override exists so a replay fixture can pin two
 // processes to distinct clocks without sleeping. It is a dump-state replay
 // harness knob: ordinary play must ignore it, or a game's save timestamps,
-// quest stage timers, and recovery-reservoir grants are all settable from the
+// quest stage timers, and other wall-clock gameplay are all settable from the
 // environment. The guard requires both `DUMP_STATE=1` and the preboot record /
 // replay mode (stone/engine/replay.rock), before `__stone_replay` exists.
 #[test]
@@ -1172,7 +1173,7 @@ fn ordinary_play_ignores_the_replay_clock_override() {
     let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
     std::fs::write(
         &progress_path,
-        serde_json::to_vec_pretty(&mag_current_progress_with_recovery(10, 100)).unwrap(),
+        serde_json::to_vec_pretty(&mag_progress_for_clock_probe()).unwrap(),
     )
     .unwrap();
 
@@ -1185,11 +1186,12 @@ fn ordinary_play_ignores_the_replay_clock_override() {
             ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
             ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
             ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
-            ("STONE_TEST_UNIX_SECONDS", MAG_RECOVERY_RECORDED_AT),
+            ("STONE_TEST_UNIX_SECONDS", MAG_CLOCK_RECORDED_AT),
+            ("STONE_TEST_CLOCK_PROBE", "1"),
         ],
     );
 
-    let observed = mag_recovery_last_observed_at(&state);
+    let observed = stone_dump_timestamp(&state);
     assert_ne!(
         observed, 1000,
         "ordinary play honored STONE_TEST_UNIX_SECONDS; the override must be replay-harness only"
@@ -1224,7 +1226,7 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
     let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
     let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
     let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
-    let mut progress = mag_current_progress_with_recovery(10, 100);
+    let mut progress = mag_progress_for_clock_probe();
     progress["player"]["level"] = serde_json::json!({"namespace": "official", "name": "recovery-gauntlet"});
     progress["player"]["grid"] = serde_json::json!([27, 27]);
     std::fs::write(&progress_path, serde_json::to_vec_pretty(&progress).unwrap()).unwrap();
@@ -1238,10 +1240,11 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
         ("PERF_MODE", "1"),
         ("PERF_DT", "0.25"),
         ("STONE_TEST_UNIX_SECONDS", "2000"),
+        ("STONE_TEST_CLOCK_PROBE", "1"),
     ];
 
-    let early = mag_recovery_last_observed_at(&run_record_dump("mag", 6, &fixture_early, &env));
-    let late = mag_recovery_last_observed_at(&run_record_dump("mag", 18, &fixture_late, &env));
+    let early = stone_dump_timestamp(&run_record_dump("mag", 6, &fixture_early, &env));
+    let late = stone_dump_timestamp(&run_record_dump("mag", 18, &fixture_late, &env));
 
     assert_eq!(
         early, 2000,
@@ -1265,26 +1268,19 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
 // the later tick, while a frozen clock would report the same header value
 // (2000) at both.
 //
-// The recorded-clock test's spawn (crypt, grid [25, 8]) has no recovery-reservoir prop
-// nearby, so the reservoir reconciles once at boot load and never again --
-// fine for a single-tick sample, useless for observing advancement. Spawning
-// in "recovery-gauntlet" at grid [27, 27] (one tile from the reservoir prop
-// at (27, 28) in mag/levels/recovery-gauntlet.json) instead draws that prop
-// every frame, so `draw_recovery_reservoir_charge`
-// (mag/recovery.rock:145, calls `get_timestamp()` on every draw) reconciles
-// the reservoir on every tick -- which is required to observe a value that
-// advances mid-replay at all.
+// The dump-only clock probe reads the production get_timestamp() after the
+// selected frame count, so no gameplay system has to consume wall time.
 #[test]
-fn mag_full_recovery_replay_reconstructs_advancing_wall_clock() {
+fn mag_replay_reconstructs_advancing_wall_clock() {
     let dir = tempfile::tempdir().unwrap();
-    let fixture = dir.path().join("recovery-clock-advance.replay");
+    let fixture = dir.path().join("clock-advance.replay");
     let fixture_s = fixture.to_string_lossy().into_owned();
     let progress_path = dir.path().join("progress.json");
     let progress_s = progress_path.to_string_lossy().into_owned();
     let layout_s = dir.path().join("spellbook-layout.jsonl").to_string_lossy().into_owned();
     let settings_s = dir.path().join("settings.json").to_string_lossy().into_owned();
     let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
-    let mut progress = mag_current_progress_with_recovery(10, 100);
+    let mut progress = mag_progress_for_clock_probe();
     progress["player"]["level"] = serde_json::json!({"namespace": "official", "name": "recovery-gauntlet"});
     progress["player"]["grid"] = serde_json::json!([27, 27]);
     std::fs::write(&progress_path, serde_json::to_vec_pretty(&progress).unwrap()).unwrap();
@@ -1297,12 +1293,13 @@ fn mag_full_recovery_replay_reconstructs_advancing_wall_clock() {
         ("MAG_BINDINGS_PATH_OVERRIDE", bindings_s.as_str()),
         ("PERF_MODE", "1"),
         ("PERF_DT", "0.25"),
+        ("STONE_TEST_CLOCK_PROBE", "1"),
     ];
 
     let mut record_env = base_env.clone();
     record_env.push(("STONE_TEST_UNIX_SECONDS", "2000"));
     let recorded_full = run_record_dump("mag", 18, &fixture_s, &record_env);
-    let recorded_at_full = mag_recovery_last_observed_at(&recorded_full);
+    let recorded_at_full = stone_dump_timestamp(&recorded_full);
 
     // The replay process is given a DIFFERENT wall clock than the recording
     // (9999 vs 2000): if it were read at all, both replay samples below would
@@ -1310,9 +1307,9 @@ fn mag_full_recovery_replay_reconstructs_advancing_wall_clock() {
     let mut replay_env = base_env.clone();
     replay_env.push(("STONE_TEST_UNIX_SECONDS", "9999"));
     let replayed_early = run_replay_dump("mag", 6, &fixture_s, &replay_env);
-    let replayed_early_at = mag_recovery_last_observed_at(&replayed_early);
+    let replayed_early_at = stone_dump_timestamp(&replayed_early);
     let replayed_full = run_replay_dump("mag", 18, &fixture_s, &replay_env);
-    let replayed_full_at = mag_recovery_last_observed_at(&replayed_full);
+    let replayed_full_at = stone_dump_timestamp(&replayed_full);
 
     // Record stamps the real clock (2000 flat, pinned by the override), so it is
     // not the comparison arm: replay reconstructs from the RECORDED start plus
@@ -1402,7 +1399,7 @@ fn replay_does_not_write_mag_progress() {
     let bindings_s = dir.path().join("bindings.json").to_string_lossy().into_owned();
     std::fs::write(
         &progress_path,
-        serde_json::to_vec_pretty(&mag_current_progress_with_recovery(10, 100)).unwrap(),
+        serde_json::to_vec_pretty(&mag_progress_for_clock_probe()).unwrap(),
     )
     .unwrap();
 

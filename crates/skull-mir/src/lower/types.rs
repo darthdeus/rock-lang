@@ -189,7 +189,8 @@ impl Builder<'_> {
                             return Ok(Some(elem.representation()));
                         }
                     }
-                    if self.resolve_funcref(e, *name).is_ok()
+                    if self.fn_field_of_call(e).is_none()
+                        && self.resolve_funcref(e, *name).is_ok()
                         && let Some(owner) = self.concrete_callee_for_site(e)?
                     {
                         let abi = self.callee_abi_plan_for_instance(&owner)?;

@@ -1,17 +1,4 @@
-//! `rock stone` reloads in FULL while callee binding is in effect.
-//!
-//! `upvalue` is the shipped emitted shape (**Callee binding** in
-//! `docs/backends.md`): a caller holds each emitted callee as an immutable
-//! upvalue. An `incremental.lua` overlay redefines one GLOBAL function, which
-//! such a caller would never read, so the overlay is unsound under that shape.
-//! `rock stone` therefore routes every rebuild -- body edits included --
-//! through the full-chunk path: `main.lua` is rewritten, the overlay is never
-//! created, and the engine's `check_hot_reload` fires its full reload
-//! (`do_hot_reload`) rather than the light overlay one. Live state survives, so
-//! this is still a hot reload and must not request a process restart.
-//!
-//! `ROCK_SKULL_CALLEE_BINDING=global` restores the overlay; that shape keeps
-//! its own coverage through the `rock stone-test` harness, which pins it.
+//! Bound-callee Stone body edits publish executable incremental overlays.
 
 use rock_cli::game_runtime::{GameCompiler, SkullGameCompiler};
 use rock_cli::skull_backend::{SkullReload, SkullStone};
@@ -63,11 +50,9 @@ fn the_shipped_stone_build_binds_its_callees() {
     );
 }
 
-/// A body edit takes the FULL path: `main.lua` is rewritten and no overlay is
-/// ever written. Under the global shape this same edit produces
-/// `SkullReload::Incremental` and an `incremental.lua`.
+/// Body edits publish only the overlay, preserving the boot chunk.
 #[test]
-fn a_body_edit_rewrites_main_and_writes_no_overlay() {
+fn a_body_edit_preserves_main_and_writes_an_overlay() {
     let f = fixture();
     let mut stone = SkullStone::init(&f.dir, &f.main, &f.incremental).expect("init v1");
     let main_v1 = std::fs::read_to_string(&f.main).expect("main.lua after init");
@@ -78,22 +63,21 @@ fn a_body_edit_rewrites_main_and_writes_no_overlay() {
         .recompile(&[f.source.clone()], &f.main, &f.incremental)
         .expect("recompile v2");
     assert!(
-        matches!(reload, SkullReload::Full { .. }),
-        "a body edit under the bound shape must route to the full chunk, got {reload:?}"
+        matches!(reload, SkullReload::Incremental { .. }),
+        "a body edit under the bound shape must publish an overlay, got {reload:?}"
     );
     assert!(
-        !f.incremental.exists(),
-        "the bound shape must never write an incremental.lua overlay"
+        f.incremental.exists(),
+        "the bound shape must write an incremental.lua overlay"
     );
     let main_v2 = std::fs::read_to_string(&f.main).expect("main.lua after edit");
-    assert_ne!(
+    assert_eq!(
         main_v1, main_v2,
-        "the full path must publish the edited body into main.lua"
+        "an overlay must preserve main.lua"
     );
 }
 
-/// The full reload stays a HOT reload: the watcher must not ask for a process
-/// restart on a body edit, or every keystroke would drop live game state.
+/// A body edit must preserve the running process and its live state.
 #[test]
 fn a_body_edit_does_not_request_a_process_restart() {
     let f = fixture();
@@ -108,20 +92,18 @@ fn a_body_edit_does_not_request_a_process_restart() {
     let outcome = compiler.compile(&changed, false).expect("body-edit compile");
     assert!(
         outcome.restart_reasons.is_empty(),
-        "a body edit must hot-reload the full chunk in place, not restart: {:?}",
+        "a body edit must publish an overlay without restarting: {:?}",
         outcome.restart_reasons
     );
     assert!(
-        !f.incremental.exists(),
-        "the bound shape must never write an incremental.lua overlay"
+        f.incremental.exists(),
+        "the bound shape must write an incremental.lua overlay"
     );
 }
 
-/// The reason the whole arrangement exists: the edited callee must reach its
-/// caller. Re-running the rewritten chunk reruns the binding pass, so `bump` is
-/// rebound to a closure over the NEW `leaf`.
+/// An unchanged caller must observe the edited callee after loading the overlay.
 #[test]
-fn a_body_edit_reaches_its_caller_through_the_full_reload() {
+fn a_body_edit_reaches_its_caller_through_the_overlay() {
     let f = fixture();
     let mut stone = SkullStone::init(&f.dir, &f.main, &f.incremental).expect("init v1");
     let before = std::fs::read_to_string(&f.main).expect("main.lua v1");
@@ -130,7 +112,7 @@ fn a_body_edit_reaches_its_caller_through_the_full_reload() {
     stone
         .recompile(&[f.source.clone()], &f.main, &f.incremental)
         .expect("recompile v2");
-    let after = std::fs::read_to_string(&f.main).expect("main.lua v2");
+    let after = std::fs::read_to_string(&f.incremental).expect("incremental.lua v2");
 
     let script = format!(
         "_G.HOT_RELOAD = false\n\
@@ -150,7 +132,26 @@ fn a_body_edit_reaches_its_caller_through_the_full_reload() {
     let out = run_lua_code(&script).unwrap_or_else(|e| panic!("LuaJIT failed:\n{e}"));
     assert!(
         out.stdout.trim().starts_with("PASS"),
-        "a body edit must reach its caller through the full reload:\n{}",
+        "a body edit must reach its caller through the overlay:\n{}",
         out.combined(),
     );
+}
+
+
+#[test]
+fn a_bound_body_edit_publishes_an_overlay_that_preserves_live_state() {
+    let f = fixture();
+    let mut stone = SkullStone::init(&f.dir, &f.main, &f.incremental).expect("init");
+    let before = std::fs::read_to_string(&f.main).expect("main.lua");
+    std::fs::write(&f.source, V2).expect("edit");
+    let reload = stone.recompile(&[f.source.clone()], &f.main, &f.incremental).expect("reload");
+    assert!(matches!(reload, SkullReload::Incremental { .. }), "{reload:?}");
+    assert_eq!(before, std::fs::read_to_string(&f.main).unwrap());
+    let overlay = std::fs::read_to_string(&f.incremental).expect("incremental.lua");
+    let script = format!(
+        "{before}\nbump()\n{overlay}\nbump()\nassert(SCORE == 11)\nprint('PASS')\n"
+    );
+    let out = run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }

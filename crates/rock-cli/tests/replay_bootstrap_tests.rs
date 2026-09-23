@@ -922,6 +922,8 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
     let layout = dir.path().join("spellbook-layout.jsonl");
     let settings = dir.path().join("settings.json");
     let replay = dir.path().join("branch.replay");
+    let before_branch = dir.path().join("before-branch.replay");
+    let before_branch_path = before_branch.to_string_lossy();
     let env_owned = fixture_env("progress", &progress, &layout, &settings);
     let mut env = env_refs(&env_owned);
     env.extend([
@@ -930,15 +932,33 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
         ("STONE_CHECKPOINT_INTERVAL", "5"),
         ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
         ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+        ("STONE_SAVE_REPRO_AT_FRAME", "69"),
+        ("STONE_SAVE_REPRO_PATH", before_branch_path.as_ref()),
         ("STONE_BRANCH_AT_FRAME", "70"),
     ]);
-    let state = run_mag(120, Some(&replay), None, &env);
+    // Stop at the rewrite: later gameplay may append new snapshot inputs.
+    let state = run_mag(70, Some(&replay), None, &env);
     assert_eq!(state["__stone_diag"]["STONE_BRANCH_COUNT"], 1,
         "branch fixture must actually rewrite the log");
 
     let text = std::fs::read_to_string(&replay).expect("read branched replay");
     let boot_lines: Vec<&str> = text.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 4, "branch rewrite must retain all bootstrap entries");
+    let before = std::fs::read_to_string(&before_branch).expect("read pre-branch replay");
+    let mut expected: Vec<&str> = before.lines().filter(|line| line.starts_with("boot ")).collect();
+    // Damage snapshots can add inputs while the fixture runs; preserve their
+    // captured bytes as well as the four inputs read at boot.
+    for key in [
+        "mag/progress.json",
+        "mag/settings.json",
+        "mag/spellbook-layout.jsonl",
+        "mag/spellbook-bindings.jsonl",
+    ] {
+        let prefix = format!("boot {} ", hex_bytes(key));
+        assert_eq!(expected.iter().filter(|line| line.starts_with(&prefix)).count(), 1,
+            "pre-branch recording must contain bootstrap input {key} exactly once");
+    }
+    expected.sort_unstable();
+    assert_eq!(boot_lines, expected, "branch rewrite must retain every captured bootstrap entry");
     let mut sorted = boot_lines.clone();
     sorted.sort_unstable();
     assert_eq!(boot_lines, sorted, "branch rewrite must emit bootstrap keys canonically");

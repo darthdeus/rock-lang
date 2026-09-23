@@ -1,6 +1,7 @@
 mod other;
 
 use stone::*;
+use stone_core::*;
 
 @sim
 co fn shared_short_name() -> Coroutine<Wait> {

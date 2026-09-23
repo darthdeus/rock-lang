@@ -1,25 +1,5 @@
 use std::time::Duration;
 
-/// Pin this test PROCESS to the global-lookup callee shape, exactly the way
-/// `rock stone-test` and `rock iter-incremental` pin it in `dispatcher.rs`.
-///
-/// The `incremental.lua` overlay only exists under that shape. `upvalue` is the
-/// shipped default, and a bound caller holds its callee as an immutable
-/// upvalue, so `assemble_overlay` refuses to redefine one and `rock stone`
-/// publishes a whole `main.lua` per edit instead
-/// (`crates/rock-cli/tests/stone_full_reload_binding.rs` covers the shipped
-/// shape end to end). Every overlay oracle in this file therefore states the
-/// shape its subject needs rather than inheriting the process default.
-///
-/// The pin is process-wide and one-way by construction -- the two shapes are
-/// mutually exclusive for a whole build session. That is safe here: the rest of
-/// this binary is shape-agnostic, measured both ways (304/304 under
-/// `ROCK_SKULL_CALLEE_BINDING=global`; under the default the same 279 pass and
-/// only these 25 overlay cases move).
-fn pin_overlay_shape() {
-    skull::force_global_callee_binding();
-}
-
 #[test]
 fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -225,11 +205,10 @@ fn is_order_only(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod incremental_watch_tests {
-    //! End-to-end check that a real `bone_semantic::Session`'s `reinferred` list drives
-    //! `emit_incremental` to the same Lua a fresh full build produces — the watch
-    //! loop's correctness, minus the file-watching. Mirrors the in-skull oracle
-    //! (`skull/tests/incremental_emit.rs`) but through the actual Session edit
-    //! path used by `skull_watch`, so it also covers "is `reinferred` enough".
+    //! Session edit oracles for `emit_incremental`: byte identity with fresh builds
+    //! under global calls, and runtime values under bound calls whose cached ranks
+    //! can differ from a fresh build. Mirrors `skull/tests/incremental_emit.rs`
+    //! through the actual Session edit path, covering whether `reinferred` is enough.
 
     use crate::bone_backend::bone_session;
 
@@ -384,7 +363,7 @@ mod incremental_watch_tests {
     // type-valid by construction: every fn is `-> int`, every callee is a
     // lower-indexed fn so the graph is a DAG, no recursion), driving the REAL
     // `Session.update_file` -> `emit_incremental` path. After each edit it asserts
-    // the incremental assembly is byte-identical to `emit_full` of the SAME
+    // the global-shape assembly is byte-identical to `emit_full` of the SAME
     // (edited) workspace — the fresh build is the ground truth. A divergence means
     // a chunk that should have re-emitted (an inline-dependent caller) didn't.
 
@@ -436,7 +415,14 @@ mod incremental_watch_tests {
         i
     }
 
-    fn run_fuzz(seed: u64, n_fns: usize, steps: usize) {
+    fn assert_fuzz_values(lua: &str, calls: &str, expected: &str, context: &str) {
+        match super::exec_lua(&format!("{lua}\n{calls}")) {
+            super::ExecOutcome::Output(output) => assert_eq!(output.trim(), expected, "{context}"),
+            super::ExecOutcome::Errored(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, binding: skull::CalleeBindingMode) -> usize {
         let mut rng = Rng(seed.max(1));
         // Start: a mix of consts and call edges so inlining is exercised from step 0.
         let mut bodies: Vec<Body> = (0..n_fns)
@@ -451,8 +437,18 @@ mod incremental_watch_tests {
 
         let mut session = bone_session(files(&render(&bodies))).expect("fuzz session init");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_init, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("fuzz emit_full init");
+        let (_init, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
+            session.workspace(), mid, binding,
+        ).expect("fuzz emit_full init");
+        let calls = (0..n_fns).map(|i| {
+            let name = format!("f{i}");
+            let (_, function) = session.workspace().modules.iter()
+                .flat_map(|module| module.functions.iter())
+                .find(|(_, function)| function.name.as_str() == name)
+                .expect("fuzz function");
+            format!("print({}())\n", skull_mir::mangle::mangle_fn(session.workspace(), function))
+        }).collect::<String>();
+        let mut shape_differences = 0;
 
         for step in 0..steps {
             let changed = mutate(&mut bodies, &mut rng);
@@ -472,30 +468,61 @@ mod incremental_watch_tests {
             let incremental =
                 skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
                     .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_incremental failed: {}", e.message));
-            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            let fresh = skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_full failed: {}", e.message))
                 .0;
-
-            assert_eq!(
-                incremental.lua, fresh.lua,
-                "seed {seed} step {step}: incremental != fresh after editing f{changed} \
-                 (reinferred={} bodies)\n--- program ---\n{text}",
-                result.reinferred.len()
-            );
+            let context = format!("seed {seed} step {step}: edited f{changed}");
+            match binding {
+                skull::CalleeBindingMode::Global => assert!(
+                    incremental.lua == fresh.lua,
+                    "{context}: incremental != fresh (reinferred={} bodies): {}\n{text}",
+                    result.reinferred.len(),
+                    super::first_diff_line(&incremental.lua, &fresh.lua),
+                ),
+                skull::CalleeBindingMode::Upvalue => {
+                    // Reload keeps cached SCC ranks; fresh builds recompute them.
+                    // New edges can therefore differ in factory captures while
+                    // executing the same calls (docs/backends.md, Callee binding).
+                    shape_differences += usize::from(incremental.lua != fresh.lua);
+                    let mut values = Vec::<i64>::with_capacity(n_fns);
+                    for body in &bodies {
+                        values.push(match body {
+                            Body::Const(value) => *value,
+                            Body::Call(callee) => values[*callee],
+                        });
+                    }
+                    let expected = values.iter().map(i64::to_string).collect::<Vec<_>>().join("\n");
+                    assert_fuzz_values(&incremental.lua, &calls, &expected, &format!("{context}: incremental"));
+                    assert_fuzz_values(&fresh.lua, &calls, &expected, &format!("{context}: fresh"));
+                }
+            }
         }
+        shape_differences
     }
 
     #[test]
     fn fuzz_incremental_matches_fresh() {
-        super::pin_overlay_shape();
         // A handful of deterministic seeds; each drives many valid body edits on a
         // call/inline graph and checks incremental==fresh every step. Override with
         // SKULL_FUZZ_SEEDS / SKULL_FUZZ_STEPS for a longer soak.
         let steps: usize = std::env::var("SKULL_FUZZ_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
         let seeds: u64 = std::env::var("SKULL_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         for seed in 1..=seeds {
-            run_fuzz(seed.wrapping_mul(2654435761), 16, steps);
+            run_fuzz(seed.wrapping_mul(2654435761), 16, steps, skull::CalleeBindingMode::Global);
         }
+    }
+
+    #[test]
+    fn fuzz_incremental_bound_calls_match_values() {
+        // Keep the original failing seed and graph size; execution is bounded
+        // because each edit launches LuaJIT for both incremental and fresh output.
+        let mut shape_differences = 0;
+        for seed in 1_u64..=2 {
+            shape_differences += run_fuzz(
+                seed.wrapping_mul(2654435761), 16, 12, skull::CalleeBindingMode::Upvalue,
+            );
+        }
+        assert!(shape_differences > 0, "fixture must exercise changed binding ranks");
     }
 }
 
@@ -600,7 +627,6 @@ mod overlay_runtime_tests {
 
     #[test]
     fn production_overlay_executes_v1_body_edit_and_preserves_state() {
-        super::pin_overlay_shape();
         let legacy = run_production_body_overlay(None);
         assert_eq!(legacy.trim(), "2\n12", "legacy control must execute the overlay");
 
@@ -612,7 +638,6 @@ mod overlay_runtime_tests {
 
     #[test]
     fn production_v1_namespace_edit_takes_full_reload_and_runs_new_definition() {
-        super::pin_overlay_shape();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("stick.toml"),
@@ -660,7 +685,7 @@ mod overlay_runtime_tests {
             )
             .expect("namespace edit through production recompile");
         assert!(
-            matches!(reload, SkullReload::Full { body_only: false, .. }),
+            matches!(reload, SkullReload::Full { .. }),
             "a namespace-affecting edit must publish the supported full path, got {reload:?}"
         );
         assert!(!incremental_path.exists(), "full namespace reload must wipe the overlay");
@@ -786,7 +811,6 @@ mod overlay_runtime_tests {
     /// (nil ctor) while fresh succeeds, and `assert_runtime_eq` fails loudly.
     #[test]
     fn overlay_referencing_baseline_value_ctor_runtime_eq() {
-        super::pin_overlay_shape();
         // `P` is DEFINED in both versions but only CONSTRUCTED in v1's `compute`.
         // v1 uses `P` as a WHOLE value (`==`), not pure field reads: SROA
         // (`scalarize_struct_cells`) scalarizes a field-read-only struct away
@@ -825,7 +849,6 @@ mod overlay_runtime_tests {
     /// overlay, the stale baseline's 1 leaks through.
     #[test]
     fn concrete_inlined_edit_runtime_eq() {
-        super::pin_overlay_shape();
         let v0 = "@inline\nfn f0() -> int { 1 }\n\
                   fn f1() -> int { f0() }\n\
                   fn main() { print(\"{f0()}\") print(\"{f1()}\") }\n";
@@ -906,7 +929,6 @@ mod overlay_runtime_tests {
     /// static before the overlay, so it can't see this -- hence the bespoke run.)
     #[test]
     fn concrete_static_init_edit_runtime_eq() {
-        super::pin_overlay_shape();
         let v0 = "fn probe() -> int { static x = 5\n x }\nfn main() { print(\"{probe()}\") }\n";
         let v1 = "fn probe() -> int { static x = 10\n x }\nfn main() { print(\"{probe()}\") }\n";
 
@@ -945,7 +967,6 @@ mod overlay_runtime_tests {
     /// and an initializer edit is silently ignored on every reload.
     #[test]
     fn nested_fn_static_init_edit_runtime_eq() {
-        super::pin_overlay_shape();
         let v0 = "fn probe() -> int { fn inner() -> int { static x = 5\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
         let v1 = "fn probe() -> int { fn inner() -> int { static x = 10\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
 
@@ -982,7 +1003,6 @@ mod overlay_runtime_tests {
     /// rebuilt on full builds would re-emit the reset here and lose the accumulation.
     #[test]
     fn static_init_edit_then_unrelated_edit_preserves_reinit_overlay() {
-        super::pin_overlay_shape();
         // `probe` accumulates into a static counter each call; DO_RESET (unused
         // here) keeps the fn shape stable. v1 edits the initializer (0 -> 100); v2
         // is an UNRELATED edit (dead `let`), initializer still 100.
@@ -1030,7 +1050,6 @@ mod overlay_runtime_tests {
     /// statics) this would wrongly re-init the static and diverge.
     #[test]
     fn static_preserved_under_unrelated_overlay_edit() {
-        super::pin_overlay_shape();
         // `DO_SET` distinguishes PRESERVE (n still 99) from RESET (n re-inits 42).
         let v0 = "global DO_SET: bool = false\n\
                   fn probe() -> int { static n = 42\n if DO_SET { n = 99 }\n n }\n\
@@ -1161,7 +1180,7 @@ mod overlay_runtime_tests {
     // --- runtime accumulation fuzz: frozen v0 baseline + cumulative overlay -----
     //
     // The byte-identical fuzz (`incremental_watch_tests::fuzz_incremental_matches_fresh`)
-    // proves `emit_incremental` (full reassembly) == fresh. This one RUNS the
+    // proves global-shape `emit_incremental` (full reassembly) == fresh. This one RUNS the
     // OVERLAY: a single frozen `main.lua` (v0) plus an overlay that accumulates
     // EVERY change from v0 through vk -- never a full rebuild in between, the
     // worst case for the accumulation rule. After each edit, `frozen ++ overlay`
@@ -1266,7 +1285,6 @@ mod overlay_runtime_tests {
 
     #[test]
     fn runtime_accumulation_fuzz() {
-        super::pin_overlay_shape();
         // Each luajit spawn costs ~10-30ms, so this runs fewer/shorter than the
         // byte fuzz. Override with SKULL_RT_FUZZ_SEEDS / SKULL_RT_FUZZ_STEPS for a
         // longer soak.
@@ -1401,7 +1419,6 @@ mod overlay_runtime_tests {
     /// against the suite silently skipping everything if emit/parse breaks).
     #[test]
     fn overlay_composition_curated_real_files() {
-        super::pin_overlay_shape();
         let curated = [
             "tests/adversarial_generics.rock",
             "tests/adversarial_map.rock",
@@ -1461,7 +1478,6 @@ mod overlay_runtime_tests {
     /// retained CodeRef. The overlay contains no decorator rebind call.
     #[test]
     fn sim_overlay_refreshes_existing_code_ref_registry_entry() {
-        super::pin_overlay_shape();
         let v0 = sim_fixture(1);
         let v1 = sim_fixture(2);
 
@@ -1512,7 +1528,6 @@ mod overlay_runtime_tests {
     /// on v0, even though the overlay has staged the edited callback body.
     #[test]
     fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
-        super::pin_overlay_shape();
         let v0 = format!(
             "const LATE: int = 0\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
             sim_fixture(1).replace("TICK_OUT = 1", "TICK_OUT = 1 + LATE")
@@ -1624,7 +1639,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// This drives the genuine edit pipeline end to end.
     #[test]
     fn coroutine_body_edit_overlay_runs_new_body() {
-        super::pin_overlay_shape();
         let v0 = "co fn counter() -> Coroutine<int> {\n  yield 1\n  yield 2\n}\n\
                   fn main() {\n  let c = counter()\n  let a = c.resume() ?? -1\n  let b = c.resume() ?? -1\n  print(\"{a} {b}\")\n}\n";
         let v1 = "co fn counter() -> Coroutine<int> {\n  yield 10\n  yield 20\n}\n\
@@ -1675,7 +1689,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// exercise the channel (int yields keep the multi-return path).
     #[test]
     fn flat_enum_coroutine_body_edit_overlay_threads_and_runs_new_body() {
-        super::pin_overlay_shape();
         // The `Act(() -> ())` closure payload makes Ev NON-cdata-eligible, so it is a
         // genuinely FLAT (boxed) enum that rides the frame-slot channel -- an
         // all-scalar-payload enum would scalarize as a `_ct` cdata instead (mirrors
@@ -1738,7 +1751,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// body (Pair(1,2)=3, not Pair(10,20)=30).
     #[test]
     fn live_flat_enum_coroutine_survives_overlay_and_threads_new_body() {
-        super::pin_overlay_shape();
         // `Act(() -> ())` forces Ev to be a FLAT (boxed) enum on the frame-slot
         // channel (an all-scalar-payload enum would be a `_ct` cdata instead).
         let prog = |a: i32, b: i32| {
@@ -1847,7 +1859,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
     #[test]
     fn live_coroutine_yield_renumber_overlay_stamp_kills() {
-        super::pin_overlay_shape();
         let prog = |extra: &str| {
             format!(
                 "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
@@ -1948,7 +1959,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// (found live: mag mob soft-locked in attack state after a reload).
     #[test]
     fn stamp_killed_outer_chains_kill_into_delegated_inner() {
-        super::pin_overlay_shape();
         let prog = |extra: &str| {
             format!(
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
@@ -2457,7 +2467,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// the NEW body on the next fire through the retained CodeRef.
     #[test]
     fn on_reload_body_edit_runs_new_body_via_code_ref() {
-        super::pin_overlay_shape();
         let prog = |v: i32| {
             format!(
                 "global OUT: int = 0\n\
@@ -2578,7 +2587,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// global -- the lambda was an inline closure inside the step).
     #[test]
     fn cofn_capturing_lambda_body_edit_overlay_created_after_reload() {
-        super::pin_overlay_shape();
         let prog = |op: char| {
             format!(
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
@@ -2629,7 +2637,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// the same logical CodeRef as a record created afterwards.
     #[test]
     fn cofn_lambda_record_snapshot_refreshes_across_reload() {
-        super::pin_overlay_shape();
         let prog = |op: char| {
             format!(
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
@@ -2710,7 +2717,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
     #[test]
     fn named_and_capture_free_values_refresh_through_reusable_slots() {
-        super::pin_overlay_shape();
         let program = |named_delta: i32, free_value: i32| {
             format!(
                 "global NAMED: (fn(int) -> int)? = null\n\
@@ -3027,7 +3033,6 @@ mod shape_drift_tests {
 
     #[test]
     fn body_and_signature_edits_stay_on_the_hot_paths() {
-        super::pin_overlay_shape();
         let v0 = "struct Mob { hp: int }\n\
                   fn heal(m: Mob) -> int { m.hp }\n\
                   fn main() { }\n";
@@ -3461,7 +3466,6 @@ fn main() {}
 
     #[test]
     fn body_only_definition_callback_changes_body_and_preserves_state() {
-        super::pin_overlay_shape();
         let mut harness = StateTransitionHarness::boot(STATE_V0);
         let body_source = STATE_V0.replace("() => 2", "() => 22");
         let reload = harness.replace_source(&body_source).expect("body-only definition edit");
@@ -3838,7 +3842,6 @@ fn main() {}
 
     #[test]
     fn compatible_wire_edits_overlay_and_structural_changes_take_full_path() {
-        super::pin_overlay_shape();
         let (_dir, mut stone, main, incremental, source_path) = boot(V0);
         let baseline = std::fs::read_to_string(&main).expect("wire baseline");
         assert!(baseline.contains("__ROCK_LIFECYCLE_PLAN"), "baseline must publish LifecyclePlan");
@@ -3911,7 +3914,6 @@ fn main() {}
 
     #[test]
     fn failed_compile_and_failed_publication_retain_last_good_wire_artifacts() {
-        super::pin_overlay_shape();
         let (_dir, mut stone, main, incremental, source_path) = boot(V0);
         let baseline = std::fs::read_to_string(&main).expect("wire baseline");
         let invalid = V0.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[UNKNOWN])");
@@ -4021,7 +4023,6 @@ mod force_full_tests {
     /// stale), and `incremental.lua` must be wiped.
     #[test]
     fn force_full_folds_overlay_matches_fresh_and_wipes() {
-        super::pin_overlay_shape();
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_str = dir.path().to_str().unwrap().to_string();
         let src = |p: &str| dir.path().join(p);
@@ -4092,7 +4093,6 @@ mod force_full_tests {
     /// global that exists in neither file and dies on load.
     #[test]
     fn overlay_delivers_a_graph_added_fn_the_edit_makes_reachable() {
-        super::pin_overlay_shape();
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_str = dir.path().to_str().unwrap().to_string();
         let src = |p: &str| dir.path().join(p);
@@ -4377,7 +4377,6 @@ mod skull_stone_lint_snapshot_tests {
 
     #[test]
     fn skull_stone_overlay_matches_cache_independent_route() {
-        super::pin_overlay_shape();
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_str().unwrap().to_string();
         let main = dir.path().join("main.lua");
@@ -4569,7 +4568,6 @@ mod skull_stone_lint_snapshot_tests {
 
     #[test]
     fn skull_stone_apply_edit_profile_covers_the_real_route() {
-        super::pin_overlay_shape();
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_str().unwrap().to_string();
         let main = dir.path().join("main.lua");
@@ -4609,7 +4607,6 @@ mod skull_stone_lint_snapshot_tests {
 
     #[test]
     fn failed_body_publication_rolls_back_cache_before_the_next_edit() {
-        super::pin_overlay_shape();
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_str().unwrap().to_string();
         let main = dir.path().join("main.lua");

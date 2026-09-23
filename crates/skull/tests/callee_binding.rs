@@ -1,6 +1,5 @@
 //! The whole-program half of the callee binding (`docs/backends.md`): the
-//! assembled artifact's SECOND PASS, and the hot-reload rule that keeps the
-//! shape out of the incremental overlay.
+//! assembled artifact's second pass and executable incremental rebinding.
 //!
 //! The mode comes from `emit_full_with_callee_binding`, not the environment:
 //! `ROCK_SKULL_CALLEE_BINDING` is read once per PROCESS and these tests share a
@@ -174,33 +173,6 @@ fn emits_main_is_reported_under_both_shapes() {
     assert!(!emit.emits_main, "no `main` is defined");
 }
 
-/// THE hot-reload rule. An incremental overlay redefines one global function;
-/// a caller that captured it as an immutable upvalue holds the previous closure
-/// and would never see the edited body. Emitting the overlay anyway would make
-/// a body edit SILENTLY not take effect, so the overlay rejects instead.
-/// `rock stone` avoids it by pinning the global-lookup shape for the session
-/// (`skull::force_global_callee_binding`).
-#[test]
-fn the_incremental_overlay_rejects_a_bound_body() {
-    let v1 = SRC;
-    let v2 = SRC.replace("a * 3 + 1", "a * 3 + 2");
-    let ws1 = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_full, mut cache) =
-        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("emit_full");
-    let ws2 = ws_with_stdlib(&v2);
-    let edited = body_id(&ws2, "mid");
-    let Err(err) = emit_overlay(&ws2, &mut cache, &[edited]) else {
-        panic!("a bound body must not reach the overlay");
-    };
-    assert!(
-        err.message.contains("incremental overlay cannot redefine")
-            && err.message.contains("ROCK_SKULL_CALLEE_BINDING=global"),
-        "expected the hot-reload rule's diagnostic, got: {}",
-        err.message
-    );
-}
-
 fn body_id(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
@@ -213,4 +185,109 @@ fn body_id(
         }
     }
     panic!("no fn named {name}");
+}
+
+#[test]
+fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
+    let v1 = format!("{SRC}\n@nomangle fn saved() -> fn(int) -> int {{ top }}\n");
+    let ws1 = ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let v2 = v1.replace("a * 3 + 1", "a * 3 + 2");
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
+    let script = format!(
+        "{}\nlocal saved_top = saved()\nassert(top_int_ret_int(3) == 33)\n{}\nassert(top_int_ret_int(3) == 36)\nassert(saved_top(3) == 36)\nprint('PASS')\n",
+        full.lua, overlay.lua,
+    );
+    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}
+
+#[test]
+fn bound_overlay_cells_follow_session_activation() {
+    let v1 = "global COUNT: int = 0\nfn delta(n: int) -> int { n + 1 }\n@nomangle fn bump() { COUNT = delta(COUNT) }\n";
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let ws2 = ws_with_stdlib(&v1.replace("delta(COUNT)", "delta(COUNT) + 1"));
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
+    let script = format!(
+        "{}\nbump()\n{}\nbump()\nassert(COUNT == 3)\nlocal old = __rock_session_current()\nlocal fresh = __rock_session_new(old.__rock_schema_id)\n__rock_session_activate(fresh)\nCOUNT = 20\nbump()\nassert(COUNT == 22)\n__rock_session_activate(old)\nbump()\nassert(COUNT == 5)\nprint('PASS')\n",
+        full.lua, overlay.lua,
+    );
+    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}
+
+#[test]
+fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
+    let v1 = "fn leaf(n: int) -> int { n }\nfn top(n: int) -> int { leaf(n) }\n@nomangle fn answer() -> int { top(3) }\n";
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let ws2 = ws_with_stdlib(&v1.replace("{ n }", "{ if n == 0 { return 10 }\n top(n - 1) }"));
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
+    let script = format!("{}\n{}\nassert(answer() == 10)\nprint('PASS')\n", full.lua, overlay.lua);
+    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}
+
+
+#[test]
+fn repeated_stripped_overlays_keep_one_session_sink_and_old_closures_live() {
+    let v1 = "global COUNT: int = 0\n@nomangle fn bump() { COUNT = COUNT + 1 }\n";
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let ws2 = ws_with_stdlib(&v1.replace("COUNT + 1", "COUNT + 2"));
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
+    let script = format!(
+        r#"
+local function stripped(code)
+  return assert(loadstring(string.dump(assert(loadstring(code)), true)))
+end
+local real_join = debug.upvaluejoin
+local joins = 0
+debug.upvaluejoin = function(...) joins = joins + 1; return real_join(...) end
+stripped({full})()
+assert(joins == 0, 'initial full chunk redundantly joined its own state cells')
+local old_bump = bump
+local sinks_before = __rock_state_cell_sinks and #__rock_state_cell_sinks or 1
+local patch = stripped({overlay})
+local first_sink = __rock_state_cell_sink
+for i = 1, 25 do patch() end
+assert(joins > 0, 'overlay did not join its independent state cells')
+local sinks_after = __rock_state_cell_sinks and #__rock_state_cell_sinks or 1
+assert(sinks_after == sinks_before, 'Session sinks grew across body edits')
+assert(__rock_state_cell_sink == first_sink)
+stripped({full})()
+patch()
+assert(__rock_state_cell_sink == first_sink)
+local old_session = __rock_session_current()
+local fresh = __rock_session_new(old_session.__rock_schema_id)
+__rock_session_activate(fresh)
+COUNT = 10
+old_bump()
+bump()
+assert(COUNT == 13)
+__rock_session_activate(old_session)
+old_bump()
+bump()
+assert(COUNT == 3)
+print('PASS')
+"#,
+        full = skull_codegen_lua::lua_string(&full.lua),
+        overlay = skull_codegen_lua::lua_string(&overlay.lua),
+    );
+    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded bytecode overlays");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }

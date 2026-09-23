@@ -51,30 +51,6 @@ impl CommandContext {
                 self.args.command.cli_name(),
             );
         }
-        // THE callee-binding hot-reload rule
-        // (`skull_codegen_lua::force_global_callee_binding`). An
-        // `incremental.lua` overlay redefines one global function; a caller that
-        // captured it as an immutable upvalue holds the previous closure and
-        // would never see the edited body. `upvalue` is the shipped default, so
-        // the two commands that drive `emit_overlay` DIRECTLY pin the
-        // global-lookup shape for the whole session, whatever
-        // `ROCK_SKULL_CALLEE_BINDING` says: `stone-test` is the overlay path's
-        // end-to-end harness, and `iter-incremental` is its profiler. Neither
-        // has another way to reach that path once the default binds.
-        //
-        // `rock stone` is NOT here any more: it ships the bound shape and
-        // publishes a full `main.lua` per edit instead of an overlay
-        // (`SkullStone::route_and_emit`), so the dev loop emits what the game
-        // ships. `rock watch` and `skull-incremental-profile` were never
-        // affected -- both reassemble the whole chunk (`emit_incremental`), so
-        // both emission passes rerun. `assemble_overlay` rejects a bound body
-        // rather than trusting this list.
-        if matches!(
-            self.args.command,
-            CliCommand::StoneTest | CliCommand::IterIncremental
-        ) {
-            skull::force_global_callee_binding();
-        }
         let _renderer_override = rock_host::stick::install_renderer_override(self.args.renderer);
         self.run_command()
     }

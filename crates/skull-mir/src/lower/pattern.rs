@@ -878,12 +878,12 @@ impl Builder<'_> {
             return Ok(None);
         }
         let arg_idxs: Vec<_> = args.into_iter().collect();
-        let any_named = arg_idxs
-            .iter()
-            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
         if self.fn_field_of_call(e).is_some() {
             return Ok(None);
         }
+        let any_named = arg_idxs
+            .iter()
+            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
         if !any_named && self.is_fn_global(name) {
             return Ok(None);
         }
