@@ -686,7 +686,7 @@ fn copy_sources(from: &Path, to: &Path) {
 /// only consumer tests and sims call; a definition a consumer's tests use is
 /// exported like any other use (author decision), and reported as test-only.
 ///
-/// The chess-game and chess-render consumers are v1, so de-migrating
+/// The chess-game, chess-render and chess consumers are v1, so de-migrating
 /// chess-core turns its declared dependency into a legacy boundary. The copy
 /// marks it `allow_legacy = true`, which is what the graph would have to say
 /// for the pre-migration world to be well formed -- without it the planner
@@ -715,12 +715,14 @@ fn chess_core_migrates_to_the_committed_hand_conversion() {
         assert_ne!(&legacy, text, "{f} must change when de-migrated");
         write(&core.join(f), &legacy);
     }
-    for consumer in ["chess-game", "chess-render"] {
-        let game_manifest_path = dir.join(format!("libs/{consumer}/stick.toml"));
+    for (consumer, core_path) in
+        [("libs/chess-game", "../chess-core"), ("libs/chess-render", "../chess-core"), ("games/chess", "../../libs/chess-core")]
+    {
+        let game_manifest_path = dir.join(format!("{consumer}/stick.toml"));
         let game_manifest = read(&game_manifest_path);
         let allow_legacy = game_manifest.replace(
-            "chess-core = { path = \"../chess-core\" }",
-            "chess-core = { path = \"../chess-core\", allow_legacy = true }",
+            &format!("chess-core = {{ path = \"{core_path}\" }}"),
+            &format!("chess-core = {{ path = \"{core_path}\", allow_legacy = true }}"),
         );
         assert_ne!(allow_legacy, game_manifest, "the v1 consumer's chess-core edge must change");
         write(&game_manifest_path, &allow_legacy);
