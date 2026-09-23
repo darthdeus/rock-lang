@@ -2818,10 +2818,10 @@ impl<'a> Parser<'a> {
     /// rock's newline rule: a postfix/infix operator on a fresh line does
     /// not continue the expression, except inside `(`/`[` (where it does,
     /// unless we are also inside a `{ }` code block). The rule applies ONLY to
-    /// operators that could also *start* a new expression (see `op_starts_expr`)
-    /// -- rock only runs its newline-break check for those operand-start
-    /// tokens, so an unambiguous binary op (`+`, `*`, `&&`) on a fresh line
-    /// continues the expression regardless of indentation.
+    /// operators whose postfix use yields to a fresh expression (see
+    /// `op_starts_expr`). Binary operators (`+`, `-`, `*`, `&&`) on a fresh
+    /// line continue the expression regardless of indentation. A `-` in a
+    /// prefix context is still parsed by `parse_prefix` as unary negation.
     fn newline_breaks(&self) -> bool {
         self.prev_trailing_newlines() > 0 && (self.delimiter_depth == 0 || self.brace_depth > 0)
     }
@@ -4210,12 +4210,11 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Operators that can ALSO begin a new expression, so a newline before them
-/// signals a fresh statement rather than a continuation. rock applies its
-/// newline-break rule only to this operand-start set (`exprs.rs` operand list:
-/// `Minus`, `Bang`, `++`, `--`, `(`, `[`, `{`); unary `Minus`/`++`/`--` reach
-/// skull's loop as infix/postfix candidates). Unambiguous binary operators
-/// (`+`, `*`, `&&`, comparisons) are not here, so they continue across lines.
+/// Postfix operators whose use yields to a fresh expression after a newline.
+/// `Minus` is deliberately absent: once the Pratt loop has a left operand it
+/// is binary subtraction, consistent with `Plus`; in a prefix context it is
+/// still unary negation. `++` and `--` remain here because their prefix and
+/// postfix forms are genuinely indistinguishable from token context alone.
 /// Consume a brace-balanced `{...}` body (cursor positioned just after the
 /// opening `{`), returning the inner text. Mirror of rock's
 /// `take_balanced_brace_body`. Errors on an unmatched `{`.
@@ -4248,8 +4247,7 @@ fn take_balanced_brace_body(
 fn op_starts_expr(op: TokenKind) -> bool {
     matches!(
         op,
-        TokenKind::Minus
-            | TokenKind::PlusPlus
+        TokenKind::PlusPlus
             | TokenKind::MinusMinus
             | TokenKind::OpenParen
             | TokenKind::OpenSquare
