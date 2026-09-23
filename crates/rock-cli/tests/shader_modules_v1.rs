@@ -61,6 +61,21 @@ fn v1_glsl_shader_compiles_and_validates() {
         "the v1 vector operator must emit a GLSL infix expression"
     );
 
+    // The runtime joins each semantic uniform group to its live GL block by
+    // name, and GL binds that block by its GLSL identifier.
+    let register = &lua[lua.find("__rock_shader_register(").expect("shader registration")..];
+    let (physical, semantic) = register.split_once("SHADER_INTERFACE_V1").expect("semantic wire");
+    let group = semantic
+        .lines()
+        .find_map(|line| line.strip_prefix("group "))
+        .expect("the probe has one uniform group");
+    let name = group.split(' ').nth(1).expect("group name");
+    assert!(
+        physical.contains(&format!("\"{name}\"")),
+        "semantic group `{name}` has no physical block of that name:\n{}",
+        &physical[physical.len().saturating_sub(600)..]
+    );
+
     let package_text = package.to_string_lossy().into_owned();
     let summary = rock_cli::glsl_test::shader_validate_run(&[package_text], false)
         .expect("shader validation run");
