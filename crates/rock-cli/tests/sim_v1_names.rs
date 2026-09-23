@@ -69,3 +69,14 @@ fn a_qualified_v1_sim_name_selects_one_of_two_same_short_names() {
         "{combined}"
     );
 }
+
+#[test]
+fn a_v1_sim_snapshot_finds_its_baseline_beside_the_declaring_file() {
+    let (out, combined) = rock_sim(&["other_snapshot_baseline"]);
+    assert!(out.status.success(), "the committed baseline must be found and match:\n{combined}");
+    // The snapshot comparison is the sim's only expect.
+    assert!(
+        combined.contains("[sim] sim_v1_names::other::other_snapshot_baseline: PASS (1/1 expects passed)"),
+        "the snapshot must be compared against tests/sims/other.snap:\n{combined}"
+    );
+}

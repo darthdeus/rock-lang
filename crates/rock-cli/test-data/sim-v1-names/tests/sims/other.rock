@@ -9,3 +9,11 @@ co fn shared_short_name() -> Coroutine<Wait> {
     sim_expect(true, "other ran")
     stop_sim()
 }
+
+@sim
+co fn other_snapshot_baseline() -> Coroutine<Wait> {
+    start_game "sim-v1-names"
+    await frame(2)
+    snapshot("other_value", 7)
+    stop_sim()
+}
