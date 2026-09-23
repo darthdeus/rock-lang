@@ -1177,12 +1177,11 @@ impl Builder<'_> {
     pub(crate) fn safe_nav_call_value_repr(
         &mut self,
         e: Idx<Expr>,
-        receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<ValueBundle, CompilerError> {
-        let value = if let Some(field) = self.fn_field_of_call(receiver, method) {
+        let value = if let Some(field) = self.fn_field_of_call(e) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
             let fieldv = self.emit_cur(Inst::Field { base: recv, field });
@@ -1215,19 +1214,18 @@ impl Builder<'_> {
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
         self.safe_nav_repr(receiver, shape, move |s, recv| {
-            s.safe_nav_call_value_repr(e, receiver, method, args, recv)
+            s.safe_nav_call_value_repr(e, method, args, recv)
         })
     }
 
     fn pack_safe_nav_call_value(
         &mut self,
         e: Idx<Expr>,
-        receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let r = self.safe_nav_call_value_repr(e, receiver, method, args, recv)?;
+        let r = self.safe_nav_call_value_repr(e, method, args, recv)?;
         Ok(self.pack(r.into_value())?)
     }
 
@@ -1305,7 +1303,7 @@ impl Builder<'_> {
 
         self.cur = call_bb;
         let recv_v = self.safe_nav_present_value(recv)?;
-        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv_v)?;
+        let cv = self.pack_safe_nav_call_value(e, method, args, recv_v)?;
         self.store_and_join(result, cv, join);
 
         self.cur = join;

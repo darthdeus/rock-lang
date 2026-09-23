@@ -1344,6 +1344,7 @@ pub(crate) fn resolve_named_call_inner(
                     )
                 };
 
+                gamma.out.fn_field_calls.insert(call_expr, field);
                 return call_fn_value(c, gamma, field_ty, call_args, span);
             }
         }

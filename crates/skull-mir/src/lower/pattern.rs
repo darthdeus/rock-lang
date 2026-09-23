@@ -881,11 +881,7 @@ impl Builder<'_> {
         let any_named = arg_idxs
             .iter()
             .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
-        if !any_named
-            && arg_idxs
-                .first()
-                .is_some_and(|&recv| self.fn_field_of_call(recv, name).is_some())
-        {
+        if self.fn_field_of_call(e).is_some() {
             return Ok(None);
         }
         if !any_named && self.is_fn_global(name) {
