@@ -1825,7 +1825,7 @@ fn build_state_nobox_accessors(
                 ty_name, paths, nullable, storage, ctor_suffix: suffix,
                 presence_path: _, unbuildable,
             } = acc;
-            let ty_symbol = skull_mir::mangle::symbol_of_key(ty_name);
+            let ty_symbol = skull_mir::mangle::type_symbol(ws, ty_name);
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
             // The leaves are emitted symbols, matching the Session slot map.

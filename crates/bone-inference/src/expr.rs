@@ -1584,6 +1584,7 @@ pub fn infer_expr_used(
                 select_overload(
                     c,
                     gamma,
+                    family,
                     &candidates,
                     None,
                     &[target, value],

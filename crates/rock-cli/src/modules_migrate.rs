@@ -8,8 +8,9 @@
 //! re-exports for the dependencies the package's bodies actually reference,
 //! `pub` on the definitions the named consumers reference plus the API type
 //! closure the compiler demands on top of them, the contextual-ascription
-//! rewrite (`x :: T` to `(x : T)`), and qualified-call repairs where a v1 tier
-//! would hide the definition a legacy call selected.
+//! rewrite (`x :: T` to `(x : T)`), and qualified-call repairs where a newly
+//! visible overload would win over the definition a legacy call selected
+//! (spec 15.2).
 //!
 //! Every fact is compiler-derived: what a consumer uses and what a fragment
 //! needs imported come from the resolved references of checked workspaces
@@ -555,13 +556,6 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                 short_path(&plan.files[d.file].id),
                 d.line
             )),
-            DefKind::Decorator => plan.notes.push(format!(
-                "decorator `{}` ({}:{}): `@{}` uses are not derived by this analysis; review whether a consumer needs it exported",
-                d.name,
-                short_path(&plan.files[d.file].id),
-                d.line,
-                d.name
-            )),
             _ => {}
         }
     }
@@ -721,7 +715,7 @@ fn owners(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>) -> BTreeSet
     let mids: Vec<ModuleId> = match t {
         Target::Fn(mid, _) => vec![*mid],
         Target::Key { modules, .. } => modules.clone(),
-        Target::Unrecorded(_) => Vec::new(),
+        Target::Unrecorded(_) | Target::Field { .. } => Vec::new(),
     };
     mids.into_iter()
         .filter(|m| *m != ModuleId::builtin())
@@ -766,9 +760,14 @@ fn p_def_spans(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>, p_id: 
                         }
                     }
                 }
+                for (_, d) in module.decorators.iter() {
+                    if d.def_key == *key {
+                        out.push((module.file, d.span.offset_range.0));
+                    }
+                }
             }
         }
-        Target::Unrecorded(_) => {}
+        Target::Unrecorded(_) | Target::Field { .. } => {}
     }
     out.sort();
     out.dedup();
@@ -806,7 +805,7 @@ fn candidate_edits(plan: &Plan) -> std::result::Result<HashMap<usize, Vec<Edit>>
         if !text[at..].starts_with(|c: char| c == '@' || c.is_ascii_alphabetic()) {
             return Err(format!("{}:{}: unexpected item start for `{}`", short_path(&plan.files[d.file].id), d.line, d.name));
         }
-        edits.entry(d.file).or_default().push(Edit { range: (at, at), text: "pub ".to_string() });
+        edits.entry(d.file).or_default().push(Edit::new((at, at), "pub "));
     }
     for (fi, a, parenthesized) in &plan.ascriptions {
         let text = &plan.files[*fi].text;
@@ -821,15 +820,15 @@ fn candidate_edits(plan: &Plan) -> std::result::Result<HashMap<usize, Vec<Edit>>
         }
         let e = edits.entry(*fi).or_default();
         if !parenthesized {
-            e.push(Edit { range: (a.node.0, a.node.0), text: "(".to_string() });
+            e.push(Edit::new((a.node.0, a.node.0), "("));
         }
-        e.push(Edit { range: (a.operand.1, a.ty.0), text: " : ".to_string() });
+        e.push(Edit::new((a.operand.1, a.ty.0), " : "));
         if !parenthesized {
-            e.push(Edit { range: (a.node.1, a.node.1), text: ")".to_string() });
+            e.push(Edit { range: (a.node.1, a.node.1), text: ")".to_string(), closes: true });
         }
     }
     for r in &plan.repairs {
-        edits.entry(r.file).or_default().push(Edit { range: (r.offset, r.offset), text: format!("{}::", r.qualifier) });
+        edits.entry(r.file).or_default().push(Edit::new((r.offset, r.offset), format!("{}::", r.qualifier)));
     }
     for list in edits.values_mut() {
         list.sort_by_key(|e| e.range);
@@ -941,7 +940,10 @@ fn candidate_file_pkg(c: &Ctx, plan: &Plan) -> HashMap<Ustr, u32> {
 
 /// A changed site the plan can repair: a named, non-method call in one of the
 /// package's files whose baseline target is a single function of std or of an
-/// imported v1 dependency. The repair qualifies the callee.
+/// imported v1 dependency. The repair qualifies the callee. Callables
+/// accumulate across the v1 lookup tiers (spec 8.3), so a call moves only
+/// when a newly visible overload outranks the legacy selection or wins its
+/// exact tie by tier.
 fn repair_for(
     plan: &Plan,
     file_index: &HashMap<Ustr, usize>,
@@ -987,7 +989,7 @@ fn repair_for(
         name: site.name.to_string(),
         qualifier: qualifier.clone(),
         reason: format!(
-            "a v1 tier would hide the `{}` this call selected from `{}` (spec 8.3); qualifying keeps the target",
+            "in v1 another overload of `{}` would win over the one this call selected from `{}` (spec 8.3); qualifying keeps the target",
             site.name,
             if qualifier == "std" { "std".to_string() } else { qualifier }
         ),
@@ -999,18 +1001,18 @@ fn repair_for(
 /// Lua references from conservative reflection candidates and reports unknown
 /// dynamic names. Paused JavaScript bodies are counted, not gated.
 fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::result::Result<(), String> {
-    let moved: BTreeSet<&str> = plan
-        .defs
-        .iter()
-        .filter(|d| !d.exempt_symbol && matches!(d.kind, DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype))
-        .map(|d| d.name.as_str())
-        .collect();
+    let mut moved: BTreeMap<&str, BTreeSet<DefKind>> = BTreeMap::new();
+    for d in &plan.defs {
+        if !d.exempt_symbol && matches!(d.kind, DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype) {
+            moved.entry(d.name.as_str()).or_default().insert(d.kind);
+        }
+    }
     // A legacy symbol is the declared name or the name plus a mangled
     // signature suffix (`name__ret_T`).
     let moved_names = |words: &mut dyn Iterator<Item = &str>| -> BTreeSet<String> {
         words
             .map(|w| w.split("__").next().unwrap_or(w))
-            .filter(|stem| moved.contains(stem))
+            .filter(|stem| moved.contains_key(stem))
             .map(str::to_string)
             .collect()
     };
@@ -1051,8 +1053,33 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
         ));
     }
     let refs = modules_analysis::lua_references(&bodies)?;
-    let tail = "whose emitted symbol changes when the package becomes v1; mark the definition `@nomangle` or reach it through Rock before migrating";
     let listed = |names: &BTreeSet<String>| names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+    // `@nomangle` is accepted only on a fn (bone-core `validate_one`); a
+    // global or a type keeps its hashed symbol and must be reached through Rock.
+    let tail = |names: &BTreeSet<String>| -> String {
+        let (fns, others): (BTreeSet<String>, BTreeSet<String>) =
+            names.iter().cloned().partition(|n| moved[n.as_str()].iter().all(|k| *k == DefKind::Fn));
+        let kinds: BTreeSet<&str> = others
+            .iter()
+            .flat_map(|n| moved[n.as_str()].iter())
+            .filter(|k| **k != DefKind::Fn)
+            .map(|k| if k.is_type() { "type" } else { k.as_str() })
+            .collect();
+        let mixed = !fns.is_empty() && !others.is_empty();
+        let mut remedies = Vec::new();
+        if !fns.is_empty() {
+            let who = if mixed { format!("for {}, ", listed(&fns)) } else { String::new() };
+            remedies.push(format!("{who}mark the fn `@nomangle` or reach it through Rock before migrating"));
+        }
+        if !others.is_empty() {
+            let who = if mixed { format!("for {}, ", listed(&others)) } else { String::new() };
+            remedies.push(format!(
+                "{who}reach it through Rock before migrating (an accessor fn, or a `@nomangle` fn wrapper; `@nomangle` is not accepted on a {})",
+                kinds.into_iter().collect::<Vec<_>>().join(" or ")
+            ));
+        }
+        format!("whose emitted symbol changes when the package becomes v1; {}", remedies.join("; "))
+    };
     for (site, r) in sites.iter().zip(refs) {
         if let Some(error) = r.error {
             plan.blockers.push(format!(
@@ -1068,24 +1095,174 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
             let possible = moved_names(&mut r.conservative.iter().map(String::as_str));
             if !possible.is_empty() {
                 plan.blockers.push(format!(
-                    "raw ABI review [conservative]: the inline body at {site} may name {} through unresolved `_G` flow, {tail}",
-                    listed(&possible)
+                    "raw ABI review [conservative]: the inline body at {site} may name {} through unresolved `_G` flow, {}",
+                    listed(&possible),
+                    tail(&possible)
                 ));
             }
         }
         let globals = moved_names(&mut r.globals.iter().map(String::as_str));
         if !globals.is_empty() {
-            plan.blockers.push(format!("raw ABI review [exact]: the inline body at {site} names {}, {tail}", listed(&globals)));
+            plan.blockers.push(format!("raw ABI review [exact]: the inline body at {site} names {}, {}", listed(&globals), tail(&globals)));
         }
         let via_g = moved_names(&mut r.via_g.iter().map(String::as_str));
         if !via_g.is_empty() {
             plan.blockers.push(format!(
-                "raw ABI review [exact]: the inline body at {site} can name {} through `_G`, {tail}",
-                listed(&via_g)
+                "raw ABI review [exact]: the inline body at {site} can name {} through `_G`, {}",
+                listed(&via_g),
+                tail(&via_g)
+            ));
+        }
+    }
+    let moved_types: BTreeSet<&str> =
+        moved.iter().filter(|(_, kinds)| kinds.iter().any(|k| k.is_type())).map(|(n, _)| *n).collect();
+    // A C type any cdef declares is the hand-written ABI's own name, in whichever
+    // body the `ffi.new` or `sizeof` that spells it sits.
+    let scanned: Vec<LuaTypeStrings> = bodies.iter().map(|body| lua_type_strings(body.src.as_str())).collect();
+    let cdef_declared: BTreeSet<&String> = scanned.iter().flat_map(|s| &s.declared).collect();
+    for (site, found) in sites.iter().zip(&scanned) {
+        let named: BTreeSet<String> = found
+            .used
+            .iter()
+            .filter(|n| moved_types.contains(n.as_str()) && !cdef_declared.contains(n))
+            .cloned()
+            .collect();
+        if !named.is_empty() {
+            plan.blockers.push(format!(
+                "raw ABI review [exact]: the inline body at {site} spells type {} in an FFI type string or a `__ty` tag, and the type's emitted name changes when the package becomes v1; reach it through Rock before migrating",
+                listed(&named)
             ));
         }
     }
     Ok(())
+}
+
+struct LuaTypeStrings {
+    /// Names a `typedef` in one of the body's cdefs declares.
+    declared: BTreeSet<String>,
+    /// Every C identifier of a cdef text or an `ffi.new`/`sizeof`/`typeof`/
+    /// `cast`/`istype`/`offsetof`/`metatype` type string, plus every literal
+    /// that is exactly one identifier (a `__ty` tag compared or constructed).
+    used: BTreeSet<String>,
+}
+
+/// The type names an inline Lua body spells inside string literals. Comments
+/// are skipped.
+fn lua_type_strings(src: &str) -> LuaTypeStrings {
+    const FFI_TYPE_FNS: &[&str] = &["new", "sizeof", "typeof", "cast", "istype", "offsetof", "metatype"];
+    let b = src.as_bytes();
+    let mut c_texts: Vec<&str> = Vec::new();
+    let mut tags = BTreeSet::new();
+    let mut i = 0;
+    // `[[`, `[=[` ... at `i`: the level, if it opens a long bracket.
+    let long_open = |i: usize| -> Option<usize> {
+        if b.get(i) != Some(&b'[') {
+            return None;
+        }
+        let mut j = i + 1;
+        while b.get(j) == Some(&b'=') {
+            j += 1;
+        }
+        (b.get(j) == Some(&b'[')).then_some(j - i - 1)
+    };
+    let long_body = |start: usize, level: usize| -> (usize, usize) {
+        let close = format!("]{}]", "=".repeat(level));
+        let open_len = level + 2;
+        let body_start = start + open_len;
+        match src[body_start..].find(&close) {
+            Some(k) => (body_start + k, body_start + k + close.len()),
+            None => (src.len(), src.len()),
+        }
+    };
+    while i < b.len() {
+        if b[i] == b'-' && b.get(i + 1) == Some(&b'-') {
+            if let Some(level) = long_open(i + 2) {
+                i = long_body(i + 2, level).1;
+            } else {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        let literal = if b[i] == b'"' || b[i] == b'\'' {
+            let quote = b[i];
+            let start = i + 1;
+            let mut j = start;
+            while j < b.len() && b[j] != quote && b[j] != b'\n' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            let end = j.min(b.len());
+            Some((i, &src[start..end], (j + 1).min(b.len())))
+        } else if let Some(level) = long_open(i) {
+            let (end, next) = long_body(i, level);
+            Some((i, &src[i + level + 2..end], next))
+        } else {
+            None
+        };
+        let Some((at, text, next)) = literal else {
+            i += 1;
+            continue;
+        };
+        let before = src[..at].trim_end();
+        let before = before.strip_suffix('(').map(str::trim_end).unwrap_or(before);
+        let is_c = before.ends_with("ffi.cdef")
+            || FFI_TYPE_FNS.iter().any(|f| before.ends_with(&format!("ffi.{f}")));
+        if is_c {
+            c_texts.push(text);
+        } else if !text.is_empty()
+            && text.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+            && !text.as_bytes()[0].is_ascii_digit()
+        {
+            tags.insert(text.to_string());
+        }
+        i = next;
+    }
+    let mut declared = BTreeSet::new();
+    let mut used = BTreeSet::new();
+    for text in c_texts {
+        let text = strip_c_comments(text);
+        let mut depth = 0i32;
+        let stmts = text.split(|c: char| {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            c == ';' && depth == 0
+        });
+        for stmt in stmts {
+            let idents: Vec<&str> = stmt
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|w| !w.is_empty() && !w.as_bytes()[0].is_ascii_digit())
+                .collect();
+            if idents.first() == Some(&"typedef") {
+                if let Some(last) = idents.last() {
+                    declared.insert(last.to_string());
+                }
+            }
+            used.extend(idents.into_iter().map(str::to_string));
+        }
+    }
+    used.extend(tags);
+    LuaTypeStrings { declared, used }
+}
+
+fn strip_c_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("//") {
+            rest = r.find('\n').map(|k| &r[k..]).unwrap_or("");
+        } else if let Some(r) = rest.strip_prefix("/*") {
+            rest = r.find("*/").map(|k| &r[k + 2..]).unwrap_or("");
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+        }
+    }
+    out
 }
 
 /// `[language] modules = "v1"` added to a manifest, comment-preserving.

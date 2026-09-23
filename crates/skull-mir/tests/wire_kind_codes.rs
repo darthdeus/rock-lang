@@ -102,8 +102,14 @@ fn the_rock_constants_match_the_compilers_codes() {
 fn rock_global(src: &str, name: &str) -> Option<i64> {
     for keyword in ["global", "const"] {
         let needle = format!("{keyword} {name}: int = ");
-        if let Some(line) = src.lines().find(|l| l.trim_start().starts_with(&needle)) {
-            return line.trim().strip_prefix(&needle)?.split_whitespace().next()?.parse().ok();
+        // A modules-v1 declaration may carry its visibility first.
+        let decl = |l: &str| {
+            let l = l.trim_start();
+            let l = l.strip_prefix("pub(package) ").or_else(|| l.strip_prefix("pub ")).unwrap_or(l);
+            l.strip_prefix(&needle).map(str::to_string)
+        };
+        if let Some(rest) = src.lines().find_map(decl) {
+            return rest.split_whitespace().next()?.parse().ok();
         }
     }
     None

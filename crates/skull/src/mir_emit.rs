@@ -4561,13 +4561,27 @@ pub fn collect_sim_fns(ws: &Workspace) -> Vec<(&bone_semantic::hir::Function, St
 /// name from generated top-level text. Shared with the reachability roots so the
 /// registration and the root cannot drift: emitting the call while DCE prunes the
 /// definition is a nil-call at load, which is exactly what happened.
+///
+/// Matched by DECLARED name: under modules v1 a function's name is its DefKey.
+/// More than one candidate is ambiguous and yields `None`;
+/// [`sim_registration_lines`] reports the candidates.
 fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
-    ws.modules.iter().find_map(|m| {
-        m.functions
-            .iter()
-            .find(|(_, f)| f.name.as_str() == "register_sim")
-            .map(|(fid, _)| FuncRef { module: m.id, func: fid })
-    })
+    match register_sim_candidates(ws).as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+fn register_sim_candidates(ws: &Workspace) -> Vec<FuncRef> {
+    ws.modules
+        .iter()
+        .flat_map(|m| {
+            m.functions
+                .iter()
+                .filter(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "register_sim")
+                .map(|(fid, _)| FuncRef { module: m.id, func: fid })
+        })
+        .collect()
 }
 
 /// Every function this build roots from, by the emitter's own predicate.
@@ -4687,6 +4701,17 @@ fn sim_registration_lines(
     }
 
     let register_fn = register_sim_fn(ws).ok_or_else(|| {
+        let candidates = register_sim_candidates(ws);
+        if candidates.len() > 1 {
+            let names: Vec<&str> = candidates
+                .iter()
+                .map(|f| ws.module(f.module).functions[f.func].name.as_str())
+                .collect();
+            return CompilerError::new_no_location(format!(
+                "`@sim` registration is ambiguous: `register_sim` is defined as {}",
+                names.join(", ")
+            ));
+        }
         CompilerError::new_no_location(
             "internal: `register_sim` is not in scope yet `@sim` annotations exist \
              (skull) -- stone/engine must be linked. Please report."
@@ -5522,7 +5547,7 @@ fn assemble(
                 // and this changes no output -- but an ungated write is a second
                 // population input, and one is the whole point of the cut.
                 if let Some(lib) = f.ffi_lib {
-                    let nm = f.name.as_str();
+                    let nm = mangle_fn(ws, f);
                     let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
                     let body = match extern_ret(ws, f)? {
                         // Returns an OWNING copy, never `__out[0]`. LuaJIT does
@@ -5530,7 +5555,8 @@ fn assemble(
                         // into it, so handing one back is a use-after-free that
                         // reads fine until the memory is reused
                         // (`tests/extern_value_return_ownership.rs`).
-                        ExternRet::ValueStruct(sname) => {
+                        ExternRet::ValueStruct(key) => {
+                            let sname = skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(&key));
                             let call_args = if params.is_empty() {
                                 "__out".to_string()
                             } else {

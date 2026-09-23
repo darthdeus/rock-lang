@@ -531,6 +531,10 @@ pub struct BodyInference {
     /// Same, for `iter(x)` where `x: I` -- identity (types as `I`, lowers to
     /// the argument itself, no call).
     pub bound_identity_calls: FxHashSet<Idx<Expr>>,
+    /// Method-syntax calls (`recv.f(..)`, `recv?.f(..)`) that go through the
+    /// receiver's fn-typed field `f` instead of a function, keyed by the call
+    /// expr. skull lowers exactly these as indirect calls through the field.
+    pub fn_field_calls: FxHashMap<Idx<Expr>, Ustr>,
     /// Calls of bounded fns: the conformance-resolution tree built at the call
     /// site, keyed by the call expr. Tells skull how to substitute the
     /// placeholder bound-calls inside that callee when it is inlined here.

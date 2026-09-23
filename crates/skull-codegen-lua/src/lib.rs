@@ -189,9 +189,11 @@ function __rock_code_slot_abort()
   _G.__rock_lifecycle_plan_pending = nil
   _G.__rock_definition_plan_pending = nil
   _G.__rock_artifact_binding_plan_pending = nil
-  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
-  if pending_wgpu then
-    for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
+  local discard_wgpu = rawget(_G, "__rock_wgpu_shader_discard_pending")
+  if discard_wgpu then
+    discard_wgpu()
+  elseif rawget(_G, "__rock_wgpu_shader_register") then
+    error("WGPU shader registrar has no discard hook", 0)
   end
 end
 function __rock_code_slot_stage(key, body, abi)
@@ -289,24 +291,13 @@ function __rock_code_slot_publish()
   if candidate_lifecycle_plan ~= nil then
     wire_due = __rock_lifecycle_wire_due(_G.__ROCK_LIFECYCLE_PLAN, candidate_lifecycle_plan)
   end
-  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
-  if pending_wgpu and next(pending_wgpu) ~= nil then
-    local register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending")
-    if not register_wgpu then
-      register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending_ret_bool")
-    end
-    if not register_wgpu or not register_wgpu() then
-      error("WGPU shader registration did not complete", 0)
-    end
-    local publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending")
-    if not publish_wgpu then
-      publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending_ret_bool")
-    end
-    if publish_wgpu then
-      if not publish_wgpu() then error("WGPU shader registration did not complete", 0) end
-    else
-      error("WGPU shader registration did not complete", 0)
-    end
+  -- The renderer owns the pending WGPU queue; these `@nomangle` hooks are
+  -- its only contract with the prelude.
+  local publish_wgpu = rawget(_G, "__rock_wgpu_shader_publish_pending")
+  if publish_wgpu then
+    if not publish_wgpu() then error("WGPU shader registration did not complete", 0) end
+  elseif rawget(_G, "__rock_wgpu_shader_register") then
+    error("WGPU shader registrar has no publish hook", 0)
   end
   local stage = _G.__rock_code_slot_pending
   if not stage then error("Rock code slot stage not open", 0) end
@@ -4596,7 +4587,7 @@ impl Emitter<'_> {
                 out.push_str("] = {repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 out.push_str(", cap = ");
                 self.write_opnd(out, *capacity);
                 out.push_str("}, ");
@@ -4613,7 +4604,7 @@ impl Emitter<'_> {
                 out.push_str("{repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 out.push_str(", cap = ");
                 self.write_opnd(out, *capacity);
                 out.push('}');
@@ -4628,7 +4619,7 @@ impl Emitter<'_> {
                 out.push_str("] = {repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 let _ = write!(out, ", stride = {stride}, cap = ");
                 self.write_opnd(out, *capacity);
                 out.push_str("}}");
@@ -4637,7 +4628,7 @@ impl Emitter<'_> {
                 out.push_str("{repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 let _ = write!(out, ", stride = {stride}, cap = ");
                 self.write_opnd(out, *capacity);
                 out.push('}');
@@ -4647,7 +4638,7 @@ impl Emitter<'_> {
                 let mut first = true;
                 if let Some(name) = ty {
                     out.push_str("__ty = ");
-                    write_lua_string(out, skull_mir::mangle::symbol_of_key(*name).as_str());
+                    write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *name).as_str());
                     first = false;
                 }
                 for (n, id) in fields {
@@ -4682,13 +4673,13 @@ impl Emitter<'_> {
                         self.write_opnd(out, *id);
                         out.push_str(", ");
                     }
-                    let symbol = skull_mir::mangle::symbol_of_key(*name);
+                    let symbol = skull_mir::mangle::type_symbol(self.ws, *name);
                     let _ = write!(out, "__ty = ");
                     write_lua_string(out, symbol.as_str());
                     let _ = write!(out, " }}, {})", value_struct_metatable_name(symbol.as_str()));
                     return;
                 }
-                let _ = write!(out, "{}{suffix}(", skull_mir::mangle::symbol_of_key(*name));
+                let _ = write!(out, "{}{suffix}(", skull_mir::mangle::type_symbol(self.ws, *name));
                 for (i, (_, id)) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -4706,7 +4697,7 @@ impl Emitter<'_> {
                 out.push_str("{__variant = ");
                 write_lua_string(out, tag.as_str());
                 out.push_str(", __ty = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*ty).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *ty).as_str());
                 for id in positional {
                     out.push_str(", ");
                     self.write_opnd(out, *id);
@@ -4721,7 +4712,7 @@ impl Emitter<'_> {
                 out.push_str("{__variant = ");
                 self.write_opnd(out, *tag);
                 out.push_str(", __ty = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*ty).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *ty).as_str());
                 for id in positional {
                     out.push_str(", ");
                     self.write_opnd(out, *id);
@@ -4734,12 +4725,12 @@ impl Emitter<'_> {
             }
 
             Inst::FfiNewArray { ctype, count, .. } => {
-                let _ = write!(out, "ffi.new(\"{}[?]\", ", skull_mir::mangle::symbol_of_key(*ctype));
+                let _ = write!(out, "ffi.new(\"{}[?]\", ", skull_mir::mangle::type_symbol(self.ws, *ctype));
                 self.write_opnd(out, *count);
                 out.push(')');
             }
             Inst::FfiViewCast { cty, ptr } => {
-                let _ = write!(out, "ffi.cast(\"{}*\", ", skull_mir::mangle::symbol_of_key(*cty));
+                let _ = write!(out, "ffi.cast(\"{}*\", ", skull_mir::mangle::type_symbol(self.ws, *cty));
                 self.write_opnd(out, *ptr);
                 out.push(')');
             }

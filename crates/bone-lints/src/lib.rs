@@ -1235,8 +1235,10 @@ fn action_edges_in_body(
         BodyOwner::Function(fid) => {
             let function = &module.functions[fid];
             !has_annotation(function, "wire")
-                && function.name != "refresh_action_defaults"
-                && function.name != "action_new"
+                && !matches!(
+                    declared_name(function.name.as_str()),
+                    "refresh_action_defaults" | "action_new"
+                )
         }
         BodyOwner::Global(gid) => !is_action_name(module.globals[gid].name),
         _ => false,
@@ -3655,7 +3657,7 @@ pub fn unused_fns_by_file(
 /// in-project call graph. See `unused_fns` for the rationale on each arm.
 fn is_root(f: &Function) -> bool {
     f.is_extern
-        || f.name.as_str() == "main"
+        || declared_name(f.name.as_str()) == "main"
         || f.annotations.iter().any(|a| !is_implementation_anno(a.name.name.as_str()))
 }
 
@@ -4257,7 +4259,7 @@ fn is_production_mag_module(file: Ustr) -> bool {
 }
 
 fn is_action_name(name: Ustr) -> bool {
-    name.as_str().starts_with("ACT_")
+    declared_name(name.as_str()).starts_with("ACT_")
 }
 
 fn has_annotation(f: &Function, name: &str) -> bool {
@@ -4313,26 +4315,7 @@ pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<Act
     let mut callers: FxHashSet<Ustr> = FxHashSet::default();
     for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
         for (owner, body) in &module.bodies {
-            let production_read = match owner {
-                BodyOwner::Function(fid) => {
-                    let function = &module.functions[*fid];
-                    !has_annotation(function, "wire")
-                        && function.name != "refresh_action_defaults"
-                        && function.name != "action_new"
-                }
-                BodyOwner::Global(gid) => !is_action_name(module.globals[*gid].name),
-                _ => false,
-            };
-            if !production_read {
-                continue;
-            }
-            for expr in body.expr_arena.values() {
-                if let Expr::Global(name) = expr {
-                    if declared.contains(name) {
-                        callers.insert(*name);
-                    }
-                }
-            }
+            callers.extend(action_edges_in_body(module, *owner, body, &declared));
         }
     }
 
@@ -4368,7 +4351,7 @@ pub fn method_syntax_in_module(
 ) -> Vec<MethodSyntax> {
     let mut out = Vec::new();
     for (_, f) in module.functions.iter() {
-        if f.is_extern || f.name.as_str() == "main" || f.name_span.file != module.file {
+        if f.is_extern || declared_name(f.name.as_str()) == "main" || f.name_span.file != module.file {
             continue;
         }
         let Some(recv) = f.param_decls.first() else { continue };
@@ -4716,7 +4699,7 @@ fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
     let (id, TypeExpr::Nullable(inner)) = head_ty(ws, bi, ty) else { return false };
     matches!(
         head_type(ws, bi, id.with_idx(inner)),
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == "Task"
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if declared_name(n.as_str()) == "Task"
     )
 }
 
@@ -5021,7 +5004,13 @@ fn reach_nominal_body(
 /// A modules-v1 definition is registered under its DefKey, which is a path. A
 /// diagnostic wants the bare name the author wrote.
 fn short_name(name: Ustr) -> String {
-    name.as_str().rsplit("::").next().unwrap_or(name.as_str()).to_string()
+    declared_name(name.as_str()).to_string()
+}
+
+/// The declared (last) segment of a DefKey; a legacy name is already bare.
+/// Classifiers that key on a spelling (`main`, `Task`) must read this.
+fn declared_name(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
 }
 
 impl LintFinding for HostResourceInGameMemory {

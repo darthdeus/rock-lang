@@ -159,14 +159,78 @@ fn a_legacy_library_migrates_with_its_exports_closure_and_ascriptions() {
     assert!(again.stdout.contains("already modules-v1"), "{}", shown(&again));
 }
 
-/// Spec 8.3: in v1 an own `min(Foo, Foo)` hides the std family for the bare
-/// name, where legacy merged them. The planner finds the call that would stop
-/// resolving and qualifies it, and the result selects the same body.
+/// A consumer that applies one of the package's decorators uses it, as it
+/// uses a function it calls: the plan exports it and the consumer's
+/// annotation still resolves. A decorator only the package applies, and one
+/// nobody applies, stay private. This consumer is v1; the next test is
+/// the legacy one.
 #[test]
-fn a_std_call_an_own_family_would_hide_is_qualified() {
-    let fixture = scratch("hidden_std");
+fn a_decorator_a_consumer_applies_is_exported() {
+    let fixture = scratch("decorator_use");
     let dir = fixture.path();
-    write(&dir.join("lib/stick.toml"), &manifest("hide-lib", ""));
+    write(&dir.join("lib/stick.toml"), &manifest("deco-lib", ""));
+    write(
+        &dir.join("lib/lib.rock"),
+        "@lifecycle(phase=\"update\", owner=\"session\")\ndeco init tick {}\n\n\
+         @lifecycle(phase=\"draw\", owner=\"session\")\ndeco init own_hook {}\n\n\
+         @lifecycle(phase=\"wire\", owner=\"session\")\ndeco init idle_hook {}\n\n\
+         @own_hook\nfn lib_draw() {}\n",
+    );
+    write(
+        &dir.join("app/stick.toml"),
+        &manifest("deco-app", "[language]\nmodules = \"v1\"\n\n[dependencies]\ndeco-lib = { path = \"../lib\", allow_legacy = true }\n"),
+    );
+    write(&dir.join("app/app.rock"), "use deco_lib::tick;\n\n@tick\nfn app_tick() {}\n");
+
+    let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert_eq!(names(&v["exports"]["pub"]), vec!["tick"], "{v}");
+    let tick = &v["exports"]["pub"][0];
+    assert_eq!(tick["consumers"][0]["package"], "deco-app", "{tick}");
+    assert_eq!(names(&v["exports"]["private"]), vec!["idle_hook", "lib_draw", "own_hook"], "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+
+    let apply = migrate(dir, "lib", &["--apply", "--consumer", "app"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    let lib = read(&dir.join("lib/lib.rock"));
+    assert!(lib.starts_with("pub @lifecycle(phase=\"update\", owner=\"session\")\ndeco init tick {}\n"), "{lib}");
+    assert!(lib.contains("\n@lifecycle(phase=\"draw\", owner=\"session\")\ndeco init own_hook"), "{lib}");
+}
+
+/// The Stone case: a legacy consumer applies the decorator, and after the
+/// conversion reaches it through its root projection. `update` also names a
+/// legacy stdlib fn, as Stone's `@update` does.
+#[test]
+fn a_decorator_a_legacy_consumer_applies_is_exported() {
+    let fixture = scratch("decorator_legacy_consumer");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("deco-lib", ""));
+    write(&dir.join("lib/lib.rock"), "@lifecycle(phase=\"update\", owner=\"session\")\ndeco init update {}\n");
+    write(&dir.join("app/stick.toml"), &manifest("deco-app", "[dependencies]\ndeco-lib = { path = \"../lib\" }\n"));
+    write(&dir.join("app/app.rock"), "@update\nfn app_update() {}\n");
+
+    let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert_eq!(names(&v["exports"]["pub"]), vec!["update"], "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+    let apply = migrate(dir, "lib", &["--apply", "--consumer", "app"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+}
+
+/// Spec 8.3: in v1 an own `min(Foo, Foo)` and std's `min` are one family,
+/// as legacy merged them, so the call keeps its std target and needs no
+/// repair.
+#[test]
+fn a_std_call_beside_an_own_family_of_its_name_needs_no_repair() {
+    let fixture = scratch("own_family_beside_std");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("family-lib", ""));
     write(
         &dir.join("lib/lib.rock"),
         "struct Foo {\n    v: int,\n}\n\nfn min(a: Foo, b: Foo) -> Foo {\n    a\n}\n\nfn smaller(a: int, b: int) -> int {\n    min(a, b)\n}\n",
@@ -174,16 +238,98 @@ fn a_std_call_an_own_family_would_hide_is_qualified() {
     write(&dir.join("lib/tests/t.rock"), "@test\nfn picks_the_smaller() {\n    assert(smaller(7, 3) == 3)\n}\n");
 
     let v = json(&migrate(&dir, "lib", &["--check", "--format", "json"]));
-    let repairs = v["repairs"].as_array().expect("repairs");
-    assert_eq!(repairs.len(), 1, "{v}");
-    assert_eq!(repairs[0]["qualifier"], "std", "{v}");
-    assert_eq!(repairs[0]["name"], "min", "{v}");
+    assert!(v["repairs"].as_array().expect("repairs").is_empty(), "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
 
     let apply = migrate(&dir, "lib", &["--apply"]);
     assert_eq!(apply.code, Some(0), "{}", shown(&apply));
-    assert!(read(&dir.join("lib/lib.rock")).contains("    std::min(a, b)\n"));
+    assert!(read(&dir.join("lib/lib.rock")).contains("    min(a, b)\n"));
     let tests = rock(&dir, &["test", "lib"]);
     assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
+}
+
+/// The `)` the ascription rewrite inserts at the end of `n :: float` belongs
+/// to every expression that ends there, so the division is compared at its
+/// candidate span and keeps its std operator.
+#[test]
+fn an_expression_ending_in_a_rewritten_ascription_keeps_its_site() {
+    let fixture = scratch("ascription_end");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("ratio-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn ratio(j: int, n: int) -> float {\n    j :: float / n :: float\n}\n");
+    write(&dir.join("lib/tests/t.rock"), "@test\nfn halves() {\n    assert(ratio(1, 2) == 0.5)\n}\n");
+
+    let v = json(&migrate(&dir, "lib", &["--check", "--format", "json"]));
+    assert_eq!(v["ascriptions"]["count"], 2, "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+    let apply = migrate(&dir, "lib", &["--apply"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    assert!(read(&dir.join("lib/lib.rock")).contains("    (j : float) / (n : float)\n"));
+    let tests = rock(&dir, &["test", "lib"]);
+    assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
+}
+
+/// `t.sprite()` calls `Tile`'s fn-typed field, which wins over free fns, so
+/// it references no definition even when the consumer's `sprite` family
+/// gains the package's `pub fn sprite` through the root projection.
+#[test]
+fn a_fn_field_call_is_not_a_reference_to_a_same_named_fn() {
+    let fixture = scratch("fn_field_call");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("field-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn sprite(n: int) -> int {\n    n + 1\n}\n");
+    write(&dir.join("app/stick.toml"), &manifest("field-app", "[dependencies]\nfield-lib = { path = \"../lib\" }\n"));
+    write(
+        &dir.join("app/app.rock"),
+        "struct Tile {\n    sprite: fn() -> int,\n}\n\nfn seven() -> int {\n    7\n}\n\n\
+         fn tile_sprite(t: Tile) -> int {\n    t.sprite() + sprite(1)\n}\n\n\
+         @test\nfn field_call_runs() {\n    assert(tile_sprite(Tile { sprite: seven }) == 9)\n}\n",
+    );
+
+    let v = json(&migrate(&dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(names(&v["exports"]["pub"]), vec!["sprite"], "{v}");
+    for ctx in v["verification"].as_array().unwrap() {
+        assert!(ctx["errors"].as_array().unwrap().is_empty(), "{ctx}");
+        assert!(ctx["changed_sites"].as_array().unwrap().is_empty(), "{ctx}");
+    }
+    let apply = migrate(&dir, "lib", &["--apply", "--consumer", "app"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    let tests = rock(&dir, &["test", "app"]);
+    assert!(tests.stdout.contains("1/1 @tests passed"), "{}", shown(&tests));
+}
+
+/// A site that really moves is reported. Legacy collapses the package's
+/// `inline(lua) fn lerp` and std's Rock `lerp` of the same signature into one
+/// logical fn and selects std's; in v1 they are different definitions and
+/// the package's own tier wins the tie. A method call is not repaired.
+#[test]
+fn a_method_call_the_own_tier_moves_is_reported() {
+    let fixture = scratch("real_move");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("move-lib", ""));
+    let src = "inline(lua) fn lerp(a: float, b: float, t: float) -> float = \"return a\"\n\n\
+               fn use_it(x: float) -> float {\n    x.lerp(1.0, 0.5)\n}\n";
+    write(&dir.join("lib/lib.rock"), src);
+
+    let run = migrate(&dir, "lib", &["--apply", "--format", "json"]);
+    assert_eq!(run.code, Some(3), "{}", shown(&run));
+    let v = json(&run);
+    assert_eq!(v["verdict"], "blocked", "{v}");
+    let changed: Vec<String> = v["verification"][0]["changed_sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(changed.len(), 1, "{v}");
+    assert!(changed[0].contains("fn lerp#0 in <stdlib>/unified.rock -> fn lerp#0 in lib/lib.rock"), "{changed:#?}");
+    assert_eq!(read(&dir.join("lib/lib.rock")), src, "a blocked plan writes nothing");
 }
 
 /// A v1 dependency the package's bodies use arrives through one
@@ -282,6 +428,33 @@ fn blockers_are_reported_and_nothing_is_written() {
     assert!(has("`b_reflected`") && has("through `_G`"), "{blockers:#?}");
     assert_eq!(read(&dir.join("lib/lib.rock")), lib_src, "a blocked plan writes nothing");
     assert!(!read(&dir.join("lib/stick.toml")).contains("[language]"));
+}
+
+/// The raw-ABI remedy depends on what the named definition is: `@nomangle`
+/// is accepted on a fn, while a global or a type must be reached through
+/// Rock (the compiler rejects `@nomangle` on a global).
+#[test]
+fn raw_abi_advice_matches_the_definition_kind() {
+    let fixture = scratch("raw_abi_advice");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("adv-lib", ""));
+    write(
+        &dir.join("lib/lib.rock"),
+        "global COUNTER: int = 0\n\nstruct Slot {\n    n: int,\n}\n\nfn bump() -> int {\n    1\n}\n\n\
+         inline(lua) fn read_counter() -> int = \"\"\"return COUNTER\"\"\"\n\n\
+         inline(lua) fn slot_table() -> int = \"\"\"return _G.Slot\"\"\"\n\n\
+         inline(lua) fn call_bump() -> int = \"\"\"return bump()\"\"\"\n",
+    );
+    let v = json(&migrate(dir, "lib", &["--check", "--format", "json"]));
+    let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
+    let about = |name: &str| blockers.iter().find(|b| b.contains(&format!("`{name}`"))).unwrap_or_else(|| panic!("{name}: {blockers:#?}"));
+    for name in ["COUNTER", "Slot"] {
+        let b = about(name);
+        assert!(!b.contains("mark the definition `@nomangle`"), "{b}");
+        assert!(b.contains("reach it through Rock"), "{b}");
+    }
+    assert!(about("COUNTER").contains("accessor fn"), "{blockers:#?}");
+    assert!(about("bump").contains("mark the fn `@nomangle`"), "{blockers:#?}");
 }
 
 /// The raw-ABI census counts only an inline Lua body's real references to a
@@ -406,6 +579,55 @@ fn raw_abi_census_keeps_real_and_conservative_environment_candidates_blocked() {
     }
 }
 
+/// Unresolved environment flow keeps only the strings that could be an
+/// environment key. A closure that captures no environment alias, a
+/// `rawget(_G, "K")` with a constant key, and a dynamic `_G[...]` index do not
+/// let the environment escape, so a field key on another table (`row.pc`,
+/// `{ pc = 1 }`) cannot name a global there; the Stone bodies at
+/// serialization.rock:187, snapshot.rock:59, state_image.rock:660 and
+/// c_struct_dispatch.rock:10 have these shapes. A string value that may reach
+/// a dynamic index, and every string once the environment escapes, still
+/// count.
+#[test]
+fn raw_abi_census_ignores_field_keys_when_the_environment_does_not_escape() {
+    let fixture = scratch("raw_field_keys");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "fn pc() -> int { 3 }\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    let run_body = |body: &str| {
+        write(&dir.join("app/app.rock"), &format!(
+            "fn app_value() -> int {{ pc() }}\ninline(lua) fn probe(flag: bool, key: string) -> int = \"\"\"{body}\"\"\"\n"
+        ));
+        json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]))
+    };
+    for body in [
+        "_G.__probe_seen = true; local function f(row) return row.pc end; return f({ pc = 1 })",
+        "local names = _G[\"__probe_\" .. key]; local t = { pc = 1 }; t.pc = 2; return names and t.pc or 0",
+        "local reg = rawget(_G, \"__PROBE_REG\"); return reg and reg.pc or 0",
+    ] {
+        let v = run_body(body);
+        assert_eq!(v["verdict"], "migration_needed", "{body}: {v}");
+        assert!(v["blockers"].as_array().unwrap().is_empty(), "{body}: {v}");
+    }
+    for body in [
+        "local t = { k = \"pc\" }; return _G[t.k]()",
+        "local names = _G[key]; local s = \"pc\"; return names and #s or 0",
+        "local env = _G; local function f(row) return env[row] end; return f(\"x\").pc",
+        "local k = \"pc\"; if flag then k = key end; return rawget(_G, k)()",
+        "local n = 0; for k in pairs({ pc = 1 }) do n = n + _G[k]() end; return n",
+    ] {
+        let v = run_body(body);
+        assert_eq!(v["verdict"], "blocked", "{body}: {v}");
+        assert!(v["blockers"].as_array().unwrap().iter().any(|b| b.as_str().unwrap().contains("`pc`")), "{body}: {v}");
+    }
+    let v = run_body("return rawget(_G, \"pc\")()");
+    assert!(v["blockers"].as_array().unwrap().iter().any(|b| {
+        let b = b.as_str().unwrap();
+        b.contains("[exact]") && b.contains("`pc` through `_G`")
+    }), "a constant rawget key is an exact environment field: {v}");
+}
+
 #[test]
 fn raw_abi_census_reports_dynamic_name_coverage_without_claiming_an_exact_reference() {
     let fixture = scratch("raw_dynamic_name");
@@ -464,7 +686,7 @@ fn copy_sources(from: &Path, to: &Path) {
 /// only consumer tests and sims call; a definition a consumer's tests use is
 /// exported like any other use (author decision), and reported as test-only.
 ///
-/// The chess-game and chess-render consumers are v1, so de-migrating
+/// The chess-game, chess-render and chess consumers are v1, so de-migrating
 /// chess-core turns its declared dependency into a legacy boundary. The copy
 /// marks it `allow_legacy = true`, which is what the graph would have to say
 /// for the pre-migration world to be well formed -- without it the planner
@@ -493,12 +715,14 @@ fn chess_core_migrates_to_the_committed_hand_conversion() {
         assert_ne!(&legacy, text, "{f} must change when de-migrated");
         write(&core.join(f), &legacy);
     }
-    for consumer in ["chess-game", "chess-render"] {
-        let game_manifest_path = dir.join(format!("libs/{consumer}/stick.toml"));
+    for (consumer, core_path) in
+        [("libs/chess-game", "../chess-core"), ("libs/chess-render", "../chess-core"), ("games/chess", "../../libs/chess-core")]
+    {
+        let game_manifest_path = dir.join(format!("{consumer}/stick.toml"));
         let game_manifest = read(&game_manifest_path);
         let allow_legacy = game_manifest.replace(
-            "chess-core = { path = \"../chess-core\" }",
-            "chess-core = { path = \"../chess-core\", allow_legacy = true }",
+            &format!("chess-core = {{ path = \"{core_path}\" }}"),
+            &format!("chess-core = {{ path = \"{core_path}\", allow_legacy = true }}"),
         );
         assert_ne!(allow_legacy, game_manifest, "the v1 consumer's chess-core edge must change");
         write(&game_manifest_path, &allow_legacy);
@@ -525,4 +749,57 @@ fn chess_core_migrates_to_the_committed_hand_conversion() {
     for (f, text) in &committed {
         assert_eq!(&read(&core.join(f)), text, "{f} differs from the committed hand conversion");
     }
+}
+
+/// Hand-written LuaJIT FFI spells a C type by its emitted name, and a v1 owner
+/// hashes the name of every nominal type: the typedef of a `value` (`Stats` ->
+/// `Stats_<hash>`) and the `__ty` tag of any struct or enum. A cdef, an
+/// `ffi.new`/`sizeof`/`typeof`/`cast`/`istype`/`offsetof` type string, and a
+/// string that IS a type's tag (`x.__ty == "Font"`) name the old spelling.
+/// A type the cdef declares itself, and a message that merely mentions a
+/// type, are not references.
+#[test]
+fn raw_abi_census_reports_type_names_inside_lua_strings() {
+    let fixture = scratch("raw_type_strings");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("t-lib", ""));
+    write(&dir.join("lib/lib.rock"), r#"
+value Stats { n: int }
+value Vert { x: float }
+struct Font { h: int }
+struct Local { a: int }
+struct Quiet { a: int }
+
+inline(lua) fn declare() = """
+    ffi.cdef [[
+        typedef struct { int a; } Local;
+        void get_stats(Stats* s);
+        void use_local(Local* l);
+    ]]
+"""
+
+inline(lua) fn new_local() -> any = """
+    return ffi.new("Local")
+"""
+
+inline(lua) fn verts(n: int) -> int = """
+    local b = ffi.new("Vert[?]", n)
+    return ffi.sizeof('Vert') * n
+"""
+
+inline(lua) fn is_font(x: any) -> bool = """
+    if x.__ty == "Font" then return true end
+    error("unknown Font or Quiet handle", 0)
+"""
+"#);
+    let run = migrate(dir, "lib", &["--check", "--format", "json"]);
+    let v = json(&run);
+    let blockers: Vec<String> = v["blockers"].as_array().unwrap().iter().map(|b| b.as_str().unwrap().to_string()).collect();
+    let about = |name: &str| blockers.iter().filter(|b| b.contains(&format!("`{name}`"))).count();
+    assert_eq!(about("Stats"), 1, "{blockers:#?}");
+    assert_eq!(about("Vert"), 1, "{blockers:#?}");
+    assert_eq!(about("Font"), 1, "{blockers:#?}");
+    assert_eq!(about("Local"), 0, "a type a cdef declares itself is not a reference, in any body: {blockers:#?}");
+    assert_eq!(about("Quiet"), 0, "a message mentioning a type is not a reference: {blockers:#?}");
+    assert_eq!(run.code, Some(3), "{}", shown(&run));
 }

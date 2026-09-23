@@ -1,5 +1,6 @@
 use super::*;
-use crate::hir::FamilyMember;
+use crate::hir::FamilyTier;
+use bone_core::modules::DefKind;
 
 pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let name = family.key();
@@ -8,8 +9,8 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let ws = gamma.workspace;
     gamma.inaccessible_overloads.borrow_mut().remove(&name);
     match *family {
-        CallFamily::Legacy(_) => member_overloads(gamma, FamilyMember { key: name, owner: None }),
-        CallFamily::Resolved { key, owner, .. } => member_overloads(gamma, FamilyMember { key, owner }),
+        CallFamily::Legacy(_) => member_overloads(gamma, name, None),
+        CallFamily::Resolved { key, owner } => member_overloads(gamma, key, owner),
         // A merged family: every member's overloads, as lowering recorded
         // them for the module the call was lowered in.
         CallFamily::Merged { file, .. } => {
@@ -22,7 +23,7 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
             let mut inaccessible = FnList::default();
             for &member in members {
                 gamma.inaccessible_overloads.borrow_mut().remove(&member.key);
-                out.extend(member_overloads(gamma, member));
+                out.extend(member_overloads(gamma, member.key, member.owner));
                 if let Some(hidden) = gamma.inaccessible_overloads.borrow().get(&member.key) {
                     inaccessible.extend(hidden.iter().copied());
                 }
@@ -40,7 +41,7 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
 /// whole bare family otherwise.
 pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamily {
     match c.body.value_owners.get(&e) {
-        Some(&owner) => CallFamily::resolved(name, Some(owner), &[]),
+        Some(&owner) => CallFamily::resolved(name, Some(owner)),
         None => CallFamily::from_name(name),
     }
 }
@@ -50,21 +51,18 @@ pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamil
 /// every legacy file defining the name, and a v1 fragment reaches only the
 /// std view's or one provider's. The key is a dependency either way, so an
 /// overload added under it re-infers this caller.
-fn member_overloads(gamma: &Gamma, member: FamilyMember) -> FnList {
-    gamma.dep_acc.borrow_mut().insert(member.key);
+fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> FnList {
+    gamma.dep_acc.borrow_mut().insert(key);
     let ws = gamma.workspace;
-    let Some(fns) = ws.functions_by_name.get(&member.key) else { return FnList::default() };
+    let Some(fns) = ws.functions_by_name.get(&key) else { return FnList::default() };
     let site = gamma.access_site();
     let mut visible = FnList::default();
     let mut inaccessible = FnList::default();
     for &(mid, fid) in fns {
-        let owned_by_view = member
-            .owner
-            .is_none_or(|owner| ws.ns.owns_file(owner, ws.module(mid).file));
-        if !owned_by_view {
+        if !owned_by_view(ws, owner, mid) {
             continue;
         }
-        if ws.callable_member_admits(member.key, mid, fid, site) {
+        if ws.callable_member_admits(key, mid, fid, site) {
             visible.push((mid, fid));
         } else {
             inaccessible.push((mid, fid));
@@ -74,11 +72,54 @@ fn member_overloads(gamma: &Gamma, member: FamilyMember) -> FnList {
         gamma
             .inaccessible_overloads
             .borrow_mut()
-            .entry(member.key)
+            .entry(key)
             .or_default()
             .extend(inaccessible);
     }
     visible
+}
+
+fn owned_by_view(ws: &Workspace, owner: Option<PackageId>, mid: ModuleId) -> bool {
+    owner.is_none_or(|owner| ws.ns.owns_file(owner, ws.module(mid).file))
+}
+
+/// The nearest lookup tier among the members of a merged v1 family that
+/// contribute the overload `(mid, fid)` (spec 8.3); `None` outside a merged
+/// family, where no tier orders the candidates.
+fn candidate_tier(gamma: &Gamma, family: CallFamily, mid: ModuleId, fid: Idx<Function>) -> Option<FamilyTier> {
+    let CallFamily::Merged { name, file } = family else { return None };
+    let ws = gamma.workspace;
+    let members = ws.module_ids.get(&file).and_then(|m| ws.module(*m).call_families.get(&name))?;
+    members
+        .iter()
+        .filter(|member| {
+            owned_by_view(ws, member.owner, mid)
+                && ws.functions_by_name.get(&member.key).is_some_and(|fns| fns.contains(&(mid, fid)))
+        })
+        .map(|member| member.tier)
+        .min()
+}
+
+/// Spec 8.3: an exact best-fit tie between members of different lookup
+/// tiers goes to the nearest tier, so a module can override a std or
+/// imported function of the same signature. Candidates of one tier stay
+/// tied.
+fn keep_nearest_tier(gamma: &Gamma, family: CallFamily, tied: &mut SmallVec<[(ModuleId, Idx<Function>); 4]>) {
+    let tiers: SmallVec<[Option<FamilyTier>; 4]> =
+        tied.iter().map(|&(mid, fid)| candidate_tier(gamma, family, mid, fid)).collect();
+    // Every candidate of a merged family comes from a recorded member; a
+    // candidate without a tier would mean it does not, so nothing is dropped
+    // and the tie is reported as it stands.
+    let Some(nearest) = tiers.iter().copied().collect::<Option<SmallVec<[FamilyTier; 4]>>>().and_then(|t| t.into_iter().min())
+    else {
+        return;
+    };
+    let mut i = 0;
+    tied.retain(|_| {
+        let keep = tiers[i] == Some(nearest);
+        i += 1;
+        keep
+    });
 }
 
 /// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
@@ -142,6 +183,15 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
             TypeExpr::Builtin(BuiltinTy::Float),
         ) => Some(1),
         (_, TypeExpr::Builtin(BuiltinTy::Any)) => Some(2),
+        // Mirrors `coerce`'s nullable target: fit the inner types, so an `int`
+        // argument fits a `float?` param in selection as it does in binding.
+        (&from, &TypeExpr::Nullable(pi)) => {
+            let from_inner = match from {
+                TypeExpr::Nullable(fi) => a.with_idx(fi),
+                _ => a,
+            };
+            fit_cost(gamma, from_inner, p.with_idx(pi), span)
+        }
         _ => {
             let p_is_iface = match *gamma.get(p) {
                 TypeExpr::App {
@@ -217,17 +267,6 @@ fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> Str
         .map(|t| format!(" -> {}", gamma.workspace.render(None, t)))
         .unwrap_or_default();
     format!("{}({}){}", f.name, params, ret)
-}
-
-fn with_hidden_note<T>(family: CallFamily, result: Result<T, CompilerError>) -> Result<T, CompilerError> {
-    result.map_err(|mut error| {
-        if let Some(hidden) = family.hidden() {
-            error.message.push_str(&format!(
-                "; shadowed candidate `{hidden}` needs an explicit import to be called"
-            ));
-        }
-        error
-    })
 }
 
 /// Backend-selection rank: a lower rank is the preferred representative when a
@@ -340,6 +379,7 @@ pub(crate) fn collapse_backend_variants(
 pub(crate) fn select_overload(
     c: BodyCtx,
     gamma: &mut Gamma,
+    family: CallFamily,
     candidates: &[(ModuleId, Idx<Function>)],
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
@@ -351,6 +391,7 @@ pub(crate) fn select_overload(
     select_overload_with_generics(
         c,
         gamma,
+        family,
         candidates,
         recv_ty,
         args,
@@ -365,6 +406,7 @@ pub(crate) fn select_overload(
 pub(crate) fn select_overload_with_generics(
     c: BodyCtx,
     gamma: &mut Gamma,
+    family: CallFamily,
     candidates: &[(ModuleId, Idx<Function>)],
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
@@ -424,6 +466,10 @@ pub(crate) fn select_overload_with_generics(
                 _ => {}
             }
         }
+    }
+
+    if best_set.len() > 1 {
+        keep_nearest_tier(gamma, family, &mut best_set);
     }
 
     match best_set.len() {
@@ -1298,6 +1344,7 @@ pub(crate) fn resolve_named_call_inner(
                     )
                 };
 
+                gamma.out.fn_field_calls.insert(call_expr, field);
                 return call_fn_value(c, gamma, field_ty, call_args, span);
             }
         }
@@ -1379,16 +1426,22 @@ pub(crate) fn resolve_named_call_inner(
         }
 
         // A v1 DefKey renders as its declared name (plan 2.1); legacy keys
-        // ARE the name. When a losing tier held a candidate of the same
-        // spelling, name it: spec 8.3 forbids the fallthrough, so the user
-        // has to import it explicitly.
-        let shown = gamma.workspace.defs.get(&name).map(|m| m.name).unwrap_or(name);
-        let message = match family.hidden() {
-            Some(hidden) => format!(
-                "Function `{shown}` doesn't exist -- `{shown}` binds to `{name}` here, and a \
-                 shadowed candidate `{hidden}` needs an explicit import to be called"
-            ),
-            None => format!("Function `{shown}` doesn't exist"),
+        // ARE the name. A v1 name whose nearest binding is a value shadows
+        // every callable of that name in a lower tier (spec 8.3), so say
+        // what it binds to.
+        let meta = gamma.workspace.defs.get(&name);
+        let shown = meta.map(|m| m.name).unwrap_or(name);
+        let message = match meta.map(|m| m.kind) {
+            Some(kind @ (DefKind::Global | DefKind::Type | DefKind::Decorator | DefKind::Module)) => {
+                let what = match kind {
+                    DefKind::Global => "global",
+                    DefKind::Type => "type",
+                    DefKind::Decorator => "decorator",
+                    _ => "module",
+                };
+                format!("Function `{shown}` doesn't exist -- `{shown}` binds to {what} `{name}` here")
+            }
+            _ => format!("Function `{shown}` doesn't exist"),
         };
         return Err(CompilerError::new_with_label(span, message));
     }
@@ -1444,6 +1497,7 @@ pub(crate) fn resolve_named_call_inner(
         match select_overload_with_generics(
             c,
             gamma,
+            family,
             &candidates,
             recv_override,
             &arg_list,
@@ -1503,13 +1557,13 @@ pub(crate) fn resolve_named_call_inner(
                     }
                 }
 
-                return with_hidden_note(family, Err(e.into()));
+                return Err(e.into());
             }
         }
     };
 
     let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
-    with_hidden_note(family, commit_selected_call(
+    commit_selected_call(
         c,
         gamma,
         name,
@@ -1521,7 +1575,7 @@ pub(crate) fn resolve_named_call_inner(
         generic_args,
         call_expr,
         span,
-    ))
+    )
 }
 
 /// The post-selection half of a named call: record the callee, instantiate

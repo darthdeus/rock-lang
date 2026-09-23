@@ -1,0 +1,11 @@
+fn main() {
+    stone_run_game(GameConfig {
+        title: "sim-v1-names",
+        width: 640,
+        height: 360,
+        vsync: 0,
+        clear_color: color(0.0, 0.0, 0.0, 1.0),
+        esc_quits: true,
+        cap_height_fonts: true,
+    })
+}

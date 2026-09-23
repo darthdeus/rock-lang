@@ -216,3 +216,50 @@ fn type_table_uses_the_shared_plan_for_a_nobox_field() {
         "the nobox field was not reflected from its inline plan:\n{lua}"
     );
 }
+
+/// Reflection names an embedded child, and keys the flat-enum layout, by the
+/// spelling `__ROCK_TYPE_TABLE` and `__ty` use. Under modules v1 that is the
+/// minted symbol, not the DefKey, or the field walk (`inspect`, serialization,
+/// state images) finds no declaration and reads the embedded field as null.
+#[test]
+fn a_v1_embedded_child_is_reflected_by_its_minted_symbol() {
+    let src = r#"
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+enum Mode { Fast(string), Slow }
+global MODE: Mode = Mode::Slow
+inline(lua) fn embed_field_x(h: Holder) -> string = """
+    local decl = _G.__ROCK_TYPE_TABLE[h.__ty]
+    for i = 1, #decl.fields do
+        local f = decl.fields[i]
+        if f.name == "p" then
+            local child = __rock_embed_view(h, "p", f.type, f.nullable)
+            return child and tostring(child.x) or "nil"
+        end
+    end
+    return "missing"
+"""
+fn probe() -> string { return embed_field_x(Holder { p: Pt { x: 4, y: 5 }, tag: 3 }) }
+fn main() {}
+"#;
+    let legacy = crate::common::emit_module(&format!("{src}\nfn legacy_probe() {{ print(probe()) }}"));
+    let legacy_probe = crate::common::mangled_name(&legacy, "legacy_probe");
+    assert_eq!(crate::common::run_luajit(&format!("{legacy}\n{legacy_probe}()\n"), "embed_reflect_legacy"), "4");
+
+    let v1_src = src.replace("fn probe()", "pub fn probe()");
+    let emitted =
+        crate::common::emit_v1_package("v1embed", &[crate::common::V1Fragment { file: "main.rock", src: &v1_src }]);
+    let probe = crate::common::mangled_name(&emitted.lua, "probe");
+    assert_eq!(crate::common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua), "embed_reflect_v1"), "4");
+    // The flat-enum layout beside the type table is read by the same `__ty`
+    // spelling (serialization.rock's column walk).
+    let keys: Vec<&str> = emitted
+        .lua
+        .lines()
+        .filter_map(|l| l.strip_prefix("_G.__ROCK_ENUM_FLAT_LAYOUT[\""))
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|key| key.contains("Mode"))
+        .collect();
+    assert_eq!(keys.len(), 1, "flat layout rows for this package: {keys:?}");
+    assert!(!keys[0].contains("::"), "the flat layout is keyed by the DefKey: {keys:?}");
+}

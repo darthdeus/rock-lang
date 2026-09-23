@@ -164,7 +164,7 @@ fn format_rock_file(file_path: &str) -> Result<String> {
 
 /// Resolve the file's dialect through the same package graph used by source
 /// loading. Standalone files retain the host's `//! modules:` directive.
-fn dialect_for_file(file_path: &Path) -> Result<Dialect> {
+pub(crate) fn dialect_for_file(file_path: &Path) -> Result<Dialect> {
     let canonical = fs_err::canonicalize(file_path)?;
     let start_dir = canonical.parent().unwrap_or(&canonical);
     if let Some((manifest, config)) = rock_host::stick::StickConfig::find_from_dir(start_dir)? {

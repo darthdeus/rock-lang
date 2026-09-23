@@ -166,7 +166,7 @@ fn interface_bytes(interface: &ShaderInterfacePlan) -> Vec<u8> {
     }
     out.u32(interface.vertex_inputs.len() as u32);
     for input in &interface.vertex_inputs {
-        out.string(input.struct_name.as_str());
+        out.string(input.struct_name.key.as_str());
         out.u8(rate_code(input.rate));
         out.u32(input.attrs.len() as u32);
         for (name, kind) in &input.attrs {
@@ -183,7 +183,7 @@ fn interface_bytes(interface: &ShaderInterfacePlan) -> Vec<u8> {
     out.u32(interface.uniform_groups.len() as u32);
     for group in &interface.uniform_groups {
         out.u8(uniform_role_code(group.role));
-        out.string(group.struct_name.as_str());
+        out.string(group.struct_name.key.as_str());
         out.u32(group.members.len() as u32);
         for (name, kind) in &group.members {
             out.string(name.as_str());
@@ -205,7 +205,7 @@ fn interface_bytes(interface: &ShaderInterfacePlan) -> Vec<u8> {
         None => out.u8(0),
         Some(group) => {
             out.u8(1);
-            out.string(group.struct_name.map_or("", |name| name.as_str()));
+            out.string(group.struct_name.map_or("", |name| name.key.as_str()));
             out.u32(group.samplers.len() as u32);
             for (name, kind) in &group.samplers {
                 out.string(name.as_str());
@@ -245,6 +245,7 @@ fn abi_bytes(abi: &ShaderAbiPlan) -> Vec<u8> {
     let mut out = Canonical::default();
     out.u32(abi.uniform_blocks.len() as u32);
     for (binding, block) in &abi.uniform_blocks {
+        let block = &block.plan;
         out.u32(*binding);
         out.string(block.struct_name.as_str());
         out.u32(block.size);

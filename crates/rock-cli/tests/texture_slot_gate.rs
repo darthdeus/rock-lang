@@ -97,7 +97,7 @@ fn unfilled_texture_slot_fails_a_sim() {
     // caught it. tonemap declares exactly two slots and this sim drives it, so
     // both lines must appear.
     for slot in [0, 1] {
-        let want = format!("`tonemap_frag` drew with slot {slot}");
+        let want = format!("`stone::tonemap_frag` drew with slot {slot}");
         assert!(
             injected.contains(&want),
             "every unfilled (shader, slot) must report, not just the first -- \
@@ -161,7 +161,7 @@ fn an_unresolvable_image_handle_is_not_a_filled_slot() {
     let (bad, bad_ok) = run_named_sim("implicit_texture_bind", &[("SIM_IMPLICIT_BAD_HANDLE", "1")]);
     assert!(!bad_ok, "an unresolvable handle must fail the run.\n{bad}");
     assert!(
-        bad.contains("`sprite_basic_vert+sprite_basic_frag` drew with slot 0"),
+        bad.contains("`stone::sprite_basic_vert+stone::sprite_basic_frag` drew with slot 0"),
         "the unresolvable handle must report slot 0 unbound.\n{bad}"
     );
 }
@@ -175,7 +175,7 @@ fn an_unresolvable_explicit_bind_is_not_a_filled_slot() {
         run_named_sim("explicit_texture_bind", &[("SIM_EXPLICIT_BAD_HANDLE", "1")]);
     assert!(!bad_ok, "an unresolved explicit bind must fail the run.\n{bad}");
     assert!(
-        bad.contains("`sprite_batch_vert+sprite_batch_frag` drew with slot 3"),
+        bad.contains("`stone::sprite_batch_vert+stone::sprite_batch_frag` drew with slot 3"),
         "the failed bind must leave slot 3 unfilled instead of certifying stale unit state.\n{bad}"
     );
 }
@@ -185,7 +185,7 @@ fn a_required_texture_bind_rejects_an_unknown_sampler() {
     let (out, ok) = run_named_sim("unknown_texture_sampler", &[]);
     assert!(ok, "the draw itself remains valid.\n{out}");
     for sampler in ["not_a_sampler", "not_a_sampler_either"] {
-        let want = format!("`sprite_basic_vert+sprite_basic_frag` has no sampler `{sampler}`");
+        let want = format!("`stone::sprite_basic_vert+stone::sprite_basic_frag` has no sampler `{sampler}`");
         assert!(
             out.contains(&format!("ERROR] [SHADER] {want}")),
             "each required bind miss needs its own diagnostic key; missing `{want}`.\n{out}"

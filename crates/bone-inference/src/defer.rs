@@ -152,7 +152,7 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
             }
             let candidates = resolve_callee(gamma, &family);
             match select_overload(
-                c, gamma, &candidates, recv_override, &args, &arg_ty, &arg_tys, name, span,
+                c, gamma, family, &candidates, recv_override, &args, &arg_ty, &arg_tys, name, span,
             ) {
                 Ok((mid, fid)) => {
                     let ret = commit_selected_call(

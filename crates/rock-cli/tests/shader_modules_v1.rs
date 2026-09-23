@@ -25,12 +25,9 @@ fn staged_fixture() -> tempfile::TempDir {
     staged
 }
 
-#[test]
-fn v1_glsl_shader_compiles_and_validates() {
-    let staged = staged_fixture();
+fn compile(package: &Path) -> String {
     let output_dir = tempfile::tempdir().expect("temporary output directory");
     let output = output_dir.path().join("shader.lua");
-    let package = staged.path();
     let compiled = Command::new(rock_bin())
         .args([
             "compile",
@@ -46,7 +43,65 @@ fn v1_glsl_shader_compiles_and_validates() {
         String::from_utf8_lossy(&compiled.stdout),
         String::from_utf8_lossy(&compiled.stderr)
     );
-    let lua = std::fs::read_to_string(&output).expect("compile output");
+    std::fs::read_to_string(&output).expect("compile output")
+}
+
+fn validate_core(package: &Path) {
+    let package_text = package.to_string_lossy().into_owned();
+    let summary = rock_cli::glsl_test::shader_validate_run(&[package_text], false)
+        .expect("shader validation run");
+    assert_eq!(summary.projects, vec![(package.to_string_lossy().into_owned(), 1)]);
+    let core = summary
+        .per_profile
+        .iter()
+        .find(|profile| profile.profile == "330core")
+        .expect("330core summary");
+    assert!(core.gl_available, "330core validation must run, not skip");
+    assert_eq!(core.passed, 1, "330core must validate the v1 shader");
+    assert!(core.failed.is_empty(), "330core failures: {:?}", core.failed);
+}
+
+/// A `@nomangle` type keeps its declared name as its emitted symbol on the Lua
+/// side, so the shader text, the GL block wire and the semantic wire must spell
+/// it the same way: the runtime joins the last two by string, and a Lua `cdef`
+/// of the `@attr` struct names it by the declared name.
+#[test]
+fn v1_nomangle_shader_types_keep_their_declared_names() {
+    let staged = staged_fixture();
+    let main = staged.path().join("main.rock");
+    let source = std::fs::read_to_string(&main).expect("fixture main");
+    let source = source
+        .replace("value ProbeVertex", "@nomangle value ProbeVertex")
+        .replace("value ProbeUniform", "@nomangle value ProbeUniform");
+    std::fs::write(&main, source).expect("rewrite fixture main");
+
+    let lua = compile(staged.path());
+    let register = &lua[lua.find("__rock_shader_register(").expect("shader registration")..];
+    let (glsl, rest) = register.split_once("]]").expect("GLSL long bracket");
+    let (physical, semantic) = rest.split_once("SHADER_INTERFACE_V1").expect("semantic wire");
+    assert!(
+        glsl.contains("layout(std140) uniform ProbeUniform {"),
+        "GLSL block must use the declared name:\n{glsl}"
+    );
+    // The texture slot names come first, then the block names.
+    let block_names = physical.split("_data = {").nth(2).and_then(|s| s.split('}').next()).expect("block names");
+    assert_eq!(block_names, "\"ProbeUniform\"", "block wire names: {physical}");
+    assert!(
+        semantic.lines().any(|line| line.starts_with("group fragment ProbeUniform ")),
+        "semantic group must use the declared name:\n{semantic}"
+    );
+    assert!(
+        semantic.lines().any(|line| line.starts_with("vertex_input ProbeVertex ")),
+        "semantic vertex input must use the declared name:\n{semantic}"
+    );
+    validate_core(staged.path());
+}
+
+#[test]
+fn v1_glsl_shader_compiles_and_validates() {
+    let staged = staged_fixture();
+    let package = staged.path();
+    let lua = compile(package);
     for invalid in [
         "uniform shader_probe::",
         "vec4 shader_probe::",
@@ -61,16 +116,20 @@ fn v1_glsl_shader_compiles_and_validates() {
         "the v1 vector operator must emit a GLSL infix expression"
     );
 
-    let package_text = package.to_string_lossy().into_owned();
-    let summary = rock_cli::glsl_test::shader_validate_run(&[package_text], false)
-        .expect("shader validation run");
-    assert_eq!(summary.projects, vec![(package.to_string_lossy().into_owned(), 1)]);
-    let core = summary
-        .per_profile
-        .iter()
-        .find(|profile| profile.profile == "330core")
-        .expect("330core summary");
-    assert!(core.gl_available, "330core validation must run, not skip");
-    assert_eq!(core.passed, 1, "330core must validate the v1 shader");
-    assert!(core.failed.is_empty(), "330core failures: {:?}", core.failed);
+    // The runtime joins each semantic uniform group to its live GL block by
+    // name, and GL binds that block by its GLSL identifier.
+    let register = &lua[lua.find("__rock_shader_register(").expect("shader registration")..];
+    let (physical, semantic) = register.split_once("SHADER_INTERFACE_V1").expect("semantic wire");
+    let group = semantic
+        .lines()
+        .find_map(|line| line.strip_prefix("group "))
+        .expect("the probe has one uniform group");
+    let name = group.split(' ').nth(1).expect("group name");
+    assert!(
+        physical.contains(&format!("\"{name}\"")),
+        "semantic group `{name}` has no physical block of that name:\n{}",
+        &physical[physical.len().saturating_sub(600)..]
+    );
+
+    validate_core(package);
 }

@@ -232,6 +232,45 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
     name.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
 }
 
+/// Map each part of each requested spec to its registered wire name. A v1
+/// package registers sims under canonical DefKeys (`game::module::name`); a
+/// trailing `::`-segment path such as the declared name selects the one sim it
+/// ends (spec sections 15 and 16). An exact wire name always wins. A name no
+/// sim has passes through unchanged so each route keeps its own unknown-name
+/// report.
+fn resolve_sim_specs(wire_names: &[String], specs: &[String]) -> Result<Vec<String>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let parts = parse_sim_chain(spec)
+                .into_iter()
+                .map(|part| resolve_sim_name(wire_names, part))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(parts.join(","))
+        })
+        .collect()
+}
+
+fn resolve_sim_name(wire_names: &[String], name: &str) -> Result<String> {
+    if wire_names.iter().any(|wire| wire == name) {
+        return Ok(name.to_string());
+    }
+    let suffix = format!("::{name}");
+    let candidates: Vec<&str> = wire_names
+        .iter()
+        .filter(|wire| wire.ends_with(&suffix))
+        .map(String::as_str)
+        .collect();
+    match candidates.as_slice() {
+        [] => Ok(name.to_string()),
+        [only] => Ok((*only).to_string()),
+        many => Err(anyhow!(
+            "sim name `{name}` is ambiguous; name one of: {}",
+            many.join(", ")
+        )),
+    }
+}
+
 /// Test-only barrier between compiling the sim build and spawning the first
 /// child. `ROCK_SIM_SPAWN_BARRIER=<path>` makes an invocation park here until
 /// `<path>` exists, so a test can deterministically interleave a second
@@ -1033,6 +1072,8 @@ fn do_run_sim_opts_recorded(
     let mut prepared = recorder.phase("compile_and_discover", || {
         prepare_sims(backend, project_path.clone(), output_path.clone())
     })?;
+    let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
+    let sim_name = sim_name.as_str();
     // Receipt consumers do not retain the compiler session. A reload entry is
     // the one exception: it edits that live session, so preserve the existing
     // fresh-compile behavior for that explicitly selected lane.
@@ -1405,6 +1446,7 @@ fn do_run_named_sims_recorded(
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
+    let names = &resolve_sim_specs(&wire_names, names)?;
     emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
     sim_spawn_barrier();
@@ -2248,7 +2290,7 @@ pub fn do_run_allocation_census(
     let selected = if names.is_empty() {
         wire_names.clone()
     } else {
-        names.to_vec()
+        resolve_sim_specs(&wire_names, names)?
     };
     if selected.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
@@ -2529,7 +2571,7 @@ pub fn do_run_allocation_sites(
     let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
     sim_spawn_barrier();
 
-    let selected = if names.is_empty() { wire_names.clone() } else { names.to_vec() };
+    let selected = if names.is_empty() { wire_names.clone() } else { resolve_sim_specs(&wire_names, names)? };
     if selected.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
@@ -5105,19 +5147,18 @@ fn run_worker(
             }
         }
 
-        let snap_dir = find_sim_source(project, &part.name)
-            .as_deref()
-            .map(snap_dir_for);
-        if let Some(dir) = snap_dir.as_ref() {
-            process_snapshots(&mut summary, dir, update_snapshots);
-        } else if !summary.snapshots.is_empty() || !summary.image_snapshots.is_empty() {
-            summary.errors.push(SiteMessage {
-                message: format!(
-                    "could not locate .rock source for sim `{}` -- snapshot ops cannot resolve baseline dir",
-                    part.name
-                ),
-                site: String::new(),
-            });
+        match find_sim_source(project, &part.name) {
+            Ok(source) => process_snapshots(&mut summary, &snap_dir_for(&source), update_snapshots),
+            Err(reason) if !summary.snapshots.is_empty() || !summary.image_snapshots.is_empty() => {
+                summary.errors.push(SiteMessage {
+                    message: format!(
+                        "could not locate .rock source for sim `{}` ({reason}) -- snapshot ops cannot resolve baseline dir",
+                        part.name
+                    ),
+                    site: String::new(),
+                });
+            }
+            Err(_) => {}
         }
 
         if buffered {
@@ -5797,7 +5838,8 @@ pub fn run_multi_order_gate(
     // Selection happens BEFORE that partition so an explicitly named reload sim
     // is reported as excluded rather than silently missing from a corpus the
     // caller wrote out by hand.
-    let wire_names = select_gate_corpus(&wire_names, selected)?;
+    let selected = resolve_sim_specs(&wire_names, selected)?;
+    let wire_names = select_gate_corpus(&wire_names, &selected)?;
     let (wire_names, excluded): (Vec<String>, Vec<String>) = wire_names
         .into_iter()
         .partition(|name| !is_reload_lane(env_by_wire.get(name).map_or(&[][..], |v| v)));
@@ -6166,10 +6208,15 @@ fn src_declares_sim(src: &str, sim_name: &str) -> bool {
 }
 
 /// Locate the .rock file containing the `@sim` decl for `sim_name` by
-/// scanning `<project>/tests/sims/*.rock`.
-fn find_sim_source(project: &str, sim_name: &str) -> Option<PathBuf> {
+/// scanning `<project>/tests/sims/*.rock`. A v1 wire name is a DefKey, and the
+/// source declares only its last segment; two modules may declare that segment
+/// in different files, which this scan cannot tell apart, so that is an error.
+fn find_sim_source(project: &str, sim_name: &str) -> Result<PathBuf, String> {
+    let declared = sim_name.rsplit("::").next().unwrap_or(sim_name);
     let sims_dir = PathBuf::from(project).join("tests").join("sims");
-    let entries = std::fs::read_dir(&sims_dir).ok()?;
+    let entries = std::fs::read_dir(&sims_dir)
+        .map_err(|error| format!("cannot read {}: {error}", sims_dir.display()))?;
+    let mut found = Vec::new();
     for ent in entries.flatten() {
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rock") {
@@ -6178,11 +6225,19 @@ fn find_sim_source(project: &str, sim_name: &str) -> Option<PathBuf> {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if src_declares_sim(&src, sim_name) {
-            return Some(path);
+        if src_declares_sim(&src, declared) {
+            found.push(path);
         }
     }
-    None
+    found.sort();
+    match found.len() {
+        0 => Err(format!("no file in {} declares `co fn {declared}(`", sims_dir.display())),
+        1 => Ok(found.remove(0)),
+        _ => Err(format!(
+            "`co fn {declared}(` is declared in {}",
+            found.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+        )),
+    }
 }
 
 /// `foo/bar/baz.rock` -> `foo/bar/baz.snap`. Carries over the .sim
@@ -8314,6 +8369,28 @@ mod tests {
     }
 
     #[test]
+    fn requested_sim_names_resolve_to_registered_wire_names() {
+        let wires: Vec<String> = ["game::boots", "game::ui::hover", "game::hover", "legacy_sim"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let resolve = |specs: &[&str]| {
+            resolve_sim_specs(&wires, &specs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(resolve(&["boots"]).unwrap(), ["game::boots"]);
+        assert_eq!(resolve(&["legacy_sim", "game::hover"]).unwrap(), ["legacy_sim", "game::hover"]);
+        assert_eq!(resolve(&["ui::hover"]).unwrap(), ["game::ui::hover"]);
+        assert_eq!(resolve(&["boots, ui::hover"]).unwrap(), ["game::boots,game::ui::hover"]);
+        assert_eq!(resolve(&["missing"]).unwrap(), ["missing"]);
+        assert_eq!(resolve(&["oots"]).unwrap(), ["oots"], "only whole segments match");
+        let error = resolve(&["hover"]).unwrap_err().to_string();
+        assert!(
+            error.contains("`hover` is ambiguous") && error.contains("game::ui::hover") && error.contains("game::hover"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn entry_passed_requires_stop_and_no_failures() {
         // Shared pass-predicate for both multi-run paths. Default (no
         // stop_sim observed) is a fail even with zero expects.
@@ -8508,6 +8585,21 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
         let src = "@sim_render\n@sim\nco fn smoke() -> Coroutine<Wait> {\n}\n";
         assert!(src_declares_sim(src, "smoke"));
         assert!(!src_declares_sim(src, "other"));
+    }
+
+    #[test]
+    fn find_sim_source_reads_the_declared_segment_of_a_v1_wire_name() {
+        let project = tempfile::tempdir().unwrap();
+        let sims = project.path().join("tests").join("sims");
+        std::fs::create_dir_all(&sims).unwrap();
+        std::fs::write(sims.join("a.rock"), "@sim\nco fn only() -> Coroutine<Wait> {\n}\nco fn twice() -> Coroutine<Wait> {\n}\n").unwrap();
+        std::fs::write(sims.join("b.rock"), "mod b;\n@sim\nco fn twice() -> Coroutine<Wait> {\n}\n").unwrap();
+        let project = project.path().to_str().unwrap();
+        assert_eq!(find_sim_source(project, "game::only").unwrap(), sims.join("a.rock"));
+        assert_eq!(find_sim_source(project, "only").unwrap(), sims.join("a.rock"));
+        let error = find_sim_source(project, "game::b::twice").unwrap_err();
+        assert!(error.contains("a.rock") && error.contains("b.rock"), "{error}");
+        assert!(find_sim_source(project, "game::missing").is_err());
     }
 
     #[test]

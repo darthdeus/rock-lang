@@ -402,7 +402,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     }
     for (field, qualified, declaration) in [
         ("potion_ready_at", "player.body.potion_ready_at", "potion_ready_at:"),
-        ("bandage_slips", "player.bandage_slips", "bandage_slips:"),
+        ("bandage_slips", "player.combat.bandage_slips", "bandage_slips:"),
         ("summon_slots", "player.summon_slots", "summon_slots:"),
     ] {
         for source in &sources {
@@ -538,7 +538,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     );
     for field in [
         "body: PlayerBody",
-        "attack_target: Entity<Mob>?",
+        "combat: PlayerCombatState",
         "gesture: PlayerGesture",
         "gesture_timer: float",
         "idle_ticks: int",
@@ -548,11 +548,9 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "loco_start_variant: PlayerStartVariant",
         "cast_words: CastWords",
         "ritual_cast: BranchedRitualCast",
-        "cast_acceleration: PlayerCastAcceleration",
         "ritual_acquisition_event_seq: int",
         "notoriety: PlayerNotoriety",
         "combat_latch: CombatLatchState",
-        "bandage_slips: int",
         "summon_slots: [Entity<Mob>?]",
         "cast_outline: PlayerCastOutline",
     ] {
@@ -574,9 +572,23 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     }
     assert_eq!(body.matches("potion_ready_at: float = 0.0").count(), 1,
         "PlayerBody must initialize its potion deadline exactly once");
+    let combat = fs::read_to_string(repo.join("mag-simulation/player_combat.rock"))
+        .expect("read simulation player combat source");
+    for field in [
+        "spell_state: SpellState", "cast_acceleration: PlayerCastAcceleration",
+        "attack_target: MobId?", "attack_timer: float", "bandage_active: bool",
+        "bandage_slips: int", "cast_equipment_damage_mult: float",
+    ] {
+        assert_eq!(combat.matches(field).count(), 1, "PlayerCombatState must own `{field}` exactly once");
+        assert!(!player_state.contains(field), "Player must not duplicate `{field}`");
+    }
+    assert!(
+        combat.contains("pub fn player_bandage_heal_left(state: PlayerCombatState)"),
+        "PlayerCombatState must own the bandage heal-left rule"
+    );
     for field in [
         "combat_latch: CombatLatchState = CombatLatchState {}",
-        "bandage_slips: int = 0",
+        "combat: PlayerCombatState = PlayerCombatState {}",
         "summon_slots: [Entity<Mob>?] = [null, null, null, null]",
         "cast_outline: PlayerCastOutline = PlayerCastOutline {}",
     ] {
@@ -611,7 +623,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         );
     }
     for method in [
-        "fn Player.bandage_heal_left(player)",
         "fn Player.summon_slot_pet(player",
         "fn Player.max_pets(player)",
         "fn Player.summon_label_spans(player",
@@ -876,7 +887,6 @@ fn mag_player_queries_are_receiver_methods() {
         "fn Player.effective_armor(player)",
         "fn Player.shaped_progress(player)",
         "fn Player.sprite(player)",
-        "fn Player.stamina_regen_per_sec(player)",
         "fn Player.mana_per_sec(player)",
         "fn Player.tint(player)",
     ];
@@ -1024,7 +1034,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 23, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 29, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));

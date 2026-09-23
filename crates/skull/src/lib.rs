@@ -970,16 +970,6 @@ fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<Stri
     skull_mir::lower::value_field_c_type(ws, ty)
 }
 
-/// The emitted name of a nominal type. A modules-v1 definition's name is its
-/// DefKey, which is neither a Lua nor a C identifier, so every minted name --
-/// the cdef typedef, `<N>_ct`/`<N>_lct`/`<N>_vt`, an `ffi.typeof`/`metatype`
-/// argument, an `__rock_enum_<E>` global -- takes its identifier form. A legacy
-/// name has no `::` and passes through byte-identical. DISPLAY text keeps the
-/// DefKey: it reads as the definition's path, and nothing parses it.
-fn type_symbol(name: ustr::Ustr) -> ustr::Ustr {
-    skull_mir::mangle::symbol_of_key(name)
-}
-
 /// Whether a struct named `name` is declared `value` (C-layout cdata).
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
     ws.struct_by_name
@@ -1123,12 +1113,12 @@ fn value_struct_defs(
                 }
                 // The dependency key above is the LOGICAL name (what the
                 // workspace sets hold); the cdef text is the C one.
-                body.push_str(&format!("  {} {};\n", type_symbol(dep), f.name));
+                body.push_str(&format!("  {} {};\n", skull_mir::mangle::type_symbol(ws, dep), f.name));
             }
             if blocked {
                 next.push(s);
             } else {
-                let sym = type_symbol(s.name);
+                let sym = skull_mir::mangle::type_symbol(ws, s.name);
                 typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, sym));
                 ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
                 // Leaf-taking ctor: LuaJIT has no brace elision, so a nested
@@ -1213,7 +1203,7 @@ fn value_leaf_layout_checks(
                     e.message
                 ))
             })?;
-        let sym = type_symbol(name);
+        let sym = skull_mir::mangle::type_symbol(ws, name);
         let _ = writeln!(
             out,
             "if ffi.sizeof(\"{sym}\") ~= {size} then error(\"skull layout drift: \
@@ -1229,7 +1219,7 @@ fn value_leaf_layout_checks(
                 path = l.path,
             );
         }
-        storage.push_str(&skull_mir::lower::nb_value_storage_lua(name, &leaves, size));
+        storage.push_str(&skull_mir::lower::nb_value_storage_lua(ws, name, &leaves, size));
     }
     Ok((out, storage))
 }
@@ -1259,7 +1249,7 @@ fn value_struct_gc_defs(
         let n = s.name;
         // `n` stays the readable path for DISPLAY text; every name the chunk
         // defines or tags with is the type's symbol.
-        let sym = type_symbol(n);
+        let sym = skull_mir::mangle::type_symbol(ws, n);
         let mt = skull_codegen_lua::value_struct_metatable_name(sym.as_str());
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
@@ -1390,7 +1380,7 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
         {
             let slots: String =
                 shape.slots.iter().map(|(nm, t)| format!(" {t} {nm};")).collect();
-            let sym = type_symbol(name);
+            let sym = skull_mir::mangle::type_symbol(ws, name);
             typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = sym));
             ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
         }
@@ -1427,7 +1417,7 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
         for (nm, _) in &shape.slots {
             eq.push_str(&format!(" and a.{nm} == b.{nm}"));
         }
-        let sym = type_symbol(name);
+        let sym = skull_mir::mangle::type_symbol(ws, name);
         out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
         out.push_str(&format!(
             "  __eq = function(a, b)\n\
@@ -1496,7 +1486,7 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
                 any = true;
             }
             let n = s.name;
-            let sym = type_symbol(n);
+            let sym = skull_mir::mangle::type_symbol(ws, n);
             out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
             out.push_str("  __eq = function(a, b)\n");
             out.push_str(
@@ -1589,14 +1579,14 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                 // symbol; the values it holds are display text.
                 out.push_str(&format!(
                     "__rock_enum_{}_names = {{ {} }}\n",
-                    type_symbol(e.name),
+                    skull_mir::mangle::type_symbol(ws, e.name),
                     items.join(", ")
                 ));
             } else {
                 // Mixed: unit variants are interned singleton tables.
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
-                        let sym = type_symbol(e.name);
+                        let sym = skull_mir::mangle::type_symbol(ws, e.name);
                         let g = enum_singleton_name(sym.as_str(), v.name.as_str());
                         // `__ty` is looked up in `__ROCK_TYPE_TABLE`, so it is
                         // the same spelling that registry is keyed on.
@@ -1647,7 +1637,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             };
             let copy_args: Vec<String> =
                 shape.field_names().iter().map(|f| format!("v.{f}")).collect();
-            let sym = type_symbol(name);
+            let sym = skull_mir::mangle::type_symbol(ws, name);
             out.push_str(&format!(
                 "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
                  end, copy = function(v)\n  return {sym}_ct({})\nend, name = \"{sym}\" }}\n",
@@ -1659,7 +1649,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
                 continue;
             }
             let n = s.name;
-            let sym = type_symbol(n);
+            let sym = skull_mir::mangle::type_symbol(ws, n);
             out.push_str(&format!("_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n"));
             if s.fields.is_empty() {
                 out.push_str(&format!("  return \"{n} {{ }}\"\n"));
@@ -1811,7 +1801,7 @@ fn desc_into(ws: &Workspace, ty: bone_semantic::prelude::TyId, out: &mut String,
                 // struct's own fields are reached through the type table's
                 // per-field descriptors rather than repeated inside this one.
                 out.push_str("{k=\"nom\",name=\"");
-                out.push_str(type_symbol(name).as_str());
+                out.push_str(skull_mir::mangle::type_symbol(ws, name).as_str());
                 out.push_str("\"}");
                 true
             }
@@ -1895,7 +1885,7 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
         Some(TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        }) => (type_symbol(name).as_str().to_string(), false),
+        }) => (skull_mir::mangle::type_symbol(ws, name).as_str().to_string(), false),
         Some(TypeExpr::App {
             ctor: TypeCtor::Array,
             ..
@@ -1964,7 +1954,7 @@ fn type_table_defs(
                     .map(|(path, offset)| format!("[\"{path}\"] = {offset}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", s.name));
+                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", skull_mir::mangle::type_symbol(ws, s.name)));
             }
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
@@ -1989,7 +1979,7 @@ fn type_table_defs(
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
                 let nullable = plan.nullable();
                 let (tystr, embed) = match plan.inline_child() {
-                    Some(child) => (child.as_str().to_string(), ", embed = true"),
+                    Some(child) => (skull_mir::mangle::type_symbol(ws, child).as_str().to_string(), ", embed = true"),
                     None => (tystr, ""),
                 };
                 let desc = match field_desc_lua(ws, f.ty) {
@@ -2003,7 +1993,7 @@ fn type_table_defs(
             }
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}{hr}, fields = {{ {f} }} }}\n",
-                n = type_symbol(s.name),
+                n = skull_mir::mangle::type_symbol(ws, s.name),
                 k = kind,
                 id = type_id,
                 hr = host_resource_key(s.host_resource),
@@ -2014,7 +2004,7 @@ fn type_table_defs(
         for (_, nt) in module.newtypes.iter() {
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}{hr}, fields = {{ }} }}\n",
-                n = type_symbol(nt.name),
+                n = skull_mir::mangle::type_symbol(ws, nt.name),
                 id = type_id,
                 hr = host_resource_key(nt.host_resource)
             ));
@@ -2032,7 +2022,7 @@ fn type_table_defs(
                     .collect::<Vec<_>>().join(", ");
                 out.push_str(&format!(
                     "_G.__ROCK_ENUM_FLAT_LAYOUT[\"{}\"] = {{ tuple_width = {}, record_fields = {{ {} }} }}\n",
-                    e.name, flat.tuple_width(), names,
+                    skull_mir::mangle::type_symbol(ws, e.name), flat.tuple_width(), names,
                 ));
             }
             let Some(shape) = plan.and_then(|plan| plan.cdata().cloned())
@@ -2046,7 +2036,7 @@ fn type_table_defs(
                 if let Some(vd) = boxed_variant_descs(ws, e) {
                     out.push_str(&format!(
                         "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", type_id = {id}, fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
-                        n = type_symbol(e.name),
+                        n = skull_mir::mangle::type_symbol(ws, e.name),
                         id = type_id,
                     ));
                     type_id += 1;
@@ -2102,7 +2092,7 @@ fn type_table_defs(
                 .collect();
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }}, variants = {{ {v} }} }}\n",
-                n = type_symbol(e.name),
+                n = skull_mir::mangle::type_symbol(ws, e.name),
                 id = type_id,
                 f = fields.join(", "),
                 v = variants.join(", ")

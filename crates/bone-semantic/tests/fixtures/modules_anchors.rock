@@ -384,3 +384,55 @@ pub use b as a;
 fn f() -> int {
     a::ply()
 }
+
+//- a_bare_variant_pattern_resolves_its_enum_like_a_variant_value
+//-- lib.rock @pkg=geo,1 @v1
+pub enum Kind {
+    Round,
+    Sharp(int),
+}
+
+pub enum Dir {
+    Up,
+    Down(int),
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::Kind;
+use geo::*;
+
+fn std_leaf(v: JsonValue) -> int {
+    let n = match v {
+        JsonValue::Int(i) => i,
+                        //^ int
+        _ => 0,
+    }
+    n
+}
+
+fn imported(k: Kind) -> int {
+    let n = match k {
+        Kind::Sharp(d) => d,
+                       //^ int
+        Kind::Round => 0,
+    }
+    n
+}
+
+fn globbed(d: Dir) -> int {
+    let n = match d {
+        Dir::Down(v) => v,
+                     //^ int
+        Dir::Up => 0,
+    }
+    n
+}
+
+//- a_bare_variant_pattern_on_an_unbound_name_is_diagnosed @fail=`Nope::A` did not resolve to any definition
+//-- app.rock @pkg=app,1 @v1
+fn f(n: int) -> int {
+    match n {
+        Nope::A => 1,
+        _ => 0,
+    }
+}

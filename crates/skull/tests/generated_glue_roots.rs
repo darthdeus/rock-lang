@@ -13,7 +13,7 @@
 //! be a nil call at load.
 
 mod common;
-use common::{fn_ref, ws_with_dependency_module, ws_with_stdlib_module};
+use common::{emit_v1_package, fn_ref, ws_v1_package, ws_with_dependency_module, ws_with_stdlib_module, V1Fragment};
 use skull::mir_emit::emit_full;
 use skull_mir::instance::Instance;
 use ustr::Ustr;
@@ -222,4 +222,45 @@ fn shader_glue_dependencies_are_retained_through_the_view() {
             ws.module(d.module).functions[d.func].name.as_str()
         );
     }
+}
+
+/// Under modules v1 a function's name is its DefKey (`<pkg>::<module>::<name>`),
+/// so the sim glue must find the registrar by its declared name: once Stone is
+/// v1, a bare-name lookup fails every sim build.
+#[test]
+fn v1_sim_glue_finds_register_sim_by_declared_name() {
+    let fragments = [
+        V1Fragment { file: "main.rock", src: SIM_SRC },
+        V1Fragment { file: "engine.rock", src: &format!("mod engine;\npub {}", SIM_LIB.trim_start()) },
+    ];
+    let emit = emit_v1_package("v1sims", &fragments);
+    let registrations: Vec<&str> =
+        emit.lua.lines().filter(|l| l.starts_with("register_sim_") && l.contains("probe_sim\"")).collect();
+    assert_eq!(registrations.len(), 1, "v1 sim glue must register `probe_sim` once:\n{}", emit.lua);
+}
+
+/// Two registrars in one v1 build are ambiguous; the glue must name both
+/// instead of silently calling whichever module came first.
+#[test]
+fn v1_sim_glue_rejects_two_register_sim_definitions() {
+    let lib = |module: &str| {
+        format!("mod {module};\npub fn register_sim(name: string, body: () -> int) {{ print(\"{{name}}\") }}\n")
+    };
+    let (a, b) = (lib("engine_a"), lib("engine_b"));
+    let fragments = [
+        V1Fragment { file: "main.rock", src: SIM_SRC },
+        V1Fragment { file: "engine_a.rock", src: &a },
+        V1Fragment { file: "engine_b.rock", src: &b },
+    ];
+    let ws = ws_v1_package("v1sims_twice", &fragments);
+    let mid = *ws.module_ids.get(&Ustr::from("main.rock")).expect("module id");
+    let error = match skull::mir_emit::emit_workspace_mir(&ws, mid) {
+        Ok(_) => panic!("two registrars must not emit"),
+        Err(error) => error,
+    };
+    assert!(
+        error.message.contains("engine_a::register_sim") && error.message.contains("engine_b::register_sim"),
+        "{}",
+        error.message
+    );
 }

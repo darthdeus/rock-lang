@@ -24,7 +24,7 @@ use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
     ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize,
     FragmentOutput, LogicalComputeResource, LogicalComputeWorkgroup, LogicalSampler, LogicalTextureGroup,
-    LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
+    LogicalUniformGroup, NominalType, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
     ShaderStageIr, UniformRole,
 };
 use skull_parser::{CompilerError, CompilerErrorKind};
@@ -1600,7 +1600,7 @@ fn logical_uniform_group(
 ) -> Result<LogicalUniformGroup, CompilerError> {
     Ok(LogicalUniformGroup {
         role,
-        struct_name,
+        struct_name: NominalType::of(ws, struct_name),
         members: logical_members(ws, struct_name, span)?,
     })
 }
@@ -1620,7 +1620,7 @@ fn logical_textures(
     }
     let slots = texture_slots(ws, group).map_err(|error| err(span, error.message))?;
     Ok(Some(LogicalTextureGroup {
-        struct_name: Some(group),
+        struct_name: Some(NominalType::of(ws, group)),
         samplers: slots
             .slots
             .iter()

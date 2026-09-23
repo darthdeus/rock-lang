@@ -189,3 +189,26 @@ fn serializer_branch_coverage() {
         "dump contains <circular> sentinel — unexpected cycle in globals"
     );
 }
+
+/// A v1 enum's names table holds its DefKey path (`pkg::Mode::Fast`); the
+/// serializer must still emit the bare variant, as it does for a legacy enum.
+/// The fixture is a v1 package over legacy Stone, run through `rock test`.
+#[test]
+fn v1_payload_free_enum_field_serializes_its_variant_name() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/enum-json-v1");
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["test", fixture.to_str().expect("fixture path is UTF-8")])
+        .env("ROCK_TEST_VERBOSE", "1")
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock test");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && text.contains("1/1 @tests passed"),
+        "v1 enum JSON fixture failed:\n{text}"
+    );
+}

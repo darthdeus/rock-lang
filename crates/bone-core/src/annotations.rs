@@ -70,7 +70,18 @@ fn validate_one(
             at(anno, pos, AnnoPos::FnItem)?;
             test_args(anno)
         }
-        "pure" | "nomangle" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
+        "nomangle" => {
+            match pos {
+                AnnoPos::FnItem | AnnoPos::StructItem => {}
+                _ => comp_error!(
+                    anno.span,
+                    "annotation `@nomangle` is not allowed on {} -- it applies to a fn or a struct",
+                    pos.describe()
+                ),
+            }
+            no_args(anno)
+        }
+        "pure" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
         | "frame_ref_source"
         | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand"

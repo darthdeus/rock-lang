@@ -10,7 +10,7 @@ use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
     ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize, LogicalComputeResource,
-    LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan,
+    LogicalTextureGroup, LogicalUniformGroup, NominalType, ShaderIR, ShaderInstance, ShaderInterfacePlan,
     ShaderStage, ShaderStageIr, UniformRole,
 };
 use ustr::Ustr;
@@ -121,7 +121,7 @@ fn perturbing_an_interface_member_changes_the_interface() {
     let base = ShaderInterfacePlan {
         uniform_groups: vec![LogicalUniformGroup {
             role: UniformRole::Stage(ShaderStage::Fragment),
-            struct_name: Ustr::from("U"),
+            struct_name: nominal("U"),
             members: vec![(Ustr::from("a"), WireKind::F32), (Ustr::from("b"), WireKind::F32x4)],
         }],
         ..Default::default()
@@ -131,16 +131,49 @@ fn perturbing_an_interface_member_changes_the_interface() {
     assert_ne!(base, widened, "the interface plan does not distinguish its own members");
 }
 
+/// A legacy-spelled type: its key is already its symbol.
+fn nominal(name: &str) -> NominalType {
+    NominalType { key: Ustr::from(name), symbol: Ustr::from(name) }
+}
+
+/// The wire spells a group by its symbol, which the runtime joins to the
+/// physical block by name; the group fingerprint hashes the key, which the CPU
+/// packer's plan of the same type hashes too.
+#[test]
+fn semantic_wire_spells_symbols_and_fingerprints_keys() {
+    let exempt = NominalType { key: Ustr::from("pkg::gfx::Params"), symbol: Ustr::from("Params") };
+    let members = vec![(Ustr::from("a"), WireKind::F32)];
+    let plan = ShaderInterfacePlan {
+        uniform_groups: vec![LogicalUniformGroup {
+            role: UniformRole::Stage(ShaderStage::Fragment),
+            struct_name: exempt,
+            members: members.clone(),
+        }],
+        ..Default::default()
+    };
+    let wire = plan.semantic_wire(true);
+    let group = &plan.uniform_groups[0];
+    assert!(
+        wire.contains(&format!("group fragment Params {} 1\n", group.semantic_fingerprint())),
+        "{wire}"
+    );
+    assert!(!wire.contains("pkg::"), "{wire}");
+    assert_eq!(
+        group.semantic_fingerprint(),
+        skull_mir::shader_ir::semantic_uniform_group_fingerprint(exempt.key, &members)
+    );
+}
+
 #[test]
 fn semantic_wire_is_neutral_and_fingerprint_tracks_logical_shape() {
     let base = ShaderInterfacePlan {
         uniform_groups: vec![LogicalUniformGroup {
             role: UniformRole::Stage(ShaderStage::Fragment),
-            struct_name: Ustr::from("U"),
+            struct_name: nominal("U"),
             members: vec![(Ustr::from("a"), WireKind::F32)],
         }],
         textures: Some(LogicalTextureGroup {
-            struct_name: Some(Ustr::from("Textures")),
+            struct_name: Some(nominal("Textures")),
             samplers: vec![
                 (Ustr::from("scene"), SamplerKind::Float),
                 (Ustr::from("bloom"), SamplerKind::Float),

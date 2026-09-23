@@ -216,8 +216,9 @@ fn an_allow_legacy_dependency_is_a_candidate() {
 
 /// A fragment that already globs a sibling module gets a glob of the
 /// candidate's module (plan 7.4) -- unless the glob would move a resolved
-/// site, as here where `geo::solids` also has a `smoothstep` that would hide
-/// the std one; then the explicit import is used.
+/// site, as here where `geo::solids` also has a `smoothstep` of std's
+/// signature that would win the exact tie by tier (spec 8.3); then the
+/// explicit import is used.
 #[test]
 fn a_sibling_glob_is_used_unless_it_moves_a_site() {
     let dir = scratch("glob");
@@ -227,13 +228,32 @@ fn a_sibling_glob_is_used_unless_it_moves_a_site() {
     let v = json(&fix(&dir, "app", &["--format", "json"]));
     assert_eq!(fixes(&v), [("volume".to_string(), "geo::solids::*".to_string())], "{v}");
 
-    geo(&dir, "\npub fn smoothstep(n: int) -> int {\n    n\n}\n");
-    let main = "use geo::shapes::*;\n\nfn main() {\n    print(\"{depth()} {volume()} {smoothstep(0.0, 1.0, 0.5)}\")\n}\n";
+    geo(&dir, "\npub fn smoothstep(a: float, b: float, t: float) -> float {\n    9.0\n}\n");
+    // The moving call is in a body of its own: `main` names the unresolved
+    // `volume`, so the baseline has no lowered sites in it to compare.
+    let main = "use geo::shapes::*;\n\nfn mix() -> float {\n    smoothstep(0.0, 1.0, 0.5)\n}\n\nfn main() {\n    print(\"{depth()} {volume()} {mix()}\")\n}\n";
     write(&dir.join("app/main.rock"), main);
     let apply = fix(&dir, "app", &["--apply", "--format", "json"]);
     assert_eq!(apply.code, Some(0), "{}", shown(&apply));
     assert_eq!(fixes(&json(&apply)), [("volume".to_string(), "geo::solids::volume".to_string())]);
     assert_eq!(read(&dir.join("app/main.rock")), format!("use geo::shapes::*;\nuse geo::solids::volume;\n{}", &main["use geo::shapes::*;\n".len()..]));
+    let run = rock(&dir, &["run", "app"]);
+    assert!(run.stdout.contains("3 5 0.5"), "{}", shown(&run));
+}
+
+/// The baseline cannot lower a body that names the unresolved name, so it
+/// has no sites there to compare; a glob that wins another call's exact tie
+/// by tier (spec 8.3) in that same body is caught against the explicit
+/// import instead, and falls back to it.
+#[test]
+fn a_sibling_glob_that_moves_a_site_in_the_unresolved_body_falls_back() {
+    let dir = scratch("glob-same-body");
+    geo(&dir, "\npub fn smoothstep(a: float, b: float, t: float) -> float {\n    9.0\n}\n");
+    let main = "use geo::shapes::*;\n\nfn main() {\n    print(\"{depth()} {volume()} {smoothstep(0.0, 1.0, 0.5)}\")\n}\n";
+    app(&dir, "geo = { path = \"../geo\" }\n", main);
+    let apply = fix(&dir, "app", &["--apply", "--format", "json"]);
+    assert_eq!(apply.code, Some(0), "{}", shown(&apply));
+    assert_eq!(fixes(&json(&apply)), [("volume".to_string(), "geo::solids::volume".to_string())]);
     let run = rock(&dir, &["run", "app"]);
     assert!(run.stdout.contains("3 5 0.5"), "{}", shown(&run));
 }

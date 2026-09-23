@@ -391,7 +391,7 @@ impl<'a> LowerCtx<'a> {
             }
         }
         .map_err(|msg| CompilerError::new_with_label(span, msg))?;
-        let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { members: Vec::new(), hidden: Vec::new() });
+        let resolved = resolved.unwrap_or(resolve::CalleeFamily::Merged { members: Vec::new() });
         Ok(self.record_family(name, resolved))
     }
 
@@ -401,12 +401,12 @@ impl<'a> LowerCtx<'a> {
         let file = self.module.file;
         match resolved {
             resolve::CalleeFamily::Single(r) if self.v1_scope().is_some() => {
-                (r.key, hir::CallFamily::resolved(r.key, r.owner, &r.hidden))
+                (r.key, hir::CallFamily::resolved(r.key, r.owner))
             }
             resolve::CalleeFamily::Single(r) => (r.key, hir::CallFamily::from_name(r.key)),
-            resolve::CalleeFamily::Merged { members, hidden } => {
+            resolve::CalleeFamily::Merged { members } => {
                 self.module.call_families.insert(name, members);
-                (name, hir::CallFamily::merged(name, file, &hidden))
+                (name, hir::CallFamily::merged(name, file))
             }
         }
     }
@@ -1407,15 +1407,14 @@ pub fn lower_expr_value(
 
                 // A local fn-typed binding is called through its value, everything else
                 // resolves at a top-level by name. A v1 fragment resolves the
-                // name through the namespace tiers to CallFamily::Resolved
-                // (DefKey + hidden origins, spec 8.3).
+                // name through the namespace tiers (spec 8.3).
                 // A local is called through its value, and inference never asks
                 // its family for a name, so a local resolves nothing further.
                 let local = lookup_local(body, scope, name.name);
                 let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
                     ctx.resolve_callee_family(name.name, name.span)?
                 } else if ctx.v1_scope().is_some() {
-                    (name.name, hir::CallFamily::resolved(name.name, None, &[]))
+                    (name.name, hir::CallFamily::resolved(name.name, None))
                 } else {
                     (name.name, hir::CallFamily::from_name(name.name))
                 };
@@ -1493,7 +1492,7 @@ pub fn lower_expr_value(
                     },
                     args: args_range,
                     generic_args,
-                    family: hir::CallFamily::resolved(key, owner, &[]),
+                    family: hir::CallFamily::resolved(key, owner),
                 }
             }
 
@@ -3432,7 +3431,8 @@ fn lower_pattern_value(
     // lower exactly like the legacy two-segment forms.
     if let skull_parser::Pattern::PathVariant { path, args } = pat {
         let Some(frag) = ctx.v1_scope() else {
-            return Err(CompilerError::new_no_location(
+            return Err(CompilerError::new_with_label(
+                path.span(),
                 "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
             ));
         };
@@ -3441,7 +3441,7 @@ fn lower_pattern_value(
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
         let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
-            .map_err(|msg| CompilerError::new_no_location(msg))?;
+            .map_err(|msg| CompilerError::new_with_label(path.span(), msg))?;
         ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Variant { enum_key, variant });
         let sub = match args {
             None => IdxRange::new_empty(),
@@ -3463,7 +3463,8 @@ fn lower_pattern_value(
     }
     if let skull_parser::Pattern::PathRecord { path, fields, rest } = pat {
         let Some(frag) = ctx.v1_scope() else {
-            return Err(CompilerError::new_no_location(
+            return Err(CompilerError::new_with_label(
+                path.span(),
                 "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
             ));
         };
@@ -3472,7 +3473,7 @@ fn lower_pattern_value(
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
         let (enum_key, variant) = ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
-            .map_err(|msg| CompilerError::new_no_location(msg))?;
+            .map_err(|msg| CompilerError::new_with_label(path.span(), msg))?;
         ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Variant { enum_key, variant });
         let mut entries = Vec::with_capacity(fields.len());
         for (fname, subpat) in fields.iter() {
@@ -3897,32 +3898,43 @@ pub fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hi
         .collect()
 }
 
-/// Lower annotation syntax and resolve v1 decorator names through the current
-/// fragment. Compiler-owned metadata intentionally stays unresolved so its
-/// raw spelling remains the source of builtin behavior.
+/// Lower annotation syntax and resolve v1 decorator names: through the
+/// current fragment, or through a legacy file's compatibility views.
+/// Compiler-owned metadata intentionally stays unresolved so its raw spelling
+/// remains the source of builtin behavior.
 pub fn lower_annotations_with_ctx(
     ctx: &LowerCtx,
     ast: &Ast,
     anns: &[skull_parser::Annotation],
 ) -> Vec<hir::Annotation> {
     let mut lowered = lower_annotations(ast, anns);
-    let Some(frag) = ctx.v1_scope() else {
-        return lowered;
-    };
     for anno in &mut lowered {
-        if let Ok(resolved) = ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), anno.name.name)) {
-            anno.resolved_name = Some(resolved.key);
+        // Only a decorator claims an annotation spelling; a same-named fn or
+        // global leaves the builtin in force.
+        let resolved = match ctx.v1_scope() {
+            Some(_) => ctx.resolve_bare(anno.name.name, anno.span).ok().map(|r| r.key),
+            None => legacy_projected_decorator(ctx, anno.name.name),
+        };
+        if let Some(key) = resolved {
+            let is_decorator = ctx
+                .workspace
+                .defs
+                .get(&key)
+                .is_some_and(|meta| meta.kind == bone_core::modules::DefKind::Decorator);
+            if is_decorator {
+                anno.resolved_name = Some(key);
+            }
         }
         let is_wire_role = anno.name.name.as_str() == "wire"
             || anno.resolved_name.is_some_and(|key| {
                 ctx.workspace
                     .defs
                     .get(&key)
-                    .is_some_and(|meta| meta.kind == bone_core::modules::DefKind::Decorator && meta.name.as_str() == "wire")
+                    .is_some_and(|meta| meta.name.as_str() == "wire")
             });
-        if !is_wire_role {
+        let Some(frag) = ctx.v1_scope().filter(|_| is_wire_role) else {
             continue;
-        }
+        };
         let Some(names) = anno.args.iter().find_map(|arg| {
             (arg.name.as_ref().is_some_and(|name| name.name.as_str() == "onchange"))
                 .then(|| match &arg.value {
@@ -3946,6 +3958,37 @@ pub fn lower_annotations_with_ctx(
         }
     }
     lowered
+}
+
+/// The v1 decorator a legacy file's annotation `name` reaches through its
+/// compatibility views (`legacy_name`). Only decorators compete for an
+/// annotation spelling, so a same-named legacy or projected fn (the stdlib's
+/// `update`) does not make it ambiguous. A legacy decorator of that name, or
+/// several v1 ones, keep the bare spelling.
+fn legacy_projected_decorator(ctx: &LowerCtx, name: Ustr) -> Option<Ustr> {
+    use bone_core::modules::{legacy_name, DefKind, LegacyName};
+    ctx.probe_legacy(name);
+    let ws = ctx.workspace;
+    let keys: Vec<Ustr> = match legacy_name(ws, ctx.module.file, name) {
+        LegacyName::Bare => return None,
+        LegacyName::Projected(entries) => entries.into_iter().map(|e| e.key).collect(),
+        LegacyName::Family(keys) => keys,
+        LegacyName::Collision { owners, foreign } => {
+            let legacy_decorator = owners.iter().any(|file| {
+                ws.ns.legacy_owned.names_defined_by(*file).iter().any(|(n, k)| *n == name && *k == DefKind::Decorator)
+            });
+            if legacy_decorator {
+                return None;
+            }
+            foreign
+        }
+    };
+    let mut decorators =
+        keys.into_iter().filter(|key| ws.defs.get(key).is_some_and(|meta| meta.kind == DefKind::Decorator));
+    match (decorators.next(), decorators.next()) {
+        (Some(key), None) => Some(key),
+        _ => None,
+    }
 }
 
 fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
