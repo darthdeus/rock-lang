@@ -806,7 +806,6 @@ fn collect_f32_state_mismatches(
 fn assert_mag_seek_census_owners(sim: &std::collections::HashSet<String>) {
     for name in [
         "MAG_ACTIVE_WORLD",
-        "MAG_PROGRESS",
         "MAG_JOURNAL",
         "MAG_RUN_UI",
         "history",
@@ -814,7 +813,9 @@ fn assert_mag_seek_census_owners(sim: &std::collections::HashSet<String>) {
         assert!(sim.contains(name), "{name} must be admitted as simulation state");
     }
     for (name, owner) in [
-        ("bank_gold", "MAG_PROGRESS"),
+        ("MAG_PROGRESS", "MAG_ACTIVE_WORLD"),
+        ("MAG_QUEST_RUNTIME", "MAG_ACTIVE_WORLD"),
+        ("bank_gold", "MAG_ACTIVE_WORLD"),
         ("journal", "MAG_JOURNAL"),
         ("quest_log_open", "MAG_RUN_UI"),
     ] {
