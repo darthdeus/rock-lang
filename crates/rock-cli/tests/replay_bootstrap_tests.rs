@@ -722,7 +722,7 @@ fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
     assert_eq!(
         log.lines().filter(|line| line.starts_with("boot ")).count(),
         6,
-        "the colour and material sidecars add one captured bootstrap input each"
+        "the colour and material sidecars add one captured bootstrap input each\n{log}"
     );
     assert_eq!(
         log.lines()

@@ -328,50 +328,57 @@ fn mag_run_stop_preserves_successor_boot_assets() {
 
 }
 
+fn history_events(history: &Path) -> Vec<serde_json::Value> {
+    let entries = std::fs::read_dir(history).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(entries.len(), 1, "one recorded run is expected");
+    let events = std::fs::read_to_string(entries[0].path().join("events.jsonl")).unwrap();
+    events.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect()
+}
+
+fn entry_end_frame_counts(events: &[serde_json::Value]) -> Vec<(String, u64)> {
+    events
+        .iter()
+        .filter(|e| e["event"] == "entry_end")
+        .map(|e| (e["name"].as_str().unwrap().to_string(), e["frame_count"].as_u64().unwrap()))
+        .collect()
+}
+
 #[test]
 fn shared_worker_records_each_entry_frame_count_before_restore() {
-    let (run, history) = run_project_workers_with_history(
-        "mag",
-        &["build_watermark_layout", "target_cycle_sim"],
-        "1",
-    );
+    let specs = ["build_watermark_layout", "target_cycle_sim"];
+    let (run, history) = run_project_workers_with_history("mag", &specs, "1");
     assert!(run.success, "shared worker entries pass:\n{}", run.combined());
     assert_eq!(peak_procs(&run.trace), (1, 1), "the entries must share one worker:\n{}", run.trace);
 
-    let entries = std::fs::read_dir(&history).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-    assert_eq!(entries.len(), 1, "one recorded run is expected");
-    let events = std::fs::read_to_string(entries[0].path().join("events.jsonl")).unwrap();
-    let events = events
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
+    let events = history_events(&history);
     assert!(events.iter().any(|event| event["event"] == "worker_spawn" && event["kind"] == "shared"));
 
-    let end_counts = events
+    // Each entry's own count comes from a process that ran only that entry; a
+    // shared worker that carried its predecessor's frames would exceed it.
+    let fresh = specs
         .iter()
-        .filter(|event| event["event"] == "entry_end")
-        .map(|event| {
-            (
-                event["name"].as_str().unwrap().to_string(),
-                event["frame_count"].as_u64().unwrap(),
-            )
+        .map(|spec| {
+            let (alone, alone_history) = run_project_workers_with_history("mag", &[spec], "1");
+            assert!(alone.success, "{spec} passes alone:\n{}", alone.combined());
+            let counts = entry_end_frame_counts(&history_events(&alone_history));
+            assert_eq!(counts.len(), 1, "{spec} alone records one entry: {counts:?}");
+            counts[0].clone()
         })
         .collect::<Vec<_>>();
+    assert!(fresh.iter().all(|(_, frames)| *frames > 0), "fresh entries must run frames: {fresh:?}");
+
     assert_eq!(
-        end_counts,
-        vec![
-            ("build_watermark_layout".into(), 2),
-            ("target_cycle_sim".into(), 18),
-        ],
+        entry_end_frame_counts(&events),
+        fresh,
         "each shared entry must retain its own pre-restore frame count"
     );
-
     let result_counts = events
         .iter()
         .filter(|event| event["event"] == "entry_result")
         .map(|event| event["frame_count"].as_u64().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(result_counts, vec![2, 18]);
+    let fresh_counts = fresh.iter().map(|(_, frames)| *frames).collect::<Vec<_>>();
+    assert_eq!(result_counts, fresh_counts, "each shared entry result must report its own frame count");
 }
 
 /// `-j 1` is the serial path, and it has to STAY the serial path: the composed

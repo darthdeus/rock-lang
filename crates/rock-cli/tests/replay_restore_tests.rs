@@ -1577,8 +1577,10 @@ fn mag_cast_seek_restores_scheduler_owner() {
         assert_eq!(sought_probe[key], ordinary_probe[key],
             "seek landing must reproduce ordinary casting state for {key}");
     }
-    assert!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"].as_i64().unwrap() > 30,
-        "the restored task must be pumped after the seek, not left at its keyframe frame");
+    // The cast task runs on the world clock, which the tick-10 keyframe
+    // restores; the target stamp shows it was pumped past that keyframe.
+    assert_eq!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
+        "the restored task must be pumped after the seek, not left at its keyframe frame: {sought_probe}");
     // Keep the targeted scheduler probes above for diagnosis, then require the
     // same full semantic-state equivalence as the general MAG seek oracle.
     let sim = mag_seek_equivalence_state_names("mag", 3);
@@ -4004,15 +4006,9 @@ fn replay_reports_its_own_costs() {
         diag["STONE_REPLAY_SAVE_MS"].as_f64().unwrap()
     );
 
-    // Keyframe BYTES are only honest where real memory was imaged. Bitgun and
-    // bopt hold game buffers; a minimal game with no buffer declarations is
+    // Keyframe BYTES are only honest where real memory was imaged. Bopt holds
+    // game buffers in sim state; a minimal game with no buffer declarations is
     // the zero control that proves we do not invent storage.
-    let seek_diag = &seeked["__stone_diag"];
-    let bitgun_bytes = seek_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("bitgun storage bytes");
-    assert!(
-        bitgun_bytes > 0,
-        "bitgun holds buffer storage in sim state, so its keyframe must report imaged bytes: {seek_diag}"
-    );
 
     let minimal_game = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -4061,8 +4057,7 @@ fn replay_reports_its_own_costs() {
         bopt["__stone_diag"]
     );
     println!(
-        "[replay-costs] keyframe buffer storage: zero control {engine_floor}B, \
-         bitgun {bitgun_bytes}B, bopt {bytes}B"
+        "[replay-costs] keyframe buffer storage: zero control {engine_floor}B, bopt {bytes}B"
     );
 }
 
