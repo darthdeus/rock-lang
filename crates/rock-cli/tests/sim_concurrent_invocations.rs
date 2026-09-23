@@ -36,7 +36,7 @@ fn rock_bin() -> PathBuf {
 /// A sim that exists in exactly one of the two projects, so a registry mixup
 /// is reported as `unknown sim` rather than silently running the wrong body.
 const VICTIM_PROJECT: &str = "testbed";
-const VICTIM_SIM: &str = "co_join2_tuple";
+const VICTIM_SIM: &str = "testbed::co_join2_tuple";
 const OTHER_PROJECT: &str = "match3";
 const OTHER_SIM: &str = "auto_move";
 

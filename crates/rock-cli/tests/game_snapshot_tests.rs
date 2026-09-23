@@ -200,7 +200,7 @@ fn test_match3_seeded_random_board_alt_seed() {
 fn test_errored_coroutine_is_logged() {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let output = Command::new(rock_bin)
-        .args(["sim", "testbed", "errored_co_logs"])
+        .args(["sim", "testbed", "testbed::errored_co_logs"])
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock sim");

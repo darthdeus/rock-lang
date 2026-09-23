@@ -98,7 +98,7 @@ fn animated_take_screenshot_is_the_same_presented_frame_on_both_renderers() {
 #[test]
 fn a_capture_without_a_present_fails_loudly_on_both_renderers() {
     for (project, sim, renderer) in [
-        ("testbed", "capture_without_present", "gl"),
+        ("testbed", "testbed::capture_without_present", "gl"),
         ("wgpu_renderer", "wgpu_capture_without_present", "wgpu"),
     ] {
         let dir = tempfile::tempdir().expect("capture directory");
