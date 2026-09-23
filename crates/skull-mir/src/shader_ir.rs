@@ -42,7 +42,7 @@ pub enum GlslProfile {
 
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use crate::instance::Instance;
-use crate::mangle::symbol_of_key;
+use crate::mangle::type_symbol;
 use crate::mir::{FuncRef, Lit, MirFunc};
 use crate::monoty::MonoInterner;
 use bone_semantic::inference::Workspace;
@@ -386,13 +386,30 @@ pub enum UniformRole {
     Stage(ShaderStage),
 }
 
+/// A nominal type an interface names. `key` is its DefKey, which lookups and
+/// every fingerprint read; `symbol` is what shader text and every wire spell.
+/// Both come from [`NominalType::of`], so the symbol is always
+/// [`type_symbol`]'s: a `@nomangle` type keeps its declared name here exactly
+/// as it does on the Lua side.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct NominalType {
+    pub key: Ustr,
+    pub symbol: Ustr,
+}
+
+impl NominalType {
+    pub fn of(ws: &Workspace, key: Ustr) -> Self {
+        Self { key, symbol: type_symbol(ws, key) }
+    }
+}
+
 /// A uniform group: its role, the struct that declares it, and its members in
 /// declaration order with neutral kinds. No offsets -- a member's PLACE is the
 /// target's answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalUniformGroup {
     pub role: UniformRole,
-    pub struct_name: Ustr,
+    pub struct_name: NominalType,
     pub members: Vec<(Ustr, WireKind)>,
 }
 
@@ -420,7 +437,7 @@ pub fn semantic_uniform_group_fingerprint(
 
 impl LogicalUniformGroup {
     pub fn semantic_fingerprint(&self) -> u64 {
-        semantic_uniform_group_fingerprint(self.struct_name, &self.members)
+        semantic_uniform_group_fingerprint(self.struct_name.key, &self.members)
     }
 }
 
@@ -446,7 +463,7 @@ pub struct LogicalArrayGroup {
 /// and was not listed emits a reference to an identifier it never declared.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalTextureGroup {
-    pub struct_name: Option<Ustr>,
+    pub struct_name: Option<NominalType>,
     pub samplers: Vec<(Ustr, SamplerKind)>,
     pub stages: Vec<ShaderStage>,
 }
@@ -470,7 +487,7 @@ pub enum VertexRate {
 /// LOCATION each attribute takes is the target's answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalVertexInput {
-    pub struct_name: Ustr,
+    pub struct_name: NominalType,
     pub rate: VertexRate,
     pub attrs: Vec<(Ustr, AttrKind)>,
 }
@@ -603,7 +620,7 @@ impl ShaderInterfacePlan {
                 VertexRate::PerVertex => "vertex",
                 VertexRate::PerInstance => "instance",
             };
-            writeln!(out, "vertex_input {} {} {}", symbol_of_key(input.struct_name), rate, input.attrs.len()).unwrap();
+            writeln!(out, "vertex_input {} {} {}", input.struct_name.symbol, rate, input.attrs.len()).unwrap();
             for (name, kind) in &input.attrs {
                 writeln!(out, "attr {} {}", name, attr_kind_code(*kind)).unwrap();
             }
@@ -616,7 +633,7 @@ impl ShaderInterfacePlan {
 
         writeln!(out, "groups {}", self.uniform_groups.len()).unwrap();
         for group in &self.uniform_groups {
-            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), symbol_of_key(group.struct_name), group.semantic_fingerprint(), group.members.len()).unwrap();
+            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), group.struct_name.symbol, group.semantic_fingerprint(), group.members.len()).unwrap();
             for (name, kind) in &group.members {
                 writeln!(out, "member {} {}", name, kind.code()).unwrap();
             }
@@ -661,8 +678,7 @@ impl ShaderInterfacePlan {
 
         match &self.textures {
             Some(group) => {
-                let struct_name = group.struct_name.map(symbol_of_key);
-                let struct_name = struct_name.as_ref().map(|name| name.as_str()).unwrap_or("none");
+                let struct_name = group.struct_name.map(|name| name.symbol.as_str()).unwrap_or("none");
                 writeln!(out, "textures {} {}", struct_name, group.samplers.len()).unwrap();
                 for (name, kind) in &group.samplers {
                     writeln!(out, "texture {} {}", name, sampler_kind_code(*kind)).unwrap();

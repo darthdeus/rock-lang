@@ -140,7 +140,7 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
     let glsl_engine = glsl
         .uniform_blocks
         .iter()
-        .find(|(_, p)| p.struct_name.as_str() == "EngineU")
+        .find(|(_, p)| p.plan.struct_name.as_str() == "EngineU")
         .map(|(b, _)| *b)
         .expect("the engine block");
     let hostile_engine = hostile
@@ -176,7 +176,7 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
     let glsl_offsets: Vec<(Ustr, u32)> = glsl
         .uniform_blocks
         .iter()
-        .flat_map(|(_, p)| p.members.iter().map(|m| (m.name, m.offset)))
+        .flat_map(|(_, p)| p.plan.members.iter().map(|m| (m.name, m.offset)))
         .collect();
     assert_ne!(
         glsl_offsets, hostile.offsets,
@@ -287,8 +287,8 @@ fn perturbing_an_interface_member_moves_the_derived_layout() {
     let engine_of = |p: &skull_codegen_glsl::ShaderAbiPlan| {
         p.uniform_blocks
             .iter()
-            .find(|(_, b)| b.struct_name.as_str() == "EngineU")
-            .map(|(_, b)| (b.size, b.members.iter().map(|m| (m.name, m.offset)).collect::<Vec<_>>()))
+            .find(|(_, b)| b.plan.struct_name.as_str() == "EngineU")
+            .map(|(_, b)| (b.plan.size, b.plan.members.iter().map(|m| (m.name, m.offset)).collect::<Vec<_>>()))
             .expect("the engine block")
     };
     let before = engine_of(&em.abi);
@@ -304,7 +304,7 @@ fn perturbing_an_interface_member_moves_the_derived_layout() {
     let g = perturbed
         .uniform_groups
         .iter_mut()
-        .find(|g| g.struct_name.as_str() == "EngineU")
+        .find(|g| g.struct_name.key.as_str() == "EngineU")
         .expect("the engine group");
     assert_eq!(g.members[0].1, WireKind::F32, "the fixture's first member is not the float");
     g.members[0].1 = WireKind::F32x4;
