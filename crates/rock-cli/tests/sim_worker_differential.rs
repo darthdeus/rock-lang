@@ -90,9 +90,9 @@ fn run_rock_with_env(args: &[&str], parent_env: &[(&str, &str)]) -> String {
 /// Distinct entries get distinct `$OUT`, in a worker as in a fresh process.
 #[test]
 fn a_worker_entry_gets_its_own_out_directory() {
-    let (isolated, worker) = differential(&["b0_out_writer"], "b0_out_probe");
+    let (isolated, worker) = differential(&["testbed::b0_out_writer"], "testbed::b0_out_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_out_probe", &c);
+    assert_equivalent("testbed::b0_out_probe", &c);
 
     assert!(
         c.population("artifacts") > 0,
@@ -111,9 +111,9 @@ fn a_worker_entry_gets_its_own_out_directory() {
 /// SHARE one `$OUT`, and a per-entry reset must not break that.
 #[test]
 fn a_comma_chain_still_shares_one_out_directory_in_a_worker() {
-    let (isolated, worker) = differential(&["b0_out_writer"], "b0_chain_head,b0_chain_tail");
+    let (isolated, worker) = differential(&["testbed::b0_out_writer"], "testbed::b0_chain_head,testbed::b0_chain_tail");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_chain_head,b0_chain_tail", &c);
+    assert_equivalent("testbed::b0_chain_head,testbed::b0_chain_tail", &c);
 
     assert_eq!(
         artifact_names(&worker),
@@ -140,9 +140,9 @@ fn a_comma_chain_still_shares_one_out_directory_in_a_worker() {
 /// first would silently lose the swept file from the record.
 #[test]
 fn deferred_artifacts_are_recorded_while_out_is_still_live() {
-    let (isolated, worker) = differential(&["b0_out_writer"], "b0_deferred_artifact");
+    let (isolated, worker) = differential(&["testbed::b0_out_writer"], "testbed::b0_deferred_artifact");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_deferred_artifact", &c);
+    assert_equivalent("testbed::b0_deferred_artifact", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert_eq!(
@@ -159,9 +159,9 @@ fn deferred_artifacts_are_recorded_while_out_is_still_live() {
 /// in the file whose contents encode the value.
 #[test]
 fn a_predecessors_global_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_leak_seed"], "b0_leak_probe");
+    let (isolated, worker) = differential(&["testbed::b0_leak_seed"], "testbed::b0_leak_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_leak_probe", &c);
+    assert_equivalent("testbed::b0_leak_probe", &c);
 
     // Agreement is only evidence when the probe measured: it passed its own
     // fresh-counter expect and wrote the counter into an artifact.
@@ -181,9 +181,9 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
 #[test]
 fn a_predecessors_telemetry_capture_does_not_reach_the_next_entry() {
     let (isolated, worker) =
-        differential(&["b0_telemetry_capture_seed"], "b0_telemetry_capture_probe");
+        differential(&["testbed::b0_telemetry_capture_seed"], "testbed::b0_telemetry_capture_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_telemetry_capture_probe", &c);
+    assert_equivalent("testbed::b0_telemetry_capture_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -198,9 +198,9 @@ fn a_predecessors_telemetry_capture_does_not_reach_the_next_entry() {
 /// a table and a scalar, which take different paths through the deep copy.
 #[test]
 fn a_predecessors_host_projection_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_projection_seed"], "b0_projection_probe");
+    let (isolated, worker) = differential(&["testbed::b0_projection_seed"], "testbed::b0_projection_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_projection_probe", &c);
+    assert_equivalent("testbed::b0_projection_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -222,9 +222,9 @@ fn a_predecessors_host_projection_does_not_reach_the_next_entry() {
 #[test]
 fn a_predecessors_engine_diagnostics_do_not_reach_the_next_entry() {
     let (isolated, worker) =
-        differential(&["b0_engine_diagnostics_seed"], "b0_engine_diagnostics_probe");
+        differential(&["testbed::b0_engine_diagnostics_seed"], "testbed::b0_engine_diagnostics_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_engine_diagnostics_probe", &c);
+    assert_equivalent("testbed::b0_engine_diagnostics_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -238,9 +238,9 @@ fn a_predecessors_engine_diagnostics_do_not_reach_the_next_entry() {
 /// successor never saw.
 #[test]
 fn a_predecessors_window_resize_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["resize_native"], "resize_output_scale");
+    let (isolated, worker) = differential(&["testbed::resize_native"], "testbed::resize_output_scale");
     let c = compare(&isolated, &worker);
-    assert_equivalent("resize_output_scale", &c);
+    assert_equivalent("testbed::resize_output_scale", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -253,11 +253,11 @@ fn a_predecessors_window_resize_does_not_reach_the_next_entry() {
 #[test]
 fn an_entry_runs_in_its_own_window_behind_a_predecessor_at_another_size() {
     for (predecessors, target) in [
-        (&["b0_entry_window_small"][..], "b0_entry_window_tall"),
-        (&["b0_entry_window_tall"][..], "b0_entry_window_small"),
-        (&["b0_entry_window_tall", "b0_entry_window_small"][..], "b0_entry_window_default"),
+        (&["testbed::b0_entry_window_small"][..], "testbed::b0_entry_window_tall"),
+        (&["testbed::b0_entry_window_tall"][..], "testbed::b0_entry_window_small"),
+        (&["testbed::b0_entry_window_tall", "testbed::b0_entry_window_small"][..], "testbed::b0_entry_window_default"),
         // Back at boot's size after a resized predecessor: nothing to apply.
-        (&["b0_entry_window_small", "b0_entry_window_tall"][..], "b0_entry_window_small"),
+        (&["testbed::b0_entry_window_small", "testbed::b0_entry_window_tall"][..], "testbed::b0_entry_window_small"),
     ] {
         let (isolated, worker) = differential(predecessors, target);
         let c = compare(&isolated, &worker);
@@ -269,9 +269,9 @@ fn an_entry_runs_in_its_own_window_behind_a_predecessor_at_another_size() {
 
 #[test]
 fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_scene_seed"], "b0_scene_probe");
+    let (isolated, worker) = differential(&["testbed::b0_scene_seed"], "testbed::b0_scene_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_scene_probe", &c);
+    assert_equivalent("testbed::b0_scene_probe", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert_eq!(record.verdict(), "PASS", "{label} Scene probe failed: {record:?}");
@@ -288,7 +288,7 @@ fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
 
 #[test]
 fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
-    let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 12];
+    let entries = vec!["testbed::t1a_worker_registries_stay_bounded".to_string(); 12];
     let records = run_worker_suite(Backend::Skull, "testbed", &entries)
         .expect("the repeated StateImage worker queue must run");
     assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
@@ -304,7 +304,7 @@ fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
 
 #[test]
 fn repeated_bootimage_entries_prove_immutable_owner_conservation() {
-    let entries = vec!["t1a_worker_registries_stay_bounded".to_string(); 8];
+    let entries = vec!["testbed::t1a_worker_registries_stay_bounded".to_string(); 8];
     let records = run_worker_suite(Backend::Skull, "testbed", &entries)
         .expect("the repeated BootImage ownership queue must run");
     assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
@@ -333,9 +333,9 @@ fn repeated_bootimage_entries_prove_immutable_owner_conservation() {
 /// which leaves the `SpellKind?` global `REG_HOVER_SPELL` set.
 #[test]
 fn a_global_that_was_null_at_boot_is_null_again_at_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_null_global_seed"], "b0_null_global_probe");
+    let (isolated, worker) = differential(&["testbed::b0_null_global_seed"], "testbed::b0_null_global_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_null_global_probe", &c);
+    assert_equivalent("testbed::b0_null_global_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert_eq!(worker.verdict(), "PASS", "and after a predecessor that set the global");
@@ -362,9 +362,9 @@ fn a_global_that_was_null_at_boot_is_null_again_at_the_next_entry() {
 /// CONTENTS.
 #[test]
 fn the_rng_stream_position_resets_at_the_entry_boundary() {
-    let (isolated, worker) = differential(&["b0_rng_seed"], "b0_rng_probe");
+    let (isolated, worker) = differential(&["testbed::b0_rng_seed"], "testbed::b0_rng_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_rng_probe", &c);
+    assert_equivalent("testbed::b0_rng_probe", &c);
 
     assert!(c.population("artifacts") > 0, "the probe never wrote its draw");
     assert_eq!(isolated.artifacts["draw.txt"], worker.artifacts["draw.txt"]);
@@ -374,9 +374,9 @@ fn the_rng_stream_position_resets_at_the_entry_boundary() {
 /// the probe's bump reaches a fresh cell.
 #[test]
 fn a_called_function_static_resets_at_the_entry_boundary() {
-    let (isolated, worker) = differential(&["b0_static_called_seed"], "b0_static_called_probe");
+    let (isolated, worker) = differential(&["testbed::b0_static_called_seed"], "testbed::b0_static_called_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_static_called_probe", &c);
+    assert_equivalent("testbed::b0_static_called_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -392,9 +392,9 @@ fn a_called_function_static_resets_at_the_entry_boundary() {
 /// from emitted bodies treats the two differently.
 #[test]
 fn an_inlined_static_resets_at_the_entry_boundary() {
-    let (isolated, worker) = differential(&["b0_static_inlined_seed"], "b0_static_inlined_probe");
+    let (isolated, worker) = differential(&["testbed::b0_static_inlined_seed"], "testbed::b0_static_inlined_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_static_inlined_probe", &c);
+    assert_equivalent("testbed::b0_static_inlined_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -412,9 +412,9 @@ fn an_inlined_static_resets_at_the_entry_boundary() {
 /// and exits cleanly either way.
 #[test]
 fn logger_dedup_does_not_suppress_the_next_entrys_warning() {
-    let (isolated, worker) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
+    let (isolated, worker) = differential(&["testbed::b0_dedup_seed"], "testbed::b0_dedup_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_dedup_probe", &c);
+    assert_equivalent("testbed::b0_dedup_probe", &c);
 
     // Agreement over silence would be agreement over nothing: the class is only
     // observable when the isolated side actually emitted the warning.
@@ -436,9 +436,9 @@ fn logger_dedup_does_not_suppress_the_next_entrys_warning() {
 /// fixture's first failure would hide the other.
 #[test]
 fn a_throttled_sites_last_fire_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_throttle_seed"], "b0_throttle_probe");
+    let (isolated, worker) = differential(&["testbed::b0_throttle_seed"], "testbed::b0_throttle_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_throttle_probe", &c);
+    assert_equivalent("testbed::b0_throttle_probe", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert!(
@@ -459,9 +459,9 @@ fn a_throttled_sites_last_fire_does_not_reach_the_next_entry() {
 /// which climbs across entries.
 #[test]
 fn the_throttle_clock_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_clock_seed"], "b0_clock_probe");
+    let (isolated, worker) = differential(&["testbed::b0_clock_seed"], "testbed::b0_clock_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_clock_probe", &c);
+    assert_equivalent("testbed::b0_clock_probe", &c);
 
     // The fixture is only meaningful while the site is SUPPRESSED on both
     // sides: a leaked clock is what makes it fire, so agreement over two
@@ -489,9 +489,9 @@ fn the_throttle_clock_does_not_reach_the_next_entry() {
 /// this red.
 #[test]
 fn a_declared_wall_clock_record_does_not_diverge_but_its_neighbours_still_compare() {
-    let (isolated, worker) = differential(&["b0_wall_clock_seed"], "b0_wall_clock_probe");
+    let (isolated, worker) = differential(&["testbed::b0_wall_clock_seed"], "testbed::b0_wall_clock_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_wall_clock_probe", &c);
+    assert_equivalent("testbed::b0_wall_clock_probe", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         // Both declared forms must have FIRED -- agreement over a record that
@@ -533,8 +533,8 @@ fn a_declared_wall_clock_record_does_not_diverge_but_its_neighbours_still_compar
 /// and this proves it is off where they are not.
 #[test]
 fn the_value_mask_is_on_only_where_records_are_compared() {
-    for mode in [vec!["sim", "testbed", "b0_wall_clock_probe"],
-                 vec!["sim", "testbed", "b0_wall_clock_seed", "b0_wall_clock_probe", "--workers"]] {
+    for mode in [vec!["sim", "testbed", "testbed::b0_wall_clock_probe"],
+                 vec!["sim", "testbed", "testbed::b0_wall_clock_seed", "testbed::b0_wall_clock_probe", "--workers"]] {
         let stderr = run_rock(&mode, false);
 
         let mixed = stderr
@@ -564,9 +564,9 @@ fn the_value_mask_is_on_only_where_records_are_compared() {
 /// diverge.
 #[test]
 fn a_fixture_cannot_unmask_a_compared_run() {
-    let (isolated, worker) = differential(&["b0_wall_clock_unmask_seed"], "b0_wall_clock_unmask_probe");
+    let (isolated, worker) = differential(&["testbed::b0_wall_clock_unmask_seed"], "testbed::b0_wall_clock_unmask_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_wall_clock_unmask_probe", &c);
+    assert_equivalent("testbed::b0_wall_clock_unmask_probe", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert!(
@@ -624,8 +624,8 @@ fn assert_ordinary_run_keeps_its_measurements(seed: &str, probe: &str, hostile_p
 #[test]
 fn an_ordinary_run_keeps_its_measurements_when_the_fixture_asks_to_mask() {
     assert_ordinary_run_keeps_its_measurements(
-        "b0_wall_clock_mask_seed",
-        "b0_wall_clock_mask_probe",
+        "testbed::b0_wall_clock_mask_seed",
+        "testbed::b0_wall_clock_mask_probe",
         false,
     );
 }
@@ -633,8 +633,8 @@ fn an_ordinary_run_keeps_its_measurements_when_the_fixture_asks_to_mask() {
 #[test]
 fn an_ordinary_run_keeps_its_measurements_when_the_parent_environment_masks() {
     assert_ordinary_run_keeps_its_measurements(
-        "b0_wall_clock_seed",
-        "b0_wall_clock_probe",
+        "testbed::b0_wall_clock_seed",
+        "testbed::b0_wall_clock_probe",
         true,
     );
 }
@@ -658,9 +658,9 @@ fn an_ordinary_run_keeps_its_measurements_when_the_parent_environment_masks() {
 /// because the queue never opened.
 #[test]
 fn a_telemetry_id_does_not_diverge_across_the_entry_boundary() {
-    let (isolated, worker) = differential(&["b0_telemetry_ids_seed"], "b0_telemetry_ids_probe");
+    let (isolated, worker) = differential(&["testbed::b0_telemetry_ids_seed"], "testbed::b0_telemetry_ids_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_telemetry_ids_probe", &c);
+    assert_equivalent("testbed::b0_telemetry_ids_probe", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         let (consent, session) = telemetry_ids(&record.entry_diagnostics)
@@ -698,9 +698,9 @@ fn a_telemetry_id_does_not_diverge_across_the_entry_boundary() {
 #[test]
 fn a_fixture_cannot_ask_a_compared_run_for_real_telemetry_ids() {
     let (isolated, worker) =
-        differential(&["b0_telemetry_ids_unmask_seed"], "b0_telemetry_ids_unmask_probe");
+        differential(&["testbed::b0_telemetry_ids_unmask_seed"], "testbed::b0_telemetry_ids_unmask_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_telemetry_ids_unmask_probe", &c);
+    assert_equivalent("testbed::b0_telemetry_ids_unmask_probe", &c);
     assert!(
         c.population("artifacts") > 0,
         "the artifact arm compared nothing, so the fixture's declaration was never tested"
@@ -745,14 +745,14 @@ fn assert_ordinary_run_keeps_real_ids(seed: &str, probe: &str, parent_env: &[(&s
 
 #[test]
 fn an_ordinary_run_keeps_its_real_telemetry_ids() {
-    assert_ordinary_run_keeps_real_ids("b0_telemetry_ids_seed", "b0_telemetry_ids_probe", &[]);
+    assert_ordinary_run_keeps_real_ids("testbed::b0_telemetry_ids_seed", "testbed::b0_telemetry_ids_probe", &[]);
 }
 
 #[test]
 fn an_ordinary_run_keeps_its_real_telemetry_ids_when_the_fixture_asks_for_reproducible_ones() {
     assert_ordinary_run_keeps_real_ids(
-        "b0_telemetry_ids_mask_seed",
-        "b0_telemetry_ids_mask_probe",
+        "testbed::b0_telemetry_ids_mask_seed",
+        "testbed::b0_telemetry_ids_mask_probe",
         &[],
     );
 }
@@ -760,8 +760,8 @@ fn an_ordinary_run_keeps_its_real_telemetry_ids_when_the_fixture_asks_for_reprod
 #[test]
 fn an_ordinary_run_keeps_its_real_telemetry_ids_when_the_parent_environment_asks_otherwise() {
     assert_ordinary_run_keeps_real_ids(
-        "b0_telemetry_ids_seed",
-        "b0_telemetry_ids_probe",
+        "testbed::b0_telemetry_ids_seed",
+        "testbed::b0_telemetry_ids_probe",
         &[("ROCK_DETERMINISTIC_IDS", "1")],
     );
 }
@@ -799,9 +799,9 @@ fn is_uuid(value: &str) -> bool {
 /// log an entry that booted its own process necessarily carries.
 #[test]
 fn the_arena_registry_survives_the_real_worker_boundary() {
-    let (isolated, worker) = differential(&["b2_arena_boundary_seed"], "b2_arena_boundary_probe");
+    let (isolated, worker) = differential(&["testbed::b2_arena_boundary_seed"], "testbed::b2_arena_boundary_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b2_arena_boundary_probe", &c);
+    assert_equivalent("testbed::b2_arena_boundary_probe", &c);
 
     assert_eq!(isolated.seq, 0, "the isolated arm is a one-entry queue");
     assert!(
@@ -844,9 +844,9 @@ fn the_arena_registry_survives_the_real_worker_boundary() {
 /// the dt its own frame advances, which is the reason this class matters.
 #[test]
 fn engine_configuration_resets_at_the_entry_boundary() {
-    let (isolated, worker) = differential(&["b0_config_seed"], "b0_config_probe");
+    let (isolated, worker) = differential(&["testbed::b0_config_seed"], "testbed::b0_config_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_config_probe", &c);
+    assert_equivalent("testbed::b0_config_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
@@ -868,9 +868,9 @@ fn engine_configuration_resets_at_the_entry_boundary() {
 /// the restored map starts the probe with nothing held and no release edge.
 #[test]
 fn a_held_key_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_input_seed"], "b0_input_probe");
+    let (isolated, worker) = differential(&["testbed::b0_input_seed"], "testbed::b0_input_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_input_probe", &c);
+    assert_equivalent("testbed::b0_input_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -889,9 +889,9 @@ fn a_held_key_does_not_reach_the_next_entry() {
 /// while a delta can move only if foreign work is still being polled here.
 #[test]
 fn a_task_left_live_at_stop_sim_does_not_tick_in_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_poller_seed"], "b0_poller_probe");
+    let (isolated, worker) = differential(&["testbed::b0_poller_seed"], "testbed::b0_poller_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_poller_probe", &c);
+    assert_equivalent("testbed::b0_poller_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "nothing foreign ticks in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -915,9 +915,9 @@ fn a_task_left_live_at_stop_sim_does_not_tick_in_the_next_entry() {
 /// the second.
 #[test]
 fn a_subprocess_does_not_outlive_the_entry_that_spawned_it() {
-    let (isolated, worker) = differential(&["b0_proc_seed"], "b0_proc_probe");
+    let (isolated, worker) = differential(&["testbed::b0_proc_seed"], "testbed::b0_proc_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_proc_probe", &c);
+    assert_equivalent("testbed::b0_proc_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "a fresh process inherits nothing");
 
@@ -951,9 +951,9 @@ fn a_subprocess_does_not_outlive_the_entry_that_spawned_it() {
 /// the probe partway and cost it its later expects and its `stop_sim()`.
 #[test]
 fn a_declared_frame_budget_belongs_to_its_entry() {
-    let (isolated, worker) = differential(&["b0_budget_pred"], "b0_budget_probe");
+    let (isolated, worker) = differential(&["testbed::b0_budget_pred"], "testbed::b0_budget_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_budget_probe", &c);
+    assert_equivalent("testbed::b0_budget_probe", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert!(record.saw_stop, "{label}: the entry was cut short of stop_sim()");
@@ -987,9 +987,9 @@ fn a_declared_frame_budget_belongs_to_its_entry() {
 /// not two runs of an unread variable.
 #[test]
 fn a_compatible_boot_signature_reaches_the_shared_worker() {
-    let (isolated, worker) = differential(&["b0_env_pred"], "b0_env_probe");
+    let (isolated, worker) = differential(&["testbed::b0_env_pred"], "testbed::b0_env_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_env_probe", &c);
+    assert_equivalent("testbed::b0_env_probe", &c);
 
     for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
         assert!(
@@ -1012,14 +1012,14 @@ fn a_compatible_boot_signature_reaches_the_shared_worker() {
 #[test]
 fn an_incompatible_boot_signature_is_refused_with_its_reason() {
     let plan = DifferentialPlan {
-        predecessors: vec!["b0_env_conflict".to_string()],
-        target: "b0_env_probe".to_string(),
+        predecessors: vec!["testbed::b0_env_conflict".to_string()],
+        target: "testbed::b0_env_probe".to_string(),
     };
     let err = run_differential(Backend::Skull, "testbed", &plan)
         .expect_err("a worker must not serve two different boot signatures");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("boot signatures") && msg.contains("b0_env_conflict") && msg.contains("b0_env_probe"),
+        msg.contains("boot signatures") && msg.contains("testbed::b0_env_conflict") && msg.contains("testbed::b0_env_probe"),
         "the refusal must say which sims and why, got: {msg}"
     );
 }
@@ -1031,8 +1031,8 @@ fn an_incompatible_boot_signature_is_refused_with_its_reason() {
 #[test]
 fn an_out_interpolating_env_is_refused_with_its_own_reason() {
     let plan = DifferentialPlan {
-        predecessors: vec!["b0_env_outref_head".to_string()],
-        target: "b0_env_outref_tail".to_string(),
+        predecessors: vec!["testbed::b0_env_outref_head".to_string()],
+        target: "testbed::b0_env_outref_tail".to_string(),
     };
     let err = run_differential(Backend::Skull, "testbed", &plan)
         .expect_err("a worker cannot give one process two different $OUT-derived values");
@@ -1057,9 +1057,9 @@ fn an_out_interpolating_env_is_refused_with_its_own_reason() {
 /// `crates/skull/tests/static_registration_coverage.rs`.
 #[test]
 fn a_dropped_definitions_static_resets_at_the_entry_boundary() {
-    let (isolated, worker) = differential(&["b1_dropped_seed"], "b1_dropped_probe");
+    let (isolated, worker) = differential(&["testbed::b1_dropped_seed"], "testbed::b1_dropped_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b1_dropped_probe", &c);
+    assert_equivalent("testbed::b1_dropped_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
@@ -1076,7 +1076,7 @@ fn a_dropped_definitions_static_resets_at_the_entry_boundary() {
 /// sees both fixtures pass standalone.
 #[test]
 fn a_budget_cut_predecessor_still_restores_boot() {
-    let (isolated, worker) = differential(&["b2_wedge_head,b2_wedge_tail"], "b0_leak_probe");
+    let (isolated, worker) = differential(&["testbed::b2_wedge_head,testbed::b2_wedge_tail"], "testbed::b0_leak_probe");
     let c = compare(&isolated, &worker);
     assert_equivalent("b0_leak_probe after a wedged predecessor", &c);
 
@@ -1100,8 +1100,8 @@ fn an_errored_main_closes_without_recovery_or_tail_updates() {
         Backend::Skull,
         "testbed",
         &[
-            "b0_main_error_head".to_string(),
-            "b0_main_error_probe".to_string(),
+            "testbed::b0_main_error_head".to_string(),
+            "testbed::b0_main_error_probe".to_string(),
         ],
     )
     .expect("an ordinary main error must finalize its entry and keep the worker alive");
@@ -1170,7 +1170,7 @@ fn a_crashed_worker_recovers_its_unstarted_entries() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
-        &["b2_crash_head,b2_crash_tail".to_string(), "b0_leak_probe".to_string()],
+        &["testbed::b2_crash_head,testbed::b2_crash_tail".to_string(), "testbed::b0_leak_probe".to_string()],
     )
     .expect("the suite call itself must not error: the crash is an entry failure");
     assert_eq!(records.len(), 2, "one record per entry spec");
@@ -1220,7 +1220,7 @@ fn a_replaced_boot_checkpoint_is_refused_not_restored() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
-        &["b1_checkpoint_take_succeeds".to_string(), "b1_checkpoint_membership".to_string()],
+        &["testbed::b1_checkpoint_take_succeeds".to_string(), "testbed::b1_checkpoint_membership".to_string()],
     )
     .expect("the suite call itself must not error: the refusal is an entry failure");
     assert_eq!(records.len(), 2);
@@ -1254,9 +1254,9 @@ fn a_replaced_boot_checkpoint_is_refused_not_restored() {
 /// ways, the ledger's own diff and the monotonic id its own canvas is handed.
 #[test]
 fn a_predecessors_native_resource_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b3_leak_seed"], "b3_leak_probe");
+    let (isolated, worker) = differential(&["testbed::b3_leak_seed"], "testbed::b3_leak_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b3_leak_probe", &c);
+    assert_equivalent("testbed::b3_leak_probe", &c);
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
 }
@@ -1274,7 +1274,7 @@ fn a_predecessors_native_resource_does_not_reach_the_next_entry() {
 #[test]
 fn a_predecessors_shader_failure_is_not_charged_to_the_next_entry() {
     let (isolated, worker) =
-        differential(&["b3_diag_head,b3_diag_injector"], "b3_diag_probe");
+        differential(&["testbed::b3_diag_head,testbed::b3_diag_injector"], "testbed::b3_diag_probe");
     let c = compare(&isolated, &worker);
     assert_equivalent("b3_diag_probe after an injected shader failure", &c);
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
@@ -1303,9 +1303,9 @@ fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_work
         Backend::Skull,
         "testbed",
         &[
-            "b3_canvas_head".to_string(),
-            "b3_canvas_seed".to_string(),
-            "b3_canvas_probe".to_string(),
+            "testbed::b3_canvas_head".to_string(),
+            "testbed::b3_canvas_seed".to_string(),
+            "testbed::b3_canvas_probe".to_string(),
         ],
     )
     .expect("the suite call itself must not error: ineligibility is a scheduling fact");
@@ -1381,9 +1381,9 @@ fn an_entry_that_resized_boots_scene_targets_keeps_its_worker() {
         Backend::Skull,
         "testbed",
         &[
-            "b3_canvas_resize_head".to_string(),
-            "b3_canvas_resize_seed".to_string(),
-            "b3_canvas_resize_probe".to_string(),
+            "testbed::b3_canvas_resize_head".to_string(),
+            "testbed::b3_canvas_resize_seed".to_string(),
+            "testbed::b3_canvas_resize_probe".to_string(),
         ],
     )
     .expect("the suite call itself must not error");
@@ -1421,9 +1421,9 @@ fn an_entry_that_shortened_a_boot_pyramid_keeps_its_worker() {
         Backend::Skull,
         "testbed",
         &[
-            "b3_pyramid_shrink_head".to_string(),
-            "b3_pyramid_shrink_seed".to_string(),
-            "b3_pyramid_shrink_probe".to_string(),
+            "testbed::b3_pyramid_shrink_head".to_string(),
+            "testbed::b3_pyramid_shrink_seed".to_string(),
+            "testbed::b3_pyramid_shrink_probe".to_string(),
         ],
     )
     .expect("the suite call itself must not error");
@@ -1566,15 +1566,15 @@ fn every_comparator_arm_is_present_and_exercised() {
     // is the union.
     let comparisons = [
         {
-            let (i, w) = differential(&["b0_leak_seed"], "b0_leak_probe");
+            let (i, w) = differential(&["testbed::b0_leak_seed"], "testbed::b0_leak_probe");
             compare(&i, &w)
         },
         {
-            let (i, w) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
+            let (i, w) = differential(&["testbed::b0_dedup_seed"], "testbed::b0_dedup_probe");
             compare(&i, &w)
         },
         {
-            let (i, w) = differential(&["b0_leak_seed"], "b0_fail_head,b0_fail_tail");
+    let (i, w) = differential(&["testbed::b0_leak_seed"], "testbed::b0_fail_head,testbed::b0_fail_tail");
             let c = compare(&i, &w);
             // The tail has a standalone branch; population is only evidence
             // once both sides are known to have taken the FAILING one.
@@ -1601,7 +1601,7 @@ fn every_comparator_arm_is_present_and_exercised() {
         }
         assert!(population > 0, "arm `{arm}` compared an empty population in every fixture");
     }
-    let (isolated, worker) = differential(&["b0_leak_seed"], "b0_leak_probe");
+    let (isolated, worker) = differential(&["testbed::b0_leak_seed"], "testbed::b0_leak_probe");
     assert!(
         isolated.errors.is_empty() && worker.errors.is_empty(),
         "the zero `errors` denominator has to be a real zero, not an unread field"
@@ -1631,7 +1631,7 @@ fn a_duplicated_spec_runs_and_reports_twice_in_worker_mode() {
 
     let out = std::process::Command::new(&rock)
         .current_dir(&root)
-        .args(["sim", "testbed", "b0_leak_probe", "b0_leak_probe", "--workers"])
+        .args(["sim", "testbed", "testbed::b0_leak_probe", "testbed::b0_leak_probe", "--workers"])
         .output()
         .expect("run rock sim --workers");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1647,7 +1647,7 @@ fn a_duplicated_spec_runs_and_reports_twice_in_worker_mode() {
     );
     // Per-entry records are the command's result on stderr; the tally is stdout.
     assert_eq!(
-        stderr.matches("b0_leak_probe: PASS").count(),
+        stderr.matches("testbed::b0_leak_probe: PASS").count(),
         2,
         "each occurrence owns its own record:\n{stderr}"
     );
@@ -1668,7 +1668,7 @@ fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
     let healthy = run_worker_suite(
         Backend::Skull,
         "testbed",
-        &["b0_leak_seed".to_string(), "b0_leak_probe".to_string(), "b0_rng_probe".to_string()],
+        &["testbed::b0_leak_seed".to_string(), "testbed::b0_leak_probe".to_string(), "testbed::b0_rng_probe".to_string()],
     )
     .expect("the healthy queue must run");
     assert_eq!(
@@ -1686,7 +1686,7 @@ fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
     let recovered = run_worker_suite(
         Backend::Skull,
         "testbed",
-        &["b2_crash_head,b2_crash_tail".to_string(), "b0_leak_probe".to_string()],
+        &["testbed::b2_crash_head,testbed::b2_crash_tail".to_string(), "testbed::b0_leak_probe".to_string()],
     )
     .expect("the suite call itself must not error: the crash is an entry failure");
     assert_eq!(
@@ -1720,7 +1720,7 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
-        &["b3_cc_painted_head".to_string(), "b3_cc_painted_probe".to_string()],
+        &["testbed::b3_cc_painted_head".to_string(), "testbed::b3_cc_painted_probe".to_string()],
     )
     .expect("the suite call itself must not error: ineligibility is a scheduling fact");
     assert_eq!(records.len(), 2, "one record per entry spec");
@@ -1747,8 +1747,8 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
         "sim",
         "testbed",
         "--multi-order",
-        "b3_cc_painted_head",
-        "b3_cc_painted_probe",
+        "testbed::b3_cc_painted_head",
+        "testbed::b3_cc_painted_probe",
     ]);
     let reason = format!("{out}{err}");
     assert!(
@@ -1785,8 +1785,8 @@ fn the_default_mode_admits_rendered_sims_into_one_worker() {
         "testbed",
         "-j",
         "1",
-        "canvas_create_preserves_color_mask",
-        "b3_readback_control",
+        "testbed::canvas_create_preserves_color_mask",
+        "testbed::b3_readback_control",
     ]);
     let all = format!("{stdout}{stderr}");
     assert!(ok, "the default mode must run both green:\n{all}");
@@ -1826,9 +1826,9 @@ fn a_boot_pixel_readback_slot_does_not_carry_its_submit_across_the_boundary() {
         "testbed",
         "-j",
         "1",
-        "b3_readback_control",
-        "b3_readback_seed",
-        "b3_readback_probe",
+        "testbed::b3_readback_control",
+        "testbed::b3_readback_seed",
+        "testbed::b3_readback_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -1862,9 +1862,9 @@ fn a_predecessors_file_change_is_not_the_next_entrys_hot_reload() {
         "testbed",
         "-j",
         "1",
-        "b3_watcher_active",
-        "b3_watcher_seed",
-        "b3_watcher_probe",
+        "testbed::b3_watcher_active",
+        "testbed::b3_watcher_seed",
+        "testbed::b3_watcher_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -1893,9 +1893,9 @@ fn a_predecessors_sampler_does_not_reach_the_next_entrys_texture_unit() {
         "testbed",
         "-j",
         "1",
-        "b3_sampler_active",
-        "b3_sampler_seed",
-        "b3_sampler_probe",
+        "testbed::b3_sampler_active",
+        "testbed::b3_sampler_seed",
+        "testbed::b3_sampler_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -1920,7 +1920,7 @@ fn a_predecessors_sampler_does_not_reach_the_next_entrys_texture_unit() {
 #[test]
 fn a_predecessors_gl_write_state_does_not_reach_the_next_entry() {
     let (ok, stdout, stderr) = run_rock_status(&[
-        "sim", "testbed", "-j", "1", "b3_ws_active", "b3_ws_seed", "b3_ws_probe",
+        "sim", "testbed", "-j", "1", "testbed::b3_ws_active", "testbed::b3_ws_seed", "testbed::b3_ws_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -1950,7 +1950,7 @@ fn a_predecessors_gl_write_state_does_not_reach_the_next_entry() {
 #[test]
 fn a_predecessors_canvas_narrowing_does_not_reach_the_next_entry() {
     let (ok, stdout, stderr) = run_rock_status(&[
-        "sim", "testbed", "-j", "1", "b3_car_active", "b3_car_seed", "b3_car_probe",
+        "sim", "testbed", "-j", "1", "testbed::b3_car_active", "testbed::b3_car_seed", "testbed::b3_car_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -1973,7 +1973,7 @@ fn a_predecessors_canvas_narrowing_does_not_reach_the_next_entry() {
 #[test]
 fn a_boot_narrowed_canvas_refuses_the_worker_and_names_itself() {
     let (ok, stdout, stderr) = run_rock_status(&[
-        "sim", "testbed", "-j", "1", "b3_car_boot_narrowed", "b3_car_boot_narrowed_follows",
+        "sim", "testbed", "-j", "1", "testbed::b3_car_boot_narrowed", "testbed::b3_car_boot_narrowed_follows",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2009,9 +2009,9 @@ fn the_rust_loggers_dedup_does_not_suppress_the_next_entrys_warning() {
         "testbed",
         "-j",
         "1",
-        "b3_log_dedup_active",
-        "b3_log_dedup_seed",
-        "b3_log_dedup_probe",
+        "testbed::b3_log_dedup_active",
+        "testbed::b3_log_dedup_seed",
+        "testbed::b3_log_dedup_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2038,8 +2038,8 @@ fn an_entry_created_mpv_target_is_torn_down_without_costing_the_worker() {
         "testbed",
         "-j",
         "1",
-        "b3_mpv_entry_only",
-        "b3_mpv_entry_only_follows",
+        "testbed::b3_mpv_entry_only",
+        "testbed::b3_mpv_entry_only_follows",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2065,8 +2065,8 @@ fn a_boot_owned_mpv_target_refuses_the_worker_and_names_itself() {
         "testbed",
         "-j",
         "1",
-        "b3_mpv_boot_live",
-        "b3_mpv_boot_follows",
+        "testbed::b3_mpv_boot_live",
+        "testbed::b3_mpv_boot_follows",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2109,9 +2109,9 @@ fn a_boot_image_does_not_carry_its_texture_across_the_boundary() {
         "testbed",
         "-j",
         "1",
-        "b3_img_active",
-        "b3_img_seed",
-        "b3_img_probe",
+        "testbed::b3_img_active",
+        "testbed::b3_img_seed",
+        "testbed::b3_img_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2147,8 +2147,8 @@ fn a_boot_image_data_does_not_carry_its_pixels_across_the_boundary() {
         "testbed",
         "-j",
         "1",
-        "b3_image_data_seed",
-        "b3_image_data_probe",
+        "testbed::b3_image_data_seed",
+        "testbed::b3_image_data_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2182,9 +2182,9 @@ fn a_boot_shader_does_not_carry_its_uniform_values_across_the_boundary() {
         "testbed",
         "-j",
         "1",
-        "b3_su_active",
-        "b3_su_seed",
-        "b3_su_probe",
+        "testbed::b3_su_active",
+        "testbed::b3_su_seed",
+        "testbed::b3_su_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2218,9 +2218,9 @@ fn a_boot_shader_does_not_carry_its_uniform_block_bytes_across_the_boundary() {
         "testbed",
         "-j",
         "1",
-        "b3_ub_active",
-        "b3_ub_seed",
-        "b3_ub_probe",
+        "testbed::b3_ub_active",
+        "testbed::b3_ub_seed",
+        "testbed::b3_ub_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2257,9 +2257,9 @@ fn a_successor_entry_draws_with_boots_gl_blend_state() {
         "testbed",
         "-j",
         "1",
-        "b3_blend_control",
-        "b3_blend_seed",
-        "b3_blend_probe",
+        "testbed::b3_blend_control",
+        "testbed::b3_blend_seed",
+        "testbed::b3_blend_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2291,9 +2291,9 @@ fn a_successor_entry_presents_through_boots_letterbox_rect() {
         "testbed",
         "-j",
         "1",
-        "b3pv_control",
-        "b3pv_seed",
-        "b3pv_probe",
+        "testbed::b3pv_control",
+        "testbed::b3pv_seed",
+        "testbed::b3pv_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2325,9 +2325,9 @@ fn a_successor_entry_points_at_boots_cursor() {
         "testbed",
         "-j",
         "1",
-        "b3c_control",
-        "b3c_seed",
-        "b3c_probe",
+        "testbed::b3c_control",
+        "testbed::b3c_seed",
+        "testbed::b3c_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2359,9 +2359,9 @@ fn a_successor_entry_mixes_with_boots_audio_ambient() {
         "testbed",
         "-j",
         "1",
-        "b3a_seed",
-        "b3a_probe",
-        "b3a_control",
+        "testbed::b3a_seed",
+        "testbed::b3a_probe",
+        "testbed::b3a_control",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2389,7 +2389,7 @@ fn a_successor_entry_mixes_with_boots_audio_ambient() {
 /// trio above, which asserts it shares one process.
 #[test]
 fn the_audio_row_records_under_the_stub_because_its_state_is_real() {
-    let (ok, stdout, stderr) = run_rock_status(&["sim", "testbed", "b3a_stub_recorded"]);
+    let (ok, stdout, stderr) = run_rock_status(&["sim", "testbed", "testbed::b3a_stub_recorded"]);
     let all = format!("{stdout}{stderr}");
     assert!(ok, "the stub's ambient answer must be green:\n{all}");
 }
@@ -2412,8 +2412,8 @@ fn a_block_boot_filled_takes_the_worker_off_the_table() {
         "testbed",
         "-j",
         "1",
-        "b3_ub_boot_filled",
-        "b3_ub_boot_filled_follows",
+        "testbed::b3_ub_boot_filled",
+        "testbed::b3_ub_boot_filled_follows",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2449,9 +2449,9 @@ fn a_boot_mesh_does_not_carry_its_instance_buffer_across_the_boundary() {
         "testbed",
         "-j",
         "1",
-        "b3_mesh_active",
-        "b3_mesh_seed",
-        "b3_mesh_probe",
+        "testbed::b3_mesh_active",
+        "testbed::b3_mesh_seed",
+        "testbed::b3_mesh_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2482,9 +2482,9 @@ fn a_boot_font_does_not_carry_its_atlas_across_the_boundary() {
         "testbed",
         "-j",
         "1",
-        "b3_font_active",
-        "b3_font_seed",
-        "b3_font_probe",
+        "testbed::b3_font_active",
+        "testbed::b3_font_seed",
+        "testbed::b3_font_probe",
     ]);
     let all = format!("{stdout}{stderr}");
 
@@ -2719,8 +2719,8 @@ fn a_named_subset_is_the_same_gate_and_still_crosses_a_worker_boundary() {
         "sim",
         "testbed",
         "--multi-order",
-        "b0_leak_seed",
-        "b0_leak_probe",
+        "testbed::b0_leak_seed",
+        "testbed::b0_leak_probe",
     ]);
 
     assert!(
@@ -2747,14 +2747,14 @@ fn a_named_subset_is_the_same_gate_and_still_crosses_a_worker_boundary() {
 #[test]
 fn a_subset_refuses_a_name_it_cannot_measure() {
     let (ok, _, stderr) =
-        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "no_such_sim"]);
+        run_rock_status(&["sim", "testbed", "--multi-order", "testbed::b0_leak_seed", "no_such_sim"]);
     assert!(!ok, "an unknown name must not run the gate over the ones that matched");
     assert!(stderr.contains("no_such_sim"), "the refusal names the offender:\n{stderr}");
 
     let (ok, _, stderr) =
-        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "b0_leak_seed"]);
+        run_rock_status(&["sim", "testbed", "--multi-order", "testbed::b0_leak_seed", "testbed::b0_leak_seed"]);
     assert!(!ok, "a repeated name has one reference record and must refuse");
-    assert!(stderr.contains("b0_leak_seed"), "the refusal names the offender:\n{stderr}");
+    assert!(stderr.contains("testbed::b0_leak_seed"), "the refusal names the offender:\n{stderr}");
 }
 
 /// The wall-clock timeout is the WEDGED-CHILD guard, so it bounds an entry,
@@ -2780,7 +2780,7 @@ fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
     // every single entry fits with room to spare.
     unsafe { std::env::set_var(VAR, "12") };
 
-    let records = run_worker_suite(Backend::Skull, "testbed", &vec!["b2_slow_entry".to_string(); 3])
+    let records = run_worker_suite(Backend::Skull, "testbed", &vec!["testbed::b2_slow_entry".to_string(); 3])
         .expect("the suite call itself must not error");
     assert_eq!(records.len(), 3);
     let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
@@ -2813,9 +2813,9 @@ fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
 /// a fresh process and passes with the restore deleted (measured).
 #[test]
 fn a_boot_owned_task_is_restored_and_still_polled_in_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_boot_task_seed"], "b0_boot_task_probe");
+    let (isolated, worker) = differential(&["testbed::b0_boot_task_seed"], "testbed::b0_boot_task_probe");
     let c = compare(&isolated, &worker);
-    assert_equivalent("b0_boot_task_probe", &c);
+    assert_equivalent("testbed::b0_boot_task_probe", &c);
 
     assert_eq!(isolated.seq, 0, "the isolated arm is a one-entry queue");
     assert!(

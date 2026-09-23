@@ -147,14 +147,14 @@ fn peak_procs(trace: &str) -> (usize, usize) {
 /// `--workers` puts all eight in ONE group and the only thing that can split
 /// them into concurrent processes is the `-j` composition.
 const EIGHT: [&str; 8] = [
-    "co_join2_tuple",
-    "co_join3_tuple",
-    "co_join_all_list",
-    "co_field_poller",
-    "co_wait_for_result",
-    "b0_leak_probe",
-    "b0_rng_probe",
-    "b0_static_called_probe",
+    "testbed::co_join2_tuple",
+    "testbed::co_join3_tuple",
+    "testbed::co_join_all_list",
+    "testbed::co_field_poller",
+    "testbed::co_wait_for_result",
+    "testbed::b0_leak_probe",
+    "testbed::b0_rng_probe",
+    "testbed::b0_static_called_probe",
 ];
 
 /// The composition itself: eight entries of one boot signature under `-j 4`
@@ -193,10 +193,10 @@ fn several_booted_workers_run_at_once() {
 #[test]
 fn small_signature_groups_do_not_buy_singleton_boots() {
     let specs = [
-        "b0_budget_pred",
-        "b0_budget_probe",
-        "b0_env_pred",
-        "b0_env_probe",
+        "testbed::b0_budget_pred",
+        "testbed::b0_budget_probe",
+        "testbed::b0_env_pred",
+        "testbed::b0_env_probe",
     ];
     let run = run_workers(&specs, "4");
     assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
@@ -265,8 +265,8 @@ fn omitted_skip_render_shares_with_explicit_default() {
 #[test]
 fn world_restore_does_not_leave_keyframes_in_the_successor() {
     let run = run_workers(&[
-        "scene_owned_task_survives_world_image_restore",
-        "t1a_worker_registries_stay_bounded",
+        "testbed::scene_owned_task_survives_world_image_restore",
+        "testbed::t1a_worker_registries_stay_bounded",
     ], "1");
     assert!(run.success, "the successor owns only its boot state:\n{}", run.combined());
     assert!(run.stdout.contains("[sim] 2/2 sims passed"), "{}", run.combined());
@@ -405,12 +405,12 @@ fn one_job_still_runs_one_worker_at_a_time() {
 #[test]
 fn a_dead_worker_does_not_reach_another_lane() {
     let specs = [
-        "b2_crash_head,b2_crash_tail",
-        "b0_leak_probe",
-        "co_join2_tuple",
-        "co_join3_tuple",
-        "co_join_all_list",
-        "co_field_poller",
+        "testbed::b2_crash_head,testbed::b2_crash_tail",
+        "testbed::b0_leak_probe",
+        "testbed::co_join2_tuple",
+        "testbed::co_join3_tuple",
+        "testbed::co_join_all_list",
+        "testbed::co_field_poller",
     ];
     let run = run_workers(&specs, "3");
     let combined = run.combined();
@@ -420,14 +420,14 @@ fn a_dead_worker_does_not_reach_another_lane() {
         "the crash entry fails, so the invocation fails:\n{combined}"
     );
     // The neighbours are the point: each keeps its own PASS record.
-    for name in ["b0_leak_probe", "co_join2_tuple", "co_join3_tuple", "co_join_all_list", "co_field_poller"] {
+    for name in ["testbed::b0_leak_probe", "testbed::co_join2_tuple", "testbed::co_join3_tuple", "testbed::co_join_all_list", "testbed::co_field_poller"] {
         assert!(
             combined.contains(&format!("{name}: PASS")),
             "`{name}` shares no process with the crash and must still pass:\n{combined}"
         );
     }
     assert!(
-        run.stdout.contains("[sim] 5/6 sims passed -- FAILED: b2_crash_head,b2_crash_tail"),
+        run.stdout.contains("[sim] 5/6 sims passed -- FAILED: testbed::b2_crash_head,testbed::b2_crash_tail"),
         "exactly the crash entry fails, and it is the one named:\n{}",
         run.stdout
     );
@@ -441,7 +441,7 @@ fn a_dead_worker_does_not_reach_another_lane() {
 /// the shipped bound-callee emission shape.
 #[test]
 fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
-    const RELOAD: &str = "reload_probe";
+    const RELOAD: &str = "testbed::reload_probe";
     let dir = tempfile::tempdir().expect("trace tempdir");
     let trace_path = dir.path().join("lifecycle.log");
     let mut args = vec!["sim", "testbed", RELOAD];
@@ -502,7 +502,7 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
 /// be the reporting order.
 #[test]
 fn results_stay_positional_and_ordered_under_the_pool() {
-    let specs = ["b0_rng_probe", "b0_leak_probe", "b0_rng_probe", "co_join2_tuple"];
+    let specs = ["testbed::b0_rng_probe", "testbed::b0_leak_probe", "testbed::b0_rng_probe", "testbed::co_join2_tuple"];
     let run = run_workers(&specs, "4");
     assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
     assert!(
@@ -511,17 +511,17 @@ fn results_stay_positional_and_ordered_under_the_pool() {
         run.stdout
     );
     assert_eq!(
-        run.stderr.matches("b0_rng_probe: PASS").count(),
+        run.stderr.matches("testbed::b0_rng_probe: PASS").count(),
         2,
         "the duplicated spec owns two records:\n{}",
         run.stderr
     );
 
-    let order: Vec<&str> = run
-        .stderr
+    let combined = run.combined();
+    let order: Vec<&str> = combined
         .lines()
         .filter_map(|l| l.strip_prefix("[sim] "))
-        .filter_map(|l| l.split_once(':'))
+        .filter_map(|l| l.rsplit_once(':'))
         .map(|(name, _)| name)
         .filter(|n| specs.contains(n))
         .collect();
@@ -529,7 +529,7 @@ fn results_stay_positional_and_ordered_under_the_pool() {
         order,
         specs.to_vec(),
         "records are emitted in spec order:\n{}",
-        run.stderr
+        combined
     );
 }
 
@@ -643,7 +643,7 @@ fn a_visual_bank_writer_leaves_the_tracked_bank() {
 
 #[test]
 fn jit_boot_mode_enabled_is_restored_between_entries() {
-    let run = run_workers(&["b0_jit_on_seed", "b0_jit_on_probe"], "1");
+    let run = run_workers(&["testbed::b0_jit_on_seed", "testbed::b0_jit_on_probe"], "1");
     assert_eq!(peak_procs(&run.trace), (1, 1), "must share one boot:\n{}", run.combined());
     assert!(run.success, "JIT boot mode must survive a predecessor toggle:\n{}", run.combined());
     assert!(run.stdout.contains("[sim] 2/2 sims passed"), "{}", run.combined());
@@ -651,7 +651,7 @@ fn jit_boot_mode_enabled_is_restored_between_entries() {
 
 #[test]
 fn jit_boot_mode_explicitly_disabled_is_restored_between_entries() {
-    let run = run_workers(&["b0_jit_off_seed", "b0_jit_off_probe"], "1");
+    let run = run_workers(&["testbed::b0_jit_off_seed", "testbed::b0_jit_off_probe"], "1");
     assert_eq!(peak_procs(&run.trace), (1, 1), "must share one boot:\n{}", run.combined());
     assert!(run.success, "explicit JIT-off boot policy must survive a predecessor toggle:\n{}", run.combined());
     assert!(run.stdout.contains("[sim] 2/2 sims passed"), "{}", run.combined());

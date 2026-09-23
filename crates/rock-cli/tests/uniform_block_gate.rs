@@ -77,7 +77,7 @@ fn run_sim(name: &str, force_unfilled: bool) -> (String, bool) {
 /// PASS, or the injected failure would say nothing about the injection.
 #[test]
 fn one_frame_stop_sim_still_sees_its_own_frames_draws() {
-    let (control, control_ok) = run_sim("b3_stop_after_one_frame", false);
+    let (control, control_ok) = run_sim("testbed::b3_stop_after_one_frame", false);
     assert!(
         control_ok,
         "control run must pass -- testbed fills every block it registers.\n{control}"
@@ -87,7 +87,7 @@ fn one_frame_stop_sim_still_sees_its_own_frames_draws() {
         "control run reported an unfilled block, so the injected run proves nothing.\n{control}"
     );
 
-    let (injected, injected_ok) = run_sim("b3_stop_after_one_frame", true);
+    let (injected, injected_ok) = run_sim("testbed::b3_stop_after_one_frame", true);
     assert!(
         !injected_ok,
         "a one-frame sim whose only frame drew unfilled blocks must FAIL.\n{injected}"

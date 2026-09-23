@@ -31,8 +31,8 @@ fn ordinary_shared_worker_run_writes_validated_lifecycle() {
         .args([
             "sim",
             "testbed",
-            "co_join2_tuple",
-            "co_join3_tuple",
+            "testbed::co_join2_tuple",
+            "testbed::co_join3_tuple",
             "--workers",
             "-j",
             "1",
@@ -71,7 +71,7 @@ fn ordinary_shared_worker_run_writes_validated_lifecycle() {
 fn single_name_preserves_requested_and_effective_mode_metadata() {
     let root = tempfile::tempdir().expect("record root");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args(["sim", "testbed", "co_join2_tuple", "--workers", "-j", "4"])
+        .args(["sim", "testbed", "testbed::co_join2_tuple", "--workers", "-j", "4"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
@@ -101,8 +101,8 @@ fn recovery_record_keeps_actual_worker_failure_and_occurrences() {
         .args([
             "sim",
             "testbed",
-            "b2_crash_head,b2_crash_tail",
-            "b0_leak_probe",
+            "testbed::b2_crash_head,testbed::b2_crash_tail",
+            "testbed::b0_leak_probe",
             "--workers",
             "-j",
             "1",
@@ -160,9 +160,9 @@ fn native_refusal_recovery_keeps_cause_and_responsible_entry() {
         .args([
             "sim",
             "testbed",
-            "b3_canvas_head",
-            "b3_canvas_seed",
-            "b3_canvas_probe",
+            "testbed::b3_canvas_head",
+            "testbed::b3_canvas_seed",
+            "testbed::b3_canvas_probe",
             "--workers",
             "-j",
             "1",
@@ -215,14 +215,14 @@ fn quiet_handled_error_still_writes_terminal_record() {
 fn concurrent_invocations_keep_independent_histories() {
     let root = tempfile::tempdir().expect("record root");
     let first = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args(["sim", "testbed", "co_join2_tuple"])
+        .args(["sim", "testbed", "testbed::co_join2_tuple"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
         .spawn()
         .expect("spawn first invocation");
     let second = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args(["sim", "testbed", "co_join3_tuple"])
+        .args(["sim", "testbed", "testbed::co_join3_tuple"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")

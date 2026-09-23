@@ -345,9 +345,7 @@ fn global_initializer_observes_imgui_before_game_code() {
     // (`__IMGUI_PRELUDE_READY_<digest>`); the call is what orders.
     let ready = ginit_call(&emitted, "__skull_ginit___IMGUI_PRELUDE_READY")
         .expect("Rock cimgui initializer must be emitted");
-    let game_init = emitted
-        .find("__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION())")
-        .or_else(|| emitted.find("CIMG_UI_GLOBAL_INIT_VERSION = __skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION()"))
+    let game_init = ginit_call(&emitted, "__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION")
         .expect("fixture global initializer must be emitted");
     assert!(
         ready < game_init,
@@ -359,7 +357,7 @@ fn global_initializer_observes_imgui_before_game_code() {
         .args([
             "sim",
             "games/testbed",
-            "cimgui_global_init_order",
+            "testbed::cimgui_global_init_order",
             "--jobs",
             "1",
         ])
@@ -370,7 +368,7 @@ fn global_initializer_observes_imgui_before_game_code() {
     text.push_str(&String::from_utf8_lossy(&result.stderr));
     assert!(result.status.success(), "global-init sim failed:\n{text}");
     assert!(
-        text.contains("cimgui_global_init_order"),
+        text.contains("testbed::cimgui_global_init_order"),
         "sim result missing:\n{text}"
     );
 }

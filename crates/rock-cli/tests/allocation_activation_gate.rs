@@ -183,7 +183,7 @@ fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
         .current_dir(repo_root())
         .args(["sim", "--allocation-sites"])
         .arg(&heatmap)
-        .args(["testbed", "sim_allocation_allocating", "sim_allocation_control"])
+        .args(["testbed", "testbed::sim_allocation_allocating", "testbed::sim_allocation_control"])
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
         .output()
         .expect("spawn allocation-site sim matrix");
