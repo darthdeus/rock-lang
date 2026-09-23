@@ -50,7 +50,7 @@ fn uniform_values_expands_to_canonical_leaves() {
     }
     for variant in ["Float", "Bool", "Int", "Uint"] {
         assert!(
-            body.contains(&format!("__variant = \"{variant}\"")),
+            body.contains(&format!("__variant = (\"{variant}\")")),
             "canonical `{variant}` leaf was not built:\n{body}"
         );
     }

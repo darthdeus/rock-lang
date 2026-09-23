@@ -710,15 +710,7 @@ impl Builder<'_> {
 
         let mut tuples = Vec::with_capacity(fields.len());
         for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
-            let payload = self.pack(parts[i].clone())?;
-            // The pairs enum is table-backed when any payload is non-scalar, so a
-            // `nobox` payload has nowhere to live but a box -- the same boundary
-            // `uniform(x: Vec2)` marks with an explicit `materialize`. Here the
-            // compiler mints the box itself and there is no source line to mark,
-            // so it mints the AUTHORIZED one rather than rejecting a program the
-            // hand-written overload accepts.
-            self.authorize_nobox_box(payload);
-            let variant_v = self.make_single_payload_variant(enum_name, variant, payload)?;
+            let variant_v = self.make_single_payload_variant(enum_name, variant, parts[i].clone())?;
             let key = self.emit_cur(Inst::Const(Lit::Str(*field)));
             let tup = self.emit_cur(Inst::MakeTuple(vec![key, variant_v]));
             tuples.push(tup);
@@ -1046,7 +1038,7 @@ impl Builder<'_> {
                 | crate::gpu_layout::WireKind::F32x4
                 | crate::gpu_layout::WireKind::Mat4 => packet.float_variant,
             };
-            canonical.push(self.make_single_payload_variant(packet.leaf_enum, variant, leaf)?);
+            canonical.push(self.make_single_payload_variant(packet.leaf_enum, variant, ValueRepr::Scalar(leaf))?);
         }
         let fingerprint = self.emit_cur(Inst::Const(Lit::Int(
             crate::shader_ir::semantic_uniform_group_fingerprint(struct_name, &members) as i64,
@@ -1112,16 +1104,28 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(v))
     }
 
-    /// Construct `enum_name::variant(payload)` for a variant with a single
-    /// positional payload, mirroring [`Self::lower_enum_variant`]'s
-    /// representation choice (cdata `<Enum>_ct` when the enum is cdata-eligible,
-    /// else the boxed `{__variant}` table).
+    /// Construct `enum_name::variant(payload)` for a compiler-built variant with
+    /// a single positional payload, through the same representation a source
+    /// ctor takes: cdata `<Enum>_ct` when the enum is cdata-eligible, the flat
+    /// cells (a scalarizable payload spread into its slots) when it is flat.
     pub(crate) fn make_single_payload_variant(
         &mut self,
         enum_name: Ustr,
         variant: Ustr,
-        payload: Idx<Inst>,
+        payload: ValueRepr,
     ) -> Result<Idx<Inst>, CompilerError> {
+        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.flat().cloned()) {
+            let cells = self.flat_ctor_cells(&shape, variant, vec![FlatPayload::Repr(payload)], Vec::new())?;
+            let r = self.flat_cells_to_repr(&shape, cells);
+            return self.pack(r);
+        }
+        // A payload the enum cannot hold unboxed has nowhere to live but a box --
+        // the same boundary `uniform(x: Vec2)` marks with an explicit
+        // `materialize`. The compiler mints this box itself and there is no
+        // source line to mark, so it mints the AUTHORIZED one rather than
+        // rejecting a program the hand-written overload accepts.
+        let payload = self.pack(payload)?;
+        self.authorize_nobox_box(payload);
         if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
             let tag = shape
                 .tag_of(variant)
