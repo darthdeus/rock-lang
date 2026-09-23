@@ -78,7 +78,7 @@ impl Builder<'_> {
                     let leaves = match arg {
                         FlatPayload::Expr(a) => {
                             let r = self.lower_expr_repr(a)?;
-                            self.repr_to_leaves_bundle(&r)?
+                            self.repr_to_storage_leaves(&r, &vs, "flat enum payload")?
                         }
                         FlatPayload::Repr(r) => self.repr_to_leaves_shape(&r, &vs)?,
                     };

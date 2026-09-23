@@ -403,9 +403,9 @@ impl Builder<'_> {
                 // alloc); a scalar/non-flat value stays a single packed value.
                 let values: Vec<Idx<Inst>> = match opt {
                     Some(eb) => match self.flat_enum_value_shape_of(eb)? {
-                        Some(_shape) => {
+                        Some(shape) => {
                             let r = self.lower_expr_repr(eb)?;
-                            self.repr_to_leaves_bundle(&r)?
+                            self.repr_to_storage_leaves(&r, &shape, "flat enum yield")?
                         }
                         None => vec![self.lower_expr(eb)?],
                     },
