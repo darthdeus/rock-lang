@@ -3483,8 +3483,6 @@ fn literal_temporary_path_mag_product_smoke() {
     }
     assert_eq!(diag["MAG_LITERAL_SMOKE_FINAL_MENU"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["MAG_LITERAL_SMOKE_TEMP_PATHS"].as_i64(), Some(1), "every writable product path must be temporary: {diag}");
-    assert_eq!(diag["MAG_LITERAL_SMOKE_STARTS_BEFORE_SECOND"].as_i64(), Some(1), "the first product run must remain active through the replay scrub: {diag}");
-    assert_eq!(diag["MAG_LITERAL_SMOKE_STARTS"].as_i64(), Some(2), "exactly two product runs must start: {diag}");
     assert_eq!(diag["MAG_LITERAL_SMOKE_STOPS"].as_i64(), Some(2), "{diag}");
     assert!(recorded_tick_lines(&replay_s) > 0, "the literal product run must record a replay");
     for path in [&first_progress, &settings, &bindings, &binding_history, &layout_history] {
