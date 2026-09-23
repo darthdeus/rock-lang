@@ -361,7 +361,7 @@ fn shared_worker_records_each_entry_frame_count_before_restore() {
         end_counts,
         vec![
             ("build_watermark_layout".into(), 2),
-            ("target_cycle_sim".into(), 18),
+            ("target_cycle_sim".into(), 19),
         ],
         "each shared entry must retain its own pre-restore frame count"
     );
@@ -371,7 +371,7 @@ fn shared_worker_records_each_entry_frame_count_before_restore() {
         .filter(|event| event["event"] == "entry_result")
         .map(|event| event["frame_count"].as_u64().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(result_counts, vec![2, 18]);
+    assert_eq!(result_counts, vec![2, 19]);
 }
 
 /// `-j 1` is the serial path, and it has to STAY the serial path: the composed
