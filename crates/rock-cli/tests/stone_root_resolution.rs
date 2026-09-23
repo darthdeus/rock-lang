@@ -122,6 +122,27 @@ fn package_tests_receive_the_injected_stone_root() {
 }
 
 #[test]
+fn transitive_stone_dependency_injects_root_for_library_tests() {
+    let repo = root();
+    let library = repo.join("libs/idle-reference");
+    let result = Command::new(rock_bin())
+        .current_dir(&repo)
+        .args(["test", library.to_str().unwrap(), "--test-threads", "1"])
+        .output()
+        .expect("run library tests with transitive Stone dependency");
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        result.status.success(),
+        "library tests with a transitive Stone dependency must receive its source root\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("78/78 @tests passed"),
+        "the library's tests must execute, not merely emit successfully:\n{stdout}"
+    );
+}
+
+#[test]
 fn projects_without_stone_do_not_receive_an_invented_root() {
     let repo = root();
     std::fs::create_dir_all(repo.join("tmp")).unwrap();

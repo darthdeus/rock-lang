@@ -3016,22 +3016,17 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
 
 fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let Some((config_path, config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
+    let Some((config_path, _config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
         return Ok(None);
     };
-    if !config.dependencies.contains_key("stone") {
-        return Ok(None);
-    }
     let manifest_dir = config_path.parent().unwrap_or(&config_path);
     let graph = rock_host::stick::graph::PackageGraph::build(manifest_dir)?;
-    let root_node = graph.package(graph.root());
-    let edge = root_node
-        .dependencies
+    let root = graph.root();
+    Ok(graph
+        .packages()
         .iter()
-        .find(|edge| edge.declared_key == "stone")
-        .ok_or_else(|| anyhow::anyhow!("Stone dependency is declared but could not be resolved"))?;
-    let stone_root = graph.package(edge.target).root.clone();
-    Ok(Some(stone_root))
+        .find(|package| package.id != root && package.manifest_name == "stone")
+        .map(|package| package.root.clone()))
 }
 
 fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {
