@@ -928,14 +928,35 @@ mod tests {
 
     #[test]
     fn leading_operator_continues_across_newline() {
-        // An unambiguous binary op on a fresh line continues the expression,
-        // even inside a `{ }` block -- matching rock's newline rule.
+        // A binary op on a fresh line continues the expression, even inside a
+        // `{ }` block. Minus follows the same rule as plus once there is a
+        // left operand.
         let src = "fn f() {\n    foo(a\n        + b\n        + c)\n}";
-        let ast = parse_module(src, Ustr::from("test.rock")).unwrap();
+        let ast = parse_module_clean(src, Ustr::from("test.rock")).unwrap();
         let ItemKind::Function(f) = &ast.items[0].kind else {
             panic!()
         };
         assert_eq!(ast.block_sexp(f.body.rock_block().unwrap()), "(block (call foo (+ (+ a b) c)))");
+
+        let src = "fn f() {\n    let x = 10.0\n        - 1.0\n    return x\n        - 2.0\n}";
+        let ast = parse_module_clean(src, Ustr::from("test.rock")).unwrap();
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            ast.block_sexp(f.body.rock_block().unwrap()),
+            "(block (let x () (- 10 1)) (return (- x 2)))"
+        );
+
+        let src = "fn f() {\n    abs(a\n        - b)\n    pair(a,\n        -b)\n}";
+        let ast = parse_module_clean(src, Ustr::from("test.rock")).unwrap();
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            ast.block_sexp(f.body.rock_block().unwrap()),
+            "(block (call abs (- a b)) (call pair a (- b)))"
+        );
     }
 
     /// Parse a single-item module and return (item-0 fn name, body s-expr).
