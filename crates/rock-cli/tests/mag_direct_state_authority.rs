@@ -364,12 +364,12 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "global tutorial_space:".to_string(),
         "global tutorial_space_ready:".to_string(),
         "fn tutorial_reset(".to_string(),
+        "global MAG_PROGRESS:".to_string(),
+        "global MAG_QUEST_RUNTIME:".to_string(),
     ];
     let required = [
-        "global MAG_PROGRESS: ProgressState",
         "global MAG_JOURNAL: JournalState",
         "global MAG_INTERACTION: InteractionState",
-        "global MAG_QUEST_RUNTIME: QuestRuntimeState",
         "global MAG_RUN_UI: RunUiState",
         "global history: [SnapshotHistoryNode]",
         "global MAG_ACTIVE_WORLD: Scene<WorldState>?",
@@ -711,20 +711,28 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     }
 
     let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
-    assert_eq!(
-        run.matches("MAG_PROGRESS = ProgressState {}").count(),
-        1,
-        "run reset must replace the complete progress domain exactly once"
-    );
+    let world_levels = fs::read_to_string(repo.join("mag/world_levels.rock"))
+        .expect("read MAG world source");
+    for (constructed, domain) in [
+        ("progress: ProgressState {},", "progress"),
+        ("quest_runtime: QuestRuntimeState {},", "quest runtime"),
+    ] {
+        assert_eq!(
+            world_levels.matches(constructed).count(),
+            1,
+            "each new world must construct its own {domain} domain exactly once"
+        );
+    }
+    for stale in ["ProgressState {}", "quest_runtime_reset()"] {
+        assert!(
+            !run.contains(stale),
+            "run reset still replaces world-owned state with `{stale}`"
+        );
+    }
     assert_eq!(
         run.matches("MAG_INTERACTION = InteractionState {}").count(),
         1,
         "run reset must replace the complete interaction domain exactly once"
-    );
-    assert_eq!(
-        run.matches("quest_runtime_reset()").count(),
-        1,
-        "run reset must use the quest runtime's shared reset authority exactly once"
     );
     assert_eq!(
         run.matches("run_ui_reset()").count(),
@@ -760,7 +768,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         );
     }
     assert_eq!(
-        quests.matches("MAG_QUEST_RUNTIME = QuestRuntimeState {}").count(),
+        quests.matches(".quest_runtime = QuestRuntimeState {}").count(),
         1,
         "quest runtime reset must replace the complete domain exactly once"
     );
@@ -854,10 +862,10 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         .expect("read MAG asynchronous save source");
     assert_eq!(
         async_save
-            .matches("save_async_metadata(world, player, MAG_PROGRESS")
+            .matches("save_async_metadata(world, player,")
             .count(),
         2,
-        "both persistence paths must pass the owning world and progress domain"
+        "both persistence paths must pass the world that owns the progress domain"
     );
     assert!(
         save.contains("fn Player.save_progress_migration(player, progress: ProgressState,"),
@@ -866,7 +874,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for (line_number, line) in save.lines().enumerate() {
         if line.contains("save_progress(player") && !line.contains("fn Player.save_progress") {
             assert!(
-                line.contains("save_progress(player, MAG_PROGRESS")
+                line.contains("save_progress(player, world.progress")
                     || line.contains("save_progress(player, progress,"),
                 "save caller at mag/save.rock:{} bypasses the progress domain: {line}",
                 line_number + 1
@@ -1034,7 +1042,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 29, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 31, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
