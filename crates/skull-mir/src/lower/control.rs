@@ -198,9 +198,11 @@ impl Builder<'_> {
                         && flat_enum_equality_is_leafwise(self.ws, lhs_shape.name)
                     {
                         let lhs_repr = self.lower_expr_repr(lhs)?;
-                        let lhs_leaves = self.repr_to_leaves_bundle(&lhs_repr)?;
+                        let lhs_leaves =
+                            self.repr_to_storage_leaves(&lhs_repr, &lhs_shape, "flat enum equality")?;
                         let rhs_repr = self.lower_expr_repr(rhs)?;
-                        let rhs_leaves = self.repr_to_leaves_bundle(&rhs_repr)?;
+                        let rhs_leaves =
+                            self.repr_to_storage_leaves(&rhs_repr, &rhs_shape, "flat enum equality")?;
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal

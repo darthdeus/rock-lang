@@ -19,9 +19,9 @@ fn f() -> string {
     let noted = !operand
               //^ string
                //^ PrefixOperand
-    -PrefixOperand { value: 1 }
-  //^ float
-   //^ PrefixOperand
+    let _ = -PrefixOperand { value: 1 }
+          //^ float
+           //^ PrefixOperand
     !PrefixOperand { value: 1 }
   //^ string
    //^ PrefixOperand

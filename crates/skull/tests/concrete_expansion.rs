@@ -166,7 +166,7 @@ fn generic_struct_wrapper_uses_the_reached_concrete_instance() {
         !crate::common::definitions_matching(&lua, "wrapped_").is_empty(),
         "no retained concrete wrapper body"
     );
-    assert!(lua.contains("__variant = \"F\""), "no concrete struct expansion was emitted:\n{lua}");
+    assert!(lua.contains("__variant = (\"F\")"), "no concrete struct expansion was emitted:\n{lua}");
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "generic_struct_expand"), "1");
 }
 

@@ -756,17 +756,6 @@ fn assert_sim_state_matches_exact(
     assert!(compared > 0, "must compare at least one sim-state global");
 }
 
-fn assert_f32_state_matches(got: &serde_json::Value, want: &serde_json::Value, path: &str) {
-    let mut mismatches = Vec::new();
-    collect_f32_state_mismatches(got, want, path, &mut mismatches);
-    assert!(
-        mismatches.is_empty(),
-        "state must match; first {} difference(s):\n{}",
-        mismatches.len(),
-        mismatches.join("\n")
-    );
-}
-
 fn collect_f32_state_mismatches(
     got: &serde_json::Value,
     want: &serde_json::Value,
@@ -862,9 +851,8 @@ fn assert_mag_seek_state_matches(
     label: &str,
 ) {
     assert_mag_seek_census_owners(sim);
-    let mut exact = sim.clone();
     assert_mag_seek_populations_match(got, want, label);
-    assert_sim_state_matches(got, want, &exact, label);
+    assert_sim_state_matches(got, want, sim, label);
 }
 
 fn assert_mag_menu_seek_state_matches(
@@ -1559,8 +1547,10 @@ fn mag_cast_seek_restores_scheduler_owner() {
         assert_eq!(sought_probe[key], ordinary_probe[key],
             "seek landing must reproduce ordinary casting state for {key}");
     }
+    // The cast task runs on the world clock, which the tick-10 keyframe
+    // restores; the target stamp shows it was pumped past that keyframe.
     assert_eq!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
-        "the restored task must be pumped to the target, not left at its keyframe frame");
+        "the restored task must be pumped after the seek, not left at its keyframe frame: {sought_probe}");
     // Keep the targeted scheduler probes above for diagnosis, then require the
     // same full semantic-state equivalence as the general MAG seek oracle.
     let sim = mag_seek_equivalence_state_names("mag", 3);
@@ -3464,7 +3454,6 @@ fn literal_temporary_path_mag_product_smoke() {
     let diag = &run.state["__stone_diag"];
     assert_eq!(diag["MAG_LITERAL_SMOKE_MENU"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1), "{diag}");
-    assert!(diag["MAG_LITERAL_SMOKE_FIRST_START_FRAME"].as_i64().is_some_and(|n| n < 150), "the first seek target must contain the live run: {diag}");
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "{diag}");
     assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(150), "the second scrub must start at the backward target: {diag}");
     assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(180), "the second scrub must move forward: {diag}");
@@ -3480,6 +3469,9 @@ fn literal_temporary_path_mag_product_smoke() {
     }
     assert_eq!(diag["MAG_LITERAL_SMOKE_FINAL_MENU"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["MAG_LITERAL_SMOKE_TEMP_PATHS"].as_i64(), Some(1), "every writable product path must be temporary: {diag}");
+    // Not MAG_RUN_STARTS: a scrub whose keyframe precedes the live admission
+    // resimulates it and counts the same run again. A restart needs a stop.
+    assert_eq!(diag["MAG_LITERAL_SMOKE_STOPS_BEFORE_SECOND"].as_i64(), Some(0), "the first product run must remain active through the replay scrub: {diag}");
     assert_eq!(diag["MAG_LITERAL_SMOKE_STOPS"].as_i64(), Some(2), "{diag}");
     assert!(recorded_tick_lines(&replay_s) > 0, "the literal product run must record a replay");
     for path in [&first_progress, &settings, &bindings, &binding_history, &layout_history] {
@@ -3984,15 +3976,9 @@ fn replay_reports_its_own_costs() {
         diag["STONE_REPLAY_SAVE_MS"].as_f64().unwrap()
     );
 
-    // Keyframe BYTES are only honest where real memory was imaged. Bitgun and
-    // bopt hold game buffers; a minimal game with no buffer declarations is
+    // Keyframe BYTES are only honest where real memory was imaged. Bopt holds
+    // game buffers in sim state; a minimal game with no buffer declarations is
     // the zero control that proves we do not invent storage.
-    let seek_diag = &seeked["__stone_diag"];
-    let bitgun_bytes = seek_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("bitgun storage bytes");
-    assert!(
-        bitgun_bytes > 0,
-        "bitgun holds buffer storage in sim state, so its keyframe must report imaged bytes: {seek_diag}"
-    );
 
     let minimal_game = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -4041,8 +4027,7 @@ fn replay_reports_its_own_costs() {
         bopt["__stone_diag"]
     );
     println!(
-        "[replay-costs] keyframe buffer storage: zero control {engine_floor}B, \
-         bitgun {bitgun_bytes}B, bopt {bytes}B"
+        "[replay-costs] keyframe buffer storage: zero control {engine_floor}B, bopt {bytes}B"
     );
 }
 

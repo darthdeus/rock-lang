@@ -564,7 +564,7 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
 fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
     let without = "pub struct Pt {\n    pub x: int,\n}\n";
     let with = "pub struct Pt {\n    pub x: int,\n}\n\npub fn __unm(a: Pt) -> Pt {\n    a\n}\n";
-    let caller = "use geo::*;\n\nfn neg() -> int {\n    let p = -Pt { x: 1 }\n    -p.x\n}\n";
+    let caller = "use geo::*;\n\nfn neg() -> int {\n    let p = -Pt { x: 1 }\n    let negative = -p\n    negative.x\n}\n";
     let files = |geo: &str| vec![v1_in(1, "geo", "geo.rock", geo), v1_in(2, "app", "app.rock", caller)];
     let aliases = aliases_of(&files(without));
 

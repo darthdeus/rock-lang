@@ -16,65 +16,23 @@ impl Builder<'_> {
     ) -> Result<FlatCells, CompilerError> {
         if let Expr::EnumVariant { enum_name, variant, args, .. } = self.body.expr_arena[value].clone() {
             if enum_name == shape.name {
-                let tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
-                // Positional args are placed at their POSITION's slot offset, and a
-                // scalarizable value spreads into its leaves there -- the layout comes
-                // from the enum declaration, so this and the match arm that reads
-                // it back agree without either seeing the other.
-                let mut slots: Vec<Option<Idx<Inst>>> = vec![None; shape.tuple_width()];
-                let rec_args: Vec<(Ustr, Idx<Inst>)> = match args {
-                    VariantArgs::Unit => Vec::new(),
+                let (positional, rec_args) = match args {
+                    VariantArgs::Unit => (Vec::new(), Vec::new()),
                     VariantArgs::Tuple(range) => {
-                        for (pos, a) in range.into_iter().enumerate() {
-                            let off = shape.slot_offset(pos);
-                            // Widened only for THIS variant's own shape: a
-                            // sibling carrying an ordinary payload, or a scalarizable
-                            // value of another shape, addresses its own leading
-                            // slots and the rest of the position nil-pads.
-                            match self.flat_payload_leaf_shape(Some(enum_name), variant, pos) {
-                                Some(_vs) => {
-                                    let r = self.lower_expr_repr(a)?;
-                                    for (k, lv) in self.repr_to_leaves_bundle(&r)?.into_iter().enumerate()
-                                    {
-                                        slots[off + k] = Some(lv);
-                                    }
-                                }
-                                None => slots[off] = Some(self.lower_expr(a)?),
-                            }
-                        }
-                        Vec::new()
+                        (range.into_iter().map(FlatPayload::Expr).collect(), Vec::new())
                     }
                     VariantArgs::Record(fields) => {
-                        let mut rec = Vec::new();
-                        for fidx in fields {
-                            let lf = self.body.struct_lit_field_arena[fidx];
-                            let v = self.lower_expr(lf.value)?;
-                            rec.push((lf.name, v));
-                        }
-                        rec
+                        let rec = fields
+                            .into_iter()
+                            .map(|fidx| {
+                                let lf = self.body.struct_lit_field_arena[fidx];
+                                (lf.name, lf.value)
+                            })
+                            .collect();
+                        (Vec::new(), rec)
                     }
                 };
-                let nil = || Inst::Const(Lit::Nil);
-                let positional = slots
-                    .into_iter()
-                    .map(|s| match s {
-                        Some(v) => v,
-                        None => self.emit_cur(nil()),
-                    })
-                    .collect();
-                let named = shape
-                    .record_fields
-                    .iter()
-                    .map(|rf| {
-                        let v = rec_args
-                            .iter()
-                            .find(|(n, _)| n == rf)
-                            .map(|(_, v)| *v)
-                            .unwrap_or_else(|| self.emit_cur(nil()));
-                        (*rf, v)
-                    })
-                    .collect();
-                return Ok(FlatCells { tag, positional, named });
+                return self.flat_ctor_cells(shape, variant, positional, rec_args);
             }
         }
         // General enum value: thread it as a repr. A flat-enum Group (a scalarized
@@ -93,6 +51,81 @@ impl Builder<'_> {
                 self.spread_maybe_null_box_to_cells(boxed, shape)
             }
         }
+    }
+
+    /// The cells of `shape::variant(positional.., rec_args..)`. Positional
+    /// payloads are placed at their POSITION's slot offset, and a scalarizable
+    /// value spreads into its leaves there -- the layout comes from the enum
+    /// declaration, so a source ctor, a compiler-built variant and the match arm
+    /// that reads it back agree without seeing each other.
+    pub(crate) fn flat_ctor_cells(
+        &mut self,
+        shape: &EnumFlatShape,
+        variant: Ustr,
+        positional: Vec<FlatPayload>,
+        rec_args: Vec<(Ustr, Idx<Expr>)>,
+    ) -> Result<FlatCells, CompilerError> {
+        let tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
+        let mut slots: Vec<Option<Idx<Inst>>> = vec![None; shape.tuple_width()];
+        for (pos, arg) in positional.into_iter().enumerate() {
+            let off = shape.slot_offset(pos);
+            // Widened only for THIS variant's own shape: a sibling carrying an
+            // ordinary payload, or a scalarizable value of another shape,
+            // addresses its own leading slots and the rest of the position
+            // nil-pads.
+            match self.flat_payload_leaf_shape(Some(shape.name), variant, pos) {
+                Some(vs) => {
+                    let leaves = match arg {
+                        FlatPayload::Expr(a) => {
+                            let r = self.lower_expr_repr(a)?;
+                            self.repr_to_storage_leaves(&r, &vs, "flat enum payload")?
+                        }
+                        FlatPayload::Repr(r) => self.repr_to_leaves_shape(&r, &vs)?,
+                    };
+                    for (k, lv) in leaves.into_iter().enumerate() {
+                        slots[off + k] = Some(lv);
+                    }
+                }
+                None => {
+                    let v = match arg {
+                        FlatPayload::Expr(a) => self.lower_expr(a)?,
+                        // A compiler-built payload has no source line to mark
+                        // `materialize`, so the box it needs is the authorized one.
+                        FlatPayload::Repr(r) => {
+                            let v = self.pack(r)?;
+                            self.authorize_nobox_box(v);
+                            v
+                        }
+                    };
+                    slots[off] = Some(v);
+                }
+            }
+        }
+        let mut rec_vals = Vec::with_capacity(rec_args.len());
+        for (name, value) in rec_args {
+            rec_vals.push((name, self.lower_expr(value)?));
+        }
+        let nil = || Inst::Const(Lit::Nil);
+        let positional = slots
+            .into_iter()
+            .map(|s| match s {
+                Some(v) => v,
+                None => self.emit_cur(nil()),
+            })
+            .collect();
+        let named = shape
+            .record_fields
+            .iter()
+            .map(|rf| {
+                let v = rec_vals
+                    .iter()
+                    .find(|(n, _)| n == rf)
+                    .map(|(_, v)| *v)
+                    .unwrap_or_else(|| self.emit_cur(nil()));
+                (*rf, v)
+            })
+            .collect();
+        Ok(FlatCells { tag, positional, named })
     }
 
     pub(crate) fn spread_maybe_null_box_to_cells(

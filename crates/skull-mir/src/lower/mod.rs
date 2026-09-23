@@ -441,6 +441,14 @@ struct FlatCells {
     named: Vec<(Ustr, Idx<Inst>)>,
 }
 
+/// One positional payload of a flat-enum construction: a source argument,
+/// lowered in place so it keeps its evaluation order, or a value the compiler
+/// already lowered (a `@struct_expand` field).
+enum FlatPayload {
+    Expr(Idx<Expr>),
+    Repr(ValueRepr),
+}
+
 /// A `match`/`if let`/`while let` scrutinee: either an ordinary lowered value, or a
 /// FLATTENED enum field still living as `parent.{prefix}__tag`/`__i` slots. The
 /// flat form lets the tag test + payload binds read the parent's slots directly --
