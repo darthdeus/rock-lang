@@ -3303,15 +3303,11 @@ fn entry_is_reload_lane(
         .any(|part| env_by_wire.get(*part).is_some_and(|e| is_reload_lane(e)))
 }
 
-/// Default concurrency for sim children: the machine's core count.
-///
-/// The earlier constant 4 was held by a rule that it only rises from a
-/// measurement on more than one machine; the author retired that rule on
-/// 2026-09-14 (`docs/sim-author-decisions.md`). GPU memory, which was the
-/// reason to stay low, is bounded separately by `--full-asset-jobs`, and the
-/// mag suite at the core count of the measured host (14) runs in under half
-/// the wall of `-j 8` with the same failing names except timing-sensitive
-/// allocation rotators (`docs/sim-boot-cost-analysis.md`, "Job count").
+/// Upper bound on concurrency for sim children: the machine's core count.
+/// The default is lower wherever GPU memory is readable (`sim_job_budget`):
+/// on the 32-core Linux workstation the core count exhausted the card and ran
+/// the mag suite slower than ten lanes (`docs/sim-author-decisions.md`,
+/// 2026-09-22).
 fn default_sim_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -3335,8 +3331,9 @@ fn resolve_full_asset_jobs(requested: Option<usize>, jobs: usize) -> usize {
 /// worker (`IOAccelerator (graphics)`): a capped lane holds 0.2-0.4 GB of GPU
 /// memory whether or not it renders, and a full-asset lane 2.0-4.3 GB. With
 /// fourteen lanes the capped floor is ~5.6 GB, so two full-asset lanes peak
-/// near 14 GB and three near 18.5 GB. The author's budget is 16 GB: the Linux
-/// workstation's GPU has ~18 GB free and the machine degrades past 16.
+/// near 14 GB and three near 18.5 GB. On the Linux workstation a capped
+/// worker lane grows to ~2 GiB, so there the job budget (`SIM_LANE_VRAM_MIB`)
+/// is what bounds GPU memory and this cap only spreads the heaviest lanes.
 /// `SIM_SKIP_RENDER` is not the variable (the earlier `--render-jobs` cap
 /// serialised 49 lanes for 100 s of wall and changed no verdict).
 const DEFAULT_FULL_ASSET_JOBS: usize = 2;
@@ -3346,6 +3343,19 @@ const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 /// destination path is unique before spawning (several `@sim`s can share one
 /// source file, so its `.snap` directory is shared too).
 fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
+    let cores = default_sim_jobs();
+    let jobs = resolve_jobs_with(requested, update_snapshots, cores, sim_job_budget());
+    if requested.is_some() && !update_snapshots && jobs > sim_job_budget() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| log::warn!(target: "SIM",
+            "--jobs {jobs} exceeds the GPU memory budget of {} lanes", sim_job_budget()));
+    }
+    jobs
+}
+
+/// Without a request the GPU budget decides; a request is still bounded by
+/// the cores, so the author can override the budget but not oversubscribe.
+fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: usize) -> usize {
     if update_snapshots {
         if requested.is_some_and(|j| j > 1) {
             log::warn!(target: "SIM",
@@ -3353,8 +3363,72 @@ fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
         }
         return 1;
     }
-    let available = default_sim_jobs();
-    requested.unwrap_or(available).clamp(1, available.max(1))
+    requested.unwrap_or(budget).clamp(1, cores.max(1))
+}
+
+/// GPU memory one sim child is planned at. Measured 2026-09-22 on the Linux
+/// workstation (RTX 4090, mag suite at `-j 6`, per-process `nvidia-smi`):
+/// long-lived workers peak at 2.0 GiB median and 3.8 GiB max as they run
+/// more sims, a one-shot child at ~0.3 GiB, and six lanes peaked at 12.8 GiB
+/// together.
+const SIM_LANE_VRAM_MIB: u64 = 2048;
+
+/// GPU memory a suite leaves free for the author's live session and anything
+/// started after it (author, 2026-09-22).
+const SIM_VRAM_RESERVE_MIB: u64 = 6 * 1024;
+
+/// Lanes affordable from the GPU memory free at launch less the reserve,
+/// bounded by the cores. A second suite launched meanwhile sees less free
+/// memory and takes fewer lanes. No reading leaves the cores in charge.
+fn vram_budgeted_jobs(cores: usize, free_vram_mib: Option<u64>) -> usize {
+    let cores = cores.max(1);
+    match free_vram_mib {
+        Some(free) => {
+            let lanes = free.saturating_sub(SIM_VRAM_RESERVE_MIB) / SIM_LANE_VRAM_MIB;
+            usize::try_from(lanes).unwrap_or(cores).clamp(1, cores)
+        }
+        None => cores,
+    }
+}
+
+/// The default job count for this process, read once so every resolution in
+/// one invocation agrees and the decision is logged once.
+fn sim_job_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let cores = default_sim_jobs();
+        match free_gpu_memory_mib() {
+            Ok(free) => {
+                let jobs = vram_budgeted_jobs(cores, Some(free));
+                log::info!(target: "SIM",
+                    "default jobs {jobs}: {free} MiB free GPU memory less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane, {cores} cores");
+                jobs
+            }
+            Err(reason) => {
+                // Unified-memory Macs have no nvidia-smi; the core count was
+                // measured safe there (`DEFAULT_FULL_ASSET_JOBS`).
+                log::info!(target: "SIM", "default jobs {cores} (core count): no GPU memory reading: {reason}");
+                cores
+            }
+        }
+    })
+}
+
+fn free_gpu_memory_mib() -> std::result::Result<u64, String> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .map_err(|error| format!("nvidia-smi: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("nvidia-smi exited with {}", output.status));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_nvidia_smi_free_mib(&stdout).ok_or_else(|| format!("nvidia-smi printed no free memory: {:?}", stdout.trim()))
+}
+
+/// The first GPU's free memory: the one GL contexts land on by default.
+fn parse_nvidia_smi_free_mib(stdout: &str) -> Option<u64> {
+    stdout.lines().next()?.trim().parse().ok()
 }
 
 /// Dump the compiled `main.lua` in `output` to a LuaJIT bytecode image beside
@@ -7313,19 +7387,39 @@ mod tests {
 
     #[test]
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        let (cores, budget) = (32, 4);
 
-        assert_eq!(resolve_jobs(None, false), cpus, "no request means every core");
-        assert_eq!(resolve_jobs(Some(1), false), 1);
-        // Never above what the machine has, however large the request.
-        assert_eq!(resolve_jobs(Some(usize::MAX), false), cpus);
+        assert_eq!(resolve_jobs_with(None, false, cores, budget), budget, "no request takes the GPU budget");
+        assert_eq!(resolve_jobs_with(Some(1), false, cores, budget), 1);
+        // An explicit request may exceed the budget, never the cores.
+        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget), 10);
+        assert_eq!(resolve_jobs_with(Some(usize::MAX), false, cores, budget), cores);
         // 0 is meaningless; clamp up rather than deadlock on an empty pool.
-        assert_eq!(resolve_jobs(Some(0), false), 1);
+        assert_eq!(resolve_jobs_with(Some(0), false, cores, budget), 1);
         // --update-snapshots wins over ANY explicit request.
-        assert_eq!(resolve_jobs(None, true), 1);
-        assert_eq!(resolve_jobs(Some(8), true), 1);
+        assert_eq!(resolve_jobs_with(None, true, cores, budget), 1);
+        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget), 1);
+    }
+
+    #[test]
+    fn the_default_job_count_leaves_a_fixed_gpu_memory_reserve() {
+        // Four lanes' worth above the reserve: four lanes.
+        assert_eq!(vram_budgeted_jobs(32, Some(SIM_VRAM_RESERVE_MIB + 4 * SIM_LANE_VRAM_MIB + 1)), 4);
+        // A small machine with a large card stays bounded by its cores.
+        assert_eq!(vram_budgeted_jobs(2, Some(SIM_VRAM_RESERVE_MIB + 64 * SIM_LANE_VRAM_MIB)), 2);
+        // Nothing above the reserve still runs one lane rather than none.
+        assert_eq!(vram_budgeted_jobs(32, Some(SIM_VRAM_RESERVE_MIB)), 1);
+        assert_eq!(vram_budgeted_jobs(32, Some(SIM_LANE_VRAM_MIB / 4)), 1);
+        // Without a reading (no NVIDIA tooling, e.g. macOS) the cores decide.
+        assert_eq!(vram_budgeted_jobs(14, None), 14);
+    }
+
+    #[test]
+    fn nvidia_smi_free_memory_reads_the_first_gpu() {
+        assert_eq!(parse_nvidia_smi_free_mib("19115\n"), Some(19115));
+        assert_eq!(parse_nvidia_smi_free_mib(" 19115\n4000\n"), Some(19115));
+        assert_eq!(parse_nvidia_smi_free_mib(""), None);
+        assert_eq!(parse_nvidia_smi_free_mib("[N/A]\n"), None);
     }
 
     #[test]
