@@ -771,17 +771,6 @@ fn assert_sim_state_matches_exact(
     assert!(compared > 0, "must compare at least one sim-state global");
 }
 
-fn assert_f32_state_matches(got: &serde_json::Value, want: &serde_json::Value, path: &str) {
-    let mut mismatches = Vec::new();
-    collect_f32_state_mismatches(got, want, path, &mut mismatches);
-    assert!(
-        mismatches.is_empty(),
-        "state must match; first {} difference(s):\n{}",
-        mismatches.len(),
-        mismatches.join("\n")
-    );
-}
-
 fn collect_f32_state_mismatches(
     got: &serde_json::Value,
     want: &serde_json::Value,
@@ -877,9 +866,8 @@ fn assert_mag_seek_state_matches(
     label: &str,
 ) {
     assert_mag_seek_census_owners(sim);
-    let mut exact = sim.clone();
     assert_mag_seek_populations_match(got, want, label);
-    assert_sim_state_matches(got, want, &exact, label);
+    assert_sim_state_matches(got, want, sim, label);
 }
 
 fn assert_mag_menu_seek_state_matches(
