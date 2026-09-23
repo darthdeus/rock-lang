@@ -122,6 +122,23 @@ pub fn symbol_of_key(name: ustr::Ustr) -> ustr::Ustr {
     }
 }
 
+/// The emitted symbol of the nominal type keyed `key`: its C typedef, `__ty`
+/// tag, `<T>_ct` constructor and every registry key minted from it. A
+/// `@nomangle` struct keeps its declared name, because inline Lua spells it
+/// (cdefs, `ffi.new`, tag compares); every other type is [`symbol_of_key`].
+/// [`collision_errors`] rejects two types that would share a symbol.
+pub fn type_symbol(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
+    let exempt = ws
+        .struct_by_name
+        .get(&key)
+        .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].nomangle);
+    if exempt {
+        ustr::Ustr::from(declared_name(key.as_str()))
+    } else {
+        symbol_of_key(key)
+    }
+}
+
 /// The digest of a DefKey's `<package>::<module path>` prefix. Hashes the
 /// prefix BYTES with std's `DefaultHasher` (the `StaticCell.init_hash`
 /// precedent): stable across processes AND across compiler builds, unlike a
@@ -410,6 +427,35 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
             Some(_) => {}
             None => {
                 by_digest.insert(digest.as_str(), prefix);
+            }
+        }
+    }
+
+    // Two nominal types with one emitted symbol would share a typedef, a
+    // constructor and a runtime tag. Only a `@nomangle` struct can reach
+    // another type's symbol: its declared name against a legacy type or
+    // another package's `@nomangle` struct of that name.
+    let mut type_keys: Vec<(ustr::Ustr, Span)> = Vec::new();
+    for m in ws.modules.iter() {
+        type_keys.extend(m.structs.iter().map(|(_, d)| (d.name, d.name_span)));
+        type_keys.extend(m.enums.iter().map(|(_, d)| (d.name, d.name_span)));
+        type_keys.extend(m.newtypes.iter().map(|(_, d)| (d.name, d.name_span)));
+    }
+    type_keys.sort_by(|a, b| a.0.cmp(&b.0));
+    type_keys.dedup_by(|a, b| a.0 == b.0);
+    let mut type_owner: HashMap<ustr::Ustr, ustr::Ustr> = HashMap::new();
+    for (key, span) in &type_keys {
+        let symbol = type_symbol(ws, *key);
+        match type_owner.get(&symbol) {
+            Some(prev) => {
+                let msg = format!(
+                    "types `{prev}` and `{key}` would both emit as `{symbol}`; \
+                     a `@nomangle` struct owns its declared name -- rename one of them"
+                );
+                out.push((symbol.to_string(), CompilerError::new_with_label(*span, msg)));
+            }
+            None => {
+                type_owner.insert(symbol, *key);
             }
         }
     }

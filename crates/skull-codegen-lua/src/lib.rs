@@ -4618,7 +4618,7 @@ impl Emitter<'_> {
                 out.push_str("] = {repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 out.push_str(", cap = ");
                 self.write_opnd(out, *capacity);
                 out.push_str("}, ");
@@ -4635,7 +4635,7 @@ impl Emitter<'_> {
                 out.push_str("{repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 out.push_str(", cap = ");
                 self.write_opnd(out, *capacity);
                 out.push('}');
@@ -4650,7 +4650,7 @@ impl Emitter<'_> {
                 out.push_str("] = {repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 let _ = write!(out, ", stride = {stride}, cap = ");
                 self.write_opnd(out, *capacity);
                 out.push_str("}}");
@@ -4659,7 +4659,7 @@ impl Emitter<'_> {
                 out.push_str("{repr = ");
                 write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
                 out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*elem).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
                 let _ = write!(out, ", stride = {stride}, cap = ");
                 self.write_opnd(out, *capacity);
                 out.push('}');
@@ -4669,7 +4669,7 @@ impl Emitter<'_> {
                 let mut first = true;
                 if let Some(name) = ty {
                     out.push_str("__ty = ");
-                    write_lua_string(out, skull_mir::mangle::symbol_of_key(*name).as_str());
+                    write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *name).as_str());
                     first = false;
                 }
                 for (n, id) in fields {
@@ -4704,13 +4704,13 @@ impl Emitter<'_> {
                         self.write_opnd(out, *id);
                         out.push_str(", ");
                     }
-                    let symbol = skull_mir::mangle::symbol_of_key(*name);
+                    let symbol = skull_mir::mangle::type_symbol(self.ws, *name);
                     let _ = write!(out, "__ty = ");
                     write_lua_string(out, symbol.as_str());
                     let _ = write!(out, " }}, {})", value_struct_metatable_name(symbol.as_str()));
                     return;
                 }
-                let _ = write!(out, "{}{suffix}(", skull_mir::mangle::symbol_of_key(*name));
+                let _ = write!(out, "{}{suffix}(", skull_mir::mangle::type_symbol(self.ws, *name));
                 for (i, (_, id)) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -4728,7 +4728,7 @@ impl Emitter<'_> {
                 out.push_str("{__variant = ");
                 write_lua_string(out, tag.as_str());
                 out.push_str(", __ty = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*ty).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *ty).as_str());
                 for id in positional {
                     out.push_str(", ");
                     self.write_opnd(out, *id);
@@ -4743,7 +4743,7 @@ impl Emitter<'_> {
                 out.push_str("{__variant = ");
                 self.write_opnd(out, *tag);
                 out.push_str(", __ty = ");
-                write_lua_string(out, skull_mir::mangle::symbol_of_key(*ty).as_str());
+                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *ty).as_str());
                 for id in positional {
                     out.push_str(", ");
                     self.write_opnd(out, *id);
@@ -4756,12 +4756,12 @@ impl Emitter<'_> {
             }
 
             Inst::FfiNewArray { ctype, count, .. } => {
-                let _ = write!(out, "ffi.new(\"{}[?]\", ", skull_mir::mangle::symbol_of_key(*ctype));
+                let _ = write!(out, "ffi.new(\"{}[?]\", ", skull_mir::mangle::type_symbol(self.ws, *ctype));
                 self.write_opnd(out, *count);
                 out.push(')');
             }
             Inst::FfiViewCast { cty, ptr } => {
-                let _ = write!(out, "ffi.cast(\"{}*\", ", skull_mir::mangle::symbol_of_key(*cty));
+                let _ = write!(out, "ffi.cast(\"{}*\", ", skull_mir::mangle::type_symbol(self.ws, *cty));
                 self.write_opnd(out, *ptr);
                 out.push(')');
             }

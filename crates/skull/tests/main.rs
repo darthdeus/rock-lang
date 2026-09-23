@@ -69,6 +69,7 @@ mod env_param_shadow;
 mod env_record_hoist;
 #[path = "extern_return_representation.rs"]
 mod extern_return_representation;
+mod nomangle_type_symbol;
 #[path = "extern_value_return_ownership.rs"]
 mod extern_value_return_ownership;
 #[path = "flat_vec_value_shape.rs"]

@@ -260,7 +260,7 @@ impl Builder<'_> {
         if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
             if self.variant_is_unit(shape.name, variant) {
                 let global = Ustr::from(
-                    format!("__rock_enum_{}_{}", crate::mangle::symbol_of_key(shape.name), variant)
+                    format!("__rock_enum_{}_{}", crate::mangle::type_symbol(self.ws, shape.name), variant)
                         .as_str(),
                 );
                 return self.emit_cur(Inst::Global(global));

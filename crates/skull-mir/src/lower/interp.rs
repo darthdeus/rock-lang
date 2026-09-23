@@ -294,7 +294,7 @@ impl Builder<'_> {
             StringifyRoute::EnumNames(name) => {
                 let names =
                     self.emit_cur(Inst::Global(Ustr::from(
-                        format!("__rock_enum_{}_names", crate::mangle::symbol_of_key(*name)).as_str(),
+                        format!("__rock_enum_{}_names", crate::mangle::type_symbol(self.ws, *name)).as_str(),
                     )));
                 Ok(self.emit_cur(Inst::Index { base: names, index: v, kind: ContainerKind::Map }))
             }

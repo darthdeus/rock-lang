@@ -367,9 +367,9 @@ pub fn nb_prim_storage_lua() -> String {
 /// derived from the layout its caller ALREADY validated. Takes the checked
 /// leaves and size rather than re-walking: the emitter needs one layout per
 /// struct and the registry is a second view of it, not a second computation.
-pub fn nb_value_storage_lua(elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
+pub fn nb_value_storage_lua(ws: &Workspace, elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
     // `__rock_nb_storage` runs `ffi.typeof` on this name: a C type, not a DefKey.
-    let elem = crate::mangle::symbol_of_key(elem);
+    let elem = crate::mangle::type_symbol(ws, elem);
     let mut views: Vec<&'static str> = Vec::new();
     for l in leaves {
         if !views.contains(&l.cty) {
@@ -432,11 +432,12 @@ pub(crate) fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafS
         return None;
     }
     let mut out = Vec::new();
-    let (size, align) = planned_layout_rec(&plan, "", 0, "", &mut out)?;
+    let (size, align) = planned_layout_rec(ws, &plan, "", 0, "", &mut out)?;
     Some((out, size, align))
 }
 
 fn planned_layout_rec(
+    ws: &Workspace,
     plan: &PlannedValue,
     prefix: &str,
     base: usize,
@@ -454,7 +455,7 @@ fn planned_layout_rec(
                     path: leaf_path(prefix, field.as_str()),
                     cty,
                     byte_off: off,
-                    offsetof_expr: join_offsetof(ofs, plan.name, field.as_str()),
+                    offsetof_expr: join_offsetof(ws, ofs, plan.name, field.as_str()),
                 });
                 off += size;
                 align = align.max(field_align);
@@ -462,10 +463,11 @@ fn planned_layout_rec(
             PlannedField::Nested(child) => {
                 let child_base = round_up(off, planned_alignment(child)?);
                 let (size, child_align) = planned_layout_rec(
+                    ws,
                     child,
                     &format!("{}{field}.", prefix),
                     child_base,
-                    &join_offsetof(ofs, plan.name, field.as_str()),
+                    &join_offsetof(ws, ofs, plan.name, field.as_str()),
                     out,
                 )?;
                 off = child_base + size;
@@ -494,8 +496,8 @@ fn planned_alignment(plan: &PlannedValue) -> Option<usize> {
 
 /// Extend an `ffi.offsetof` composition by one field hop. `owner` names a C
 /// TYPE, so a v1 nominal contributes its emitted symbol, never its DefKey.
-pub(crate) fn join_offsetof(prefix: &str, owner: Ustr, field: &str) -> String {
-    let owner = crate::mangle::symbol_of_key(owner);
+pub(crate) fn join_offsetof(ws: &Workspace, prefix: &str, owner: Ustr, field: &str) -> String {
+    let owner = crate::mangle::type_symbol(ws, owner);
     let hop = format!("ffi.offsetof(\"{owner}\", \"{field}\")");
     if prefix.is_empty() {
         hop

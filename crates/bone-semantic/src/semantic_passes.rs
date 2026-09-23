@@ -2254,6 +2254,9 @@ pub fn pass_register_forward_decls(
                 name_span: s.name.span,
                 is_value: s.is_value,
                 is_nobox: s.is_nobox,
+                nomangle: bone_lower::lower_annotations(rock_module, &item.annotations)
+                    .iter()
+                    .any(|anno| anno.is_builtin("nomangle")),
                 span: item.span,
                 generics: Vec::new(),
                 fields: Vec::new(),

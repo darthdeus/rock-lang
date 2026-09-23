@@ -1101,6 +1101,9 @@ pub struct StructDef {
     pub name_span: Span,
     pub is_value: bool,
     pub is_nobox: bool,
+    /// `@nomangle`: the emitted type symbol (C typedef, `__ty` tag) is the
+    /// declared name even under modules v1, for inline Lua that spells it.
+    pub nomangle: bool,
     pub span: Span,
     pub generics: Vec<TyId>,
     pub fields: Vec<StructFieldDef>,

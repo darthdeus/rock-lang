@@ -1178,7 +1178,7 @@ impl Builder<'_> {
             // enum still has payload variants, so its values stay tables, and the
             // singleton is reference-equal across uses + usable as a Map key.
             let g = Ustr::from(
-                format!("__rock_enum_{}_{variant}", crate::mangle::symbol_of_key(enum_name)).as_str(),
+                format!("__rock_enum_{}_{variant}", crate::mangle::type_symbol(self.ws, enum_name)).as_str(),
             );
             return Ok(self.emit_cur(Inst::Global(g)));
         }
