@@ -345,9 +345,7 @@ fn global_initializer_observes_imgui_before_game_code() {
     // (`__IMGUI_PRELUDE_READY_<digest>`); the call is what orders.
     let ready = ginit_call(&emitted, "__skull_ginit___IMGUI_PRELUDE_READY")
         .expect("Rock cimgui initializer must be emitted");
-    let game_init = emitted
-        .find("__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION())")
-        .or_else(|| emitted.find("CIMG_UI_GLOBAL_INIT_VERSION = __skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION()"))
+    let game_init = ginit_call(&emitted, "__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION")
         .expect("fixture global initializer must be emitted");
     assert!(
         ready < game_init,
