@@ -490,6 +490,36 @@ fn raw_abi_census_counts_only_real_references() {
 }
 
 #[test]
+fn raw_abi_census_does_not_match_lua_globals_to_receiver_methods() {
+    let fixture = scratch("raw_receiver_method");
+    let dir = fixture.path();
+    write(&dir.join("lib/stick.toml"), &manifest("r-lib", ""));
+    write(&dir.join("lib/lib.rock"), "struct Rng { value: int }\n\nfn Rng.next(rng) -> int { rng.value }\n");
+    write(&dir.join("app/stick.toml"), &manifest("r-app", "[dependencies]\nr-lib = { path = \"../lib\" }\n"));
+    write(&dir.join("app/app.rock"), "inline(lua) fn use_lua_next() -> bool = \"return next({}) ~= nil\"\n");
+
+    let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "migration_needed", "{v}");
+    assert!(v["blockers"].as_array().unwrap().is_empty(), "{v}");
+
+    write(&dir.join("lib/lib.rock"), "fn next() -> bool { true }\n");
+    let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "blocked", "a top-level `next` can be a raw Lua global: {v}");
+    assert!(v["blockers"].as_array().unwrap().iter().any(|b| {
+        let b = b.as_str().unwrap();
+        b.contains("raw ABI review [exact]") && b.contains("`next`")
+    }), "{v}");
+
+    write(&dir.join("app/app.rock"), "inline(lua) fn use_lua_next() -> bool = \"return _G.next({}) ~= nil\"\n");
+    let v = json(&migrate(dir, "lib", &["--check", "--consumer", "app", "--format", "json"]));
+    assert_eq!(v["verdict"], "blocked", "an explicit `_G.next` reference remains exact: {v}");
+    assert!(v["blockers"].as_array().unwrap().iter().any(|b| {
+        let b = b.as_str().unwrap();
+        b.contains("raw ABI review [exact]") && b.contains("`next` through `_G`")
+    }), "{v}");
+}
+
+#[test]
 fn raw_abi_census_uses_the_foreign_scalar_parameter_abi() {
     let fixture = scratch("raw_scalar_params");
     let dir = fixture.path();

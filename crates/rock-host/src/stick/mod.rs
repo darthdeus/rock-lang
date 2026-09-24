@@ -122,6 +122,15 @@ pub struct StickConfig {
     /// Source-language selection for this package. `None` = legacy.
     pub language: Option<LanguageConfig>,
     pub dependencies: HashMap<String, Dependency>,
+    /// Optional implementation directories that retain this package's owner.
+    pub source_groups: HashMap<String, SourceGroupConfig>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceGroupConfig {
+    pub directory: String,
+    pub channels: Vec<String>,
 }
 
 impl StickConfig {
@@ -746,6 +755,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut sound: Option<SoundConfig> = None;
                 let mut language: Option<LanguageConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
+                let mut source_groups: HashMap<String, SourceGroupConfig> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "package" => { package = Some(map.next_value()?); }
@@ -758,11 +768,12 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "ios" => { ios = map.next_value()?; }
                         "language" => { language = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
+                        "source_groups" => { source_groups = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, language, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, language, dependencies, source_groups })
             }
         }
         d.deserialize_map(Vis)

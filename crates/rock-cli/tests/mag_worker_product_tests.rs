@@ -15,8 +15,8 @@ fn without_absent_agent_daemon_diagnostic(text: &str) -> String {
 #[test]
 fn mag_worker_reset_discards_unfinished_save() {
     let entries = vec![
-        "async_save_worker_reset_seed".to_string(),
-        "async_save_worker_reset_probe".to_string(),
+        "mag::async_save_worker_reset_seed".to_string(),
+        "mag::async_save_worker_reset_probe".to_string(),
     ];
     let worker = run_worker_suite(Backend::Skull, "mag", &entries)
         .expect("save reset worker queue must run");
@@ -35,8 +35,8 @@ fn mag_worker_reset_discards_unfinished_save() {
 #[test]
 fn mag_worker_boundary_restores_game_diagnostics() {
     let entries = vec![
-        "worker_boundary_game_diagnostics_seed".to_string(),
-        "worker_boundary_game_diagnostics_probe".to_string(),
+        "mag::worker_boundary_game_diagnostics_seed".to_string(),
+        "mag::worker_boundary_game_diagnostics_probe".to_string(),
     ];
     let worker = run_worker_suite(Backend::Skull, "mag", &entries)
         .expect("game diagnostics worker queue must run");
@@ -71,9 +71,9 @@ fn mag_worker_boundary_restores_game_diagnostics() {
 #[test]
 fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
     let entries = vec![
-        "boot_image_scene_registry_npcs_seed".to_string(),
-        "boot_image_scene_registry_npcs_probe".to_string(),
-        "spell_damages".to_string(),
+        "mag::boot_image_scene_registry_npcs_seed".to_string(),
+        "mag::boot_image_scene_registry_npcs_probe".to_string(),
+        "mag::spell_damages".to_string(),
     ];
     let worker = run_worker_suite(Backend::Skull, "mag", &entries)
         .expect("MAG BootImage product queue must run");

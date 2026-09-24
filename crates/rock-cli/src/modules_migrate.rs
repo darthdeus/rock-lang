@@ -109,6 +109,8 @@ struct Def {
     file: usize,
     name: Ustr,
     kind: DefKind,
+    /// Legacy `Type.method` declarations do not occupy a bare Lua global.
+    receiver_method: bool,
     /// The item's byte range, annotations included; `pub ` goes at its start
     /// because a visibility leads the item (`parse_item`).
     span: (usize, usize),
@@ -130,6 +132,10 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
         }
         for item in &ast.items {
             let annotated = |n: &str| item.annotations.iter().any(|a| a.name.name.as_str() == n);
+            let receiver_method = matches!(
+                &item.kind,
+                skull_parser::ItemKind::Function(fd) if fd.receiver_surface.is_some()
+            );
             let (name, kind, extern_body) = match &item.kind {
                 skull_parser::ItemKind::Function(fd) => {
                     let kind = if fd.is_macro {
@@ -158,6 +164,7 @@ fn parse_defs(files: &[PkgFile]) -> Result<(Vec<Def>, Vec<Vec<modules_analysis::
                 file: fi,
                 name,
                 kind,
+                receiver_method,
                 span: item.span.offset_range,
                 line: item.span.line_range.0 + 1,
                 exempt_symbol,
@@ -1001,18 +1008,21 @@ fn repair_for(
 /// Lua references from conservative reflection candidates and reports unknown
 /// dynamic names. Paused JavaScript bodies are counted, not gated.
 fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::result::Result<(), String> {
-    let mut moved: BTreeMap<&str, BTreeSet<DefKind>> = BTreeMap::new();
+    let mut moved_globals: BTreeMap<&str, BTreeSet<DefKind>> = BTreeMap::new();
     for d in &plan.defs {
-        if !d.exempt_symbol && matches!(d.kind, DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype) {
-            moved.entry(d.name.as_str()).or_default().insert(d.kind);
+        if !d.exempt_symbol
+            && !d.receiver_method
+            && matches!(d.kind, DefKind::Fn | DefKind::Global | DefKind::Struct | DefKind::Enum | DefKind::Newtype)
+        {
+            moved_globals.entry(d.name.as_str()).or_default().insert(d.kind);
         }
     }
-    // A legacy symbol is the declared name or the name plus a mangled
-    // signature suffix (`name__ret_T`).
+    // Inline Lua's bare globals can address package globals and constructors,
+    // but not receiver methods whose legacy symbols include the receiver type.
     let moved_names = |words: &mut dyn Iterator<Item = &str>| -> BTreeSet<String> {
         words
             .map(|w| w.split("__").next().unwrap_or(w))
-            .filter(|stem| moved.contains_key(stem))
+            .filter(|stem| moved_globals.contains_key(stem))
             .map(str::to_string)
             .collect()
     };
@@ -1058,10 +1068,10 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
     // global or a type keeps its hashed symbol and must be reached through Rock.
     let tail = |names: &BTreeSet<String>| -> String {
         let (fns, others): (BTreeSet<String>, BTreeSet<String>) =
-            names.iter().cloned().partition(|n| moved[n.as_str()].iter().all(|k| *k == DefKind::Fn));
+            names.iter().cloned().partition(|n| moved_globals[n.as_str()].iter().all(|k| *k == DefKind::Fn));
         let kinds: BTreeSet<&str> = others
             .iter()
-            .flat_map(|n| moved[n.as_str()].iter())
+            .flat_map(|n| moved_globals[n.as_str()].iter())
             .filter(|k| **k != DefKind::Fn)
             .map(|k| if k.is_type() { "type" } else { k.as_str() })
             .collect();
@@ -1115,7 +1125,7 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
         }
     }
     let moved_types: BTreeSet<&str> =
-        moved.iter().filter(|(_, kinds)| kinds.iter().any(|k| k.is_type())).map(|(n, _)| *n).collect();
+        moved_globals.iter().filter(|(_, kinds)| kinds.iter().any(|k| k.is_type())).map(|(n, _)| *n).collect();
     // A C type any cdef declares is the hand-written ABI's own name, in whichever
     // body the `ffi.new` or `sizeof` that spells it sits.
     let scanned: Vec<LuaTypeStrings> = bodies.iter().map(|body| lua_type_strings(body.src.as_str())).collect();
