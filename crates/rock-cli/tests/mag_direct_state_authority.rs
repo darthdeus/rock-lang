@@ -445,20 +445,20 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         assert!(world.contains(field), "WorldState is missing Scene-owned `{field}`");
     }
 
-    let tutorial = fs::read_to_string(repo.join("mag/tutorial.rock"))
-        .expect("read MAG tutorial source");
+    let tutorial = fs::read_to_string(repo.join("mag-simulation/tutorial_state.rock"))
+        .expect("read package tutorial state");
     let tutorial_state = tutorial
-        .split_once("struct TutorialState {")
+        .split_once("pub struct TutorialState {")
         .and_then(|(_, rest)| rest.split_once("\n}"))
         .map(|(body, _)| body)
         .expect("read TutorialState body");
     for field in [
-        "precast_dummy: Entity<Mob>?",
+        "precast_dummy: MobId?",
         "precast_dummy_tile: IVec2",
         "precast_entrance_tiles: [IVec2]",
         "precast_barrier_tiles: [IVec2]",
         "precast_highlight_next: float",
-        "practice_dummies: [Entity<Mob>?]",
+        "practice_dummies: [MobId?]",
         "practice_dummy_tiles: [IVec2]",
         "practice_rewarded: [bool]",
         "practice_entrance_tiles: [IVec2]",
@@ -553,7 +553,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "ritual_acquisition_event_seq: int",
         "notoriety: PlayerNotoriety",
         "combat_latch: CombatLatchState",
-        "summon_slots: [Entity<Mob>?]",
+        "summon_slots: [MobId?]",
         "cast_outline: PlayerCastOutline",
     ] {
         assert_eq!(
@@ -591,7 +591,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for field in [
         "combat_latch: CombatLatchState = CombatLatchState {}",
         "combat: PlayerCombatState = PlayerCombatState {}",
-        "summon_slots: [Entity<Mob>?] = [null, null, null, null]",
+        "summon_slots: [MobId?] = [null, null, null, null]",
         "cast_outline: PlayerCastOutline = PlayerCastOutline {}",
     ] {
         assert_eq!(
@@ -1044,7 +1044,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 31, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 34, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));

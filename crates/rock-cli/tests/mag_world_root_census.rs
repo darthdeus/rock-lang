@@ -35,6 +35,15 @@ struct Function {
     name: String,
     file: String,
     body: String,
+    min_arity: usize,
+    max_arity: usize,
+    receiver: bool,
+}
+
+struct CallSite {
+    name: String,
+    arity: Option<usize>,
+    receiver: bool,
 }
 
 fn repo_root() -> PathBuf {
@@ -140,6 +149,49 @@ fn identifier_continue(byte: u8) -> bool {
     byte == b'_' || byte.is_ascii_alphanumeric()
 }
 
+fn arguments(source: &str, open: usize, type_arguments: bool) -> Option<Vec<&str>> {
+    let bytes = source.as_bytes();
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut parens = 1;
+    let mut brackets = 0;
+    let mut braces = 0;
+    let mut angles = 0;
+    let mut start = open + 1;
+    let mut args = Vec::new();
+    for (index, byte) in bytes.iter().enumerate().skip(start) {
+        match byte {
+            b'(' => parens += 1,
+            b')' => {
+                parens -= 1;
+                if parens == 0 {
+                    let arg = source[start..index].trim();
+                    if !arg.is_empty() {
+                        args.push(arg);
+                    }
+                    return Some(args);
+                }
+            }
+            b'[' => brackets += 1,
+            b']' => brackets -= 1,
+            b'{' => braces += 1,
+            b'}' => braces -= 1,
+            b'<' if type_arguments => angles += 1,
+            b'>' if type_arguments && angles > 0 => angles -= 1,
+            b',' if parens == 1 && brackets == 0 && braces == 0 && angles == 0 => {
+                let arg = source[start..index].trim();
+                if !arg.is_empty() {
+                    args.push(arg);
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn function_declarations(source: &str, path: &Path) -> Vec<Function> {
     let view = code_view(source);
     let mut result = Vec::new();
@@ -155,6 +207,21 @@ fn function_declarations(source: &str, path: &Path) -> Vec<Function> {
                 .map(|(name, _)| name.trim())
                 .unwrap_or("");
             if !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.') {
+                let signature_open = view[line_start..]
+                    .find('(')
+                    .map(|offset| line_start + offset)
+                    .expect("Rock function has argument list");
+                let signature_args = arguments(&view, signature_open, true);
+                let (min_arity, max_arity) = match signature_args {
+                    Some(args) => {
+                        let max = args.len();
+                        // Defaults are uncommon here. An uncertain default is
+                        // treated as optional so this census stays conservative.
+                        let min = if args.iter().any(|arg| arg.contains('=')) { 0 } else { max };
+                        (min, max)
+                    }
+                    None => (0, usize::MAX),
+                };
                 let open = view[line_start..]
                     .find('{')
                     .map(|offset| line_start + offset)
@@ -179,6 +246,9 @@ fn function_declarations(source: &str, path: &Path) -> Vec<Function> {
                     name: name.to_string(),
                     file: path.strip_prefix(repo_root()).unwrap().display().to_string(),
                     body: source[open + 1..close].to_string(),
+                    min_arity,
+                    max_arity,
+                    receiver: name.contains('.'),
                 });
             }
         }
@@ -187,7 +257,7 @@ fn function_declarations(source: &str, path: &Path) -> Vec<Function> {
     result
 }
 
-fn call_names(source: &str) -> Vec<String> {
+fn call_sites(source: &str) -> Vec<CallSite> {
     let view = code_view(source);
     let bytes = view.as_bytes();
     let mut result = Vec::new();
@@ -211,7 +281,12 @@ fn call_names(source: &str) -> Vec<String> {
             && !matches!(name, "if" | "for" | "while" | "match" | "fn" | "return"
                 | "space_point" | "world_point")
         {
-            result.push(name.to_string());
+            let receiver = view[..start].trim_end().ends_with('.');
+            result.push(CallSite {
+                name: name.to_string(),
+                arity: arguments(&view, next, false).map(|args| args.len()),
+                receiver,
+            });
         }
     }
     result
@@ -238,7 +313,7 @@ fn token_count(source: &str, token: &str) -> usize {
 }
 
 fn call_count(source: &str, name: &str) -> usize {
-    call_names(source).into_iter().filter(|call| call == name).count()
+    call_sites(source).into_iter().filter(|call| call.name == name).count()
 }
 
 fn functions() -> Vec<Function> {
@@ -270,10 +345,16 @@ fn tick_reachable(functions: &[Function]) -> HashSet<usize> {
         if !reachable.insert(index) {
             continue;
         }
-        for call in call_names(&functions[index].body) {
-            if let Some(targets) = by_name.get(call.as_str()) {
+        for call in call_sites(&functions[index].body) {
+            if let Some(targets) = by_name.get(call.name.as_str()) {
                 for target in targets {
-                    if !reachable.contains(target) {
+                    let candidate = &functions[*target];
+                    let compatible = candidate.receiver == call.receiver
+                        && call.arity.is_none_or(|arity| {
+                            let supplied = arity + usize::from(call.receiver);
+                            candidate.min_arity <= supplied && supplied <= candidate.max_arity
+                        });
+                    if compatible && !reachable.contains(target) {
                         queue.push_back(*target);
                     }
                 }
@@ -283,9 +364,8 @@ fn tick_reachable(functions: &[Function]) -> HashSet<usize> {
     reachable
 }
 
-fn census() -> (BTreeMap<String, Counts>, usize) {
-    let functions = functions();
-    let reachable = tick_reachable(&functions);
+fn census_from(functions: &[Function]) -> (BTreeMap<String, Counts>, usize) {
+    let reachable = tick_reachable(functions);
     let mut counts: BTreeMap<String, Counts> = BTreeMap::new();
     for index in reachable.iter().copied() {
         let function = &functions[index];
@@ -298,6 +378,58 @@ fn census() -> (BTreeMap<String, Counts>, usize) {
         }
     }
     (counts, reachable.len())
+}
+
+fn census() -> (BTreeMap<String, Counts>, usize) {
+    census_from(&functions())
+}
+
+#[test]
+fn census_call_shape_keeps_real_access_and_rejects_import_name_collisions() {
+    fn fixture(name: &str, body: &str, arity: usize, receiver: bool) -> Function {
+        Function {
+            name: name.to_string(),
+            file: "mag/fixture.rock".to_string(),
+            body: body.to_string(),
+            min_arity: arity,
+            max_arity: arity,
+            receiver,
+        }
+    }
+    let functions = vec![
+        fixture("mag_simulation_tick", "tick_helper()", 0, false),
+        fixture("tick_helper", "world_mobs(); recovery_run_start(state); recovery_run_complete(state)", 0, false),
+        fixture("world_mobs", "", 0, false),
+        fixture("recovery_run_start", "mag_world_state()", 2, false),
+        fixture("Player.recovery_run_complete", "mag_world_state()", 2, true),
+    ];
+    let (counts, reachable) = census_from(&functions);
+    assert_eq!(reachable, 3, "same-name wrappers with incompatible call shape stay off tick");
+    assert_eq!(counts["mag/fixture.rock"].arena, 1, "the real accessor remains counted");
+    assert_eq!(counts["mag/fixture.rock"].world_state, 0);
+
+    let methods = vec![
+        fixture("mag_simulation_tick", "player.complete(space)", 0, false),
+        fixture("Player.complete", "mag_world_state()", 2, true),
+    ];
+    let (counts, reachable) = census_from(&methods);
+    assert_eq!(reachable, 2, "receiver syntax supplies the declared receiver argument");
+    assert_eq!(counts["mag/fixture.rock"].world_state, 1);
+}
+
+#[test]
+fn census_argument_scan_handles_nested_calls_and_optional_parameters() {
+    let view = "f(inner(a, b), [x, y], named: { a: 1, b: 2 },)";
+    assert_eq!(arguments(view, 1, false).unwrap().len(), 3);
+    let sites = call_sites("actor.step(inner(a, b), [x, y])");
+    assert_eq!(sites[0].name, "step");
+    assert!(sites[0].receiver);
+    assert_eq!(sites[0].arity, Some(2));
+    let source = "fn helper(items: Map<int, [float]>, count: int = 1) { return count }";
+    let parsed = function_declarations(source, &repo_root().join("mag/fixture.rock"));
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].min_arity, 0);
+    assert_eq!(parsed[0].max_arity, 2);
 }
 
 fn baseline_bounds() -> BTreeMap<&'static str, Counts> {
