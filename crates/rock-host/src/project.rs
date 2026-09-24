@@ -188,7 +188,10 @@ pub fn get_project_id(project_root: &Path) -> Result<String> {
 /// commands like `rock run` must not shell out to cargo or copy from
 /// target/debug/ — there is no target dir.
 pub fn is_release_layout() -> bool {
-    let root = PathBuf::from(crate::rock_dir());
+    is_release_layout_in(Path::new(&crate::rock_dir()))
+}
+
+fn is_release_layout_in(root: &Path) -> bool {
     root.join("lib").is_dir() && root.join("bin").is_dir() && root.join("stone").is_dir()
         && !root.join("Cargo.toml").exists()
 }
@@ -232,8 +235,10 @@ pub fn luajit_path() -> PathBuf {
 /// In dev layout: `tmp` (macOS), `tmp:prebuilt/gamelibs-<platform>/lib` (Linux),
 ///                `tmp;prebuilt\gamelibs-<platform>\bin` (Windows)
 pub fn lib_path_value() -> String {
-    let root = PathBuf::from(crate::rock_dir());
+    lib_path_value_in(Path::new(&crate::rock_dir()))
+}
 
+fn lib_path_value_in(root: &Path) -> String {
     // Release layout: lib/ directory exists at root
     let release_lib = root.join("lib");
     if release_lib.exists() {
@@ -663,6 +668,42 @@ mod tests {
     use super::*;
     use fs_err as fs;
     use tempfile::TempDir;
+
+    fn lib_path_entries(value: &str) -> Vec<&str> {
+        value.split(if cfg!(target_os = "windows") { ';' } else { ':' }).collect()
+    }
+
+    #[test]
+    fn release_lib_path_never_searches_a_worktree_tmp() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        for dir in ["lib", "bin", "stone", "tmp"] {
+            fs::create_dir(root.join(dir)).unwrap();
+        }
+        assert!(is_release_layout_in(root));
+
+        let value = lib_path_value_in(root);
+        let entries = lib_path_entries(&value);
+        assert_eq!(entries[0], root.join("lib").to_string_lossy(), "{value}");
+        assert!(
+            !entries.iter().any(|entry| Path::new(entry).ends_with("tmp")),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn dev_lib_path_searches_staged_tmp_first() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::create_dir(root.join("tmp")).unwrap();
+        assert!(!is_release_layout_in(root));
+
+        let value = lib_path_value_in(root);
+        let entries = lib_path_entries(&value);
+        assert_eq!(entries[0], "tmp", "{value}");
+        assert_eq!(entries[1], root.join("tmp").to_string_lossy(), "{value}");
+    }
 
     #[test]
     fn test_find_project_root_with_stick_toml() {
