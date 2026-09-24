@@ -34,8 +34,10 @@ pub fn is_stdlib_module_file(file: &str) -> bool {
 /// Intrinsic recognition is keyed by the canonical DefKey, not by a path's
 /// display tail. A v1 definition such as `other::FieldRef` therefore cannot
 /// enter an intrinsic branch merely because it has the same final segment.
+/// The whole key is compared as text: interning `spelling` here would take the
+/// shared interner lock on hot inference paths across all workers.
 pub fn is_intrinsic_key(key: Ustr, spelling: &str) -> bool {
-    key == Ustr::from(spelling)
+    key.as_str() == spelling
 }
 
 pub fn intrinsic_type_name(key: Ustr) -> Option<&'static str> {
