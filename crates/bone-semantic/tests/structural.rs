@@ -466,6 +466,33 @@ fn nested_block_does_not_leak_into_outer_statements() {
     );
 }
 
+// The same contiguity trap for parameters: the lambda default's own `x`
+// binding is allocated between `f` and `k`, and must stay out of the fn's
+// parameter range. With the lambda default last it never could.
+#[test]
+fn lambda_param_default_does_not_leak_into_fn_params() {
+    for (src, names) in [
+        ("fn f(v: int, g: fn(int) -> int = x => x, k: int = 1) -> int { g(v) + k }", ["v", "g", "k"]),
+        ("fn f(v: int, k: int = 1, g: fn(int) -> int = x => x) -> int { g(v) + k }", ["v", "k", "g"]),
+    ] {
+        let ws = check(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        let mid = ws.modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("one user module")
+            .id;
+        let hir = ws.module(mid);
+        let (f_idx, _) = hir.functions.iter().next().expect("one function");
+        let fbody = &hir.bodies[&BodyOwner::Function(f_idx)];
+        let got: Vec<_> = fbody
+            .param_bindings
+            .clone()
+            .map(|b| fbody.binding_arena[b].name.to_string())
+            .collect();
+        assert_eq!(got, names, "{src}");
+    }
+}
+
 // The same contiguity trap for interpolation parts: the hole's `if` holds its
 // own interpolated string, whose parts are allocated while the outer parts are
 // being collected. The outer string has exactly 2 parts (`"a: "` and the `if`);
