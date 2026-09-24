@@ -1142,9 +1142,9 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
 
     let update = rock_function_body(&run, "fn mag_run_update()");
     assert_eq!(
-        update.matches("let tick_intent = mag_tick_intent_from_input(player)").count(),
+        update.matches("let tick_intent = if player_input { mag_tick_intent_from_input(player) } else { GRAPHICS_DETECT_IDLE_INTENT }").count(),
         1,
-        "the host must construct the retained tick intent once"
+        "the host must construct the retained tick intent once when input is admitted"
     );
     assert_eq!(
         update.matches("mag_present_status_effects(world)").count(),
@@ -1214,7 +1214,7 @@ fn mag_tick_intent_is_overwritten_before_the_live_tick_consumes_it() {
     );
     let update = rock_function_body(&run, "fn mag_run_update()");
     let fill = update
-        .find("let tick_intent = mag_tick_intent_from_input(player)")
+        .find("let tick_intent = if player_input { mag_tick_intent_from_input(player) } else { GRAPHICS_DETECT_IDLE_INTENT }")
         .expect("host input adapter call");
     let consume = update
         .find("mag_simulation_tick(world, tick_intent, dt)")
