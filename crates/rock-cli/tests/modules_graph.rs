@@ -8,6 +8,7 @@ use rock_host::stick::graph::PackageGraph;
 use rock_host::stick::StickConfig;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn write_package(dir: &Path, name: &str, body: &str, sources: &[&str]) {
     fs::create_dir_all(dir).expect("create package dir");
@@ -118,4 +119,59 @@ fn stick_config_language_table_loads_from_disk() {
         .expect("find manifest")
         .expect("manifest exists");
     assert_eq!(cfg.dialect(), Dialect::V1);
+}
+
+#[test]
+fn channel_source_group_has_one_owner_and_excludes_inactive_files() {
+    let tmp = temp_tree("modules-source-group");
+    let root = tmp.path().join("app");
+    write_package(
+        &root,
+        "app",
+        "\n[language]\nmodules = \"v1\"\n\n[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n\n[source_groups.agent]\ndirectory = \"agent\"\nchannels = [\"dev\"]\n",
+        &["main.rock"],
+    );
+    fs::create_dir(root.join("agent")).unwrap();
+    fs::write(root.join("agent/bridge.rock"), "fn broken( {\n").unwrap();
+
+    let config = StickConfig::from_path(&root.join("stick.toml")).unwrap();
+    let steam = PackageGraph::build_with_channel(&root, &config, "steam").unwrap();
+    let agent = fs::canonicalize(root.join("agent/bridge.rock")).unwrap();
+    assert!(!steam.includes_file(steam.root(), &agent));
+
+    assert_eq!(steam.selected_rock_files(steam.root(), &root).unwrap().len(), 1);
+
+    let dev = PackageGraph::build_with_channel(&root, &config, "dev").unwrap();
+    assert!(dev.includes_file(dev.root(), &agent));
+    assert_eq!(dev.package_of_file(&agent), Some(dev.root()));
+
+    let output = tmp.path().join("steam.lua");
+    let compile = |channel: &str, output: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(["compile", root.to_str().unwrap(), "--channel", channel, "--output", output.to_str().unwrap()])
+            .output().expect("spawn rock compile")
+    };
+    let shipping = compile("steam", &output);
+    assert!(shipping.status.success(), "inactive broken file must not parse: {}", String::from_utf8_lossy(&shipping.stderr));
+    fs::write(root.join("main.rock"), "fn private_helper() -> int { 7 }\nfn main() {}\n").unwrap();
+    fs::write(&agent, "global AGENT_SOURCE_PRESENT: string = \"agent-source-present-{private_helper()}\"\n").unwrap();
+    let dev_output = tmp.path().join("dev.lua");
+    let development = compile("dev", &dev_output);
+    assert!(development.status.success(), "group must reach owner-private declaration: {}", String::from_utf8_lossy(&development.stderr));
+    assert!(fs::read_to_string(dev_output).unwrap().contains("agent-source-present-"));
+    assert!(!fs::read_to_string(output).unwrap().contains("agent-source-present-"));
+}
+
+#[test]
+fn source_group_rejects_escape_and_unknown_channel() {
+    let tmp = temp_tree("modules-source-group-invalid");
+    let root = tmp.path().join("app");
+    write_package(&root, "app", "\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n\n[source_groups.agent]\ndirectory = \"../outside\"\nchannels = [\"dev\"]\n", &["main.rock"]);
+    let err = PackageGraph::build(&root).unwrap_err().to_string();
+    assert!(err.contains("package-relative"), "{err}");
+
+    fs::create_dir(root.join("agent")).unwrap();
+    fs::write(root.join("stick.toml"), "[package]\nname = \"app\"\n\n[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n\n[source_groups.agent]\ndirectory = \"agent\"\nchannels = [\"steam\"]\n").unwrap();
+    let err = PackageGraph::build(&root).unwrap_err().to_string();
+    assert!(err.contains("undeclared channel `steam`"), "{err}");
 }

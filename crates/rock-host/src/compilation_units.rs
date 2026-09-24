@@ -43,7 +43,16 @@ pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnal
     let mut test_util_files = Vec::new();
 
     let dir_path_ref = dir_path.as_ref();
-    let rock_files = crate::project::find_rock_files_at_path(dir_path_ref)?;
+    let rock_files = if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(dir_path_ref)? {
+        let root = manifest.parent().unwrap_or(&manifest);
+        let graph = crate::stick::graph::PackageGraph::build_with_channel(
+            root, &config, &crate::stick::resolved_channel_for(&config),
+        )?;
+        graph.selected_rock_files(graph.root(), dir_path_ref)?
+            .into_iter().map(|path| path.to_string_lossy().into_owned()).collect()
+    } else {
+        crate::project::find_rock_files_at_path(dir_path_ref)?
+    };
 
     // Check if this is a tests directory or a directory without a project
     let is_tests_directory = dir_path_ref
@@ -209,7 +218,11 @@ pub fn source_facts(
     rock_core::source_code::MemoryClass,
     rock_core::source_code::GlobalPolicy,
 )> {
-    let node = graph.package(graph.package_of_file(path)?);
+    let owner = graph.package_of_file(path)?;
+    if !graph.includes_file(owner, path) {
+        return None;
+    }
+    let node = graph.package(owner);
     Some((
         rock_core::source_code::PackageTag { id: node.id.0, self_name: node.self_name.clone() },
         node.dialect,
@@ -246,11 +259,10 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                                 continue;
                             }
                             let node = resolved.package(*id);
-                            let dep_files = crate::project::find_rock_files_at_path(&node.root)?;
+                            let dep_files = resolved.selected_rock_files(*id, &node.root)?;
 
                             // Filter out script files
-                            for dep_file_path in dep_files {
-                                let path = PathBuf::from(&dep_file_path);
+                            for path in dep_files {
                                 let source = source_file_new(&path)?;
                                 if !source.is_script {
                                     all_files.push(path);

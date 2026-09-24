@@ -52,6 +52,15 @@ pub struct PackageNode {
     pub global_policy: rock_core::source_code::GlobalPolicy,
     /// Channel-filtered edges, sorted by declared key.
     pub dependencies: Vec<PackageEdge>,
+    /// Source directories selected before parsing, under this same owner.
+    pub source_groups: Vec<SourceGroup>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceGroup {
+    pub name: String,
+    pub directory: PathBuf,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +125,41 @@ impl Builder {
         self.stack.push((root.clone(), config.package.name.clone()));
 
         let dialect = config.dialect();
+        let mut source_groups = Vec::new();
+        let mut declared_groups: Vec<_> = config.source_groups.iter().collect();
+        declared_groups.sort_by_key(|(name, _)| *name);
+        for (name, group) in declared_groups {
+            let relative = Path::new(&group.directory);
+            if relative.as_os_str().is_empty()
+                || !relative.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(anyhow!("source group `{name}` directory must be a nonempty package-relative path"));
+            }
+            if group.channels.is_empty() {
+                return Err(anyhow!("source group `{name}` must select at least one channel"));
+            }
+            for selected in &group.channels {
+                if !config.build.as_ref().is_some_and(|b| b.channels.contains(selected)) {
+                    return Err(anyhow!("source group `{name}` names undeclared channel `{selected}`"));
+                }
+            }
+            let directory = fs_err::canonicalize(root.join(relative)).map_err(|e| {
+                anyhow!("source group `{name}` directory `{}` cannot be resolved: {e}", group.directory)
+            })?;
+            if directory == root || !directory.starts_with(&root) || !directory.is_dir() {
+                return Err(anyhow!("source group `{name}` directory must be a directory below its package root"));
+            }
+            if source_groups.iter().any(|other: &SourceGroup| {
+                directory.starts_with(&other.directory) || other.directory.starts_with(&directory)
+            }) {
+                return Err(anyhow!("source group `{name}` overlaps another source group"));
+            }
+            source_groups.push(SourceGroup {
+                name: name.clone(),
+                directory,
+                active: group.channels.iter().any(|selected| selected == channel),
+            });
+        }
         let mut dependencies = Vec::new();
         let mut direct: Vec<(&String, &super::Dependency)> = config
             .dependencies
@@ -163,6 +207,7 @@ impl Builder {
             memory_class: config.memory_class(),
             global_policy: config.global_policy(),
             dependencies,
+            source_groups,
         });
         Ok(id)
     }
@@ -371,6 +416,25 @@ impl PackageGraph {
         } else {
             true
         }
+    }
+
+    /// Selected source membership. Inactive groups vanish before parsing and
+    /// never contribute definitions, initializers or lifecycle hooks.
+    pub fn includes_file(&self, owner: PackageId, path: &Path) -> bool {
+        if !self.owns_file(owner, path) {
+            return false;
+        }
+        !self.package(owner).source_groups.iter().any(|group| {
+            path.starts_with(&group.directory) && !group.active
+        })
+    }
+
+    pub fn selected_rock_files(&self, owner: PackageId, directory: &Path) -> Result<Vec<PathBuf>> {
+        Ok(crate::project::find_rock_files_at_path(directory)?
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|path| self.includes_file(owner, path))
+            .collect())
     }
 }
 

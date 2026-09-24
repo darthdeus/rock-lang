@@ -50,12 +50,9 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                     } else {
                         node.root.clone()
                     };
-                    let package_sources = SourceFiles::from_dir_preprocessed(&load_dir)?;
+                    let selected = graph.selected_rock_files(*id, &load_dir)?;
+                    let package_sources = SourceFiles::from_multiple_paths(&selected, true)?;
                     for file in package_sources.files {
-                        let path = file.borrow().file.to_id_path();
-                        if !graph.owns_file(*id, std::path::Path::new(&path)) {
-                            continue;
-                        }
                         // Skip files with #script directive (test/example files in library dependencies)
                         if !file.borrow().is_script || *id == graph.root() {
                             stamp_package(&file, node);

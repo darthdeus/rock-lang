@@ -750,6 +750,12 @@ impl BoneWorkspace {
 
         let root = Self::root_for(path);
         let proj = self.project_mut(&root);
+        if proj.graph.as_ref().is_some_and(|graph| {
+            graph.package_of_file(Path::new(path))
+                .is_some_and(|owner| !graph.includes_file(owner, Path::new(path)))
+        }) {
+            return vec![(editor_path(path).into_owned(), Vec::new())];
+        }
         proj.texts.insert(path.to_string(), text.clone());
 
         // A parse/lower failure of *this* file reverts the session to its last
