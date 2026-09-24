@@ -687,6 +687,49 @@ mod tests {
         assert!(rejected, "malformed hole must be rejected, not emitted as literal text");
     }
 
+    /// Every `Ident` span in `ast`, as (name, the source text it covers).
+    fn ident_spans(ast: &Ast, src: &str) -> Vec<(String, String)> {
+        ast.exprs
+            .iter()
+            .filter_map(|(_, x)| match &x.kind {
+                ExprKind::Ident(id) => {
+                    let (s, e) = x.span.offset_range;
+                    Some((id.name.to_string(), src.get(s..e).unwrap_or("<out of range>").to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn interpolation_nested_hole_spans_are_file_offsets() {
+        // A hole inside a string that itself sits in a hole is scanned against
+        // the enclosing hole's cooked text; its offsets must still come out in
+        // file coordinates. The escaped form cooks `\"` away, so its map is not
+        // a plain shift.
+        let src = "fn a() {}\n\
+                   fn b(y: int, z: int) -> string {\n    \
+                       let s = \"v {y} w {if true { \"{z}\" } else { \"\" }}\"\n    \
+                       \"{s} {f(\\\"n {h(y, g(\\\"{z}\\\"))}\\\")}\"\n\
+                   }\n";
+        let file = Ustr::from("test.rock");
+        let full = parse_module(src, file).expect("full parse");
+        for (name, text) in ident_spans(&full, src) {
+            assert_eq!(text, name, "ident span does not cover its source");
+        }
+
+        // The single-item reparse starts its source mid-file, so a hole offset
+        // left relative to that slice lands `offset` bytes short.
+        let item = &full.items[1];
+        let (s, e) = item.span.offset_range;
+        let mini =
+            parse_one_item(&src[s..e], file, s, item.span.line_range.0, item.span.col_range.0, Dialect::Legacy)
+                .expect("parse_one_item");
+        for (name, text) in ident_spans(&mini, src) {
+            assert_eq!(text, name, "reparsed ident span does not cover its source");
+        }
+    }
+
     #[test]
     fn expr_hole_sexp_matches_rock_numbering() {
         // Bare anonymous hole renders `?0`; a named one renders `?name`.
