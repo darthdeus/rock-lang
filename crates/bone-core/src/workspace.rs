@@ -217,34 +217,38 @@ impl Workspace {
     /// Legacy and compiler-owned callable keys have no namespace member table
     /// and return `None`, which means their existing visibility remains public.
     pub fn callable_family_members(&self, key: Ustr) -> Option<&[crate::modules::CallableMember]> {
-        let meta = self.defs.get(&key)?;
+        self.callable_members_of(self.defs.get(&key)?)
+    }
+
+    fn callable_members_of(&self, meta: &crate::modules::DefMeta) -> Option<&[crate::modules::CallableMember]> {
         if meta.kind != crate::modules::DefKind::Callable {
             return None;
         }
-        let package = self.ns.package(meta.package)?;
-        let node = package.node(package.key_of(&meta.module))?;
+        let node = self.ns.package(meta.package)?.node(meta.node)?;
         node.callable_members.get(&meta.name).map(Vec::as_slice)
     }
 
-    /// The declared visibility of one lowered callable member. The source
-    /// namespace table remains authoritative, so a visibility-only edit does
-    /// not require a second visibility field on HIR functions.
-    pub fn callable_member_visibility(
+    /// The declared visibility of the lowered callable `fid` among its
+    /// family's `members`, matched by source file and per-file overload
+    /// ordinal. The source namespace table remains authoritative, so a
+    /// visibility-only edit does not require a second visibility field on HIR
+    /// functions.
+    fn member_visibility<'a>(
         &self,
+        members: &'a [crate::modules::CallableMember],
         key: Ustr,
         mid: ModuleId,
         fid: Idx<Function>,
-    ) -> Option<&crate::modules::NsVisibility> {
-        let members = self.callable_family_members(key)?;
-        let ordinal = self
-            .module(mid)
+    ) -> Option<&'a crate::modules::NsVisibility> {
+        let module = self.module(mid);
+        let ordinal = module
             .functions_by_name
             .get(&key)?
             .iter()
             .position(|(_, candidate)| *candidate == fid)?;
         members
             .iter()
-            .find(|member| member.file == self.module(mid).file && member.ordinal == ordinal)
+            .find(|member| member.file == module.file && member.ordinal == ordinal)
             .map(|member| &member.vis)
     }
 
@@ -259,9 +263,9 @@ impl Workspace {
         site: crate::modules::AccessSite<'_>,
     ) -> bool {
         let Some(meta) = self.defs.get(&key) else { return true };
-        let vis = match self.callable_family_members(key) {
-            Some(_) => {
-                let Some(vis) = self.callable_member_visibility(key, mid, fid) else {
+        let vis = match self.callable_members_of(meta) {
+            Some(members) => {
+                let Some(vis) = self.member_visibility(members, key, mid, fid) else {
                     return false;
                 };
                 vis
@@ -277,8 +281,8 @@ impl Workspace {
     /// Whether a lowered callable member is public in its defining namespace.
     pub fn callable_member_is_public(&self, key: Ustr, mid: ModuleId, fid: Idx<Function>) -> bool {
         match self.callable_family_members(key) {
-            Some(_) => self
-                .callable_member_visibility(key, mid, fid)
+            Some(members) => self
+                .member_visibility(members, key, mid, fid)
                 .is_some_and(|vis| *vis == crate::modules::NsVisibility::Pub),
             None => self
                 .defs

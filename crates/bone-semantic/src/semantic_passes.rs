@@ -840,13 +840,11 @@ fn is_type_publicly_accessible(
     if reachable_defs.contains(&type_name) {
         return true;
     }
-    if matches!(meta.vis, NsVisibility::Pub) {
-        if let Some(pkg) = ws.ns.package(pkg_id) {
-            let mod_key = pkg.key_of(&meta.module);
-            if reachable_modules.contains(&mod_key) {
-                return true;
-            }
-        }
+    if matches!(meta.vis, NsVisibility::Pub)
+        && ws.ns.package(pkg_id).is_some()
+        && reachable_modules.contains(&meta.node)
+    {
+        return true;
     }
     false
 }
@@ -890,10 +888,7 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
             continue;
         };
 
-        let module_reachable = ws
-            .ns
-            .package(pkg_id)
-            .is_some_and(|pkg| reachable_modules.contains(&pkg.key_of(&meta.module)));
+        let module_reachable = ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
         let is_exported = match meta.kind {
             bone_core::modules::DefKind::Callable => {
                 let has_public_member = ws
@@ -1966,6 +1961,7 @@ fn register_items(
                 let meta = bone_core::modules::DefMeta {
                     package: pkg_id,
                     module: path.to_vec(),
+                    node: key,
                     kind: def_kind,
                     name: bare,
                     // Callable families use `callable_members`; retaining the

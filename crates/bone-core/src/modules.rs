@@ -187,6 +187,9 @@ pub enum DefKind {
 pub struct DefMeta {
     pub package: PackageId,
     pub module: ModulePath,
+    /// `module`'s namespace node key ([`NsPackage::path_key`]), kept so a
+    /// lookup does not join and intern the path again.
+    pub node: Ustr,
     pub kind: DefKind,
     pub name: Ustr,
     pub vis: NsVisibility,
