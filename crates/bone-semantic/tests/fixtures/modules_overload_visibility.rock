@@ -97,3 +97,95 @@ fn external() -> int {
                  //^ int
     result
 }
+
+//- restricted_members_of_a_two_file_module_keep_their_own_visibility
+//-- m1.rock @pkg=chess,1 @v1
+mod m;
+
+pub(package) fn f(n: int) -> int {
+    n
+}
+
+//-- m2.rock @pkg=chess,1 @v1
+mod m;
+
+fn f(s: string) -> string {
+    s
+}
+
+fn inside() -> string {
+    let s = f("x")
+            //^ string
+    s
+}
+
+//-- c.rock @pkg=chess,1 @v1
+mod c;
+
+fn outside() -> int {
+    let n = super::m::f(1)
+            //^ int
+    n
+}
+
+//- a_private_member_of_a_two_file_module_stays_hidden @fail=No accessible overload for `chess::m::f` with argument types (string)
+//-- m1.rock @pkg=chess,1 @v1
+mod m;
+
+pub(package) fn f(n: int) -> int {
+    n
+}
+
+//-- m2.rock @pkg=chess,1 @v1
+mod m;
+
+fn f(s: string) -> string {
+    s
+}
+
+//-- c.rock @pkg=chess,1 @v1
+mod c;
+
+fn outside() -> string {
+    super::m::f("x")
+}
+
+//- a_pub_super_member_of_a_nested_module_reaches_its_parent
+//-- outer.rock @pkg=chess,1 @v1
+mod outer;
+
+fn from_parent() -> int {
+    let n = inner::g(1)
+            //^ int
+    n
+}
+
+//-- inner.rock @pkg=chess,1 @v1
+mod outer::inner;
+
+pub(super) fn g(n: int) -> int {
+    n
+}
+
+fn g(s: string) -> string {
+    s
+}
+
+//- a_private_member_of_a_nested_module_stays_hidden_from_its_parent @fail=No accessible overload for `chess::outer::inner::g` with argument types (string)
+//-- outer.rock @pkg=chess,1 @v1
+mod outer;
+
+fn from_parent() -> string {
+    inner::g("x")
+}
+
+//-- inner.rock @pkg=chess,1 @v1
+mod outer::inner;
+
+pub(super) fn g(n: int) -> int {
+    n
+}
+
+fn g(s: string) -> string {
+    s
+}

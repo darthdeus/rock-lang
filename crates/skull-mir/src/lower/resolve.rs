@@ -95,24 +95,18 @@ pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
 
 /// The backend-variant group containing `member`.
 ///
-/// This is bone's complete collapse rule: same name and rendered parameter
-/// signature, with every backend distinct. A repeated backend is a genuine
-/// overload ambiguity, so no group exists and the member stays by itself.
+/// This is bone's complete collapse rule: equal
+/// [`Workspace::backend_variant_key`], with every backend distinct. A repeated
+/// backend is a genuine overload ambiguity, so no group exists and the member
+/// stays by itself.
 pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
-    let mf = &ws.module(member.module).functions[member.func];
-    let member_sig: Vec<String> =
-        mf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
-    let Some(cands) = ws.functions_by_name.get(&mf.name) else { return vec![member] };
-    let mut group = Vec::new();
-    for &(mid, fid) in cands.iter() {
-        let f = &ws.module(mid).functions[fid];
-        if f.param_decls.len() != member_sig.len() {
-            continue;
-        }
-        if f.param_decls.iter().zip(&member_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
-            group.push(FuncRef { module: mid, func: fid });
-        }
-    }
+    let key = ws.backend_variant_key(member.module, member.func);
+    let Some(cands) = ws.functions_by_name.get(&key.0) else { return vec![member] };
+    let group: Vec<FuncRef> = cands
+        .iter()
+        .filter(|&&(mid, fid)| ws.backend_variant_key(mid, fid) == key)
+        .map(|&(mid, fid)| FuncRef { module: mid, func: fid })
+        .collect();
     let mut backends = std::collections::BTreeSet::new();
     if group.iter().all(|r| backends.insert(ws.module(r.module).functions[r.func].backend)) {
         group

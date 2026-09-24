@@ -152,6 +152,38 @@ fn read(r: FieldRef<int, int>) -> int {
     r.value
 }
 
+//- qualified_user_fieldref_rejects_sibling_ref @fail=field reference `.health` is only valid against an expected
+//-- other.rock @pkg=app,1 @v1
+mod other;
+pub struct FieldRef<T, V> {
+    pub value: V,
+}
+pub struct Mob {
+    pub health: int,
+}
+
+//-- app.rock @pkg=app,1 @v1
+use app::other::{FieldRef, Mob};
+
+fn main() {
+    let r: FieldRef<Mob, int> = .health
+}
+
+//- qualified_user_vec2_has_no_swizzle @fail=struct `app::other::Vec2` has no field `r`
+//-- other.rock @pkg=app,1 @v1
+mod other;
+pub struct Vec2 {
+    pub x: float,
+    pub y: float,
+}
+
+//-- app.rock @pkg=app,1 @v1
+use app::other::Vec2 as Vec2;
+
+fn red(v: Vec2) -> float {
+    v.r
+}
+
 //- user_std_package_name_is_reserved @fail=user packages cannot use the compiler-owned package name `std`
 //-- app.rock @pkg=std,3 @v1
 fn main() {}

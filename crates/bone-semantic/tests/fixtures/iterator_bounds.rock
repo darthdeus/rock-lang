@@ -1,0 +1,24 @@
+//! `Iterator<E>`-bounded overloads: when every candidate is rejected, the
+//! diagnostic names why the bounded one was.
+
+//- a_caller_generic_with_the_wrong_element_names_both_elements @fail=`J` satisfies `Iterator<string>`, but the bound requires `Iterator<int>`
+fn total<I: Iterator<int>>(it: I) -> int {
+    return 0
+}
+
+fn total(x: bool) -> int {
+    return 1
+}
+
+fn fwd<J: Iterator<string>>(j: J) -> int {
+    return total(j)
+}
+
+//- a_lone_bounded_callee_reports_the_element_mismatch @fail=type mismatch: expected `int`, found `string`
+fn total<I: Iterator<int>>(it: I) -> int {
+    return 0
+}
+
+fn fwd<J: Iterator<string>>(j: J) -> int {
+    return total(j)
+}

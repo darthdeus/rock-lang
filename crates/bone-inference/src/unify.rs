@@ -238,22 +238,22 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             },
         ) => {
             if ctor_a != ctor_b {
-                let a_str = gamma.workspace.render(Some(&gamma.out), a);
-                let b_str = gamma.workspace.render(Some(&gamma.out), b);
-
                 // Both sides are plain nominals (structs/enums with no type
                 // args) far more often than generics; "different generic
                 // constructors" is nonsense for those. Only mention generics
                 // when a side actually has type parameters.
-                if params_a.is_empty() && params_b.is_empty() {
-                    unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+                let detail = if params_a.is_empty() && params_b.is_empty() {
+                    ""
                 } else {
-                    unify_fail!(
-                        gamma,
-                        span,
-                        "type mismatch: expected `{b_str}`, found `{a_str}` (different type constructors)"
-                    )
-                }
+                    " (different type constructors)"
+                };
+                unify_fail!(
+                    gamma,
+                    span,
+                    "type mismatch: expected `{}`, found `{}`{detail}",
+                    gamma.workspace.render(Some(&gamma.out), b),
+                    gamma.workspace.render(Some(&gamma.out), a)
+                )
             }
 
             if params_a.len() != params_b.len() {
@@ -339,9 +339,13 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
         // `from`/`to` in that order), so `b` is the expected type and `a` the
         // found one -- matching the nominal-mismatch arm above.
         _ => {
-            let a_str = gamma.workspace.render(Some(&gamma.out), a);
-            let b_str = gamma.workspace.render(Some(&gamma.out), b);
-            unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+            unify_fail!(
+                gamma,
+                span,
+                "type mismatch: expected `{}`, found `{}`",
+                gamma.workspace.render(Some(&gamma.out), b),
+                gamma.workspace.render(Some(&gamma.out), a)
+            )
         }
     }
 

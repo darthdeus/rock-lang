@@ -17,9 +17,10 @@ fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()>
         }
     } else {
         for section in sections {
-            let (name, expect_fail) = match section.name.strip_suffix(" @fail") {
-                Some(n) => (n, true),
-                None => (section.name, false),
+            // `@fail` expects any rejection; `@fail=<text>` also pins the reason.
+            let (name, expect_fail, want) = match section.name.split_once(" @fail") {
+                Some((n, rest)) => (n, true, rest.strip_prefix('=').map(str::trim)),
+                None => (section.name, false, None),
             };
             match (bone_semantic::test_support::check_types(section.content), expect_fail) {
                 (Ok(_), true) => {
@@ -35,6 +36,15 @@ fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()>
                      (it only failed on the missing `//^` marker) -- the rule it \
                      claims to pin is not enforced"
                 ),
+                (Err(e), true) => {
+                    if let Some(want) = want {
+                        assert!(
+                            e.contains(want),
+                            "section `{name}` failed for the wrong reason: \
+                             expected the error to contain `{want}`, got:\n{e}"
+                        );
+                    }
+                }
                 _ => {}
             }
         }
