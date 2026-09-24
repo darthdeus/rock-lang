@@ -1514,3 +1514,54 @@ fn mrt_early_return_terminates_the_entry() {
     let end = branch.find('}').expect("branch end");
     assert!(branch[..end].contains("return;"), "MRT branch must not fall through:\n{glsl}");
 }
+
+// --- per-stage sampler budget ---------------------------------------------
+// GL 4.1 core (macOS) and GLES 3.0 guarantee 16 texture image units per
+// stage. Linux drivers allow more, so a shader over the budget linked there
+// and failed only on a Mac.
+
+fn sampler_group_src(n: usize) -> String {
+    let fields: Vec<String> = (0..n).map(|i| format!("s{i}: Sampler2D")).collect();
+    let reads: Vec<String> = (0..n).map(|i| format!("acc += texture(t.s{i}, uv).x")).collect();
+    format!(
+        r#"
+        struct ManyTex {{ {} }}
+        value Quad {{ aPos: Vec2, aUv: Vec2 }}
+        value Vary {{ position: Vec4, uv: Vec2 }}
+        @shader(vertex)
+        fn many_vs(@attr a: Quad) -> Vary {{ return Vary {{ position: v(a.aPos, 0.0, 1.0), uv: a.aUv }} }}
+        @shader(fragment)
+        fn many_fs(vary: Vary, @textures t: ManyTex) -> Vec4 {{
+            let uv = vary.uv
+            let acc = 0.0
+            {}
+            return Vec4 {{ x: acc, y: 0.0, z: 0.0, w: 1.0 }}
+        }}
+        @shader(fragment)
+        fn many_entry(@textures t: ManyTex, uv: Vec2) -> Vec4 {{
+            let acc = 0.0
+            {}
+            return Vec4 {{ x: acc, y: 0.0, z: 0.0, w: 1.0 }}
+        }}
+    "#,
+        fields.join(", "),
+        reads.join("\n            "),
+        reads.join("\n            ")
+    )
+}
+
+#[test]
+fn fragment_stage_at_sixteen_samplers_emits() {
+    let src = sampler_group_src(16);
+    emit_pipeline(&src, "many_vs", "many_fs").expect("16 samplers fit every GLSL target");
+    emit_entry(&src, "many_entry").expect("16 samplers fit every GLSL target");
+}
+
+#[test]
+fn fragment_stage_over_sixteen_samplers_rejects_naming_the_shader() {
+    let src = sampler_group_src(17);
+    let e = emit_pipeline(&src, "many_vs", "many_fs").expect_err("17 samplers must reject");
+    assert!(e.contains("many_fs") && e.contains("17 samplers") && e.contains("16"), "got: {e}");
+    let e = emit_entry(&src, "many_entry").expect_err("17 samplers must reject");
+    assert!(e.contains("many_entry") && e.contains("17 samplers") && e.contains("16"), "got: {e}");
+}

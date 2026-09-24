@@ -156,6 +156,15 @@ impl Frame<'_> {
         }
     }
 
+    /// The file offset of frame-local offset `local`; the inverse of
+    /// [`Frame::to_local`].
+    fn to_file(&self, local: usize) -> usize {
+        match self {
+            Frame::File { base, .. } => base + local,
+            Frame::Hole { map, .. } => map[local],
+        }
+    }
+
     /// The (line, column) of frame-local offset 0.
     fn origin(&self) -> Option<(usize, usize)> {
         match self {
@@ -3479,7 +3488,10 @@ impl<'a> Parser<'a> {
                         let cook = |at: (usize, usize), from: Pos| {
                             let mut p = from;
                             p.advance(frame.text(), at.0);
-                            let (text, map) = scan.hole_source(frame.text(), at);
+                            // `hole_source` maps into this frame's text, which
+                            // is a slice of the file or an enclosing hole.
+                            let (text, local) = scan.hole_source(frame.text(), at);
+                            let map = local.into_iter().map(|o| frame.to_file(o)).collect();
                             HoleFrame { text, map, line: p.line, column: p.column }
                         };
                         pending.push(Pending::Hole(holes.len()));
