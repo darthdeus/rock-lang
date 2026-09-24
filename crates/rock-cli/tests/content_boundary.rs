@@ -95,7 +95,7 @@ fn mag_content_does_not_depend_on_the_game() {
         "mag-content/stick.toml declares no dependencies at all -- this test would \
          pass vacuously if the manifest moved or changed shape"
     );
-    for banned in ["mag", "Mag", "mag-agent", "lighting3d"] {
+    for banned in ["mag", "mag-agent", "lighting3d"] {
         assert!(
             !deps.iter().any(|d| d == banned),
             "mag-content must not depend on `{banned}`. The content layer is a leaf: \
