@@ -3701,7 +3701,9 @@ fn lower_interp_parts(
     parts: &[skull_parser::InterpolatedPart],
 ) -> Result<IdxRange<InterpPart>, CompilerError> {
     use skull_parser::InterpolatedPart as P;
-    let mut ids = Vec::with_capacity(parts.len());
+    // Lower every part before allocating any: a hole can hold its own
+    // interpolated string, whose parts would otherwise land inside this range.
+    let mut lowered = Vec::with_capacity(parts.len());
 
     for part in parts {
         let hir = match part {
@@ -3758,8 +3760,13 @@ fn lower_interp_parts(
             }
         };
 
-        ids.push(body.interp_part_arena.alloc(hir));
+        lowered.push(hir);
     }
+
+    let ids: Vec<_> = lowered
+        .into_iter()
+        .map(|hir| body.interp_part_arena.alloc(hir))
+        .collect();
 
     Ok(match (ids.first(), ids.last()) {
         (Some(min), Some(max)) => IdxRange::new_inclusive(*min..=*max),
