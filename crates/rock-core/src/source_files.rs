@@ -141,9 +141,13 @@ impl SourceFiles {
                 return Ok(false);
             }
         };
-        Ok(relative
-            .components()
-            .any(|c| c.as_os_str() == "tests"))
+        Ok(Self::is_test_only_relative_path(relative))
+    }
+
+    /// Shared by production discovery and watch-event filtering after each
+    /// caller has resolved the owning package root.
+    pub fn is_test_only_relative_path(relative: &Path) -> bool {
+        relative.components().any(|c| c.as_os_str() == "tests")
     }
 }
 

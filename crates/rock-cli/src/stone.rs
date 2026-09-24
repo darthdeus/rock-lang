@@ -202,6 +202,42 @@ fn stone_source_watch_paths(
     }
 }
 
+fn retain_production_changes(
+    changes: &mut std::collections::HashSet<PathBuf>,
+    project: &str,
+    package_roots: Option<&[(u32, PathBuf)]>,
+    comptime_watch: &crate::file_watcher::SharedWatchSet,
+) {
+    let inputs = comptime_watch.lock();
+    changes.retain(|path| {
+        if path.extension().is_none_or(|extension| extension != "rock") || inputs.contains(path) {
+            return true;
+        }
+        let canonical = path.canonicalize().or_else(|_| {
+            let parent = path.parent().ok_or_else(|| std::io::Error::other("no parent"))?;
+            let name = path.file_name().ok_or_else(|| std::io::Error::other("no file name"))?;
+            parent.canonicalize().map(|parent| parent.join(name))
+        });
+        let Ok(canonical) = canonical else { return true };
+        let roots = package_roots.unwrap_or(&[]);
+        let owning_root = roots.iter()
+            .filter_map(|(_, root)| {
+                let root = root.canonicalize().ok()?;
+                canonical.strip_prefix(&root).ok().map(|_| root)
+            })
+            .max_by_key(|root| root.components().count())
+            .or_else(|| {
+                roots.is_empty().then(|| {
+                    PathBuf::from(project).canonicalize()
+                        .unwrap_or_else(|_| PathBuf::from(project))
+                })
+            });
+        let Some(root) = owning_root else { return true };
+        let Ok(relative) = canonical.strip_prefix(&root) else { return true };
+        !rock_core::source_files::SourceFiles::is_test_only_relative_path(relative)
+    });
+}
+
 struct StoneWatcher {
     handle: Option<crate::file_watcher::WatchHandle>,
     paths: Vec<PathBuf>,
@@ -389,7 +425,8 @@ pub fn do_stone_watch(
             manual_restart_requested = true;
         }
 
-        let changes = categorize_stone_changes(&event, &sound_watch, &comptime_watch);
+        let mut changes = categorize_stone_changes(&event, &sound_watch, &comptime_watch);
+        retain_production_changes(&mut changes.changed_paths, path, compiler.package_roots(), &comptime_watch);
         needs_libstone_rebuild |= changes.needs_libstone_rebuild;
         needs_compiler_rebuild |= changes.needs_compiler_rebuild;
         sound_dirty |= changes.sound_dirty;
@@ -1924,7 +1961,7 @@ mod tests {
 
 #[cfg(test)]
 mod watch_reload_tests {
-    use super::{categorize_stone_changes, stone_source_watch_paths, StoneWatcher};
+    use super::{categorize_stone_changes, retain_production_changes, stone_source_watch_paths, StoneWatcher};
     use crate::game_runtime::{GameCompiler, SkullGameCompiler};
     use crate::FileChangeEvent;
     use std::collections::HashSet;
@@ -1985,7 +2022,8 @@ mod watch_reload_tests {
                 std::fs::write(&self.edited, text).unwrap();
             }
             let event = receive_path(&rx, &self.edited);
-            let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+            let mut changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+            retain_production_changes(&mut changes.changed_paths, self.root.to_str().unwrap(), self.compiler.package_roots(), &Default::default());
             assert!(changes.changed_paths.contains(&self.edited), "Stone dropped source edit: {:?}", event.paths);
             assert!(!changes.needs_compiler_rebuild && !changes.needs_libstone_rebuild);
             let outcome = self.compiler.compile(&changes.changed_paths, false).expect("reload compile");
@@ -2021,6 +2059,38 @@ mod watch_reload_tests {
     #[test]
     fn stone_sibling_dependency_edit_reloads_live_state() {
         Fixture::new(true).assert_reload(false);
+    }
+
+    #[test]
+    fn stone_sim_edit_does_not_rebuild_or_restart_the_game() {
+        let fixture = Fixture::new(false);
+        let sims = fixture.root.join("tests/sims");
+        std::fs::create_dir_all(&sims).unwrap();
+        let sim = sims.join("probe.rock");
+        std::fs::write(&sim, "fn probe() {}\n").unwrap();
+        let before = std::fs::read(&fixture.main).unwrap();
+        let (tx, rx) = channel();
+        let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
+        watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
+
+        std::fs::write(&sim, "fn probe( {\n").unwrap();
+        let event = receive_path(&rx, &sim);
+        let mut changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+        assert_eq!(changes.changed_paths, HashSet::from([sim.clone()]));
+        retain_production_changes(&mut changes.changed_paths, fixture.root.to_str().unwrap(), fixture.compiler.package_roots(), &Default::default());
+        assert!(changes.changed_paths.is_empty(), "sim edit reached the game compiler");
+        assert_eq!(std::fs::read(&fixture.main).unwrap(), before, "sim edit rewrote the game artifact");
+
+        std::fs::remove_file(&sim).unwrap();
+        let mut removed = HashSet::from([sim.clone()]);
+        retain_production_changes(&mut removed, fixture.root.to_str().unwrap(), fixture.compiler.package_roots(), &Default::default());
+        assert!(removed.is_empty(), "deleted sim reached the game compiler");
+
+        let inputs: crate::file_watcher::SharedWatchSet = Default::default();
+        inputs.lock().insert(sim.clone());
+        let mut embedded = HashSet::from([sim.clone()]);
+        retain_production_changes(&mut embedded, fixture.root.to_str().unwrap(), fixture.compiler.package_roots(), &inputs);
+        assert_eq!(embedded, HashSet::from([sim]), "declared embedded input must remain watched");
     }
 
     #[test]
