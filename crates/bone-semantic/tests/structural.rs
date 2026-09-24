@@ -466,6 +466,42 @@ fn nested_block_does_not_leak_into_outer_statements() {
     );
 }
 
+// The same contiguity trap for interpolation parts: the hole's `if` holds its
+// own interpolated string, whose parts are allocated while the outer parts are
+// being collected. The outer string has exactly 2 parts (`"a: "` and the `if`);
+// a leaked inner `{x}` part printed the inner string twice.
+#[test]
+fn nested_interpolation_does_not_leak_into_outer_parts() {
+    use bone_semantic::hir::{Expr, InterpPart};
+    let src = "fn f(x: int, ok: bool) -> string {\n    \"a: {if ok { \"{x}\" } else { \"no\" }}\"\n}";
+    let ws = check(src).unwrap();
+
+    let mid = ws.modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let hir = ws.module(mid);
+
+    let (f_idx, _) = hir.functions.iter().next().expect("one function");
+    let fbody = &hir.bodies[&BodyOwner::Function(f_idx)];
+    let body = fbody.expr_arena[fbody.root.expect("rock function has a body")];
+    let Expr::Block { tail: Some(tail), .. } = body else {
+        panic!("function body should be a block with a tail, got {:?}", body);
+    };
+    let Expr::InterpolatedString(parts) = fbody.expr_arena[tail] else {
+        panic!("tail should be an interpolated string, got {:?}", fbody.expr_arena[tail]);
+    };
+
+    let parts: Vec<_> = parts.map(|p| fbody.interp_part_arena[p].clone()).collect();
+    assert_eq!(parts.len(), 2, "inner interpolation parts leaked into the outer range: {parts:?}");
+    assert!(matches!(parts[0], InterpPart::Literal(s) if s == "a: "), "{parts:?}");
+    assert!(
+        matches!(parts[1], InterpPart::Value { expr, .. } if matches!(fbody.expr_arena[expr], Expr::If { .. })),
+        "{parts:?}"
+    );
+}
+
 // Phase 0 of docs/bone-incremental-plan.md: a type error in one body must
 // not abort checking of the others -- pass 4 collects errors per BodyOwner
 // instead of fail-fasting through `?`. A watch/LSP session has to keep
