@@ -1,6 +1,7 @@
 use super::*;
 use crate::hir::FamilyTier;
 use bone_core::modules::DefKind;
+use std::borrow::Cow;
 
 pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let name = family.key();
@@ -56,7 +57,7 @@ fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> FnLis
     let ws = gamma.workspace;
     let Some(fns) = ws.functions_by_name.get(&key) else { return FnList::default() };
     let site = gamma.access_site();
-    let mut visible = FnList::default();
+    let mut visible = FnList::with_capacity(fns.len());
     let mut inaccessible = FnList::default();
     for &(mid, fid) in fns {
         if !owned_by_view(ws, owner, mid) {
@@ -298,12 +299,12 @@ fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String 
 /// collapses to its lowest-rank member; a group with a repeated backend (a
 /// genuine duplicate) is kept whole so the tie still surfaces as an
 /// "Ambiguous overload" error.
-pub(crate) fn collapse_backend_variants(
+pub(crate) fn collapse_backend_variants<'c>(
     gamma: &Gamma,
-    candidates: &[(ModuleId, Idx<Function>)],
-) -> Vec<(ModuleId, Idx<Function>)> {
+    candidates: &'c [(ModuleId, Idx<Function>)],
+) -> Cow<'c, [(ModuleId, Idx<Function>)]> {
     if candidates.len() <= 1 {
-        return candidates.to_vec();
+        return Cow::Borrowed(candidates);
     }
     // Fast path: a cross-backend collapse is only possible when candidates span
     // >= 2 distinct backends. If they all share one backend (the overwhelmingly
@@ -316,7 +317,7 @@ pub(crate) fn collapse_backend_variants(
         .iter()
         .all(|&(mid, fid)| gamma.workspace.module(mid).functions[fid].backend == first_backend)
     {
-        return candidates.to_vec();
+        return Cow::Borrowed(candidates);
     }
     // Preserve input order for determinism; group indices by variant key.
     let mut groups: SmallVec<[((Ustr, Ustr), SmallVec<[usize; 2]>); 4]> = SmallVec::new();
@@ -360,7 +361,7 @@ pub(crate) fn collapse_backend_variants(
             }
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 pub(crate) fn select_overload(
@@ -1303,8 +1304,8 @@ pub(crate) fn resolve_named_call_inner(
     let name = family.key();
     let _span = tracing::info_span!("named_call", name = %name).entered();
     let all_candidates = resolve_callee(gamma, &family);
-    let candidates: Vec<_> = if generic_args.is_empty() {
-        all_candidates.to_vec()
+    let candidates: FnList = if generic_args.is_empty() {
+        all_candidates
     } else {
         all_candidates
             .into_iter()
