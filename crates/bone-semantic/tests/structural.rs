@@ -2289,3 +2289,47 @@ pub struct ReadableSecret {
         "field `secret` on struct `Actor` is not accessible from this module"
     );
 }
+
+// Argument-to-parameter matching reports its reason when the call's callee is
+// fixed; overload scoring discards the same rejections without a message.
+#[test]
+fn argument_matching_errors_name_the_parameter() {
+    let cases = [
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, 2, 3) }",
+            "Too many positional arguments, expected at most 2",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1) }",
+            "Missing required argument for parameter `b`",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, a: 2) }",
+            "Multiple values provided for parameter `a`",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, c: 2) }",
+            "unknown parameter `c`",
+        ),
+        (
+            "struct ABC { a: int, b: int, c: int }\nfn two(a: int, b: int) -> int { a + b }\n\
+             fn main() { let p = ABC { a: 1, b: 2, c: 3 }\n two(..p) }",
+            "spread field `c` names no parameter of the callee",
+        ),
+        (
+            "struct AB { a: int, b: int }\nfn two(a: int, b: int) -> int { a + b }\n\
+             fn main() { let p = AB { a: 1, b: 2 }\n two(a: 9, ..p) }",
+            "parameter `a` is given before the spread that also supplies it",
+        ),
+        (
+            "struct AB { a: int, b: int }\nstruct AC { a: int, c: int }\n\
+             fn three(a: int, b: int, c: int) -> int { a + b + c }\n\
+             fn main() { let x = AB { a: 1, b: 2 }\n let y = AC { a: 8, c: 3 }\n three(..x, ..y) }",
+            "two spreads both supply parameter `a`",
+        ),
+    ];
+    for (src, want) in cases {
+        let msgs = all_err_msgs(src);
+        assert!(msgs.iter().any(|m| m == want), "expected `{want}` for\n{src}\ngot: {msgs:?}");
+    }
+}

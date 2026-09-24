@@ -718,6 +718,7 @@ pub(crate) fn score_candidate_with_generics(
         args,
         &pnames[offset..],
         f.num_required.saturating_sub(offset),
+        false,
         span,
     ) {
         Ok(s) => s,
@@ -940,12 +941,26 @@ pub(crate) fn spread_struct_fields(
     }
 }
 
+/// A rejection by `reorder_call_args`: its message is built only when `report`
+/// is set, since overload scoring discards the rejections of the candidates it
+/// tries.
+macro_rules! slot_fail {
+    ($report:expr, $span:expr, $($arg:tt)*) => {{
+        if !$report {
+            return Err(CompilerError::silent($span));
+        }
+
+        comp_error!($span, $($arg)*)
+    }}
+}
+
 pub(crate) fn reorder_call_args(
     c: BodyCtx,
     gamma: &mut Gamma,
     args: &[Idx<Expr>],
     param_names: &[Ustr],
     num_required: usize,
+    report: bool,
     span: Span,
 ) -> Result<Vec<Option<SlotFill>>, CompilerError> {
     let mut slots: Vec<Option<SlotFill>> = vec![None; param_names.len()];
@@ -958,19 +973,17 @@ pub(crate) fn reorder_call_args(
             let op_ty = infer_expr(c, gamma, arg)?;
             let aspan = c.body.expr_spans[arg];
             for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
-                let pi = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        span,
-                        format!("spread field `{}` names no parameter of the callee", fname),
-                    )
-                })?;
+                let Some(pi) = param_names.iter().position(|p| *p == fname) else {
+                    slot_fail!(report, span, "spread field `{}` names no parameter of the callee", fname)
+                };
                 match slots[pi] {
                     // rule 5: two spreads supplying the same param.
                     Some(SlotFill::SpreadField(..)) => {
-                        comp_error!(span, "two spreads both supply parameter `{}`", fname)
+                        slot_fail!(report, span, "two spreads both supply parameter `{}`", fname)
                     }
                     // rule 4: a named/positional arg written BEFORE the spread.
-                    Some(SlotFill::Direct(_)) => comp_error!(
+                    Some(SlotFill::Direct(_)) => slot_fail!(
+                        report,
                         span,
                         "parameter `{}` is given before the spread that also supplies it",
                         fname
@@ -985,7 +998,8 @@ pub(crate) fn reorder_call_args(
             // positional
             None => {
                 if pos >= param_names.len() {
-                    comp_error!(
+                    slot_fail!(
+                        report,
                         span,
                         "Too many positional arguments, expected at most {}",
                         param_names.len()
@@ -993,16 +1007,16 @@ pub(crate) fn reorder_call_args(
                 }
 
                 if slots[pos].is_some() {
-                    comp_error!(span, "Multiple values provided for parameter `{}`", param_names[pos]);
+                    slot_fail!(report, span, "Multiple values provided for parameter `{}`", param_names[pos]);
                 }
                 slots[pos] = Some(SlotFill::Direct(arg));
                 pos += 1;
             }
 
             Some(nm) => {
-                let pi = param_names.iter().position(|p| p == nm).ok_or_else(|| {
-                    CompilerError::new_with_label(span, format!("unknown parameter `{}`", nm))
-                })?;
+                let Some(pi) = param_names.iter().position(|p| p == nm) else {
+                    slot_fail!(report, span, "unknown parameter `{}`", nm)
+                };
 
                 match slots[pi] {
                     // rule 3: a named arg AFTER a spread overrides that field.
@@ -1010,7 +1024,7 @@ pub(crate) fn reorder_call_args(
                         slots[pi] = Some(SlotFill::Direct(arg))
                     }
                     Some(SlotFill::Direct(_)) => {
-                        comp_error!(span, "Multiple values provided for parameter `{}`", nm)
+                        slot_fail!(report, span, "Multiple values provided for parameter `{}`", nm)
                     }
                 }
             }
@@ -1019,7 +1033,8 @@ pub(crate) fn reorder_call_args(
 
     for i in 0..num_required {
         if slots[i].is_none() {
-            comp_error!(
+            slot_fail!(
+                report,
                 span,
                 "Missing required argument for parameter `{}`",
                 param_names[i]
@@ -1670,6 +1685,7 @@ pub(crate) fn commit_selected_call(
             &arg_list,
             &param_names[offset..],
             function.num_required.saturating_sub(offset),
+            true,
             span,
         )?;
 
