@@ -237,6 +237,32 @@ fn leaf_type_mismatch_says_expected_found() {
     );
 }
 
+// Overload scoring and `coerce` try unifications quietly and discard the
+// failures; a unify that can be reported must still name both types. Here the
+// nullable-target coerce fails a quiet trial before the reported unify.
+#[test]
+fn nominal_mismatch_after_a_quiet_trial_names_both_types() {
+    let msgs = main_body_error_messages(
+        "struct Foo { x: int }\nstruct Bar { x: int }\nfn main() { let a: Foo? = Bar { x: 1 } }",
+    );
+    assert!(
+        msgs.iter().any(|m| m == "type mismatch: expected `Foo`, found `Bar`"),
+        "expected the nominal mismatch message, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn generic_constructor_mismatch_names_both_types() {
+    let msgs = main_body_error_messages(
+        "struct Foo { x: int }\nfn main() { let a: [int] = Foo { x: 1 } }",
+    );
+    assert!(
+        msgs.iter().any(|m| m
+            == "type mismatch: expected `[int]`, found `Foo` (different type constructors)"),
+        "expected the constructor mismatch message, got: {msgs:?}"
+    );
+}
+
 // P1b: the mismatch carries a second label at the expected type's origin (the
 // `: Foo` annotation), so the reader sees WHERE the expectation came from.
 // Works for span-carrying types (nominal/compound); builtins (`int`) lower to a
