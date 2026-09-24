@@ -3538,6 +3538,37 @@ fn attr_location_span(_k: AttrKind) -> u32 {
     1
 }
 
+/// Texture image units every GLSL target guarantees per stage: GL 4.1 core
+/// (Apple's only desktop context) and GLES 3.0 both promise 16. Desktop Linux
+/// drivers allow more, so a program over it linked there and failed to link
+/// on a Mac; checking at compile time makes every host refuse it.
+pub const GLSL_STAGE_SAMPLER_BUDGET: usize = 16;
+
+/// Refuse a stage that declares more samplers than every GLSL target has
+/// units for. Counts DECLARED samplers (group plus bare) rather than the ones
+/// a driver keeps active: the budget has to hold before any optimizer runs.
+fn check_stage_sampler_budget(
+    iface: &ShaderInterfacePlan,
+    stage: IrStage,
+    entry: &str,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let count = iface.stage_samplers(stage).len();
+    if count <= GLSL_STAGE_SAMPLER_BUDGET {
+        return Ok(());
+    }
+    let name = match stage {
+        IrStage::Vertex => "vertex",
+        IrStage::Fragment => "fragment",
+        IrStage::Compute => "compute",
+    };
+    Err(err(span, format!(
+        "shader `{entry}`: the {name} stage declares {count} samplers, over the \
+         {GLSL_STAGE_SAMPLER_BUDGET} texture units GL 4.1 core (macOS) and GLES 3.0 guarantee \
+         per stage -- pack inputs into shared textures"
+    )))
+}
+
 pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
 pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
@@ -3796,6 +3827,7 @@ fn plan_shader_entry_inner(
         ..Default::default()
     };
     skull_codegen_shader::check_entry_collisions(&interface, f.name_span)?;
+    check_stage_sampler_budget(&interface, IrStage::Fragment, &f.name, f.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
     let shape = entry_shape(&class.global_params, &class.sampler_params, &interface);
     Ok(EntryPlan { fref, shape, stage, interface, abi })
@@ -5044,6 +5076,8 @@ fn plan_shader_pipeline_inner(
     };
 
     check_pipeline_collisions(&interface, vf.name_span)?;
+    check_stage_sampler_budget(&interface, IrStage::Vertex, &vf.name, vf.name_span)?;
+    check_stage_sampler_budget(&interface, IrStage::Fragment, &ff.name, ff.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, vf.name_span)?;
     check_block_name_collisions(
         abi.uniform_blocks.iter().map(|(_, p)| p),
