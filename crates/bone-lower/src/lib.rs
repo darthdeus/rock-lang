@@ -2596,7 +2596,12 @@ fn lower_fn_body_into(
 
         bindings.insert(p.name.name, b_idx);
         params.push(b_idx);
+    }
 
+    // Defaults are lowered after every param binding exists: a lambda default
+    // allocates its own param bindings, which would otherwise land inside the
+    // `first..=last` param range below.
+    for p in &f.params {
         let param_default = match &p.default {
             Some(expr) => Some(lower_expr(ctx, a, body, default_scope, a.e(expr))?),
             None => None,
