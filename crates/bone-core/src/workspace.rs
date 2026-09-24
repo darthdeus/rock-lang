@@ -47,6 +47,12 @@ pub struct Workspace {
     pub const_globals: FxHashSet<Ustr>,
 
     pub functions_by_name: FxHashMap<Ustr, FnList>,
+    /// Every lowered function's declared parameter types, rendered and
+    /// `\u{1}`-joined, per module. Half of [`Workspace::backend_variant_key`].
+    /// `insert_module` indexes the module it stores; a caller that replaces
+    /// one function's signature in place re-indexes it with
+    /// [`Workspace::index_param_signature`].
+    pub param_signatures: Vec<ArenaMap<Idx<Function>, Ustr>>,
 
     /// Workspace-wide `deco` declaration names, collected from the raw ASTs in
     /// `lower_modules` BEFORE lowering (the `type_generic_arity` pattern) so
@@ -177,6 +183,7 @@ impl Workspace {
             globals_by_name: Default::default(),
             const_globals: Default::default(),
             functions_by_name: Default::default(),
+            param_signatures: Default::default(),
             decorator_names: Default::default(),
 
             phase_timings: Default::default(),
@@ -193,6 +200,7 @@ impl Workspace {
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());
         ws.modules.push(bm);
+        ws.param_signatures.push(Default::default());
 
         ws
     }
@@ -326,7 +334,41 @@ impl Workspace {
             self.modules.push(module);
         }
 
+        let signatures = self
+            .module(id)
+            .functions
+            .iter()
+            .map(|(fid, _)| (fid, self.render_param_signature(id, fid)))
+            .collect();
+        if idx < self.param_signatures.len() {
+            self.param_signatures[idx] = signatures;
+        } else {
+            self.param_signatures.push(signatures);
+        }
+
         id
+    }
+
+    /// Re-index one function whose signature was replaced in place.
+    pub fn index_param_signature(&mut self, mid: ModuleId, fid: Idx<Function>) {
+        let signature = self.render_param_signature(mid, fid);
+        self.param_signatures[mid.index()].insert(fid, signature);
+    }
+
+    fn render_param_signature(&self, mid: ModuleId, fid: Idx<Function>) -> Ustr {
+        let f = &self.module(mid).functions[fid];
+        Ustr::from(&f.param_decls.iter().map(|p| self.render(None, p.ty)).join("\u{1}"))
+    }
+
+    /// The backend-variant group identity of a lowered function: its name
+    /// (the family key) and its declared parameter types. Declarations with
+    /// equal keys and distinct backends are one logical function. Return type
+    /// is excluded because overload resolution keys on parameters. The name
+    /// matters for a merged legacy family, whose members are unrelated
+    /// definitions: identical signatures there are not backend siblings
+    /// (spec 8.3) but a tie.
+    pub fn backend_variant_key(&self, mid: ModuleId, fid: Idx<Function>) -> (Ustr, Ustr) {
+        (self.module(mid).functions[fid].name, self.param_signatures[mid.index()][fid])
     }
 
     pub fn log_time(&mut self, label: &'static str, timer: Instant) {

@@ -282,20 +282,6 @@ fn backend_rank(b: skull_parser::FnBackend) -> u8 {
     }
 }
 
-/// The signature key two decls must share to be backend variants of one another:
-/// the family key plus param types (rendered, inference-free) -- the same key
-/// `static_owner_tag`-class grouping uses and skull's `backend_variant_group`
-/// applies. Return type is deliberately excluded (overload resolution keys on
-/// params). The key matters for a merged legacy family, whose members are
-/// unrelated definitions: identical signatures there are not backend siblings
-/// (spec 8.3) but a tie.
-fn signature_key(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
-    let f = &gamma.workspace.module(mid).functions[fid];
-    std::iter::once(f.name.to_string())
-        .chain(f.param_decls.iter().map(|p| gamma.workspace.render(None, p.ty)))
-        .join("\u{1}")
-}
-
 /// Where a tied candidate comes from, when a tie spans unrelated definitions
 /// (a merged legacy family): the v1 DefKey, or the legacy defining file.
 fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
@@ -307,10 +293,11 @@ fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String 
     }
 }
 
-/// See the call site in [`select_overload`]. Groups candidates by signature; a
-/// group whose backends are all distinct collapses to its lowest-rank member; a
-/// group with a repeated backend (a genuine duplicate) is kept whole so the tie
-/// still surfaces as an "Ambiguous overload" error.
+/// See the call site in [`select_overload`]. Groups candidates by
+/// [`Workspace::backend_variant_key`]; a group whose backends are all distinct
+/// collapses to its lowest-rank member; a group with a repeated backend (a
+/// genuine duplicate) is kept whole so the tie still surfaces as an
+/// "Ambiguous overload" error.
 pub(crate) fn collapse_backend_variants(
     gamma: &Gamma,
     candidates: &[(ModuleId, Idx<Function>)],
@@ -322,8 +309,8 @@ pub(crate) fn collapse_backend_variants(
     // >= 2 distinct backends. If they all share one backend (the overwhelmingly
     // common case -- an all-`Any` portable overload set, or an all-`Lua`
     // inline(lua)/operator set), no group is ever "all distinct", so the result
-    // equals the input. Skip the signature rendering entirely -- this keeps the
-    // collapse off the hot overload path unless a backend variant is in play.
+    // equals the input. Skip the grouping entirely -- this keeps the collapse
+    // off the hot overload path unless a backend variant is in play.
     let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
     if candidates
         .iter()
@@ -331,13 +318,13 @@ pub(crate) fn collapse_backend_variants(
     {
         return candidates.to_vec();
     }
-    // Preserve input order for determinism; group indices by signature key.
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    // Preserve input order for determinism; group indices by variant key.
+    let mut groups: SmallVec<[((Ustr, Ustr), SmallVec<[usize; 2]>); 4]> = SmallVec::new();
     for (i, &(mid, fid)) in candidates.iter().enumerate() {
-        let key = signature_key(gamma, mid, fid);
+        let key = gamma.workspace.backend_variant_key(mid, fid);
         match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push(i),
-            None => groups.push((key, vec![i])),
+            None => groups.push((key, smallvec::smallvec![i])),
         }
     }
     let mut out = Vec::with_capacity(candidates.len());
@@ -348,7 +335,7 @@ pub(crate) fn collapse_backend_variants(
         }
         let backend_of = |i: usize| gamma.workspace.module(candidates[i].0).functions[candidates[i].1].backend;
         let all_distinct = {
-            let mut seen: Vec<skull_parser::FnBackend> = Vec::new();
+            let mut seen: SmallVec<[skull_parser::FnBackend; 3]> = SmallVec::new();
             idxs.iter().all(|&i| {
                 let b = backend_of(i);
                 if seen.contains(&b) {

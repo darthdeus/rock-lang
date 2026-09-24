@@ -2045,6 +2045,32 @@ fn use_it() -> int {
     );
 }
 
+/// The backend-variant collapse keeps each signature group together, in
+/// order of first appearance. A group with a repeated backend is not
+/// collapsed, so its members stay adjacent: the "available overloads" list
+/// is in collapse order, not declaration order.
+#[test]
+fn backend_variant_groups_list_in_first_appearance_order() {
+    let src = r#"
+inline(lua) fn g(x: int) -> int = """return x"""
+fn g(x: string) -> int { return 0 }
+inline(lua) fn g(x: int) -> int = """return x"""
+extern(js) fn g(x: bool, y: int) -> int
+fn main() {
+    let _ = g(1.5)
+}
+"#;
+    let msgs = check(src)
+        .expect("semantic_pass")
+        .inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten().cloned().collect::<Vec<_>>())
+        .map(|e| e.message)
+        .collect::<Vec<_>>();
+    let expected = "No overload for `g` with argument types (float)\navailable overloads:\n  \
+                    g(x: int) -> int\n  g(x: int) -> int\n  g(x: string) -> int\n  g(x: bool, y: int) -> int";
+    assert!(msgs.iter().any(|m| m == expected), "{msgs:?}");
+}
+
 #[test]
 fn legacy_caller_field_access_enforces_v1_visibility_and_allows_legacy() {
     use bone_semantic::inference::{field_access, AccessDenied, AccessSite, FieldAccessNeed, Gamma};

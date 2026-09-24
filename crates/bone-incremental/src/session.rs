@@ -2046,6 +2046,7 @@ impl Session {
             }
         }
         *self.ws.module_mut(mid) = module;
+        self.ws.index_param_signature(mid, fid);
         self.ws.log_time("lower functions", lower_timer);
 
         let infer_timer = Instant::now();
@@ -2158,6 +2159,7 @@ impl Session {
         }
 
         *self.ws.module_mut(mid) = module;
+        self.ws.index_param_signature(mid, fid);
         self.ws.log_time("lower functions", lower_timer);
 
         let infer_timer = Instant::now();
