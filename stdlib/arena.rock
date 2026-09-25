@@ -15,6 +15,7 @@
 // what lets `clear()` empty the columns while remaining unable to reissue a
 // generation a stale handle already holds.
 struct ArenaStore<T> {
+    _owner_scene_id: int,
     generations: [int],
     occupied: [bool],
     data: [T],
@@ -30,29 +31,28 @@ struct ArenaGenerationSnapshot {
 }
 
 struct ArenaRegistry {
-    stores: [any?],
-    scene_ids: [int],
+    stores: Map<int, any>,
     next_id: int,
     session_root: int,
+    live_count: int,
+    retired_since_compact: int,
 }
 
 // --- the Session Arena registry ----------------------------------------------
 //
-// One flat physical lookup for the whole Session: ownership is a Scene concern,
-// but a nested Session -> Scene -> Arena walk would put two hash lookups in
-// front of every random `Entity.get()`. Arena IDs are dense and monotonic, so
-// `_arena_id` indexes the stores column in `__ARENA_REGISTRY` directly.
+// One Session-wide lookup from monotonic logical IDs to live stores. Retired
+// entries leave the map; periodic rebuilding bounds Lua table tombstones without
+// reusing IDs or weakening stale-handle rejection.
 //
-// IDs are never reused: a destroyed Arena's slot is nulled and its ID retires
-// with it, which is what stops an escaped handle from resolving into whatever
-// is created next. Owner IDs are a parallel column rather than a store field,
-// so the physical lookup needs no knowledge of the element type.
+// The owner ID lives beside the Arena columns, so the hot lookup needs one map
+// access and does not depend on the element type.
 //
 // Everything created by `arena_new()` belongs to owner (scene) 0, the Session
 // root, until P2 introduces typed Scenes.
 @state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
-    stores: [], scene_ids: [], next_id: 0, session_root: 0,
+    stores: map_new(), next_id: 0, session_root: 0,
+    live_count: 0, retired_since_compact: 0,
 }
 
 // THE resolution oracle: every Arena operation, the `enumerate(arena)` loop
@@ -61,11 +61,11 @@ global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
 // `inline(lua)` walker can both target it; the element type is recovered by the
 // typed wrapper below, which is a no-op at runtime.
 @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
-    let slot = __ARENA_REGISTRY.stores.get(arena_id)
-    if is_null(slot) { return null }
-    let store = slot.unwrap()
-    if is_null(store) { return null }
-    if __ARENA_REGISTRY.scene_ids[arena_id] != scene_id { return null }
+    let found = __ARENA_REGISTRY.stores.get(arena_id)
+    if is_null(found) { return null }
+    let store = found.unwrap()
+    let owner: ArenaStore<int> = cast(store)
+    if owner._owner_scene_id != scene_id { return null }
     return store
 }
 
@@ -100,6 +100,7 @@ fn __arena_store_mut<T>(arena: Arena<T>) -> ArenaStore<T> {
 // lowering, which needs a non-generic callee for its synthesized `Inst::Call`.
 @state(ownership=session, world=boot_only, realization=fresh_session)
 global __ARENA_DEAD_STORE: ArenaStore<int> = ArenaStore {
+    _owner_scene_id: -1,
     generations: [], occupied: [], data: [], free_indices: [],
     occupied_count: 0, next_generation: 0,
 }
@@ -129,14 +130,14 @@ fn arena_new<T>() -> Arena<T> {
 
 fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
     let id = __ARENA_REGISTRY.next_id
-    assert(id == vec_len(__ARENA_REGISTRY.stores), "Arena registry is not dense at id {id}")
     __ARENA_REGISTRY.next_id = id + 1
     let store: ArenaStore<T> = ArenaStore {
+        _owner_scene_id: scene_id,
         generations: [], occupied: [], data: [], free_indices: [],
         occupied_count: 0, next_generation: 0,
     }
-    vec_push(__ARENA_REGISTRY.stores, store)
-    vec_push(__ARENA_REGISTRY.scene_ids, scene_id)
+    __ARENA_REGISTRY.stores.insert(id, store)
+    __ARENA_REGISTRY.live_count += 1
     return Arena { _scene_id: scene_id, _arena_id: id }
 }
 
@@ -144,10 +145,11 @@ fn __arena_reinitialize<T>(arena: Arena<T>) {
     assert(!is_null(__arena_store_any(arena._scene_id, arena._arena_id)),
         "Arena {arena._arena_id} is not live")
     let store: ArenaStore<T> = ArenaStore {
+        _owner_scene_id: arena._scene_id,
         generations: [], occupied: [], data: [], free_indices: [],
         occupied_count: 0, next_generation: 0,
     }
-    __ARENA_REGISTRY.stores[arena._arena_id] = store
+    __ARENA_REGISTRY.stores.insert(arena._arena_id, store)
 }
 
 // Retires one Arena incarnation, releasing its rows. True on the first call,
@@ -159,11 +161,35 @@ fn arena_destroy<T>(arena: Arena<T>) -> bool {
 
 fn __arena_drain_retired() {}
 
+// Lua tables retain their hash capacity after deletes. Rebuild only after the
+// retired-key debt reaches the live population (with a small floor), so churn
+// remains amortized while sparse old IDs cannot retain unbounded table storage.
+fn __arena_compact_retired_registry() {
+    if __ARENA_REGISTRY.live_count == 0 {
+        __ARENA_REGISTRY.stores = map_new()
+        __ARENA_REGISTRY.retired_since_compact = 0
+        return
+    }
+
+    let threshold = __ARENA_REGISTRY.live_count + 32
+    if __ARENA_REGISTRY.retired_since_compact <= threshold { return }
+
+    let compacted: Map<int, any> = map_new()
+    for (id, store) in __ARENA_REGISTRY.stores {
+        compacted.insert(id, store)
+    }
+    __ARENA_REGISTRY.stores = compacted
+    __ARENA_REGISTRY.retired_since_compact = 0
+}
+
 // The element-type-free half, for Scene teardown: a Scene owns Arena IDs, not
 // typed handles, so the drain cannot spell `Arena<T>` for each one.
 fn __arena_destroy_id(scene_id: int, arena_id: int) -> bool {
     if is_null(__arena_store_any(scene_id, arena_id)) { return false }
-    __ARENA_REGISTRY.stores.set(arena_id, null)
+    __ARENA_REGISTRY.stores.remove(arena_id)
+    __ARENA_REGISTRY.live_count -= 1
+    __ARENA_REGISTRY.retired_since_compact += 1
+    __arena_compact_retired_registry()
     return true
 }
 
@@ -332,11 +358,14 @@ fn Arena<T>.len(arena) -> int {
 // makes this the leak oracle -- a loop that spawns and despawns must leave it
 // flat, and a test asserting only `len()` cannot see the difference.
 fn arena_live_count() -> int {
-    let live = 0
-    for i in 0..vec_len(__ARENA_REGISTRY.stores) {
-        if !is_null(__ARENA_REGISTRY.stores[i]) { live += 1 }
-    }
-    return live
+    return __ARENA_REGISTRY.live_count
+}
+
+// Upper bound on live keys plus IDs retired since the last map rebuild. Lua
+// does not expose hash-table capacity; this tracks the population the collector
+// may still retain and is reset by rebuilding the map.
+fn arena_registry_storage_bound() -> int {
+    return __ARENA_REGISTRY.live_count + __ARENA_REGISTRY.retired_since_compact
 }
 
 // How many slots the Arena has ever allocated, live or free -- its high-water
