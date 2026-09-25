@@ -89,3 +89,6 @@ mod engine_build_scope_gate;
 
 #[path = "engine_cdylib_target_dir_gate.rs"]
 mod engine_cdylib_target_dir_gate;
+
+#[path = "engine_launcher_rebuild_gate.rs"]
+mod engine_launcher_rebuild_gate;
