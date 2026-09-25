@@ -1,6 +1,7 @@
 use super::*;
 use crate::hir::FamilyTier;
 use bone_core::modules::DefKind;
+use std::borrow::Cow;
 
 pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
     let name = family.key();
@@ -56,7 +57,7 @@ fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> FnLis
     let ws = gamma.workspace;
     let Some(fns) = ws.functions_by_name.get(&key) else { return FnList::default() };
     let site = gamma.access_site();
-    let mut visible = FnList::default();
+    let mut visible = FnList::with_capacity(fns.len());
     let mut inaccessible = FnList::default();
     for &(mid, fid) in fns {
         if !owned_by_view(ws, owner, mid) {
@@ -282,20 +283,6 @@ fn backend_rank(b: skull_parser::FnBackend) -> u8 {
     }
 }
 
-/// The signature key two decls must share to be backend variants of one another:
-/// the family key plus param types (rendered, inference-free) -- the same key
-/// `static_owner_tag`-class grouping uses and skull's `backend_variant_group`
-/// applies. Return type is deliberately excluded (overload resolution keys on
-/// params). The key matters for a merged legacy family, whose members are
-/// unrelated definitions: identical signatures there are not backend siblings
-/// (spec 8.3) but a tie.
-fn signature_key(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
-    let f = &gamma.workspace.module(mid).functions[fid];
-    std::iter::once(f.name.to_string())
-        .chain(f.param_decls.iter().map(|p| gamma.workspace.render(None, p.ty)))
-        .join("\u{1}")
-}
-
 /// Where a tied candidate comes from, when a tie spans unrelated definitions
 /// (a merged legacy family): the v1 DefKey, or the legacy defining file.
 fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
@@ -307,37 +294,38 @@ fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String 
     }
 }
 
-/// See the call site in [`select_overload`]. Groups candidates by signature; a
-/// group whose backends are all distinct collapses to its lowest-rank member; a
-/// group with a repeated backend (a genuine duplicate) is kept whole so the tie
-/// still surfaces as an "Ambiguous overload" error.
-pub(crate) fn collapse_backend_variants(
+/// See the call site in [`select_overload`]. Groups candidates by
+/// [`Workspace::backend_variant_key`]; a group whose backends are all distinct
+/// collapses to its lowest-rank member; a group with a repeated backend (a
+/// genuine duplicate) is kept whole so the tie still surfaces as an
+/// "Ambiguous overload" error.
+pub(crate) fn collapse_backend_variants<'c>(
     gamma: &Gamma,
-    candidates: &[(ModuleId, Idx<Function>)],
-) -> Vec<(ModuleId, Idx<Function>)> {
+    candidates: &'c [(ModuleId, Idx<Function>)],
+) -> Cow<'c, [(ModuleId, Idx<Function>)]> {
     if candidates.len() <= 1 {
-        return candidates.to_vec();
+        return Cow::Borrowed(candidates);
     }
     // Fast path: a cross-backend collapse is only possible when candidates span
     // >= 2 distinct backends. If they all share one backend (the overwhelmingly
     // common case -- an all-`Any` portable overload set, or an all-`Lua`
     // inline(lua)/operator set), no group is ever "all distinct", so the result
-    // equals the input. Skip the signature rendering entirely -- this keeps the
-    // collapse off the hot overload path unless a backend variant is in play.
+    // equals the input. Skip the grouping entirely -- this keeps the collapse
+    // off the hot overload path unless a backend variant is in play.
     let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
     if candidates
         .iter()
         .all(|&(mid, fid)| gamma.workspace.module(mid).functions[fid].backend == first_backend)
     {
-        return candidates.to_vec();
+        return Cow::Borrowed(candidates);
     }
-    // Preserve input order for determinism; group indices by signature key.
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    // Preserve input order for determinism; group indices by variant key.
+    let mut groups: SmallVec<[((Ustr, Ustr), SmallVec<[usize; 2]>); 4]> = SmallVec::new();
     for (i, &(mid, fid)) in candidates.iter().enumerate() {
-        let key = signature_key(gamma, mid, fid);
+        let key = gamma.workspace.backend_variant_key(mid, fid);
         match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push(i),
-            None => groups.push((key, vec![i])),
+            None => groups.push((key, smallvec::smallvec![i])),
         }
     }
     let mut out = Vec::with_capacity(candidates.len());
@@ -348,7 +336,7 @@ pub(crate) fn collapse_backend_variants(
         }
         let backend_of = |i: usize| gamma.workspace.module(candidates[i].0).functions[candidates[i].1].backend;
         let all_distinct = {
-            let mut seen: Vec<skull_parser::FnBackend> = Vec::new();
+            let mut seen: SmallVec<[skull_parser::FnBackend; 3]> = SmallVec::new();
             idxs.iter().all(|&i| {
                 let b = backend_of(i);
                 if seen.contains(&b) {
@@ -373,7 +361,7 @@ pub(crate) fn collapse_backend_variants(
             }
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 pub(crate) fn select_overload(
@@ -731,6 +719,7 @@ pub(crate) fn score_candidate_with_generics(
         args,
         &pnames[offset..],
         f.num_required.saturating_sub(offset),
+        false,
         span,
     ) {
         Ok(s) => s,
@@ -953,12 +942,26 @@ pub(crate) fn spread_struct_fields(
     }
 }
 
+/// A rejection by `reorder_call_args`: its message is built only when `report`
+/// is set, since overload scoring discards the rejections of the candidates it
+/// tries.
+macro_rules! slot_fail {
+    ($report:expr, $span:expr, $($arg:tt)*) => {{
+        if !$report {
+            return Err(CompilerError::silent($span));
+        }
+
+        comp_error!($span, $($arg)*)
+    }}
+}
+
 pub(crate) fn reorder_call_args(
     c: BodyCtx,
     gamma: &mut Gamma,
     args: &[Idx<Expr>],
     param_names: &[Ustr],
     num_required: usize,
+    report: bool,
     span: Span,
 ) -> Result<Vec<Option<SlotFill>>, CompilerError> {
     let mut slots: Vec<Option<SlotFill>> = vec![None; param_names.len()];
@@ -971,19 +974,17 @@ pub(crate) fn reorder_call_args(
             let op_ty = infer_expr(c, gamma, arg)?;
             let aspan = c.body.expr_spans[arg];
             for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
-                let pi = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        span,
-                        format!("spread field `{}` names no parameter of the callee", fname),
-                    )
-                })?;
+                let Some(pi) = param_names.iter().position(|p| *p == fname) else {
+                    slot_fail!(report, span, "spread field `{}` names no parameter of the callee", fname)
+                };
                 match slots[pi] {
                     // rule 5: two spreads supplying the same param.
                     Some(SlotFill::SpreadField(..)) => {
-                        comp_error!(span, "two spreads both supply parameter `{}`", fname)
+                        slot_fail!(report, span, "two spreads both supply parameter `{}`", fname)
                     }
                     // rule 4: a named/positional arg written BEFORE the spread.
-                    Some(SlotFill::Direct(_)) => comp_error!(
+                    Some(SlotFill::Direct(_)) => slot_fail!(
+                        report,
                         span,
                         "parameter `{}` is given before the spread that also supplies it",
                         fname
@@ -998,7 +999,8 @@ pub(crate) fn reorder_call_args(
             // positional
             None => {
                 if pos >= param_names.len() {
-                    comp_error!(
+                    slot_fail!(
+                        report,
                         span,
                         "Too many positional arguments, expected at most {}",
                         param_names.len()
@@ -1006,16 +1008,16 @@ pub(crate) fn reorder_call_args(
                 }
 
                 if slots[pos].is_some() {
-                    comp_error!(span, "Multiple values provided for parameter `{}`", param_names[pos]);
+                    slot_fail!(report, span, "Multiple values provided for parameter `{}`", param_names[pos]);
                 }
                 slots[pos] = Some(SlotFill::Direct(arg));
                 pos += 1;
             }
 
             Some(nm) => {
-                let pi = param_names.iter().position(|p| p == nm).ok_or_else(|| {
-                    CompilerError::new_with_label(span, format!("unknown parameter `{}`", nm))
-                })?;
+                let Some(pi) = param_names.iter().position(|p| p == nm) else {
+                    slot_fail!(report, span, "unknown parameter `{}`", nm)
+                };
 
                 match slots[pi] {
                     // rule 3: a named arg AFTER a spread overrides that field.
@@ -1023,7 +1025,7 @@ pub(crate) fn reorder_call_args(
                         slots[pi] = Some(SlotFill::Direct(arg))
                     }
                     Some(SlotFill::Direct(_)) => {
-                        comp_error!(span, "Multiple values provided for parameter `{}`", nm)
+                        slot_fail!(report, span, "Multiple values provided for parameter `{}`", nm)
                     }
                 }
             }
@@ -1032,7 +1034,8 @@ pub(crate) fn reorder_call_args(
 
     for i in 0..num_required {
         if slots[i].is_none() {
-            comp_error!(
+            slot_fail!(
+                report,
                 span,
                 "Missing required argument for parameter `{}`",
                 param_names[i]
@@ -1301,8 +1304,8 @@ pub(crate) fn resolve_named_call_inner(
     let name = family.key();
     let _span = tracing::info_span!("named_call", name = %name).entered();
     let all_candidates = resolve_callee(gamma, &family);
-    let candidates: Vec<_> = if generic_args.is_empty() {
-        all_candidates.to_vec()
+    let candidates: FnList = if generic_args.is_empty() {
+        all_candidates
     } else {
         all_candidates
             .into_iter()
@@ -1683,6 +1686,7 @@ pub(crate) fn commit_selected_call(
             &arg_list,
             &param_names[offset..],
             function.num_required.saturating_sub(offset),
+            true,
             span,
         )?;
 

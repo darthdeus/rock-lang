@@ -791,6 +791,51 @@ fn overload_member_visibility_edit_rechecks_external_callers() {
     assert_eq!(h.relowered_body_count(), 3, "a's two overloads and c's caller");
 }
 
+/// The file of every overloaded call `path` selected.
+fn selected_files(h: &V1Harness, path: &str) -> Vec<String> {
+    snapshot(h.session.workspace(), &h.files)
+        .references
+        .into_iter()
+        .filter(|r| r.0 == path && r.3 == "selects")
+        .map(|r| r.4.split_once("::").expect("file::name@offset").0.to_string())
+        .collect()
+}
+
+/// A signature edit in another file moves a declaration into, and back out
+/// of, the backend-variant group of the caller's portable `now(int)`. Paired,
+/// the call collapses to the portable declaration instead of tying; split,
+/// the exact `int` overload wins.
+#[test]
+fn a_signature_edit_regroups_backend_variants() {
+    let a = "fn now(n: int) -> int {\n    n\n}\n\nfn pick() -> int {\n    now(1)\n}\n";
+    let apart = "extern(js) fn now(n: float) -> int\n";
+    let paired = "extern(js) fn now(n: int) -> int\n";
+    let mut h = V1Harness::new(vec![legacy("a.rock", a), legacy("b.rock", apart)]);
+    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+
+    for text in [paired, apart] {
+        h.edit("b.rock", text).expect("accepted");
+        assert!(h.diagnostics().is_empty(), "{text}: {:?}", h.diagnostics());
+        assert_eq!(selected_files(&h, "a.rock"), vec!["a.rock".to_string()], "{text}");
+    }
+}
+
+/// A backend sibling added by an edit joins the group of an unchanged
+/// module's declaration, and removing it leaves that declaration alone.
+#[test]
+fn an_added_backend_sibling_joins_the_group() {
+    let a = "fn now(n: int) -> int {\n    n\n}\n\nfn pick() -> int {\n    now(1)\n}\n";
+    let without = "fn other() -> int {\n    2\n}\n";
+    let with = "fn other() -> int {\n    2\n}\n\nextern(js) fn now(n: int) -> int\n";
+    let mut h = V1Harness::new(vec![legacy("a.rock", a), legacy("b.rock", without)]);
+
+    for text in [with, without] {
+        h.edit("b.rock", text).expect("accepted");
+        assert!(h.diagnostics().is_empty(), "{text}: {:?}", h.diagnostics());
+        assert_eq!(selected_files(&h, "a.rock"), vec!["a.rock".to_string()], "{text}");
+    }
+}
+
 /// A named export binding added to a module makes a path that did not
 /// resolve through it resolve, and removing it breaks the path again.
 #[test]

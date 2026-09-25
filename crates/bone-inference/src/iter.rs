@@ -331,7 +331,21 @@ pub(crate) fn check_iterator_bounds(
                     );
                 };
                 let elem_expected = substitute(gamma, elem_decl, subs, span)?;
-                unify(gamma, caller_elem, elem_expected, span)?;
+                if let Err(e) = unify(gamma, caller_elem, elem_expected, span) {
+                    // A quiet unify failure has no message, and overload
+                    // selection reports this one as the bounded candidate's
+                    // rejection.
+                    if !gamma.quiet {
+                        return Err(e);
+                    }
+                    comp_error!(
+                        span,
+                        "`{}` satisfies `Iterator<{}>`, but the bound requires `Iterator<{}>`",
+                        gname,
+                        gamma.render(caller_elem),
+                        gamma.render(elem_expected)
+                    );
+                }
                 tree.next.insert(idx, BoundNext::CallerGeneric(caller_idx));
                 done.insert(idx);
             }

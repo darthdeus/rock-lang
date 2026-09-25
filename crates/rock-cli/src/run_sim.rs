@@ -289,9 +289,10 @@ fn resolve_sim_name(wire_names: &[String], name: &str) -> Result<String> {
 ///
 /// Lives under `tmp/` rather than the system temp dir so a failing run's build
 /// is still findable next to `tmp/libstone.so` for `luajit main.lua` debugging.
-/// The engine cdylibs stay in `tmp/` itself: they are staged before any spawn
-/// and children resolve them through the relative `tmp` entry that
-/// `rock_host::project::lib_path_value` puts on the library search path.
+/// In a source workspace the engine cdylibs stay in `tmp/` itself: they are
+/// staged before any spawn and children resolve them through the relative
+/// `tmp` entry that `rock_host::project::lib_path_value` puts on the library
+/// search path. An SDK resolves them from its own `lib/` instead.
 fn sim_output_dir() -> Result<TempDir> {
     fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
     let mut dir = tempfile::Builder::new()
