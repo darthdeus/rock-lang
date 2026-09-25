@@ -1522,6 +1522,19 @@ function stone_image_data_copy_into(dst, src) {
   d.px.set(s.px);
   return true;
 }
+function stone_image_data_blit(dst, src, sx, sy, w, h, dx, dy, r, g, b, a) {
+  var d = __SW.imageData[dst], s = __SW.imageData[src];
+  if (!d || !s || dst === src || sx < 0 || sy < 0 || dx < 0 || dy < 0 || w < 0 || h < 0
+      || sx + w > s.w || sy + h > s.h || dx + w > d.w || dy + h > d.h) return false;
+  var f = [r, g, b, a];
+  for (var y = 0; y < h; y++) {
+    for (var i = 0; i < w * 4; i++) {
+      var v = Math.round(s.px[((sy + y) * s.w + sx) * 4 + i] * f[i % 4]);
+      d.px[((dy + y) * d.w + dx) * 4 + i] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+  }
+  return true;
+}
 function stone_image_data_set_pixel(h, x, y, r, g, b, a) {
   var d = __SW.imageData[h];
   if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) return;
