@@ -446,9 +446,9 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     }
 
     let tutorial = fs::read_to_string(repo.join("mag-simulation/tutorial_state.rock"))
-        .expect("read simulation-owned tutorial source");
+        .expect("read package tutorial state");
     let tutorial_state = tutorial
-        .split_once("struct TutorialState {")
+        .split_once("pub struct TutorialState {")
         .and_then(|(_, rest)| rest.split_once("\n}"))
         .map(|(body, _)| body)
         .expect("read TutorialState body");
@@ -1044,7 +1044,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 32, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 33, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));

@@ -675,7 +675,7 @@ pub fn infer_expr_used(
             // representative before deciding value-ness, exactly as the call
             // path does. Genuine overloads (different signatures) survive and
             // still reject below.
-            None => match collapse_backend_variants(gamma, &resolve_callee(gamma, &fn_value_family(c, e, *name))).as_slice()
+            None => match &*collapse_backend_variants(gamma, &resolve_callee(gamma, &fn_value_family(c, e, *name)))
             {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();

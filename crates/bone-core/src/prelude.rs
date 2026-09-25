@@ -32,6 +32,8 @@ macro_rules! or_fail {
     }
 }
 
+// The message arguments are evaluated only when the error can be reported, so
+// keep `render` calls inside the macro: quiet trials discard the message.
 #[macro_export]
 macro_rules! unify_fail {
     ($gamma:expr, $span:expr, $($arg:tt)*) => {{

@@ -9,7 +9,7 @@ use bone_semantic::{
     prelude::*,
     semantic_passes::{contribute, FragmentContribution},
 };
-use bone_core::modules::{NsPackage, ScopeProbe};
+use bone_core::modules::ScopeProbe;
 
 use crate::span_shift;
 
@@ -176,7 +176,7 @@ impl ScopeDelta {
             };
             if !same {
                 for meta in o.into_iter().chain(n) {
-                    delta.members.insert((meta.package, NsPackage::path_key(&meta.module), meta.name));
+                    delta.members.insert((meta.package, meta.node, meta.name));
                 }
             }
         }
@@ -1412,7 +1412,7 @@ impl Session {
             // type (`E::V`, a newtype call, a type annotation), and records
             // the member it looked up.
             if let Some(meta) = self.ws.defs.get(key) {
-                delta.members.insert((meta.package, NsPackage::path_key(&meta.module), meta.name));
+                delta.members.insert((meta.package, meta.node, meta.name));
             }
         }
         to_relower.extend(self.modules_reading(&delta, mid));
@@ -2046,6 +2046,7 @@ impl Session {
             }
         }
         *self.ws.module_mut(mid) = module;
+        self.ws.index_param_signature(mid, fid);
         self.ws.log_time("lower functions", lower_timer);
 
         let infer_timer = Instant::now();
@@ -2158,6 +2159,7 @@ impl Session {
         }
 
         *self.ws.module_mut(mid) = module;
+        self.ws.index_param_signature(mid, fid);
         self.ws.log_time("lower functions", lower_timer);
 
         let infer_timer = Instant::now();

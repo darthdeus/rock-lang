@@ -21,7 +21,7 @@ mod unix {
     }
 
     #[test]
-    fn replay_builds_engine_and_cli_together_before_direct_exec() {
+    fn replay_builds_the_cli_before_direct_exec() {
         let fixture = tempfile::tempdir().expect("launcher fixture");
         let root = fixture.path();
         let bin = root.join("bin");
@@ -58,7 +58,7 @@ mod unix {
         assert!(status.success(), "rock.sh replay fixture failed: {status}");
         assert_eq!(
             fs::read_to_string(log).expect("launcher log"),
-            "cargo:build --lib --bin rock\nrock:replay mag mag/replays/last.replay\n"
+            "cargo:build --bin rock\nrock:replay mag mag/replays/last.replay\n"
         );
     }
 }

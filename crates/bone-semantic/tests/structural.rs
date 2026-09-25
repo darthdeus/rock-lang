@@ -237,6 +237,32 @@ fn leaf_type_mismatch_says_expected_found() {
     );
 }
 
+// Overload scoring and `coerce` try unifications quietly and discard the
+// failures; a unify that can be reported must still name both types. Here the
+// nullable-target coerce fails a quiet trial before the reported unify.
+#[test]
+fn nominal_mismatch_after_a_quiet_trial_names_both_types() {
+    let msgs = main_body_error_messages(
+        "struct Foo { x: int }\nstruct Bar { x: int }\nfn main() { let a: Foo? = Bar { x: 1 } }",
+    );
+    assert!(
+        msgs.iter().any(|m| m == "type mismatch: expected `Foo`, found `Bar`"),
+        "expected the nominal mismatch message, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn generic_constructor_mismatch_names_both_types() {
+    let msgs = main_body_error_messages(
+        "struct Foo { x: int }\nfn main() { let a: [int] = Foo { x: 1 } }",
+    );
+    assert!(
+        msgs.iter().any(|m| m
+            == "type mismatch: expected `[int]`, found `Foo` (different type constructors)"),
+        "expected the constructor mismatch message, got: {msgs:?}"
+    );
+}
+
 // P1b: the mismatch carries a second label at the expected type's origin (the
 // `: Foo` annotation), so the reader sees WHERE the expectation came from.
 // Works for span-carrying types (nominal/compound); builtins (`int`) lower to a
@@ -2108,6 +2134,32 @@ fn use_it() -> int {
     );
 }
 
+/// The backend-variant collapse keeps each signature group together, in
+/// order of first appearance. A group with a repeated backend is not
+/// collapsed, so its members stay adjacent: the "available overloads" list
+/// is in collapse order, not declaration order.
+#[test]
+fn backend_variant_groups_list_in_first_appearance_order() {
+    let src = r#"
+inline(lua) fn g(x: int) -> int = """return x"""
+fn g(x: string) -> int { return 0 }
+inline(lua) fn g(x: int) -> int = """return x"""
+extern(js) fn g(x: bool, y: int) -> int
+fn main() {
+    let _ = g(1.5)
+}
+"#;
+    let msgs = check(src)
+        .expect("semantic_pass")
+        .inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten().cloned().collect::<Vec<_>>())
+        .map(|e| e.message)
+        .collect::<Vec<_>>();
+    let expected = "No overload for `g` with argument types (float)\navailable overloads:\n  \
+                    g(x: int) -> int\n  g(x: int) -> int\n  g(x: string) -> int\n  g(x: bool, y: int) -> int";
+    assert!(msgs.iter().any(|m| m == expected), "{msgs:?}");
+}
+
 #[test]
 fn legacy_caller_field_access_enforces_v1_visibility_and_allows_legacy() {
     use bone_semantic::inference::{field_access, AccessDenied, AccessSite, FieldAccessNeed, Gamma};
@@ -2299,4 +2351,48 @@ pub struct ReadableSecret {
         secret_err.message,
         "field `secret` on struct `Actor` is not accessible from this module"
     );
+}
+
+// Argument-to-parameter matching reports its reason when the call's callee is
+// fixed; overload scoring discards the same rejections without a message.
+#[test]
+fn argument_matching_errors_name_the_parameter() {
+    let cases = [
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, 2, 3) }",
+            "Too many positional arguments, expected at most 2",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1) }",
+            "Missing required argument for parameter `b`",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, a: 2) }",
+            "Multiple values provided for parameter `a`",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, c: 2) }",
+            "unknown parameter `c`",
+        ),
+        (
+            "struct ABC { a: int, b: int, c: int }\nfn two(a: int, b: int) -> int { a + b }\n\
+             fn main() { let p = ABC { a: 1, b: 2, c: 3 }\n two(..p) }",
+            "spread field `c` names no parameter of the callee",
+        ),
+        (
+            "struct AB { a: int, b: int }\nfn two(a: int, b: int) -> int { a + b }\n\
+             fn main() { let p = AB { a: 1, b: 2 }\n two(a: 9, ..p) }",
+            "parameter `a` is given before the spread that also supplies it",
+        ),
+        (
+            "struct AB { a: int, b: int }\nstruct AC { a: int, c: int }\n\
+             fn three(a: int, b: int, c: int) -> int { a + b + c }\n\
+             fn main() { let x = AB { a: 1, b: 2 }\n let y = AC { a: 8, c: 3 }\n three(..x, ..y) }",
+            "two spreads both supply parameter `a`",
+        ),
+    ];
+    for (src, want) in cases {
+        let msgs = all_err_msgs(src);
+        assert!(msgs.iter().any(|m| m == want), "expected `{want}` for\n{src}\ngot: {msgs:?}");
+    }
 }

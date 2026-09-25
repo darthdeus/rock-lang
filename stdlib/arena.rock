@@ -23,6 +23,12 @@ struct ArenaStore<T> {
     next_generation: int = 0,
 }
 
+struct ArenaGenerationSnapshot {
+    generations: [int],
+    free_indices: [int],
+    next_generation: int,
+}
+
 struct ArenaRegistry {
     stores: [any?],
     scene_ids: [int],
@@ -340,6 +346,27 @@ fn arena_slot_count<T>(arena: Arena<T>) -> int {
     let found = __arena_store(arena)
     if is_null(found) { return 0 }
     return vec_len(found.unwrap().occupied)
+}
+
+// Copy allocator history for deterministic observers without exposing the
+// mutable backing store or omitting generations left in vacant slots.
+fn arena_generation_snapshot<T>(arena: Arena<T>) -> ArenaGenerationSnapshot {
+    let found = __arena_store(arena)
+    if is_null(found) {
+        return ArenaGenerationSnapshot {
+            generations: [], free_indices: [], next_generation: 0,
+        }
+    }
+    let store = found.unwrap()
+    let generations: [int] = []
+    for generation in store.generations { generations.push(generation) }
+    let free_indices: [int] = []
+    for slot in store.free_indices { free_indices.push(slot) }
+    return ArenaGenerationSnapshot {
+        generations,
+        free_indices,
+        next_generation: store.next_generation,
+    }
 }
 
 // Releases the payload graph while keeping the incarnation: same Arena ID, so
