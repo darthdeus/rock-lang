@@ -2,6 +2,7 @@
 
 //- prelude_inventory
 // prelude: Arena
+// prelude: ArenaGenerationSnapshot
 // prelude: ArenaKeyIter
 // prelude: ArenaPairIter
 // prelude: ArenaRegistry
@@ -83,6 +84,7 @@
 // prelude: __SCENE_LIVE
 // prelude: __SCENE_REGISTRY
 // prelude: __SCENE_RESERVED
+// prelude: __arena_compact_retired_registry
 // prelude: __arena_destroy_id
 // prelude: __arena_drain_retired
 // prelude: __arena_new_owned
@@ -233,8 +235,10 @@
 // prelude: any
 // prelude: arena
 // prelude: arena_destroy
+// prelude: arena_generation_snapshot
 // prelude: arena_live_count
 // prelude: arena_new
+// prelude: arena_registry_storage_bound
 // prelude: arena_slot_count
 // prelude: arena_slot_live
 // prelude: assert
