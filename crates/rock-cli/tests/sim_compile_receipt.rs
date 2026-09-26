@@ -67,6 +67,20 @@ fn prepared_sim_receipt_reuses_one_project_compile() {
         .expect("one project receipt")
         .expect("read project receipt")
         .path();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project_receipt.join("receipt.json")).expect("read receipt manifest"),
+    )
+    .expect("parse receipt manifest");
+    assert_eq!(manifest["schema_version"], 2, "source metadata changes the receipt schema");
+    let registry = manifest["registry"].as_array().expect("receipt registry");
+    assert!(!registry.is_empty(), "testbed receipt should include simulations");
+    for entry in registry {
+        let source_file = entry["source_file"].as_str().expect("receipt source file");
+        assert!(
+            source_file.starts_with("games/testbed/"),
+            "receipt source paths should be workspace-relative, got {source_file}"
+        );
+    }
     let main_path = project_receipt.join("main.lua");
     let mut main = std::fs::read(&main_path).expect("read receipt main.lua");
     main.extend_from_slice(b"\n-- tampered\n");

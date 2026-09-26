@@ -4521,13 +4521,13 @@ fn decorator_application_lines(
     deco_lines
 }
 
-/// Every `@sim`-annotated fn in the workspace, paired with its wire name (the
-/// `@sim("name")` string arg, else the fn name). The SINGLE source of the
-/// `@sim` walk + wire derivation, shared by the codegen registry
+/// Every `@sim`-annotated fn in the workspace, paired with its module file and
+/// wire name (the `@sim("name")` string arg, else the fn name). The SINGLE
+/// source of the `@sim` walk + wire derivation, shared by the codegen registry
 /// ([`sim_registration_lines`]) and the rock-cli sim runner
 /// (`collect_skull_sims`) so the registered name and the name the runner asks
 /// to dispatch cannot drift.
-pub fn collect_sim_fns(ws: &Workspace) -> Vec<(&bone_semantic::hir::Function, String)> {
+pub fn collect_sim_fns(ws: &Workspace) -> Vec<(Ustr, &bone_semantic::hir::Function, String)> {
     let mut sims = Vec::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -4537,7 +4537,7 @@ pub fn collect_sim_fns(ws: &Workspace) -> Vec<(&bone_semantic::hir::Function, St
             let Some(wire) = skull_mir::lifecycle::sim_wire_name(f) else {
                 continue;
             };
-            sims.push((f, wire.as_str().to_string()));
+            sims.push((module.file, f, wire.as_str().to_string()));
         }
     }
     sims
@@ -4721,7 +4721,7 @@ fn sim_registration_lines(
     let register_name = mangle_fn(ws, &ws.module(register_fn.module).functions[register_fn.func]);
 
     let mut out = String::new();
-    for (f, wire) in sims {
+    for (_file, f, wire) in sims {
         if f.backend == bone_semantic::hir::FnBackend::Js {
             continue;
         }

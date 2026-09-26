@@ -60,6 +60,7 @@ fn sim_glue_retains_register_sim_through_the_view() {
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let sims = skull::mir_emit::collect_sim_fns(&ws);
     assert_eq!(sims.len(), 1, "fixture must register exactly one sim, got {}", sims.len());
+    assert_eq!(sims[0].0.as_str(), "<test>", "sim collection retains its HIR module file");
 
     let (emit, cache) = emit_full(&ws, mid).expect("emit");
     let view = cache.lua_view();

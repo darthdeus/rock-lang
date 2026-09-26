@@ -13,6 +13,7 @@
 
 use crate::Result;
 use crate::bone_backend::{categorize, short_path};
+use anyhow::Context;
 use colored::Colorize;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
@@ -1960,7 +1961,7 @@ fn build_state_nobox_accessors(
 /// game can dispatch.
 fn collect_skull_sims(
     ws: &bone_semantic::inference::Workspace,
-) -> Vec<(String, Vec<(String, String)>)> {
+) -> Vec<(String, String, Vec<(String, String)>)> {
     use bone_semantic::hir::AnnoValue;
 
     // The `@sim` walk + wire derivation is shared with skull's emitted registry
@@ -1970,7 +1971,7 @@ fn collect_skull_sims(
     // `@sim_env` can override.
     skull::mir_emit::collect_sim_fns(ws)
         .into_iter()
-        .map(|(f, wire)| {
+        .map(|(file, f, wire)| {
             let mut env_pairs = Vec::new();
             if f.annotations.iter().any(|a| a.is_builtin("sim_render")) {
                 env_pairs.push(("SIM_SKIP_RENDER".to_string(), "0".to_string()));
@@ -1987,20 +1988,89 @@ fn collect_skull_sims(
                 };
                 env_pairs.push((k.to_string(), v.to_string()));
             }
-            (wire, env_pairs)
+            (wire, file.as_str().to_string(), env_pairs)
         })
         .collect()
 }
 
+fn relative_sim_source_path(
+    workspace_root: &std::path::Path,
+    project_dir: &std::path::Path,
+    source_file: &str,
+) -> Result<String> {
+    use std::path::Component;
+
+    let source_path = std::path::Path::new(source_file);
+    let source_path = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else {
+        project_dir.join(source_path)
+    };
+    let source_path = source_path
+        .canonicalize()
+        .with_context(|| format!("resolve @sim source file `{source_file}`"))?;
+    let root_components = workspace_root.components().collect::<Vec<_>>();
+    let source_components = source_path.components().collect::<Vec<_>>();
+    let common = root_components
+        .iter()
+        .zip(&source_components)
+        .take_while(|(root, source)| root == source)
+        .count();
+    if common == 0 || root_components.first() != source_components.first() {
+        anyhow::bail!(
+            "@sim source file `{source_file}` is on a different filesystem root from {}",
+            workspace_root.display()
+        );
+    }
+
+    let mut relative = std::path::PathBuf::new();
+    for component in root_components.iter().skip(common) {
+        if matches!(component, Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    for component in source_components.iter().skip(common) {
+        relative.push(component.as_os_str());
+    }
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty() {
+        anyhow::bail!("@sim source file `{source_file}` resolves to the workspace root");
+    }
+    Ok(normalized)
+}
+
+fn source_root_for_sim_project(project_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let project_dir = project_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalize sim project {}", project_dir.display()))?;
+    let mut current = project_dir.as_path();
+    loop {
+        if current.join(".git").exists() {
+            return Ok(current.to_path_buf());
+        }
+        let Some(parent) = current.parent() else { break };
+        current = parent;
+    }
+    if let Some(root) = rock_host::project::find_source_root(&project_dir) {
+        if let Ok(root) = root.canonicalize() {
+            if project_dir.starts_with(&root) {
+                return Ok(root);
+            }
+        }
+    }
+    Ok(project_dir)
+}
+
 /// Build the skull game program for `dir`, write the game-shaped `main.lua`
 /// (preamble + entry + the `@sim` registry) to `main_path`, and collect the
-/// project's `@sim` wire names + env pairs from the SAME workspace build. The
-/// skull counterpart of rock's `compile_sims` -- one type-check feeds both the
-/// emitted registry and the runner's wire/env list, so they cannot drift.
+/// project's `@sim` wire names, source paths and env pairs from the SAME
+/// workspace build. The skull counterpart of rock's `compile_sims` -- one
+/// type-check feeds both the emitted registry and the runner's wire/env list,
+/// so they cannot drift.
 pub fn skull_compile_game_and_collect_sims(
     dir: &str,
     main_path: &std::path::Path,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, HashMap<String, String>, SkullStone)> {
     skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None)
 }
 
@@ -2008,7 +2078,12 @@ pub fn skull_compile_game_and_collect_sims_with_allocation(
     dir: &str,
     main_path: &std::path::Path,
     allocation_manifest: Option<&std::path::Path>,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
+) -> Result<(
+    Vec<String>,
+    HashMap<String, Vec<(String, String)>>,
+    HashMap<String, String>,
+    SkullStone,
+)> {
     // Session-based build (same machinery as `rock stone`, tests included so the
     // `@sim` bodies are in the program). The live SkullStone is returned so the
     // runner can serve mid-sim `reload_edit` ops through the REAL incremental
@@ -2025,14 +2100,89 @@ pub fn skull_compile_game_and_collect_sims_with_allocation(
     }
     .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
 
+    let project_dir = std::path::Path::new(dir)
+        .canonicalize()
+        .with_context(|| format!("canonicalize sim project {dir}"))?;
+    let workspace_root = source_root_for_sim_project(&project_dir)?;
     let sims = collect_skull_sims(stone.project.workspace());
     let mut wire_names = Vec::with_capacity(sims.len());
     let mut env_by_wire = HashMap::with_capacity(sims.len());
-    for (wire, env) in sims {
+    let mut source_files = HashMap::with_capacity(sims.len());
+    let mut relative_by_source = HashMap::new();
+    for (wire, source_file, env) in sims {
         wire_names.push(wire.clone());
+        let relative_source = match relative_by_source.entry(source_file.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                relative_sim_source_path(&workspace_root, &project_dir, &source_file)
+                    .with_context(|| format!("record source for @sim `{wire}`"))?,
+            ),
+        };
+        source_files.insert(wire.clone(), relative_source.clone());
         env_by_wire.insert(wire, env);
     }
-    Ok((wire_names, env_by_wire, stone))
+    Ok((wire_names, env_by_wire, source_files, stone))
+}
+
+#[cfg(test)]
+mod sim_source_path_tests {
+    use super::{relative_sim_source_path, source_root_for_sim_project};
+
+    #[test]
+    fn sim_source_paths_are_workspace_relative_across_projects_and_dependencies() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let project = workspace.join("mag");
+        let source = project.join("tests/sims/example.rock");
+        std::fs::create_dir_all(source.parent().unwrap()).expect("create project source dir");
+        std::fs::write(&source, "@sim\nco fn example() {}\n").expect("write project source");
+
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let project = project.canonicalize().expect("canonical project");
+        assert_eq!(
+            relative_sim_source_path(&workspace, &project, source.to_str().unwrap()).unwrap(),
+            "mag/tests/sims/example.rock"
+        );
+
+        let dependency = temp.path().join("dependency/tests/sims/example.rock");
+        std::fs::create_dir_all(dependency.parent().unwrap()).expect("create dependency source dir");
+        std::fs::write(&dependency, "@sim\nco fn example() {}\n").expect("write dependency source");
+        assert_eq!(
+            relative_sim_source_path(&workspace, &project, dependency.to_str().unwrap()).unwrap(),
+            "../dependency/tests/sims/example.rock"
+        );
+    }
+
+    #[test]
+    fn source_root_comes_from_project_when_sdk_root_is_separate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_root = temp.path().join("source-worktree");
+        let project = source_root.join("mag");
+        let sdk_root = temp.path().join("sdk");
+        std::fs::create_dir_all(source_root.join(".git")).expect("create source repository marker");
+        std::fs::create_dir_all(&project).expect("create project");
+        std::fs::create_dir_all(&sdk_root).expect("create separate sdk root");
+
+        let found = source_root_for_sim_project(&project).unwrap();
+        assert_eq!(found, source_root.canonicalize().unwrap());
+        assert_ne!(found, sdk_root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn standalone_sim_project_uses_its_own_source_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("standalone-project");
+        let source = project.join("tests/sims/probe.rock");
+        std::fs::create_dir_all(source.parent().unwrap()).expect("create source directory");
+        std::fs::write(&source, "@sim\nco fn probe() {}\n").expect("write source");
+
+        let project_root = project.canonicalize().expect("canonical project");
+        assert_eq!(source_root_for_sim_project(&project).unwrap(), project_root);
+        assert_eq!(
+            relative_sim_source_path(&project_root, &project_root, source.to_str().unwrap()).unwrap(),
+            "tests/sims/probe.rock"
+        );
+    }
 }
 
 /// `rock compile <project-dir> --backend skull` — assemble + type-check + emit

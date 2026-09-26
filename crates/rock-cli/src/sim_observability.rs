@@ -6,7 +6,7 @@
 //! never change the sim result.
 
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -172,7 +172,13 @@ impl SimRunRecorder {
         requested_mode: &str,
         effective_mode: &str,
         update_snapshots: bool,
+        source_files: &HashMap<String, String>,
     ) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.timings.set_source_files(source_files);
+        } else {
+            self.warn_once("sim history lock was poisoned while recording sim source files".into());
+        }
         self.event(
             "run_config",
             json!({
