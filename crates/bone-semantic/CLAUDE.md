@@ -5,11 +5,8 @@ generics-aware). This file holds conventions specific to working in it.
 
 ## Working in bone
 
-Typechecker source is editable. Until 2026-09-09 Claude wrote only tests here and the
-author transcribed every `src` change by hand; that rule is lifted -- the author
-sanctions agent edits across the repository and reviews them in the diff.
-
-What the old rule was protecting is still true, so keep these habits:
+Typechecker source is editable; the author reviews edits in the diff. It is
+easy to break, so keep these habits:
 
 - **Lead with the fixture.** `crates/bone-semantic/tests/fixtures/*.rock` and
   the structural tests in `crates/bone-semantic/tests/structural.rs` are the
