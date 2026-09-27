@@ -235,23 +235,42 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
 /// Map each part of each requested spec to its registered wire name. A v1
 /// package registers sims under canonical DefKeys (`game::module::name`); a
 /// trailing `::`-segment path such as the declared name selects the one sim it
-/// ends (spec sections 15 and 16). An exact wire name always wins. A name no
-/// sim has passes through unchanged so each route keeps its own unknown-name
-/// report.
+/// ends (spec sections 15 and 16). An exact wire name always wins.
+///
+/// Every name must be a registered sim, checked here before anything boots: a
+/// helper coroutine named in a batch would otherwise kill its whole worker
+/// with `unknown sim`, and a name holding whitespace (one argv element of
+/// newline-joined names) splits the worker's entry-plan line. Every problem is
+/// reported at once, one `unknown sim: <name>` line per name, so a batch is
+/// fixed in one pass.
 fn resolve_sim_specs(wire_names: &[String], specs: &[String]) -> Result<Vec<String>> {
-    specs
-        .iter()
-        .map(|spec| {
-            let parts = parse_sim_chain(spec)
-                .into_iter()
-                .map(|part| resolve_sim_name(wire_names, part))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(parts.join(","))
-        })
-        .collect()
+    let mut problems = Vec::new();
+    let mut resolved = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let mut parts = Vec::new();
+        for part in parse_sim_chain(spec) {
+            match resolve_sim_name(wire_names, part) {
+                Ok(wire) => parts.push(wire),
+                Err(problem) => problems.push(problem),
+            }
+        }
+        resolved.push(parts.join(","));
+    }
+    if problems.is_empty() {
+        return Ok(resolved);
+    }
+    Err(anyhow!(
+        "{} requested sim name{} not runnable (list sims with `rock sim --list <project>`):\n  {}",
+        problems.len(),
+        if problems.len() == 1 { " is" } else { "s are" },
+        problems.join("\n  ")
+    ))
 }
 
-fn resolve_sim_name(wire_names: &[String], name: &str) -> Result<String> {
+fn resolve_sim_name(wire_names: &[String], name: &str) -> std::result::Result<String, String> {
+    if name.contains(char::is_whitespace) {
+        return Err(format!("sim name {name:?} contains whitespace; pass each sim name as its own argument"));
+    }
     if wire_names.iter().any(|wire| wire == name) {
         return Ok(name.to_string());
     }
@@ -262,12 +281,9 @@ fn resolve_sim_name(wire_names: &[String], name: &str) -> Result<String> {
         .map(String::as_str)
         .collect();
     match candidates.as_slice() {
-        [] => Ok(name.to_string()),
+        [] => Err(format!("unknown sim: {name}")),
         [only] => Ok((*only).to_string()),
-        many => Err(anyhow!(
-            "sim name `{name}` is ambiguous; name one of: {}",
-            many.join(", ")
-        )),
+        many => Err(format!("sim name `{name}` is ambiguous; name one of: {}", many.join(", "))),
     }
 }
 
@@ -2345,9 +2361,6 @@ pub fn do_run_allocation_census(
                 "allocation census accepts one sim per entry; comma-chain `{name}` would hide a per-sim row"
             ));
         }
-        if !wire_names.iter().any(|known| known == name) {
-            return Err(anyhow!("no sim named `{name}` in project `{project}`"));
-        }
     }
 
     let mut reload_idx = Vec::new();
@@ -2622,9 +2635,6 @@ pub fn do_run_allocation_sites(
     for name in &selected {
         if parse_sim_chain(name).len() != 1 {
             return Err(anyhow!("allocation-site diagnostics accept one sim per entry; comma-chain `{name}` would merge frame populations"));
-        }
-        if !wire_names.iter().any(|known| known == name) {
-            return Err(anyhow!("no sim named `{name}` in project `{project}`"));
         }
         if entry_is_reload_lane(name, &env_by_wire) {
             return Err(anyhow!("allocation-site diagnostics do not support reload sim `{name}` because its emitted site IDs can change after the initial manifest"));
@@ -3843,6 +3853,25 @@ fn per_entry_env_pairs(part: &WorkerPart) -> Vec<(String, String)> {
         .collect()
 }
 
+/// One entry-plan line, without its newline: `<name>\t<out>\t<budget>` and a
+/// flat key, value tail (see `sim_load_entries` in stone/engine/sim.rock).
+fn entry_plan_line(p: &WorkerPart) -> Result<String> {
+    let mut fields = vec![p.name.clone(), p.out_dir.to_string_lossy().into_owned(), p.frame_budget.to_string()];
+    for (k, v) in per_entry_env_pairs(p).into_iter().chain(runner_owned_plan_pairs(&p.env)) {
+        fields.push(k);
+        fields.push(v);
+    }
+    // The worker splits on these unescaped, so one inside a field would shift
+    // or split the line and kill every entry in the worker.
+    if let Some(bad) = fields.iter().find(|f| f.contains(['\t', '\n', '\r'])) {
+        return Err(anyhow!(
+            "entry plan field {bad:?} of sim `{}` contains a tab or line break the worker cannot parse",
+            p.name
+        ));
+    }
+    Ok(fields.join("\t"))
+}
+
 /// How `rock sim` maps entries to processes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SimExecMode {
@@ -4573,20 +4602,7 @@ fn run_worker(
         .tempfile_in(output)
         .context("creating the worker entry plan")?;
     for p in parts {
-        write!(
-            plan_file,
-            "{}\t{}\t{}",
-            p.name,
-            p.out_dir.to_string_lossy(),
-            p.frame_budget
-        )?;
-        for (k, v) in per_entry_env_pairs(p) {
-            write!(plan_file, "\t{k}\t{v}")?;
-        }
-        for (k, v) in runner_owned_plan_pairs(&p.env) {
-            write!(plan_file, "\t{k}\t{v}")?;
-        }
-        writeln!(plan_file)?;
+        writeln!(plan_file, "{}", entry_plan_line(p)?)?;
     }
     plan_file.flush()?;
 
@@ -8439,13 +8455,62 @@ mod tests {
         assert_eq!(resolve(&["legacy_sim", "game::hover"]).unwrap(), ["legacy_sim", "game::hover"]);
         assert_eq!(resolve(&["ui::hover"]).unwrap(), ["game::ui::hover"]);
         assert_eq!(resolve(&["boots, ui::hover"]).unwrap(), ["game::boots,game::ui::hover"]);
-        assert_eq!(resolve(&["missing"]).unwrap(), ["missing"]);
-        assert_eq!(resolve(&["oots"]).unwrap(), ["oots"], "only whole segments match");
+        let error = resolve(&["oots"]).unwrap_err().to_string();
+        assert!(error.contains("unknown sim: oots"), "only whole segments match: {error}");
         let error = resolve(&["hover"]).unwrap_err().to_string();
         assert!(
             error.contains("`hover` is ambiguous") && error.contains("game::ui::hover") && error.contains("game::hover"),
             "{error}"
         );
+    }
+
+    // A name the registry lacks used to pass through to the worker's entry
+    // plan, where a name holding a line break (one argv element of
+    // newline-joined names) split the plan line and killed the whole worker
+    // with `malformed entry plan line: <a valid sim>`.
+    #[test]
+    fn requested_sim_names_that_are_not_sims_are_all_refused_before_boot() {
+        let wires: Vec<String> = ["game::boots", "game::hover"].into_iter().map(String::from).collect();
+        let specs: Vec<String> =
+            ["boots", "helper_probe", "boots\nhover", "hover,missing_part", "other_helper"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let error = resolve_sim_specs(&wires, &specs).unwrap_err().to_string();
+        for expected in [
+            "unknown sim: helper_probe",
+            "unknown sim: missing_part",
+            "unknown sim: other_helper",
+            "\"boots\\nhover\" contains whitespace",
+        ] {
+            assert!(error.contains(expected), "missing `{expected}` in:\n{error}");
+        }
+        assert!(!error.contains("unknown sim: boots"), "a valid sim must not be named unknown:\n{error}");
+    }
+
+    #[test]
+    fn an_entry_plan_field_that_would_split_the_line_is_refused() {
+        let part = |name: &str, env: Vec<(String, String)>| WorkerPart {
+            name: name.to_string(),
+            out_dir: PathBuf::from("/tmp/out"),
+            frame_budget: 60,
+            env,
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        let line = entry_plan_line(&part("game::boots", Vec::new())).unwrap();
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(&fields[..3], ["game::boots", "/tmp/out", "60"], "{line:?}");
+        assert!(!line.contains('\n'), "{line:?}");
+        for bad in ["a\nb", "a\tb", "a\rb"] {
+            let error = entry_plan_line(&part(bad, Vec::new())).unwrap_err().to_string();
+            assert!(error.contains("entry plan"), "{error}");
+        }
+        let env = vec![
+            (PER_ENTRY_ENV_DECL.to_string(), "KEY".to_string()),
+            ("KEY".to_string(), "line\nbreak".to_string()),
+        ];
+        assert!(entry_plan_line(&part("game::boots", env)).is_err(), "a value must not split the line");
     }
 
     #[test]
