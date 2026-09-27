@@ -3438,6 +3438,7 @@ fn literal_temporary_path_mag_product_smoke() {
         540,
         &replay_s,
         &[
+            ("STONE_TEST_FIXED_DT", "0.1"),
             ("MAG_BOOT_MENU", "1"),
             ("MAG_LITERAL_PRODUCT_SMOKE", "1"),
             ("MAG_PROGRESS_PATH_OVERRIDE", &first_progress_s),
@@ -3450,8 +3451,22 @@ fn literal_temporary_path_mag_product_smoke() {
             ("MAG_LITERAL_PRODUCT_SMOKE_HISTORY_V1_PATH", &editor_history_v1_s),
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_KEYFRAME_INTERVAL", "10"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT", "2"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "3"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT", "45"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "46"),
+            ("STONE_PHYSICAL_MOUSE_X", "960"),
+            ("STONE_PHYSICAL_MOUSE_Y", "591"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "49"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "50"),
+            ("STONE_PHYSICAL_MOUSE_X_2", "960"),
+            ("STONE_PHYSICAL_MOUSE_Y_2", "370"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT_3", "55"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_3", "56"),
+            ("STONE_PHYSICAL_MOUSE_X_3", "1100"),
+            ("STONE_PHYSICAL_MOUSE_Y_3", "700"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT_4", "60"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_4", "61"),
+            ("STONE_PHYSICAL_MOUSE_X_4", "960"),
+            ("STONE_PHYSICAL_MOUSE_Y_4", "370"),
             ("STONE_PHYSICAL_KEY_PRESS_AT", "100"),
             ("STONE_PHYSICAL_KEY_RELEASE_AT", "101"),
             ("STONE_PHYSICAL_KEY", "down"),
@@ -3475,7 +3490,10 @@ fn literal_temporary_path_mag_product_smoke() {
     );
     let diag = &run.state["__stone_diag"];
     assert_eq!(diag["MAG_LITERAL_SMOKE_MENU"].as_i64(), Some(1), "{diag}");
-    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1),
+        "screen={} slots={} consent={} play_effect={} diag={diag}",
+        run.state["mag"]["SCREEN"], run.state["mag"]["SAVE_SLOTS_OPEN"],
+        run.state["mag"]["CONSENT_OPEN"], diag["MAG_PLAY_EFFECT_SCREEN"]);
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "{diag}");
     assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(150), "the second scrub must start at the backward target: {diag}");
     assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(180), "the second scrub must move forward: {diag}");
@@ -4441,14 +4459,11 @@ fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
 /// A keyframe taken while image publication is HELD carries the requests that
 /// were still outstanding, and restoring it puts them back.
 ///
-/// Nothing else produces that state headlessly. A decode finishes inside the
-/// tick that asked for it, and MAG's admission waits for
-/// `stone_image_uploads_pending() == 0` before it proceeds, so no cadence
-/// keyframe in an ordinary run ever captures an outstanding queue --
-/// `mag_replay_profiles_through_admission_after_a_short_splash_tap` asks for
-/// one and measures zero at every keyframe of its recording.
-/// `STONE_IMAGE_HOLD_AT_FRAME` holds `select` off so the fixture can ask for
-/// the state it means to test, through the same
+/// A decode finishes inside the tick that asked for it, and MAG's admission
+/// waits for `stone_image_uploads_pending() == 0` before it proceeds, so no
+/// cadence keyframe in an ordinary run captures an outstanding queue.
+/// The fixture submits a real image request while `STONE_IMAGE_HOLD_AT_FRAME`
+/// holds `select` off, through the same
 /// `stone_image_publication_hold` production uses across a session activation.
 ///
 /// The control arm is the denominator: without the hold the same snapshot and
@@ -4459,10 +4474,14 @@ fn a_restore_reinstalls_the_image_requests_that_were_still_outstanding() {
     let dir = tempfile::tempdir().unwrap();
     let progress = dir.path().join("progress.json").to_string_lossy().into_owned();
     let settings = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let image = workspace_root().join("games/match3/tests/sims/smoke.snap/boot.png");
+    let image_path = image.to_string_lossy().into_owned();
     let common: Vec<(&str, &str)> = vec![
         ("MAG_BOOT_PLAYING", "1"),
         ("MAG_PROGRESS_PATH_OVERRIDE", &progress),
         ("MAG_SETTINGS_PATH_OVERRIDE", &settings),
+        ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "2"),
+        ("STONE_TEST_IMAGE_LOAD_PATH", &image_path),
         ("STONE_SNAPSHOT_AT_TICK", "3"),
         ("STONE_RESTORE_AT_TICK", "6"),
     ];
