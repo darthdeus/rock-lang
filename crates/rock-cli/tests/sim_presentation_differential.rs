@@ -39,7 +39,7 @@ fn assert_sim_pass(name: &str, output: &std::process::Output) {
     );
     let verdicts = text
         .lines()
-        .filter(|line| line.starts_with(&format!("[sim] {name}:")))
+        .filter(|line| line.starts_with(&format!("[sim] mag::{name}:")))
         .filter(|line| line.contains("PASS"))
         .collect::<Vec<_>>();
     assert_eq!(

@@ -522,9 +522,10 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         0,
         "panel definitions must not reload Session state per catalog entry"
     );
+    let attach_player = rock_function_body(&world, "fn WorldState.attach_player(");
     assert!(
-        world.contains("player.get().unwrap().entity = player"),
-        "WorldState construction must publish the Player's self identity"
+        attach_player.contains("entity.get().unwrap().entity = entity"),
+        "attaching a Player must publish its self identity"
     );
 
     let player = fs::read_to_string(repo.join("mag/player.rock"))
@@ -939,7 +940,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
         "world_mark_head =",
         "    cloud = []",
         "struct Cloud {",
-        "CLOUD_SIZE",
+        "const CLOUD_SIZE:",
         "fn init_cloud()",
         "fn Player.update_cloud(player)",
         "fn Player.draw_cloud(player)",
@@ -1079,17 +1080,17 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     );
     let tick = rock_function_body(&run, "fn mag_simulation_tick(");
     for call in [
-        "coroutine_poller_update(actor.tasks)",
+        "coroutine_poller_update(world.tasks)",
         "flow_frame_reset()",
         "world_tick_all(world)",
-        "actor.update_casting_in(world, intents.cast)",
+        "active.update_casting_in(world, intents.cast)",
         "player.apply_target_intent_in(world, intents.target)",
         "player.update_movement_in(world, intents.movement, dt)",
         "player.apply_inventory_command_in(world, intents.inventory)",
         "player.apply_bandage_intent_in(world, intents.consumables)",
         "player.update_walls_in(world, dt)",
-        "actor.update_ground_pickup(world)",
-        "actor.cull_dead_mobs(world)",
+        "active.update_ground_pickup(world)",
+        "cull_dead_mobs_in(world)",
         "tick_corpses(world, dt)",
         "player.tick_wisp_intent_in(world, dt)",
         "wisp_motes_tick_in(world, dt)",
