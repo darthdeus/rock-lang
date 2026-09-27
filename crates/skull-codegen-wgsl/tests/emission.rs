@@ -1,4 +1,5 @@
 use bone_semantic::prelude::Span;
+use skull_parser::Dialect;
 use skull_parser::CompilerErrorKind;
 use skull_codegen_wgsl::{
     WgslAbiPlan, WgslPrimitiveTopology, emit_fullscreen_shader, plan_fullscreen_artifact,
@@ -63,6 +64,44 @@ fn workspace(
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module");
     (ws, mid)
+}
+
+fn v1_workspace(
+    package: &str,
+    main_source: &str,
+    helpers_source: &str,
+) -> (
+    bone_semantic::inference::Workspace,
+    bone_semantic::prelude::ModuleId,
+) {
+    let mut modules = STDLIB.clone();
+    for (file, source) in [("main.rock", main_source), ("helpers.rock", helpers_source)] {
+        let mut module = skull_parser::parse_module_with_dialect(
+            source,
+            Ustr::from(file),
+            Dialect::V1,
+        )
+        .expect("v1 shader fixture parse");
+        module.package = Some(skull_parser::PackageTag {
+            id: 1,
+            self_name: package.to_string(),
+        });
+        modules.push(module);
+    }
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+        .expect("v1 shader fixture semantic pass");
+    let mid = *ws.module_ids.get(&Ustr::from("main.rock")).expect("v1 main module");
+    (ws, mid)
+}
+
+fn assert_naga_valid(source: &str) {
+    let module = naga::front::wgsl::parse_str(source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("WGSL validates");
 }
 
 fn try_artifact(
@@ -1232,4 +1271,78 @@ fn naga_validates_all_three_fullscreen_fixture_modules_3_of_3() {
         errors.is_empty(),
         "no generated module was silently skipped"
     );
+}
+
+#[test]
+fn v1_shader_identifiers_and_intrinsics_validate_on_both_wgsl_pipelines() {
+    let explicit_main = include_str!("../../rock-cli/tests/fixtures/shader-v1/explicit_wgpu/main.rock");
+    let explicit_helpers = include_str!("../../rock-cli/tests/fixtures/shader-v1/explicit_wgpu/helpers.rock");
+    let (ws, mid) = v1_workspace("shader_probe", explicit_main, explicit_helpers);
+    let vertex = skull_codegen_glsl::resolve_root(&ws, mid, "shader_probe::shader_probe_vert")
+        .expect("v1 vertex root");
+    let fragment = skull_codegen_glsl::resolve_root(&ws, mid, "shader_probe::shader_probe_frag")
+        .expect("v1 fragment root");
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "shader_probe::shader_probe_vert",
+        "shader_probe::shader_probe_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("v1 GLSL pipeline");
+    assert!(!glsl.source.contains("::"), "GLSL emitted a DefKey: {}", glsl.source);
+    assert!(glsl.source.contains("dot("), "GLSL intrinsic mapping: {}", glsl.source);
+    assert!(glsl.source.contains(" + vec2("), "GLSL vector infix: {}", glsl.source);
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("v1 explicit WGSL ABI");
+    let explicit = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("v1 explicit WGSL");
+    assert!(!explicit.source.contains("::"), "WGSL emitted a DefKey: {}", explicit.source);
+    assert!(explicit.source.contains("dot("), "WGSL intrinsic mapping: {}", explicit.source);
+    assert!(
+        explicit.source.contains(" + vec2<f32>("),
+        "WGSL vector infix: {}",
+        explicit.source
+    );
+    assert_naga_valid(&explicit.source);
+    assert_eq!(vertex.module, fragment.module, "roots belong to one v1 package");
+
+    let fullscreen_main = include_str!("../../rock-cli/tests/fixtures/shader-v1/fullscreen/main.rock");
+    let fullscreen_helpers = include_str!("../../rock-cli/tests/fixtures/shader-v1/fullscreen/helpers.rock");
+    let (ws, mid) = v1_workspace(
+        "shader_probe_fullscreen",
+        fullscreen_main,
+        fullscreen_helpers,
+    );
+    let fragment = skull_codegen_glsl::resolve_root(
+        &ws,
+        mid,
+        "shader_probe_fullscreen::shader_probe_frag",
+    )
+    .expect("v1 fullscreen root");
+    let neutral = plan_fullscreen_artifact(&ws, fragment).expect("v1 fullscreen plan");
+    let abi = WgslAbiPlan::wgsl(&neutral.interface, Span::default()).expect("v1 fullscreen ABI");
+    let fullscreen = emit_fullscreen_shader(
+        &ws,
+        &neutral.ir,
+        &neutral.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("v1 fullscreen WGSL");
+    assert!(!fullscreen.source.contains("::"));
+    assert!(fullscreen.source.contains("dot("));
+    assert!(fullscreen.source.contains(" + vec2<f32>("));
+    assert_naga_valid(&fullscreen.source);
 }

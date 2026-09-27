@@ -52,6 +52,38 @@ pub fn asset_overlay_roots(
     configured_asset_overlays(project_dir, config)
 }
 
+pub fn sound_project_path(
+    project_dir: &Path,
+    config: Option<&StickConfig>,
+) -> Result<Option<PathBuf>> {
+    let Some(sound) = config.and_then(|config| config.sound.as_ref()) else {
+        return Ok(None);
+    };
+    let relative = &sound.project;
+    let path = Path::new(relative);
+    if relative.trim().is_empty()
+        || path.is_absolute()
+        || relative.starts_with('~')
+        || relative.contains('\\')
+        || relative.as_bytes().get(1) == Some(&b':')
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "[sound].project must be a non-empty relative path without traversal: {relative:?}"
+        );
+    }
+    let project_path = project_dir.join(path);
+    if !project_path.is_file() {
+        anyhow::bail!(
+            "declared sound project does not exist: {}",
+            project_path.display()
+        );
+    }
+    Ok(Some(project_path))
+}
+
 fn configured_asset_overlays(
     project_dir: &Path,
     config: Option<&StickConfig>,
@@ -128,7 +160,7 @@ pub fn select_assets_with_overlays(
     let mut by_key = BTreeMap::<String, PathBuf>::new();
     let mut missing = Vec::new();
     for name in &names {
-        let source = project_dir.join(&name);
+        let source = project_dir.join(name);
         if !source.exists() {
             missing.push(source);
             continue;
@@ -218,11 +250,87 @@ pub fn resolve_asset_with_overlays(
     Ok(None)
 }
 
+pub fn resolve_worktree_asset(
+    project_dir: &Path,
+    game_key: &str,
+    logical_key: &str,
+) -> Result<Option<ReleaseAsset>> {
+    validate_relative_key(logical_key, "asset key")?;
+    if !logical_key.starts_with("assets/") || logical_key.contains('\\') {
+        anyhow::bail!("asset key must be a canonical assets-relative key: {logical_key:?}");
+    }
+    let candidate = project_dir.join(logical_key);
+    if candidate.is_file() {
+        return Ok(Some(ReleaseAsset {
+            key: key_for(game_key, logical_key),
+            source: candidate,
+        }));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod worktree_bank_tests {
+    use super::*;
+
+    #[test]
+    fn worktree_bank_resolution_prefers_the_project_over_an_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("mag");
+        let overlay = root.path().join("vault");
+        std::fs::create_dir_all(project.join("assets")).unwrap();
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(project.join("assets/visual_bank.json"), "project").unwrap();
+        std::fs::write(overlay.join("assets/visual_bank.json"), "overlay").unwrap();
+
+        let selected = resolve_worktree_asset(&project, "mag", "assets/visual_bank.json")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.source, project.join("assets/visual_bank.json"));
+
+        let ordinary = resolve_asset_with_overlays(
+            &project,
+            "mag",
+            &[overlay.clone()],
+            "assets/visual_bank.json",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ordinary.source, overlay.join("assets/visual_bank.json"));
+    }
+
+    #[test]
+    fn missing_worktree_bank_does_not_fall_back_to_an_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("mag");
+        let overlay = root.path().join("vault");
+        std::fs::create_dir_all(project.join("assets")).unwrap();
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(overlay.join("assets/visual_bank.json"), "overlay").unwrap();
+
+        let selected = resolve_worktree_asset(&project, "mag", "assets/visual_bank.json").unwrap();
+        assert!(selected.is_none());
+    }
+}
+
 pub fn include_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
     if selection.assets.iter().any(|existing| existing.key == asset.key) {
         return;
     }
     selection.assets.push(asset);
+    selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
+}
+
+pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
+    if let Some(existing) = selection
+        .assets
+        .iter_mut()
+        .find(|existing| existing.key == asset.key)
+    {
+        *existing = asset;
+    } else {
+        selection.assets.push(asset);
+    }
     selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
 }
 
@@ -473,6 +581,31 @@ mod tests {
         let err = select_assets(&project, "/tmp/demo", None, root.path(), false)
             .expect_err("absolute game key must reject");
         assert!(format!("{err}").contains("relative"), "error explains key restriction: {err}");
+    }
+
+    #[test]
+    fn sound_project_path_resolves_the_stick_declaration_without_allowing_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("game");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sounds.json"), "{}").unwrap();
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"game\"\n[sound]\nproject = \"sounds.json\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            sound_project_path(&project, Some(&cfg)).unwrap(),
+            Some(project.join("sounds.json"))
+        );
+
+        let escaped = StickConfig::new_from_str(
+            "[package]\nname = \"game\"\n[sound]\nproject = \"../sounds.json\"\n",
+        )
+        .unwrap();
+        let error = sound_project_path(&project, Some(&escaped))
+            .expect_err("a declared sound project cannot escape its game");
+        assert!(format!("{error}").contains("without traversal"));
     }
 
     #[test]

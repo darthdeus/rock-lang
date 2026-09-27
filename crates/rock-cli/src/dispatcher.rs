@@ -1,5 +1,18 @@
 use crate::*;
 
+/// Special device files cannot serve as an input path: the compiler reads them
+/// more than once and a stream cannot be rewound.
+fn reject_device_path(path: &str) -> Result<()> {
+    if path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
+        anyhow::bail!(
+            "Cannot use {} as input path. Special device files are not supported.\n\
+             Please provide a regular file or directory path.",
+            path
+        );
+    }
+    Ok(())
+}
+
 pub struct CommandContext {
     pub args: Args,
 }
@@ -14,6 +27,7 @@ impl CommandContext {
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
+        self.require_optional_features()?;
         // `--profile` is global in the clap definition but only `rock shader`
         // acts on it: the profile is a property of the GL context, and the
         // engine adapts the header per context at shader-compile time. Every
@@ -39,6 +53,27 @@ impl CommandContext {
         }
         let _renderer_override = rock_host::stick::install_renderer_override(self.args.renderer);
         self.run_command()
+    }
+
+    fn require_optional_features(&self) -> Result<()> {
+        if self.args.command == CliCommand::Web && !cfg!(feature = "backend-js") {
+            anyhow::bail!(
+                "the `rock web` command was omitted from this build; enable the `backend-js` feature (for example, `just test-js` or `cargo run --features backend-js --bin rock web ...)"
+            );
+        }
+        if self.args.command == CliCommand::MonoManifest && !cfg!(feature = "backend-js") {
+            anyhow::bail!(
+                "the `mono-manifest` command was omitted from this build; enable the `backend-js` feature (for example, `cargo run --features backend-js --bin rock mono-manifest ...)"
+            );
+        }
+        if matches!(self.args.renderer, Some(RendererBackend::Wgpu))
+            && !cfg!(feature = "renderer-wgpu")
+        {
+            anyhow::bail!(
+                "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (for example, `just test-wgpu` or `cargo run --features renderer-wgpu --bin rock ... --renderer wgpu)"
+            );
+        }
+        Ok(())
     }
 
     pub fn get_required_file(&self, command_name: &str) -> Result<&str> {
@@ -207,15 +242,25 @@ impl CommandContext {
             .cloned()
             .unwrap_or_else(|| ".".to_string());
 
-        if path == "/dev/stdin" || path == "/dev/stdout" || path == "/dev/stderr" {
-            anyhow::bail!(
-                "Cannot use {} as input path. Special device files are not supported.\n\
-                 Please provide a regular file or directory path.",
-                path
-            );
-        }
+        reject_device_path(&path)?;
 
         Ok(path)
+    }
+
+    /// Every path argument, for the commands that act on a list rather than on
+    /// one entry point. `get_path_or_current` drops everything after the first.
+    pub fn get_paths_or_current(&self) -> Result<Vec<String>> {
+        let paths = if self.args.files.is_empty() {
+            vec![".".to_string()]
+        } else {
+            self.args.files.clone()
+        };
+
+        for path in &paths {
+            reject_device_path(path)?;
+        }
+
+        Ok(paths)
     }
 
     pub fn get_output_or_default(&self, default: &str) -> Result<String> {
@@ -342,6 +387,7 @@ impl CommandContext {
             self.args.warmup_seconds,
             self.args.gc_window,
             self.args.gc_window_start,
+            &self.args.gc_window_mode,
             &self.args.perf_format,
             &self.args.app_args,
         )
@@ -409,6 +455,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         } else {
@@ -424,6 +471,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         }
@@ -488,6 +536,9 @@ impl CommandContext {
     /// per-test emission, run under node). Serves `test` only -- the `serves`
     /// table gates everything else before this switch.
     fn run_command_js(&self) -> Result<()> {
+        #[cfg(not(feature = "backend-js"))]
+        unreachable!("JS dispatch requires the `backend-js` feature");
+        #[cfg(feature = "backend-js")]
         match self.args.command {
             CliCommand::Test => {
                 let files = self.get_test_files()?;
@@ -625,6 +676,82 @@ impl CommandContext {
 
     /// Run command directly
     fn run_command(&self) -> Result<()> {
+        if self.args.command == CliCommand::EngineBuildReceipt {
+            let output = self.args.output.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: rock engine-build-receipt [<game>...] --output <receipt.json>"
+                )
+            })?;
+            return rock_host::engine_build::prepare_engine_build_receipt(
+                &self.args.files,
+                std::path::Path::new(output),
+            );
+        }
+        if self.args.command == CliCommand::SdkCheck {
+            if self.args.files.len() != 1 {
+                anyhow::bail!("usage: rock sdk-check <project>");
+            }
+            crate::sdk_check::check(&self.args.files[0], std::path::Path::new(&rock_host::rock_dir()))?;
+            println!("SDK manifest compatibility: OK");
+            return Ok(());
+        }
+        if self.args.command == CliCommand::Modules {
+            let usage = "usage: rock modules audit <project> [--closed] [--format pretty|json]\n       rock modules migrate <package> --check|--apply [--consumer <dir>]... [--format pretty|json]";
+            let format = match self.args.perf_format.as_str() {
+                "pretty" => crate::modules_audit::Format::Pretty,
+                "json" => crate::modules_audit::Format::Json,
+                other => anyhow::bail!("rock modules: unknown --format `{other}` (pretty|json)\n{usage}"),
+            };
+            let code = match self.args.files.as_slice() {
+                [sub, project] if sub == "audit" => {
+                    crate::modules_audit::run(std::path::Path::new(project), self.args.closed, format)?
+                }
+                [sub, package] if sub == "migrate" => {
+                    let mode = if self.args.apply {
+                        crate::modules_migrate::Mode::Apply
+                    } else {
+                        crate::modules_migrate::Mode::Check
+                    };
+                    let consumers: Vec<std::path::PathBuf> =
+                        self.args.consumer.iter().map(std::path::PathBuf::from).collect();
+                    crate::modules_migrate::run(
+                        std::path::Path::new(package),
+                        &consumers,
+                        mode,
+                        format,
+                    )?
+                }
+                [sub, ..] if sub != "audit" && sub != "migrate" => {
+                    anyhow::bail!("rock modules: unknown subcommand `{sub}`; `audit` and `migrate` exist\n{usage}")
+                }
+                _ => anyhow::bail!("{usage}"),
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
+        if self.args.command == CliCommand::Fix {
+            let usage = "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]";
+            if !self.args.imports {
+                anyhow::bail!("rock fix: name the fix to run (`--imports` is the only one)\n{usage}");
+            }
+            let format = match self.args.perf_format.as_str() {
+                "pretty" => crate::modules_audit::Format::Pretty,
+                "json" => crate::modules_audit::Format::Json,
+                other => anyhow::bail!("rock fix: unknown --format `{other}` (pretty|json)\n{usage}"),
+            };
+            let [target] = self.args.files.as_slice() else { anyhow::bail!("{usage}") };
+            let mode = if self.args.apply { crate::modules_migrate::Mode::Apply } else { crate::modules_migrate::Mode::Check };
+            let code = crate::modules_fix::run(std::path::Path::new(target), mode, format)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return Ok(());
+        }
+        if self.args.command == CliCommand::DocsIndex {
+            return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
+        }
         if self.args.command == CliCommand::ReplayReport {
             if self.args.files.len() != 1 {
                 anyhow::bail!("usage: rock replay-report <file.replay> [--top N] [--context N] [--format pretty|json]");
@@ -633,6 +760,21 @@ impl CommandContext {
                 std::path::Path::new(&self.args.files[0]),
                 self.args.top,
                 self.args.context,
+                &self.args.perf_format,
+            );
+        }
+        if self.args.command == CliCommand::SimReport {
+            if self.args.files.len() > 1 {
+                anyhow::bail!(
+                    "usage: rock sim-report [<run-id>] [--sim-log-dir <root>] \
+                     [--sim-entry <name>] [--top N] [--format pretty|json]"
+                );
+            }
+            return crate::sim_report::run(
+                self.args.sim_log_dir.as_deref(),
+                self.args.files.first().map(String::as_str),
+                self.args.sim_entry.as_deref(),
+                self.args.top,
                 &self.args.perf_format,
             );
         }
@@ -657,6 +799,7 @@ impl CommandContext {
         // web emits a static browser build (index.html + game.js) via the JS
         // backend; it runs project-mode JS emission itself and ignores
         // --backend, so it dispatches before the backend switch like shader/fmt.
+        #[cfg(feature = "backend-js")]
         if self.args.command == CliCommand::Web {
             let project = self.get_project_dir_or_current()?;
             return crate::web::run_web(
@@ -675,6 +818,10 @@ impl CommandContext {
         if self.args.command == CliCommand::Package {
             let project = self.get_project_dir_or_current()?;
             return crate::package::run_package(&project, self.args.output.as_deref());
+        }
+        if self.args.command == CliCommand::SoundInspect {
+            let project = self.get_project_dir_or_current()?;
+            return crate::sound_inspect::run(&project);
         }
         // shader is GLSL fn-library emission (route B); it type-checks a single
         // file against the stdlib and emits GLSL, so it's backend-agnostic and
@@ -746,6 +893,7 @@ impl CommandContext {
         }
         // mono-manifest builds the Stage-0d shadow instance graph; a diagnostic
         // that touches no emission, dispatched early like its 0c sibling.
+        #[cfg(feature = "backend-js")]
         if self.args.command == CliCommand::MonoManifest {
             let root = self.get_path_or_current()?;
             // `ROCK_MONO_DUMP=<dir>` writes the per-project Lua and JS manifests
@@ -824,8 +972,8 @@ impl CommandContext {
         // Backend-agnostic kept commands: dispatched before the backend switch so
         // they never depend on a backend (the legacy rock execution arm is gone).
         if self.args.command == CliCommand::Fmt {
-            let path = self.get_path_or_current()?;
-            return match do_fmt(&path, !self.args.stdout, self.args.check) {
+            let paths = self.get_paths_or_current()?;
+            return match do_fmt(&paths, !self.args.stdout, self.args.check) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     log::error!(target: "FMT", "{}", e);

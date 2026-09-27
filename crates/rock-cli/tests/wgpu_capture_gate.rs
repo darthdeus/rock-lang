@@ -1,4 +1,4 @@
-//! Renderer-neutral presented-frame capture (docs/wgpu-stabilization-plan.md
+//! Renderer-neutral presented-frame capture (docs/backends.md
 //! S0). The subject is games/wgpu_renderer with WGPU_PROBE_CAPTURE_FILL=1: a
 //! red top half and green bottom half drawn at late_draw, so an orientation
 //! flip, a stale frame and an all-zero capture are three distinct wrong

@@ -1,6 +1,6 @@
 //! `rock test <path> --backend js` -- execute the `@test` suite under node via
 //! the JS-subset emitter (`skull-codegen-js`), T1 of
-//! `docs/multi-backend-testing-plan.md`.
+//! `docs/backends.md`.
 //!
 //! Shares the backend-neutral half of the test driver with the luajit path
 //! (`skull_backend::skull_test`): unit discovery (`collect_test_units`), the
@@ -567,7 +567,9 @@ pub(crate) fn try_emit_js_program_project_cached(
     let sources = crate::unified_compile::discover_sources(&spec)
         .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
     let sources = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
-        sources.production_only()
+        sources
+            .production_only(std::path::Path::new(dir))
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
     } else {
         sources
     };
@@ -606,7 +608,12 @@ pub(crate) fn try_emit_js_program_project_cached(
 /// to Rock null (`undefined -> null`), matching `os.getenv`.
 const NODE_RNG_ENV_GLUE: &str = r#"
 function __rock_env_var(n) { var v = process.env[n]; return v === undefined ? null : v; }
-(function() { var s = Number(process.env.ROCK_TEST_SEED); __rock_rng_seed(Number.isFinite(s) ? s : Date.now()); })();
+(function() {
+  var s = Number(process.env.ROCK_TEST_SEED);
+  var base = Number.isFinite(s) ? s : Date.now();
+  __rock_rng_seed(base);
+  __rock_presentation_rng_seed(base + 10007);
+})();
 "#;
 
 /// Assemble the streaming run program: the same runtime prelude set/order as the

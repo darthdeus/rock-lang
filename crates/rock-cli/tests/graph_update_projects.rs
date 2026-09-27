@@ -39,7 +39,7 @@ fn project_dir(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
 }
 
-fn project_files(path: &str) -> Vec<(String, String)> {
+fn project_files(path: &str) -> Vec<bone_incremental::session::SessionFile> {
     let spec = rock_cli::common::path_to_source_spec(path);
     let sources = rock_cli::unified_compile::discover_sources(&spec).expect("discovery");
     sources
@@ -47,7 +47,14 @@ fn project_files(path: &str) -> Vec<(String, String)> {
         .iter()
         .map(|f| {
             let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
+            bone_incremental::session::SessionFile {
+                path: f.file.to_id_path(),
+                text: f.contents.clone(),
+                dialect: f.dialect,
+                package: f.package.clone(),
+                memory_class: f.memory_class,
+                global_policy: f.global_policy,
+            }
         })
         .collect()
 }
@@ -123,7 +130,9 @@ fn project_case(rel: &str) {
     let dir = project_dir(rel);
     let files = project_files(&dir);
     assert!(files.len() > 1, "{rel} should have several modules");
-    let mut session = Session::new(warm_stdlib(), files.clone())
+    let aliases = bone_query::package_aliases::for_manifest_dir(std::path::Path::new(&dir))
+        .expect("project dependency aliases");
+    let mut session = Session::new(warm_stdlib(), files.clone(), &aliases)
         .unwrap_or_else(|e| panic!("{rel} session warm failed: {}", e.message));
     assert!(
         session.diagnostics().is_empty(),
@@ -150,7 +159,8 @@ fn project_case(rel: &str) {
     // denominator rather than stopping at the first line that parses.
     let mut examined = 0usize;
     let mut chosen: Option<(String, String, String)> = None;
-    'outer: for (path, text) in &files {
+    'outer: for f in &files {
+        let (path, text) = (&f.path, &f.text);
         if !path.contains(&format!("{}/", rel.rsplit('/').next().unwrap_or(rel))) {
             continue;
         }
@@ -211,14 +221,17 @@ fn project_case(rel: &str) {
             m.stats.owners
         );
         assert_eq!(m.stats.settle_rounds, 0, "{rel} {what}: the conformance fixpoint engaged");
-        // Against the walk, not against the program: all four pruning
-        // populations are per-edit quantities.
+        // Pruned instances are the search's unavoidable output. Bound only the
+        // extra live region against the owner walk; otherwise a legitimate
+        // helper chain longer than four fails even when the search visits
+        // exactly the instances it removes.
         assert!(
-            m.stats.suspect_region <= m.stats.expanded * 4,
-            "{rel} {what}: the strand search visited {} instances after walking {} owners \
-             (of {} instances, {} pruned) -- that is a whole-graph walk, not an affected region",
-            m.stats.suspect_region,
+            m.stats.suspect_region.saturating_sub(m.stats.pruned) <= m.stats.expanded * 4,
+            "{rel} {what}: the strand search visited {} extra live instances after walking {} owners \
+             ({} visited of {} instances, {} pruned) -- that is a whole-graph walk, not an affected region",
+            m.stats.suspect_region.saturating_sub(m.stats.pruned),
             m.stats.expanded,
+            m.stats.suspect_region,
             m.stats.instances,
             m.stats.pruned
         );

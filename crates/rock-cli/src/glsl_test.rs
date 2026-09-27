@@ -1,6 +1,6 @@
 //! `rock test <path> --backend glsl` -- execute the value-test class
 //! (`@test(returns = <literal>)`) on the GPU via the GLSL emitter
-//! (`skull-codegen-glsl`), G1 of `docs/multi-backend-testing-plan.md`.
+//! (`skull-codegen-glsl`), as described by `docs/backends.md`.
 //!
 //! Shares the backend-neutral half of the test driver with the luajit and node
 //! paths: unit discovery (`collect_test_units`), the `@test` metadata
@@ -753,9 +753,16 @@ pub fn validate_shader_workspace(dir: &str) -> Result<bone_semantic::inference::
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let mut sources = crate::unified_compile::discover_sources(&spec)
         .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;
+    let production_paths: std::collections::HashSet<String> = sources
+        .production_only(std::path::Path::new(dir))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        .files
+        .iter()
+        .map(|file| file.borrow().file.to_id_path())
+        .collect();
     sources.files.retain(|file| {
         let file = file.borrow();
-        !rock_core::SourceFiles::is_test_only_path(&file.file.to_id_path())
+        production_paths.contains(&file.file.to_id_path())
             || file.is_test_util
             || file.contents.contains("@shader")
             || file.contents.contains("rock_shader")

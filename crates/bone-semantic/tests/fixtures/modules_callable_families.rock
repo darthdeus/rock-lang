@@ -1,0 +1,337 @@
+//! Spec 8.3 "Values shadow; callables accumulate". When the first tier that
+//! binds a bare name binds callables, the overload family is the union of the
+//! visible callables of that tier and every lower tier from 2 to 5 (own
+//! module, explicit imports, globs, std). Fit ranks the whole family; the
+//! tier breaks only an exact tie, nearer tier first. Lexical bindings and
+//! non-callables still shadow. Function syntax and UFCS read one family.
+//!
+//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
+
+//- an_own_clear_does_not_hide_std_clear_for_a_map_or_a_vec
+//-- app.rock @pkg=app,1 @v1
+pub struct ScreenCanvas {
+    pub w: int,
+}
+
+fn clear(sc: ScreenCanvas) -> int {
+    sc.w
+}
+
+fn wipe(m: Map<string, int>, v: [int], sc: ScreenCanvas) -> int {
+    m.clear()
+    v.clear()
+    clear(m)
+    let n = sc.clear()
+      //^ int
+    n + clear(sc)
+}
+
+//- an_own_ui_rect_contains_does_not_hide_string_contains
+//-- app.rock @pkg=app,1 @v1
+pub struct UiRect {
+    pub x: float,
+}
+
+fn UiRect.contains(r, px: float) -> bool {
+    px > r.x
+}
+
+fn hits(s: string, r: UiRect) -> bool {
+    let a = s.contains("a")
+      //^ bool
+    a && r.contains(1.0) && contains(s, "b")
+}
+
+//- a_glob_ui_rect_contains_does_not_hide_string_contains_in_a_consumer
+//-- ui.rock @pkg=stone,1 @v1
+pub struct UiRect {
+    pub x: float,
+}
+
+pub fn UiRect.contains(r, px: float) -> bool {
+    px > r.x
+}
+
+//-- app.rock @pkg=app,2 @v1
+use stone::*;
+
+fn hits(s: string, r: UiRect) -> bool {
+    s.contains("a") && r.contains(1.0)
+}
+
+//- a_glob_vec2_lerp_joins_std_lerp
+//-- core.rock @pkg=core,1 @v1
+pub fn lerp(a: Vec2, b: Vec2, t: float) -> Vec2 {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use core::*;
+
+fn mix(v: Vec2, w: Vec2) -> float {
+    let s = lerp(1.0, 2.0, 0.5)
+      //^ float
+    let p = lerp(v, w, 0.5)
+      //^ Vec2
+    s + p.x
+}
+
+//- an_explicit_import_joins_std_lerp
+//-- lib.rock @pkg=x_lib,1 @v1
+pub fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use x_lib::lerp;
+
+fn f() -> float {
+    let x = lerp(1.0, 2.0, 0.5)
+      //^ float
+    let s = lerp("a", "b", 0.5)
+      //^ string
+    x
+}
+
+//- an_own_definition_joins_std_lerp
+//-- app.rock @pkg=app,1 @v1
+fn lerp(a: string, b: string, t: float) -> string {
+    a
+}
+
+fn f() -> float {
+    let x = lerp(1.0, 2.0, 0.5)
+      //^ float
+    x
+}
+
+//- a_cross_tier_exact_tie_goes_to_the_own_module
+//-- app.rock @pkg=app,1 @v1
+fn lerp(a: float, b: float, t: float) -> int {
+    7
+}
+
+fn mix() -> int {
+    let n = lerp(1.0, 2.0, 0.5)
+      //^ int
+    n
+}
+
+//- a_cross_tier_exact_tie_goes_to_the_explicit_import_over_the_glob
+//-- a.rock @pkg=a,1 @v1
+pub fn heal(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=b,2 @v1
+pub fn heal(n: int) -> string {
+    "b"
+}
+
+//-- app.rock @pkg=app,3 @v1
+use a::heal;
+use b::*;
+
+fn f() -> int {
+    let n = heal(3)
+      //^ int
+    n
+}
+
+//- a_cross_tier_exact_tie_goes_to_the_glob_over_std
+//-- core.rock @pkg=core,1 @v1
+pub fn clamp(value: float, min: float, max: float) -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+use core::*;
+
+fn f() -> int {
+    let n = clamp(1.0, 0.0, 2.0)
+      //^ int
+    n
+}
+
+//- a_same_tier_tie_is_ambiguous_and_names_both_origins @fail=Ambiguous overload for `heal`
+//-- a.rock @pkg=a,1 @v1
+pub fn heal(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=b,2 @v1
+pub fn heal(n: int) -> int {
+    n
+}
+
+//-- app.rock @pkg=app,3 @v1
+use a::*;
+use b::*;
+
+fn f() -> int {
+    heal(3)
+}
+
+//- two_explicit_imports_of_one_signature_are_ambiguous_and_name_each_origin @fail=(v1 definition b::heal)
+//-- a.rock @pkg=a,1 @v1
+pub fn heal(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=b,2 @v1
+pub fn heal(n: int) -> int {
+    n
+}
+
+//-- app.rock @pkg=app,3 @v1
+use a::heal;
+use b::heal;
+
+fn f() -> int {
+    heal(3)
+}
+
+//- an_own_heal_and_an_imported_heal_form_one_family
+//-- actors.rock @pkg=actors,1 @v1
+pub struct Actor {
+    pub hp: int,
+}
+
+pub fn heal(a: Actor) -> Actor {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+use actors::{Actor, heal};
+
+fn heal(n: int) -> int {
+    n + 1
+}
+
+fn f(actor: Actor) -> int {
+    let a = heal(actor)
+      //^ actors::Actor
+    let n = heal(3)
+      //^ int
+    a.hp + n + actor.heal().hp
+}
+
+//- a_lower_tier_global_does_not_block_std
+//-- core.rock @pkg=core,1 @v1
+pub global clamp: int = 3
+
+//-- app.rock @pkg=app,2 @v1
+use core::*;
+
+pub struct Pt {
+    pub x: float,
+}
+
+fn clamp(p: Pt) -> Pt {
+    p
+}
+
+fn f() -> float {
+    let x = clamp(1.0, 0.0, 2.0)
+      //^ float
+    x
+}
+
+//- an_own_global_shadows_a_std_function @fail=binds to
+//-- app.rock @pkg=app,1 @v1
+global lerp: int = 1
+
+fn f() -> float {
+    lerp(1.0, 2.0, 0.5)
+}
+
+//- a_local_closure_named_like_a_std_function_still_shadows
+//-- app.rock @pkg=app,1 @v1
+fn f() -> int {
+    let lerp = (x: int) => x + 1
+    let n = lerp(3)
+      //^ int
+    n
+}
+
+//- a_local_closure_named_like_a_std_function_hides_it_in_a_mismatch @fail
+//-- app.rock @pkg=app,1 @v1
+fn f() -> float {
+    let lerp = (x: int) => x + 1
+    lerp(1.0, 2.0, 0.5)
+}
+
+//- an_own_operator_and_a_glob_operator_form_one_family
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Qt {
+    pub x: int,
+}
+
+pub operator +(a: Qt, b: Qt) -> Qt {
+    Qt { x: a.x + b.x }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::*;
+
+pub struct Pt {
+    pub x: int,
+}
+
+operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x + b.x }
+}
+
+fn f() -> int {
+    let p = Pt { x: 1 } + Pt { x: 2 }
+      //^ app::Pt
+    let q = Qt { x: 1 } + Qt { x: 2 }
+      //^ geo::Qt
+    let n = 1 + 2
+      //^ int
+    p.x + q.x + n
+}
+
+//- a_no_overload_lists_the_candidates_of_every_tier @fail=lerp(a: float, b: float, t: float)
+//-- app.rock @pkg=app,1 @v1
+pub struct Pt {
+    pub x: float,
+}
+
+fn lerp(a: Pt, b: Pt, t: float) -> Pt {
+    a
+}
+
+fn f() -> float {
+    lerp("a", "b", 0.5)
+}
+
+//- a_qualified_call_reads_only_that_modules_family @fail=expected `Vec2`, found `float`
+//-- core.rock @pkg=core,1 @v1
+pub fn lerp(a: Vec2, b: Vec2, t: float) -> Vec2 {
+    a
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> float {
+    core::lerp(1.0, 2.0, 0.5)
+}
+
+//- a_private_better_fit_in_a_glob_module_stays_out
+//-- core.rock @pkg=core,1 @v1
+pub fn lerp(a: Vec2, b: Vec2, t: float) -> Vec2 {
+    a
+}
+
+fn clamp(value: float, min: float, max: float) -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+use core::*;
+
+fn f() -> float {
+    let x = clamp(1.0, 0.0, 2.0)
+      //^ float
+    x
+}

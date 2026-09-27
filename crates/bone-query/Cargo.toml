@@ -12,6 +12,7 @@ autotests = false
 sequential = ["bone-semantic/sequential"]
 
 [dependencies]
+bone-core = { path = "../bone-core" }
 bone-semantic = { path = "../bone-semantic" }
 bone-incremental = { path = "../bone-incremental" }
 bone-lints = { path = "../bone-lints" }

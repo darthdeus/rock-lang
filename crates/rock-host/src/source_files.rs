@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use atomic_refcell::AtomicRefCell;
 use rock_core::{FileContents, ModuleId, SourceFile, SourceFiles, Span};
 
@@ -67,7 +67,10 @@ impl SourceFilesExt for SourceFiles {
             .map(|x| Arc::new(AtomicRefCell::new(x)))
             .collect();
 
-        Ok(SourceFiles { files })
+        Ok(SourceFiles {
+            files,
+            package_roots: Vec::new(),
+        })
     }
 
     fn test_from_code_literal(code: &str) -> SourceFiles {
@@ -99,7 +102,32 @@ fn source_files_from_dir_impl<P: AsRef<Path>>(source_dir: P, preprocess: bool) -
         .map(|x| Arc::new(AtomicRefCell::new(x)))
         .collect();
 
-    Ok(SourceFiles { files })
+    Ok(SourceFiles {
+        files,
+        package_roots: Vec::new(),
+    })
+}
+
+/// Scan a file's leading `//!` directives for `modules: v1` (spec 3.1:
+/// standalone test/script sources declare their dialect explicitly; package
+/// files take theirs from the manifest via the package graph). Only the first
+/// ten lines count, mirroring `parse_lib_directive`.
+pub fn parse_modules_directive(contents: &str) -> Result<rock_core::source_code::Dialect> {
+    for line in contents.lines().take(10) {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("//!") else { continue };
+        let rest = rest.trim();
+        if let Some(value) = rest.strip_prefix("modules:") {
+            return match value.trim() {
+                "v1" => Ok(rock_core::source_code::Dialect::V1),
+                "legacy" | "" => Ok(rock_core::source_code::Dialect::Legacy),
+                other => bail!(
+                    "unknown `//! modules:` directive value `{other}` (known: legacy, v1)"
+                ),
+            };
+        }
+    }
+    Ok(rock_core::source_code::Dialect::Legacy)
 }
 
 // Helper function to process content and extract directives.
@@ -137,10 +165,13 @@ fn create_source_file(
     is_test: bool,
     is_test_util: bool,
     used_packages: Vec<String>,
-) -> SourceFile {
+) -> Result<SourceFile> {
     let module_id = ModuleId::new(file.to_id_path().into());
 
-    SourceFile {
+    // A `//! modules: v1` directive opts a standalone source into v1. Package
+    // loaders overwrite this with the manifest/graph fact afterwards.
+    let dialect = parse_modules_directive(&contents)?;
+    Ok(SourceFile {
         module_id,
         file,
         contents,
@@ -148,7 +179,11 @@ fn create_source_file(
         is_test,
         is_test_util,
         used_packages,
-    }
+        package: None,
+        dialect,
+        memory_class: rock_core::source_code::MemoryClass::Game,
+        global_policy: rock_core::source_code::GlobalPolicy::Any,
+    })
 }
 
 /// Load a source file without applying preprocessor output (used by the
@@ -185,14 +220,14 @@ fn source_file_from_canonical_path(
         filename: path.file_name().unwrap().to_string_lossy().to_string(),
     };
 
-    Ok(create_source_file(
+    create_source_file(
         file,
         contents,
         is_script,
         is_test,
         is_test_util,
         used_packages,
-    ))
+    )
 }
 
 pub fn source_file_from_path_and_contents(
@@ -218,6 +253,7 @@ pub fn source_file_from_path_and_contents(
     let file = FileContents::Filesystem { path, filename };
 
     create_source_file(file, contents, is_script, is_test, is_test_util, used_packages)
+        .unwrap_or_else(|e| panic!("rock: {e:#}"))
 }
 
 pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
@@ -237,4 +273,5 @@ pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
     };
 
     create_source_file(file, processed_contents, is_script, is_test, is_test_util, used_packages)
+        .unwrap_or_else(|e| panic!("rock: {e:#}"))
 }

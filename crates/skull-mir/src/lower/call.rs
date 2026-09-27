@@ -257,12 +257,16 @@ impl Builder<'_> {
                     {
                         self.f.struct_registry_roots.insert(name);
                     }
-                    if let Some(elem) = self.vec_column_elem_of(arg)? {
+                    let flat_elem = match self.vec_column_elem_of(arg)? {
+                        Some(elem) => Some(elem),
+                        None => self.vec_strided_elem_of(arg)?,
+                    };
+                    if let Some(elem) = flat_elem {
                         if elem.is_nobox() {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
                                 format!(
-                                    "cannot inspect a column-stored nobox value `{}`: \
+                                    "cannot inspect a flat-stored nobox value `{}`: \
                                      inspection requires implicit element materialization",
                                     elem.name
                                 ),
@@ -373,10 +377,16 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
+                    if let Some(elem) = self.vec_strided_elem_of(recv)? {
+                        return self.strided_push(recv, item, elem);
+                    }
                     if let Some(elem) = self.vec_column_elem_of(recv)? {
                         return self.column_push(recv, item, elem);
                     }
                 }
+            }
+            if let Some(r) = self.strided_data_primitive(name.as_str(), &arg_idxs)? {
+                return Ok(r);
             }
             // The three raw-backing primitives ARE the representation boundary.
             // Nearly every stdlib Vec helper -- `get`, `set`, `pop`, `clear`,
@@ -399,12 +409,20 @@ impl Builder<'_> {
             // boundary; the concrete plan must select the column representation
             // before the body would otherwise expose a table-backed `_data`.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
+                if let Some(elem) = self.vec_strided_elem_of(e)? {
+                    let capacity = self.lower_expr(arg_idxs[0])?;
+                    return Ok(ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?));
+                }
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
                 }
             }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
+                if let Some(elem) = self.vec_strided_elem_of(e)? {
+                    let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+                    return Ok(ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?));
+                }
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
@@ -428,6 +446,13 @@ impl Builder<'_> {
                 }
             }
             if name.as_str() == "__rock_vec_from_lua_array" {
+                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_strided_elem_of(e)?) {
+                    let raw = self.lower_expr(*raw)?;
+                    let len = self.lower_expr(*len)?;
+                    return Ok(ValueRepr::Scalar(
+                        self.strided_vec_from_raw_array(raw, len, elem)?,
+                    ));
+                }
                 if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)?) {
                     let raw = self.lower_expr(*raw)?;
                     let len = self.lower_expr(*len)?;
@@ -531,16 +556,16 @@ impl Builder<'_> {
         let any_named = arg_idxs
             .iter()
             .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
-        if let Callee::Unresolved { name, .. } = callee {
-            if !any_named {
-                if let Some(&recv_expr) = arg_idxs.first() {
-                    if let Some(plan) = self.struct_field_fn_rep_plan(recv_expr, name)? {
-                        let recv = self.lower_expr(recv_expr)?;
-                        let fieldv = self.emit_cur(Inst::Field { base: recv, field: name });
-                        return self.indirect_call_by_plan(plan, fieldv, &arg_idxs[1..]);
-                    }
-                }
-            }
+        if let Some(field) = self.fn_field_of_call(e) {
+            let Some(&recv_expr) = arg_idxs.first() else {
+                return Err(gap("inferred fn-field call has no receiver argument"));
+            };
+            let plan = self
+                .struct_field_fn_rep_plan(recv_expr, field)?
+                .ok_or_else(|| gap("inferred fn-field call has no representation plan"))?;
+            let recv = self.lower_expr(recv_expr)?;
+            let fieldv = self.emit_cur(Inst::Field { base: recv, field });
+            return self.indirect_call_by_plan(plan, fieldv, &arg_idxs[1..]);
         }
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at
@@ -554,8 +579,7 @@ impl Builder<'_> {
             }
             // A statically-named function -> a `FuncRef` (mangling is codegen's
             // job, not baked into the IR). On resolution failure, recover an
-            // INDIRECT call: a fn-typed struct field via UFCS (`recv.f(a)` ==
-            // `f(recv, a)`, no real fn `f`) or a fn-typed global (`g(a)`).
+            // INDIRECT call through a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
                 // A `@struct_expand` fn (docs/shaders.md) is replaced
                 // by its literal pairs list -- recognized through the intrinsic
@@ -614,8 +638,13 @@ impl Builder<'_> {
                         self.f.code_value_identities.insert(g, identity);
                     }
                     let param_shapes = abi.param_slots(&self.scx.rep_arena());
-                    let arg_vals =
-                        self.slotted_call_args(e, &abi.param_names, &param_shapes, &arg_idxs)?;
+                    let arg_vals = self.slotted_call_args(
+                        e,
+                        &abi.param_names,
+                        &param_shapes,
+                        &arg_idxs,
+                        &[],
+                    )?;
                     let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         self.f.call_rep_plans.insert(v, abi.representation.clone());
@@ -839,7 +868,7 @@ impl Builder<'_> {
         let lua_opaque = self.call_scx.target() == bone_semantic::hir::FnBackend::Lua
             && callee.inline_body.is_some()
             && !callee.generics.is_empty()
-            && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
+            && !callee.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
         if !dc.plan.uses_scalar_abi() {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
@@ -859,17 +888,23 @@ impl Builder<'_> {
             } else if any_named {
                 self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
-                arg_idxs
+                let mut args: Vec<Idx<Inst>> = arg_idxs
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
-                        let v = self.lower_call_arg(e, a)?;
                         let t = self
                             .concrete_callee_param_ty(e, &dc.callee_inst, i)?
                             .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
-                        Ok(self.coerced_mono(v, a, t.as_ref()))
+                        if self.is_ref_call_arg(e, a) {
+                            self.lower_place_base(a)
+                        } else {
+                            let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+                            Ok(self.coerced_mono(v, a, t.as_ref()))
+                        }
                     })
-                    .collect::<Result<_, CompilerError>>()?
+                    .collect::<Result<_, CompilerError>>()?;
+                args.extend(self.trailing_default_args(func, arg_idxs.len(), None)?);
+                args
             };
             // Above the tuple early return: the exemption is a property of the
             // CALLEE, so making it arity-dependent would be a guarantee hole the
@@ -1167,6 +1202,7 @@ impl Builder<'_> {
                 )?;
                 out.extend(self.arg_values_for_call_slot(e, &slot, a)?);
             }
+            out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
         }
         let param_names: Vec<Ustr> = self.ws.module(func.module).functions[func.func]
@@ -1174,7 +1210,8 @@ impl Builder<'_> {
             .iter()
             .map(|pd| pd.name)
             .collect();
-        self.slotted_call_args(e, &param_names, param_shapes, arg_idxs)
+        let defaults = self.literal_param_defaults(func);
+        self.slotted_call_args(e, &param_names, param_shapes, arg_idxs, &defaults)
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -1184,12 +1221,15 @@ impl Builder<'_> {
     /// calling convention that has param names -- a convention with its own
     /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
     /// `param_shapes` shorter than `param_names` (or all-`Opaque`) is the boxed ABI.
+    /// `defaults` is [`literal_param_defaults`] of the callee, or empty when the
+    /// callee is not a declaration the emitter can read (a nested fn value).
     pub(crate) fn slotted_call_args(
         &mut self,
         e: Idx<Expr>,
         param_names: &[Ustr],
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
+        defaults: &[Option<Lit>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<ValueBundle>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
@@ -1231,6 +1271,12 @@ impl Builder<'_> {
             slots[pidx] = Some(r);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
+        // A trailing param with a literal default is passed explicitly too.
+        let hi = defaults
+            .iter()
+            .take(slots.len())
+            .rposition(|d| d.is_some())
+            .map_or(hi, |i| hi.max(i + 1));
         let mut out = Vec::new();
         for i in 0..hi {
             let slot = required_wire_slot(
@@ -1243,8 +1289,13 @@ impl Builder<'_> {
             )?;
             match slots[i].clone() {
                 Some(r) => out.extend(self.repr_to_slot_values_bundle(&r, &slot)?),
-                // An omitted param arrives as one nil PER WIRE VALUE, so the
-                // callee's default-fill sees a nil in every leaf it binds.
+                // A one-slot param with a literal default is passed that literal.
+                None if slot.slot_count() == 1 && defaults.get(i).is_some_and(Option::is_some) => {
+                    let lit = defaults[i].clone().expect("checked above");
+                    out.push(self.emit_cur(Inst::Const(lit)));
+                }
+                // Otherwise an omitted param arrives as one nil PER WIRE VALUE,
+                // so the callee's default-fill sees a nil in every leaf it binds.
                 None => {
                     for _ in 0..slot.slot_count() {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));
@@ -1260,12 +1311,30 @@ impl Builder<'_> {
     /// Materialize a `ValueRepr` as a single value — the one place a `Group`
     /// becomes a real `<name>_ct(...)` cdata (an escape: stored/compared/boxed).
     pub(crate) fn pack(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
+        self.pack_boxed(r, BoxKind::Implicit)
+    }
+
+    /// [`Self::pack`] with the box's AUTHORIZATION carried through the whole
+    /// tree. This is the one packer: `materialize(v)` differs from an ordinary
+    /// escape only in which ctor instruction each `value`-struct box mints, so
+    /// it takes this path rather than a parallel one. A second recursion went
+    /// wrong at every tier the first one had grown an arm for -- a flat-enum
+    /// field reached it as if it were a struct, and a leaf-table struct emitted
+    /// a declared-form ctor against a leaf-table plan.
+    pub(crate) fn pack_boxed(
+        &mut self,
+        r: ValueRepr,
+        kind: BoxKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
         match r {
             ValueRepr::Scalar(v) => Ok(v),
             // A splatting tuple's box. Its `nobox` elements pack too, which is
             // exactly how a whole-tuple use reaches the guarantee's rejection.
             ValueRepr::Tuple { parts, .. } => {
-                let vs = parts.into_iter().map(|p| self.pack(p)).collect::<Result<Vec<_>, _>>()?;
+                let vs = parts
+                    .into_iter()
+                    .map(|p| self.pack_boxed(p, kind))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
@@ -1287,7 +1356,7 @@ impl Builder<'_> {
                 }
                 let packed: Vec<Idx<Inst>> = parts
                     .into_iter()
-                    .map(|p| self.pack(p))
+                    .map(|p| self.pack_boxed(p, kind))
                     .collect::<Result<Vec<_>, _>>()?;
                 let cells = FlatCells {
                     tag: packed[0],
@@ -1348,14 +1417,15 @@ impl Builder<'_> {
                         )));
                     }
                     let fields = paths.into_iter().zip(leaves).collect();
-                    Ok(self.emit_cur(Inst::MakeValueStruct {
+                    let ctor = kind.value_ctor(
                         name,
                         representation,
-                        form: ValueCtorForm::Leaves,
+                        ValueCtorForm::Leaves,
                         fields,
-                    }))
+                    );
+                    Ok(self.emit_cur(ctor))
                 } else {
-                    self.pack_group_fields(name, parts)
+                    self.pack_group_fields(name, parts, kind)
                 }
             }
         }
@@ -1428,8 +1498,24 @@ impl Builder<'_> {
     /// is already an escape -- the ctor survives either way, so honouring
     /// presence buys the correct `nil` for free. Same split safe-nav uses.
     pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
-        let ValueRepr::Group { name, parts, present: Some(present) } = r else {
-            return self.pack(r);
+        self.pack_maybe_absent_boxed(r, BoxKind::Implicit)
+    }
+
+    /// [`Self::pack_maybe_absent`] carrying the box's authorization, the shape
+    /// `materialize(v)` of a nullable value takes.
+    pub(crate) fn pack_maybe_absent_boxed(
+        &mut self,
+        r: ValueRepr,
+        kind: BoxKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let (present, value) = match r {
+            ValueRepr::Group { name, parts, present: Some(present) } => {
+                (present, ValueRepr::Group { name, parts, present: None })
+            }
+            ValueRepr::Tuple { parts, present: Some(present) } => {
+                (present, ValueRepr::Tuple { parts, present: None })
+            }
+            other => return self.pack_boxed(other, kind),
         };
         let result = self.f.new_cell(None);
         let absent_bb = self.f.new_block();
@@ -1446,7 +1532,10 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(join));
 
         self.cur = present_bb;
-        let boxed = self.pack_group_fields(name, parts)?;
+        // The present arm is an ordinary whole-value box, so it goes through the
+        // same tier dispatch: a leaf-table or flat-enum payload has no
+        // declared-field ctor to take.
+        let boxed = self.pack_boxed(value, kind)?;
         self.emit_cur(Inst::Store { cell: result, value: boxed });
         self.f.set_term(self.cur, Term::Goto(join));
 
@@ -1461,7 +1550,12 @@ impl Builder<'_> {
     /// forward a `Field` read to its ctor operand (SROA), eliminating the cdata
     /// when it never escapes. A payload-free enum field is just an `int` value
     /// (Prim), packed like any primitive.
-    fn pack_group_fields(&mut self, name: Ustr, parts: Vec<ValueRepr>) -> Result<Idx<Inst>, CompilerError> {
+    fn pack_group_fields(
+        &mut self,
+        name: Ustr,
+        parts: Vec<ValueRepr>,
+        kind: BoxKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let representation = self.nominal_value_representation(name)?;
         let names = struct_field_names(self.ws, name);
         let fields = parts
@@ -1475,15 +1569,11 @@ impl Builder<'_> {
                 let fname = *names
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
-                Ok((fname, self.pack(p)?))
+                Ok((fname, self.pack_boxed(p, kind)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(self.emit_cur(Inst::MakeValueStruct {
-            name,
-            representation,
-            form: ValueCtorForm::Declared,
-            fields,
-        }))
+        let ctor = kind.value_ctor(name, representation, ValueCtorForm::Declared, fields);
+        Ok(self.emit_cur(ctor))
     }
 
     /// Flatten a `ValueRepr` to its primitive leaf values per `shape` (the wire
@@ -1859,6 +1949,33 @@ impl Builder<'_> {
             self.cur = join;
             return Ok(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect());
         }
+        // A shape with no nullable and no enum child anywhere is a plain key
+        // walk: the paths come from the one rule the uniform packer reads a
+        // global with too (`boxed_leaf_paths`), so the two readers cannot drift.
+        // Each intermediate box is loaded ONCE and its children read off it
+        // (a whole-value read wants every leaf anyway); the packer walks the
+        // same paths but re-reads the parent per leaf, keeping one leaf live.
+        if self.shape_is_plain_keys(shape) {
+            let paths = self.boxed_leaf_paths(shape)?;
+            let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
+            let mut out = Vec::with_capacity(paths.len());
+            for path in paths {
+                let mut cur = v;
+                for depth in 1..=path.len() {
+                    let prefix = &path[..depth];
+                    if let Some((_, inst)) = loaded.iter().find(|(p, _)| p.as_slice() == prefix) {
+                        cur = *inst;
+                        continue;
+                    }
+                    cur = self.emit_cur(Inst::Field { base: cur, field: path[depth - 1] });
+                    if depth < path.len() {
+                        loaded.push((prefix.to_vec(), cur));
+                    }
+                }
+                out.push(cur);
+            }
+            return Ok(out);
+        }
         // A leaf-table box stores one key per leaf, so the split IS the key
         // reads -- the exact inverse of the `<Name>_lct` ctor, including the
         // presence key at a nullable child's own name.
@@ -1925,6 +2042,63 @@ impl Builder<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// Whether every leaf of `shape` is reached by a plain key walk: no
+    /// nullable child (presence branch) and no flat enum child (tag spread)
+    /// anywhere.
+    pub(crate) fn shape_is_plain_keys(&self, shape: &ValueShape) -> bool {
+        if shape.nullable || EnumPlan::for_name(self.ws, shape.name).is_some() {
+            return false;
+        }
+        shape.fields.iter().all(|(_, fs)| match fs {
+            FieldShape::Prim => true,
+            FieldShape::Nested(sub) => self.shape_is_plain_keys(sub),
+        })
+    }
+
+    /// The key path from a box of `shape` (no nullable child anywhere) to each
+    /// of its leaves, in `repr_to_leaves` order. A leaf-table box keys every
+    /// leaf by its dotted path at the top level; cdata and GC boxes nest, and
+    /// a nested child consults its own storage, so a leaf-table child inside a
+    /// GC parent keys by its dotted path under the parent's field.
+    pub(crate) fn boxed_leaf_paths(
+        &self,
+        shape: &ValueShape,
+    ) -> Result<Vec<Vec<Ustr>>, CompilerError> {
+        let mut out = Vec::new();
+        self.boxed_leaf_paths_into(shape, &mut Vec::new(), &mut out)?;
+        Ok(out)
+    }
+
+    fn boxed_leaf_paths_into(
+        &self,
+        shape: &ValueShape,
+        prefix: &mut Vec<Ustr>,
+        out: &mut Vec<Vec<Ustr>>,
+    ) -> Result<(), CompilerError> {
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
+            .map_err(|e| self.gap_here(e.message))?;
+        if storage == ValueStorage::LeafTable {
+            for path in value_leaf_paths(shape) {
+                let mut full = prefix.clone();
+                full.push(path);
+                out.push(full);
+            }
+            return Ok(());
+        }
+        for (fname, fs) in &shape.fields {
+            prefix.push(*fname);
+            match fs {
+                FieldShape::Prim => out.push(prefix.clone()),
+                FieldShape::Nested(sub) => self.boxed_leaf_paths_into(sub, prefix, out)?,
+            }
+            prefix.pop();
+        }
+        Ok(())
     }
 
     /// A whole-value read of value struct `name` out of a BOXED place (struct
@@ -1997,6 +2171,9 @@ impl Builder<'_> {
         match kind {
             ContainerKind::VecValueColumns(elem) => {
                 self.column_element_repr(arr, index, elem).map(ValueBundle::into_value)
+            }
+            ContainerKind::VecValueStrided(elem) => {
+                self.strided_element_repr(arr, index, elem).map(ValueBundle::into_value)
             }
             ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => {
                 self.nb_leaf_element_repr(arr, index, elem)

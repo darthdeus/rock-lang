@@ -73,12 +73,12 @@ pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<Compi
 /// fix-one-recompile-repeat loop.
 pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
-    // under `<bone-stdlib:NAME>` and appear in no caller's source set -- the
+    // under the loader's stdlib id and appear in no caller's source set -- the
     // span lookup then fails and the snippet plus every label is dropped. Added
     // here, the one sink all render paths share, rather than per caller.
-    let mut sf = SourceFiles { files: sources.files.clone() };
+    let mut sf = sources.clone();
     for f in rock_host::stdlib_loader::stdlib_files() {
-        let id = format!("<bone-stdlib:{}>", f.name);
+        let id = rock_host::stdlib_loader::stdlib_file_id(f.name);
         sf.add_or_update_file(source_file_from_path_and_contents(
             id.clone(),
             id,
@@ -112,6 +112,58 @@ pub(crate) fn with_stdlib(
     modules
 }
 
+/// Convert the already-resolved host package graph into bone's namespace
+/// facts. Source files carry dense graph ids, so deriving this once from the
+/// root package's manifest keeps v1 alias lookup tied to the same graph that
+/// selected the files. Synthetic and legacy-only module sets intentionally use
+/// the empty table.
+pub(crate) fn aliases_for_modules(
+    modules: &[skull_parser::Ast],
+) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
+    let has_v1 = modules.iter().any(|module| {
+        module.dialect == skull_parser::Dialect::V1 && module.package.is_some()
+    });
+    if !has_v1 {
+        return Ok(bone_core::modules::NsAliases::default());
+    }
+
+    let root = modules.iter().find(|module| {
+        module
+            .package
+            .as_ref()
+            .is_some_and(|package| package.id == 0)
+    });
+    let Some(root) = root else {
+        return Err(CompilerError::new_no_location(
+            "modules-v1 sources have no root package file from which to load dependency aliases",
+        ));
+    };
+    let mut manifest_dir = Path::new(root.file.as_str()).parent().map(Path::to_path_buf);
+    let manifest_dir = loop {
+        let Some(dir) = manifest_dir.as_ref() else {
+            return Err(CompilerError::new_no_location(format!(
+                "cannot find stick.toml for modules-v1 root source `{}`",
+                root.file
+            )));
+        };
+        if dir.join("stick.toml").is_file() {
+            break dir.clone();
+        }
+        let Some(parent) = dir.parent() else {
+            manifest_dir = None;
+            continue;
+        };
+        if parent == dir {
+            manifest_dir = None;
+        } else {
+            manifest_dir = Some(parent.to_path_buf());
+        }
+    };
+
+    bone_query::package_aliases::for_manifest_dir(&manifest_dir)
+        .map_err(CompilerError::new_no_location)
+}
+
 /// Run bone's front half over an already-assembled `modules` set and gate on the
 /// load-verdict: the one "modules -> verified Workspace" step. `Err` carries
 /// EVERY diagnostic (all syntax errors, else all type errors) so the CLI reports
@@ -120,6 +172,34 @@ pub(crate) fn with_stdlib(
 pub(crate) fn check_modules(
     modules: &mut [skull_parser::Ast],
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
+    let (ws, errs) = check_modules_inner(modules, ClosureGate::Enforce)?;
+    if !errs.is_empty() {
+        return Err(errs);
+    }
+    Ok(ws)
+}
+
+/// [`check_modules`] for the modules tools, which must read a workspace whose
+/// bodies have errors (the migrate planner compares resolution site by site
+/// and repairs what changed) and which read the spec 11 closure themselves
+/// (`api_closure_requirements`). Every other gate is the same; the body
+/// errors come back beside the workspace instead of replacing it.
+pub(crate) fn check_modules_for_tools(
+    modules: &mut [skull_parser::Ast],
+) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+    check_modules_inner(modules, ClosureGate::LeaveToCaller)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClosureGate {
+    Enforce,
+    LeaveToCaller,
+}
+
+fn check_modules_inner(
+    modules: &mut [skull_parser::Ast],
+    gate: ClosureGate,
+) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
     let syntax = syntax_errors(modules);
     if !syntax.is_empty() {
         return Err(syntax);
@@ -136,12 +216,25 @@ pub(crate) fn check_modules(
     if !macro_labels.is_empty() {
         return Err(macro_labels);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(modules).map_err(|e| vec![e])?;
-    let errs = body_errors(&ws);
-    if !errs.is_empty() {
-        return Err(errs);
+    let aliases = aliases_for_modules(modules).map_err(|error| vec![error])?;
+    let ws = match gate {
+        ClosureGate::Enforce => bone_semantic::semantic_passes::semantic_pass_with_aliases(modules, &aliases),
+        ClosureGate::LeaveToCaller => {
+            bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, &aliases)
+        }
+    };
+    // Expansion RECOVERS: a macro that must not expand (item-macro `mod`/`use`)
+    // records the reason on `recovery_errors` and leaves the call in place, so
+    // the syntax gate runs again over the expanded trees. The pass's own
+    // verdict comes second -- the expansion reason explains any type error the
+    // unexpanded call caused. `Session`/LSP still never run this gate.
+    let expanded_syntax = syntax_errors(modules);
+    if !expanded_syntax.is_empty() {
+        return Err(expanded_syntax);
     }
-    Ok(ws)
+    let ws = ws.map_err(|e| vec![e])?;
+    let errs = body_errors(&ws);
+    Ok((ws, errs))
 }
 
 /// Every recovered syntax error across `modules`, in module order. The
@@ -171,9 +264,60 @@ pub(crate) fn check_with_stdlib(
 /// sessions (bone watch, iter benches, LSP survey, tests). A session whose
 /// workspace will be EMITTED constructs through [`bone_session_for_emission`].
 pub(crate) fn bone_session(
-    files: Vec<(String, String)>,
+    files: Vec<bone_incremental::session::SessionFile>,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
-    bone_incremental::session::Session::new(bone_stdlib_modules(), files)
+    // The session parses its own user modules, so the alias tables are derived
+    // from the same facts `aliases_for_modules` reads off a parsed set: the
+    // root package's manifest, reached through the file that carries graph id 0.
+    let aliases = aliases_for_session(&files)?;
+    bone_incremental::session::Session::new(bone_stdlib_modules(), files, &aliases)
+}
+
+/// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
+/// A set with no v1 file uses the empty table, exactly as the batch path does.
+///
+/// Every file with a package is carried, not just the v1 ones: the manifest the
+/// graph is built from is found through the ROOT package's file (graph id 0),
+/// and in a mixed build -- a legacy game consuming a v1 library, which is the
+/// whole point of the compatibility projection -- the root is the legacy side.
+pub(crate) fn aliases_for_session(
+    files: &[bone_incremental::session::SessionFile],
+) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
+    let stubs: Vec<skull_parser::Ast> = files
+        .iter()
+        .filter(|f| f.package.is_some())
+        .map(|f| {
+            let mut ast = skull_parser::Ast::default();
+            ast.file = ustr::Ustr::from(f.path.as_str());
+            ast.dialect = f.dialect;
+            ast.package = f.package.clone();
+            ast.memory_class = f.memory_class;
+            ast.global_policy = f.global_policy;
+            ast
+        })
+        .collect();
+    aliases_for_modules(&stubs)
+}
+
+/// The session files for a discovered project: each file's text plus the
+/// dialect and owning package the package graph stamped on it. A session
+/// re-parses on every edit, so it needs the facts, not a one-shot stamp.
+pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::SessionFile> {
+    sources
+        .files
+        .iter()
+        .map(|source| {
+            let source = source.borrow();
+            bone_incremental::session::SessionFile {
+                path: source.file.to_id_path(),
+                text: source.contents.clone(),
+                dialect: source.dialect,
+                package: source.package.clone(),
+                memory_class: source.memory_class,
+                global_policy: source.global_policy,
+            }
+        })
+        .collect()
 }
 
 /// [`bone_session`] plus comptime-input stamping against `anchor`'s enclosing
@@ -183,7 +327,7 @@ pub(crate) fn bone_session(
 /// survives `update_file` (the Session mutates its ws in place); a full
 /// session rebuild constructs a new one through here and so re-resolves.
 pub(crate) fn bone_session_for_emission(
-    files: Vec<(String, String)>,
+    files: Vec<bone_incremental::session::SessionFile>,
     anchor: &std::path::Path,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
     let mut session = bone_session(files)?;
@@ -241,7 +385,12 @@ pub(crate) fn parse_user_modules(
         .map(|file| {
             let f = file.borrow();
             let id = ustr::Ustr::from(f.file.to_id_path().as_str());
-            let module = skull_parser::parse_module(&f.contents, id).map_err(|e| vec![e])?;
+            let mut module =
+                skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect)
+                    .map_err(|e| vec![e])?;
+            module.package = f.package.clone();
+            module.memory_class = f.memory_class;
+            module.global_policy = f.global_policy;
             Ok((module, id))
         })
         .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;
@@ -323,10 +472,14 @@ pub(crate) fn bone_workspace_timed(
     let t = Instant::now();
     modules.extend(user_modules);
     times.stdlib_extend = t.elapsed();
+    let aliases = match aliases_for_modules(&modules) {
+        Ok(aliases) => aliases,
+        Err(error) => return (Err(vec![error]), times),
+    };
     // Time the call from out here so bone's teardown (dropping the input ASTs at
     // fn return) is included — bone's internal phase timers stop before it.
     let t_call = Instant::now();
-    let res = bone_semantic::semantic_passes::semantic_pass(&mut modules);
+    let res = bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases);
     times.semantic_call = t_call.elapsed();
     times.semantic = t_sem.elapsed();
 
@@ -345,16 +498,17 @@ pub(crate) fn bone_workspace_timed(
 /// its own subset. Parsed once and cloned per check.
 ///
 /// bone keys modules by file (`Ast.file`, interned to a dense `ModuleId`), so
-/// each stdlib file is parsed with a distinct `<bone-stdlib:NAME>` file id to
-/// avoid colliding with each other or with the test module. (Re-checked per file
-/// for now; caching a checked workspace is a later optimization.)
+/// each stdlib file uses the loader-owned id shared with the LSP. (Re-checked
+/// per file for now; caching a checked workspace is a later optimization.)
 pub(crate) fn bone_stdlib_modules() -> Vec<skull_parser::Ast> {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
             .map(|f| {
-                let id = ustr::Ustr::from(format!("<bone-stdlib:{}>", f.name).as_str());
+                let id = ustr::Ustr::from(
+                    rock_host::stdlib_loader::stdlib_file_id(f.name).as_str(),
+                );
                 skull_parser::parse_module(f.contents, id)
                     .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
             })
@@ -370,7 +524,7 @@ pub(crate) fn bone_stdlib_modules() -> Vec<skull_parser::Ast> {
 /// same id for the span lookup to resolve — the real on-disk `path` is only used
 /// in the human-facing header line we print separately.
 fn render_source_errs(src: &str, errs: &[CompilerError]) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         "<parse_rock>".to_string(),
         "<parse_rock>".to_string(),
@@ -679,7 +833,14 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
         // Bench harness: build the workspace once for the inference loop; no
         // load-verdict gate (we time inference, not acceptance).
         let mut modules = with_stdlib(user_modules);
-        match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+        let aliases = match aliases_for_modules(&modules) {
+            Ok(aliases) => aliases,
+            Err(e) => {
+                eprintln!("{}", e.render(&sources));
+                crate::ablation_report::exit_with_census(1);
+            }
+        };
+        match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
             Ok(ws) => ws,
             Err(e) => {
                 eprintln!("{}", e.render(&sources));
@@ -813,14 +974,7 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
 
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
     let sources = crate::unified_compile::discover_sources(&spec)?;
-    let files: Vec<(String, String)> = sources
-        .files
-        .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
-        })
-        .collect();
+    let files = session_files(&sources);
     let mut session =
         bone_session(files.clone()).map_err(|e| anyhow::anyhow!("session warm: {}", e.message))?;
 
@@ -840,7 +994,7 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
         let mut best = (String::new(), 0usize);
         for module in session.ws.modules.iter() {
             let file = module.file.as_str();
-            if file.starts_with("<bone-stdlib:") || !file.contains(&proj_marker) {
+            if session.warm_mids.contains(&module.id) || !file.contains(&proj_marker) {
                 continue;
             }
             for name in module.struct_by_name.keys() {
@@ -859,8 +1013,8 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
 
     let (target, orig) = files
         .iter()
-        .find(|(p, t)| p.contains(&proj_marker) && struct_decl_pos(t, &tname).is_some())
-        .map(|(p, t)| (p.clone(), t.clone()))
+        .find(|f| f.path.contains(&proj_marker) && struct_decl_pos(&f.text, &tname).is_some())
+        .map(|f| (f.path.clone(), f.text.clone()))
         .ok_or_else(|| anyhow::anyhow!("no project file defines `struct {tname}`"))?;
     let edited =
         field_edit(&orig, &tname).ok_or_else(|| anyhow::anyhow!("no field edit for `struct {tname}`"))?;
@@ -930,14 +1084,7 @@ pub fn bone_iter_reinfer(path: &str, iters: usize, warmup: usize) -> Result<()> 
 
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
     let sources = crate::unified_compile::discover_sources(&spec)?;
-    let files: Vec<(String, String)> = sources
-        .files
-        .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
-        })
-        .collect();
+    let files = session_files(&sources);
     let mut session =
         bone_session(files.clone()).map_err(|e| anyhow::anyhow!("session warm: {}", e.message))?;
 
@@ -957,7 +1104,7 @@ pub fn bone_iter_reinfer(path: &str, iters: usize, warmup: usize) -> Result<()> 
         let mut best = (String::new(), 0usize);
         for module in session.ws.modules.iter() {
             let file = module.file.as_str();
-            if file.starts_with("<bone-stdlib:") || !file.contains(&proj_marker) {
+            if session.warm_mids.contains(&module.id) || !file.contains(&proj_marker) {
                 continue;
             }
             for name in module.functions_by_name.keys() {
@@ -975,8 +1122,8 @@ pub fn bone_iter_reinfer(path: &str, iters: usize, warmup: usize) -> Result<()> 
 
     let (target, orig) = files
         .iter()
-        .find(|(p, t)| p.contains(&proj_marker) && t.contains(&format!("fn {fname}")))
-        .map(|(p, t)| (p.clone(), t.clone()))
+        .find(|f| f.path.contains(&proj_marker) && f.text.contains(&format!("fn {fname}")))
+        .map(|f| (f.path.clone(), f.text.clone()))
         .ok_or_else(|| anyhow::anyhow!("no project file defines `fn {fname}`"))?;
     let edited =
         sig_edit(&orig, &fname).ok_or_else(|| anyhow::anyhow!("no signature edit for `fn {fname}`"))?;
@@ -1060,14 +1207,7 @@ pub fn bone_watch(path: &str) -> Result<()> {
                 return;
             }
         };
-        let files: Vec<(String, String)> = sources
-            .files
-            .iter()
-            .map(|f| {
-                let f = f.borrow();
-                (f.file.to_id_path(), f.contents.clone())
-            })
-            .collect();
+        let files = session_files(&sources);
 
         let t = Instant::now();
         let mut reinferred = 0usize;
@@ -1085,8 +1225,8 @@ pub fn bone_watch(path: &str) -> Result<()> {
                 }
             },
             Some(s) => {
-                for (file_path, text) in &files {
-                    match s.update_file(file_path, text) {
+                for f in &files {
+                    match s.update_file(&f.path, &f.text) {
                         Ok(result) => reinferred += result.reinferred.len(),
                         Err(e) => {
                             update_failed = true;
@@ -1097,7 +1237,7 @@ pub fn bone_watch(path: &str) -> Result<()> {
                 let gone: Vec<String> = s
                     .tracked_paths()
                     .into_iter()
-                    .filter(|p| !files.iter().any(|(fp, _)| fp == p))
+                    .filter(|p| !files.iter().any(|f| f.path == *p))
                     .map(|p| p.to_string())
                     .collect();
                 for file_path in gone {
@@ -1209,9 +1349,9 @@ mod tests {
     }
 
     // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
-    // under `<bone-stdlib:NAME>` and belong to no project's source set. Without
-    // the registration in `render_errs` the header still prints and the snippet
-    // plus every label is silently dropped. Renderer-level on purpose: a
+    // under the loader's stdlib id and belong to no project's source set.
+    // Without the registration in `render_errs` the header still prints and the
+    // snippet plus every label is silently dropped. Renderer-level on purpose: a
     // lowering change can move where a rejection LANDS -- which is how the
     // end-to-end fixture that used to cover this went vacuous -- but it cannot
     // move the span-to-source lookup this asserts.
@@ -1227,18 +1367,37 @@ mod tests {
         let line = head.matches('\n').count();
         let col = offset - head.rfind('\n').map_or(0, |i| i + 1);
         let span = rock_core::Span {
-            file: ustr::Ustr::from("<bone-stdlib:unified.rock>"),
+            file: ustr::Ustr::from(
+                rock_host::stdlib_loader::stdlib_file_id("unified.rock").as_str(),
+            ),
             line_range: (line, line),
             col_range: (col, col + NEEDLE.len()),
             offset_range: (offset, offset + NEEDLE.len()),
         };
         let err = CompilerError::new_with_label(span, "boxed here".to_string());
-        let rendered = render_errs(&SourceFiles { files: vec![] }, &[err]);
+        let rendered = render_errs(&SourceFiles::empty(), &[err]);
 
         assert!(
             rendered.contains(NEEDLE),
             "the stdlib source line must render, not be dropped:\n{rendered}"
         );
         assert!(rendered.contains("boxed here"), "the label must render:\n{rendered}");
+    }
+
+    #[test]
+    fn cli_warm_stdlib_uses_loader_file_ids() {
+        let expected: Vec<_> = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| rock_host::stdlib_loader::stdlib_file_id(f.name))
+            .collect();
+        let session = bone_session(Vec::new()).expect("CLI warm session must build");
+        let actual: Vec<_> = session
+            .ws
+            .modules
+            .iter()
+            .filter(|module| session.warm_mids.contains(&module.id))
+            .map(|module| module.file.as_str().to_owned())
+            .collect();
+        assert_eq!(actual, expected, "CLI and LSP must warm the same stdlib file ids");
     }
 }

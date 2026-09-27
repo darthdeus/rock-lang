@@ -269,6 +269,94 @@ fn replay_profile_report_rejects_false_denominators_and_mixed_replay_rows() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("playback revisions disagree"));
 }
 
+/// A drifted run is reportable -- divergence is the accepted default -- but it
+/// must never read as an exact run. The label appears in the JSON root, and the
+/// pretty output carries it BOTH above the run summary and immediately above
+/// the measurements, so no number is far from it.
+#[test]
+fn replay_profile_report_labels_a_drifted_run_and_names_its_divergent_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("profile.jsonl");
+    write_jsonl(&input);
+    let mut rows = read_rows(&input);
+    for row in &mut rows {
+        row["identity"]["playback_build"] = json!("fedcba9876543210");
+        row["identity"]["exact_artifact"] = json!(false);
+        if row["kind"] == "run" {
+            row["divergence"] = json!({
+                "checkpoint_interval": 10,
+                "detectable": true,
+                "first_divergent_tick": 40,
+            });
+        }
+    }
+    let drifted = dir.path().join("drifted.jsonl");
+    write_rows(&drifted, &rows);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["replay-profile-report", drifted.to_str().unwrap(), "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a drifted profile must still report:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json_report["exact_artifact"], false);
+    assert_eq!(json_report["divergence"]["first_divergent_tick"], 40);
+    assert_eq!(json_report["divergence"]["detectable"], true);
+    assert_eq!(json_report["runs"]["complete"], 4, "the measurements survive the label");
+
+    let pretty = report(&drifted);
+    assert!(pretty.status.success());
+    let pretty = String::from_utf8(pretty.stdout).unwrap();
+    assert_eq!(
+        pretty.matches("NOT EXACT").count(),
+        2,
+        "the label must sit above the summary AND above the numbers:\n{pretty}"
+    );
+    assert!(pretty.contains("diverged at tick 40"), "{pretty}");
+    assert!(pretty.contains("fedcba9876543210"), "the playback identity must be named:\n{pretty}");
+}
+
+/// The exactness label is not decorative: a row cannot claim an exactness its
+/// own two fingerprints contradict, in either direction.
+#[test]
+fn replay_profile_report_rejects_a_dishonest_exactness_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("profile.jsonl");
+    write_jsonl(&input);
+
+    let mut rows = read_rows(&input);
+    for row in &mut rows {
+        row["identity"]["playback_build"] = json!("fedcba9876543210");
+    }
+    let forged_exact = dir.path().join("forged-exact.jsonl");
+    write_rows(&forged_exact, &rows);
+    let output = report(&forged_exact);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("claims an exact Artifact"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut rows = read_rows(&input);
+    for row in &mut rows {
+        row["identity"]["exact_artifact"] = json!(false);
+    }
+    let forged_drift = dir.path().join("forged-drift.jsonl");
+    write_rows(&forged_drift, &rows);
+    let output = report(&forged_drift);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("claims drift"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn replay_profile_report_retains_a_failed_population_with_no_complete_run() {
     let dir = tempfile::tempdir().unwrap();

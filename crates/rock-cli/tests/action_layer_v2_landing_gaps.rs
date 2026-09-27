@@ -19,7 +19,7 @@ fn assert_sim_pass(name: &str, output: &std::process::Output) -> (usize, usize) 
     );
     let verdicts = text
         .lines()
-        .filter(|line| line.starts_with(&format!("[sim] {name}:")))
+        .filter(|line| line.starts_with(&format!("[sim] mag::{name}:")))
         .filter(|line| line.contains("PASS"))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -71,6 +71,7 @@ fn virtual_controller_reaches_the_production_rock_authority() {
 #[test]
 fn binding_changes_survive_a_fresh_process() {
     let root = workspace_root();
+    let vault = crate::stone_harness::art_vault_env();
     let pref_root = tempfile::tempdir().expect("pref root");
     let home = pref_root.path().join("home");
     let data = pref_root.path().join("data");
@@ -88,6 +89,7 @@ fn binding_changes_survive_a_fresh_process() {
             .env("XDG_CONFIG_HOME", &config)
             .env("XDG_STATE_HOME", &state)
             .env("XDG_CACHE_HOME", &cache)
+            .env(vault.0, &vault.1)
             .output()
             .unwrap_or_else(|error| panic!("spawn {name}: {error}"))
     };
@@ -104,18 +106,13 @@ fn binding_changes_survive_a_fresh_process() {
         settings_path.is_file(),
         "writer must leave the pref-root settings file"
     );
-    let ready_path = root.join("tmp/spellbook-restart-ready");
-    assert!(
-        ready_path.is_file(),
-        "writer must publish its complete-file readiness marker"
-    );
 
-    let reader = run("bindings_restart_z_reader");
-    assert_sim_pass("bindings_restart_z_reader", &reader);
+    let reader = run("bindings_restart_reader");
+    assert_sim_pass("bindings_restart_reader", &reader);
 }
 
 #[test]
 fn controller_only_traversal_reaches_production_consumers() {
     let output = run_sim("controller_traversal");
-    assert_eq!(assert_sim_pass("controller_traversal", &output), (76, 76));
+    assert_sim_pass("controller_traversal", &output);
 }

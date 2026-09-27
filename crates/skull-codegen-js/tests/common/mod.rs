@@ -50,6 +50,10 @@ pub fn stdlib_ws() -> bone_semantic::inference::Workspace {
 
 /// Stdlib workspace plus `src` as the `<test>` module.
 pub fn ws_with(src: &str) -> bone_semantic::inference::Workspace {
+    ws_with_named("<test>", src)
+}
+
+pub fn ws_with_named(file: &str, src: &str) -> bone_semantic::inference::Workspace {
     let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
         .iter()
         .map(|f| {
@@ -57,7 +61,7 @@ pub fn ws_with(src: &str) -> bone_semantic::inference::Workspace {
             skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from(file)).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 

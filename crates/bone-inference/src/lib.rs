@@ -3,7 +3,7 @@ use bone_core::suspension::{uses_after_suspension, SuspensionPolicy};
 
 use bone_core::{
     hir::{
-        AsKind, BindingInfo, BindingKind, BindingPattern, BuiltinTy, Callee, DecoratorDef,
+        AsKind, BindingInfo, BindingKind, BindingPattern, BuiltinTy, CallFamily, Callee, DecoratorDef,
         Function, GlobalDef, InterpPart, Pattern, StructDef, StructFieldDef, TyId, TypeCtor,
         TypeExpr, VarId, VariantArgs, VariantPayload,
     },
@@ -14,10 +14,11 @@ use ustr::ustr;
 
 // Compilation storage + inference result structs now live in bone-core; re-export
 // them through the historical `bone::inference::*` path so consumers don't churn.
+pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
-pub use fields::vec_swizzle_components;
+pub use fields::{field_access, vec_swizzle_components, AccessDenied, FieldAccessNeed};
 
 mod narrowing;
 
@@ -43,10 +44,6 @@ pub(crate) use calls::*;
 pub(crate) use fields::*;
 pub(crate) use patterns::*;
 pub(crate) use iter::*;
-
-static NOT: LazyLock<Ustr> = LazyLock::new(|| ustr("__not"));
-
-static UNM: LazyLock<Ustr> = LazyLock::new(|| ustr("__unm"));
 
 static NULL: LazyLock<Ustr> = LazyLock::new(|| ustr("null"));
 
@@ -108,7 +105,7 @@ impl SuspensionPolicy for RefSuspensionPolicy<'_> {
             .get(binding)
             .copied()
             .or(self.gamma.body.binding_arena[binding].declared_ty)
-            .is_some_and(|ty| is_frame_borrow_type(self.gamma, ty))
+            .is_some_and(|ty| contains_frame_ref(self.gamma, ty))
     }
 }
 
@@ -147,6 +144,10 @@ pub struct Gamma<'a> {
     pub(crate) deferrable_vars: FxHashMap<VarId, DeferOrigin>,
     pub(crate) pending: Vec<Option<Pending>>,
     pub(crate) pending_by_var: FxHashMap<VarId, SmallVec<[usize; 2]>>,
+    /// Candidates removed by the per-member visibility filter for the current
+    /// call family. Selection uses this only to distinguish an inaccessible
+    /// matching overload from an ordinary no-fit error.
+    pub(crate) inaccessible_overloads: RefCell<FxHashMap<Ustr, FnList>>,
 
     pub(crate) allow_frame_ref_return_place: bool,
     pub(crate) ref_binding_provenance: FxHashMap<Idx<BindingInfo>, RefProvenance>,
@@ -184,6 +185,7 @@ impl<'a> Gamma<'a> {
             deferrable_vars: Default::default(),
             pending: Vec::new(),
             pending_by_var: Default::default(),
+            inaccessible_overloads: Default::default(),
 
             allow_frame_ref_return_place: false,
             ref_binding_provenance: Default::default(),
@@ -196,6 +198,21 @@ impl<'a> Gamma<'a> {
 
                 ..Default::default()
             },
+        }
+    }
+
+    pub fn access_site(&self) -> AccessSite<'_> {
+        let file = self.workspace.module(self.current_module_id).file;
+        if let Some(frag) = self.workspace.fragment_scopes.get(&file) {
+            AccessSite {
+                package: Some(frag.package),
+                module_path: &frag.module_path,
+            }
+        } else {
+            AccessSite {
+                package: None,
+                module_path: &[],
+            }
         }
     }
 
@@ -413,11 +430,10 @@ pub fn check_function(
     let frame_ref_source = f
         .annotations
         .iter()
-        .find(|annotation| annotation.name.name.as_str() == "frame_ref_source");
-    let is_arena_stdlib = matches!(
-        module.file.as_str(),
-        "<stdlib:arena.rock>" | "<bone-stdlib:arena.rock>"
-    );
+        .find(|annotation| annotation.is_builtin("frame_ref_source"));
+    let file = module.file.as_str();
+    let is_arena_stdlib = bone_core::modules::is_stdlib_module_file(file)
+        && (file.ends_with("/arena.rock") || file.ends_with(":arena.rock>"));
     if let Some(annotation) = frame_ref_source
         && !is_arena_stdlib
     {

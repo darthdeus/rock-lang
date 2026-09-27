@@ -128,15 +128,12 @@ fn run(src: &str, tag: &str) -> String {
     common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
-/// Every top-level `function <name>__step(` the program defines, in text order.
+/// Every top-level `<name>__step` definition the program carries, in emission
+/// order, in whichever callee shape the build emits.
 fn step_definitions(lua: &str) -> Vec<String> {
-    lua.match_indices("__step(")
-        .filter_map(|(i, _)| {
-            let head = &lua[..i];
-            let start = head.rfind("function ")? + "function ".len();
-            let name = &lua[start..i];
-            (!name.contains(['(', ')', ' ', '\n'])).then(|| name.to_string())
-        })
+    common::definitions_matching(lua, "__step")
+        .into_iter()
+        .map(str::to_string)
         .collect()
 }
 

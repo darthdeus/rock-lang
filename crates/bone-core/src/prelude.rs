@@ -32,6 +32,8 @@ macro_rules! or_fail {
     }
 }
 
+// The message arguments are evaluated only when the error can be reported, so
+// keep `render` calls inside the macro: quiet trials discard the message.
 #[macro_export]
 macro_rules! unify_fail {
     ($gamma:expr, $span:expr, $($arg:tt)*) => {{
@@ -124,6 +126,8 @@ pub struct NewtypeDef {
     pub span: Span,
     pub generics: Vec<TyId>,
     pub wrapped: TyId,
+    /// `@host_resource` -- see [`crate::hir::HostResource`].
+    pub host_resource: Option<crate::hir::HostResource>,
 }
 
 // ---------------------------------------------------------------------------

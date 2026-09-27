@@ -1,4 +1,4 @@
-//! The JS intrinsic table (docs/js-backend-plan.md): the THIRD
+//! The JS intrinsic table (docs/backends.md): the THIRD
 //! [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies) and
 //! GLSL. Covers the eight scalar fallback+mapping intrinsics of the conformance
 //! differential (`tests/intrinsics/fallback_reference.rock`), the base math
@@ -15,7 +15,7 @@
 //! the S4 diff compares two implementations, not a thing to itself. `round`
 //! (floor(x+0.5)) and `fract` (x-floor(x)) coincide with their fallback math --
 //! the diff there only proves both emit paths produce runnable JS (logged in
-//! js-backend-plan Risks).
+//! optional backend risk).
 
 use bone_semantic::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
@@ -440,9 +440,8 @@ function __try_call(f) {
 /// `__op_eq` (verified on luajit: reference structs, value structs, tuples,
 /// enums, newtypes all compare BY CONTENTS; primitives by value). Lua `nil` maps
 /// to both JS `null` and `undefined` (an absent arg / an array hole), so both
-/// count as nil. A Vec compares by its tracked `len` over `_data[0..len)`, not
-/// as a dense array -- mirroring luajit's `pairs`-walk, which is len-bounded, so
-/// a drained tail slot (`_data[len] = undefined` after pop/clear) is invisible.
+/// count as nil. A Vec compares its live logical storage, not reserved capacity
+/// or representation metadata, so a drained tail slot is invisible.
 /// Structs are `{__ty, ...}` plain objects (the
 /// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
 /// key-walk that includes `__ty` covers the type check for free. A capturing
@@ -463,10 +462,35 @@ function __op_eq(a, b) {
   if (typeof a !== "object" || typeof b !== "object") return a === b;
   if (typeof __rock_code_ref_kind === "function" &&
       (__rock_code_ref_kind(a) !== null || __rock_code_ref_kind(b) !== null)) return a === b;
-  // A Vec compares by tracked `len` over `_data[0..len)` (len-bounded, like
-  // luajit's pairs-walk), so a drained tail slot beyond `len` never breaks eq.
+  // A Vec compares live storage only. Each concrete element type has one
+  // compiler-selected representation, so unlike representations cannot be
+  // values of the same concrete Vec type.
   if (a.__ty === "Vec" || b.__ty === "Vec") {
     if (a.__ty !== "Vec" || b.__ty !== "Vec" || a.len !== b.len) return false;
+    var ah = a["@vec"], bh = b["@vec"];
+    var ar = ah !== null && typeof ah === "object" ? ah.repr : "boxed";
+    var br = bh !== null && typeof bh === "object" ? bh.repr : "boxed";
+    if (ar !== br) return false;
+    if (ar === "strided") {
+      if (ah.elem !== bh.elem || ah.stride !== bh.stride) return false;
+      for (var si = 0; si < a.len * ah.stride; si++) {
+        if (!__op_eq(a._data[si], b._data[si])) return false;
+      }
+      return true;
+    }
+    if (ar === "columns") {
+      if (ah.elem !== bh.elem) return false;
+      var ak = Object.keys(a).filter(function(k) { return k !== "len" && k !== "__ty" && k !== "@vec"; });
+      var bk = Object.keys(b).filter(function(k) { return k !== "len" && k !== "__ty" && k !== "@vec"; });
+      if (ak.length !== bk.length) return false;
+      for (var ci = 0; ci < ak.length; ci++) {
+        var ck = ak[ci];
+        if (!Array.isArray(a[ck]) || !Array.isArray(b[ck])) return false;
+        for (var cj = 0; cj < a.len; cj++) if (!__op_eq(a[ck][cj], b[ck][cj])) return false;
+      }
+      return true;
+    }
+    if (!Array.isArray(a._data) || !Array.isArray(b._data)) return false;
     for (var vi = 0; vi < a.len; vi++) if (!__op_eq(a._data[vi], b._data[vi])) return false;
     return true;
   }
@@ -548,6 +572,19 @@ function __rock_col_header(t) {
   var h = t["@vec"];
   return (h !== null && typeof h === "object" && h.repr === "columns") ? h : null;
 }
+function __rock_stride_header(t) {
+  var h = t["@vec"];
+  return (h !== null && typeof h === "object" && h.repr === "strided") ? h : null;
+}
+function __rock_stride_element(t, h, index) {
+  var base = index * h.stride;
+  var out = {__variant: t._data[base], __ty: h.elem};
+  for (var j = 1; j < h.stride; j++) {
+    var value = t._data[base + j];
+    if (value !== false) out[j - 1] = value;
+  }
+  return out;
+}
 function __rock_inspect_key_lt(a, b) {
   var sa = lua_tostring(a), sb = lua_tostring(b);
   return sa < sb ? -1 : (sa > sb ? 1 : 0);
@@ -610,14 +647,15 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   }
   var type_name = t.__ty;
   var colh = type_name === "Vec" && t.len !== undefined ? __rock_col_header(t) : null;
-  if (type_name === "Vec" && t.len !== undefined && (t._data || colh)) {
+  var strideh = type_name === "Vec" && t.len !== undefined ? __rock_stride_header(t) : null;
+  if (type_name === "Vec" && t.len !== undefined && (t._data || colh || strideh)) {
     var mat = colh ? __rock_col_mat[colh.elem] : null;
     if (colh && mat === undefined) {
       throw new Error("no column materializer emitted for element type " + colh.elem);
     }
     var vparts = [];
     for (var i = 0; i < t.len; i++) {
-      var elem = colh ? mat(t, i) : t._data[i];
+      var elem = colh ? mat(t, i) : strideh ? __rock_stride_element(t, strideh, i) : t._data[i];
       vparts.push(__rock_inspect_value(elem, indent, path + "[" + i + "]", visited, precision));
     }
     if (visited) visited.delete(t);
@@ -775,24 +813,27 @@ function log_set_level(level) { __G.__stone_log_level = level; }
 var __stone_log_dedup = {};
 var __stone_log_counts = {};
 var __stone_log_sites = {};
+var __stone_log_site_levels = {};
 var __stone_log_summary_done = false;
 var __stone_log_throttle = {};
 var __stone_log_wall = {};
 var __stone_log_now_override = null;
-function _log_once_impl(category, msg, site) {
+function _log_once_impl(level, category, msg, site) {
   __stone_log_init();
-  if (0 > __G.__stone_log_level) return;
+  if (level > __G.__stone_log_level) return;
   var n = (__stone_log_dedup[site] || 0) + 1;
   __stone_log_dedup[site] = n;
   __stone_log_sites[site] = (category || "") + "|" + msg;
+  __stone_log_site_levels[site] = level;
   if (n > 1) return;
-  __stone_emit(0, category, msg, false);
+  __stone_emit(level, category, msg, false);
 }
-function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site, wall_clock) {
+function _log_throttled_with_now_impl(now_sec, level, category, msg, interval_sec, site, wall_clock) {
   __stone_log_init();
-  if (0 > __G.__stone_log_level) return;
+  if (level > __G.__stone_log_level) return;
   __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
   __stone_log_sites[site] = (category || "") + "|" + msg;
+  __stone_log_site_levels[site] = level;
   // `= nil` in the luajit sibling, which removes the key; keep the two tables
   // the same shape rather than storing a false.
   if (wall_clock) __stone_log_wall[site] = true;
@@ -800,7 +841,7 @@ function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
-  __stone_emit(0, category, msg, wall_clock);
+  __stone_emit(level, category, msg, wall_clock);
 }
 // Ties order differently from the luajit sibling (JS sort is stable, table.sort
 // is not); the counts themselves match.
@@ -824,7 +865,9 @@ function log_suppression_summary() {
     var r = rows[i];
     var rec = __stone_log_sites[r.site] || "|";
     var bar = rec.indexOf("|");
-    __stone_emit(0, rec.slice(0, bar),
+    var level = __stone_log_site_levels[r.site] || 0;
+    if (level > __G.__stone_log_level) continue;
+    __stone_emit(level, rec.slice(0, bar),
       "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1),
       __stone_log_wall[r.site] === true);
   }
@@ -835,12 +878,13 @@ function __stone_log_now() {
   if (__stone_log_now_override != null) return __stone_log_now_override;
   return Date.now() / 1000;
 }
-function _log_throttled_impl(category, msg, interval_sec, site, wall_clock) {
-  _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site, wall_clock);
+function _log_throttled_impl(level, category, msg, interval_sec, site, wall_clock) {
+  _log_throttled_with_now_impl(__stone_log_now(), level, category, msg, interval_sec, site, wall_clock);
 }
 function log_reset_dedup() {
   __stone_log_dedup = {}; __stone_log_throttle = {}; __stone_log_wall = {};
-  __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_summary_done = false;
+  __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_site_levels = {};
+  __stone_log_summary_done = false;
 }
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 "#;
@@ -848,10 +892,10 @@ function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 /// The RNG runtime: mulberry32 over a single 32-bit state word (`>>> 0` keeps it
 /// unsigned; `Math.imul` for the 32-bit multiplies) -- zero allocation. The fn
 /// surface mirrors the Lua splitmix prelude (`crates/skull/src/lib.rs`):
-/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` (the single-word replay
-/// serialization surface), and the draw. Streams differ per backend by doctrine
+/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` for gameplay, and
+/// `__rock_presentation_rng_*` for presentation. Streams differ per backend by doctrine
 /// (Lua splitmix64, JS mulberry32) -- bit-parity is a non-goal; the SEMANTIC
-/// (seedable + deterministic + single serializable stream) is upheld. Engine-
+/// (seedable + deterministic + independent serializable streams) is upheld. Engine-
 /// agnostic: seeding is done by the driver glue (it reads `ROCK_TEST_SEED`), not
 /// here. `random()` draws one 32-bit word / 2^32 in [0,1); `random_int(min,max)`
 /// is `[min,max)` exclusive (`r=max-min`, `r<=0 -> min`), single draw for
@@ -885,6 +929,35 @@ function __rock_random_int(min, max) {
   if (r <= 0) return min;
   if (r <= 4294967296) return min + (__rock_rng_next32() % r);
   var hi = __rock_rng_next32(), lo = __rock_rng_next32();
+  return min + ((hi * 2097152 + (lo >>> 11)) % r);
+}
+var __rock_presentation_rng_state = 0;
+function __rock_presentation_rng_current() {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session
+      && __rock_active_session.__rock_presentation_rng_state !== null) return __rock_active_session.__rock_presentation_rng_state;
+  return __rock_presentation_rng_state;
+}
+function __rock_presentation_rng_store(s) {
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_presentation_rng_state = s >>> 0;
+  else __rock_presentation_rng_state = s >>> 0;
+}
+function __rock_presentation_rng_seed(s) { __rock_presentation_rng_store(s); }
+function __rock_presentation_rng_state_get() { return __rock_presentation_rng_current(); }
+function __rock_presentation_rng_state_set(s) { __rock_presentation_rng_store(s); }
+function __rock_presentation_rng_next32() {
+  var state = (__rock_presentation_rng_current() + 0x6D2B79F5) >>> 0;
+  __rock_presentation_rng_store(state);
+  var t = state;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+  return (t ^ (t >>> 14)) >>> 0;
+}
+function __rock_presentation_random() { return __rock_presentation_rng_next32() / 4294967296; }
+function __rock_presentation_random_int(min, max) {
+  var r = max - min;
+  if (r <= 0) return min;
+  if (r <= 4294967296) return min + (__rock_presentation_rng_next32() % r);
+  var hi = __rock_presentation_rng_next32(), lo = __rock_presentation_rng_next32();
   return min + ((hi * 2097152 + (lo >>> 11)) % r);
 }
 "#;
@@ -1447,6 +1520,19 @@ function stone_image_data_copy_into(dst, src) {
   var d = __SW.imageData[dst], s = __SW.imageData[src];
   if (!d || !s || d.w !== s.w || d.h !== s.h) return false;
   d.px.set(s.px);
+  return true;
+}
+function stone_image_data_blit(dst, src, sx, sy, w, h, dx, dy, r, g, b, a) {
+  var d = __SW.imageData[dst], s = __SW.imageData[src];
+  if (!d || !s || dst === src || sx < 0 || sy < 0 || dx < 0 || dy < 0 || w < 0 || h < 0
+      || sx + w > s.w || sy + h > s.h || dx + w > d.w || dy + h > d.h) return false;
+  var f = [r, g, b, a];
+  for (var y = 0; y < h; y++) {
+    for (var i = 0; i < w * 4; i++) {
+      var v = Math.round(s.px[((sy + y) * s.w + sx) * 4 + i] * f[i % 4]);
+      d.px[((dy + y) * d.w + dx) * 4 + i] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+  }
   return true;
 }
 function stone_image_data_set_pixel(h, x, y, r, g, b, a) {
@@ -2198,7 +2284,7 @@ function stone_draw_fullscreen_quad() {
   __sw_mark_drawn(sh);
 }
 
-// --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
+// --- text: canvas2d glyph atlas (optional web backend) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
 // is synchronous canvas2d against that family. ASCII 32..126 plus Á bakes as
 // one 16-glyph-wide atlas; density changes explicitly rebake into the same
@@ -2232,7 +2318,13 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   faceMask = faceMask | 0;
   if (globalThis.__STONE_WEB_FAKE_ENV || typeof document === "undefined") {
     __sw_log_once("stone_load_font: no canvas2d in this environment -- glyphless fallback font");
-    return { em: pixelSize, atlas: existingAtlas || 0, glyphs: [{}, {}, {}, {}], maxH: pixelSize, fake: true, sourcePath: path, faceMask: faceMask };
+    return {
+      em: pixelSize, atlas: existingAtlas || 0, glyphs: [{}, {}, {}, {}],
+      maxH: pixelSize,
+      unitMetrics: new Float32Array([pixelSize, pixelSize, 0, 0, pixelSize]),
+      unitGlyphs: [{}, {}, {}, {}],
+      fake: true, sourcePath: path, faceMask: faceMask,
+    };
   }
   var fams = __SW.fontFamilies || {};
   var fam = fams[__sw_font_path_key(path)];
@@ -2251,6 +2343,16 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   mctx.font = fontSpec;
   mctx.fontSynthesis = "none"; // never the browser's own faux face; see above
   mctx.textBaseline = "alphabetic";
+
+  var vertical = mctx.measureText("Hg");
+  var cap = mctx.measureText("X");
+  var fontAscent = vertical.fontBoundingBoxAscent || vertical.emHeightAscent || pixelSize;
+  var fontDescent = vertical.fontBoundingBoxDescent || vertical.emHeightDescent || 0;
+  var capHeight = (cap.actualBoundingBoxAscent || pixelSize)
+    + (cap.actualBoundingBoxDescent || 0);
+  var unitMetrics = new Float32Array([
+    pixelSize, fontAscent, -fontDescent, 0, capHeight,
+  ]);
 
   var baked = [];
   for (var f = 0; f < 4; f++) if (__sw_face_declared(faceMask, f)) baked.push(f);
@@ -2370,7 +2472,21 @@ function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   __SW.imageSizes[texHandle] = { w: aw, h: ah };
 
-  return { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH, sourcePath: path, faceMask: faceMask };
+  var unitGlyphs = [{}, {}, {}, {}];
+  for (var uf = 0; uf < 4; uf++) {
+    for (var slot in glyphs[uf]) {
+      var source = glyphs[uf][slot];
+      unitGlyphs[uf][slot] = new Float32Array([
+        source[6], source[7], source[4], source[5], source[8],
+      ]);
+    }
+  }
+
+  return {
+    em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH,
+    unitMetrics: unitMetrics, unitGlyphs: unitGlyphs,
+    sourcePath: path, faceMask: faceMask,
+  };
 }
 
 function stone_load_font(path, pixelSize, faceMask) {
@@ -2379,6 +2495,7 @@ function stone_load_font(path, pixelSize, faceMask) {
 
   __SW.fonts = __SW.fonts || {};
   var fid = (__SW.nextFont = (__SW.nextFont || 0) + 1);
+  baked.instances = [baked];
   __SW.fonts[fid] = baked;
   console.log("[STONE-WEB] font atlas baked @ " + pixelSize + "px");
   return fid;
@@ -2391,6 +2508,7 @@ function stone_reload_font(fontId, path, pixelSize) {
   // bytes or the size, never what the family declared at load.
   var baked = __sw_bake_font(path, pixelSize, old.atlas, old.faceMask);
   if (!baked) return false;
+  if (!__sw_refresh_font_instances(old, baked)) return false;
   __SW.fonts[fontId] = baked;
   console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
   return true;
@@ -2400,6 +2518,9 @@ function stone_resize_font(fontId, pixelSize) {
   if (!old || pixelSize < 1) return false;
   var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas, old.faceMask);
   if (!baked) return false;
+  baked.unitMetrics = old.unitMetrics;
+  baked.unitGlyphs = old.unitGlyphs;
+  if (!__sw_refresh_font_instances(old, baked)) return false;
   __SW.fonts[fontId] = baked;
   console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
   return true;
@@ -2415,12 +2536,102 @@ function stone_get_font_pixel_size_for(fontId) {
   var f = __sw_font(fontId);
   return f ? f.em : 48;
 }
+function __sw_refresh_font_instances(old, baked) {
+  baked.instances = [baked];
+  for (var i = 1; i < old.instances.length; i++) {
+    var prior = old.instances[i];
+    var refreshed = __sw_bake_font(
+      baked.sourcePath, prior.em, prior.atlas, baked.faceMask);
+    if (!refreshed) return false;
+    baked.instances.push(refreshed);
+  }
+  return true;
+}
+function __sw_font_instance_id(fontId, index) {
+  return fontId * 4294967296 + index + 1;
+}
+function __sw_font_instance(instanceId) {
+  if (!Number.isSafeInteger(instanceId) || instanceId <= 0) return null;
+  var fontId = Math.floor(instanceId / 4294967296);
+  var index = instanceId - fontId * 4294967296 - 1;
+  var font = __sw_font(fontId);
+  if (!font || !font.instances || index < 0 || index >= font.instances.length) return null;
+  return font.instances[index];
+}
+function stone_ensure_font_atlas_instance(fontId, pixelSize) {
+  var font = __sw_font(fontId);
+  if (!font || pixelSize < 1) return 0;
+  for (var i = 0; i < font.instances.length; i++) {
+    if (font.instances[i].em === pixelSize) return __sw_font_instance_id(fontId, i);
+  }
+  var baked = __sw_bake_font(font.sourcePath, pixelSize, 0, font.faceMask);
+  if (!baked) return 0;
+  font.instances.push(baked);
+  return __sw_font_instance_id(fontId, font.instances.length - 1);
+}
+function stone_get_font_instance_image(instanceId) {
+  var instance = __sw_font_instance(instanceId);
+  return instance && instance.atlas ? instance.atlas : 0;
+}
+function stone_get_font_atlas_instance_pixel_size(fontId, index) {
+  var font = __sw_font(fontId);
+  var instance = font && font.instances ? font.instances[index] : null;
+  return instance ? instance.em : 0;
+}
+function stone_get_font_atlas_instance_image(fontId, index) {
+  var font = __sw_font(fontId);
+  var instance = font && font.instances ? font.instances[index] : null;
+  return instance && instance.atlas ? instance.atlas : 0;
+}
+function stone_get_font_instance_size(instanceId, width, height) {
+  var instance = __sw_font_instance(instanceId);
+  var size = instance ? __SW.imageSizes[instance.atlas] : null;
+  if (!size) return false;
+  width[0] = size.w;
+  height[0] = size.h;
+  return size.w > 0 && size.h > 0;
+}
+function stone_get_font_instance_byte_len(instanceId) {
+  var instance = __sw_font_instance(instanceId);
+  var size = instance ? __SW.imageSizes[instance.atlas] : null;
+  return size ? size.w * size.h * 4 : 0;
+}
+function stone_get_font_instance_glyph_info(instanceId, face, ch, out) {
+  var instance = __sw_font_instance(instanceId);
+  if (!instance || face < 0 || face > 3) return false;
+  var g = instance.glyphs[face][ch];
+  if (!g) return false;
+  for (var i = 0; i < 9; i++) out[i] = g[i];
+  return true;
+}
+function stone_get_font_instance_pixel_size(instanceId) {
+  var instance = __sw_font_instance(instanceId);
+  return instance ? instance.em : 0;
+}
+function stone_font_atlas_instance_count(fontId) {
+  var font = __sw_font(fontId);
+  return font && font.instances ? font.instances.length : 0;
+}
 function stone_get_glyph_info_for(fontId, face, ch, out) {
   var f = __sw_font(fontId);
   if (!f || face < 0 || face > 3) return false;
   var g = f.glyphs[face][ch];
   if (!g) return false;
   for (var i = 0; i < 9; i++) out[i] = g[i];
+  return true;
+}
+function stone_get_font_unit_metrics(fontId, out) {
+  var f = __sw_font(fontId);
+  if (!f || !f.unitMetrics) return false;
+  for (var i = 0; i < 5; i++) out[i] = f.unitMetrics[i];
+  return true;
+}
+function stone_get_glyph_unit_metrics(fontId, face, ch, out) {
+  var f = __sw_font(fontId);
+  if (!f || face < 0 || face > 3) return false;
+  var g = f.unitGlyphs[face][ch];
+  if (!g) return false;
+  for (var i = 0; i < 5; i++) out[i] = g[i];
   return true;
 }
 function __sw_glyph_slot(cp) {
@@ -2595,7 +2806,7 @@ function stone_unload_sound(h) {
 // The web mixer has only sfx and music nodes, so music routes to musicGain and
 // every other bus shares sfxGain -- the topology is coarser than native, not
 // ignored.
-function stone_play_sound(h, bus, volume, speed, decay, looped) {
+function stone_play_sound(h, bus, volume, speed, decay, looped, spatial, pan) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
@@ -2605,7 +2816,15 @@ function stone_play_sound(h, bus, volume, speed, decay, looped) {
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
   g.gain.value = vol;
-  src.connect(g); g.connect(bus === 2 ? A.musicGain : A.sfxGain); src.start();
+  src.connect(g);
+  var output = g;
+  if (spatial && A.ctx.createStereoPanner) {
+    var panner = A.ctx.createStereoPanner();
+    panner.pan.value = Math.min(Math.max(pan, -1), 1);
+    g.connect(panner);
+    output = panner;
+  }
+  output.connect(bus === 2 ? A.musicGain : A.sfxGain); src.start();
   if (decay > 0) {
     var t = A.ctx.currentTime;
     g.gain.setValueAtTime(vol, t);
@@ -2683,15 +2902,22 @@ function stone_mesh_create(mode, verts, vc, stride, sizes, ac) {
 // (the shadowmap visibility fans + glow quads ride this). "fill" fans from
 // vertex 0; outline mode draws 1px-wide rotated line quads per edge.
 function stone_set_color_mask(r, g, b, a) { var gl = __SW.gl; if (gl) gl.colorMask(r, g, b, a); }
-// Draw-buffer list of the CURRENTLY BOUND FBO (per-FBO state in WebGL2, same
-// as GL): [A0, A1] during the MRT color pass, [A0] otherwise. Tracked on the
-// bound canvas so stone_clear_canvas knows when to narrow for the float clear.
-function stone_set_draw_buffers(count) {
+// Draw-buffer attachment BITMASK of the CURRENTLY BOUND FBO (per-FBO state in
+// WebGL2, same as GL): bit i enables COLOR_ATTACHMENT i and a clear bit below
+// the highest set one writes NONE there, so a batch can skip an attachment
+// rather than only truncate the list. 0b11 during the MRT color pass, 0b1
+// otherwise. The enabled COUNT is tracked on the bound canvas so
+// stone_clear_canvas knows when to narrow for the float clear. This tier still
+// attaches only color and id, so bits above the second are not reachable here.
+function stone_set_draw_buffer_mask(mask) {
   var gl = __SW.gl;
   var c = __SW.canvases[__SW.boundCanvas];
-  var n = count >= 2 ? 2 : 1;
-  gl.drawBuffers(n === 2 ? [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1] : [gl.COLOR_ATTACHMENT0]);
-  if (c) c.drawBufs = n;
+  var bits = (mask & 3) || 1;
+  var list = [];
+  if (bits & 1) list.push(gl.COLOR_ATTACHMENT0); else if (bits > 1) list.push(gl.NONE);
+  if (bits & 2) list.push(gl.COLOR_ATTACHMENT1);
+  gl.drawBuffers(list);
+  if (c) c.drawBufs = (bits & 2) ? 2 : 1;
 }
 
 // The (format, type, view, convert) readPixels shape for one pixel of canvas
@@ -3019,7 +3245,7 @@ function __rock_web_arm_raf(frameFn) {
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
 pub const JS_SESSION_RUNTIME: &str = r#"
 function __rock_session_new(schema_id) {
-  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null };
+  return { __rock_schema_id: schema_id, __rock_state: Object.create(null), __rock_initialized: Object.create(null), __rock_initializer_keys: Object.create(null), __rock_rng_state: null, __rock_presentation_rng_state: null };
 }
 function __rock_session_activate(session) {
   if (!session || !session.__rock_state || !session.__rock_initialized) throw new Error("invalid Rock Session");
@@ -3347,7 +3573,8 @@ function __rock_state_image_capture(kind, tick) {
   var id = ++__rock_state_image_next_id;
   var image = { id: id, kind: kind, tick: tick, schema_id: __rock_state_schema_id,
     layouts: Object.create(null), entries: Object.create(null), members: Object.create(null),
-    rng_state: __rock_active_session.__rock_rng_state };
+    rng_state: __rock_active_session.__rock_rng_state,
+    presentation_rng_state: __rock_active_session.__rock_presentation_rng_state };
   __ROCK_STATE_IMAGE_PLAN.entries.forEach(function (entry) { image.layouts[entry.identity] = entry.layout; });
   var seen = new Map();
   __ROCK_STATE_SCHEMA.forEach(function (entry) {
@@ -3392,6 +3619,7 @@ function __rock_state_image_materialize(image_id, kind) {
   __rock_state_image_validate_layouts(image);
   var candidate = __rock_session_new(image.schema_id);
   candidate.__rock_rng_state = image.rng_state;
+  candidate.__rock_presentation_rng_state = image.presentation_rng_state;
   var seen = new Map();
   var source = __rock_active_session;
   __ROCK_STATE_SCHEMA.forEach(function (entry) {
@@ -3476,6 +3704,8 @@ function __rock_state_image_session_commit(session_id) {
     __rock_session_activate(candidate);
     if (candidate.__rock_rng_state !== null && candidate.__rock_rng_state !== undefined
         && typeof __rock_rng_state_set === "function") __rock_rng_state_set(candidate.__rock_rng_state);
+    if (candidate.__rock_presentation_rng_state !== null && candidate.__rock_presentation_rng_state !== undefined
+        && typeof __rock_presentation_rng_state_set === "function") __rock_presentation_rng_state_set(candidate.__rock_presentation_rng_state);
     if (old_id >= 0 && old_id !== session_id) delete __rock_state_image_sessions[old_id];
     return true;
   } catch (e) {
@@ -3490,6 +3720,8 @@ function __rock_state_image_session_activate(session_id) {
   __rock_session_activate(session);
   if (session.__rock_rng_state !== null && session.__rock_rng_state !== undefined
       && typeof __rock_rng_state_set === "function") __rock_rng_state_set(session.__rock_rng_state);
+  if (session.__rock_presentation_rng_state !== null && session.__rock_presentation_rng_state !== undefined
+      && typeof __rock_presentation_rng_state_set === "function") __rock_presentation_rng_state_set(session.__rock_presentation_rng_state);
   return true;
 }
 function __rock_state_image_current_session() {

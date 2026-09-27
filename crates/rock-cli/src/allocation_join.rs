@@ -1,4 +1,5 @@
 use crate::Result;
+use skull::emitted_body_name;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 
@@ -41,6 +42,10 @@ struct Site<'a> {
     kind: &'a str,
     source: &'a str,
     body: &'a str,
+    result_use: &'a str,
+    result_uses: u32,
+    aggregate_type: &'a str,
+    aggregate_fields: u32,
     lua_body_line: Option<u32>,
     update_chain: Option<&'a str>,
     draw_chain: Option<&'a str>,
@@ -74,7 +79,7 @@ struct Activation<'a> {
 
 #[derive(Debug, Default)]
 struct JitEvidence<'a> {
-    traces: HashSet<u32>,
+    traces: HashSet<(u32, u32)>,
     ir: usize,
     sunk: bool,
     retained: bool,
@@ -83,18 +88,15 @@ struct JitEvidence<'a> {
     ops: HashSet<&'a str>,
 }
 
-fn emitted_body_name(line: &str) -> Option<&str> {
-    line.strip_prefix("function ")?
-        .split_once('(')
-        .map(|(name, _)| name)
-}
-
 fn parse_jit_trace<'a>(
     trace: &'a str,
     lua: &str,
 ) -> Result<BTreeMap<(String, u32), JitEvidence<'a>>> {
     let mut lines = trace.lines();
-    if lines.next() != Some("rock.jit-allocation-trace.v1") {
+    let format = lines.next();
+    let legacy = format == Some("rock.jit-allocation-trace.v1");
+    let current = format == Some("rock.jit-allocation-trace.v2");
+    if !legacy && !current {
         anyhow::bail!("JIT allocation trace has the wrong or missing format header");
     }
     let artifact = lines
@@ -104,7 +106,12 @@ fn parse_jit_trace<'a>(
     if artifact.is_empty() {
         anyhow::bail!("JIT allocation trace has an empty artifact path");
     }
-    if lines.next() != Some("trace\tir\tstate\top\tbody_start\tlua_line") {
+    let expected_header = if legacy {
+        "trace\tir\tstate\top\tbody_start\tlua_line"
+    } else {
+        "trace_generation\ttrace\tir\tstate\top\tbody_start\tlua_line"
+    };
+    if lines.next() != Some(expected_header) {
         anyhow::bail!("JIT allocation trace has the wrong column header");
     }
 
@@ -120,24 +127,31 @@ fn parse_jit_trace<'a>(
     let mut evidence: BTreeMap<(String, u32), JitEvidence<'a>> = BTreeMap::new();
     for line in lines {
         let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 6 {
+        if fields.len() != if legacy { 6 } else { 7 } {
             anyhow::bail!("malformed JIT allocation trace row `{line}`");
         }
-        let trace_id = fields[0].parse::<u32>()?;
-        let ir = fields[1].parse::<u32>()?;
-        if !seen.insert((trace_id, ir)) {
-            anyhow::bail!("JIT allocation trace repeats trace {trace_id} IR {ir}");
+        let (trace_generation, trace_index, ir_index) = if legacy {
+            (0, 0, 1)
+        } else {
+            (fields[0].parse::<u32>()?, 1, 2)
+        };
+        let trace_id = fields[trace_index].parse::<u32>()?;
+        let ir = fields[ir_index].parse::<u32>()?;
+        if !seen.insert((trace_generation, trace_id, ir)) {
+            anyhow::bail!(
+                "JIT allocation trace repeats generation {trace_generation} trace {trace_id} IR {ir}"
+            );
         }
-        let state = fields[2];
+        let state = fields[ir_index + 1];
         if state != "sunk" && state != "retained" {
             anyhow::bail!("JIT allocation trace has invalid state `{state}`");
         }
-        let op = fields[3];
+        let op = fields[ir_index + 2];
         if op.is_empty() {
             anyhow::bail!("JIT allocation trace has an empty IR operation");
         }
-        let body_start = fields[4].parse::<u32>()?;
-        let lua_line = fields[5].parse::<u32>()?;
+        let body_start = fields[ir_index + 3].parse::<u32>()?;
+        let lua_line = fields[ir_index + 4].parse::<u32>()?;
         if body_start == 0 || lua_line < body_start {
             anyhow::bail!(
                 "JIT allocation trace has invalid body/artifact lines {body_start}/{lua_line}"
@@ -155,7 +169,7 @@ fn parse_jit_trace<'a>(
         }
         let local_line = lua_line - emitted_start + 1;
         let entry = evidence.entry((body_name.clone(), local_line)).or_default();
-        entry.traces.insert(trace_id);
+        entry.traces.insert((trace_generation, trace_id));
         entry.ir += 1;
         entry.sunk |= state == "sunk";
         entry.retained |= state == "retained";
@@ -196,7 +210,7 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
         let trimmed = line.trim_start();
         if route.is_none() {
             let fields = trimmed.split('\t').collect::<Vec<_>>();
-            if (fields.len() == 4 || fields.len() == 5 || fields.len() == 6) && site_id(fields[0]) {
+            if matches!(fields.len(), 4 | 5 | 6 | 10) && site_id(fields[0]) {
                 let lua_body_line = fields
                     .get(4)
                     .map(|line| line.parse::<u32>())
@@ -221,6 +235,24 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                         "allocation manifest site {} has invalid local loop depth: {error}", fields[0]
                     ))?
                     .unwrap_or(0);
+                let result_use = fields.get(6).copied().unwrap_or("unknown");
+                let result_uses = fields
+                    .get(7)
+                    .map(|uses| uses.parse::<u32>())
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!(
+                        "allocation manifest site {} has invalid result use count: {error}", fields[0]
+                    ))?
+                    .unwrap_or(0);
+                let aggregate_type = fields.get(8).copied().unwrap_or("-");
+                let aggregate_fields = fields
+                    .get(9)
+                    .map(|count| count.parse::<u32>())
+                    .transpose()
+                    .map_err(|error| anyhow::anyhow!(
+                        "allocation manifest site {} has invalid aggregate field count: {error}", fields[0]
+                    ))?
+                    .unwrap_or(0);
                 if sites
                     .insert(
                         fields[0],
@@ -228,6 +260,10 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                             kind: fields[1],
                             source: fields[2],
                             body: fields[3],
+                            result_use,
+                            result_uses,
+                            aggregate_type,
+                            aggregate_fields,
                             lua_body_line,
                             update_chain: None,
                             draw_chain: None,
@@ -472,13 +508,13 @@ pub fn render_joined_report_with_jit(
         out,
         "{}",
         if jit.is_some() && frame_aware {
-            "rock.allocation-join.v9"
+            "rock.allocation-join.v13"
         } else if jit.is_some() {
-            "rock.allocation-join.v7"
+            "rock.allocation-join.v11"
         } else if frame_aware {
-            "rock.allocation-join.v8"
+            "rock.allocation-join.v12"
         } else {
-            "rock.allocation-join.v6"
+            "rock.allocation-join.v10"
         }
     )?;
     writeln!(out, "frames\t{frames}")?;
@@ -488,9 +524,9 @@ pub fn render_joined_report_with_jit(
     writeln!(out, "filter\t{}", filter.as_str())?;
     writeln!(out, "active_sites\t{}", hits.len())?;
     let base_header = if frame_aware {
-        "hits/frame\thits\tframe_hits\tactive_frames\tframe_coverage\thits/active_frame\tmax_hits/frame\toutside_hits\troute\tstructural_loop_depth\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
+        "hits/frame\thits\tframe_hits\tactive_frames\tframe_coverage\thits/active_frame\tmax_hits/frame\toutside_hits\troute\tstructural_loop_depth\tkind\tresult_use\tresult_uses\taggregate_type\taggregate_fields\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
     } else {
-        "hits/frame\thits\troute\tstructural_loop_depth\tkind\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
+        "hits/frame\thits\troute\tstructural_loop_depth\tkind\tresult_use\tresult_uses\taggregate_type\taggregate_fields\tsource\tbody\tlua_body_line\tlua_artifact_line\tcall_chain\tdirect_caller_count\tdirect_callers\tid"
     };
     if jit.is_some() {
         writeln!(
@@ -583,10 +619,14 @@ pub fn render_joined_report_with_jit(
         }
         write!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             route,
             structural_loop_depth,
             site.kind,
+            site.result_use,
+            site.result_uses,
+            site.aggregate_type,
+            site.aggregate_fields,
             site.source,
             site.body,
             site.lua_body_line
@@ -723,11 +763,50 @@ sites	1
 aaaaaaaaaaaaaaaa	11	11	3	5	0
 "#;
 
+    const CLASSIFIED_MANIFEST: &str = r#"emitted allocation-capable Lua report: 1 bodies, 1 direct sites
+
+emitted site manifest: 1 sites
+  bbbbbbbbbbbbbbbb	struct-construction	game.rock:20	draw_leaf	2	0	direct-call	1	Carrier	3
+
+route frame.draw: 1 roots, 1 reachable bodies, 1 allocation-capable sites, 0 opaque boundaries
+  bbbbbbbbbbbbbbbb struct-construction at game.rock:20 via draw_root -> draw_leaf	callers	draw_root
+"#;
+
+    const CLASSIFIED_ACTIVATION: &str = r#"rock.allocation-activation.v2
+frames	4
+sites	1
+bbbbbbbbbbbbbbbb	20	18	3	9	2
+"#;
+
+    #[test]
+    fn join_preserves_result_use_and_aggregate_shape_classification() {
+        let report = render_joined_report(
+            CLASSIFIED_MANIFEST,
+            CLASSIFIED_ACTIVATION,
+            Some("draw"),
+            None,
+        )
+        .expect("joined classified allocation report");
+        let mut lines = report.lines().skip(4);
+        let header = lines.next().expect("joined header").split('\t').collect::<Vec<_>>();
+        let row = lines.next().expect("joined row").split('\t').collect::<Vec<_>>();
+        let value = |name: &str| {
+            let index = header.iter().position(|column| *column == name)
+                .unwrap_or_else(|| panic!("missing {name} column: {report}"));
+            row[index]
+        };
+
+        assert_eq!(value("result_use"), "direct-call");
+        assert_eq!(value("result_uses"), "1");
+        assert_eq!(value("aggregate_type"), "Carrier");
+        assert_eq!(value("aggregate_fields"), "3");
+    }
+
     #[test]
     fn join_retains_the_exact_replay_observation_population() {
         let report = render_joined_report(MANIFEST, OBSERVATION_ACTIVATION, Some("update"), None)
             .expect("joined observation-scoped activation report");
-        assert!(report.starts_with("rock.allocation-join.v8\n"));
+        assert!(report.starts_with("rock.allocation-join.v12\n"));
         assert!(report.contains("frames\t3\nobservations\t329,330,331\nfilter\tupdate\n"));
         assert!(report.contains("3.6667\t11\t11\t3\t1.0000\t3.6667\t5\t0"));
     }
@@ -841,6 +920,17 @@ end
     }
 
     #[test]
+    fn join_resolves_callee_bound_body_and_jit_lines() {
+        let lua = "-- runtime preamble\n__rock_mk_draw_leaf = function(callee) return function()\n  local v = __rock_alloc_hit(\"bbbbbbbbbbbbbbbb\", callee())\nend end\ndraw_leaf = __rock_mk_draw_leaf(callee)\n";
+        let trace = "rock.jit-allocation-trace.v1\nartifact\t/generated/main.lua\ntrace\tir\tstate\top\tbody_start\tlua_line\n1\t4\tsunk\tTNEW\t2\t3\n";
+        let report = render_joined_report_with_jit(
+            MANIFEST, ACTIVATION, Some("draw"), Some(lua), Some(trace),
+        ).expect("callee-bound allocation join");
+        assert!(report.contains("draw_leaf\t2\t3\tdraw_root -> draw_leaf"), "{report}");
+        assert!(report.contains("sunk\tnone\t1\t1\tTNEW"), "{report}");
+    }
+
+    #[test]
     fn join_classifies_observed_jit_allocations_as_sunk_or_retained() {
         let lua = r#"-- runtime preamble
 function draw_leaf()
@@ -862,9 +952,33 @@ trace	ir	state	op	body_start	lua_line
         )
         .expect("joined JIT allocation evidence");
 
-        assert!(report.starts_with("rock.allocation-join.v7\n"));
+        assert!(report.starts_with("rock.allocation-join.v11\n"));
         assert!(report.contains("jit_state\tjit_class\tjit_traces\tjit_ir\tjit_ops"));
         assert!(report.contains("mixed\tobject\t2\t2\tTNEW"));
+    }
+
+    #[test]
+    fn jit_join_accepts_reused_trace_ids_when_generations_differ() {
+        let lua = r#"function draw_leaf()
+  local v = __rock_alloc_hit("bbbbbbbbbbbbbbbb", __rock_vec_new())
+end
+"#;
+        let trace = r#"rock.jit-allocation-trace.v2
+artifact	/generated/main.lua
+trace_generation	trace	ir	state	op	body_start	lua_line
+0	1	4	sunk	TNEW	1	2
+1	1	4	retained	TNEW	1	2
+"#;
+        let report = render_joined_report_with_jit(
+            MANIFEST,
+            ACTIVATION,
+            Some("draw"),
+            Some(lua),
+            Some(trace),
+        )
+        .expect("joined generation-aware JIT allocation evidence");
+
+        assert!(report.contains("mixed\tobject\t2\t2\tTNEW"), "{report}");
     }
 
     #[test]

@@ -1294,11 +1294,9 @@ fn definition_of_stdlib_type_resolves_to_a_real_file() {
     );
 }
 
-// `backend_sibling_mismatch` is whole-project and decl-level. The live path
-// must publish it, and -- unlike `unused_fn` -- for a `lib` too: a library's
-// backend siblings have to agree just as much as a game's.
+// `backend_sibling_mismatch` is an explicit parity audit, not a bare LSP lint.
 #[test]
-fn update_publishes_backend_sibling_mismatch_warning() {
+fn update_omits_backend_sibling_mismatch_without_explicit_selection() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
     std::fs::write(
@@ -1313,12 +1311,10 @@ fn update_publishes_backend_sibling_mismatch_warning() {
     let diags: Vec<_> =
         per_file.into_iter().filter(|(p, _)| p == &m).flat_map(|(_, d)| d).collect();
     assert!(
-        diags.iter().any(|d| d.message.contains("backend sibling mismatch")
-            && d.code == Some(lsp_types::NumberOrString::String(
-                "backend_sibling_mismatch".to_string()
-            ))
-            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
-        "live path must publish the backend_sibling_mismatch warning: {diags:?}"
+        diags.iter().all(|d| d.code != Some(lsp_types::NumberOrString::String(
+            "backend_sibling_mismatch".to_string()
+        ))),
+        "bare LSP lint must omit backend_sibling_mismatch: {diags:?}"
     );
 }
 

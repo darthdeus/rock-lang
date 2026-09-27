@@ -127,6 +127,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
             };
             ast.items.push(Item {
                 annotations: vec![mk_anno("pure"), mk_anno("inline")],
+                vis: None,
                 is_global_write: false,
                 span: sp,
                 kind: ItemKind::Function(FunctionDef {
@@ -170,12 +171,14 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
         | ExprKind::ContinueExpr
         | ExprKind::SiblingFieldRef(_)
         | ExprKind::FunctionRef(_)
-        | ExprKind::AnaphoricIdent(_) => {}
+        | ExprKind::AnaphoricIdent(_)
+        | ExprKind::Path { .. } => {}
 
         ExprKind::Paren(x)
         | ExprKind::As(x, _)
         | ExprKind::Bitcast(x, _)
         | ExprKind::TypeAscription(x, _)
+        | ExprKind::ParenAscription(x, _)
         | ExprKind::Not(x)
         | ExprKind::BitNot(x)
         | ExprKind::UnaryMinus(x)
@@ -213,6 +216,10 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
             out.extend(fields.iter().map(|(_, v)| *v));
         }
         ExprKind::EnumVariantRecord { fields, .. } => {
+            out.extend(fields.iter().map(|(_, v)| *v));
+        }
+        ExprKind::PathStructLiteral { bases, fields, .. } => {
+            out.extend(bases.iter().copied());
             out.extend(fields.iter().map(|(_, v)| *v));
         }
         ExprKind::ReturnExpr(o) | ExprKind::Yield(o) => out.extend(o.iter().copied()),

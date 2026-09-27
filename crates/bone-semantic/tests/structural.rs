@@ -25,6 +25,141 @@ fn check(src: &str) -> Result<bone_semantic::inference::Workspace, CompilerError
     semantic_pass(&mut module)
 }
 
+#[test]
+fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let mut module = parse_module_with_dialect(
+        "fn main() { print(1) }",
+        Ustr::from("main.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy module");
+    module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: Ustr::from("game"),
+            aliases: vec![],
+        }],
+    };
+
+    let ws = semantic_pass_with_aliases(&mut [module], &aliases).expect("semantic pass");
+    assert!(ws.ns.packages.is_empty());
+    assert!(ws.fragment_scopes.is_empty());
+}
+
+#[test]
+fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let mut provider = parse_module_with_dialect(
+        "pub struct Provider {}",
+        Ustr::from("provider.rock"),
+        Dialect::V1,
+    )
+    .expect("parse v1 provider");
+    provider.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "provider".to_string(),
+    });
+
+    let legacy_src = "use provider::Provider;\nfn main() {}";
+    let legacy = parse_module_with_dialect(
+        legacy_src,
+        Ustr::from("legacy.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy consumer");
+
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: Ustr::from("provider"),
+            aliases: vec![],
+        }],
+    };
+    let err = semantic_pass_with_aliases(&mut [provider, legacy], &aliases)
+        .expect_err("a package-less legacy use must be rejected");
+
+    assert_eq!(
+        err.message,
+        "legacy item-level `use` needs an owning package to resolve its path"
+    );
+    let label = err.labels.first().expect("the rejected use is labeled");
+    assert_eq!(label.span.file, Ustr::from("legacy.rock"));
+    let covered = &legacy_src[label.span.offset_range.0..label.span.offset_range.1];
+    assert!(covered.starts_with("use provider::Provider"), "labeled span: {covered:?}");
+}
+
+#[test]
+fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let src = "fn f(n: int) -> int {\n    match n {\n        Nope::A => 1,\n        _ => 0,\n    }\n}";
+    let mut module = parse_module_with_dialect(src, Ustr::from("app.rock"), Dialect::V1).expect("parse v1 module");
+    module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "app".to_string(),
+    });
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: Ustr::from("app"),
+            aliases: vec![],
+        }],
+    };
+
+    let ws = semantic_pass_with_aliases(&mut [module], &aliases).expect("semantic pass");
+    let err = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.lowering_errors.values().flatten())
+        .find(|e| e.message.contains("did not resolve"))
+        .expect("the unbound pattern prefix is a lowering error");
+    let label = err.labels.first().expect("the unresolved pattern is labeled");
+    assert_eq!(label.span.file, Ustr::from("app.rock"));
+    let covered = &src[label.span.offset_range.0..label.span.offset_range.1];
+    assert_eq!(covered, "Nope::A");
+}
+
+#[test]
+fn legacy_only_workspace_keeps_the_std_namespace() {
+    use skull_parser::Dialect;
+
+    let std_module = skull_parser::parse_module_with_dialect(
+        "fn print() {}",
+        Ustr::from("<stdlib>/fixture.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse stdlib module");
+    let mut user_module = skull_parser::parse_module_with_dialect(
+        "fn main() {}",
+        Ustr::from("main.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy module");
+    user_module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+
+    let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
+    let std_root = ws
+        .ns
+        .package(u32::MAX)
+        .and_then(|package| package.node(Ustr::from("")))
+        .expect("stdlib namespace root");
+    assert!(std_root.owned_callables.contains_key(&Ustr::from("print")));
+    assert!(ws.fragment_scopes.is_empty());
+}
+
 /// Measurement harness, not a guard: runs `unified.rock` (or the file in
 /// `BONE_STDLIB_PROBE`) through `semantic_pass` and panics with the first
 /// strict-lowering wall. Run with `--ignored` to see the next stdlib gap.
@@ -99,6 +234,32 @@ fn leaf_type_mismatch_says_expected_found() {
     assert!(
         msgs.iter().any(|m| m.contains("expected `int`, found `string`")),
         "expected an expected/found message, got: {msgs:?}"
+    );
+}
+
+// Overload scoring and `coerce` try unifications quietly and discard the
+// failures; a unify that can be reported must still name both types. Here the
+// nullable-target coerce fails a quiet trial before the reported unify.
+#[test]
+fn nominal_mismatch_after_a_quiet_trial_names_both_types() {
+    let msgs = main_body_error_messages(
+        "struct Foo { x: int }\nstruct Bar { x: int }\nfn main() { let a: Foo? = Bar { x: 1 } }",
+    );
+    assert!(
+        msgs.iter().any(|m| m == "type mismatch: expected `Foo`, found `Bar`"),
+        "expected the nominal mismatch message, got: {msgs:?}"
+    );
+}
+
+#[test]
+fn generic_constructor_mismatch_names_both_types() {
+    let msgs = main_body_error_messages(
+        "struct Foo { x: int }\nfn main() { let a: [int] = Foo { x: 1 } }",
+    );
+    assert!(
+        msgs.iter().any(|m| m
+            == "type mismatch: expected `[int]`, found `Foo` (different type constructors)"),
+        "expected the constructor mismatch message, got: {msgs:?}"
     );
 }
 
@@ -328,6 +489,69 @@ fn nested_block_does_not_leak_into_outer_statements() {
         statements.len(),
         2,
         "inner block's `let b` leaked into the outer block's statement range"
+    );
+}
+
+// The same contiguity trap for parameters: the lambda default's own `x`
+// binding is allocated between `f` and `k`, and must stay out of the fn's
+// parameter range. With the lambda default last it never could.
+#[test]
+fn lambda_param_default_does_not_leak_into_fn_params() {
+    for (src, names) in [
+        ("fn f(v: int, g: fn(int) -> int = x => x, k: int = 1) -> int { g(v) + k }", ["v", "g", "k"]),
+        ("fn f(v: int, k: int = 1, g: fn(int) -> int = x => x) -> int { g(v) + k }", ["v", "k", "g"]),
+    ] {
+        let ws = check(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        let mid = ws.modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("one user module")
+            .id;
+        let hir = ws.module(mid);
+        let (f_idx, _) = hir.functions.iter().next().expect("one function");
+        let fbody = &hir.bodies[&BodyOwner::Function(f_idx)];
+        let got: Vec<_> = fbody
+            .param_bindings
+            .clone()
+            .map(|b| fbody.binding_arena[b].name.to_string())
+            .collect();
+        assert_eq!(got, names, "{src}");
+    }
+}
+
+// The same contiguity trap for interpolation parts: the hole's `if` holds its
+// own interpolated string, whose parts are allocated while the outer parts are
+// being collected. The outer string has exactly 2 parts (`"a: "` and the `if`);
+// a leaked inner `{x}` part printed the inner string twice.
+#[test]
+fn nested_interpolation_does_not_leak_into_outer_parts() {
+    use bone_semantic::hir::{Expr, InterpPart};
+    let src = "fn f(x: int, ok: bool) -> string {\n    \"a: {if ok { \"{x}\" } else { \"no\" }}\"\n}";
+    let ws = check(src).unwrap();
+
+    let mid = ws.modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let hir = ws.module(mid);
+
+    let (f_idx, _) = hir.functions.iter().next().expect("one function");
+    let fbody = &hir.bodies[&BodyOwner::Function(f_idx)];
+    let body = fbody.expr_arena[fbody.root.expect("rock function has a body")];
+    let Expr::Block { tail: Some(tail), .. } = body else {
+        panic!("function body should be a block with a tail, got {:?}", body);
+    };
+    let Expr::InterpolatedString(parts) = fbody.expr_arena[tail] else {
+        panic!("tail should be an interpolated string, got {:?}", fbody.expr_arena[tail]);
+    };
+
+    let parts: Vec<_> = parts.map(|p| fbody.interp_part_arena[p].clone()).collect();
+    assert_eq!(parts.len(), 2, "inner interpolation parts leaked into the outer range: {parts:?}");
+    assert!(matches!(parts[0], InterpPart::Literal(s) if s == "a: "), "{parts:?}");
+    assert!(
+        matches!(parts[1], InterpPart::Value { expr, .. } if matches!(fbody.expr_arena[expr], Expr::If { .. })),
+        "{parts:?}"
     );
 }
 
@@ -1541,11 +1765,20 @@ fn ref_finished_before_a_coroutine_suspension_is_allowed() {
 }
 
 #[test]
-fn implicit_identity_borrow_cannot_live_across_a_coroutine_suspension() {
+fn implicit_identity_parameter_is_checked_by_the_backend_at_suspension() {
     let src = "struct Player { hp: int }\nco fn bad(player: Player) -> Coroutine<int> { yield 1  player.hp = 1 }";
     assert!(
-        bone_rejects(src),
-        "an identity parameter cannot be retained in a coroutine frame"
+        !bone_rejects(src),
+        "the selected backend checks whether the identity parameter is borrowed"
+    );
+}
+
+#[test]
+fn locally_owned_identity_can_live_across_a_coroutine_suspension() {
+    let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  yield 1  player.hp = 2 }";
+    assert!(
+        !bone_rejects(src),
+        "an owned identity in a coroutine frame remains valid across yield"
     );
 }
 
@@ -1880,7 +2113,7 @@ fn unary_minus_miss_reads_as_operator_error() {
 // Float literals in annotation args must survive lowering as
 // `AnnoValue::Float` (incl. the unary-minus form) -- the value-test
 // expectation surface (`@test(returns = 1.5)`,
-// docs/multi-backend-testing-plan.md V1) reads them; `Other` would make
+// docs/backends.md) reads them; `Other` would make
 // float expectations silently unreadable.
 #[test]
 fn annotation_float_args_lower_as_float() {
@@ -2037,4 +2270,267 @@ fn use_it() -> int {
         msgs.iter().any(|m| m.contains("ambiguous fn-value reference `pick`")),
         "a real overload as a value must stay ambiguous, got: {msgs:?}"
     );
+}
+
+/// The backend-variant collapse keeps each signature group together, in
+/// order of first appearance. A group with a repeated backend is not
+/// collapsed, so its members stay adjacent: the "available overloads" list
+/// is in collapse order, not declaration order.
+#[test]
+fn backend_variant_groups_list_in_first_appearance_order() {
+    let src = r#"
+inline(lua) fn g(x: int) -> int = """return x"""
+fn g(x: string) -> int { return 0 }
+inline(lua) fn g(x: int) -> int = """return x"""
+extern(js) fn g(x: bool, y: int) -> int
+fn main() {
+    let _ = g(1.5)
+}
+"#;
+    let msgs = check(src)
+        .expect("semantic_pass")
+        .inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten().cloned().collect::<Vec<_>>())
+        .map(|e| e.message)
+        .collect::<Vec<_>>();
+    let expected = "No overload for `g` with argument types (float)\navailable overloads:\n  \
+                    g(x: int) -> int\n  g(x: int) -> int\n  g(x: string) -> int\n  g(x: bool, y: int) -> int";
+    assert!(msgs.iter().any(|m| m == expected), "{msgs:?}");
+}
+
+#[test]
+fn legacy_caller_field_access_enforces_v1_visibility_and_allows_legacy() {
+    use bone_semantic::inference::{field_access, AccessDenied, AccessSite, FieldAccessNeed, Gamma};
+    use bone_semantic::semantic_passes::semantic_pass_with_aliases;
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let v1_src = r#"
+pub struct Actor {
+    pub health: int,
+    pub private(set) mana: int,
+    private secret: int,
+}
+"#;
+    let mut v1_mod = parse_module_with_dialect(v1_src, ustr("lib.rock"), Dialect::V1)
+        .expect("parse v1");
+    v1_mod.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+
+    let legacy_src = r#"
+struct LegacyActor {
+    health: int,
+}
+"#;
+    let legacy_mod = parse_module_with_dialect(legacy_src, ustr("legacy.rock"), Dialect::Legacy)
+        .expect("parse legacy");
+
+    let mut aliases = bone_core::modules::NsAliases::default();
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 1,
+        self_name: ustr("game"),
+        aliases: vec![],
+    });
+
+    let mut modules = vec![v1_mod, legacy_mod];
+    let ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
+
+    let mid = ws.modules.iter().find(|m| m.file == ustr("lib.rock")).unwrap().id;
+    let body = bone_core::hir::Body::default();
+    let gamma = Gamma::new(&ws, &body, mid);
+
+    let v1_key = ustr("game::Actor");
+    let legacy_site = AccessSite {
+        package: None,
+        module_path: &[],
+    };
+
+    // Public field: legacy can read and write
+    assert!(field_access(&gamma, v1_key, ustr("health"), legacy_site, FieldAccessNeed::Read).is_ok());
+    assert!(field_access(&gamma, v1_key, ustr("health"), legacy_site, FieldAccessNeed::Write).is_ok());
+
+    // private(set) field: legacy can read
+    assert!(field_access(&gamma, v1_key, ustr("mana"), legacy_site, FieldAccessNeed::Read).is_ok());
+
+    // private(set) field: legacy write is denied
+    let write_mana = field_access(&gamma, v1_key, ustr("mana"), legacy_site, FieldAccessNeed::Write);
+    assert!(
+        matches!(write_mana, Err(AccessDenied::Privilege { need: FieldAccessNeed::Write, .. })),
+        "legacy caller writing private(set) field must be denied"
+    );
+
+    // private field: legacy read and write are both denied
+    let read_secret = field_access(&gamma, v1_key, ustr("secret"), legacy_site, FieldAccessNeed::Read);
+    assert!(
+        matches!(read_secret, Err(AccessDenied::Privilege { need: FieldAccessNeed::Read, .. })),
+        "legacy caller reading private field must be denied"
+    );
+    let write_secret = field_access(&gamma, v1_key, ustr("secret"), legacy_site, FieldAccessNeed::Write);
+    assert!(
+        matches!(write_secret, Err(AccessDenied::Privilege { need: FieldAccessNeed::Write, .. })),
+        "legacy caller writing private field must be denied"
+    );
+
+    // Legacy-owned struct: legacy caller has unrestricted read/write
+    let legacy_key = ustr("LegacyActor");
+    assert!(field_access(&gamma, legacy_key, ustr("health"), legacy_site, FieldAccessNeed::Read).is_ok());
+    assert!(field_access(&gamma, legacy_key, ustr("health"), legacy_site, FieldAccessNeed::Write).is_ok());
+
+    // v1 caller within game package: can access private and private(set) fields
+    let v1_site = AccessSite {
+        package: Some(1),
+        module_path: &[],
+    };
+    assert!(field_access(&gamma, v1_key, ustr("mana"), v1_site, FieldAccessNeed::Write).is_ok());
+    assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Read).is_ok());
+    assert!(field_access(&gamma, v1_key, ustr("secret"), v1_site, FieldAccessNeed::Write).is_ok());
+}
+
+#[test]
+fn structural_interface_conformance_rejects_private_set_field_for_writable_interface() {
+    use bone_semantic::inference::{coerce_to_interface, Gamma};
+    use bone_semantic::semantic_passes::semantic_pass_with_aliases;
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let lib_src = r#"
+pub struct Actor {
+    pub health: int,
+    pub private(set) mana: int,
+    private secret: int,
+}
+"#;
+    let mut lib_mod = parse_module_with_dialect(lib_src, ustr("lib.rock"), Dialect::V1)
+        .expect("parse lib");
+    lib_mod.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+
+    let consumer_src = r#"
+pub struct WritableMana {
+    pub mana: int,
+}
+pub struct WritableHealth {
+    pub health: int,
+}
+pub struct MissingField {
+    pub missing: int,
+}
+pub struct ReadableSecret {
+    pub secret: int,
+}
+"#;
+    let mut consumer_mod = parse_module_with_dialect(consumer_src, ustr("consumer.rock"), Dialect::V1)
+        .expect("parse consumer");
+    consumer_mod.package = Some(rock_core::source_code::PackageTag {
+        id: 2,
+        self_name: "consumer".to_string(),
+    });
+
+    let mut aliases = bone_core::modules::NsAliases::default();
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 1,
+        self_name: ustr("game"),
+        aliases: vec![],
+    });
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 2,
+        self_name: ustr("consumer"),
+        aliases: vec![(ustr("game"), 1)],
+    });
+
+    let mut modules = vec![lib_mod, consumer_mod];
+    let mut ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
+
+    let iface_mana = ustr("consumer::WritableMana");
+    let iface_health = ustr("consumer::WritableHealth");
+    let iface_missing = ustr("consumer::MissingField");
+    let iface_secret = ustr("consumer::ReadableSecret");
+    ws.interface_names.insert(iface_mana);
+    ws.interface_names.insert(iface_health);
+    ws.interface_names.insert(iface_missing);
+    ws.interface_names.insert(iface_secret);
+
+    let consumer_mid = ws.modules.iter().find(|m| m.file == ustr("consumer.rock")).unwrap().id;
+    let body = bone_core::hir::Body::default();
+    let mut gamma = Gamma::new(&ws, &body, consumer_mid);
+
+    let actor_ty = gamma.nominal_app(ustr("game::Actor"), &[], Span::unknown());
+
+    // Coercing Actor to WritableHealth is allowed: `health` is pub read/write
+    let ok_res = coerce_to_interface(&mut gamma, actor_ty, iface_health, Span::unknown());
+    assert!(ok_res.is_ok(), "coercing to interface with pub read/write field must succeed");
+
+    // Coercing Actor to WritableMana must fail: `mana` is pub private(set), not writable from consumer
+    let err_res = coerce_to_interface(&mut gamma, actor_ty, iface_mana, Span::unknown());
+    assert!(
+        err_res.is_err(),
+        "coercing Actor to WritableMana must fail because mana is private(set)"
+    );
+    let err = err_res.unwrap_err();
+    assert_eq!(
+        err.message,
+        "field `mana` on struct `Actor` is not writable from this module"
+    );
+
+    // A genuinely absent source field gets the interface-specific diagnostic.
+    let missing_err = coerce_to_interface(&mut gamma, actor_ty, iface_missing, Span::unknown())
+        .expect_err("coercing Actor to an interface with a missing field must fail");
+    assert_eq!(
+        missing_err.message,
+        "type game::Actor does not have required field `missing` of interface `consumer::MissingField`"
+    );
+
+    // A present but inaccessible source field keeps the access diagnostic.
+    let secret_err = coerce_to_interface(&mut gamma, actor_ty, iface_secret, Span::unknown())
+        .expect_err("coercing Actor to an interface with a private field must fail");
+    assert_eq!(
+        secret_err.message,
+        "field `secret` on struct `Actor` is not accessible from this module"
+    );
+}
+
+// Argument-to-parameter matching reports its reason when the call's callee is
+// fixed; overload scoring discards the same rejections without a message.
+#[test]
+fn argument_matching_errors_name_the_parameter() {
+    let cases = [
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, 2, 3) }",
+            "Too many positional arguments, expected at most 2",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1) }",
+            "Missing required argument for parameter `b`",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, a: 2) }",
+            "Multiple values provided for parameter `a`",
+        ),
+        (
+            "fn two(a: int, b: int) -> int { a + b }\nfn main() { two(1, c: 2) }",
+            "unknown parameter `c`",
+        ),
+        (
+            "struct ABC { a: int, b: int, c: int }\nfn two(a: int, b: int) -> int { a + b }\n\
+             fn main() { let p = ABC { a: 1, b: 2, c: 3 }\n two(..p) }",
+            "spread field `c` names no parameter of the callee",
+        ),
+        (
+            "struct AB { a: int, b: int }\nfn two(a: int, b: int) -> int { a + b }\n\
+             fn main() { let p = AB { a: 1, b: 2 }\n two(a: 9, ..p) }",
+            "parameter `a` is given before the spread that also supplies it",
+        ),
+        (
+            "struct AB { a: int, b: int }\nstruct AC { a: int, c: int }\n\
+             fn three(a: int, b: int, c: int) -> int { a + b + c }\n\
+             fn main() { let x = AB { a: 1, b: 2 }\n let y = AC { a: 8, c: 3 }\n three(..x, ..y) }",
+            "two spreads both supply parameter `a`",
+        ),
+    ];
+    for (src, want) in cases {
+        let msgs = all_err_msgs(src);
+        assert!(msgs.iter().any(|m| m == want), "expected `{want}` for\n{src}\ngot: {msgs:?}");
+    }
 }

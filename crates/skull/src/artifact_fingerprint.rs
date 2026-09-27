@@ -19,7 +19,7 @@ use skull_mir::monoty::MonoInterner;
 use skull_mir::state_schema::{StateKind, StateSchema};
 use ustr::Ustr;
 
-const FINGERPRINT_VERSION: &str = "semantic-artifact-v1";
+const FINGERPRINT_VERSION: &str = "semantic-artifact-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FingerprintError(pub String);
@@ -60,6 +60,7 @@ pub fn compute(
     h.string(FINGERPRINT_VERSION);
     h.string(renderer);
     h.string(&ws.comptime_inputs.channel);
+    h.string(&ws.comptime_inputs.modules_mode);
 
     let mut volatile = volatile_vars
         .iter()
@@ -100,7 +101,18 @@ pub fn compute(
         h.boolean(entry.compatibility.capture.complete);
         h.len(entry.compatibility.capture.fields.len());
         for field in &entry.compatibility.capture.fields {
-            h.string(field.name.as_str());
+            match &field.identity {
+                skull_mir::code_identity::CaptureIdentity::Binding { site, projection } => {
+                    h.string("binding");
+                    h.string(site.file.as_str());
+                    h.u64(site.offset);
+                    h.string(projection.as_str());
+                }
+                skull_mir::code_identity::CaptureIdentity::Generated { role } => {
+                    h.string("generated");
+                    h.string(role.as_str());
+                }
+            }
             h.string(match field.mode {
                 CaptureMode::ByValue => "by-value",
                 CaptureMode::Shared => "shared",
@@ -443,7 +455,7 @@ fn state_kind(kind: StateKind) -> &'static str {
 
 #[derive(Default)]
 struct CanonicalHasher {
-    state: u64,
+    bytes: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -472,14 +484,27 @@ mod tests {
     fn canonical_comptime_value_is_an_identity_input() {
         assert_ne!(read_fingerprint("A"), read_fingerprint("B"));
     }
+
+    #[test]
+    fn xxhash64_matches_reference_vectors() {
+        assert_eq!(xxhash64(b""), 0xef46_db37_51d8_e999);
+        assert_eq!(xxhash64(b"a"), 0xd24e_c4f1_a98c_6e5b);
+        assert_eq!(xxhash64(b"hello"), 0x26c7_827d_889f_6da3);
+        assert_eq!(
+            xxhash64(b"01234567890123456789012345678901"),
+            0xe5cc_9f41_1ea1_10ba
+        );
+        assert_eq!(
+            xxhash64(b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+            0x7639_d419_de61_4eed
+        );
+    }
 }
 
 impl CanonicalHasher {
     fn string(&mut self, value: &str) {
         self.len(value.len());
-        for byte in value.as_bytes() {
-            self.byte(*byte);
-        }
+        self.bytes.extend_from_slice(value.as_bytes());
     }
 
     fn len(&mut self, value: usize) {
@@ -487,9 +512,7 @@ impl CanonicalHasher {
     }
 
     fn u64(&mut self, value: u64) {
-        for byte in value.to_le_bytes() {
-            self.byte(byte);
-        }
+        self.bytes.extend_from_slice(&value.to_le_bytes());
     }
 
     fn i64(&mut self, value: i64) {
@@ -509,14 +532,81 @@ impl CanonicalHasher {
     }
 
     fn byte(&mut self, value: u8) {
-        if self.state == 0 {
-            self.state = 0xcbf29ce484222325;
-        }
-        self.state ^= u64::from(value);
-        self.state = self.state.wrapping_mul(0x100000001b3);
+        self.bytes.push(value);
     }
 
     fn finish(self) -> u64 {
-        self.state
+        xxhash64(&self.bytes)
     }
+}
+
+fn xxhash64(bytes: &[u8]) -> u64 {
+    const P1: u64 = 0x9e37_79b1_85eb_ca87;
+    const P2: u64 = 0xc2b2_ae3d_27d4_eb4f;
+    const P3: u64 = 0x1656_67b1_9e37_79f9;
+    const P4: u64 = 0x85eb_ca77_c2b2_ae63;
+    const P5: u64 = 0x27d4_eb2f_1656_67c5;
+
+    let read_u64 = |chunk: &[u8]| u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+    let round = |acc: u64, input: u64| {
+        acc.wrapping_add(input.wrapping_mul(P2))
+            .rotate_left(31)
+            .wrapping_mul(P1)
+    };
+    let merge_round = |acc: u64, value: u64| {
+        (acc ^ round(0, value)).wrapping_mul(P1).wrapping_add(P4)
+    };
+
+    let mut offset = 0;
+    let mut hash = if bytes.len() >= 32 {
+        let mut v1 = P1.wrapping_add(P2);
+        let mut v2 = P2;
+        let mut v3 = 0;
+        let mut v4 = 0_u64.wrapping_sub(P1);
+        while offset + 32 <= bytes.len() {
+            v1 = round(v1, read_u64(&bytes[offset..offset + 8]));
+            v2 = round(v2, read_u64(&bytes[offset + 8..offset + 16]));
+            v3 = round(v3, read_u64(&bytes[offset + 16..offset + 24]));
+            v4 = round(v4, read_u64(&bytes[offset + 24..offset + 32]));
+            offset += 32;
+        }
+        let merged = v1
+            .rotate_left(1)
+            .wrapping_add(v2.rotate_left(7))
+            .wrapping_add(v3.rotate_left(12))
+            .wrapping_add(v4.rotate_left(18));
+        merge_round(
+            merge_round(merge_round(merge_round(merged, v1), v2), v3),
+            v4,
+        )
+    } else {
+        P5
+    };
+
+    hash = hash.wrapping_add(bytes.len() as u64);
+    while offset + 8 <= bytes.len() {
+        hash ^= round(0, read_u64(&bytes[offset..offset + 8]));
+        hash = hash.rotate_left(27).wrapping_mul(P1).wrapping_add(P4);
+        offset += 8;
+    }
+    if offset + 4 <= bytes.len() {
+        let value = u32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .expect("four bytes"),
+        );
+        hash ^= u64::from(value).wrapping_mul(P1);
+        hash = hash.rotate_left(23).wrapping_mul(P2).wrapping_add(P3);
+        offset += 4;
+    }
+    while offset < bytes.len() {
+        hash ^= u64::from(bytes[offset]).wrapping_mul(P5);
+        hash = hash.rotate_left(11).wrapping_mul(P1);
+        offset += 1;
+    }
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(P2);
+    hash ^= hash >> 29;
+    hash = hash.wrapping_mul(P3);
+    hash ^ (hash >> 32)
 }

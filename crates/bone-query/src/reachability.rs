@@ -15,6 +15,7 @@
 //! cycle guard (no depth cap) and a UX result cap. Design:
 //! `docs/completion-reachability-plan.md`.
 
+use bone_core::modules::{FragmentScope, NsVisibility};
 use bone_semantic::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -33,6 +34,18 @@ struct Edge {
     kind: EdgeKind,
     /// Rendered type this edge leads to (a node key).
     target: Ustr,
+    /// The callable family member behind a method edge. Fields have no member
+    /// identity and therefore carry `None`.
+    method: Option<MethodRef>,
+    field: Option<FieldRef>,
+}
+
+pub(crate) type MethodRef = (Ustr, ModuleId, Idx<bone_semantic::hir::Function>);
+
+#[derive(Clone)]
+pub(crate) struct FieldRef {
+    owner: Ustr,
+    vis: NsVisibility,
 }
 
 /// One completed path from a root variable to a value of the expected type.
@@ -51,6 +64,8 @@ pub struct ReachPath {
     /// call but ends on a field).
     pub via_call: bool,
     pub dist: u16,
+    pub(crate) method_members: Vec<MethodRef>,
+    pub(crate) field_members: Vec<FieldRef>,
 }
 
 pub struct ReachResult {
@@ -101,6 +116,8 @@ impl ReachabilityIndex {
                         label: f.name.to_string(),
                         kind: EdgeKind::Field,
                         target: type_key(ws, f.ty),
+                        method: None,
+                        field: Some(FieldRef { owner: src, vis: f.read_vis.clone() }),
                     });
                 }
             }
@@ -111,7 +128,7 @@ impl ReachabilityIndex {
         // over all functions -- this replaces the per-root-per-keystroke
         // `ufcs_methods` scan.
         for m in ws.modules.iter() {
-            for f in m.functions.values() {
+            for (fid, f) in m.functions.iter() {
                 if f.name.as_str().starts_with("__") {
                     continue;
                 }
@@ -128,6 +145,8 @@ impl ReachabilityIndex {
                         takes_args: f.param_decls.len() > 1,
                     },
                     target: type_key(ws, ret),
+                    method: Some((f.name, m.id, fid)),
+                    field: None,
                 });
             }
         }
@@ -163,7 +182,7 @@ impl ReachabilityIndex {
             let mut paths = Vec::new();
             let mut on_path: HashSet<Ustr> = HashSet::new();
             on_path.insert(src);
-            enumerate_arg_paths(&edges, src, "", 0, false, &mut on_path, &mut paths);
+            enumerate_arg_paths(&edges, src, "", 0, false, &mut on_path, &mut paths, &[], &[]);
             if !paths.is_empty() {
                 arg_paths.insert(src, paths);
             }
@@ -179,6 +198,21 @@ impl ReachabilityIndex {
     pub fn arg_paths_from(&self, ty: &str) -> &[ReachPath] {
         let key = Ustr::from(ty.strip_suffix('?').unwrap_or(ty));
         self.arg_paths.get(&key).map_or(&[], |v| v.as_slice())
+    }
+
+    /// The same shallow paths, restricted to callable members admitted by a
+    /// modules-v1 fragment. The cached graph is workspace-wide; visibility is
+    /// a property of the request site, so it is applied at read time.
+    pub fn arg_paths_in_scope(
+        &self,
+        ws: &Workspace,
+        frag: &FragmentScope,
+        ty: &str,
+    ) -> Vec<&ReachPath> {
+        self.arg_paths_from(ty)
+            .iter()
+            .filter(|path| path_admitted(ws, frag, path))
+            .collect()
     }
 
     /// `N nodes, E edges, R closure-pairs` -- for the build profiling line.
@@ -198,6 +232,28 @@ impl ReachabilityIndex {
     /// guided-DFS pruned by the closure, simple-path cycle-guarded, ranked by
     /// (distance, suffix) and capped at `cap`.
     pub fn paths_to(&self, root_ty: &str, expected: &[String], cap: usize) -> ReachResult {
+        self.paths_to_impl(root_ty, expected, cap, None)
+    }
+
+    /// `paths_to` with per-member visibility applied for a modules-v1 query.
+    pub fn paths_to_in_scope(
+        &self,
+        ws: &Workspace,
+        frag: &FragmentScope,
+        root_ty: &str,
+        expected: &[String],
+        cap: usize,
+    ) -> ReachResult {
+        self.paths_to_impl(root_ty, expected, cap, Some((ws, frag)))
+    }
+
+    fn paths_to_impl(
+        &self,
+        root_ty: &str,
+        expected: &[String],
+        cap: usize,
+        visibility: Option<(&Workspace, &FragmentScope)>,
+    ) -> ReachResult {
         let root = Ustr::from(root_ty.strip_suffix('?').unwrap_or(root_ty));
         // Node keys are canonical nominal names (no nullable `?`), so match the
         // expected types the same way -- a nullable link can still satisfy a
@@ -214,7 +270,18 @@ impl ReachabilityIndex {
         }
         let mut on_path: HashSet<Ustr> = HashSet::new();
         on_path.insert(root);
-        self.dfs(root, String::new(), 0, false, &want, &mut on_path, &mut out);
+        self.dfs(
+            root,
+            String::new(),
+            0,
+            false,
+            &want,
+            &mut on_path,
+            &mut out,
+            &[],
+            &[],
+            visibility,
+        );
 
         out.sort_by(|a, b| a.dist.cmp(&b.dist).then_with(|| a.suffix.cmp(&b.suffix)));
         let truncated = out.len() > cap;
@@ -231,9 +298,27 @@ impl ReachabilityIndex {
         want: &[Ustr],
         on_path: &mut HashSet<Ustr>,
         out: &mut Vec<ReachPath>,
+        method_members: &[MethodRef],
+        field_members: &[FieldRef],
+        visibility: Option<(&Workspace, &FragmentScope)>,
     ) {
         let Some(outs) = self.edges.get(&cur) else { return };
         for e in outs {
+            let mut next_methods = method_members.to_vec();
+            if let Some(method) = e.method {
+                next_methods.push(method);
+            }
+            let mut next_fields = field_members.to_vec();
+            if let Some(field) = &e.field {
+                next_fields.push(field.clone());
+            }
+            if let Some((ws, frag)) = visibility {
+                if !methods_admitted(ws, frag, &next_methods)
+                    || !fields_admitted(ws, frag, &next_fields)
+                {
+                    continue;
+                }
+            }
             // Simple-path cycle guard: never re-enter a type already on this
             // path. Finiteness comes from here, not a depth cap.
             if on_path.contains(&e.target) {
@@ -259,6 +344,8 @@ impl ReachabilityIndex {
                     takes_args,
                     via_call: prefix_call || is_method,
                     dist: depth + 1,
+                    method_members: next_methods.clone(),
+                    field_members: next_fields.clone(),
                 });
             }
 
@@ -279,6 +366,9 @@ impl ReachabilityIndex {
                     want,
                     on_path,
                     out,
+                    &next_methods,
+                    &next_fields,
+                    visibility,
                 );
                 on_path.remove(&e.target);
             }
@@ -300,12 +390,22 @@ fn enumerate_arg_paths(
     prefix_call: bool,
     on_path: &mut HashSet<Ustr>,
     out: &mut Vec<ReachPath>,
+    method_members: &[MethodRef],
+    field_members: &[FieldRef],
 ) {
     let Some(outs) = edges.get(&cur) else { return };
     for e in outs {
         // Simple-path cycle guard: never re-enter a type already on this path.
         if on_path.contains(&e.target) {
             continue;
+        }
+        let mut next_methods = method_members.to_vec();
+        if let Some(method) = e.method {
+            next_methods.push(method);
+        }
+        let mut next_fields = field_members.to_vec();
+        if let Some(field) = &e.field {
+            next_fields.push(field.clone());
         }
         let leaf_suffix =
             if prefix.is_empty() { e.label.clone() } else { format!("{prefix}.{}", e.label) };
@@ -320,6 +420,8 @@ fn enumerate_arg_paths(
             takes_args,
             via_call: prefix_call || is_method,
             dist: depth + 1,
+            method_members: next_methods.clone(),
+            field_members: next_fields.clone(),
         });
         // Descend through traversable edges (fields + no-arg methods) until the
         // depth cap. An args-taking method ends the path (can't chain through it).
@@ -332,10 +434,46 @@ fn enumerate_arg_paths(
             let descend_prefix =
                 if prefix.is_empty() { seg_label } else { format!("{prefix}.{seg_label}") };
             on_path.insert(e.target);
-            enumerate_arg_paths(edges, e.target, &descend_prefix, depth + 1, prefix_call || is_method, on_path, out);
+            enumerate_arg_paths(
+                edges,
+                e.target,
+                &descend_prefix,
+                depth + 1,
+                prefix_call || is_method,
+                on_path,
+                out,
+                &next_methods,
+                &next_fields,
+            );
             on_path.remove(&e.target);
         }
     }
+}
+
+pub(crate) fn methods_admitted(ws: &Workspace, frag: &FragmentScope, methods: &[MethodRef]) -> bool {
+    methods.iter().all(|(key, mid, fid)| {
+        crate::modules_scope::callable_member_admitted(ws, frag, *key, *mid, *fid)
+    })
+}
+
+pub(crate) fn path_admitted(ws: &Workspace, frag: &FragmentScope, path: &ReachPath) -> bool {
+    methods_admitted(ws, frag, &path.method_members)
+        && fields_admitted(ws, frag, &path.field_members)
+}
+
+pub(crate) fn fields_admitted(ws: &Workspace, frag: &FragmentScope, fields: &[FieldRef]) -> bool {
+    fields.iter().all(|field| {
+        let Some(meta) = ws.defs.get(&field.owner) else {
+            return true;
+        };
+        ws.ns.can_access(
+            &field.vis,
+            meta.package,
+            &meta.module,
+            frag.package,
+            &frag.module_path,
+        )
+    })
 }
 
 /// Canonical graph-node key for a type: its bare nominal name when it is a

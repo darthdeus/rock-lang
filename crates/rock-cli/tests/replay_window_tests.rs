@@ -15,6 +15,7 @@ use std::process::Command;
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(Path::parent)
         .expect("workspace root")
 }
 
@@ -41,7 +42,7 @@ fn record_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
 /// end-of-run FPS summary on stderr.
 fn frames_run(stderr: &str) -> u32 {
     for line in stderr.lines() {
-        if let Some(i) = line.find("avg=") {
+        if let Some(i) = line.find("overall avg=") {
             if let Some(j) = line[i..].find('(') {
                 let rest = &line[i + j + 1..];
                 if let Some(n) = rest.split_whitespace().next() {

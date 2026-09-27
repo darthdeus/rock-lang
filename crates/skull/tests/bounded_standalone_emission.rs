@@ -19,7 +19,7 @@ use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
-use crate::common::{AblationGuard as ModeGuard, InlineOffGuard};
+use crate::common::{definitions_matching, function_body, AblationGuard as ModeGuard, InlineOffGuard};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -101,12 +101,23 @@ fn emit_err(src: &str) -> Option<String> {
 }
 
 /// The lines of the top-level Lua function whose header line is `header`.
-fn body_of<'a>(lua: &'a str, header: &str) -> Vec<&'a str> {
-    lua.lines()
-        .skip_while(|l| *l != header)
-        .skip(1)
-        .take_while(|l| !l.starts_with("function ") && *l != "end")
-        .collect()
+/// The lines of the emitted definition `symbol`, read through the shape-aware
+/// harness helper: under the bound callee shape a definition's header is
+/// `__rock_mk_<symbol> = function(..) return function(..)`, so a scan for
+/// `function <symbol>` at column 0 finds nothing.
+fn body_of<'a>(lua: &'a str, symbol: &str) -> Vec<&'a str> {
+    function_body(lua, symbol).lines().skip(1).filter(|l| *l != "end" && *l != "end end").collect()
+}
+
+/// The one emitted specialization whose name starts with `prefix` and carries a
+/// `_spec_` instance suffix.
+fn specialization<'a>(lua: &'a str, prefix: &str, what: &str) -> &'a str {
+    let found: Vec<&str> = definitions_matching(lua, "_spec_")
+        .into_iter()
+        .filter(|name| name.starts_with(prefix))
+        .collect();
+    assert_eq!(found.len(), 1, "expected one standalone {what} in:\n{lua}");
+    found[0]
 }
 
 /// Three separate things, because each alone is satisfied by a broken build.
@@ -122,20 +133,20 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
     let _inline = InlineOffGuard::on();
     let _g = ModeGuard::on();
     let lua = emit(BOUNDED).expect("a bounded body must emit standalone under its demand");
-    let def = lua
-        .lines()
-        .find(|l| l.starts_with("function total_") && l.contains("_spec_"))
-        .unwrap_or_else(|| panic!("no standalone specialized definition of `total` in:\n{lua}"));
-    let symbol = &def["function ".len()..def.find('(').expect("a definition header has params")];
-    let body = body_of(&lua, def);
+    let symbol = specialization(&lua, "total_", "specialized definition of `total`");
+    let body = body_of(&lua, symbol);
     assert!(
         body.iter().any(|l| l.contains("next_")),
         "the standalone `total` calls no concrete `next`, so its placeholder bound-call \
          was not resolved: {body:?}"
     );
-    let called = lua
-        .lines()
-        .any(|l| !l.starts_with("function ") && l.contains(&format!("{symbol}(")));
+    // A call site, not a header. Under the bound shape the caller names the
+    // symbol as a factory PARAMETER too, which is a binding, not a call.
+    let called = lua.lines().any(|l| {
+        !l.starts_with("function ")
+            && !l.starts_with(skull_codegen_lua::CALLEE_FACTORY_PREFIX)
+            && l.contains(&format!("{symbol}("))
+    });
     assert!(called, "`{symbol}` is emitted but nothing calls it");
 }
 
@@ -156,11 +167,8 @@ fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
     let _inline = InlineOffGuard::on();
     let _g = ModeGuard::on();
     let lua = emit(NESTED).expect("a bounded witness of a bounded body must emit standalone");
-    let def = lua
-        .lines()
-        .find(|l| l.starts_with("function next_MapIter_") && l.contains("_spec_"))
-        .unwrap_or_else(|| panic!("no standalone `MapIter.next` specialization in:\n{lua}"));
-    let body = body_of(&lua, def);
+    let symbol = specialization(&lua, "next_MapIter_", "`MapIter.next` specialization");
+    let body = body_of(&lua, symbol);
     assert!(
         body.iter().any(|l| l.contains("next_VecIter")),
         "`MapIter.next` emitted without resolving its own placeholder to the inner \

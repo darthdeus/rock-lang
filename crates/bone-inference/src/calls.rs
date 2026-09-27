@@ -1,28 +1,126 @@
 use super::*;
+use crate::hir::FamilyTier;
+use bone_core::modules::DefKind;
+use std::borrow::Cow;
 
-pub(crate) fn resolve_callee(gamma: &Gamma, name: Ustr) -> FnList {
+pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
+    let name = family.key();
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
-    gamma.dep_acc.borrow_mut().insert(name);
+    let ws = gamma.workspace;
+    gamma.inaccessible_overloads.borrow_mut().remove(&name);
+    match *family {
+        CallFamily::Legacy(_) => member_overloads(gamma, name, None),
+        CallFamily::Resolved { key, owner } => member_overloads(gamma, key, owner),
+        // A merged family: every member's overloads, as lowering recorded
+        // them for the module the call was lowered in.
+        CallFamily::Merged { file, .. } => {
+            let members = ws
+                .module_ids
+                .get(&file)
+                .and_then(|mid| ws.module(*mid).call_families.get(&name))
+                .unwrap_or_else(|| panic!("merged family `{name}` of `{file}` was not recorded at lowering"));
+            let mut out = FnList::default();
+            let mut inaccessible = FnList::default();
+            for &member in members {
+                gamma.inaccessible_overloads.borrow_mut().remove(&member.key);
+                out.extend(member_overloads(gamma, member.key, member.owner));
+                if let Some(hidden) = gamma.inaccessible_overloads.borrow().get(&member.key) {
+                    inaccessible.extend(hidden.iter().copied());
+                }
+            }
+            if !inaccessible.is_empty() {
+                gamma.inaccessible_overloads.borrow_mut().insert(name, inaccessible);
+            }
+            out
+        }
+    }
+}
 
-    gamma
-        .workspace
-        .functions_by_name
-        .get(&name)
-        .cloned()
-        .unwrap_or_default()
+/// The family a function taken as a value (`Expr::Global` at `e`) is looked
+/// up in: the view that owns it in a v1 fragment (`Body::value_owners`), the
+/// whole bare family otherwise.
+pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamily {
+    match c.body.value_owners.get(&e) {
+        Some(&owner) => CallFamily::resolved(name, Some(owner)),
+        None => CallFamily::from_name(name),
+    }
+}
 
-    // gamma
-    //     .workspace
-    //     .modules
-    //     .iter()
-    //     .flat_map(|(mid, m)| {
-    //         m.functions
-    //             .iter()
-    //             .filter(|(_, f)| f.name == name)
-    //             .map(|(idx, _)| (*mid, idx))
-    //     })
-    //     .collect()
+/// The overloads registered under a member's key, narrowed to the files of
+/// the view that owns it (`FamilyMember::owner`): a legacy key is shared by
+/// every legacy file defining the name, and a v1 fragment reaches only the
+/// std view's or one provider's. The key is a dependency either way, so an
+/// overload added under it re-infers this caller.
+fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> FnList {
+    gamma.dep_acc.borrow_mut().insert(key);
+    let ws = gamma.workspace;
+    let Some(fns) = ws.functions_by_name.get(&key) else { return FnList::default() };
+    let site = gamma.access_site();
+    let mut visible = FnList::with_capacity(fns.len());
+    let mut inaccessible = FnList::default();
+    for &(mid, fid) in fns {
+        if !owned_by_view(ws, owner, mid) {
+            continue;
+        }
+        if ws.callable_member_admits(key, mid, fid, site) {
+            visible.push((mid, fid));
+        } else {
+            inaccessible.push((mid, fid));
+        }
+    }
+    if !inaccessible.is_empty() {
+        gamma
+            .inaccessible_overloads
+            .borrow_mut()
+            .entry(key)
+            .or_default()
+            .extend(inaccessible);
+    }
+    visible
+}
+
+fn owned_by_view(ws: &Workspace, owner: Option<PackageId>, mid: ModuleId) -> bool {
+    owner.is_none_or(|owner| ws.ns.owns_file(owner, ws.module(mid).file))
+}
+
+/// The nearest lookup tier among the members of a merged v1 family that
+/// contribute the overload `(mid, fid)` (spec 8.3); `None` outside a merged
+/// family, where no tier orders the candidates.
+fn candidate_tier(gamma: &Gamma, family: CallFamily, mid: ModuleId, fid: Idx<Function>) -> Option<FamilyTier> {
+    let CallFamily::Merged { name, file } = family else { return None };
+    let ws = gamma.workspace;
+    let members = ws.module_ids.get(&file).and_then(|m| ws.module(*m).call_families.get(&name))?;
+    members
+        .iter()
+        .filter(|member| {
+            owned_by_view(ws, member.owner, mid)
+                && ws.functions_by_name.get(&member.key).is_some_and(|fns| fns.contains(&(mid, fid)))
+        })
+        .map(|member| member.tier)
+        .min()
+}
+
+/// Spec 8.3: an exact best-fit tie between members of different lookup
+/// tiers goes to the nearest tier, so a module can override a std or
+/// imported function of the same signature. Candidates of one tier stay
+/// tied.
+fn keep_nearest_tier(gamma: &Gamma, family: CallFamily, tied: &mut SmallVec<[(ModuleId, Idx<Function>); 4]>) {
+    let tiers: SmallVec<[Option<FamilyTier>; 4]> =
+        tied.iter().map(|&(mid, fid)| candidate_tier(gamma, family, mid, fid)).collect();
+    // Every candidate of a merged family comes from a recorded member; a
+    // candidate without a tier would mean it does not, so nothing is dropped
+    // and the tie is reported as it stands.
+    let Some(nearest) = tiers.iter().copied().collect::<Option<SmallVec<[FamilyTier; 4]>>>().and_then(|t| t.into_iter().min())
+    else {
+        return;
+    };
+    let mut i = 0;
+    tied.retain(|_| {
+        let keep = tiers[i] == Some(nearest);
+        i += 1;
+        keep
+    });
 }
 
 /// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
@@ -86,6 +184,15 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
             TypeExpr::Builtin(BuiltinTy::Float),
         ) => Some(1),
         (_, TypeExpr::Builtin(BuiltinTy::Any)) => Some(2),
+        // Mirrors `coerce`'s nullable target: fit the inner types, so an `int`
+        // argument fits a `float?` param in selection as it does in binding.
+        (&from, &TypeExpr::Nullable(pi)) => {
+            let from_inner = match from {
+                TypeExpr::Nullable(fi) => a.with_idx(fi),
+                _ => a,
+            };
+            fit_cost(gamma, from_inner, p.with_idx(pi), span)
+        }
         _ => {
             let p_is_iface = match *gamma.get(p) {
                 TypeExpr::App {
@@ -107,8 +214,11 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                     TypeExpr::App { ctor: TypeCtor::Nominal(an), .. },
                     TypeExpr::App { ctor: TypeCtor::Nominal(pn), .. },
                 ) => {
-                    an.as_str() == "FieldRef"
-                        && matches!(pn.as_str(), "ReadFieldRef" | "WriteFieldRef")
+                    bone_core::modules::is_intrinsic_key(an, "FieldRef")
+                        && bone_core::modules::is_intrinsic_key_in(
+                            pn,
+                            &["ReadFieldRef", "WriteFieldRef"],
+                        )
                 }
                 _ => false,
             };
@@ -173,49 +283,49 @@ fn backend_rank(b: skull_parser::FnBackend) -> u8 {
     }
 }
 
-/// The signature key two decls must share to be backend variants of one another:
-/// param types (rendered, inference-free) -- the same key `static_owner_tag`-class
-/// grouping uses. Return type is deliberately excluded (overload resolution keys
-/// on params).
-fn signature_key(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
+/// Where a tied candidate comes from, when a tie spans unrelated definitions
+/// (a merged legacy family): the v1 DefKey, or the legacy defining file.
+fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
     let f = &gamma.workspace.module(mid).functions[fid];
-    f.param_decls
-        .iter()
-        .map(|p| gamma.workspace.render(None, p.ty))
-        .join("\u{1}")
+    if gamma.workspace.defs.contains_key(&f.name) {
+        format!("v1 definition {}", f.name)
+    } else {
+        format!("legacy definition in {}", gamma.workspace.module(mid).file)
+    }
 }
 
-/// See the call site in [`select_overload`]. Groups candidates by signature; a
-/// group whose backends are all distinct collapses to its lowest-rank member; a
-/// group with a repeated backend (a genuine duplicate) is kept whole so the tie
-/// still surfaces as an "Ambiguous overload" error.
-pub(crate) fn collapse_backend_variants(
+/// See the call site in [`select_overload`]. Groups candidates by
+/// [`Workspace::backend_variant_key`]; a group whose backends are all distinct
+/// collapses to its lowest-rank member; a group with a repeated backend (a
+/// genuine duplicate) is kept whole so the tie still surfaces as an
+/// "Ambiguous overload" error.
+pub(crate) fn collapse_backend_variants<'c>(
     gamma: &Gamma,
-    candidates: &[(ModuleId, Idx<Function>)],
-) -> Vec<(ModuleId, Idx<Function>)> {
+    candidates: &'c [(ModuleId, Idx<Function>)],
+) -> Cow<'c, [(ModuleId, Idx<Function>)]> {
     if candidates.len() <= 1 {
-        return candidates.to_vec();
+        return Cow::Borrowed(candidates);
     }
     // Fast path: a cross-backend collapse is only possible when candidates span
     // >= 2 distinct backends. If they all share one backend (the overwhelmingly
     // common case -- an all-`Any` portable overload set, or an all-`Lua`
     // inline(lua)/operator set), no group is ever "all distinct", so the result
-    // equals the input. Skip the signature rendering entirely -- this keeps the
-    // collapse off the hot overload path unless a backend variant is in play.
+    // equals the input. Skip the grouping entirely -- this keeps the collapse
+    // off the hot overload path unless a backend variant is in play.
     let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
     if candidates
         .iter()
         .all(|&(mid, fid)| gamma.workspace.module(mid).functions[fid].backend == first_backend)
     {
-        return candidates.to_vec();
+        return Cow::Borrowed(candidates);
     }
-    // Preserve input order for determinism; group indices by signature key.
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    // Preserve input order for determinism; group indices by variant key.
+    let mut groups: SmallVec<[((Ustr, Ustr), SmallVec<[usize; 2]>); 4]> = SmallVec::new();
     for (i, &(mid, fid)) in candidates.iter().enumerate() {
-        let key = signature_key(gamma, mid, fid);
+        let key = gamma.workspace.backend_variant_key(mid, fid);
         match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, v)) => v.push(i),
-            None => groups.push((key, vec![i])),
+            None => groups.push((key, smallvec::smallvec![i])),
         }
     }
     let mut out = Vec::with_capacity(candidates.len());
@@ -226,7 +336,7 @@ pub(crate) fn collapse_backend_variants(
         }
         let backend_of = |i: usize| gamma.workspace.module(candidates[i].0).functions[candidates[i].1].backend;
         let all_distinct = {
-            let mut seen: Vec<skull_parser::FnBackend> = Vec::new();
+            let mut seen: SmallVec<[skull_parser::FnBackend; 3]> = SmallVec::new();
             idxs.iter().all(|&i| {
                 let b = backend_of(i);
                 if seen.contains(&b) {
@@ -251,12 +361,13 @@ pub(crate) fn collapse_backend_variants(
             }
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 pub(crate) fn select_overload(
     c: BodyCtx,
     gamma: &mut Gamma,
+    family: CallFamily,
     candidates: &[(ModuleId, Idx<Function>)],
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
@@ -268,6 +379,7 @@ pub(crate) fn select_overload(
     select_overload_with_generics(
         c,
         gamma,
+        family,
         candidates,
         recv_ty,
         args,
@@ -282,6 +394,7 @@ pub(crate) fn select_overload(
 pub(crate) fn select_overload_with_generics(
     c: BodyCtx,
     gamma: &mut Gamma,
+    family: CallFamily,
     candidates: &[(ModuleId, Idx<Function>)],
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
@@ -343,12 +456,25 @@ pub(crate) fn select_overload_with_generics(
         }
     }
 
+    if best_set.len() > 1 {
+        keep_nearest_tier(gamma, family, &mut best_set);
+    }
+
     match best_set.len() {
         1 => Ok(best_set[0]),
         n if n > 1 => {
+            let fn_name = |&(mid, fid): &(ModuleId, Idx<Function>)| gamma.workspace.module(mid).functions[fid].name;
+            let spans_families = best_set.iter().any(|c| fn_name(c) != fn_name(&best_set[0]));
             let tied = best_set
                 .iter()
-                .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
+                .map(|&(mid, fid)| {
+                    let sig = render_candidate_sig(gamma, mid, fid);
+                    if spans_families {
+                        format!("  {sig} ({})", candidate_origin(gamma, mid, fid))
+                    } else {
+                        format!("  {sig}")
+                    }
+                })
                 .join("\n");
             Err(SelectError::Tied(CompilerError::new_with_label(
                 span,
@@ -371,9 +497,36 @@ pub(crate) fn select_overload_with_generics(
                 .iter()
                 .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
                 .join("\n");
+            let inaccessible = gamma
+                .inaccessible_overloads
+                .borrow()
+                .get(&name)
+                .cloned()
+                .unwrap_or_default();
+            let mut hidden_bound_fail = None;
+            let hidden_fit = inaccessible.iter().any(|&(mid, fid)| {
+                score_candidate_with_generics(
+                    c,
+                    gamma,
+                    mid,
+                    fid,
+                    recv_ty,
+                    args,
+                    arg_ty,
+                    generic_args,
+                    span,
+                    &mut hidden_bound_fail,
+                )
+                .is_some()
+            });
             Err(SelectError::NoFit(CompilerError::new_with_label(
                 span,
-                match bound_fail {
+                if hidden_fit {
+                    format!(
+                        "No accessible overload for `{name}` with argument types ({args_msg}); the matching overload is not accessible\navailable overloads:\n{overloads}"
+                    )
+                } else {
+                    match bound_fail {
                     Some(be) => format!(
                         "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}\navailable overloads:\n{overloads}",
                         be.message
@@ -381,6 +534,7 @@ pub(crate) fn select_overload_with_generics(
                     None => format!(
                         "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}"
                     ),
+                    }
                 },
             )))
         }
@@ -426,6 +580,7 @@ pub(crate) fn check_positional_args(
 pub(crate) fn check_named_fields(
     c: BodyCtx,
     gamma: &mut Gamma,
+    struct_key: Option<Ustr>,
     fields: &[StructFieldDef],
     provided: &[(Ustr, Idx<Expr>)],
     subs: &FxHashMap<VarId, TyId>,
@@ -448,13 +603,31 @@ pub(crate) fn check_named_fields(
             comp_error!(vspan, "Duplicate field `{}` in {} literal", fname, what);
         }
 
+        if let Some(skey) = struct_key {
+            let site = gamma.access_site();
+            field_access(gamma, skey, *fname, site, FieldAccessNeed::Write)
+                .map_err(|e| e.to_compiler_error(vspan))?;
+        }
+
         seen.push(*fname);
 
         let fty = substitute(gamma, fdef.ty, subs, vspan)?;
         check_expr(c, gamma, *fvalue, fty, vspan)?
     }
 
-    if !base_covers_all {
+    if base_covers_all {
+        if let Some(skey) = struct_key {
+            let site = gamma.access_site();
+            for f in fields {
+                if !seen.contains(&f.name) {
+                    field_access(gamma, skey, f.name, site, FieldAccessNeed::Read)
+                        .map_err(|e| e.to_compiler_error(span))?;
+                    field_access(gamma, skey, f.name, site, FieldAccessNeed::Write)
+                        .map_err(|e| e.to_compiler_error(span))?;
+                }
+            }
+        }
+    } else {
         for f in fields {
             if !seen.contains(&f.name) && !f.has_default {
                 comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
@@ -546,6 +719,7 @@ pub(crate) fn score_candidate_with_generics(
         args,
         &pnames[offset..],
         f.num_required.saturating_sub(offset),
+        false,
         span,
     ) {
         Ok(s) => s,
@@ -768,12 +942,26 @@ pub(crate) fn spread_struct_fields(
     }
 }
 
+/// A rejection by `reorder_call_args`: its message is built only when `report`
+/// is set, since overload scoring discards the rejections of the candidates it
+/// tries.
+macro_rules! slot_fail {
+    ($report:expr, $span:expr, $($arg:tt)*) => {{
+        if !$report {
+            return Err(CompilerError::silent($span));
+        }
+
+        comp_error!($span, $($arg)*)
+    }}
+}
+
 pub(crate) fn reorder_call_args(
     c: BodyCtx,
     gamma: &mut Gamma,
     args: &[Idx<Expr>],
     param_names: &[Ustr],
     num_required: usize,
+    report: bool,
     span: Span,
 ) -> Result<Vec<Option<SlotFill>>, CompilerError> {
     let mut slots: Vec<Option<SlotFill>> = vec![None; param_names.len()];
@@ -786,19 +974,17 @@ pub(crate) fn reorder_call_args(
             let op_ty = infer_expr(c, gamma, arg)?;
             let aspan = c.body.expr_spans[arg];
             for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
-                let pi = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        span,
-                        format!("spread field `{}` names no parameter of the callee", fname),
-                    )
-                })?;
+                let Some(pi) = param_names.iter().position(|p| *p == fname) else {
+                    slot_fail!(report, span, "spread field `{}` names no parameter of the callee", fname)
+                };
                 match slots[pi] {
                     // rule 5: two spreads supplying the same param.
                     Some(SlotFill::SpreadField(..)) => {
-                        comp_error!(span, "two spreads both supply parameter `{}`", fname)
+                        slot_fail!(report, span, "two spreads both supply parameter `{}`", fname)
                     }
                     // rule 4: a named/positional arg written BEFORE the spread.
-                    Some(SlotFill::Direct(_)) => comp_error!(
+                    Some(SlotFill::Direct(_)) => slot_fail!(
+                        report,
                         span,
                         "parameter `{}` is given before the spread that also supplies it",
                         fname
@@ -813,7 +999,8 @@ pub(crate) fn reorder_call_args(
             // positional
             None => {
                 if pos >= param_names.len() {
-                    comp_error!(
+                    slot_fail!(
+                        report,
                         span,
                         "Too many positional arguments, expected at most {}",
                         param_names.len()
@@ -821,16 +1008,16 @@ pub(crate) fn reorder_call_args(
                 }
 
                 if slots[pos].is_some() {
-                    comp_error!(span, "Multiple values provided for parameter `{}`", param_names[pos]);
+                    slot_fail!(report, span, "Multiple values provided for parameter `{}`", param_names[pos]);
                 }
                 slots[pos] = Some(SlotFill::Direct(arg));
                 pos += 1;
             }
 
             Some(nm) => {
-                let pi = param_names.iter().position(|p| p == nm).ok_or_else(|| {
-                    CompilerError::new_with_label(span, format!("unknown parameter `{}`", nm))
-                })?;
+                let Some(pi) = param_names.iter().position(|p| p == nm) else {
+                    slot_fail!(report, span, "unknown parameter `{}`", nm)
+                };
 
                 match slots[pi] {
                     // rule 3: a named arg AFTER a spread overrides that field.
@@ -838,7 +1025,7 @@ pub(crate) fn reorder_call_args(
                         slots[pi] = Some(SlotFill::Direct(arg))
                     }
                     Some(SlotFill::Direct(_)) => {
-                        comp_error!(span, "Multiple values provided for parameter `{}`", nm)
+                        slot_fail!(report, span, "Multiple values provided for parameter `{}`", nm)
                     }
                 }
             }
@@ -847,7 +1034,8 @@ pub(crate) fn reorder_call_args(
 
     for i in 0..num_required {
         if slots[i].is_none() {
-            comp_error!(
+            slot_fail!(
+                report,
                 span,
                 "Missing required argument for parameter `{}`",
                 param_names[i]
@@ -909,7 +1097,7 @@ pub(crate) fn spread_constituents(
 pub(crate) fn resolve_named_call(
     gamma: &mut Gamma,
     c: BodyCtx,
-    name: Ustr,
+    family: CallFamily,
     recv_override: Option<TyId>,
     args: IdxRange<Expr>,
     call_expr: Idx<Expr>,
@@ -918,7 +1106,7 @@ pub(crate) fn resolve_named_call(
     resolve_named_call_with_generics(
         gamma,
         c,
-        name,
+        family,
         recv_override,
         args,
         IdxRange::new_empty(),
@@ -930,17 +1118,18 @@ pub(crate) fn resolve_named_call(
 pub(crate) fn resolve_named_call_with_generics(
     gamma: &mut Gamma,
     c: BodyCtx,
-    name: Ustr,
+    family: CallFamily,
     recv_override: Option<TyId>,
     args: IdxRange<Expr>,
     generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    let name = family.key();
     let res = resolve_named_call_inner(
         gamma,
         c,
-        name,
+        family,
         recv_override,
         args,
         generic_args,
@@ -972,6 +1161,7 @@ pub(crate) fn resolve_named_call_with_generics(
     let err_span = e.labels.first().map(|l| l.span);
     let about_receiver = err_span == Some(span) || (recv_span.is_some() && err_span == recv_span);
     if about_receiver {
+        let name = written_method_name(c, recv_override, args, call_expr).unwrap_or(name);
         if let Ok(fty) = struct_field_ty(gamma, recv_ty, name, span) {
             let fty = resolve(gamma, fty, span);
             if !matches!(gamma.get(fty), TypeExpr::Function { .. }) {
@@ -1060,20 +1250,62 @@ pub(crate) fn eq_compared_generic_indices(
     out
 }
 
+/// The method name as written at a method-syntax call: the receiver is
+/// `args[0]` for `recv.name(..)` and the `SafeNavCall` receiver for
+/// `recv?.name(..)`. `None` for a call written by name.
+fn written_method_name(
+    c: BodyCtx,
+    recv_override: Option<TyId>,
+    args: IdxRange<Expr>,
+    call_expr: Idx<Expr>,
+) -> Option<Ustr> {
+    let receiver = match (recv_override, &c.body.expr_arena[call_expr]) {
+        (Some(_), Expr::SafeNavCall { receiver, .. }) => *receiver,
+        (None, _) if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => args.start(),
+        _ => return None,
+    };
+    c.body.method_names.get(&receiver).copied()
+}
+
+fn unary_operator_symbol(name: Ustr) -> Option<&'static str> {
+    match name.as_str() {
+        "__not" => Some("!"),
+        "__unm" => Some("-"),
+        _ => None,
+    }
+}
+
+fn unary_operator_error(
+    gamma: &mut Gamma,
+    name: Ustr,
+    operand: Option<TyId>,
+    span: Span,
+) -> CompilerError {
+    let symbol = unary_operator_symbol(name).expect("unary operator name");
+    let operand = operand
+        .map(|t| {
+            let t = resolve(gamma, t, span);
+            gamma.workspace.render(Some(&gamma.out), t)
+        })
+        .unwrap_or_else(|| "<no operand>".to_string());
+    CompilerError::new_with_label(span, format!("operator `{symbol}` is not defined for `{operand}`"))
+}
+
 pub(crate) fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
-    name: Ustr,
+    family: CallFamily,
     recv_override: Option<TyId>,
     args: IdxRange<Expr>,
     generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    let name = family.key();
     let _span = tracing::info_span!("named_call", name = %name).entered();
-    let all_candidates = resolve_callee(gamma, name);
-    let candidates: Vec<_> = if generic_args.is_empty() {
-        all_candidates.to_vec()
+    let all_candidates = resolve_callee(gamma, &family);
+    let candidates: FnList = if generic_args.is_empty() {
+        all_candidates
     } else {
         all_candidates
             .into_iter()
@@ -1097,7 +1329,8 @@ pub(crate) fn resolve_named_call_inner(
     };
 
     if let Some(recv_ty) = method_recv {
-        if let Ok(field_ty) = struct_field_ty(gamma, recv_ty, name, span) {
+        let field = written_method_name(c, recv_override, args, call_expr).unwrap_or(name);
+        if let Ok(field_ty) = struct_field_ty(gamma, recv_ty, field, span) {
             let field_ty = resolve(gamma, field_ty, span);
 
             if matches!(gamma.get(field_ty), TypeExpr::Function { .. }) {
@@ -1114,6 +1347,7 @@ pub(crate) fn resolve_named_call_inner(
                     )
                 };
 
+                gamma.out.fn_field_calls.insert(call_expr, field);
                 return call_fn_value(c, gamma, field_ty, call_args, span);
             }
         }
@@ -1186,34 +1420,33 @@ pub(crate) fn resolve_named_call_inner(
             }
         }
 
-        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with an
-        // empty overload set read as operator errors naming the operand type,
+        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with no
+        // applicable overload read as operator errors naming the operand type,
         // not as a missing internal function.
-        let op_symbol = match name.as_str() {
-            "__not" => Some("!"),
-            "__unm" => Some("-"),
-            _ => None,
-        };
-        if let Some(sym) = op_symbol {
-            let operand = args
-                .into_iter()
-                .next()
-                .map(|a| -> Result<String, CompilerError> {
-                    let t = infer_expr(c, gamma, a)?;
-                    let t = resolve(gamma, t, span);
-                    Ok(gamma.workspace.render(Some(&gamma.out), t))
-                })
-                .transpose()?
-                .unwrap_or_else(|| "<no operand>".to_string());
-            comp_error!(
-                span,
-                "operator `{}` is not defined for `{}`",
-                sym,
-                operand
-            );
+        if unary_operator_symbol(name).is_some() {
+            let operand = args.into_iter().next().map(|a| infer_expr(c, gamma, a)).transpose()?;
+            return Err(unary_operator_error(gamma, name, operand, span));
         }
 
-        comp_error!(span, "Function `{}` doesn't exist", name);
+        // A v1 DefKey renders as its declared name (plan 2.1); legacy keys
+        // ARE the name. A v1 name whose nearest binding is a value shadows
+        // every callable of that name in a lower tier (spec 8.3), so say
+        // what it binds to.
+        let meta = gamma.workspace.defs.get(&name);
+        let shown = meta.map(|m| m.name).unwrap_or(name);
+        let message = match meta.map(|m| m.kind) {
+            Some(kind @ (DefKind::Global | DefKind::Type | DefKind::Decorator | DefKind::Module)) => {
+                let what = match kind {
+                    DefKind::Global => "global",
+                    DefKind::Type => "type",
+                    DefKind::Decorator => "decorator",
+                    _ => "module",
+                };
+                format!("Function `{shown}` doesn't exist -- `{shown}` binds to {what} `{name}` here")
+            }
+            _ => format!("Function `{shown}` doesn't exist"),
+        };
+        return Err(CompilerError::new_with_label(span, message));
     }
 
     // let (callee_mid, callee_fn) = resolve_callee(gamma, name).ok_or_else(|| {
@@ -1225,7 +1458,13 @@ pub(crate) fn resolve_named_call_inner(
 
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
 
-    let (callee_mid, callee_fn) = if candidates.len() == 1 {
+    let has_inaccessible_overloads = gamma
+        .inaccessible_overloads
+        .borrow()
+        .get(&name)
+        .is_some_and(|hidden| !hidden.is_empty());
+    let single = candidates.len() == 1 && !has_inaccessible_overloads && unary_operator_symbol(name).is_none();
+    let (callee_mid, callee_fn) = if single {
         candidates[0]
     } else {
         let mut arg_tys: Vec<TyId> = Vec::new();
@@ -1261,6 +1500,7 @@ pub(crate) fn resolve_named_call_inner(
         match select_overload_with_generics(
             c,
             gamma,
+            family,
             &candidates,
             recv_override,
             &arg_list,
@@ -1273,6 +1513,10 @@ pub(crate) fn resolve_named_call_inner(
             Ok(pick) => pick,
 
             Err(e) => {
+                if matches!(&e, SelectError::NoFit(_)) && unary_operator_symbol(name).is_some() {
+                    return Err(unary_operator_error(gamma, name, arg_tys.first().copied(), span));
+                }
+
                 // Defer-to-use: a cost tie whose operand is an unpinned
                 // lambda-param var re-resolves when a later use pins it
                 // (defer.rs). Wins over the `__op_*` fallback below -- the
@@ -1289,7 +1533,7 @@ pub(crate) fn resolve_named_call_inner(
                                 gamma,
                                 v,
                                 Pending::Call {
-                                    name,
+                                    family,
                                     call_expr,
                                     recv_override,
                                     args: arg_list,
@@ -1442,6 +1686,7 @@ pub(crate) fn commit_selected_call(
             &arg_list,
             &param_names[offset..],
             function.num_required.saturating_sub(offset),
+            true,
             span,
         )?;
 

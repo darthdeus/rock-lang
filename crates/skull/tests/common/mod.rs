@@ -115,6 +115,48 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
+/// One fragment of a modules-v1 package fixture (plan 2.2: fragment = file,
+/// logical module = its `mod` header). The FIRST fragment is the one emission
+/// starts from, so it owns `main`.
+pub struct V1Fragment<'a> {
+    pub file: &'a str,
+    pub src: &'a str,
+}
+
+/// A v1 package's workspace over the real stdlib (which stays legacy, as it is
+/// in a real build). Each fragment parses under the v1 dialect and carries the
+/// package tag the host's graph stamps, so its definitions register under their
+/// DefKeys (`<package>::<module path>::<name>`) instead of bare names.
+pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
+    let mut modules = STDLIB.clone();
+    for fragment in fragments {
+        let mut module = skull_parser::parse_module_clean_with_dialect(
+            fragment.src,
+            Ustr::from(fragment.file),
+            skull_parser::Dialect::V1,
+        )
+        .expect("parse");
+        module.package = Some(skull_parser::PackageTag {
+            id: 0,
+            self_name: package.to_string(),
+        });
+        modules.push(module);
+    }
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
+/// Full MIR emit for a v1 package, rooted at its first fragment.
+pub fn emit_v1_package(package: &str, fragments: &[V1Fragment]) -> skull::mir_emit::MirEmit {
+    let ws = ws_v1_package(package, fragments);
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from(fragments[0].file))
+        .expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+}
+
 /// Like [`try_emit_module`] but with `Workspace.comptime_inputs` set before
 /// emission -- the seam the host CLI uses for `build_var`/`embed_string`
 /// (docs/comptime-plan.md tier 1).
@@ -160,19 +202,139 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
-/// The body of `function <name>(...) ... end` in emitted module Lua. `name` is
+/// Like [`try_emit_module`] but with LuaJIT's frame-limit rejection OFF, so the
+/// emitted Lua of a body the check rejects is still produced. The
+/// boundary-agreement test needs it: without the Lua there is nothing to ask
+/// `loadfile` about, and "the compiler rejected it" would be unfalsifiable.
+pub fn emit_module_without_frame_limits(src: &str) -> String {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_full_with_shapes(
+        &ws,
+        mid,
+        skull::mir_emit::ShapeOverrides {
+            frame_limits: Some(false),
+            ..Default::default()
+        },
+    )
+    .map(|(emit, _cache)| emit.lua)
+    .expect("emit with the frame-limit check off")
+}
+
+/// Whether the bundled LuaJIT can LOAD `prog` (parse only -- the chunk is never
+/// run), and the parse error when it cannot. This is the oracle the frame-limit
+/// model is measured against.
+pub fn luajit_loads(prog: &str, tag: &str) -> Result<(), String> {
+    use std::process::Command;
+    let path = std::env::temp_dir().join(format!("skull_load_{}_{tag}.lua", std::process::id()));
+    std::fs::write(&path, prog).expect("write program");
+    let out = Command::new("luajit")
+        .arg("-e")
+        .arg(format!(
+            "local f, e = loadfile({:?}); if not f then io.stderr:write(e) os.exit(1) end",
+            path.to_string_lossy()
+        ))
+        .output()
+        .expect("spawn luajit");
+    let _ = std::fs::remove_file(&path);
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
+/// The body of the emitted definition named (or prefixed by) `name`. `name` is
 /// the rock identifier; the emitted definition is mangled
-/// (`hot_int_int_int_ret_float`), so match the `function <name>` prefix. The
-/// first top-level `\nend\n` closes the function (nested blocks are indented
-/// `end`s, never column-0). A hoisted def (`<name>__lambda0`) shares the
-/// `function <name>` prefix, but the enclosing `<name>` is emitted first, so
-/// `.find` returns the enclosing body -- not the hoist.
+/// (`hot_int_int_int_ret_float`), so the prefix is resolved against the
+/// definitions the chunk actually carries.
+///
+/// Handles both emitted callee shapes: the global-lookup `function <name>(..)`
+/// and the callee-bound factory `__rock_mk_<name> = function(..) return
+/// function(..)`, whose body ends at the column-0 `end end` that closes the
+/// inner function and the factory together. The body TEXT is identical in both
+/// (the factory's parameters are named like the globals they replace), so a
+/// test asserting body shape reads the same either way.
+///
+/// The NAME is resolved before the text is searched, which is what keeps the
+/// bound shape honest. A hoisted `<name>__lambda0` stays a plain global while
+/// its enclosing `<name>` moves into a factory, so a bare `function <name>`
+/// scan would silently return the HOIST; and `forward_wide` prefixes
+/// `forward_wide_indirect`, so a bare prefix scan would return whichever of the
+/// two happened to keep the global spelling.
 pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let head = format!("function {name}");
-    let start = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
+    let resolved = resolve_definition(lua, name);
+    let global = format!("\nfunction {resolved}(");
+    let (start, terminator) = match lua.find(&global) {
+        Some(at) => (at + 1, "\nend\n"),
+        None => {
+            let head =
+                format!("\n{}{resolved} = function(", skull_codegen_lua::CALLEE_FACTORY_PREFIX);
+            let at = lua
+                .find(&head)
+                .unwrap_or_else(|| panic!("definition `{resolved}` has neither shape in:\n{lua}"));
+            (at + 1, "\nend end\n")
+        }
+    };
     let rest = &lua[start..];
-    let end = rest.find("\nend\n").map(|e| e + 5).unwrap_or(rest.len());
+    let end = rest.find(terminator).map(|e| e + terminator.len()).unwrap_or(rest.len());
     &rest[..end]
+}
+
+/// The emitted definition `name` names: an exact name wins, then the first
+/// definition it prefixes WITHOUT crossing a synthetic `__` suffix (so `main`
+/// resolves to `main`, never to `main__lambda0`), then any prefix match.
+fn resolve_definition<'a>(lua: &'a str, name: &str) -> &'a str {
+    let names = definition_names(lua);
+    names
+        .iter()
+        .find(|n| **n == name)
+        .or_else(|| {
+            names
+                .iter()
+                .find(|n| n.starts_with(name) && !n[name.len()..].contains("__"))
+        })
+        .or_else(|| names.iter().find(|n| n.starts_with(name)))
+        .copied()
+        .unwrap_or_else(|| panic!("no definition of `{name}` in:\n{lua}"))
+}
+
+/// Every top-level definition's emitted name, in either shape, in EMISSION
+/// order. Order matters: a caller resolving a prefix takes the first match, and
+/// the bound shape splits the population between `function <name>(` globals and
+/// `__rock_mk_<name> = function(` factories, so scanning one kind and then the
+/// other would reorder the chunk.
+pub fn definition_names(lua: &str) -> Vec<&str> {
+    let factory_head = format!("\n{}", skull_codegen_lua::CALLEE_FACTORY_PREFIX);
+    let mut names: Vec<(usize, &str)> = Vec::new();
+    for (at, m) in lua.match_indices("\nfunction ") {
+        let rest = &lua[at + m.len()..];
+        names.push((at, &rest[..rest.find('(').expect("fn header has `(`")]));
+    }
+    for (at, m) in lua.match_indices(factory_head.as_str()) {
+        let rest = &lua[at + m.len()..];
+        // The binding pass (`F = __rock_mk_F(..)`) shares the prefix and is not
+        // a definition; only a factory HEADER carries ` = function(` on its own
+        // line.
+        if let Some(end) = rest.find(" = function(") {
+            if !rest[..end].contains('\n') {
+                names.push((at, &rest[..end]));
+            }
+        }
+    }
+    names.sort_by_key(|(at, _)| *at);
+    names.into_iter().map(|(_, name)| name).collect()
+}
+
+/// Every emitted definition whose name contains `needle`, in emission order.
+/// The shape-aware replacement for counting `function <needle>` occurrences:
+/// under the bound shape a definition's header reads `__rock_mk_<name> =
+/// function(`, so a raw substring count reports zero and whatever was built on
+/// it passes or fails for the wrong reason.
+pub fn definitions_matching<'a>(lua: &'a str, needle: &str) -> Vec<&'a str> {
+    definition_names(lua).into_iter().filter(|n| n.contains(needle)).collect()
 }
 
 /// The body of the single emitted function whose name contains `needle`.
@@ -181,12 +343,8 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
 /// than spelled out. Panics if it is not unique -- an ambiguous match would
 /// silently assert against the wrong body.
 pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
-    let names: Vec<&str> = lua
-        .match_indices("\nfunction ")
-        .map(|(i, m)| {
-            let rest = &lua[i + m.len()..];
-            &rest[..rest.find('(').expect("fn header has `(`")]
-        })
+    let names: Vec<&str> = definition_names(lua)
+        .into_iter()
         .filter(|n| n.contains(needle))
         .collect();
     assert_eq!(names.len(), 1, "expected exactly one fn containing `{needle}`, got {names:?}");
@@ -201,19 +359,11 @@ pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
 /// appears on the synthetic derivations, and for a `co fn` a `__step`/`__resume`
 /// header can emit before the constructor), so skip `__`-bearing candidates.
 pub fn mangled_name(lua: &str, src: &str) -> String {
-    let head = format!("function {src}");
-    let mut from = 0;
-    while let Some(p) = lua[from..].find(&head) {
-        let start = from + p + "function ".len();
-        let rest = &lua[start..];
-        let end = rest.find('(').expect("fn header has `(`");
-        let name = &rest[..end];
-        if !name.contains("__") {
-            return name.to_string();
-        }
-        from = start + end;
-    }
-    panic!("no non-synthetic `function {src}` in:\n{lua}");
+    definition_names(lua)
+        .into_iter()
+        .find(|name| name.starts_with(src) && !name.contains("__"))
+        .unwrap_or_else(|| panic!("no non-synthetic definition of `{src}` in:\n{lua}"))
+        .to_string()
 }
 
 /// Like [`try_emit_module`] but ALSO loads `lib` as an extra stdlib module. The
@@ -226,6 +376,37 @@ pub fn try_emit_with_stdlib_module(
 ) -> Result<String, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
+/// The dialect the package at `dir` (relative to the repository root) declares
+/// in its stick.toml, as the host selects it for that package's files.
+pub fn package_dialect(dir: &str) -> skull_parser::Dialect {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(dir).join("stick.toml");
+    rock_host::stick::StickConfig::from_path(&manifest).expect("package manifest").dialect()
+}
+
+/// Like [`try_emit_with_stdlib_module`], but `lib` is a source of the package
+/// at `dir` (Stone, say), parsed in the dialect that package declares and, for
+/// a v1 package, tagged with its name the way the host's graph tags it.
+pub fn try_emit_with_package_module(
+    dir: &str,
+    lib: &str,
+    src: &str,
+) -> Result<String, skull_parser::CompilerError> {
+    let dialect = package_dialect(dir);
+    let mut modules = STDLIB.clone();
+    let file = format!("{dir}/probe.rock");
+    let mut module =
+        skull_parser::parse_module_clean_with_dialect(lib, Ustr::from(file.as_str()), dialect).expect("parse lib");
+    if dialect == skull_parser::Dialect::V1 {
+        module.package = Some(skull_parser::PackageTag { id: 0, self_name: dir.to_string() });
+    }
+    modules.push(module);
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);

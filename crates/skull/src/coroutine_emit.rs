@@ -9,9 +9,10 @@ use std::collections::HashSet;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
+use rustc_hash::FxHashSet;
 use skull_codegen_lua::{emit_named_framed, emit_named_framed_with_allocation_sites, CodegenCtx, FrameCtx, LuaEmission};
 use skull_mir::code_identity::{
-    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
+    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema, LambdaSiteId,
 };
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
@@ -29,6 +30,32 @@ fn collect_nested_code_identities(mf: &MirFunc, out: &mut HashSet<CodeIdentity>)
         }
         collect_nested_code_identities(nested, out);
     }
+}
+
+fn hook_registration_site(
+    source: &MirFunc,
+    kind: CoroHookKind,
+    entry: Idx<Block>,
+) -> Option<LambdaSiteId> {
+    source.insts.iter().find_map(|(_, inst)| {
+        let Inst::CoroHook { kind: registered, lambda } = inst else {
+            return None;
+        };
+        if *registered != kind {
+            return None;
+        }
+        let Inst::Lambda { entry: lambda_entry, .. } = &source.insts[*lambda] else {
+            return None;
+        };
+        if *lambda_entry != entry {
+            return None;
+        }
+        source
+            .inst_spans
+            .get(*lambda)
+            .copied()
+            .and_then(LambdaSiteId::from_span)
+    })
 }
 
 fn add_coroutine_code_values(
@@ -94,20 +121,30 @@ fn add_coroutine_code_values(
 pub fn emit_coroutine(
     ws: &Workspace,
     ctx: &CodegenCtx,
-    interner: &skull_mir::monoty::MonoInterner,
+    scx: &skull_mir::lower::ScalarCtx,
+    source_func: &bone_semantic::hir::Function,
     plan: &CoroutinePlan,
     func: &MirFunc,
 ) -> Result<String, CompilerError> {
-    emit_coroutine_with_artifact(ws, ctx, interner, plan, func).map(|(lua, _, _)| lua)
+    emit_coroutine_with_artifact(ws, ctx, scx, source_func, plan, func)
+        .map(|(lua, _, _, _, _)| lua)
 }
 
 pub fn emit_coroutine_with_artifact(
     ws: &Workspace,
     ctx: &CodegenCtx,
-    interner: &skull_mir::monoty::MonoInterner,
+    scx: &skull_mir::lower::ScalarCtx,
+    source_func: &bone_semantic::hir::Function,
     plan: &CoroutinePlan,
     func: &MirFunc,
-) -> Result<(String, CodeArtifact, Vec<crate::allocation_report::AllocationBody>), CompilerError> {
+) -> Result<(
+    String,
+    CodeArtifact,
+    Vec<crate::allocation_report::AllocationBody>,
+    FxHashSet<FuncRef>,
+    Vec<StaticCell>,
+), CompilerError> {
+    let interner = scx.interner();
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
@@ -148,10 +185,39 @@ pub fn emit_coroutine_with_artifact(
     let mut hook_funcs = Vec::with_capacity(hook_entries.len());
     for (kind, entry) in &hook_entries {
         let hname = ctx.mint_synthetic(plan.hook(kind.slot()));
-        hook_funcs.push((
-            *kind,
-            skull_transform::lower_detached_region(&lowered.step, *entry, &hname, &frame_info),
-        ));
+        let mut aux =
+            skull_transform::lower_detached_region(&lowered.step, *entry, &hname, &frame_info);
+        // A hook without a body site uses its registration lambda's source site.
+        if aux.code_identity.is_none() {
+            let enclosing = func
+                .code_identity
+                .as_ref()
+                .and_then(CodeIdentity::owner);
+            let site = hook_registration_site(func, *kind, *entry);
+            let (Some(enclosing), Some(site)) = (enclosing, site) else {
+                return Err(CompilerError::new_with_label(
+                    source_func.name_span,
+                    format!(
+                        "coroutine hook `{}` has no source identity at its registration lambda",
+                        kind.slot()
+                    ),
+                ));
+            };
+            aux.code_identity = Some(CodeIdentity::Nested {
+                enclosing,
+                site,
+                name: aux.name,
+            });
+            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
+            slots.sort_unstable();
+            aux.code_compatibility = Some(CodeCompatibility {
+                call_abi: format!("detached:{}", aux.name),
+                capture: CaptureSchema::empty(),
+                frame: Some(FrameSchema { slots }),
+                lambda_topology: Default::default(),
+            });
+        }
+        hook_funcs.push((*kind, aux));
     }
     skull_transform::erase_detached_lambdas(
         &mut lowered.step,
@@ -161,6 +227,10 @@ pub fn emit_coroutine_with_artifact(
             .chain(hook_entries.iter().map(|(_, entry)| *entry)),
     );
     let pre_nested = lowered.step.nested_fns.len();
+    crate::mir_emit::convert_named_nested_closures(
+        ctx,
+        &mut lowered.step.nested_fns[..pre_nested],
+    );
     skull_transform::convert_closures_framed(
         &mut lowered.step,
         &step_name,
@@ -183,6 +253,7 @@ pub fn emit_coroutine_with_artifact(
     for nf in lowered.step.nested_fns[pre_nested..].iter() {
         ctx.mint_synthetic(nf.name.to_string());
     }
+    skull_transform::validate_no_residual_bound_calls(ws, source_func, &lowered.step)?;
     let mut allocation_bodies = Vec::new();
     let step_emission = emit_coroutine_body(
         ws, ctx, interner, &step_name, plan.base(), &lowered.step, Some(&frame),
@@ -195,8 +266,24 @@ pub fn emit_coroutine_with_artifact(
     // codegen's relooper (`recognize_counted_loops`), same as the step -- so no
     // `recover_counted_loops` transform here (unlike an ordinary fn's nested_fns).
     let mut nested_luas = String::new();
+    let mut nested_deps = FxHashSet::default();
+    let mut nested_statics = lowered.step.statics.clone();
+    let mut nested_times = crate::mir_emit::PhaseTimes::default();
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
-    for nf in hoisted[pre_nested..].iter_mut() {
+    let (named_nested, lambda_nested) = hoisted.split_at_mut(pre_nested);
+    crate::mir_emit::emit_nested_fns(
+        ws,
+        ctx,
+        scx,
+        named_nested,
+        &lowered.step.statics,
+        &mut nested_deps,
+        &mut nested_statics,
+        &mut allocation_bodies,
+        &mut nested_luas,
+        &mut nested_times,
+    )?;
+    for nf in lambda_nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf)?;
         let emission = emit_coroutine_body(
             ws, ctx, interner, nf.name.as_str(), nf.name.as_str(), nf, None,
@@ -296,6 +383,8 @@ pub fn emit_coroutine_with_artifact(
         format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"),
         code_artifact,
         allocation_bodies,
+        nested_deps,
+        nested_statics,
     ))
 }
 
@@ -315,12 +404,14 @@ fn emit_coroutine_body(
 ) -> CoroutineBodyEmission {
     if !crate::allocation_report::enabled() {
         return CoroutineBodyEmission {
-            lua: emit_named_framed(ws, ctx, interner, emitted_name, func, frame),
+            // A coroutine `__step` is not a declaration of its own, so it
+            // has no call-graph component and binds no callees.
+            lua: emit_named_framed(ws, ctx, interner, emitted_name, func, frame, None),
             body: None,
         };
     }
     let LuaEmission { lua, allocation_sites } = emit_named_framed_with_allocation_sites(
-        ws, ctx, interner, emitted_name, func, frame, &[],
+        ws, ctx, interner, emitted_name, func, frame, &[], None,
         crate::allocation_report::activation_enabled(),
     );
     let body = crate::allocation_report::collect_emitted_body(
@@ -412,7 +503,7 @@ fn emit_constructor(
         let mut box_fields = format!(
             "{{__variant = s.{tag}, __ty = {ty}",
             tag = skull_mir::lower::yield_slot(0),
-            ty = skull_codegen_lua::lua_string(ch.enum_name.as_str()),
+            ty = skull_codegen_lua::lua_string(skull_mir::mangle::symbol_of_key(ch.enum_name).as_str()),
         );
         for i in 0..ch.tuple_width {
             let _ = write!(box_fields, ", s.{}", skull_mir::lower::yield_slot(1 + i));

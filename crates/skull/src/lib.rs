@@ -22,6 +22,11 @@ pub mod shader_artifact;
 pub mod site_join;
 pub mod mir_emit;
 
+/// Emitted callee shape, shared by CLI sessions and the Lua printer.
+pub use skull_codegen_lua::{callee_binding_is_bound, callee_binding_mode, CalleeBindingMode};
+
+pub use skull_codegen_lua::emitted_body_name;
+
 // The shared graph layer, re-exported under its original paths. It moved BELOW
 // the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
 // graph the luajit driver does; consumers name it the same way either side of
@@ -197,11 +202,19 @@ pub fn user_module_id(ws: &Workspace) -> Result<ModuleId, CompilerError> {
         .find(|m| *m != ModuleId::builtin())
         .ok_or_else(|| CompilerError::new_no_location("skull: no user module after semantic_pass"))
 }
-/// A `@test` function discovered in a module: the Lua name to call (a `@test`
-/// fn is never mangled) and the expected stdout of `@test(output = "...")`.
+/// A `@test` function discovered in a module: its LOGICAL name (the DefKey --
+/// what a report labels and what the value backends look the fn up by), the
+/// SYMBOL the artifact defines it under, and the expected stdout of
+/// `@test(output = "...")`.
+///
+/// The two differ for a v1 package. `@test` is mangling-exempt, so the emitted
+/// global is the key's declared segment, while the key itself (`pkg::mod::name`)
+/// is not an identifier in any backend's grammar. A harness that must CALL the
+/// test uses `symbol`; text a human reads uses `name`.
 #[derive(Clone, Debug)]
 pub struct SkullTest {
     pub name: String,
+    pub symbol: String,
     pub output: Option<String>,
     /// `@test(returns = <literal>)`: the fn's return value is captured by the
     /// backend harness and compared HOST-side against this pinned literal.
@@ -266,12 +279,12 @@ pub fn module_tests_with_ids(
     };
     let mut out = Vec::new();
     for (fid, f) in module.functions.iter() {
-        let Some(test_ann) = f.annotations.iter().find(|a| a.name.name.as_str() == "test") else {
+        let Some(test_ann) = f.annotations.iter().find(|a| a.is_builtin("test")) else {
             continue;
         };
         // Honor `@ignore` (same convention as rock-cli/src/test.rs): a test
         // marked ignored is not run.
-        if f.annotations.iter().any(|a| a.name.name.as_str() == "ignore") {
+        if f.annotations.iter().any(|a| a.is_builtin("ignore")) {
             continue;
         }
         let returns = match test_ann
@@ -344,6 +357,9 @@ pub fn module_tests_with_ids(
             fid,
             SkullTest {
                 name: f.name.as_str().to_string(),
+                // The one emitted-name oracle, so the harness cannot drift from
+                // the definition the artifact actually writes.
+                symbol: skull_mir::mangle::mangle_fn(ws, f),
                 output,
                 returns,
             },
@@ -371,7 +387,7 @@ pub fn global_init_fn_name(global: &str) -> String {
 
 /// Lua name for a decorator fn (`@register` -> `__deco_register`).
 pub fn decorator_fn_name(deco: &str) -> String {
-    format!("__deco_{}", deco)
+    format!("__deco_{}", skull_mir::mangle::symbol_of_key(ustr::Ustr::from(deco)))
 }
 
 /// A `@deco`-annotation argument (or `deco` param default) as a Lua literal.
@@ -430,8 +446,53 @@ fn runtime_prelude() -> &'static str {
     //      and re-traces on a cliff/spiral (mag floors_walls: ~2.6 ms vs ~0.5
     //      with this). A trace must fit one `sizemcode` block. On arm64 macOS,
     //      dyld leaves room for the first block near the VM but later mappings
-    //      prevent a second one, so that first block must hold the hot set.
-    //   2. splitmix64 RNG (stdlib `random_*` inline(lua) bodies call
+    //      prevent a second one, so that first block must hold the hot set --
+    //      which is why size == max on both arches: one block, not several.
+    //      The budget is arch-split because the jump range is: x64 reaches
+    //      +/-2GB, arm64 only +/-128MB, so arm64 keeps the 16 MB figure from
+    //      the W1 decision in docs/luajit-mcode-flush-plan.md while x64 takes
+    //      64 MB. 8 MB was sized against `mag floors_walls` and is far too
+    //      small for the live game: a 60 s session of real play (summons,
+    //      combat, multiple spaces) flushed 31 times -- once every ~0.7 s --
+    //      and flush-plus-recovery accounted for 94% of all frame time over
+    //      budget. Evidence and the per-frame join are in
+    //      docs/trace-pressure-work-plan.md.
+    //      ROCK_JIT_MCODE_KB overrides both, so the budget can be swept
+    //      without a rebuild; this prelude runs at chunk load and beats any
+    //      -O flag passed on the command line.
+    //      `hotexit` is raised from LuaJIT's default 10 to 100 because a side
+    //      trace that FAILS is never penalised or blacklisted
+    //      (lj_trace.c:596-606) and snap->count only saturates on success, so a
+    //      doomed exit is re-recorded ~245 times for nothing. MAG's hottest
+    //      exits are doomed: they die in asm_head_side and never appear as a
+    //      parent for any other trace. Measured -57% aborts and -22% mean frame
+    //      on two independent workloads (a scripted combat sim and a recorded
+    //      play session), both disjoint across interleaved arms.
+    //      NOT validated on a workload whose side traces mostly SUCCEED, where
+    //      a higher threshold would cost real compiled coverage; and 250 beat
+    //      100 on every metric without the curve flattening, so this is a
+    //      conservative pick rather than a tuned one. ROCK_JIT_HOTEXIT
+    //      overrides it, so a regression reverts without a rebuild.
+    //      `maxtrace` is 32000 (LuaJIT default 1000, previously 4000 here).
+    //      A MAG combat session compiles ~24,600 traces; at 4000 the trace
+    //      array filled six times per benchmark run and every fill flushed
+    //      the whole cache -- all compiled code, every side-exit counter and
+    //      every abort penalty -- so the working set was re-recorded from
+    //      scratch six times. At 32000 the benchmark never flushes: aborts
+    //      11.1-11.5k -> 3.9k, mean frame 7.1 -> 4.7-5.1 ms, frames over
+    //      16.7 ms 37-39 -> 3-4, two interleaved pairs, peak RSS unchanged.
+    //      The trace array is 16 bytes per slot, so the fixed cost is 512 KB.
+    //      ROCK_JIT_MAXTRACE overrides it. `maxirconst` stays at LuaJIT's 500
+    //      (ROCK_JIT_MAXIRCONST): every "trace too long" in the census is the
+    //      constant limit, not maxrecord, but raising it only converts the
+    //      aborts into tail-call unroll aborts at the same starts.
+    //      `hotloop` and `loopunroll` stay at LuaJIT's defaults (56, 15) but
+    //      are exposed as ROCK_JIT_HOTLOOP / ROCK_JIT_LOOPUNROLL: MAG's inner
+    //      loops (glyphs per string, points per ribbon) run fewer than 56
+    //      iterations, so they never become loop traces and get unrolled by
+    //      whichever function-entry trace reaches them, which is where the
+    //      "trace too long" aborts come from. Sweepable without a rebuild.
+    //   2. 32-bit RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
     // The CodeRef runtime is appended by assembly only when this artifact has an
@@ -440,6 +501,7 @@ fn runtime_prelude() -> &'static str {
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", "")
+            .replace("{SESSION_CELL_BINDING}\n", SESSION_CELL_BINDING)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a
@@ -461,8 +523,34 @@ fn runtime_prelude() -> &'static str {
     &PRELUDE
 }
 
+/// Session activation must reseat cells in full chunks and incremental overlays.
+pub(crate) const SESSION_CELL_BINDING: &str = r#"if not _G.__rock_state_cell_sink then
+  _G.__rock_state_cell_sink = function(session)
+    __rock_state_cell = session and session.__rock_state or nil
+    __rock_initialized_cell = session and session.__rock_initialized or nil
+  end
+end
+if not _G.__rock_active_session then
+  _G.__rock_session_activate(_G.__rock_session_new(nil))
+end
+__rock_state_cell = _G.__rock_active_session.__rock_state
+__rock_initialized_cell = _G.__rock_active_session.__rock_initialized
+"#;
+
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then jit.opt.start("maxmcode=8192", "sizemcode=8192", "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 16384 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
+-- Everything up to the entry call runs inside one block, so the block's locals
+-- -- the Session cells first of all -- are CLOSED upvalues (UREFC: one guard,
+-- no constant) by the time an emitted function runs under the JIT. Left open,
+-- every inlined frame reading a cell would intern its own 2-slot i64 guard
+-- constant (docs/trace-pressure-work-plan.md, "Session cells"). The matching
+-- `end` is the last line the full emitter writes; the entry call the CLI
+-- appends runs after it.
+do
+-- Chunk-level cells every bound function reads a mutable global through
+-- (docs/backends.md, "Session cells"). Seated by __rock_session_publish below.
+local __rock_state_cell, __rock_initialized_cell
+local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
@@ -499,30 +587,52 @@ end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
-if not _G.__rock_session_new then
-  _G.__rock_session_new = function(schema_id)
-    return {
-      __rock_schema_id = schema_id,
-      __rock_state = {},
-      __rock_initialized = {},
-      __rock_initializer_keys = {},
-      __rock_rng_state = nil
-    }
-  end
-  _G.__rock_session_activate = function(session)
-    if type(session) ~= "table" or type(session.__rock_state) ~= "table"
-        or type(session.__rock_initialized) ~= "table" then
-      error("invalid Rock Session", 0)
-    end
-    local published = _G.__rock_state_schema_id
-    if published ~= nil and session.__rock_schema_id ~= published then
-      error("Rock StateSchema does not match the active Session", 0)
-    end
-    _G.__rock_active_session = session
-    _G.__rock_active_state = session.__rock_state
-    _G.__rock_active_initialized = session.__rock_initialized
-    return session
-  end
+-- A Session's state tables are sized to the schema's rehash fixpoint
+-- (`_G.__ROCK_STATE_CAPACITY`, emitted by the compiler; `__rock_state_reserve`
+-- below) so their array part never moves after load. LuaJIT specialises a
+-- constant-key read to the table's CURRENT array/hash split, and a table that
+-- grows lazily from `{}` rehashes once per hash-part overflow -- each time
+-- recomputing the array part from the keys populated so far -- which left
+-- every trace recorded before a move with a permanently failing guard
+-- (`docs/backends.md`, "Session cells"). Defined outside the define-once block
+-- so a reload with a newer artifact never keeps an older constructor.
+_G.__rock_session_new = function(schema_id)
+  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
+  local narr, nhash = 0, 0
+  if capacity then narr, nhash = capacity[1], capacity[2] end
+  return {
+    __rock_schema_id = schema_id,
+    __rock_state = __rock_table_new(narr, nhash),
+    __rock_initialized = __rock_table_new(narr, nhash),
+    __rock_initializer_keys = {},
+    __rock_rng_state = nil,
+    __rock_presentation_rng_state = nil,
+    __rock_state_capacity = { narr, nhash }
+  }
+end
+-- Grow a Session's tables to at least (narr, nhash) by rebuilding them at that
+-- size; values and keys are preserved. The first Session is created above
+-- before the compiler's capacity line runs, and a full reload may raise the
+-- capacity, so this is what seats the fixpoint on a live Session.
+_G.__rock_state_reserve = function(session, narr, nhash)
+  local have = session.__rock_state_capacity
+  if have and have[1] >= narr and have[2] >= nhash then return end
+  local state = __rock_table_new(narr, nhash)
+  for key, value in pairs(session.__rock_state) do state[key] = value end
+  local initialized = __rock_table_new(narr, nhash)
+  for key, value in pairs(session.__rock_initialized) do initialized[key] = value end
+  session.__rock_state = state
+  session.__rock_initialized = initialized
+  session.__rock_state_capacity = { narr, nhash }
+  if rawget(_G, "__rock_active_session") == session then _G.__rock_session_publish(session) end
+end
+_G.__rock_state_reserve_active = function()
+  local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
+  if not capacity then return end
+  _G.__rock_state_reserve(_G.__rock_active_session, capacity[1], capacity[2])
+end
+if not _G.__rock_session_new_defined_once then
+  _G.__rock_session_new_defined_once = true
   _G.__rock_session_current = function()
     local session = _G.__rock_active_session
     if not session then error("no active Rock Session", 0) end
@@ -566,8 +676,52 @@ if not _G.__rock_session_new then
     rawset(_G, "__rock_state_name_index", nil)
   end
 end
-if not _G.__rock_active_session then
-  _G.__rock_session_activate(_G.__rock_session_new(nil))
+-- Every Session swap publishes through the canonical pair of state cells,
+-- including state-image candidates and transaction aborts.
+_G.__rock_session_publish = function(session)
+  rawset(_G, "__rock_active_session", session)
+  rawset(_G, "__rock_active_state", session and session.__rock_state or nil)
+  rawset(_G, "__rock_active_initialized", session and session.__rock_initialized or nil)
+  local sink = rawget(_G, "__rock_state_cell_sink")
+  if sink then sink(session) end
+  return session
+end
+_G.__rock_session_activate = function(session)
+  if type(session) ~= "table" or type(session.__rock_state) ~= "table"
+      or type(session.__rock_initialized) ~= "table" then
+    error("invalid Rock Session", 0)
+  end
+  local published = _G.__rock_state_schema_id
+  if published ~= nil and session.__rock_schema_id ~= published then
+    error("Rock StateSchema does not match the active Session", 0)
+  end
+  return _G.__rock_session_publish(session)
+end
+{SESSION_CELL_BINDING}
+-- Join before a factory creates its body, so all later closures inherit these
+-- same two cells. Match table identity: stripped bytecode has no upvalue names.
+_G.__rock_bind_state_cells = function(body)
+  local session = _G.__rock_active_session
+  local sink = _G.__rock_state_cell_sink
+  -- Initial full-chunk factories already share these cells. Avoid a redundant
+  -- join there; overlays and later full chunks still join their distinct cells.
+  local state_id = debug.upvalueid(sink, 1)
+  local initialized_id = debug.upvalueid(sink, 2)
+  local i = 1
+  while true do
+    local name, value = debug.getupvalue(body, i)
+    if name == nil then break end
+    if value == session.__rock_state then
+      if debug.upvalueid(body, i) ~= state_id then
+        debug.upvaluejoin(body, i, sink, 1)
+      end
+    elseif value == session.__rock_initialized then
+      if debug.upvalueid(body, i) ~= initialized_id then
+        debug.upvaluejoin(body, i, sink, 2)
+      end
+    end
+    i = i + 1
+  end
 end
 _G.__rock_state_clear = function(key)
   local session = _G.__rock_session_current()
@@ -600,9 +754,7 @@ _G.__rock_state_transaction_abort = function()
   local transaction = rawget(_G, "__rock_state_transaction")
   if not transaction then return end
   local session = transaction.session
-  rawset(_G, "__rock_active_session", session)
-  rawset(_G, "__rock_active_state", session.__rock_state)
-  rawset(_G, "__rock_active_initialized", session.__rock_initialized)
+  _G.__rock_session_publish(session)
   session.__rock_schema_id = transaction.schema_id
   for key in pairs(session.__rock_state) do session.__rock_state[key] = nil end
   for key, value in pairs(transaction.state) do session.__rock_state[key] = value end
@@ -690,16 +842,17 @@ _G.__rock_state_install_global_bridge = function()
     mt.__rock_state_original_index = old_index
     mt.__rock_state_original_newindex = old_newindex
   end
-  local function old_read(t, key)
-    if type(old_index) == "function" then return old_index(t, key) end
-    if type(old_index) == "table" then return old_index[key] end
-    return nil
-  end
-  local function old_write(t, key, value)
-    if type(old_newindex) == "function" then return old_newindex(t, key, value) end
-    if type(old_newindex) == "table" then old_newindex[key] = value; return end
-    rawset(t, key, value)
-  end
+  -- Which of the three pre-bridge fallback shapes applies is decided HERE, once,
+  -- rather than re-decided inside the metamethod on every miss. `_G` normally
+  -- carries no metatable at all, so both resolve to nil and the miss path is a
+  -- plain `return nil` / `rawset` with no Lua-level TAIL CALL -- and a miss is
+  -- the common case: a read of any global that is not a Rock state global and
+  -- holds nil (an unset feature flag, say) reaches `__index` every time, and
+  -- cannot be cached raw, because rawsetting nil leaves the key absent.
+  local index_fn = type(old_index) == "function" and old_index or nil
+  local index_tab = type(old_index) == "table" and old_index or nil
+  local newindex_fn = type(old_newindex) == "function" and old_newindex or nil
+  local newindex_tab = type(old_newindex) == "table" and old_newindex or nil
   local previous_physical = rawget(_G, "__rock_state_bridge_physical") or {}
   for _, physical in ipairs(previous_physical) do rawset(_G, physical, nil) end
   local current_physical = {}
@@ -715,12 +868,16 @@ _G.__rock_state_install_global_bridge = function()
   mt.__index = function(t, key)
     local entry = _G.__rock_state_entry_for_name(key)
     if entry and entry.kind == "global" then return _G.__rock_state_entry_get(entry) end
-    return old_read(t, key)
+    if index_fn then return index_fn(t, key) end
+    if index_tab then return index_tab[key] end
+    return nil
   end
   mt.__newindex = function(t, key, value)
     local entry = _G.__rock_state_entry_for_name(key)
     if entry and entry.kind == "global" then return _G.__rock_state_entry_set(entry, value) end
-    return old_write(t, key, value)
+    if newindex_fn then return newindex_fn(t, key, value) end
+    if newindex_tab then newindex_tab[key] = value; return end
+    rawset(t, key, value)
   end
   mt.__rock_state_bridge = true
   setmetatable(_G, mt)
@@ -731,7 +888,7 @@ end
 {FN_MT}
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
-  local __rock_rng_state = _G.ffi.new("uint64_t", 0)
+  local __rock_rng_state = 0
   local function active_rng_state()
     local session = _G.__rock_active_session
     if session and session.__rock_rng_state ~= nil then return session.__rock_rng_state end
@@ -742,26 +899,65 @@ if not _G.__rock_rng_next then
     if session then session.__rock_rng_state = state else __rock_rng_state = state end
   end
   _G.__rock_rng_seed = function(s)
-    store_rng_state(_G.ffi.new("uint64_t", s))
+    local state = __rock_bit.tobit(tonumber(s))
+    store_rng_state(state)
   end
   -- Whole RNG state is this one counter; get/set serialize it for replay
-  -- keyframe restore (docs/replay-scrub-plan.md). Returns the uint64 cdata.
+  -- keyframe restore (docs/replay-scrub-plan.md). It is a plain 32-bit number.
   _G.__rock_rng_state_get = function() return active_rng_state() end
   _G.__rock_rng_state_set = function(s)
-    store_rng_state(_G.ffi.new("uint64_t", s))
+    local state = __rock_bit.tobit(tonumber(s))
+    store_rng_state(state)
   end
   _G.__rock_rng_next = function()
-    local state = active_rng_state() + 0x9E3779B97F4A7C15ULL
+    local state = __rock_bit.tobit(active_rng_state() + 0x9E3779B9)
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
+    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
     store_rng_state(state)
-    local z = state
-    z = __rock_bit.bxor(z, __rock_bit.rshift(z, 30)) * 0xBF58476D1CE4E5B9ULL
-    z = __rock_bit.bxor(z, __rock_bit.rshift(z, 27)) * 0x94D049BB133111EBULL
-    z = __rock_bit.bxor(z, __rock_bit.rshift(z, 31))
-    return z
+    local output = __rock_bit.bxor(state, __rock_bit.rshift(state, 16))
+    if output < 0 then return output + 4294967296 end
+    return output
   end
+
+  local __rock_presentation_rng_state = 0
+  local function active_presentation_rng_state()
+    local session = _G.__rock_active_session
+    if session and session.__rock_presentation_rng_state ~= nil then return session.__rock_presentation_rng_state end
+    return __rock_presentation_rng_state
+  end
+  local function store_presentation_rng_state(state)
+    local session = _G.__rock_active_session
+    if session then session.__rock_presentation_rng_state = state else __rock_presentation_rng_state = state end
+  end
+  _G.__rock_presentation_rng_seed = function(s)
+    local state = __rock_bit.tobit(tonumber(s))
+    store_presentation_rng_state(state)
+  end
+  _G.__rock_presentation_rng_state_get = function() return active_presentation_rng_state() end
+  _G.__rock_presentation_rng_state_set = function(s)
+    local state = __rock_bit.tobit(tonumber(s))
+    store_presentation_rng_state(state)
+  end
+  _G.__rock_presentation_rng_next = function()
+    local state = __rock_bit.tobit(active_presentation_rng_state() + 0x9E3779B9)
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 13))
+    state = __rock_bit.bxor(state, __rock_bit.rshift(state, 17))
+    state = __rock_bit.bxor(state, __rock_bit.lshift(state, 5))
+    store_presentation_rng_state(state)
+    local output = __rock_bit.bxor(state, __rock_bit.rshift(state, 16))
+    if output < 0 then return output + 4294967296 end
+    return output
+  end
+
   local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
-  if __seed then _G.__rock_rng_seed(__seed)
-  else _G.__rock_rng_seed(os.time()) end
+  if __seed then
+    _G.__rock_rng_seed(__seed)
+    _G.__rock_presentation_rng_seed(__seed + 10007)
+  else
+    _G.__rock_rng_seed(os.time())
+    _G.__rock_presentation_rng_seed(os.time() + 10007)
+  end
 end
 "#;
 
@@ -915,13 +1111,16 @@ fn value_struct_defs(
                 if ffi_names.contains(&dep) && !emitted.contains(&dep) {
                     blocked = true;
                 }
-                body.push_str(&format!("  {} {};\n", ct, f.name));
+                // The dependency key above is the LOGICAL name (what the
+                // workspace sets hold); the cdef text is the C one.
+                body.push_str(&format!("  {} {};\n", skull_mir::mangle::type_symbol(ws, dep), f.name));
             }
             if blocked {
                 next.push(s);
             } else {
-                typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, s.name));
-                ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = s.name));
+                let sym = skull_mir::mangle::type_symbol(ws, s.name);
+                typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, sym));
+                ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
                 // Leaf-taking ctor: LuaJIT has no brace elision, so a nested
                 // field cannot be passed as loose scalars to `_ct`. Allocate and
                 // write leaves instead, hoisting each nested reference once.
@@ -935,7 +1134,7 @@ fn value_struct_defs(
                     )
                     .map_err(|e| CompilerError::new_no_location(e.message))?;
                 if paths.iter().any(|p| p.contains('.')) {
-                    ctors.push_str(&leaf_ctor_def(s.name, &paths));
+                    ctors.push_str(&leaf_ctor_def(sym, &paths));
                 }
                 emitted.insert(s.name);
                 progress = true;
@@ -1004,22 +1203,23 @@ fn value_leaf_layout_checks(
                     e.message
                 ))
             })?;
+        let sym = skull_mir::mangle::type_symbol(ws, name);
         let _ = writeln!(
             out,
-            "if ffi.sizeof(\"{name}\") ~= {size} then error(\"skull layout drift: \
-             sizeof({name}) = \" .. ffi.sizeof(\"{name}\") .. \", expected {size}\", 0) end"
+            "if ffi.sizeof(\"{sym}\") ~= {size} then error(\"skull layout drift: \
+             sizeof({sym}) = \" .. ffi.sizeof(\"{sym}\") .. \", expected {size}\", 0) end"
         );
         for l in &leaves {
             let _ = writeln!(
                 out,
-                "if ({expr}) ~= {off} then error(\"skull layout drift: {name}.{path} at \" \
+                "if ({expr}) ~= {off} then error(\"skull layout drift: {sym}.{path} at \" \
                  .. ({expr}) .. \", expected {off}\", 0) end",
                 expr = l.offsetof_expr,
                 off = l.byte_off,
                 path = l.path,
             );
         }
-        storage.push_str(&skull_mir::lower::nb_value_storage_lua(name, &leaves, size));
+        storage.push_str(&skull_mir::lower::nb_value_storage_lua(ws, name, &leaves, size));
     }
     Ok((out, storage))
 }
@@ -1047,7 +1247,10 @@ fn value_struct_gc_defs(
             continue;
         }
         let n = s.name;
-        let mt = format!("__rock_vt_{n}");
+        // `n` stays the readable path for DISPLAY text; every name the chunk
+        // defines or tags with is the type's symbol.
+        let sym = skull_mir::mangle::type_symbol(ws, n);
+        let mt = skull_codegen_lua::value_struct_metatable_name(sym.as_str());
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
@@ -1094,9 +1297,12 @@ fn value_struct_gc_defs(
                 })
                 .collect();
             out.push_str(&format!(
-                "{n}_lct = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+                "{sym}_lct = function({p})\n{r}\nend\n",
                 p = params.join(", "),
-                b = assigns.concat(),
+                r = skull_codegen_lua::wrapper_return(&format!(
+                    "setmetatable({{ {b}__ty = \"{sym}\" }}, {mt})",
+                    b = assigns.concat(),
+                )),
             ));
             continue;
         }
@@ -1145,9 +1351,12 @@ fn value_struct_gc_defs(
             body.push_str(", ");
         }
         out.push_str(&format!(
-            "{n}_vt = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+            "{sym}_vt = function({p})\n{r}\nend\n",
             p = params.join(", "),
-            b = body,
+            r = skull_codegen_lua::wrapper_return(&format!(
+                "setmetatable({{ {b}__ty = \"{sym}\" }}, {mt})",
+                b = body,
+            )),
         ));
     }
     Ok(out)
@@ -1171,8 +1380,9 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
         {
             let slots: String =
                 shape.slots.iter().map(|(nm, t)| format!(" {t} {nm};")).collect();
-            typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = name));
-            ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = name));
+            let sym = skull_mir::mangle::type_symbol(ws, name);
+            typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = sym));
+            ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
         }
     }
     if typedefs.is_empty() {
@@ -1207,7 +1417,8 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
         for (nm, _) in &shape.slots {
             eq.push_str(&format!(" and a.{nm} == b.{nm}"));
         }
-        out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{name}\"] = {{\n"));
+        let sym = skull_mir::mangle::type_symbol(ws, name);
+        out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
         out.push_str(&format!(
             "  __eq = function(a, b)\n\
              \x20   if type(b) ~= \"cdata\" or type(a) ~= \"cdata\" then return false end\n\
@@ -1246,9 +1457,9 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
         ts.push_str("    return \"?\"\n  end,\n}\n");
         out.push_str(&ts);
         out.push_str(&format!(
-            "pcall(ffi.metatype, \"{name}\", {{\n\
-             \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{name}\"].__eq(a, b) end,\n\
-             \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{name}\"].__tostring(v) end,\n\
+            "pcall(ffi.metatype, \"{sym}\", {{\n\
+             \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{sym}\"].__eq(a, b) end,\n\
+             \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{sym}\"].__tostring(v) end,\n\
              }})\n"
         ));
     }
@@ -1275,7 +1486,8 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
                 any = true;
             }
             let n = s.name;
-            out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{n}\"] = {{\n"));
+            let sym = skull_mir::mangle::type_symbol(ws, n);
+            out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
             out.push_str("  __eq = function(a, b)\n");
             out.push_str(
                 "    if type(b) ~= \"cdata\" or type(a) ~= \"cdata\" then return false end\n",
@@ -1306,9 +1518,9 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
             }
             out.push_str("  end,\n}\n");
             out.push_str(&format!(
-                "pcall(ffi.metatype, \"{n}\", {{\n\
-                 \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{n}\"].__eq(a, b) end,\n\
-                 \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{n}\"].__tostring(v) end,\n\
+                "pcall(ffi.metatype, \"{sym}\", {{\n\
+                 \x20 __eq = function(a, b) return _G.__ROCK_C_METATYPE[\"{sym}\"].__eq(a, b) end,\n\
+                 \x20 __tostring = function(v) return _G.__ROCK_C_METATYPE[\"{sym}\"].__tostring(v) end,\n\
                  }})\n"
             ));
         }
@@ -1363,16 +1575,25 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                     .enumerate()
                     .map(|(ord, v)| format!("[{ord}] = \"{e}::{v}\"", e = e.name, v = v.name))
                     .collect();
-                out.push_str(&format!("__rock_enum_{}_names = {{ {} }}\n", e.name, items.join(", ")));
+                // The table is a Lua GLOBAL, so its name carries the enum's
+                // symbol; the values it holds are display text.
+                out.push_str(&format!(
+                    "__rock_enum_{}_names = {{ {} }}\n",
+                    skull_mir::mangle::type_symbol(ws, e.name),
+                    items.join(", ")
+                ));
             } else {
                 // Mixed: unit variants are interned singleton tables.
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
-                        let g = enum_singleton_name(e.name.as_str(), v.name.as_str());
+                        let sym = skull_mir::mangle::type_symbol(ws, e.name);
+                        let g = enum_singleton_name(sym.as_str(), v.name.as_str());
+                        // `__ty` is looked up in `__ROCK_TYPE_TABLE`, so it is
+                        // the same spelling that registry is keyed on.
                         out.push_str(&format!(
                             "{g} = {g} or {{ __variant = \"{var}\", __ty = \"{ty}\" }}\n",
                             var = v.name,
-                            ty = e.name,
+                            ty = sym,
                         ));
                     }
                 }
@@ -1389,6 +1610,12 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
 /// printing an address, `deepcopy` copies it instead of SHARING it, and the sim
 /// checkpoint census classifies it as `value_cdata` instead of refusing it as
 /// unmodelled. Mirrors rock-codegen/src/backend/lua/structs.rs.
+///
+/// Every consumer asks through the stdlib's `__rock_c_struct_of`, which
+/// memoizes the `ffi.istype` scan per CTypeID in `__ROCK_C_STRUCT_BY_CTYPE`.
+/// The rows own that memo's lifetime: it is reset here, after the rows, so a
+/// re-emission (a hot reload that re-runs this scaffolding) can never serve a
+/// row that no longer exists or predates its replacement.
 ///
 /// Two producers, one registry. `value` structs are gated by `emitted` — exactly
 /// the structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
@@ -1410,9 +1637,10 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             };
             let copy_args: Vec<String> =
                 shape.field_names().iter().map(|f| format!("v.{f}")).collect();
+            let sym = skull_mir::mangle::type_symbol(ws, name);
             out.push_str(&format!(
-                "_G.__ROCK_C_STRUCT[\"{name}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
-                 end, copy = function(v)\n  return {name}_ct({})\nend, name = \"{name}\" }}\n",
+                "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
+                 end, copy = function(v)\n  return {sym}_ct({})\nend, name = \"{sym}\" }}\n",
                 copy_args.join(", ")
             ));
         }
@@ -1421,7 +1649,8 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
                 continue;
             }
             let n = s.name;
-            out.push_str(&format!("_G.__ROCK_C_STRUCT[\"{n}\"] = {{ inspect = function(v)\n"));
+            let sym = skull_mir::mangle::type_symbol(ws, n);
+            out.push_str(&format!("_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n"));
             if s.fields.is_empty() {
                 out.push_str(&format!("  return \"{n} {{ }}\"\n"));
             } else {
@@ -1438,11 +1667,12 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             let copy_args: Vec<String> =
                 s.fields.iter().map(|f| format!("v.{}", f.name)).collect();
             out.push_str(&format!(
-                "end, copy = function(v)\n  return {n}_ct({})\nend, name = \"{n}\" }}\n",
+                "end, copy = function(v)\n  return {sym}_ct({})\nend, name = \"{sym}\" }}\n",
                 copy_args.join(", ")
             ));
         }
     }
+    out.push_str("_G.__ROCK_C_STRUCT_BY_CTYPE = {}\n");
     out
 }
 
@@ -1571,7 +1801,7 @@ fn desc_into(ws: &Workspace, ty: bone_semantic::prelude::TyId, out: &mut String,
                 // struct's own fields are reached through the type table's
                 // per-field descriptors rather than repeated inside this one.
                 out.push_str("{k=\"nom\",name=\"");
-                out.push_str(name.as_str());
+                out.push_str(skull_mir::mangle::type_symbol(ws, name).as_str());
                 out.push_str("\"}");
                 true
             }
@@ -1655,7 +1885,7 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
         Some(TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        }) => (name.as_str().to_string(), false),
+        }) => (skull_mir::mangle::type_symbol(ws, name).as_str().to_string(), false),
         Some(TypeExpr::App {
             ctor: TypeCtor::Array,
             ..
@@ -1666,17 +1896,66 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
-/// value's metadata from its `__ty` tag. Mirrors
-/// rock-codegen/src/codegen_pass.rs. The prelude already seeds the table empty,
-/// so this only adds entries. No metatables: type tagging is the direct `__ty`.
+/// value's metadata from its `__ty` tag. The prelude already seeds the table
+/// empty, so this only adds entries. No metatables: type tagging is the direct
+/// `__ty`.
+///
+/// `type_id` below is WRITE-ONLY, and deliberately so. It is a counter over
+/// `ws.modules` in resolution order, so it renumbers whenever a declaration
+/// moves between files or a dependency is added -- it is not stable across
+/// builds, worktrees or manifest edits. Every consumer of this table keys by
+/// the type NAME (`serialization.rock`, `snapshot.rock`, `sim_checkpoint.rock`,
+/// `stdlib/unified.rock`) and reads `.kind`/`.fields`/`.variants`; nothing in
+/// the tree reads `.type_id`, and `docs/incremental-testing.md` already treats
+/// its variation as harmless.
+///
+/// It becomes load-bearing the moment anything reads it -- a `type_id<T>()`
+/// intrinsic, an entry in the canonical serializer's hash, a save, a wire
+/// message, an FFI tag. If that day comes, derive the number from a sorted,
+/// order-independent key the way `StateSchema` already does with
+/// `(kind, identity)`, rather than from module order.
+/// The `host_resource` key of a type-table entry, or nothing.
+///
+/// `@host_resource(<class>)` on the declaration is the ONE place a type is
+/// named a host resource; `__stone_host_projection_class`
+/// (`stone/engine/host_projection.rock`) reads this key instead of keeping its
+/// own list of type names, which is what stops the two drifting and reporting
+/// every handle of a forgotten type as a missing one. A host resource the
+/// native ledger does not track publishes the empty class, which reads as
+/// "ordinary state" to the projection walk while still being a compile error
+/// in game memory.
+fn host_resource_key(hr: Option<bone_semantic::hir::HostResource>) -> String {
+    match hr {
+        Some(hr) => format!(", host_resource = \"{}\"", hr.ledger_class),
+        None => String::new(),
+    }
+}
+
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
-    let mut out = String::new();
+    let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
+            // Row offsets of a `[S]` stored as strided rows, so reflection
+            // reads a row by leaf path (`serialization.rock`).
+            if s.is_nobox
+                && s.generics.is_empty()
+                && let Some(offsets) = skull_mir::lower::ContainerPlan::strided_struct_row_offsets(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                )
+            {
+                let entries = offsets
+                    .iter()
+                    .map(|(path, offset)| format!("[\"{path}\"] = {offset}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!("_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n", skull_mir::mangle::type_symbol(ws, s.name)));
+            }
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
             // immutable Lua tables (`value_table`).
@@ -1700,7 +1979,7 @@ fn type_table_defs(
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
                 let nullable = plan.nullable();
                 let (tystr, embed) = match plan.inline_child() {
-                    Some(child) => (child.as_str().to_string(), ", embed = true"),
+                    Some(child) => (skull_mir::mangle::type_symbol(ws, child).as_str().to_string(), ", embed = true"),
                     None => (tystr, ""),
                 };
                 let desc = match field_desc_lua(ws, f.ty) {
@@ -1713,19 +1992,21 @@ fn type_table_defs(
                 ));
             }
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}, fields = {{ {f} }} }}\n",
-                n = s.name,
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}{hr}, fields = {{ {f} }} }}\n",
+                n = skull_mir::mangle::type_symbol(ws, s.name),
                 k = kind,
                 id = type_id,
+                hr = host_resource_key(s.host_resource),
                 f = fields.join(", ")
             ));
             type_id += 1;
         }
         for (_, nt) in module.newtypes.iter() {
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}, fields = {{ }} }}\n",
-                n = nt.name,
-                id = type_id
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}{hr}, fields = {{ }} }}\n",
+                n = skull_mir::mangle::type_symbol(ws, nt.name),
+                id = type_id,
+                hr = host_resource_key(nt.host_resource)
             ));
             type_id += 1;
         }
@@ -1734,8 +2015,17 @@ fn type_table_defs(
         for (_, e) in module.enums.iter() {
             use bone_semantic::hir::VariantPayload;
 
-            let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, e.name)
-                .and_then(|plan| plan.cdata().cloned())
+            let plan = skull_mir::lower::EnumPlan::for_name(ws, e.name);
+            if let Some(flat) = plan.as_ref().and_then(|plan| plan.flat()) {
+                let names = flat.record_fields().iter()
+                    .map(|name| format!("\"{name}\""))
+                    .collect::<Vec<_>>().join(", ");
+                out.push_str(&format!(
+                    "_G.__ROCK_ENUM_FLAT_LAYOUT[\"{}\"] = {{ tuple_width = {}, record_fields = {{ {} }} }}\n",
+                    skull_mir::mangle::type_symbol(ws, e.name), flat.tuple_width(), names,
+                ));
+            }
+            let Some(shape) = plan.and_then(|plan| plan.cdata().cloned())
             else {
                 // A BOXED enum has no value shape, and until now no reflection
                 // entry at all -- so a serializer reaching one had nothing to
@@ -1746,7 +2036,7 @@ fn type_table_defs(
                 if let Some(vd) = boxed_variant_descs(ws, e) {
                     out.push_str(&format!(
                         "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", type_id = {id}, fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
-                        n = e.name,
+                        n = skull_mir::mangle::type_symbol(ws, e.name),
                         id = type_id,
                     ));
                     type_id += 1;
@@ -1802,7 +2092,7 @@ fn type_table_defs(
                 .collect();
             out.push_str(&format!(
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }}, variants = {{ {v} }} }}\n",
-                n = e.name,
+                n = skull_mir::mangle::type_symbol(ws, e.name),
                 id = type_id,
                 f = fields.join(", "),
                 v = variants.join(", ")
@@ -1821,10 +2111,70 @@ mod tests {
         compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
     }
 
+    /// The budget itself is tuning and moves with measurement, so this pins the
+    /// shape and the floor rather than a literal. LuaJIT's own defaults (512 KB
+    /// total, 32 KB blocks) flush the trace arena thousands of times in a real
+    /// MAG session; 8 MB still flushed it 31 times in 60 s of play. Neither
+    /// architecture may regress below that. See docs/trace-pressure-work-plan.md.
     #[test]
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
-        assert!(prelude.contains("maxmcode=8192\", \"sizemcode=8192"));
+        for knob in ["\"maxtrace=\" .. __mt", "maxrecord=32000", "maxsnap=4000", "\"maxirconst=\" .. __mk"] {
+            assert!(prelude.contains(knob), "runtime prelude stopped setting {knob}");
+        }
+        // One block, not several: a trace must fit a single `sizemcode` area,
+        // and on arm64 macOS dyld only leaves room for the first one near the
+        // VM. Driving both from one value is what guarantees that.
+        assert!(
+            prelude.contains("\"maxmcode=\" .. __mc, \"sizemcode=\" .. __mc"),
+            "mcode max and size must come from one value"
+        );
+        assert!(
+            prelude.contains("ROCK_JIT_MCODE_KB"),
+            "the mcode budget must stay sweepable without a rebuild"
+        );
+        // A doomed side trace is never blacklisted, so LuaJIT's default 10
+        // re-records it ~245 times for nothing. Pin the floor and the override,
+        // not the value: the value is a measured pick that may move again.
+        assert!(
+            prelude.contains("ROCK_JIT_HOTEXIT"),
+            "the hot-exit threshold must stay sweepable without a rebuild"
+        );
+        let hotexit: u32 = prelude
+            .split("ROCK_JIT_HOTEXIT\") or \"\") or ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("prelude no longer defaults the hot-exit threshold")
+            .parse()
+            .expect("hot-exit default is not a literal count");
+        assert!(
+            hotexit > 10,
+            "hot-exit default {hotexit} is back at or below LuaJIT's, which re-records doomed exits"
+        );
+        let picked = prelude
+            .split("jit.arch == \"arm64\" and ")
+            .nth(1)
+            .expect("prelude no longer selects an mcode budget by architecture");
+        let (arm64, rest) = picked
+            .split_once(" or ")
+            .expect("arch-selected mcode budget is not an `arm64 and A or B` pick");
+        let x64 = rest
+            .split(')')
+            .next()
+            .expect("arch-selected mcode budget has no x64 arm");
+        for (arch, kb) in [("arm64", arm64.trim()), ("x64", x64.trim())] {
+            let kb: u32 = kb
+                .parse()
+                .unwrap_or_else(|_| panic!("{arch} mcode budget is not a literal KB count: {kb:?}"));
+            assert!(kb >= 8192, "{arch} mcode budget {kb} KB is below the 8 MB floor");
+        }
+    }
+
+    #[test]
+    fn runtime_prelude_rng_state_is_numeric() {
+        let prelude = super::runtime_prelude();
+        assert!(prelude.contains("local __rock_rng_state = 0"));
+        assert!(!prelude.contains("ffi.new(\"uint64_t\", 0)"));
     }
 
     /// Bare-name aliases (`_G["pick"] = pick_bool_ret_int`) for the user module's
@@ -2224,7 +2574,11 @@ mod tests {
         // (killed is -1, errored -2), over an ordinary goto-CFG — NOT the
         // emit-time goto-into-block re-entry labels.
         assert!(lua.contains(".__state ="), "expected state-saving write, got:\n{lua}");
-        assert!(lua.contains("__state = (-3)"), "expected completed-terminal transition, got:\n{lua}");
+        exec_eq(
+            "co fn counter() -> Coroutine<int> {\n yield 1\n yield 2\n }",
+            "local c = counter(); c.__resume(c); c.__resume(c); c.__resume(c); print(c.__state)",
+            "-3",
+        );
         assert!(lua.contains("goto bb"), "expected ordinary goto CFG, got:\n{lua}");
         assert!(
             !lua.contains("__co_resume_"),
@@ -2424,14 +2778,32 @@ mod tests {
     /// assertion scope to one fn and ignore the always-emitted value-struct
     /// `copy = function(v) return V2_ct(...) end` metatype helpers.
     fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so match
-        // the `function <name>` PREFIX and scope from the header's `(` to the next
-        // top-level `function `.
-        let head = format!("function {name}");
-        let hpos = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
-        let rest = &lua[hpos..];
-        let paren = rest.find('(').expect("fn header has `(`");
-        rest[paren + 1..].split("\nfunction ").next().unwrap()
+        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so
+        // match the `function <name>` PREFIX and scope from the header's `(` to
+        // the next top-level definition. Under the bound callee shape the
+        // definition reads `__rock_mk_<name> = function(<callees>) return
+        // function(..)`, so the body starts after the INNER header and the next
+        // definition can be a factory rather than a `function ` line.
+        let factory_prefix = skull_codegen_lua::CALLEE_FACTORY_PREFIX;
+        let inner = " return function(";
+        let (start, header_end) = match lua.find(&format!("function {name}")) {
+            Some(at) => (at, lua[at..].find('(').expect("fn header has `(`") + 1),
+            None => {
+                let head = format!("{factory_prefix}{name}");
+                let at = lua
+                    .find(&head)
+                    .unwrap_or_else(|| panic!("no `function {name}` or `{head}` in:\n{lua}"));
+                (at, lua[at..].find(inner).expect("a factory returns its body") + inner.len())
+            }
+        };
+        let rest = &lua[start + header_end..];
+        let factory_start = format!("\n{factory_prefix}");
+        let end = [rest.find("\nfunction "), rest.find(factory_start.as_str())]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(rest.len());
+        &rest[..end]
     }
 
     /// A defaulted flat-value param is scalarized like any other value param:

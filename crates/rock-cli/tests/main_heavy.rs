@@ -1,8 +1,6 @@
 // Game-spawning tests, excluded from the default nextest profile (see .config/nextest.toml).
 
 mod stone_harness;
-#[path = "web_test_process.rs"]
-mod web_test_process;
 
 #[path = "arena_serialization_tests.rs"]
 mod arena_serialization_tests;
@@ -21,6 +19,8 @@ mod replay_flight_tests;
 mod artifact_fingerprint_replay_tests;
 #[path = "replay_bindings_tests.rs"]
 mod replay_bindings_tests;
+#[path = "telemetry_isolation_tests.rs"]
+mod telemetry_isolation_tests;
 #[path = "action_layer_v2_landing_gaps.rs"]
 mod action_layer_v2_landing_gaps;
 #[path = "replay_restore_tests.rs"]
@@ -35,31 +35,10 @@ mod replay_timeline_tests;
 mod replay_window_tests;
 #[path = "replay_timing_tests.rs"]
 mod replay_timing_tests;
-#[path = "engine_cdylib_freshness_gate.rs"]
-mod engine_cdylib_freshness_gate;
-
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
 #[path = "allocation_activation_gate.rs"]
 mod allocation_activation_gate;
-#[path = "frame_watchdog_gate.rs"]
-mod frame_watchdog_gate;
-#[path = "macos_wgpu_lifecycle_gate.rs"]
-mod macos_wgpu_lifecycle_gate;
-#[path = "macos_wgpu_recovery_gate.rs"]
-mod macos_wgpu_recovery_gate;
-#[path = "bounded_summary_gate.rs"]
-mod bounded_summary_gate;
-#[path = "wgpu_refusal_gate.rs"]
-mod wgpu_refusal_gate;
-#[path = "wgpu_capture_gate.rs"]
-mod wgpu_capture_gate;
-#[path = "wgpu_capture_contract_gate.rs"]
-mod wgpu_capture_contract_gate;
-#[path = "wgpu_gameplay_origin_gate.rs"]
-mod wgpu_gameplay_origin_gate;
-#[path = "wgpu_menu_parity_gate.rs"]
-mod wgpu_menu_parity_gate;
 #[path = "rich_text_reject_gate.rs"]
 mod rich_text_reject_gate;
 #[path = "plain_text_reject_gate.rs"]
@@ -74,19 +53,26 @@ mod texture_slot_gate;
 mod skull_overlay_wipe;
 #[path = "sim_concurrent_invocations.rs"]
 mod sim_concurrent_invocations;
+#[path = "sim_compile_receipt.rs"]
+mod sim_compile_receipt;
 #[path = "sim_allocation_census.rs"]
 mod sim_allocation_census;
 #[path = "sim_worker_differential.rs"]
 mod sim_worker_differential;
 #[path = "mag_worker_product_tests.rs"]
 mod mag_worker_product_tests;
-#[path = "sim_reload_lane_drain.rs"]
-mod sim_reload_lane_drain;
+#[path = "sim_memory_cap.rs"]
+mod sim_memory_cap;
+#[path = "sim_v1_names.rs"]
+mod sim_v1_names;
+#[path = "headless_scope.rs"]
+mod headless_scope;
+#[path = "sim_reload_lane.rs"]
+mod sim_reload_lane;
 #[path = "sim_worker_pool.rs"]
 mod sim_worker_pool;
-#[path = "web_smoke_tests.rs"]
-mod web_smoke_tests;
-
+#[path = "sim_observability_heavy.rs"]
+mod sim_observability_heavy;
 #[path = "shader_texture_census.rs"]
 mod shader_texture_census;
 #[path = "shader_corpus_oracle.rs"]
@@ -94,3 +80,15 @@ mod shader_corpus_oracle;
 
 #[path = "graph_update_projects.rs"]
 mod graph_update_projects;
+
+#[path = "sim_presentation_differential.rs"]
+mod sim_presentation_differential;
+
+#[path = "engine_build_scope_gate.rs"]
+mod engine_build_scope_gate;
+
+#[path = "engine_cdylib_target_dir_gate.rs"]
+mod engine_cdylib_target_dir_gate;
+
+#[path = "engine_launcher_rebuild_gate.rs"]
+mod engine_launcher_rebuild_gate;

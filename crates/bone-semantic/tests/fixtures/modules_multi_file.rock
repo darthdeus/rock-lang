@@ -1,0 +1,1202 @@
+//! Modules-v1 namespace resolution (plan M2): multi-file logical modules,
+//! visibility, scope tiers, UFCS, operators, paths.
+//!
+//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
+//! `//^ ty` markers are checked in every embedded file.
+
+//- module_ownership_two_files_share_one_module
+//-- lib.rock @pkg=chess,1 @v1
+mod pieces;
+
+//-- lib_pieces_a.rock @pkg=chess,1 @v1
+mod pieces;
+
+pub fn pawn_value() -> int {
+    shared_base()
+}
+
+fn shared_base() -> int {
+    1
+}
+
+//-- lib_pieces_b.rock @pkg=chess,1 @v1
+mod pieces;
+
+use chess::pieces::pawn_value;
+
+fn doubled() -> int {
+    let n = pawn_value()
+            //^ int
+    n
+}
+
+//- cross_package_qualified_paths
+//-- lib.rock @pkg=chess,1 @v1
+pub struct Board {
+    pub size: int,
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn describe() -> int {
+    let b = chess::Board { size: 8 }
+    let n = b.size
+            //^ int
+    n
+}
+
+//- import_tiers_own_module_shadows_glob
+//-- lib.rock @pkg=chess,1 @v1
+pub mod util;
+
+//-- lib_other.rock @pkg=chess,1 @v1
+mod other;
+
+pub fn width() -> string {
+    "wide"
+}
+
+//-- lib_util.rock @pkg=chess,1 @v1
+mod util;
+
+use chess::other::*;
+
+pub fn width() -> int {
+    10
+}
+
+// Tier 2 (this logical module's own definition) wins over the tier 4 glob:
+// the glob `width` returns string, so the marker below is the oracle.
+pub fn outer_width() -> int {
+    let n = width()
+            //^ int
+    n
+}
+
+//- root_alias_collision_rejects @fail
+//-- bad.rock @pkg=chess,1 @v1
+struct chess { x: int }
+
+fn main() {}
+
+//- struct_and_fn_same_name_reject @fail
+//-- lib.rock @pkg=chess,1 @v1
+struct Foo { x: int }
+fn Foo() {}
+
+//- child_module_and_fn_same_name_reject @fail
+//-- lib.rock @pkg=chess,1 @v1
+pub mod util {
+}
+fn util() {}
+
+//- broken_import_does_not_fall_through_to_glob @fail
+//-- lib.rock @pkg=chess,1 @v1
+pub fn foo() -> int { 1 }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::*;
+use chess::missing as foo;
+
+fn f() -> int {
+    foo()
+}
+
+//- private_fn_inaccessible_from_sibling @fail
+//-- a.rock @pkg=chess,1 @v1
+mod a;
+fn hidden() -> int { 1 }
+
+//-- b.rock @pkg=chess,1 @v1
+mod b;
+fn f() -> int {
+    super::a::hidden()
+}
+
+//- pub_fn_accessible_from_sibling
+//-- a.rock @pkg=chess,1 @v1
+mod a;
+pub fn shown() -> int { 1 }
+
+//-- b.rock @pkg=chess,1 @v1
+mod b;
+fn f() -> int {
+    super::a::shown()
+}
+
+//- operator_import_selects_user_plus
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Vec2 { pub x: int, pub y: int }
+pub operator +(a: Vec2, b: Vec2) -> Vec2 {
+    Vec2 { x: a.x, y: a.y }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::{Vec2, operator(+)};
+fn f() -> Vec2 {
+    let a = Vec2 { x: 1, y: 2 }
+    let b = Vec2 { x: 3, y: 4 }
+    a + b
+}
+
+//- qualified_user_fieldref_keeps_normal_nominal_identity
+//-- other.rock @pkg=app,1 @v1
+mod other;
+pub struct FieldRef<T, V> {
+    pub value: V,
+}
+
+//-- app.rock @pkg=app,1 @v1
+use app::other::FieldRef as FieldRef;
+
+fn read(r: FieldRef<int, int>) -> int {
+    r.value
+}
+
+//- qualified_user_fieldref_rejects_sibling_ref @fail=field reference `.health` is only valid against an expected
+//-- other.rock @pkg=app,1 @v1
+mod other;
+pub struct FieldRef<T, V> {
+    pub value: V,
+}
+pub struct Mob {
+    pub health: int,
+}
+
+//-- app.rock @pkg=app,1 @v1
+use app::other::{FieldRef, Mob};
+
+fn main() {
+    let r: FieldRef<Mob, int> = .health
+}
+
+//- qualified_user_vec2_has_no_swizzle @fail=struct `app::other::Vec2` has no field `r`
+//-- other.rock @pkg=app,1 @v1
+mod other;
+pub struct Vec2 {
+    pub x: float,
+    pub y: float,
+}
+
+//-- app.rock @pkg=app,1 @v1
+use app::other::Vec2 as Vec2;
+
+fn red(v: Vec2) -> float {
+    v.r
+}
+
+//- user_std_package_name_is_reserved @fail=user packages cannot use the compiler-owned package name `std`
+//-- app.rock @pkg=std,3 @v1
+fn main() {}
+
+//- package_root_std_module_is_reserved @fail=package-root module name `std` is reserved
+//-- app.rock @pkg=app,3 @v1
+mod std;
+
+fn main() {}
+
+//- operator_not_globally_discovered @fail
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Vec2 { pub x: int, pub y: int }
+pub operator +(a: Vec2, b: Vec2) -> Vec2 {
+    Vec2 { x: a.x, y: a.y }
+}
+
+//-- app.rock @pkg=app,2 @v1
+use geo::Vec2;
+fn f() -> Vec2 {
+    let a = Vec2 { x: 1, y: 2 }
+    let b = Vec2 { x: 3, y: 4 }
+    a + b
+}
+
+//- pub_package_glob_is_glob_priority
+//-- util.rock @pkg=chess,1 @v1
+mod util;
+pub fn width() -> int { 1 }
+
+//-- root.rock @pkg=chess,1 @v1
+pub(package) use self::util::*;
+fn width() -> int { 2 }
+fn pick() -> int {
+    width()
+}
+
+//- an_own_global_shadows_a_glob_function_in_a_call @fail=`width` binds to global `app::width` here
+//-- lib.rock @pkg=chess,1 @v1
+pub mod util;
+
+//-- lib_util.rock @pkg=chess,1 @v1
+mod util;
+
+pub fn width() -> int { 1 }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::util::*;
+
+global width: int = 3
+
+fn f() -> int {
+    width()
+}
+
+//- v1_infix_ascription_is_a_path_not_an_ascription @fail=`x::int` did not resolve to any definition; `::` is a path separator in modules-v1, so a type ascription is written `(x : int)`
+//-- app.rock @pkg=app,1 @v1
+fn f() -> int {
+    let x = 5
+    let y = x :: int
+    y
+}
+
+//- v1_infix_ascription_to_a_type_in_scope_names_the_replacement @fail=a type ascription is written `(p : Point)`
+//-- app.rock @pkg=app,1 @v1
+struct Point { x: int }
+
+fn f() -> Point {
+    let p = Point { x: 1 }
+    p :: Point
+}
+
+//- an_unresolved_qualified_path_keeps_its_message @fail=`a::missing` did not resolve to any definition @not=ascription
+//-- app.rock @pkg=app,1 @v1
+fn f() -> int {
+    a::missing
+}
+
+//- the_contextual_ascription_resolves
+//-- app.rock @pkg=app,1 @v1
+fn f() -> int {
+    let x = 5
+    let y = (x : int)
+    y
+}
+
+//- inline_mod_block_members_resolve
+//-- app.rock @pkg=app,1 @v1
+pub mod util {
+    pub fn heal() -> int { 7 }
+}
+
+fn f() -> int {
+    let n = self::util::heal()
+    let m = n
+          //^ int
+    m
+}
+
+//- qualified_variant_construction_carries_its_payload
+//-- lib.rock @pkg=chess,1 @v1
+pub enum Move {
+    Pass,
+    Step(int),
+    Jump { from: int, to: int },
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn played() -> int {
+    let stepped = chess::Move::Step(2)
+    let echoed = stepped
+       //^ chess::Move
+    let jumped = chess::Move::Jump { from: 1, to: 3 }
+    let passed = chess::Move::Pass
+    let n = match echoed {
+        chess::Move::Step(d) => d,
+                             //^ int
+        chess::Move::Jump { from, to } => to,
+        chess::Move::Pass => 0,
+    }
+    n
+}
+
+//- qualified_newtype_construction_resolves_by_name
+//-- lib.rock @pkg=chess,1 @v1
+pub newtype Rank(int)
+
+//-- app.rock @pkg=app,2 @v1
+fn made() -> chess::Rank {
+    let r = chess::Rank(3)
+    let echoed = r
+       //^ chess::Rank
+    echoed
+}
+
+//- legacy_projection_resolves_public_root_export
+//-- lib.rock @pkg=lib,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,2
+fn read(x: Shared) -> int {
+    let n = x.value
+            //^ int
+    n
+}
+
+//- legacy_projection_names_the_variants_of_a_projected_enum
+//-- lib.rock @pkg=sfx,1 @v1
+pub enum MoveSfx {
+    Silent,
+    Step(int),
+    Jump { to: int },
+}
+
+//-- game.rock @pkg=game,2
+fn pick(n: int) -> MoveSfx {
+    if n == 0 {
+        return MoveSfx::Silent
+    }
+    if n == 1 {
+        return MoveSfx::Jump { to: 3 }
+    }
+    MoveSfx::Step(n)
+}
+
+fn score(m: MoveSfx) -> int {
+    let n = match m {
+        MoveSfx::Silent => 0,
+        MoveSfx::Step(k) => k,
+                         //^ int
+        MoveSfx::Jump { to } => to,
+    }
+    n
+}
+
+//- legacy_projection_rejects_private_root_export @fail=Unknown type name Hidden
+//-- lib.rock @pkg=lib,1 @v1
+struct Hidden {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,2
+fn read(x: Hidden) -> int {
+    x.value
+}
+
+//- legacy_projection_reports_distinct_ambiguity @fail=ambiguous legacy reference to `Shared`: candidates lib_a::Shared, lib_b::Shared
+//-- a.rock @pkg=lib_a,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,3
+fn read(x: Shared) -> int {
+    x.value
+}
+
+//- legacy_projection_deduplicates_reexport
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Item {
+    pub value: int,
+}
+
+//-- facade.rock @pkg=facade,2 @v1
+pub use provider::Item;
+
+//-- main.rock @pkg=app,3
+fn read(x: Item) -> int {
+    let n = x.value
+            //^ int
+    n
+}
+
+//- legacy_item_use_is_additive
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Imported {
+    pub value: int,
+}
+
+//-- main.rock @pkg=app,2
+use provider::Imported;
+
+fn read(x: Imported) -> int {
+    let y = 1 :: int
+    let n = x.value
+            //^ int
+    n
+}
+
+//- v1_does_not_see_legacy_consumer_names @fail=`ConsumerOnly` did not resolve to any definition
+//-- consumer.rock @pkg=consumer,1
+struct ConsumerOnly {
+    value: int,
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn read(x: ConsumerOnly) -> int {
+    x.value
+}
+
+//- legacy_projection_retains_v1_callable_family
+//-- provider.rock @pkg=provider,1 @v1
+pub fn choose(x: int) -> int {
+    x
+}
+
+pub fn choose(x: string) -> string {
+    x
+}
+
+//-- main.rock @pkg=app,2
+fn read() -> int {
+    let n = choose(1)
+            //^ int
+    n
+}
+
+//- same_signature_legacy_and_projected_fns_are_an_ambiguous_overload @fail=Ambiguous overload for `bump` with argument types (int)
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> int {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    bump(1)
+}
+
+//- legacy_owned_type_and_projected_type_are_ambiguous @fail=ambiguous legacy reference to `Shared`: legacy definition in defs.rock and v1 definition provider::Shared
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+fn read(x: Shared) -> int {
+    x.value
+}
+
+//- legacy_owned_global_and_projected_fn_are_ambiguous @fail=ambiguous legacy reference to `bump`: legacy definition in defs.rock and v1 definition provider::bump
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> int {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+global bump: int = 3
+
+//-- main.rock @pkg=game,2
+fn read() -> int {
+    bump
+}
+
+//- an_explicit_legacy_import_replaces_a_legacy_type_in_its_file
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+use provider::Shared;
+
+fn read(x: Shared) -> int {
+    let y = x
+      //^ provider::Shared
+    y.value
+}
+
+//- legacy_owned_generic_and_projected_generic_are_ambiguous @fail=ambiguous legacy reference to `Holder`: legacy definition in defs.rock and v1 definition provider::Holder
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Holder<T> {
+    pub value: T,
+}
+
+//-- defs.rock @pkg=game,2
+struct Holder<T> {
+    value: T,
+}
+
+//-- main.rock @pkg=game,2
+fn read(x: Holder<int>) -> int {
+    x.value
+}
+
+//- legacy_projection_resolves_a_generic_root_export
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Holder<T> {
+    pub value: T,
+}
+
+//-- main.rock @pkg=game,2
+fn read(x: Holder<int>) -> int {
+    let n = x.value
+            //^ int
+    n
+}
+
+//- legacy_owned_and_projected_names_resolve_when_they_do_not_collide
+//-- provider.rock @pkg=provider,1 @v1
+pub fn projected_only() -> string {
+    "v1"
+}
+
+fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let s = projected_only()
+            //^ string
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- an_unused_legacy_and_projected_collision_is_not_diagnosed
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> int {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn unrelated() -> int {
+    1
+}
+
+//- legacy_and_projected_overloads_form_one_family
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let s = bump("v1")
+            //^ string
+    let u = "ufcs".bump()
+                   //^ string
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- a_projected_overload_extends_a_stdlib_family
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Color {
+    pub r: float,
+}
+
+pub fn lerp(a: Color, b: Color, t: float) -> Color {
+    Color { r: a.r }
+}
+
+//-- main.rock @pkg=game,2
+fn mix() -> float {
+    let c = lerp(Color { r: 0.0 }, Color { r: 1.0 }, 0.5)
+            //^ provider::Color
+    let f = lerp(0.0, 1.0, 0.5)
+            //^ float
+    f
+}
+
+//- a_merged_family_is_not_a_single_function_value @fail=ambiguous legacy reference to `bump`: legacy definition in defs.rock and v1 definition provider::bump
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() {
+    let f = bump
+}
+
+//- an_alias_import_clears_a_type_collision_in_its_file
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+use provider::Shared as PShared;
+
+fn read(x: Shared, p: PShared) -> int {
+    let y = x
+      //^ Shared
+    let q = p
+      //^ provider::Shared
+    y.value
+}
+
+//- an_alias_import_does_not_clear_a_type_collision_in_another_file @fail=ambiguous legacy reference to `Shared`: legacy definition in defs.rock and v1 definition provider::Shared
+//-- provider.rock @pkg=provider,1 @v1
+pub struct Shared {
+    pub value: int,
+}
+
+//-- defs.rock @pkg=game,2
+struct Shared {
+    value: int,
+}
+
+//-- main.rock @pkg=game,2
+use provider::Shared as PShared;
+
+fn read(x: Shared, p: PShared) -> int {
+    x.value
+}
+
+//-- other.rock @pkg=game,2
+fn other(x: Shared) -> int {
+    x.value
+}
+
+//- an_alias_import_clears_a_callable_collision_in_its_file
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> string {
+    "v1"
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump as vbump;
+
+fn use_it() -> int {
+    let s = vbump(1)
+            //^ string
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- an_alias_import_does_not_clear_a_callable_collision_in_another_file @fail=Ambiguous overload for `bump` with argument types (int)
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> string {
+    "v1"
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump as vbump;
+
+fn use_it() -> int {
+    bump(1)
+}
+
+//-- other.rock @pkg=game,2
+fn other() -> int {
+    bump(1)
+}
+
+//- an_unaliased_explicit_import_replaces_the_legacy_family_in_its_file
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump;
+
+fn use_it() -> string {
+    let s = bump("v1")
+            //^ string
+    s
+}
+
+//-- other.rock @pkg=game,2
+fn other() -> int {
+    let n = bump(1)
+            //^ int
+    n
+}
+
+//- an_unaliased_explicit_import_hides_the_legacy_members_in_its_file @fail=type mismatch: expected `string`, found `int`
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: string) -> string {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+fn bump(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,2
+use provider::bump;
+
+fn use_it() -> int {
+    bump(1)
+}
+
+//- projected_callables_with_no_legacy_owner_form_one_family
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() -> int {
+    let s = pick("v1")
+            //^ string
+    let u = "ufcs".pick()
+                   //^ string
+    let n = pick(1)
+            //^ int
+    n
+}
+
+//- same_signature_projected_callables_tie_at_the_call @fail=lib_b::pick(n: int) -> int (v1 definition lib_b::pick)
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() -> int {
+    pick(1)
+}
+
+//- globbed_callables_with_no_legacy_owner_form_one_family
+//-- a.rock @pkg=lib_a,1 @v1
+pub mod inner;
+
+//-- a_inner.rock @pkg=lib_a,1 @v1
+mod inner;
+
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub mod more;
+
+//-- b_more.rock @pkg=lib_b,2 @v1
+mod more;
+
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3
+use lib_a::inner::*;
+use lib_b::more::*;
+
+fn use_it() -> int {
+    let s = pick("v1")
+            //^ string
+    let n = pick(1)
+            //^ int
+    n
+}
+
+//- a_projected_type_and_callable_of_one_name_stay_ambiguous @fail=ambiguous legacy reference to `Pick`: candidates lib_a::Pick, lib_b::Pick
+//-- a.rock @pkg=lib_a,1 @v1
+pub struct Pick {
+    pub n: int,
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn Pick(n: int) -> int {
+    n
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() -> int {
+    Pick(1)
+}
+
+//- a_projected_family_with_no_legacy_owner_is_not_a_single_function_value @fail=ambiguous legacy reference to `pick`: candidates lib_a::pick, lib_b::pick
+//-- a.rock @pkg=lib_a,1 @v1
+pub fn pick(n: int) -> int {
+    n
+}
+
+//-- b.rock @pkg=lib_b,2 @v1
+pub fn pick(s: string) -> string {
+    s
+}
+
+//-- main.rock @pkg=game,3
+fn use_it() {
+    let f = pick
+}
+
+//- a_legacy_operator_reaches_a_projected_v1_overload
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let a = Pt { x: 1, y: 2 }
+    let c = a + a
+            //^ geo::Pt
+    let n = 1 + 2
+            //^ int
+    let f = 1.5 + 2.0
+            //^ float
+    c.x + n
+}
+
+//- a_legacy_compound_assignment_reaches_a_projected_v1_overload
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let c = Pt { x: 1, y: 2 }
+    c += Pt { x: 3, y: 4 }
+    let n = 1
+    n += 2
+    let f = 1.5
+    f += 2.0
+    c.x + n
+}
+
+//- a_legacy_safe_nav_compound_assignment_reaches_a_projected_v1_overload
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- main.rock @pkg=game,2
+struct Holder {
+    p: Pt,
+}
+
+fn use_it(h: Holder?) {
+    h?.p += Pt { x: 3, y: 4 }
+}
+
+//- a_legacy_operator_overload_and_a_projected_one_merge
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- money.rock @pkg=game,2
+struct Money {
+    cents: int,
+}
+
+operator +(a: Money, b: Money) -> Money {
+    Money { cents: a.cents + b.cents }
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+            //^ geo::Pt
+    let m = Money { cents: 1 } + Money { cents: 2 }
+            //^ Money
+    m += Money { cents: 3 }
+    p += Pt { x: 5, y: 6 }
+    let n = 1 + 2
+            //^ int
+    p.x + m.cents + n
+}
+
+//- a_same_signature_legacy_and_projected_operator_tie @fail=geo::__op_add(a: geo::Pt, b: geo::Pt) -> geo::Pt (v1 definition geo::__op_add)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- defs.rock @pkg=game,2
+operator +(a: Pt, b: Pt) -> Pt {
+    a
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let p = Pt { x: 1, y: 2 } + Pt { x: 3, y: 4 }
+    p.x
+}
+
+//- a_same_signature_compound_assignment_ties_too @fail=(legacy definition in defs.rock)
+//-- geo.rock @pkg=geo,1 @v1
+pub struct Pt {
+    pub x: int,
+    pub y: int,
+}
+
+pub operator +(a: Pt, b: Pt) -> Pt {
+    Pt { x: a.x, y: b.y }
+}
+
+//-- defs.rock @pkg=game,2
+operator +(a: Pt, b: Pt) -> Pt {
+    a
+}
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    let p = Pt { x: 1, y: 2 }
+    p += Pt { x: 3, y: 4 }
+    p.x
+}
+
+//- a_pub_child_module_is_reachable_from_a_consumer
+//-- lib.rock @pkg=chess,1 @v1
+pub mod openings;
+
+//-- lib_openings.rock @pkg=chess,1 @v1
+mod openings;
+
+pub fn ply() -> int {
+    1
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> int {
+    let n = chess::openings::ply()
+            //^ int
+    n
+}
+
+//- a_private_child_module_is_unreachable_from_a_consumer @fail=module `secret` is not accessible from this module
+//-- lib.rock @pkg=chess,1 @v1
+pub fn sauce() -> int {
+    secret::recipe()
+}
+
+//-- lib_secret.rock @pkg=chess,1 @v1
+private mod secret;
+
+pub fn recipe() -> int {
+    7
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> int {
+    chess::secret::recipe()
+}
+
+//- an_undeclared_child_module_is_unreachable_from_a_consumer @fail=module `hidden` is not accessible from this module
+//-- lib.rock @pkg=chess,1 @v1
+pub fn exposed() -> int {
+    hidden::inner()
+}
+
+//-- lib_hidden.rock @pkg=chess,1 @v1
+mod hidden;
+
+pub fn inner() -> int {
+    3
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn f() -> int {
+    chess::hidden::inner()
+}
+
+//- a_private_child_module_is_unreachable_through_a_use_import @fail=module `secret` is not accessible from this module
+//-- lib.rock @pkg=chess,1 @v1
+//-- lib_secret.rock @pkg=chess,1 @v1
+private mod secret;
+
+pub fn recipe() -> int {
+    7
+}
+
+//-- app.rock @pkg=app,2 @v1
+use chess::secret::recipe;
+
+fn f() -> int {
+    recipe()
+}
+
+//- a_std_qualified_call_selects_from_the_overload_family
+//-- app.rock @pkg=app,1 @v1
+struct Foo {
+    v: int,
+}
+
+// The own `min` hides the std family for the bare name (spec 8.3); the
+// qualified path reaches the std family and selects by argument type.
+fn min(a: Foo, b: Foo) -> Foo {
+    a
+}
+
+fn f() -> int {
+    let n = std::min(1, 2)
+            //^ int
+    n
+}
+
+//- pub_in_admits_the_named_ancestor_subtree
+//-- lib.rock @pkg=app,1 @v1
+pub fn root_fn() -> int {
+    0
+}
+
+//-- lib_a_b.rock @pkg=app,1 @v1
+pub mod a::b;
+
+pub(in a) fn f() -> int {
+    1
+}
+
+//-- lib_a_c.rock @pkg=app,1 @v1
+mod a::c;
+
+fn g() -> int {
+    let n = super::b::f()
+            //^ int
+    n
+}
+
+//- pub_in_rejects_outside_the_named_ancestor @fail=`f` is not accessible from this module
+//-- lib.rock @pkg=app,1 @v1
+fn h() -> int {
+    a::b::f()
+}
+
+//-- lib_a_b.rock @pkg=app,1 @v1
+pub mod a::b;
+
+pub(in a) fn f() -> int {
+    1
+}
+
+//- a_method_call_reaches_a_fn_typed_field
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    stop: fn() -> int,
+}
+
+// Spec 8.4 keeps the field-call precedence: no tier binds `stop`, and the
+// call is the field's function, exactly as in legacy.
+fn run(a: Api) -> int {
+    let n = a.stop()
+    let m = n
+            //^ int
+    m
+}
+
+//- a_method_call_with_no_field_and_no_function_still_rejects @fail=stop
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    go: fn() -> int,
+}
+
+fn run(a: Api) -> int {
+    a.stop()
+}
+
+//- a_safe_nav_method_call_reaches_a_fn_typed_field
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    stop: fn() -> int,
+}
+
+fn run(a: Api?) -> int {
+    let n = a?.stop()
+    let m = n ?? 0
+            //^ int
+    m
+}
+
+//- a_fn_typed_field_wins_over_a_same_named_function
+//-- app.rock @pkg=app,1 @v1
+struct Api {
+    stop: fn() -> int,
+}
+
+fn stop(a: Api) -> string {
+    "free"
+}
+
+// Legacy calls the field here; so must v1 (spec 8.4). The free fn returns
+// string, so the marker catches a rebinding.
+fn run(a: Api) -> int {
+    let n = a.stop()
+    let m = n
+            //^ int
+    m
+}

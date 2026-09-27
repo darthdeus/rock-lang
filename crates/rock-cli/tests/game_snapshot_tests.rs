@@ -4,6 +4,7 @@ use std::process::Command;
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(|p| p.parent())
         .expect("workspace root")
 }
 
@@ -171,11 +172,9 @@ fn test_match3_many_moves_preset_frame1() {
     insta::assert_json_snapshot!(match3_runtime(&state));
 }
 
-// Seeded-random snapshots: `random_int` routes through a pure-integer
-// SplitMix64 PRNG (see `rock/src/backend/lua/assembler.rs` bootstrap) so the
-// stream is bit-identical across architectures. The earlier `math.random`-
-// based implementation diverged between ARM and x86 after ~6 draws because
-// of FMA-vs-separate-mul-add rounding in the float-based Tausworthe step.
+// Seeded-random snapshots exercise the numeric 32-bit RNG state. A given
+// Artifact/backend/seed combination must produce a deterministic board;
+// streams may differ between backends.
 #[test]
 fn test_match3_seeded_random_board_frame1() {
     // No preset — verifies seed alone produces a deterministic board.
@@ -201,7 +200,7 @@ fn test_match3_seeded_random_board_alt_seed() {
 fn test_errored_coroutine_is_logged() {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let output = Command::new(rock_bin)
-        .args(["sim", "testbed", "errored_co_logs"])
+        .args(["sim", "testbed", "testbed::errored_co_logs"])
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock sim");

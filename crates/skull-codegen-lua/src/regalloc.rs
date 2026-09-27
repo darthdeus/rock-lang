@@ -39,6 +39,9 @@ impl BitSet {
     fn remove(&mut self, i: usize) {
         self.words[i >> 6] &= !(1u64 << (i & 63));
     }
+    fn get(&self, i: usize) -> bool {
+        self.words[i >> 6] & (1u64 << (i & 63)) != 0
+    }
     fn copy_from(&mut self, o: &BitSet) {
         self.words.copy_from_slice(&o.words);
     }
@@ -475,7 +478,7 @@ pub fn color_values(
 // 200-local parse cap (`update_mobs` in bitgun: 193 cells).
 
 /// Cells an instruction DEFINES (writes).
-fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
+pub(crate) fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     match inst {
         Inst::Store { cell, .. } => push(*cell),
         Inst::CallMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
@@ -490,7 +493,7 @@ fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
 
 /// Cells an instruction USES (reads). `MapNext` reads its key cell (the cursor)
 /// before writing it.
-fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
+pub(crate) fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     match inst {
         Inst::Load(c) => push(*c),
         Inst::MapNext { key_cell, .. } => push(*key_cell),
@@ -548,19 +551,59 @@ fn term_cell_uses(
     });
 }
 
-/// Color the cells of an ORDINARY function (NOT a coroutine `__step` — callers
-/// pass those an all-`u32::MAX` table so they keep raw `c<raw>` names and the
-/// frame-field naming is preserved). Returns a dense `raw(cell) -> color` table
-/// (`u32::MAX` = uncolored). Non-interfering cells share a color; the caller
-/// renders a colored cell as `c<color>`. Cells in detached nested CFGs are
-/// forced to a unique color and are never emitted with their enclosing body.
+/// Color the cells of a function that has no emitter-only cell uses. Returns a
+/// dense `raw(cell) -> color` table (`u32::MAX` = uncolored). Non-interfering
+/// cells share a color; the caller renders a colored cell as `c<color>`. Cells
+/// in detached nested CFGs are forced to a unique color and are never emitted
+/// with their enclosing body.
 pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     color_cells_with_inlined_loads(func, None)
 }
 
+/// Cells held by reference for the whole body -- a closure's params, any cell
+/// a detached (closure) sub-CFG touches, and cells the emit-id table forces --
+/// as a dense `raw(cell) -> bool`. They never share a color and are never
+/// nil-killed: the closure reads the local by identity, so a kill would be
+/// visible through it.
+pub(crate) fn pinned_cells(func: &MirFunc) -> Vec<bool> {
+    let top_set: HashSet<Idx<Block>> =
+        reachable_blocks_from(func, func.entry()).into_iter().collect();
+    let mut pinned = vec![false; func.cells.len()];
+    for c in collect_lambda_params(func) {
+        pinned[raw(c)] = true;
+    }
+    for (bid, b) in func.blocks.iter() {
+        if top_set.contains(&bid) {
+            continue;
+        }
+        for &id in &b.insts {
+            cell_defs(&func.insts[id], &mut |c| pinned[raw(c)] = true);
+            cell_uses(&func.insts[id], &mut |c| pinned[raw(c)] = true);
+        }
+    }
+    if let Some(ids) = func.emit_ids.as_ref() {
+        let forced: HashSet<u32> = ids.forced_cells.iter().copied().collect();
+        for (id, _) in func.cells.iter() {
+            if forced.contains(&func.emit_cell_id(id)) {
+                pinned[raw(id)] = true;
+            }
+        }
+    }
+    pinned
+}
+
 pub(crate) fn color_cells_with_inlined_loads(func: &MirFunc, inline: Option<&[bool]>) -> Vec<u32> {
+    color_cells_with_inlined_loads_and_pinned_cells(func, inline, &[])
+}
+
+/// Like [`color_cells_with_inlined_loads`], with additional cells that the
+/// emitter uses implicitly and therefore cannot see in ordinary MIR liveness.
+pub(crate) fn color_cells_with_inlined_loads_and_pinned_cells(
+    func: &MirFunc,
+    inline: Option<&[bool]>,
+    extra_pinned: &[Idx<Cell>],
+) -> Vec<u32> {
     let top: Vec<Idx<Block>> = reachable_blocks_from(func, func.entry());
-    let top_set: HashSet<Idx<Block>> = top.iter().copied().collect();
     let n = top.len();
     // Dense block -> top-index (raw-id keyed; usize::MAX = not a top block).
     let mut pos = vec![usize::MAX; func.blocks.len()];
@@ -568,27 +611,17 @@ pub(crate) fn color_cells_with_inlined_loads(func: &MirFunc, inline: Option<&[bo
         pos[raw(b)] = i;
     }
 
-    // Cells any closure sub-CFG touches must stay unique (the closure captures /
-    // mutates the local by reference). Closure blocks are those not in `top`.
-    let mut force_unique: HashSet<Idx<Cell>> = collect_lambda_params(func);
+    let mut pinned = pinned_cells(func);
+    for &cell in extra_pinned {
+        pinned[raw(cell)] = true;
+    }
+    // Forced emit ids may name a hole in a compact template's arena; such a
+    // hole still consumes a unique color so later colors keep their numbers.
     let forced_emit_ids: HashSet<u32> = func
         .emit_ids
         .as_ref()
         .map(|ids| ids.forced_cells.iter().copied().collect())
         .unwrap_or_default();
-    for (bid, b) in func.blocks.iter() {
-        if top_set.contains(&bid) {
-            continue;
-        }
-        for &id in &b.insts {
-            cell_defs(&func.insts[id], &mut |c| {
-                force_unique.insert(c);
-            });
-            cell_uses(&func.insts[id], &mut |c| {
-                force_unique.insert(c);
-            });
-        }
-    }
 
     // Color EVERY cell of the function (an ordinary fn has no frame cells) into a
     // dense `0..C` index space so liveness/interference run on bitsets. A compact
@@ -706,10 +739,9 @@ pub(crate) fn color_cells_with_inlined_loads(func: &MirFunc, inline: Option<&[bo
     // Dense force-unique flag (per dense cell index) — replaces the `force_idx`
     // HashSet lookups in the per-live-bit interference inner loop.
     let mut force_idx = vec![false; c_count];
-    for c in &force_unique {
-        let k = ci[raw(*c)];
-        if k != u32::MAX {
-            force_idx[k as usize] = true;
+    for (i, c) in ordered.iter().enumerate() {
+        if let Some(c) = c {
+            force_idx[i] = pinned[raw(*c)];
         }
     }
     for &emit_id in &forced_emit_ids {
@@ -828,6 +860,411 @@ pub(crate) fn color_cells_with_inlined_loads(func: &MirFunc, inline: Option<&[bo
         color_of[i] = col as u32;
     }
     colors
+}
+
+// --- nil-kill: where each emitted local dies ------------------------------
+//
+// LuaJIT assembles a side trace only if every non-constant slot in the parent
+// trace's exit snapshot fits a register at the side-trace head (13 GPR / 16 FPR
+// on x64, `asm_head_side`), and snapshot pruning covers only the innermost
+// frame up to its first jump. A local assigned `nil` after its last use is a
+// snapshot constant from then on, in every frame of the inlined chain
+// (`benchmarks/luajit/trace-aborts/calleekill.lua`). This pass computes, over
+// the locals the emitter actually declares (value colors `r<k>`, cell colors
+// `c<k>`), the point at which each one dies; the emitter writes `<local> = nil`
+// there. Kills are placed only where the local is dead on every path, so a
+// missed kill costs pressure and a misplaced one would be a miscompile.
+
+/// One emitted Lua local: a value register `r<color>` or a cell local `c<color>`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum KillLocal {
+    Value(u32),
+    Cell(u32),
+}
+
+pub(crate) struct NilKills {
+    /// Dense `raw(inst) -> locals dead right after that instruction's statement`.
+    pub after_inst: Vec<Vec<KillLocal>>,
+    /// Dense `raw(block) -> locals dead on entry to the block that some
+    /// predecessor still had live` (dying on the edge or at its terminator).
+    pub at_entry: Vec<Vec<KillLocal>>,
+    /// Per scope block: live-in slots, and slots live at the block's end
+    /// (successor live-in plus the terminator's own reads).
+    live_in: Vec<BitSet>,
+    end_live: Vec<BitSet>,
+    pos: Vec<usize>,
+    /// Per scope block: slots redefined by its leading call-free statements,
+    /// so an entry kill of them would be wasted.
+    first_pure_defs: Vec<Vec<usize>>,
+    value_count: u32,
+    value_scope: Vec<Option<Idx<Block>>>,
+    loop_blocks: Vec<(Idx<Block>, HashSet<Idx<Block>>)>,
+}
+
+impl NilKills {
+    /// No kills anywhere (coroutine `__step` bodies, or the pass disabled).
+    pub(crate) fn none(func: &MirFunc) -> Self {
+        NilKills {
+            after_inst: vec![Vec::new(); func.insts.len()],
+            at_entry: vec![Vec::new(); func.blocks.len()],
+            live_in: Vec::new(),
+            end_live: Vec::new(),
+            pos: Vec::new(),
+            first_pure_defs: Vec::new(),
+            value_count: 0,
+            value_scope: Vec::new(),
+            loop_blocks: Vec::new(),
+        }
+    }
+
+    fn decode(&self, slot: usize) -> KillLocal {
+        if (slot as u32) < self.value_count {
+            KillLocal::Value(slot as u32)
+        } else {
+            KillLocal::Cell(slot as u32 - self.value_count)
+        }
+    }
+
+    /// A loop-scoped register is declared inside its `for` block, so a kill
+    /// anywhere else would assign a global of the same name.
+    fn allowed_at(&self, local: KillLocal, block: Idx<Block>) -> bool {
+        match local {
+            KillLocal::Value(c) => match self.value_scope.get(c as usize).copied().flatten() {
+                None => true,
+                Some(h) => self
+                    .loop_blocks
+                    .iter()
+                    .any(|(header, blocks)| *header == h && blocks.contains(&block)),
+            },
+            KillLocal::Cell(_) => true,
+        }
+    }
+
+    /// Locals live at the end of `from` that are dead on entry to `to`, for a
+    /// control-flow edge the emitter renders as a direct fall-through (the
+    /// `math.min`/`math.max` selection skips its arm blocks).
+    pub(crate) fn on_edge(&self, from: Idx<Block>, to: Idx<Block>) -> Vec<KillLocal> {
+        let (Some(&fi), Some(&ti)) = (self.pos.get(raw(from)), self.pos.get(raw(to))) else {
+            return Vec::new();
+        };
+        if fi == usize::MAX || ti == usize::MAX {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (wi, (&e, &l)) in self.end_live[fi].words.iter().zip(self.live_in[ti].words.iter()).enumerate() {
+            let mut bits = e & !l;
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                let slot = wi * 64 + b;
+                let local = self.decode(slot);
+                if self.allowed_at(local, to) && !self.first_pure_defs[ti].contains(&slot) {
+                    out.push(local);
+                }
+                bits &= bits - 1;
+            }
+        }
+        out
+    }
+}
+
+/// Whether the statement for `id` (with the operands folded into it) runs no
+/// Lua call: a trace exit inside it can only be at the statement itself.
+/// Conservative allowlist; anything unlisted counts as a possible call.
+pub(crate) fn statement_is_pure(func: &MirFunc, inline: &[bool], id: Idx<Inst>) -> bool {
+    let inst = &func.insts[id];
+    let pure_kind = matches!(
+        inst,
+        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Store { .. }
+            | Inst::Field { .. } | Inst::TupleIndex { .. }
+            | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
+            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
+            | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
+            | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
+            | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
+            | Inst::Eq(..) | Inst::NotEq(..)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_)
+            | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
+            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
+    );
+    if !pure_kind {
+        return false;
+    }
+    let mut pure = true;
+    inst_uses(inst, &mut |u| {
+        if inline[raw(u)] && !statement_is_pure(func, inline, u) {
+            pure = false;
+        }
+    });
+    pure
+}
+
+/// Compute the death point of every emitted local of one function body.
+/// `inline` marks instructions that emit no statement of their own (tree-folded
+/// values, hoisted constants); their reads are attributed to the consumer, as
+/// the emitter renders them. `loops` supplies the blocks in which a loop-scoped
+/// register may be killed (its `for` body plus the latch label, both inside the
+/// `for` block). `cell_excluded` is every cell this body does NOT render as a
+/// bare `c<color>` local, from the caller's own declaration predicate: a kill of
+/// one of those would assign a GLOBAL of that name.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn nil_kills(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    inline: &[bool],
+    value_colors: &[u32],
+    value_scope: &[Option<Idx<Block>>],
+    loops: &[LoopScope],
+    cell_colors: &[u32],
+    cell_excluded: &[bool],
+    params: &[Idx<Cell>],
+) -> NilKills {
+    let n = scope.len();
+    let mut pos = vec![usize::MAX; func.blocks.len()];
+    for (i, &b) in scope.iter().enumerate() {
+        pos[raw(b)] = i;
+    }
+    let value_count = value_colors
+        .iter()
+        .filter(|&&c| c != u32::MAX)
+        .map(|&c| c + 1)
+        .max()
+        .unwrap_or(0);
+    // Slot space: value colors first, then killable cell colors. `cell_excluded`
+    // carries both reasons a cell is not killable: it is pinned (owning its color
+    // alone, so excluding it by cell excludes the color), or the emitter renders
+    // it as no local at all, in which case a kill would assign a global.
+    let mut cell_slot = vec![u32::MAX; func.cells.len()];
+    let mut cell_count = 0u32;
+    for (id, _) in func.cells.iter() {
+        let col = cell_colors[raw(id)];
+        if col != u32::MAX && !cell_excluded[raw(id)] {
+            cell_slot[raw(id)] = value_count + col;
+            cell_count = cell_count.max(col + 1);
+        }
+    }
+    let s_count = (value_count + cell_count) as usize;
+    let value_slot = |v: Idx<Inst>| -> Option<usize> {
+        let c = value_colors[raw(v)];
+        (c != u32::MAX).then_some(c as usize)
+    };
+    let uses_of = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
+        effective_uses(func, inline, &func.insts[id], &mut |v| {
+            if let Some(s) = value_slot(v) {
+                push(s);
+            }
+        });
+        emitted_cell_uses(func, Some(inline), id, &mut |c| {
+            let s = cell_slot[raw(c)];
+            if s != u32::MAX {
+                push(s as usize);
+            }
+        });
+    };
+    let defs_of = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
+        if func.insts[id].produces_value() {
+            if let Some(s) = value_slot(id) {
+                push(s);
+            }
+        }
+        cell_defs(&func.insts[id], &mut |c| {
+            let s = cell_slot[raw(c)];
+            if s != u32::MAX {
+                push(s as usize);
+            }
+        });
+    };
+    let term_slots = |term: &Term, push: &mut dyn FnMut(usize)| {
+        term_uses(term, &mut |v| {
+            if inline[raw(v)] {
+                effective_uses(func, inline, &func.insts[v], &mut |w| {
+                    if let Some(s) = value_slot(w) {
+                        push(s);
+                    }
+                });
+            } else if let Some(s) = value_slot(v) {
+                push(s);
+            }
+        });
+        term_cell_uses(func, Some(inline), term, &mut |c| {
+            let s = cell_slot[raw(c)];
+            if s != u32::MAX {
+                push(s as usize);
+            }
+        });
+    };
+
+    // Per-block upward-exposed uses and defs, then the same worklist liveness
+    // as `color_cells_with_inlined_loads`, over the slot space.
+    let mut use_set: Vec<BitSet> = vec![BitSet::new(s_count); n];
+    let mut def_set: Vec<BitSet> = vec![BitSet::new(s_count); n];
+    for (bi, &b) in scope.iter().enumerate() {
+        for &id in &func.blocks[b].insts {
+            if inline[raw(id)] {
+                continue;
+            }
+            uses_of(id, &mut |s| {
+                if !def_set[bi].get(s) {
+                    use_set[bi].set(s);
+                }
+            });
+            defs_of(id, &mut |s| def_set[bi].set(s));
+        }
+        term_slots(&func.blocks[b].term, &mut |s| {
+            if !def_set[bi].get(s) {
+                use_set[bi].set(s);
+            }
+        });
+    }
+    let mut pred_off = vec![0u32; n + 1];
+    for &b in scope {
+        successors(&func.blocks[b].term, |s| {
+            let si = pos[raw(s)];
+            if si != usize::MAX {
+                pred_off[si + 1] += 1;
+            }
+        });
+    }
+    for i in 0..n {
+        pred_off[i + 1] += pred_off[i];
+    }
+    let mut pred_list = vec![0u32; pred_off[n] as usize];
+    let mut fill = pred_off.clone();
+    for (bi, &b) in scope.iter().enumerate() {
+        successors(&func.blocks[b].term, |s| {
+            let si = pos[raw(s)];
+            if si != usize::MAX {
+                pred_list[fill[si] as usize] = bi as u32;
+                fill[si] += 1;
+            }
+        });
+    }
+    let mut live_in: Vec<BitSet> = vec![BitSet::new(s_count); n];
+    let mut out = BitSet::new(s_count);
+    let mut inn = BitSet::new(s_count);
+    let mut work: Vec<u32> = (0..n as u32).collect();
+    let mut in_queue = vec![true; n];
+    while let Some(bi) = work.pop() {
+        let bi = bi as usize;
+        in_queue[bi] = false;
+        out.clear();
+        successors(&func.blocks[scope[bi]].term, |s| {
+            let si = pos[raw(s)];
+            if si != usize::MAX {
+                out.or_with(&live_in[si]);
+            }
+        });
+        inn.copy_from(&use_set[bi]);
+        for (wi, (&o, &d)) in out.words.iter().zip(def_set[bi].words.iter()).enumerate() {
+            inn.words[wi] |= o & !d;
+        }
+        if live_in[bi].or_with(&inn) {
+            for pi in pred_off[bi]..pred_off[bi + 1] {
+                let p = pred_list[pi as usize] as usize;
+                if !in_queue[p] {
+                    in_queue[p] = true;
+                    work.push(p as u32);
+                }
+            }
+        }
+    }
+
+    let mut kills = NilKills {
+        after_inst: vec![Vec::new(); func.insts.len()],
+        at_entry: vec![Vec::new(); func.blocks.len()],
+        live_in,
+        end_live: vec![BitSet::new(s_count); n],
+        pos,
+        first_pure_defs: vec![Vec::new(); n],
+        value_count,
+        value_scope: value_scope.to_vec(),
+        loop_blocks: loops
+            .iter()
+            .map(|l| (l.header, l.region.iter().copied().collect()))
+            .collect(),
+    };
+
+    // Backward walk per block: a slot read or written by a statement and not
+    // live after it dies there -- unless a later statement of the block
+    // redefines it before any statement that can call. No exit can then
+    // observe the stale value: an exit at one of those pure statements
+    // re-executes from it, and LuaJIT's own snapshot pruning drops a slot the
+    // straight-line continuation defines. Such a kill would only cost the
+    // interpreter a `KPRI`.
+    let mut live = BitSet::new(s_count);
+    let mut touched: Vec<usize> = Vec::new();
+    let mut next_pure_defs: Vec<usize> = Vec::new();
+    for (bi, &b) in scope.iter().enumerate() {
+        let block = &func.blocks[b];
+        live.clear();
+        successors(&block.term, |s| {
+            let si = kills.pos[raw(s)];
+            if si != usize::MAX {
+                live.or_with(&kills.live_in[si]);
+            }
+        });
+        term_slots(&block.term, &mut |s| live.set(s));
+        kills.end_live[bi].copy_from(&live);
+        next_pure_defs.clear();
+        for &id in block.insts.iter().rev() {
+            if inline[raw(id)] {
+                continue;
+            }
+            touched.clear();
+            defs_of(id, &mut |s| touched.push(s));
+            let n_defs = touched.len();
+            uses_of(id, &mut |s| touched.push(s));
+            let mut dead: Vec<usize> = Vec::new();
+            for &s in &touched {
+                if !live.get(s) && !dead.contains(&s) && !next_pure_defs.contains(&s) {
+                    dead.push(s);
+                }
+            }
+            if statement_is_pure(func, inline, id) {
+                next_pure_defs.extend_from_slice(&touched[..n_defs]);
+            } else {
+                next_pure_defs.clear();
+            }
+            for &s in &dead {
+                let local = kills.decode(s);
+                kills.after_inst[raw(id)].push(local);
+            }
+            for &s in &touched[..n_defs] {
+                live.remove(s);
+            }
+            for &s in &touched[n_defs..] {
+                live.set(s);
+            }
+        }
+        // After the walk this holds the defs of the leading pure statements.
+        kills.first_pure_defs[bi] = next_pure_defs.clone();
+        if b == func.entry() {
+            // A parameter is defined at entry; one never read dies there.
+            for &p in params {
+                let s = cell_slot[raw(p)];
+                if s != u32::MAX && !live.get(s as usize) {
+                    let local = kills.decode(s as usize);
+                    if !kills.at_entry[raw(b)].contains(&local) {
+                        kills.at_entry[raw(b)].push(local);
+                    }
+                }
+            }
+        }
+    }
+    // Slots live at the end of a predecessor and dead on entry die on the edge;
+    // the successor's label is the one place that covers every such edge.
+    for &b in scope {
+        successors(&func.blocks[b].term, |s| {
+            for local in kills.on_edge(b, s) {
+                if !kills.at_entry[raw(s)].contains(&local) {
+                    kills.at_entry[raw(s)].push(local);
+                }
+            }
+        });
+    }
+    kills
 }
 
 #[cfg(test)]

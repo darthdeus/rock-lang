@@ -33,6 +33,10 @@ mod coalesce_value_struct_literal_field;
 mod concrete_body;
 #[path = "concrete_coroutine_emission.rs"]
 mod concrete_coroutine_emission;
+#[path = "coroutine_frame_writes.rs"]
+mod coroutine_frame_writes;
+#[path = "callee_binding.rs"]
+mod callee_binding;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]
@@ -43,6 +47,8 @@ mod coroutine_hook_hoist;
 mod dead_lambda_scope;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
+#[path = "v1_enum_join_scalarize.rs"]
+mod v1_enum_join_scalarize;
 #[path = "expansion_admission.rs"]
 mod expansion_admission;
 #[path = "concrete_expansion.rs"]
@@ -63,6 +69,8 @@ mod env_param_shadow;
 mod env_record_hoist;
 #[path = "extern_return_representation.rs"]
 mod extern_return_representation;
+#[path = "nomangle_type_symbol.rs"]
+mod nomangle_type_symbol;
 #[path = "extern_value_return_ownership.rs"]
 mod extern_value_return_ownership;
 #[path = "flat_vec_value_shape.rs"]
@@ -83,6 +91,8 @@ mod incremental_emit;
 mod lua_definition_scopes;
 #[path = "opaque_declared_type_reach.rs"]
 mod opaque_declared_type_reach;
+#[path = "optional_entity_vec.rs"]
+mod optional_entity_vec;
 
 #[path = "opaque_container_axes.rs"]
 mod opaque_container_axes;
@@ -100,6 +110,8 @@ mod inline_body_column_map_param;
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
+#[path = "live_call_conversion.rs"]
+mod live_call_conversion;
 #[path = "inline_stats.rs"]
 mod inline_stats;
 #[path = "parallel_inline_mode.rs"]
@@ -147,12 +159,22 @@ mod lambda_static;
 mod leaf_form_invariant;
 #[path = "loop_scoped_locals.rs"]
 mod loop_scoped_locals;
+#[path = "tail_calls.rs"]
+mod tail_calls;
 #[path = "mangle_rename_hot_reload.rs"]
 mod mangle_rename_hot_reload;
 #[path = "mem2reg_stats.rs"]
 mod mem2reg_stats;
 #[path = "mir_execution_oracle.rs"]
 mod mir_execution_oracle;
+#[path = "modules_state_identity.rs"]
+mod modules_state_identity;
+#[path = "modules_lifecycle.rs"]
+mod modules_lifecycle;
+#[path = "wgpu_prelude_hooks.rs"]
+mod wgpu_prelude_hooks;
+#[path = "modules_type_emission.rs"]
+mod modules_type_emission;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
 #[path = "nb_storage_registry.rs"]
@@ -163,10 +185,20 @@ mod native_buffer_alloc;
 mod native_buffer_element_admission;
 #[path = "native_buffer_leaf_addressing.rs"]
 mod native_buffer_leaf_addressing;
+#[path = "nil_kill_scope.rs"]
+mod nil_kill_scope;
 #[path = "nobox_arena_random_sentinel.rs"]
 mod nobox_arena_random_sentinel;
 #[path = "nobox_column_threshold.rs"]
 mod nobox_column_threshold;
+#[path = "nobox_wide_strided.rs"]
+mod nobox_wide_strided;
+#[path = "nobox_materialize_gc_tier.rs"]
+mod nobox_materialize_gc_tier;
+#[path = "wide_value_abi.rs"]
+mod wide_value_abi;
+#[path = "wide_value_slot_budget.rs"]
+mod wide_value_slot_budget;
 #[path = "nobox_fn_value_nullable_return_sentinel.rs"]
 mod nobox_fn_value_nullable_return_sentinel;
 #[path = "nobox_generic_return_boundary_sentinel.rs"]
@@ -195,8 +227,8 @@ mod reserved_namespace;
 mod comptime_inputs;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
-#[path = "compute_surface.rs"]
-mod compute_surface;
+#[path = "state_global_bridge.rs"]
+mod state_global_bridge;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
@@ -217,14 +249,20 @@ mod uniform_block_pack;
 mod uint_surface;
 #[path = "user_fn_emit_rejection.rs"]
 mod user_fn_emit_rejection;
+#[path = "value_ctor_splice.rs"]
+mod value_ctor_splice;
 #[path = "value_leaf_layout.rs"]
 mod value_leaf_layout;
 #[path = "value_push_generic_boundary.rs"]
 mod value_push_generic_boundary;
 #[path = "value_scalarize.rs"]
 mod value_scalarize;
+#[path = "value_struct_eq_dispatch.rs"]
+mod value_struct_eq_dispatch;
 #[path = "value_test_discovery.rs"]
 mod value_test_discovery;
+#[path = "vec_flat_enum_strided.rs"]
+mod vec_flat_enum_strided;
 #[path = "valid_type_identity.rs"]
 mod valid_type_identity;
 #[path = "vec_value_columns.rs"]

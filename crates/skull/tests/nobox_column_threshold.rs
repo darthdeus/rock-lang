@@ -1,19 +1,48 @@
 //! `[Opt]` where `Opt` is a `value` struct with a nullable `nobox` field, swept
 //! by LEAF COUNT.
 //!
-//! The sweep is the point. `MAX_COLUMN_LEAVES` (`skull-mir/src/lower.rs`) makes
-//! the STORAGE flip at 4 leaves -- flat columns at or below it, a boxed element
-//! above -- and that flip is invisible from any single repro: a 2-field `Opt` is
-//! 4 leaves (presence + x + y + a) and column-stores, a 3-field `Opt` is 5 and
-//! boxes. Both must round-trip, present and absent, and the count is what tells
-//! you which path a row exercised. This was long read as a leaf-count LIMIT on
-//! the nobox guarantee; it is a storage tier, and the guarantee holds on both
-//! sides of it. Raising the constant only moves the flip.
+//! The sweep is the point. `MAX_COLUMN_LEAVES`
+//! (`skull-mir/src/lower/shape.rs`) makes the implicit STORAGE flip at 4 leaves
+//! -- flat columns at or below it, a boxed element above -- and that flip is
+//! invisible from any single repro: a 2-field `Opt` is 4 leaves (presence + x +
+//! y + a) and column-stores, a 3-field `Opt` is 5 and boxes. Both must round-trip,
+//! present and absent, and the count is what tells you which path a row exercised.
+//! An element explicitly marked `nobox` bypasses this heuristic and stays flat
+//! at any supported width -- columns up to the constant, one strided row
+//! backing above it (`nobox_wide_strided.rs`); for unmarked values the constant
+//! chooses between columns and a box.
 //!
 //! The GC-tier ctor itself (one field, no Vec) is pinned by
 //! `nobox_nested_ctor.rs`.
 
-use crate::common::{run_luajit, try_emit_module};
+use crate::common::{function_body, run_luajit, try_emit_module};
+
+const WIDE_NOBOX_OVERWRITE: &str = r#"
+nobox value Wide { a: int, b: int, c: int, d: int, e: int }
+
+fn main() {
+    let values: [Wide] = []
+    values.push(Wide { a: 1, b: 2, c: 3, d: 4, e: 5 })
+    values[0] = Wide { a: 6, b: 7, c: 8, d: 9, e: 10 }
+    print("{values[0].a} {values[0].e}")
+}
+"#;
+
+#[test]
+fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
+    let lua = try_emit_module(WIDE_NOBOX_OVERWRITE)
+        .expect("an explicit nobox guarantee must not fall back to boxed Vec elements");
+    let body = function_body(&lua, "main");
+    assert!(
+        !body.contains("Wide_lct("),
+        "wide nobox Vec materialized an element:\n{body}"
+    );
+    assert!(
+        body.contains(r#"repr = "strided""#),
+        "wide nobox Vec left flat row storage:\n{body}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_vec"), "6 10");
+}
 
 /// `n` float fields after `pos`, so the element carries `n + 3` leaves
 /// (presence, `pos.x`, `pos.y`, then the floats).
@@ -53,13 +82,19 @@ fn main() {{
 /// storage tier having moved, when `Opt_lct` was still being called and every
 /// round-trip row above still passed. A spelling is not a tier.
 ///
-/// `__op_eq` lines are excluded because the fixture's `V[1] == V[0]` MATERIALIZES
-/// both operands through the same ctor whatever the storage is -- at 3 leaves
-/// that comparison is the only `Opt_lct(` in the chunk. Matching the bare name
-/// therefore reports "boxed" for every row, which is the same failure from the
-/// other side. The tier is whether the STORE builds an element.
+/// The equality comparison line is excluded because the fixture's
+/// `V[1] == V[0]` MATERIALIZES both operands through the same ctor whatever
+/// the storage is -- at 3 leaves that comparison is the only `Opt_lct(` in
+/// the chunk. Matching the bare name therefore reports "boxed" for every row,
+/// which is the same failure from the other side. The tier is whether the
+/// STORE builds an element, not whether a same-type equality compares two
+/// materialized operands (same-named `value` struct equality is native `==`
+/// now, not a `__op_eq` call -- see `value_struct_eq_dispatch.rs` -- so the
+/// comparison line no longer names a callee; it is instead the only line
+/// where `Opt_lct(` appears TWICE, once per operand, whereas a genuine
+/// element store calls it exactly once).
 fn is_column_stored(lua: &str) -> bool {
-    !lua.lines().filter(|l| !l.contains("__op_eq")).any(|l| l.contains("Opt_lct("))
+    !lua.lines().any(|l| l.matches("Opt_lct(").count() == 1)
 }
 
 #[test]

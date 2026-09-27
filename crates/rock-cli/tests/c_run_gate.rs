@@ -18,19 +18,27 @@ fn c_tool_imgui_bindings_link_and_run_against_actual_stone_artifact() {
     let source_path = dir.path().join("stone/engine/input/tool.rock");
     std::fs::create_dir_all(source_path.parent().expect("tool fixture parent"))
         .expect("create tool fixture parent");
-    let mut source = std::fs::read_to_string(root.join("stone/engine/input/tool.rock"))
+    let production_source = std::fs::read_to_string(root.join("stone/engine/input/tool.rock"))
         .expect("read authoritative tool source");
+    // The C fixture parser does not accept Rock's public item modifier.
+    let mut source = production_source
+        .lines()
+        .map(|line| line.strip_prefix("pub ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     source.push_str(
         r#"
+
+global UI_TEXT_INPUT_CAPTURE: bool = false
 
 fn stone_diag_set_s(key: string, value: string) {}
 
 fn main() {
     let id = __tool_imgui_key_id("space")
-    if id != -2 { let _ = 1 ./ 0 }
-    if __tool_imgui_key_down_id(42) { let _ = 1 ./ 0 }
-    if __tool_imgui_key_pressed_id(42) { let _ = 1 ./ 0 }
-    if __tool_imgui_ctrl_down() { let _ = 1 ./ 0 }
+    let down = __tool_imgui_key_down_id(42)
+    let pressed = __tool_imgui_key_pressed_id(42)
+    let ctrl = __tool_imgui_ctrl_down()
+    print("id={id} down={down} pressed={pressed} ctrl={ctrl}")
     __tool_imgui_inject_key_id(42)
     __tool_imgui_release_key_id(42)
     print("tool-imgui-ok")
@@ -75,11 +83,12 @@ fn main() {
         .expect("run linked C tool consumer");
     assert!(
         run.status.success(),
-        "linked C tool consumer failed:\nstdout:{}\nstderr:{}",
+        "linked C tool consumer failed ({:?}):\nstdout:{}\nstderr:{}",
+        run.status,
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(run.stdout, b"tool-imgui-ok\n");
+    assert_eq!(run.stdout, b"id=-2 down=false pressed=false ctrl=false\ntool-imgui-ok\n");
 }
 
 #[test]

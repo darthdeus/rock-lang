@@ -5,12 +5,12 @@
 //! - `ExpectPretty` renders any `Result<T, CompilerError>` failure through
 //!   rock's ariadne pipeline before panicking.
 
-use skull_parser::parse_module;
+use skull_parser::{parse_module, parse_module_with_dialect};
 
 use crate::prelude::*;
 
 pub fn render_err(sources: &[(&str, &str)], e: &CompilerError) -> String {
-    let mut sf = SourceFiles { files: vec![] };
+    let mut sf = SourceFiles::empty();
     for (path, content) in sources {
         sf.add_or_update_file(source_file_from_path_and_contents(
             path.to_string(),
@@ -229,4 +229,229 @@ fn dump_at(
     }
 
     err
+}
+
+/// One embedded source file in a multi-package fixture (plan M2).
+pub struct PackageFixture<'a> {
+    pub file: &'a str,
+    /// `None` = legacy standalone; `Some((self_name, package_id))` stamps a
+    /// v1 package owner.
+    pub package: Option<(&'a str, u32)>,
+    pub dialect: skull_parser::Dialect,
+    pub src: &'a str,
+}
+
+/// Like [`check_types`] but over several files in possibly several packages:
+/// each file parses under its dialect, v1 files join the namespace tree, and
+/// every `//^ ty` marker in every file must resolve. Cross-package alias
+/// tables default to "every package is reachable under its own self name".
+pub fn check_types_packages(files: &[PackageFixture<'_>]) -> Result<(), String> {
+    check_types_packages_inner(files, files)
+}
+
+/// Like [`check_types_packages`], but prepends trusted legacy stdlib sources
+/// without treating their internal `//^` comments as fixture assertions.
+pub fn check_types_packages_with_stdlib(
+    files: &[PackageFixture<'_>],
+    stdlib_sources: &[(&str, &str)],
+) -> Result<(), String> {
+    let mut all = Vec::with_capacity(stdlib_sources.len() + files.len());
+    all.extend(stdlib_sources.iter().map(|(file, src)| PackageFixture {
+        file,
+        package: None,
+        dialect: skull_parser::Dialect::Legacy,
+        src,
+    }));
+    all.extend(files.iter().map(|file| PackageFixture {
+        file: file.file,
+        package: file.package,
+        dialect: file.dialect,
+        src: file.src,
+    }));
+    check_types_packages_inner(&all, files)
+}
+
+fn check_types_packages_inner(
+    all_files: &[PackageFixture<'_>],
+    checked_files: &[PackageFixture<'_>],
+) -> Result<(), String> {
+    let mut srcs: Vec<(&str, &str)> = Vec::new();
+    let mut modules = Vec::new();
+    for f in all_files {
+        srcs.push((f.file, f.src));
+        let mut module = parse_module_with_dialect(f.src, ustr(f.file), f.dialect)
+            .map_err(|e| render_err(&srcs, &e))?;
+        if let Some(e) = module.recovery_errors.first() {
+            return Err(render_err(&srcs, &e.clone()));
+        }
+        module.package = f.package.map(|(name, id)| {
+            rock_core::source_code::PackageTag {
+                id,
+                self_name: name.to_string(),
+            }
+        });
+        modules.push(module);
+    }
+
+    // Default alias table: each package reachable under its own self name.
+    let mut aliases = bone_core::modules::NsAliases::default();
+    let ids: Vec<(u32, &str)> = all_files
+        .iter()
+        .filter_map(|f| f.package.map(|(name, id)| (id, name)))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for (id, name) in &ids {
+        if !seen.insert(*id) {
+            continue;
+        }
+        let self_u = ustr(name);
+        let entry = bone_core::modules::PackageAliases {
+            id: *id,
+            self_name: self_u,
+            aliases: ids
+                .iter()
+                .filter(|(other, _)| other != id)
+                .map(|(other, other_name)| (ustr(other_name), *other))
+                .collect(),
+        };
+        aliases.packages.push(entry);
+    }
+
+    let ws = semantic_pass_with_aliases(&mut modules, &aliases)
+        .map_err(|e| render_err(&srcs, &e))?;
+
+    // Body / lowering / interface errors fail the fixture (an `@fail` caller
+    // treats any Err as the expected outcome).
+    let mut body_errs: Vec<&CompilerError> = ws
+        .inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten())
+        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
+        .collect();
+    body_errs.sort_by_key(|e| e.location.offset);
+    if let Some(e) = body_errs.first() {
+        return Err(render_err(&srcs, *e));
+    }
+
+    // Check `//^` markers in every file.
+    for f in checked_files.iter() {
+        let annotations = test_utils::extract_annotations(f.src);
+        if annotations.is_empty() {
+            continue;
+        }
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.file == ustr(f.file))
+            .ok_or_else(|| format!("file {} missing from workspace", f.file))?
+            .id;
+        let inf = ws
+            .inference(mid)
+            .ok_or_else(|| format!("no inference for {}", f.file))?;
+        for ((start, _end), expected) in &annotations {
+            if expected == "?" {
+                return Err(format!("`?` dump markers are not supported in package fixtures"));
+            }
+            let actual = crate::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
+                format!("no type at marker (expected `{expected}`) in {}", f.file)
+            })?;
+            let actual_str = ws.render(actual.body, actual.ty);
+            if actual_str != **expected {
+                return Err(format!(
+                    "type mismatch in {}: expected `{expected}`, found `{actual_str}`",
+                    f.file
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One embedded file inside a fixture section: `//-- <file> @pkg=<name>,<id> @v1`.
+pub struct EmbeddedFile<'a> {
+    pub file: &'a str,
+    pub package: Option<(&'a str, u32)>,
+    pub dialect: skull_parser::Dialect,
+    pub src: &'a str,
+}
+
+/// Split a fixture section body into embedded files. Lines `//-- <name>
+/// [@pkg=<self_name>,<id>] [@v1]` start a file; everything until the next
+/// marker is that file's source.
+pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
+    let mut files: Vec<EmbeddedFile> = Vec::new();
+    let mut current: Option<(&str, Option<(&str, u32)>, skull_parser::Dialect, usize)> = None;
+    for (idx, line) in body.lines().enumerate() {
+        if let Some(rest) = line.trim_start().strip_prefix("//--") {
+            if let Some(prev) = current.take() {
+                let src = body.lines().skip(prev.3 + 1).take(idx - prev.3 - 1).collect::<Vec<_>>().join("\n");
+                files.push(EmbeddedFile {
+                    file: prev.0,
+                    package: prev.1,
+                    dialect: prev.2,
+                    src: Box::leak(src.into_boxed_str()),
+                });
+            }
+            let mut it = rest.trim().split_whitespace();
+            let file = it.next().unwrap_or("file.rock");
+            let mut package = None;
+            let mut dialect = skull_parser::Dialect::Legacy;
+            for token in it {
+                if let Some(spec) = token.strip_prefix("@pkg=") {
+                    let mut parts = spec.split(',');
+                    let name: &str = parts.next().unwrap_or("pkg");
+                    let id = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+                    package = Some((leaked, id));
+                } else if token == "@v1" {
+                    dialect = skull_parser::Dialect::V1;
+                }
+            }
+            let leaked_file: &'static str = Box::leak(file.to_string().into_boxed_str());
+            current = Some((leaked_file, package, dialect, idx));
+        }
+    }
+    if let Some(prev) = current.take() {
+        let src = body.lines().skip(prev.3 + 1).collect::<Vec<_>>().join("\n");
+        files.push(EmbeddedFile {
+            file: prev.0,
+            package: prev.1,
+            dialect: prev.2,
+            src: Box::leak(src.into_boxed_str()),
+        });
+    }
+    files
+}
+
+/// Check one multi-file fixture section: parse the embedded files, run the
+/// pipeline with default (self-name) alias tables, and verify `//^` markers.
+pub fn check_types_embedded(files: &[EmbeddedFile<'_>]) -> Result<(), String> {
+    let fixtures: Vec<PackageFixture<'_>> = files
+        .iter()
+        .map(|f| PackageFixture {
+            file: f.file,
+            package: f.package,
+            dialect: f.dialect,
+            src: f.src,
+        })
+        .collect();
+    check_types_packages(&fixtures)
+}
+
+/// Check embedded modules with the compiler-owned stdlib export view
+/// available as the v1 default prelude.
+pub fn check_types_embedded_with_stdlib(
+    files: &[EmbeddedFile<'_>],
+    stdlib_sources: &[(&str, &str)],
+) -> Result<(), String> {
+    let fixtures: Vec<PackageFixture<'_>> = files
+        .iter()
+        .map(|f| PackageFixture {
+            file: f.file,
+            package: f.package,
+            dialect: f.dialect,
+            src: f.src,
+        })
+        .collect();
+    check_types_packages_with_stdlib(&fixtures, stdlib_sources)
 }

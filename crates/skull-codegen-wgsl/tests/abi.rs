@@ -6,24 +6,30 @@ use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeDispatchContract, ComputeInterfacePlan,
     ComputeResourceShape, ComputeValueKind, ComputeBuiltin, ComputeWorkgroupSize, FragmentOutput,
     LogicalArrayGroup, LogicalComputeResource, LogicalTextureGroup, LogicalUniformGroup,
-    LogicalVarying, LogicalVertexInput, ShaderInterfacePlan, ShaderStage, UniformRole, VertexRate,
+    LogicalVarying, LogicalVertexInput, NominalType, ShaderInterfacePlan, ShaderStage, UniformRole,
+    VertexRate,
 };
 use skull_wgsl_abi::WgslAbi;
 use ustr::Ustr;
+
+/// A legacy-spelled type: its key is already its symbol.
+fn nominal(name: &str) -> NominalType {
+    NominalType { key: Ustr::from(name), symbol: Ustr::from(name) }
+}
 
 fn fixture() -> ShaderInterfacePlan {
     ShaderInterfacePlan {
         stages: vec![ShaderStage::Fragment],
         uniform_groups: vec![LogicalUniformGroup {
             role: UniformRole::Stage(ShaderStage::Fragment),
-            struct_name: Ustr::from("FragU"),
+            struct_name: nominal("FragU"),
             members: vec![
                 (Ustr::from("cutoff"), WireKind::F32),
                 (Ustr::from("resolution"), WireKind::F32x2),
             ],
         }],
         textures: Some(LogicalTextureGroup {
-            struct_name: Some(Ustr::from("Tex")),
+            struct_name: Some(nominal("Tex")),
             samplers: vec![
                 (Ustr::from("scene"), SamplerKind::Float),
                 (Ustr::from("bloom"), SamplerKind::Float),
@@ -61,7 +67,7 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
     assert_eq!(wgsl_block.members[0].offset, 0);
     assert_eq!(wgsl_block.members[1].offset, 8);
     assert_eq!(
-        glsl_block.1.members[1].offset, wgsl_block.members[1].offset,
+        glsl_block.1.plan.members[1].offset, wgsl_block.members[1].offset,
         "the logical members agree while physical bindings differ"
     );
 
@@ -219,6 +225,29 @@ fn a_bool_uniform_member_is_laid_out_and_declared_as_u32() {
     assert_eq!(skull_codegen_wgsl::wgsl_type(WireKind::Bool32), None);
 }
 
+/// The WGSL source, the runtime ABI and the semantic wire spell a type by its
+/// symbol, never by its DefKey: a `@nomangle` type's symbol is its declared
+/// name, which is what the host-side vertex layout names too.
+#[test]
+fn explicit_abi_spells_type_symbols() {
+    let mut iface = explicit_fixture(vec![decl("values", WireKind::F32, 1)]);
+    iface.vertex_inputs[0].struct_name =
+        NominalType { key: Ustr::from("pkg::gfx::Vertex"), symbol: Ustr::from("Vertex") };
+    iface.uniform_groups = vec![LogicalUniformGroup {
+        role: UniformRole::Stage(ShaderStage::Fragment),
+        struct_name: NominalType { key: Ustr::from("pkg::gfx::Params"), symbol: Ustr::from("Params") },
+        members: vec![(Ustr::from("gain"), WireKind::F32)],
+    }];
+    let plan = WgslAbiPlan::explicit(&iface, "vertex_main", "fragment_main", Span::default())
+        .expect("explicit ABI");
+    let shared = plan.to_shared_abi();
+    assert_eq!(shared.vertex_inputs[0].struct_name, "Vertex");
+    assert_eq!(shared.uniform_blocks[0].struct_name, "Params");
+    let parsed = WgslAbi::parse(&plan.wire()).expect("explicit ABI parses");
+    assert_eq!(parsed.vertex_inputs[0].struct_name, "Vertex");
+    assert_eq!(parsed.uniform_blocks[0].struct_name, "Params");
+}
+
 #[test]
 fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
     let mut iface = explicit_fixture(vec![decl("values", WireKind::F32, 1)]);
@@ -230,7 +259,7 @@ fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
     ];
     iface.uniform_groups = vec![LogicalUniformGroup {
         role: UniformRole::Engine,
-        struct_name: Ustr::from("EngineU"),
+        struct_name: nominal("EngineU"),
         members: vec![
             (Ustr::from("direction"), WireKind::F32x3),
             (Ustr::from("gain"), WireKind::F32),
@@ -293,7 +322,7 @@ fn compute_fixture() -> ShaderInterfacePlan {
         stages: vec![ShaderStage::Compute],
         uniform_groups: vec![LogicalUniformGroup {
             role: UniformRole::Stage(ShaderStage::Compute),
-            struct_name: Ustr::from("SaxpyParams"),
+            struct_name: nominal("SaxpyParams"),
             members: vec![(Ustr::from("a"), WireKind::I32), (Ustr::from("n"), WireKind::I32)],
         }],
         compute: Some(ComputeInterfacePlan {
@@ -326,7 +355,7 @@ fn rect_loss_interface_fixture() -> ShaderInterfacePlan {
         stages: vec![ShaderStage::Compute],
         uniform_groups: vec![LogicalUniformGroup {
             role: UniformRole::Stage(ShaderStage::Compute),
-            struct_name: Ustr::from("RectLossParams"),
+            struct_name: nominal("RectLossParams"),
             members: vec![
                 (Ustr::from("width"), WireKind::I32),
                 (Ustr::from("region_x"), WireKind::I32),
@@ -500,7 +529,7 @@ fn explicit_fixture(arrays: Vec<ArrayMemberDecl>) -> ShaderInterfacePlan {
     ShaderInterfacePlan {
         stages: vec![ShaderStage::Vertex, ShaderStage::Fragment],
         vertex_inputs: vec![LogicalVertexInput {
-            struct_name: Ustr::from("Vtx"),
+            struct_name: nominal("Vtx"),
             rate: VertexRate::PerVertex,
             attrs: vec![(Ustr::from("pos"), AttrKind::F32x2)],
         }],
@@ -515,7 +544,7 @@ fn explicit_fixture(arrays: Vec<ArrayMemberDecl>) -> ShaderInterfacePlan {
             members: arrays,
         }],
         textures: Some(LogicalTextureGroup {
-            struct_name: Some(Ustr::from("Tex")),
+            struct_name: Some(nominal("Tex")),
             samplers: vec![(Ustr::from("scene"), SamplerKind::Float)],
             stages: vec![ShaderStage::Fragment],
         }),

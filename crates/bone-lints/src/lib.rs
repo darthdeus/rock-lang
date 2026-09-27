@@ -180,6 +180,9 @@ pub const KNOWN_LINTS: &[&str] = &[
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
+    REDUNDANT_STATE_ANNOTATION,
+    HOST_RESOURCE_IN_GAME_MEMORY,
+    HOST_RESOURCE_SUPPRESSION_CENSUS,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -190,11 +193,13 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// conversion needs: the sweep is readable, and the build/LSP surfaces stay
 /// quiet the whole time.
 pub const OPT_IN_LINTS: &[&str] = &[
+    BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
     ROW_ESCAPE,
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
+    HOST_RESOURCE_SUPPRESSION_CENSUS,
 ];
 
 /// What an invocation asks of the lint engine: which lints run, and the knobs
@@ -1230,8 +1235,10 @@ fn action_edges_in_body(
         BodyOwner::Function(fid) => {
             let function = &module.functions[fid];
             !has_annotation(function, "wire")
-                && function.name != "refresh_action_defaults"
-                && function.name != "action_new"
+                && !matches!(
+                    declared_name(function.name.as_str()),
+                    "refresh_action_defaults" | "action_new"
+                )
         }
         BodyOwner::Global(gid) => !is_action_name(module.globals[gid].name),
         _ => false,
@@ -2743,6 +2750,53 @@ fn flat_findings_with(
                 .map(Finding::of),
         );
     }
+    if sel.enabled(REDUNDANT_STATE_ANNOTATION) {
+        let found = redundant_state_annotations_in_module(module);
+        out.extend(
+            filter_suppressed_census(found, src, census.as_deref_mut())
+                .iter()
+                .map(Finding::of),
+        );
+    }
+    if sel.enabled(HOST_RESOURCE_IN_GAME_MEMORY) {
+        let found = host_resources_in_game_memory_in_module(ws, module);
+        out.extend(
+            filter_suppressed_census(found, src, census.as_deref_mut())
+                .iter()
+                .map(Finding::of),
+        );
+    }
+    if sel.enabled(HOST_RESOURCE_SUPPRESSION_CENSUS) {
+        let lines: Vec<&str> = src.lines().collect();
+        for found in host_resources_in_game_memory_in_module(ws, module) {
+            let line = found.span.line_range.0;
+            let marker = lines
+                .get(line)
+                .copied()
+                .filter(|s| parse_allow_comment(s, HOST_RESOURCE_IN_GAME_MEMORY))
+                .or_else(|| {
+                    line.checked_sub(1)
+                        .and_then(|n| lines.get(n).copied())
+                        .filter(|s| parse_allow_comment(s, HOST_RESOURCE_IN_GAME_MEMORY))
+                });
+            let Some(marker) = marker else { continue };
+            let reason = marker
+                .split_once("//")
+                .and_then(|(_, comment)| comment.split_once('"'))
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(reason, _)| format!("; reason: {reason}"))
+                .unwrap_or_default();
+            out.push(Finding {
+                lint: HOST_RESOURCE_SUPPRESSION_CENSUS,
+                error: CompilerError::new_with_label(
+                    found.span,
+                    format!("suppressed host-resource finding on `{}`{reason}", found.global),
+                )
+                .with_level(CompilerErrorLevel::Warning),
+                line,
+            });
+        }
+    }
     if sel.enabled(RAW_INPUT_MIGRATION) {
         let found = raw_input_sites_in_module(module);
         out.extend(
@@ -2836,7 +2890,9 @@ fn inference_findings_with(
 /// holds the per-file text and applies [`filter_suppressed_findings`].
 ///
 /// `unused_fn` is closed-world and runs only for a `bin` package;
-/// `backend_sibling_mismatch` is not gated (a lib's siblings must agree too).
+/// `backend_sibling_mismatch` is opt-in because JS is an optional backend; use
+/// `LintOptions::only` or `rock lint --lints=backend_sibling_mismatch` when
+/// auditing parity explicitly.
 pub fn workspace_findings_by_file(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -3601,7 +3657,7 @@ pub fn unused_fns_by_file(
 /// in-project call graph. See `unused_fns` for the rationale on each arm.
 fn is_root(f: &Function) -> bool {
     f.is_extern
-        || f.name.as_str() == "main"
+        || declared_name(f.name.as_str()) == "main"
         || f.annotations.iter().any(|a| !is_implementation_anno(a.name.name.as_str()))
 }
 
@@ -3788,7 +3844,7 @@ pub fn unused_pure_exprs_in_body(body: &Body) -> Vec<UnusedPureExpr> {
 fn reportable_root(body: &Body, e: Idx<Expr>) -> Option<bool> {
     match &body.expr_arena[e] {
         Expr::BinOp { op, .. } => Some(is_comparison_op(*op)),
-        Expr::Not(_) | Expr::BitNot(_) | Expr::UnaryMinus(_) => Some(false),
+        Expr::Not(..) | Expr::BitNot(_) | Expr::UnaryMinus(..) => Some(false),
         Expr::Var(_) => Some(false),
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => Some(false),
         Expr::Unit | Expr::Null => Some(false),
@@ -3820,7 +3876,7 @@ fn is_pure(body: &Body, e: Idx<Expr>) -> bool {
         | Expr::Global(_)
         | Expr::SiblingRef(_) => true,
 
-        Expr::Not(x) | Expr::BitNot(x) | Expr::UnaryMinus(x) => is_pure(body, *x),
+        Expr::Not(x, _) | Expr::BitNot(x) | Expr::UnaryMinus(x, _) => is_pure(body, *x),
         Expr::As { value, .. } => is_pure(body, *value),
         Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => is_pure(body, *base),
         Expr::TupleIndex { tuple, .. } => is_pure(body, *tuple),
@@ -4203,7 +4259,7 @@ fn is_production_mag_module(file: Ustr) -> bool {
 }
 
 fn is_action_name(name: Ustr) -> bool {
-    name.as_str().starts_with("ACT_")
+    declared_name(name.as_str()).starts_with("ACT_")
 }
 
 fn has_annotation(f: &Function, name: &str) -> bool {
@@ -4259,26 +4315,7 @@ pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<Act
     let mut callers: FxHashSet<Ustr> = FxHashSet::default();
     for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
         for (owner, body) in &module.bodies {
-            let production_read = match owner {
-                BodyOwner::Function(fid) => {
-                    let function = &module.functions[*fid];
-                    !has_annotation(function, "wire")
-                        && function.name != "refresh_action_defaults"
-                        && function.name != "action_new"
-                }
-                BodyOwner::Global(gid) => !is_action_name(module.globals[*gid].name),
-                _ => false,
-            };
-            if !production_read {
-                continue;
-            }
-            for expr in body.expr_arena.values() {
-                if let Expr::Global(name) = expr {
-                    if declared.contains(name) {
-                        callers.insert(*name);
-                    }
-                }
-            }
+            callers.extend(action_edges_in_body(module, *owner, body, &declared));
         }
     }
 
@@ -4314,7 +4351,7 @@ pub fn method_syntax_in_module(
 ) -> Vec<MethodSyntax> {
     let mut out = Vec::new();
     for (_, f) in module.functions.iter() {
-        if f.is_extern || f.name.as_str() == "main" || f.name_span.file != module.file {
+        if f.is_extern || declared_name(f.name.as_str()) == "main" || f.name_span.file != module.file {
             continue;
         }
         let Some(recv) = f.param_decls.first() else { continue };
@@ -4662,7 +4699,7 @@ fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
     let (id, TypeExpr::Nullable(inner)) = head_ty(ws, bi, ty) else { return false };
     matches!(
         head_type(ws, bi, id.with_idx(inner)),
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == "Task"
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if declared_name(n.as_str()) == "Task"
     )
 }
 
@@ -4702,4 +4739,305 @@ pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
         }
     }
     out
+}
+
+/// A `global` whose `@state` resolves to exactly what its unit's memory class
+/// already gives it (`docs/state-ownership-plan.md` R2/R3). The line is
+/// harmless -- it emits the same StateImagePlan entry either way -- which is
+/// why this is a `Warning` and not an error: branches in flight still write
+/// the 87-character line by habit and merge it in, and they should get a named
+/// message rather than a broken build.
+#[derive(Clone, Debug)]
+pub struct RedundantStateAnnotation {
+    pub global: Ustr,
+    pub found: bone_core::hir::RedundantStateAnnotation,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(redundant_state_annotation)`.
+pub const REDUNDANT_STATE_ANNOTATION: &str = "redundant_state_annotation";
+
+/// Every `@state` in the module that only repeats its unit's memory class.
+///
+/// This does NOT re-derive the comparison: `lower_state_metadata` makes it,
+/// with the annotation's resolved triple and the unit default both in hand,
+/// and records the verdict on the declaration. A restatement here would be
+/// free to drift and would eventually ask for a deletion the compiler
+/// disagrees with.
+pub fn redundant_state_annotations_in_module(module: &Module) -> Vec<RedundantStateAnnotation> {
+    module
+        .globals
+        .iter()
+        .filter_map(|(_, g)| {
+            g.redundant_state
+                .map(|found| RedundantStateAnnotation { global: g.name, found })
+        })
+        .collect()
+}
+
+impl LintFinding for RedundantStateAnnotation {
+    const LINT: &'static str = REDUNDANT_STATE_ANNOTATION;
+    fn line(&self) -> usize {
+        self.found.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        use bone_core::hir::MemoryClassSite;
+        let class = self.found.class.as_str();
+        let where_ = match self.found.site {
+            MemoryClassSite::Header(_) => {
+                format!("this file's `@memory({class})` header")
+            }
+            MemoryClassSite::Package(pkg) => {
+                format!("package `{pkg}` (`[language] memory` in its stick.toml)")
+            }
+            MemoryClassSite::LanguageDefault => {
+                format!("the `{class}` language default for a file with no package")
+            }
+        };
+        CompilerError::new_with_label(
+            self.found.span,
+            format!(
+                "redundant `@state` on `{}`: it resolves to the `{class}` memory class \
+                 that {where_} already gives every global here; delete the line",
+                self.global
+            ),
+        )
+        .with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+/// A `game`-memory global whose declared type is, or structurally contains, a
+/// type declared `@host_resource` (`docs/state-ownership-plan.md` R4).
+///
+/// A host resource is a NAME for something the host owns. Game memory is
+/// captured into a WorldImage, hashed into the replay desync digest, and
+/// handed across a sim-worker boundary -- three things that all assume the
+/// value means the same to whoever reads it next. A handle does not: the id is
+/// a process-local allocation counter, so two identical runs are free to
+/// disagree on it, and a restore hands back a name for something that is gone.
+/// Every instance of this found so far (`SFX_REPLAY_VOICE`, and the five the
+/// `platform` class caught) was a live defect found by divergence rather than
+/// by a check.
+///
+/// The seven original Stone handle types found 251 declarations in 15
+/// projects. After presentation roots were classified, intentional sim cases
+/// gained reasoned allow comments, and the world-held cases moved to logical
+/// keys, all 15 projects had zero unsuppressed findings. The lint is `Error`;
+/// `host_resource_suppression_census` keeps the allowed population visible.
+#[derive(Clone, Debug)]
+pub struct HostResourceInGameMemory {
+    pub global: Ustr,
+    pub span: Span,
+    /// The `@host_resource` type reached.
+    pub host_type: Ustr,
+    /// How it is reached from the global's declared type, outermost first.
+    /// One element means the global's own type is the host resource.
+    pub path: Vec<String>,
+}
+
+/// Canonical lint name for suppression:
+/// `// rock: allow(host_resource_in_game_memory)`.
+pub const HOST_RESOURCE_IN_GAME_MEMORY: &str = "host_resource_in_game_memory";
+
+/// Opt-in live census of `host_resource_in_game_memory` findings hidden by an
+/// allow comment. It reports the suppressed declaration while the main lint
+/// remains quiet, so raising the main lint to Error cannot hide exceptions.
+pub const HOST_RESOURCE_SUPPRESSION_CENSUS: &str = "host_resource_suppression_census";
+
+/// Every `game`-memory global in the module that can reach a `@host_resource`
+/// type through its declared type.
+///
+/// Scope is GLOBALS. A handle in a function local, a parameter or a coroutine
+/// frame is out of this arc; a global is what the StateImagePlan is built from,
+/// and a field reachable from a global (a `WorldState` field, say) is covered
+/// here by the transitive walk rather than by a separate rule.
+///
+/// `const` is exempt because a `const` never enters the StateSchema
+/// (`crates/skull-mir/src/state_schema.rs`, `!g.is_const`), and `platform` /
+/// `debug` are exempt because neither is captured or hashed -- which is
+/// exactly what the two ways out offer.
+pub fn host_resources_in_game_memory_in_module(
+    ws: &Workspace,
+    module: &Module,
+) -> Vec<HostResourceInGameMemory> {
+    let mut out = Vec::new();
+    for (_, g) in module.globals.iter() {
+        if g.is_const || g.state_metadata.ownership != bone_core::hir::StateOwnership::Session {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut seen = FxHashSet::default();
+        if let Some(host_type) = reach_host_resource(ws, g.ty, &mut seen, &mut path) {
+            out.push(HostResourceInGameMemory {
+                global: g.name,
+                span: g.name_span,
+                host_type,
+                path,
+            });
+        }
+    }
+    out
+}
+
+/// The `@host_resource` declaration on a nominal type, whichever of the three
+/// kinds it is.
+fn nominal_host_resource(ws: &Workspace, name: Ustr) -> Option<bone_core::hir::HostResource> {
+    if let Some(id) = ws.struct_by_name.get(&name) {
+        return ws.module(id.module).structs[id.def].host_resource;
+    }
+    if let Some(id) = ws.newtypes_by_name.get(&name) {
+        return ws.module(id.module).newtypes[id.def].host_resource;
+    }
+    if let Some(id) = ws.enums_by_name.get(&name) {
+        return ws.module(id.module).enums[id.def].host_resource;
+    }
+    None
+}
+
+/// Depth-first search for a `@host_resource` type reachable from `ty`,
+/// recording the path as it goes.
+///
+/// `seen` holds the nominal names whose DEFINITIONS are already on the stack,
+/// which is what makes a recursive struct terminate; the same name reached
+/// again under different generic arguments is not re-expanded, because the
+/// question asked here is about declared types and a nominal's fields are the
+/// same fields either way.
+///
+/// A function type is not descended into: its type says nothing about what a
+/// capturing lambda closed over, so a claim either way would be made up. See
+/// `docs/state-ownership-plan.md` S2 for what covering that would need.
+fn reach_host_resource(
+    ws: &Workspace,
+    ty: TyId,
+    seen: &mut FxHashSet<Ustr>,
+    path: &mut Vec<String>,
+) -> Option<Ustr> {
+    let te = match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        // A declared global's type and a struct field's type are both lowered
+        // into their module's arena; a body-local type cannot be reached from
+        // here, and guessing at one without its BodyInference would be wrong.
+        TyId::Local(_) => return None,
+    };
+    match te {
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
+        TypeExpr::Function { .. } => None,
+        TypeExpr::Nullable(inner) => reach_host_resource(ws, ty.with_idx(inner), seen, path),
+        TypeExpr::Tuple { elements } => elements
+            .into_iter()
+            .find_map(|e| reach_host_resource(ws, ty.with_idx(e), seen, path)),
+        TypeExpr::App { ctor, params } => {
+            if let TypeCtor::Nominal(name) = ctor {
+                if nominal_host_resource(ws, name).is_some() {
+                    path.push(name.to_string());
+                    return Some(name);
+                }
+            }
+            // Element, key and value types of a container, and every generic
+            // argument of a nominal, are reached through the same list.
+            for p in params {
+                if let Some(hit) = reach_host_resource(ws, ty.with_idx(p), seen, path) {
+                    if let TypeCtor::Nominal(name) = ctor {
+                        path.insert(0, format!("{name}<..>"));
+                    } else {
+                        path.insert(0, ws.render(None, ty));
+                    }
+                    return Some(hit);
+                }
+            }
+            let TypeCtor::Nominal(name) = ctor else { return None };
+            if !seen.insert(name) {
+                return None;
+            }
+            let hit = reach_nominal_body(ws, name, seen, path);
+            seen.remove(&name);
+            hit
+        }
+    }
+}
+
+/// The declaration side of [`reach_host_resource`]: a struct's fields, an
+/// enum's variant payloads, a newtype's wrapped type.
+fn reach_nominal_body(
+    ws: &Workspace,
+    name: Ustr,
+    seen: &mut FxHashSet<Ustr>,
+    path: &mut Vec<String>,
+) -> Option<Ustr> {
+    if let Some(id) = ws.struct_by_name.get(&name).copied() {
+        let def = &ws.module(id.module).structs[id.def];
+        for field in &def.fields {
+            if let Some(hit) = reach_host_resource(ws, field.ty, seen, path) {
+                path.insert(0, format!("{}.{}", short_name(name), field.name));
+                return Some(hit);
+            }
+        }
+        return None;
+    }
+    if let Some(id) = ws.newtypes_by_name.get(&name).copied() {
+        let wrapped = ws.module(id.module).newtypes[id.def].wrapped;
+        if let Some(hit) = reach_host_resource(ws, wrapped, seen, path) {
+            path.insert(0, format!("{}(..)", short_name(name)));
+            return Some(hit);
+        }
+        return None;
+    }
+    let id = ws.enums_by_name.get(&name).copied()?;
+    let def = &ws.module(id.module).enums[id.def];
+    for variant in &def.variants {
+        let hit = match &variant.payload {
+            bone_core::hir::VariantPayload::Unit => None,
+            bone_core::hir::VariantPayload::Tuple(tys) => tys
+                .iter()
+                .find_map(|&t| reach_host_resource(ws, t, seen, path)),
+            bone_core::hir::VariantPayload::Record(fields) => fields
+                .iter()
+                .find_map(|f| reach_host_resource(ws, f.ty, seen, path)),
+        };
+        if let Some(hit) = hit {
+            path.insert(0, format!("{}::{}", short_name(name), variant.name));
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// A modules-v1 definition is registered under its DefKey, which is a path. A
+/// diagnostic wants the bare name the author wrote.
+fn short_name(name: Ustr) -> String {
+    declared_name(name.as_str()).to_string()
+}
+
+/// The declared (last) segment of a DefKey; a legacy name is already bare.
+/// Classifiers that key on a spelling (`main`, `Task`) must read this.
+fn declared_name(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+impl LintFinding for HostResourceInGameMemory {
+    const LINT: &'static str = HOST_RESOURCE_IN_GAME_MEMORY;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let through = if self.path.len() > 1 {
+            format!(" through `{}`", self.path.join(" -> "))
+        } else {
+            String::new()
+        };
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "`{}` is game memory and reaches the host resource `{}`{}; game memory is \
+                 captured, hashed and handed across a worker boundary, none of which a \
+                 host handle survives. Move it to platform memory \
+                 (`@state(ownership=host_projection, world=exclude, \
+                 realization=rebuild_host_projection)`, or an `@memory(platform)` file \
+                 header), or store a game-side id and look the handle up from it.",
+                self.global,
+                short_name(self.host_type),
+                through
+            ),
+        )
+        .with_level(CompilerErrorLevel::Error)
+    }
 }

@@ -60,9 +60,9 @@ fn walk_expr(body: &Body, e: Idx<Expr>, out: &mut FxHashSet<Idx<Expr>>) {
                 }
             }
         }
-        Expr::Not(v)
+        Expr::Not(v, _)
         | Expr::BitNot(v)
-        | Expr::UnaryMinus(v)
+        | Expr::UnaryMinus(v, _)
         | Expr::YieldDelegate(v)
         | Expr::Spread(v)
         | Expr::IncDec { target: v, .. }

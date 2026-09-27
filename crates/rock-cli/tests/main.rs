@@ -1,11 +1,11 @@
 // Inner-loop integration tests: one linked binary instead of one per file.
 
 mod stone_harness;
-#[path = "web_test_process.rs"]
-mod web_test_process;
 
 #[path = "ablation_census_survives_failure.rs"]
 mod ablation_census_survives_failure;
+#[path = "child_lifetime.rs"]
+mod child_lifetime;
 #[path = "arena_reuse_alloc_gate.rs"]
 mod arena_reuse_alloc_gate;
 #[path = "allocation_jit_trace_gate.rs"]
@@ -14,26 +14,54 @@ mod allocation_jit_trace_gate;
 mod bone_incremental_timing;
 #[path = "completions_cli.rs"]
 mod completions_cli;
+#[path = "modules_audit.rs"]
+mod modules_audit;
+#[path = "modules_emit.rs"]
+mod modules_emit;
+#[path = "modules_migrate.rs"]
+mod modules_migrate;
+#[path = "modules_fix.rs"]
+mod modules_fix;
+#[path = "formatting_modules.rs"]
+mod formatting_modules;
+#[path = "modules_witness.rs"]
+mod modules_witness;
+#[path = "sound_inspect_cli.rs"]
+mod sound_inspect_cli;
 #[path = "glsl_backend_ratchet.rs"]
 mod glsl_backend_ratchet;
 #[path = "glsl_runner_gate.rs"]
 mod glsl_runner_gate;
 #[path = "harness_coverage.rs"]
 mod harness_coverage;
-#[path = "js_backend_externs_gate.rs"]
-mod js_backend_externs_gate;
-#[path = "js_backend_ratchet.rs"]
-mod js_backend_ratchet;
-#[path = "js_coroutines.rs"]
-mod js_coroutines;
-#[path = "js_test_harness_globals_sentinel.rs"]
-mod js_test_harness_globals_sentinel;
-#[path = "comptime_build_vars.rs"]
-mod comptime_build_vars;
-#[path = "sample_game_c_build_vars.rs"]
-mod sample_game_c_build_vars;
+#[path = "backend_feature_gates.rs"]
+mod backend_feature_gates;
+#[path = "mag_build_vars.rs"]
+mod mag_build_vars;
+#[path = "asset_overlay_defaults.rs"]
+mod asset_overlay_defaults;
+#[path = "stone_root_resolution.rs"]
+mod stone_root_resolution;
+#[path = "docs_index.rs"]
+mod docs_index;
+#[path = "source_revision.rs"]
+mod source_revision;
 #[path = "cimgui_prelude.rs"]
 mod cimgui_prelude;
+#[path = "test_exit_status_gate.rs"]
+mod test_exit_status_gate;
+#[path = "js_test_harness_globals_lua.rs"]
+mod js_test_harness_globals_lua;
+#[path = "js_backend_externs_lua.rs"]
+mod js_backend_externs_lua;
+#[path = "comptime_build_vars_lua.rs"]
+mod comptime_build_vars_lua;
+#[path = "lua_run_gate.rs"]
+mod lua_run_gate;
+#[path = "shape_oracle.rs"]
+mod shape_oracle;
+#[path = "sample_game_c_build_vars.rs"]
+mod sample_game_c_build_vars;
 #[path = "release_mode_deleted.rs"]
 mod release_mode_deleted;
 #[path = "replay_report_tests.rs"]
@@ -42,18 +70,17 @@ mod replay_report_tests;
 mod replay_profile_tests;
 #[path = "replay_profile_report_tests.rs"]
 mod replay_profile_report_tests;
-#[path = "mag_build_vars.rs"]
-mod mag_build_vars;
 #[path = "package.rs"]
 mod package;
+
+#[path = "modules_graph.rs"]
+mod modules_graph;
 #[path = "fire_manifest.rs"]
 mod fire_manifest;
-#[path = "js_run_gate.rs"]
-mod js_run_gate;
+#[path = "fire_asset_archive.rs"]
+mod fire_asset_archive;
 #[path = "c_run_gate.rs"]
 mod c_run_gate;
-#[path = "js_value_tests.rs"]
-mod js_value_tests;
 #[path = "json_serialize_tests.rs"]
 mod json_serialize_tests;
 #[path = "lint_cli.rs"]
@@ -78,8 +105,8 @@ mod production_sources_test;
 mod launcher_engine_commands;
 #[path = "mag_direct_state_authority.rs"]
 mod mag_direct_state_authority;
-#[path = "asset_overlay_defaults.rs"]
-mod asset_overlay_defaults;
+#[path = "mag_world_root_census.rs"]
+mod mag_world_root_census;
 #[path = "directory_listing_api.rs"]
 mod directory_listing_api;
 #[path = "editor_inspector_position.rs"]
@@ -88,41 +115,35 @@ mod editor_inspector_position;
 mod run_exit_status;
 #[path = "shader_pipeline_cli.rs"]
 mod shader_pipeline_cli;
-#[path = "shader_register_arity_gate.rs"]
-mod shader_register_arity_gate;
 #[path = "shader_validate_gate.rs"]
 mod shader_validate_gate;
-#[path = "shape_oracle.rs"]
-mod shape_oracle;
+#[path = "shader_modules_v1.rs"]
+mod shader_modules_v1;
 #[path = "stone_test_comptime.rs"]
 mod stone_test_comptime;
 #[path = "stone_test_debounce.rs"]
 mod stone_test_debounce;
 #[path = "stone_test_decorator_cleanup.rs"]
 mod stone_test_decorator_cleanup;
+#[path = "stone_full_reload_binding.rs"]
+mod stone_full_reload_binding;
 #[path = "stone_test_endtoend.rs"]
 mod stone_test_endtoend;
-#[path = "test_exit_status_gate.rs"]
-mod test_exit_status_gate;
 #[path = "test_harness_truncation.rs"]
 mod test_harness_truncation;
 #[path = "watcher_tmp_project_path.rs"]
 mod watcher_tmp_project_path;
-#[path = "imgui_web_stubs.rs"]
-mod imgui_web_stubs;
 #[path = "iter_parse_cli.rs"]
 mod iter_parse_cli;
-#[path = "mono_js_backend_realization.rs"]
-mod mono_js_backend_realization;
-#[path = "web_build_gate.rs"]
-mod web_build_gate;
-#[path = "web_driver_tests.rs"]
-mod web_driver_tests;
-#[path = "web_fake_gl_tests.rs"]
-mod web_fake_gl_tests;
-#[path = "web_package_tests.rs"]
-mod web_package_tests;
-#[path = "web_watch_tests.rs"]
-mod web_watch_tests;
 #[path = "backend_stats_gate.rs"]
 mod backend_stats_gate;
+#[path = "sim_observability.rs"]
+mod sim_observability;
+#[path = "sim_report_tests.rs"]
+mod sim_report_tests;
+#[path = "content_boundary.rs"]
+mod content_boundary;
+#[path = "state_memory_class.rs"]
+mod state_memory_class;
+#[path = "state_globals_none.rs"]
+mod state_globals_none;

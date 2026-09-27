@@ -24,6 +24,7 @@ fn run_perf_json_window_with_sections(
     game: &str,
     gc_window: Option<(usize, usize)>,
     detailed_sections: bool,
+    gc_window_mode: Option<&str>,
 ) -> Value {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     // Per-test scratch for --output so concurrent invocations don't race
@@ -50,6 +51,9 @@ fn run_perf_json_window_with_sections(
             "--gc-window-start".to_string(),
             start.to_string(),
         ]);
+    }
+    if let Some(mode) = gc_window_mode {
+        args.extend(["--gc-window-mode".to_string(), mode.to_string()]);
     }
     let mut command = Command::new(rock_bin);
     command.args(&args).current_dir(workspace_root());
@@ -82,7 +86,7 @@ fn run_perf_json_window_with_sections(
 }
 
 fn run_perf_json_window(game: &str, gc_window: Option<(usize, usize)>) -> Value {
-    run_perf_json_window_with_sections(game, gc_window, false)
+    run_perf_json_window_with_sections(game, gc_window, false, None)
 }
 
 fn run_perf_json(game: &str) -> Value {
@@ -90,7 +94,7 @@ fn run_perf_json(game: &str) -> Value {
 }
 
 fn run_perf_json_with_sections(game: &str) -> Value {
-    run_perf_json_window_with_sections(game, None, true)
+    run_perf_json_window_with_sections(game, None, true, None)
 }
 
 /// Validate one uniform stat block: every field present + numeric, the
@@ -258,16 +262,18 @@ fn perf_json_sections_have_uniform_blocks() {
             .unwrap_or_else(|| panic!("sections[{i}].share missing or not a number: {s}"));
         assert!(share >= 0.0, "sections[{i}].share must be non-negative, got {share}");
 
-        // Section duration (ms) and net alloc (KB) are each a uniform block.
+        // Section duration (ms) and exclusive request traffic (KB/frame) are
+        // each a uniform block.
         let ms = s
             .get("ms")
             .unwrap_or_else(|| panic!("sections[{i}].ms block missing: {s}"));
         assert_stat_block(ms, &format!("sections[{i}].ms"), true);
 
-        let alloc = s
-            .get("alloc_kb")
-            .unwrap_or_else(|| panic!("sections[{i}].alloc_kb block missing: {s}"));
-        assert_stat_block(alloc, &format!("sections[{i}].alloc_kb"), true);
+        let request = s
+            .get("request_kb")
+            .unwrap_or_else(|| panic!("sections[{i}].request_kb block missing: {s}"));
+        assert_stat_block(request, &format!("sections[{i}].request_kb"), false);
+        assert!(s.get("alloc_kb").is_none(), "old allocation proxy remains: {s}");
 
         let gc = s
             .get("gc_window_alloc")
@@ -284,12 +290,13 @@ fn perf_json_memory_has_uniform_blocks() {
     let doc = run_perf_json("games/match3");
     let mem = &doc["memory"];
 
-    for group in ["heap_kb", "alloc_kb_per_frame"] {
+    for group in ["heap_kb"] {
         let block = mem
             .get(group)
             .unwrap_or_else(|| panic!("memory.{group} block missing: {mem}"));
         assert_stat_block(block, &format!("memory.{group}"), true);
     }
+    assert!(mem.get("alloc_kb_per_frame").is_none());
 
     assert!(
         mem.get("gc_events")
@@ -306,6 +313,8 @@ fn perf_json_memory_has_uniform_blocks() {
         .get("gc_window")
         .unwrap_or_else(|| panic!("memory.gc_window missing: {mem}"));
     assert_eq!(gc["available"], Value::Bool(false));
+    assert!(gc["mode"].is_null());
+    assert!(gc["collector_running_at_start"].is_null());
     assert!(gc["gross_request_kb_per_frame"].is_null());
     for key in [
         "positive_growth_kb_per_frame",
@@ -348,7 +357,8 @@ fn perf_json_memory_has_uniform_blocks() {
 
 #[test]
 fn perf_json_gc_window_has_trustworthy_reconciliation() {
-    let doc = run_perf_json_window_with_sections("games/match3", Some((4, 2)), true);
+    let doc = run_perf_json_window_with_sections(
+        "games/match3", Some((4, 2)), true, Some("stopped"));
     let mem = &doc["memory"];
     let gc = &mem["gc_window"];
     assert_eq!(gc["requested_frames"].as_i64(), Some(4));
@@ -426,6 +436,36 @@ fn perf_json_gc_window_has_trustworthy_reconciliation() {
         sections.iter().any(|s| s["gc_window_alloc"]["events"].as_i64().unwrap_or(0) > 0),
         "at least one GC-window section row must expose a non-zero event population"
     );
+}
+
+#[test]
+fn perf_json_gc_window_names_and_applies_both_collector_modes() {
+    for (mode, running) in [("stopped", false), ("running", true)] {
+        let doc = run_perf_json_window_with_sections(
+            "games/match3", Some((4, 2)), false, Some(mode));
+        let gc = &doc["memory"]["gc_window"];
+        assert_eq!(gc["mode"].as_str(), Some(mode), "mode label drifted: {gc}");
+        assert_eq!(
+            gc["collector_running_at_start"].as_bool(),
+            Some(running),
+            "{mode} did not control the real collector: {gc}"
+        );
+    }
+}
+
+#[test]
+fn perf_json_retires_heap_delta_allocation_fields() {
+    let doc = run_perf_json_window_with_sections(
+        "games/match3", Some((4, 2)), true, Some("running"));
+    let memory = &doc["memory"];
+    assert!(
+        memory.get("alloc_kb_per_frame").is_none(),
+        "heap-delta allocation proxy must be removed: {memory}"
+    );
+    for section in doc["sections"].as_array().expect("sections array") {
+        assert!(section.get("alloc_kb").is_none(), "old section proxy remains: {section}");
+        assert!(section.get("request_kb").is_some(), "request traffic missing: {section}");
+    }
 }
 
 #[test]

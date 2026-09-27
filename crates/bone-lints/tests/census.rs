@@ -34,9 +34,18 @@ fn main() { helper() }
     assert!(census.inference.modules_examined > 0);
     assert!(census.inference.bodies_examined > 0);
     assert!(census.suppression.requests > 0);
-    assert!(census.backend_sibling.requests > 0);
+    assert_eq!(census.backend_sibling.requests, 0);
     assert!(census.unused_fn.requests > 0);
     assert!(census.unused_fn.modules_examined > 0);
+
+    let (_, sibling_census) = lint_workspace_with_census(
+        &ws,
+        &FxHashSet::default(),
+        true,
+        &sources,
+        &LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()]),
+    );
+    assert!(sibling_census.backend_sibling.requests > 0);
 }
 
 #[test]

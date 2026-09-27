@@ -47,6 +47,12 @@ pub struct Workspace {
     pub const_globals: FxHashSet<Ustr>,
 
     pub functions_by_name: FxHashMap<Ustr, FnList>,
+    /// Every lowered function's declared parameter types, rendered and
+    /// `\u{1}`-joined, per module. Half of [`Workspace::backend_variant_key`].
+    /// `insert_module` indexes the module it stores; a caller that replaces
+    /// one function's signature in place re-indexes it with
+    /// [`Workspace::index_param_signature`].
+    pub param_signatures: Vec<ArenaMap<Idx<Function>, Ustr>>,
 
     /// Workspace-wide `deco` declaration names, collected from the raw ASTs in
     /// `lower_modules` BEFORE lowering (the `type_generic_arity` pattern) so
@@ -64,6 +70,31 @@ pub struct Workspace {
     /// keeps `Workspace: Clone` and lets the parallel dependent re-check (which
     /// holds `&Workspace`) share one counter across threads.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Count of function bodies LOWERED since the last reset: every function
+    /// a full or partial module lowering builds, including one whose body
+    /// fails to lower, and the one function the body fast path re-lowers.
+    /// The lowering twin of `reinferred_body_count`, reset by the session per
+    /// update; `UpdateResult.relowered` is derived from inference keys, so a
+    /// body that re-lowers into a lowering error is only visible here.
+    pub relowered_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Modules-v1 namespace scope (plan M2). Empty for legacy-only
+    /// workspaces — every legacy path behaves exactly as before when `ns`
+    /// has no packages and `fragment_scopes` is empty.
+    pub ns: crate::modules::NsTree,
+    /// Per-file v1 scope facts: package, logical module path, and the
+    /// fragment's own imports. Keyed by file id (`Module.file`).
+    pub fragment_scopes: FxHashMap<Ustr, crate::modules::FragmentScope>,
+    /// Canonical definition metadata keyed by DefKey (plan 2.1). Legacy
+    /// definitions keep their bare-name keys and gain no entry.
+    pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
+    /// Per-legacy-file compatibility views over the public root exports of
+    /// participating v1 packages. Built once by the semantic pass; lowering
+    /// only reads the finished view.
+    pub legacy_projections: FxHashMap<Ustr, crate::modules::LegacyProjection>,
+    /// Contextual item-level `use` bindings in legacy files. These are
+    /// additive and do not change legacy `x :: T` ascription parsing.
+    pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyImports>,
 
     /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
     /// host once per session build before emission. bone itself never reads them
@@ -86,6 +117,10 @@ pub struct ComptimeInputs {
     /// Effective declared build channel for package metadata. Empty means a
     /// synthetic/type-only workspace did not come through CLI resolution.
     pub channel: String,
+    /// Source-language mode of the root package ("legacy" or "v1", plan M0).
+    /// Part of the Artifact fingerprint: the same sources under different
+    /// language modes are different builds.
+    pub modules_mode: String,
     /// FALLBACK root for `embed_string(path)`, used only when the calling
     /// module has no file on disk to resolve from (a synthetic module).
     /// Normally the path resolves against the nearest stick.toml at or above
@@ -148,16 +183,24 @@ impl Workspace {
             globals_by_name: Default::default(),
             const_globals: Default::default(),
             functions_by_name: Default::default(),
+            param_signatures: Default::default(),
             decorator_names: Default::default(),
 
             phase_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
+            relowered_body_count: Default::default(),
             comptime_inputs: Default::default(),
+            ns: Default::default(),
+            fragment_scopes: Default::default(),
+            defs: Default::default(),
+            legacy_projections: Default::default(),
+            legacy_imports: Default::default(),
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());
         ws.modules.push(bm);
+        ws.param_signatures.push(Default::default());
 
         ws
     }
@@ -168,6 +211,84 @@ impl Workspace {
 
     pub fn module_mut(&mut self, mid: ModuleId) -> &mut Module {
         &mut self.modules[mid.index()]
+    }
+
+    /// The per-declaration visibility records for a v1 callable family.
+    /// Legacy and compiler-owned callable keys have no namespace member table
+    /// and return `None`, which means their existing visibility remains public.
+    pub fn callable_family_members(&self, key: Ustr) -> Option<&[crate::modules::CallableMember]> {
+        self.callable_members_of(self.defs.get(&key)?)
+    }
+
+    fn callable_members_of(&self, meta: &crate::modules::DefMeta) -> Option<&[crate::modules::CallableMember]> {
+        if meta.kind != crate::modules::DefKind::Callable {
+            return None;
+        }
+        let node = self.ns.package(meta.package)?.node(meta.node)?;
+        node.callable_members.get(&meta.name).map(Vec::as_slice)
+    }
+
+    /// The declared visibility of the lowered callable `fid` among its
+    /// family's `members`, matched by source file and per-file overload
+    /// ordinal. The source namespace table remains authoritative, so a
+    /// visibility-only edit does not require a second visibility field on HIR
+    /// functions.
+    fn member_visibility<'a>(
+        &self,
+        members: &'a [crate::modules::CallableMember],
+        key: Ustr,
+        mid: ModuleId,
+        fid: Idx<Function>,
+    ) -> Option<&'a crate::modules::NsVisibility> {
+        let module = self.module(mid);
+        let ordinal = module
+            .functions_by_name
+            .get(&key)?
+            .iter()
+            .position(|(_, candidate)| *candidate == fid)?;
+        members
+            .iter()
+            .find(|member| member.file == module.file && member.ordinal == ordinal)
+            .map(|member| &member.vis)
+    }
+
+    /// Whether a lowered callable member is admitted at an access site.
+    /// Callable keys without v1 member metadata are legacy or compiler-owned
+    /// families and retain their existing public behavior.
+    pub fn callable_member_admits(
+        &self,
+        key: Ustr,
+        mid: ModuleId,
+        fid: Idx<Function>,
+        site: crate::modules::AccessSite<'_>,
+    ) -> bool {
+        let Some(meta) = self.defs.get(&key) else { return true };
+        let vis = match self.callable_members_of(meta) {
+            Some(members) => {
+                let Some(vis) = self.member_visibility(members, key, mid, fid) else {
+                    return false;
+                };
+                vis
+            }
+            None => &meta.vis,
+        };
+        match site.package {
+            Some(from_pkg) => self.ns.can_access(vis, meta.package, &meta.module, from_pkg, site.module_path),
+            None => *vis == crate::modules::NsVisibility::Pub,
+        }
+    }
+
+    /// Whether a lowered callable member is public in its defining namespace.
+    pub fn callable_member_is_public(&self, key: Ustr, mid: ModuleId, fid: Idx<Function>) -> bool {
+        match self.callable_family_members(key) {
+            Some(members) => self
+                .member_visibility(members, key, mid, fid)
+                .is_some_and(|vis| *vis == crate::modules::NsVisibility::Pub),
+            None => self
+                .defs
+                .get(&key)
+                .is_some_and(|meta| meta.vis == crate::modules::NsVisibility::Pub),
+        }
     }
 
     pub fn inference(&self, mid: ModuleId) -> Option<&InferenceResult> {
@@ -217,7 +338,41 @@ impl Workspace {
             self.modules.push(module);
         }
 
+        let signatures = self
+            .module(id)
+            .functions
+            .iter()
+            .map(|(fid, _)| (fid, self.render_param_signature(id, fid)))
+            .collect();
+        if idx < self.param_signatures.len() {
+            self.param_signatures[idx] = signatures;
+        } else {
+            self.param_signatures.push(signatures);
+        }
+
         id
+    }
+
+    /// Re-index one function whose signature was replaced in place.
+    pub fn index_param_signature(&mut self, mid: ModuleId, fid: Idx<Function>) {
+        let signature = self.render_param_signature(mid, fid);
+        self.param_signatures[mid.index()].insert(fid, signature);
+    }
+
+    fn render_param_signature(&self, mid: ModuleId, fid: Idx<Function>) -> Ustr {
+        let f = &self.module(mid).functions[fid];
+        Ustr::from(&f.param_decls.iter().map(|p| self.render(None, p.ty)).join("\u{1}"))
+    }
+
+    /// The backend-variant group identity of a lowered function: its name
+    /// (the family key) and its declared parameter types. Declarations with
+    /// equal keys and distinct backends are one logical function. Return type
+    /// is excluded because overload resolution keys on parameters. The name
+    /// matters for a merged legacy family, whose members are unrelated
+    /// definitions: identical signatures there are not backend siblings
+    /// (spec 8.3) but a tie.
+    pub fn backend_variant_key(&self, mid: ModuleId, fid: Idx<Function>) -> (Ustr, Ustr) {
+        (self.module(mid).functions[fid].name, self.param_signatures[mid.index()][fid])
     }
 
     pub fn log_time(&mut self, label: &'static str, timer: Instant) {
@@ -425,6 +580,10 @@ pub struct BodyInference {
     /// Same, for `iter(x)` where `x: I` -- identity (types as `I`, lowers to
     /// the argument itself, no call).
     pub bound_identity_calls: FxHashSet<Idx<Expr>>,
+    /// Method-syntax calls (`recv.f(..)`, `recv?.f(..)`) that go through the
+    /// receiver's fn-typed field `f` instead of a function, keyed by the call
+    /// expr. skull lowers exactly these as indirect calls through the field.
+    pub fn_field_calls: FxHashMap<Idx<Expr>, Ustr>,
     /// Calls of bounded fns: the conformance-resolution tree built at the call
     /// site, keyed by the call expr. Tells skull how to substitute the
     /// placeholder bound-calls inside that callee when it is inlined here.

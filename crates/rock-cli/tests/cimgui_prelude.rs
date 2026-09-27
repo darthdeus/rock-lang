@@ -315,6 +315,19 @@ io.write("C_STUB_OK\n")
     );
 }
 
+/// Offset of the first CALL of the global initializer `ginit` (optionally
+/// followed by a modules-v1 digest suffix `_<8 hex>`), not its definition.
+fn ginit_call(emitted: &str, ginit: &str) -> Option<usize> {
+    emitted.match_indices(ginit).map(|(at, _)| at).find(|&at| {
+        let rest = &emitted[at + ginit.len()..];
+        let rest = match rest.strip_prefix('_') {
+            Some(tail) if tail.len() > 8 && tail.as_bytes()[..8].iter().all(u8::is_ascii_hexdigit) => &tail[8..],
+            _ => rest,
+        };
+        rest.starts_with("()") && !emitted[..at].ends_with("function ")
+    })
+}
+
 #[test]
 fn global_initializer_observes_imgui_before_game_code() {
     let root = repo_root();
@@ -328,13 +341,11 @@ fn global_initializer_observes_imgui_before_game_code() {
     )
     .expect("testbed with the cimgui global-init fixture must compile");
     let emitted = std::fs::read_to_string(&main).expect("read emitted testbed");
-    let ready = emitted
-        .find("__skull_ginit___IMGUI_PRELUDE_READY())")
-        .or_else(|| emitted.find("then __IMGUI_PRELUDE_READY = __skull_ginit___IMGUI_PRELUDE_READY()"))
+    // Stone's global is minted with its module digest under modules v1
+    // (`__IMGUI_PRELUDE_READY_<digest>`); the call is what orders.
+    let ready = ginit_call(&emitted, "__skull_ginit___IMGUI_PRELUDE_READY")
         .expect("Rock cimgui initializer must be emitted");
-    let game_init = emitted
-        .find("__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION())")
-        .or_else(|| emitted.find("then CIMG_UI_GLOBAL_INIT_VERSION = __skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION()"))
+    let game_init = ginit_call(&emitted, "__skull_ginit_CIMG_UI_GLOBAL_INIT_VERSION")
         .expect("fixture global initializer must be emitted");
     assert!(
         ready < game_init,
@@ -346,7 +357,7 @@ fn global_initializer_observes_imgui_before_game_code() {
         .args([
             "sim",
             "games/testbed",
-            "cimgui_global_init_order",
+            "testbed::cimgui_global_init_order",
             "--jobs",
             "1",
         ])
@@ -357,71 +368,8 @@ fn global_initializer_observes_imgui_before_game_code() {
     text.push_str(&String::from_utf8_lossy(&result.stderr));
     assert!(result.status.success(), "global-init sim failed:\n{text}");
     assert!(
-        text.contains("cimgui_global_init_order"),
+        text.contains("testbed::cimgui_global_init_order"),
         "sim result missing:\n{text}"
-    );
-}
-
-#[test]
-fn js_sibling_compiles_the_real_prelude_module() {
-    let root = repo_root();
-    for backend in ["skull", "js"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-            .current_dir(&root)
-            .args([
-                "test",
-                "stone/engine/ui/imgui_prelude.rock",
-                "--backend",
-                backend,
-            ])
-            .output()
-            .expect("run prelude backend compile");
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        assert!(
-            output.status.success(),
-            "{backend} prelude compile failed:\n{text}"
-        );
-    }
-    let source = prelude_source();
-    assert!(source.contains("inline(js) fn __imgui_prelude_init"));
-    assert!(source.contains("return true;"));
-
-    let tmp_root = root.join("tmp");
-    std::fs::create_dir_all(&tmp_root).expect("create temp root");
-    let project = tempfile::Builder::new()
-        .prefix("cimgui-js-global-init-")
-        .tempdir_in(&tmp_root)
-        .expect("JS initializer project");
-    let stone = root.join("stone");
-    std::fs::write(
-        project.path().join("stick.toml"),
-        format!(
-            "[package]\nname = \"cimgui_js_global_init\"\ntype = \"bin\"\n\n[dependencies]\nstone = {{ path = \"{}\" }}\n",
-            stone.display()
-        ),
-    )
-    .expect("write JS initializer manifest");
-    std::fs::write(
-        project.path().join("main.rock"),
-        "global OBSERVED: bool = __IMGUI_PRELUDE_READY\nfn main() { print(OBSERVED) }\n",
-    )
-    .expect("write JS initializer source");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(&root)
-        .args(["run", project.path().to_str().unwrap(), "--backend", "js"])
-        .output()
-        .expect("run JS initializer project");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "JS initializer project failed:\n{stdout}\n{stderr}"
-    );
-    assert_eq!(
-        stdout.trim(),
-        "true",
-        "JS prelude global was not ready for game code"
     );
 }
 

@@ -54,6 +54,14 @@ impl StoneHarness {
     /// paths relative to tempdir root). Blocks until the child emits
     /// `ready`.
     pub fn spawn(seed: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env(seed, &[])
+    }
+
+    /// [`Self::spawn`] with extra environment for the child `rock stone-test`.
+    /// Used to drive a process-scoped emission switch (which the parent test
+    /// binary must not set for itself -- it shares a process with every other
+    /// test here).
+    pub fn spawn_with_env(seed: &[(&str, &str)], env: &[(&str, &str)]) -> Self {
         let tempdir = tempfile::tempdir().expect("tempdir");
         for (path, content) in seed {
             let full = tempdir.path().join(path);
@@ -64,7 +72,11 @@ impl StoneHarness {
         }
 
         let exe = rock_binary_path();
-        let mut child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command
             .arg("stone-test")
             .arg(tempdir.path())
             .stdin(Stdio::piped())
@@ -423,4 +435,128 @@ pub fn count_host_projections(v: &serde_json::Value) -> usize {
         serde_json::Value::Array(items) => items.iter().map(count_host_projections).sum(),
         _ => 0,
     }
+}
+
+/// The replay row tags the format gained over time, with the version that
+/// introduced each. This mirrors the admission gates in `__replay_load`
+/// (`stone/engine/replay.rock`): a row BELOW its gate counts as malformed, not
+/// as an ignored unknown, and sixteen of them make the loader call the file
+/// corrupt and exit 4.
+const ROW_SINCE: &[(&str, u32)] = &[
+    ("p ", 9),
+    ("s ", 11),
+    ("i ", 12),
+    ("j ", 14),
+    ("a ", 15),
+    ("u ", 16),
+];
+
+/// Rewrite a log this build wrote into one a version-`to` reader accepts.
+///
+/// Rewriting only the header does not produce a legacy log: every row the
+/// format gained after `to` is still in the file, and the reader rejects the
+/// whole log as corrupt before it reaches whatever the fixture wanted to test.
+/// The header-only rewrites predate v15 and v16, which added a per-observation
+/// row each.
+///
+/// Covers v6 and up. Below v6 the `t` row itself has a different arity and
+/// below v5 the `env` grammar does, neither of which this rewrites.
+pub fn downgrade_replay(text: &str, to: u32) -> String {
+    assert!(
+        (6..rock_replay_protocol::REPLAY_VERSION).contains(&to),
+        "downgrade_replay covers v6..v{}, not v{to}",
+        rock_replay_protocol::REPLAY_VERSION - 1
+    );
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line == rock_replay_protocol::replay_header() {
+            out.push(format!("STONE_REPLAY {to}"));
+            continue;
+        }
+        if ROW_SINCE.iter().any(|(tag, since)| *since > to && line.starts_with(tag)) {
+            continue;
+        }
+        // v10 added the per-phase columns to a timing row; a v9 reader reads
+        // the total alone and counts a row carrying more as malformed.
+        if to == 9 {
+            if let Some(rest) = line.strip_prefix("p ") {
+                let f: Vec<&str> = rest.split_whitespace().collect();
+                out.push(format!("p {} {} {}", f[0], f[1], f[2]));
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    out.join("\n") + "\n"
+}
+
+/// Drop the dump-state envelope keys and everything the engine names as
+/// non-reproducible, leaving a dump two runs of the same session must agree on.
+///
+/// The name set comes from the dump itself
+/// (`stone_dump_nonreproducible_json`, `stone/engine/stone_diag.rock`) rather
+/// than from a list kept here: the engine owns those globals, and the last time
+/// a test kept its own list the always-on hitch ledger landed as a registered
+/// global and turned `replay_reproduces_dump_state_byte_identical` red with
+/// JIT trace counters nobody had told the comparison about.
+pub fn strip_nonreproducible(v: &mut serde_json::Value) {
+    let names: Vec<String> = v
+        .get("__stone_nonreproducible")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !names.is_empty(),
+        "the dump must publish __stone_nonreproducible; without it this \
+         comparison silently stops excluding wall-clock state"
+    );
+    for name in names {
+        let (package, field) = name.split_once('.').unwrap_or_else(||
+            panic!("__stone_nonreproducible names `package.field`, got {name:?}"));
+        if let Some(pkg) = v.get_mut(package).and_then(serde_json::Value::as_object_mut) {
+            pkg.remove(field);
+        }
+    }
+    if let Some(root) = v.as_object_mut() {
+        // The test-observability envelope: replay-only counters that
+        // legitimately differ between a record run and its replay.
+        root.remove("__stone_diag");
+        root.remove("__stone_nonreproducible");
+    }
+}
+
+/// The registered packages of a dump-state object, in dump order.
+///
+/// A dump is package keys plus the `__stone_`-prefixed envelope keys the
+/// runner splices on (`stone_dump_state_envelope`), and only the former hold
+/// globals. Every caller walking "every package" needs the same skip, and the
+/// one that open-coded it panicked the day the envelope gained a key whose
+/// value is not an object.
+pub fn dump_packages(
+    v: &serde_json::Value,
+) -> impl Iterator<Item = (&String, &serde_json::Map<String, serde_json::Value>)> {
+    v.as_object()
+        .expect("dump is an object")
+        .iter()
+        .filter(|(key, _)| !key.starts_with("__stone_"))
+        .map(|(key, value)| {
+            (key, value.as_object().unwrap_or_else(||
+                panic!("dump package {key} is an object, got {value}")))
+        })
+}
+
+/// `("GAME_ART_VAULT", <root>)` for a fixture that substitutes `HOME`.
+///
+/// `rock_host::art_vault::root` reads `$GAME_ART_VAULT`, else
+/// `$HOME/projects/game-art-vault`. A fixture that points `HOME` at a temp
+/// directory to isolate the preferences dir therefore moves the art vault too,
+/// and every `$GAME_ART_VAULT` entry in a game's `[assets].overlays` stops
+/// expanding -- the game refuses to start, with a message about the vault
+/// rather than about the fixture. Resolve it from the REAL environment first
+/// and pass it through.
+pub fn art_vault_env() -> (&'static str, String) {
+    let root = rock_host::art_vault::root().expect("game-art vault");
+    (rock_host::art_vault::ENV, root.to_string_lossy().into_owned())
 }

@@ -8,6 +8,99 @@ use crate::prelude::*;
 /// path, and `"<unknown>".into()` re-hashes the ustr interner each time.
 static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr("<unknown>"));
 
+/// Source dialect of one file. Legacy is today's grammar and flat lookup;
+/// `V1` opts a package into the modules-v1 grammar (`::` paths, `mod`/`use`,
+/// visibility). Selected per package by its stick.toml
+/// (`[language] modules = "v1"`), never per file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Dialect {
+    #[default]
+    Legacy,
+    V1,
+}
+
+/// The memory class of a compilation unit: which store a `global` declared in
+/// it belongs to when the declaration says nothing itself
+/// (`docs/state-ownership-plan.md` R2). Selected per package by its stick.toml
+/// (`[language] memory = "platform"`) and per module by a `@memory(<class>)`
+/// file header; a per-declaration `@state` still wins over both.
+///
+/// `Game` is today's default for every unannotated global: captured in the
+/// WorldImage, hashed for desync, fresh per Session. `Platform` is host-owned
+/// state that survives a restore and is excluded from the hash. `Debug` is
+/// tools and diagnostics, handed forward or reset at a worker boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MemoryClass {
+    #[default]
+    Game,
+    Platform,
+    Debug,
+}
+
+impl MemoryClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Game => "game",
+            Self::Platform => "platform",
+            Self::Debug => "debug",
+        }
+    }
+
+    /// Parse a declared class name. `None` is an unknown spelling; every caller
+    /// rejects rather than falling back to `Game`, so a typo cannot silently
+    /// move a package's state into the world plan.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "game" => Some(Self::Game),
+            "platform" => Some(Self::Platform),
+            "debug" => Some(Self::Debug),
+            _ => None,
+        }
+    }
+
+    pub const NAMES: [&'static str; 3] = ["game", "platform", "debug"];
+}
+
+/// Whether a package may declare mutable global storage. The default keeps
+/// today's language behavior; `none` is the package boundary used by a
+/// simulation library whose state must be reachable from its explicit root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GlobalPolicy {
+    #[default]
+    Any,
+    None,
+}
+
+impl GlobalPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::None => "none",
+        }
+    }
+
+    /// Parse a declared policy. Unknown values are rejected by the manifest
+    /// loader instead of silently restoring the permissive default.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "any" => Some(Self::Any),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub const NAMES: [&'static str; 2] = ["any", "none"];
+}
+
+/// The package a file belongs to, minted by the host's PackageGraph.
+/// `id` is dense and stable within one graph build; `self_name` is the
+/// manifest name with `-` normalized to `_`, case preserved.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PackageTag {
+    pub id: u32,
+    pub self_name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SourceFile {
     pub module_id: ModuleId,
@@ -17,6 +110,18 @@ pub struct SourceFile {
     pub is_test: bool,
     pub is_test_util: bool,
     pub used_packages: Vec<String>,
+    /// Owning package and source dialect, stamped by the loader that resolved
+    /// the package graph. `None`/`Legacy` for files loaded outside a package
+    /// (standalone scripts, editor synthetic sources).
+    pub package: Option<PackageTag>,
+    pub dialect: Dialect,
+    /// The owning package's declared memory class, stamped by the same loader
+    /// that stamps `package`/`dialect`. `Game` for files loaded outside a
+    /// package, which keeps a standalone script on today's default.
+    pub memory_class: MemoryClass,
+    /// The owning package's mutable-global policy, stamped by the same loader
+    /// as `package`, `dialect` and `memory_class`.
+    pub global_policy: GlobalPolicy,
 }
 
 /// Build a `SourceFile` from an on-disk path + already-read contents. The
@@ -36,6 +141,10 @@ pub fn source_file_from_path_and_contents(
         is_test: false,
         is_test_util: false,
         used_packages: vec![],
+        package: None,
+        dialect: Dialect::Legacy,
+        memory_class: MemoryClass::Game,
+        global_policy: GlobalPolicy::Any,
     }
 }
 
@@ -276,4 +385,3 @@ impl LineCol {
         }
     }
 }
-

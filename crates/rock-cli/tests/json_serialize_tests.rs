@@ -15,7 +15,7 @@
 //
 // All assertions run against a single `rock frame match3 --dump-state`
 // invocation. match3 has IVec2 globals (anim_swap_a etc.) and stone
-// exports Vec2 pivot constants, covering both cdata types without needing
+// exports a live Vec2 window size, covering both cdata types without needing
 // the heavier mag game.
 
 use std::path::Path;
@@ -52,11 +52,14 @@ fn serializer_branch_coverage() {
 
     // ── cdata value-struct: IVec2 ────────────────────────────────────────
     // match3 keeps anim_swap_a as a global IVec2. The cdata branch must
-    // find the type via ffi.istype + __ROCK_TYPE_TABLE and emit
-    // {"__ty":"IVec2","x":<int>,"y":<int>}.
+    // find the type via ffi.istype + __ROCK_TYPE_TABLE. The tag is the
+    // emitted nominal identity, including the v1 package.
     let swap = &state["match3"]["anim_swap_a"];
     assert!(swap.is_object(), "anim_swap_a should be a JSON object, got: {swap}");
-    assert_eq!(swap["__ty"], "IVec2", "anim_swap_a.__ty must be IVec2; got: {swap}");
+    assert_eq!(
+        swap["__ty"], skull_mir::mangle::ident_of_key("stone_core::IVec2").as_ref(),
+        "anim_swap_a.__ty must identify stone_core::IVec2; got: {swap}"
+    );
     assert!(
         swap["x"].is_i64() || swap["x"].is_u64(),
         "IVec2.x must be integer, got: {}",
@@ -76,13 +79,13 @@ fn serializer_branch_coverage() {
     assert!(extra.is_empty(), "IVec2 has unexpected fields: {extra:?}");
 
     // ── cdata value-struct: two distinct types in one dump ───────────────
-    // stone exports Vec2 pivot constants alongside match3's IVec2 globals.
+    // stone exports a live Vec2 window size alongside match3's IVec2 globals.
     // The cdata branch iterates __ROCK_C_STRUCT with ffi.istype; if two
     // types alias the same C layout the wrong name could win.
-    let pivot = &state["stone"]["PIVOT_CENTER"];
-    assert_eq!(pivot["__ty"], "Vec2", "PIVOT_CENTER.__ty must be Vec2; got: {pivot}");
+    let window_size = &state["stone"]["WINDOW_SIZE"];
+    assert_eq!(window_size["__ty"], "Vec2", "WINDOW_SIZE.__ty must be Vec2; got: {window_size}");
     assert_ne!(
-        swap["__ty"], pivot["__ty"],
+        swap["__ty"], window_size["__ty"],
         "IVec2 and Vec2 must have distinct __ty values"
     );
 
@@ -184,5 +187,28 @@ fn serializer_branch_coverage() {
     assert!(
         !s.contains("<circular>"),
         "dump contains <circular> sentinel — unexpected cycle in globals"
+    );
+}
+
+/// A v1 enum's names table holds its DefKey path (`pkg::Mode::Fast`); the
+/// serializer must still emit the bare variant, as it does for a legacy enum.
+/// The fixture is a v1 package over legacy Stone, run through `rock test`.
+#[test]
+fn v1_payload_free_enum_field_serializes_its_variant_name() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/enum-json-v1");
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["test", fixture.to_str().expect("fixture path is UTF-8")])
+        .env("ROCK_TEST_VERBOSE", "1")
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock test");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && text.contains("1/1 @tests passed"),
+        "v1 enum JSON fixture failed:\n{text}"
     );
 }

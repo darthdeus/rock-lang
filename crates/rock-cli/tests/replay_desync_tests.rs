@@ -2,8 +2,10 @@
 //! every K ticks the engine hashes each registered global (canonical %a
 //! serialization) and writes per-global `c <tick> <name> <hash>` checkpoint
 //! lines into the replay log. On replay it recomputes and compares; the FIRST
-//! divergent tick + which global diverged is reported and the run exits
-//! nonzero (reject-don't-fall-back, same policy as the log-load errors).
+//! divergent tick + which global diverged is reported and the run CONTINUES.
+//! Divergence is the accepted default -- a replay is re-run to be measured,
+//! and aborting at the first drifted tick throws the measurement away -- so
+//! the tick and the global are the whole product of the detector.
 //!
 //! Heavy: spawns `rock frame` against a compiled game. Excluded from the
 //! default nextest profile (see `.config/nextest.toml`); runs under `-P full`.
@@ -17,6 +19,18 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
+fn configure_game_fixture(command: &mut Command, game: &str) {
+    if game != "mag" {
+        return;
+    }
+    let vault = crate::stone_harness::art_vault_env();
+    let overlay = Path::new(&vault.1).join("mag");
+    command
+        .env(vault.0, vault.1)
+        .env("ROCK_ASSET_OVERLAYS", overlay)
+        .env("STONE_ASSET_STUB", "1");
+}
+
 /// Run `rock frame <game> -n N [extra…]` without asserting success; returns
 /// the raw Output so tests can inspect exit status + stderr.
 fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Output {
@@ -26,7 +40,8 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
     let frames_s = frames.to_string();
     let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
     args.extend_from_slice(extra);
-    Command::new(rock_bin)
+    let mut command = Command::new(rock_bin);
+    command
         .args(&args)
         // The default 3s Stone watchdog is too tight for a HEAVY game (mag)
         // under nextest's parallel process load: init + cargo-lock waits can
@@ -35,8 +50,9 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
         // divergence). This was the note-6 flake; the game records fine given
         // wall-clock. 60s absorbs the contention without hiding a real hang.
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
+        .current_dir(workspace_root());
+    configure_game_fixture(&mut command, game);
+    command.output()
         .expect("failed to spawn rock frame")
 }
 
@@ -79,7 +95,8 @@ fn clean_roundtrip_with_checkpoints_reports_no_divergence() {
 
 /// Injected divergence: record, flip one recorded checkpoint hash in the log,
 /// replay. The recomputed hash won't match the tampered one, so replay must
-/// exit nonzero and name the tick + global.
+/// name the tick + global -- and still finish, so the run's measurements
+/// survive the report.
 #[test]
 fn injected_checkpoint_divergence_is_detected_and_named() {
     let dir = tempfile::tempdir().expect("dir");
@@ -102,15 +119,20 @@ fn injected_checkpoint_divergence_is_detected_and_named() {
     std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite log");
 
     let rep = run_frame_raw("bitgun", 30, &["--replay", &log_s]);
-    assert!(
-        !rep.status.success(),
-        "an injected checkpoint mismatch must abort the replay\nstderr:\n{}",
-        String::from_utf8_lossy(&rep.stderr)
-    );
     let stderr = String::from_utf8_lossy(&rep.stderr);
+    assert!(
+        rep.status.success(),
+        "an injected checkpoint mismatch must be reported, not abort the run\nstderr:\n{stderr}"
+    );
     assert!(
         stderr.contains("desync") && stderr.contains(&name) && stderr.contains(&format!("tick={tick}")),
         "desync report must name the tick ({tick}) and global ({name})\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("desync at tick").count(),
+        1,
+        "only the FIRST divergent tick is reported; a drifted run diverges at every later \
+         checkpoint too and the repeats would bury the answer\nstderr:\n{stderr}"
     );
 }
 
@@ -165,7 +187,7 @@ fn desync_compare_is_off_past_a_reload() {
 /// seek (`STONE_RUN_TO_TICK`) skips the render pass on the intermediate ticks,
 /// so render-derived globals differ from a rendered run. Two categories, two
 /// mechanisms (both exercised here):
-///   - engine render/accumulative globals (`RENDER_BATCHES`, `stats_history_*`)
+///   - engine render/accumulative globals (`RENDER_BATCHES`, `LAST_FRAME_GFX`)
 ///     and game render handles (Materials, `RetainedMesh`) are excluded from
 ///     hashing entirely by the sim-state predicate -- they would stay divergent
 ///     even AFTER the seek;
@@ -194,13 +216,16 @@ fn assert_seek_across_checkpoints_clean(game: &str) {
     // render-skipped seek must reach the same SIMULATION state the recording
     // hashed, so no divergence fires.
     let scratch = tempfile::tempdir().expect("scratch");
-    let rep = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command
         .args(["frame", game, "-n", "30", "--replay", &log_s,
                "--output", &scratch.path().to_string_lossy()])
-        .env("STONE_RUN_TO_TICK", "25")
+        .env("STONE_TIMELINE_SEEK_AT_FRAME", "1")
+        .env("STONE_TIMELINE_SEEK_TO_TICK", "25")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
+        .current_dir(workspace_root());
+    configure_game_fixture(&mut command, game);
+    let rep = command.output()
         .expect("spawn seek replay");
     assert!(
         rep.status.success(),

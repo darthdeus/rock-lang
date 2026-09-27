@@ -1,4 +1,4 @@
-//! Loop recovery tests (docs/multi-backend-testing-plan.md T3). The emitter
+//! Loop recovery tests (docs/backends.md). The emitter
 //! recovers single-entry natural loops from MIR back-edges: a range-`for`
 //! (`loop_binding` slot + pure-increment latch) becomes a real JS
 //! `for (; slot < bound; slot = slot + 1)`, every other natural loop a
@@ -271,7 +271,6 @@ fn range_match_folds_to_and_diamond() {
         "no longer rejects:\n{js}"
     );
 }
-
 
 
 

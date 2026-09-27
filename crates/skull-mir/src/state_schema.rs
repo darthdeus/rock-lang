@@ -7,16 +7,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use bone_semantic::hir::{FnBackend, StateMetadata};
+use bone_semantic::hir::{FnBackend, StateMetadata, StateOwnership, TypeExpr, VariantPayload};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
+use rustc_hash::FxHashSet;
 
-use crate::code_identity::{CodeArtifact, CodeIdentity, FrameSchema};
+use crate::code_identity::{logical_def_key, CodeArtifact, CodeIdentity, FrameSchema};
 use crate::lifecycle::LifecyclePlan;
+use crate::mangle::symbol_of_key;
 use crate::lower::{GlobalPlan, NB_PRIM_ELEMS, ScalarCtx, ValueStorage};
 use crate::mir::{MirFunc, StaticCell};
-use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy};
+use crate::monoty::{convert_decl, MonoCtor, MonoSubst, MonoTy, TyEnv};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateKind {
@@ -40,6 +42,8 @@ pub struct StateEntry {
     pub owner: Option<String>,
     pub initializer_identity: Option<u64>,
     pub metadata: Option<StateMetadata>,
+    /// The declared host graph cannot contain NativeBuffer storage or raw pointers.
+    pub storage_free: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -277,9 +281,7 @@ impl StateSchema {
                     identity: global_identity(module.file, global.name),
                     }
                 })?;
-                let names = plan
-                    .leaf_names(global.name)
-                    .unwrap_or_else(|| vec![global.name]);
+                let names = physical_leaf_names(&plan, global.name);
                 let logical = global_identity(module.file, global.name);
                 expected
                     .entry(StateKind::Global)
@@ -295,9 +297,11 @@ impl StateSchema {
                     identity: logical.clone(),
                     fingerprint,
                     physical: names.iter().map(|n| n.to_string()).collect(),
-                    owner: Some(module.file.to_string()),
+                    owner: Some(global_owner(module.file, global.name)),
                     initializer_identity: None,
                     metadata: Some(global.state_metadata),
+                    storage_free: global.state_metadata.ownership == StateOwnership::HostProjection
+                        && declared_storage_free(ws, global.ty),
                 };
                 entries.push(entry);
             }
@@ -326,6 +330,7 @@ impl StateSchema {
                 owner: None,
                 initializer_identity: None,
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             };
             entries.push(entry);
         }
@@ -367,6 +372,7 @@ impl StateSchema {
                 owner: Some(name.to_string()),
                 initializer_identity: None,
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             };
             entries.push(entry);
         }
@@ -457,11 +463,97 @@ fn registry_role(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<&'s
     if !params.is_empty() {
         return None;
     }
-    match name.as_str() {
-        "SceneRegistry" => Some("SceneRegistry"),
-        "ArenaRegistry" => Some("ArenaRegistry"),
-        _ => None,
+    if bone_semantic::prelude::is_intrinsic_key(name, "SceneRegistry") {
+        Some("SceneRegistry")
+    } else if bone_semantic::prelude::is_intrinsic_key(name, "ArenaRegistry") {
+        Some("ArenaRegistry")
+    } else {
+        None
     }
+}
+
+fn declared_storage_free(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
+    let Ok(ty) = convert_decl(ws, ty, &MonoSubst::default()) else { return false };
+    storage_free_type(ws, &ty, &mut FxHashSet::default(), 0)
+}
+
+fn nominal_subst(
+    ws: &Workspace,
+    generics: &[bone_semantic::prelude::TyId],
+    params: &[MonoTy],
+) -> Option<MonoSubst> {
+    if generics.len() != params.len() { return None }
+    let mut subst = MonoSubst::default();
+    for (generic, param) in generics.iter().zip(params) {
+        let TypeExpr::Generic(var, _) = TyEnv::Decl.decl_node(ws, *generic).ok()? else {
+            return None;
+        };
+        subst.insert(var, param.clone());
+    }
+    Some(subst)
+}
+
+fn storage_free_type(
+    ws: &Workspace,
+    ty: &MonoTy,
+    visiting: &mut FxHashSet<MonoTy>,
+    depth: usize,
+) -> bool {
+    if depth > 64 || !visiting.insert(ty.clone()) { return false }
+    let safe = match ty {
+        MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String
+        | MonoTy::Unit | MonoTy::Never => true,
+        MonoTy::Any | MonoTy::Function { .. } => false,
+        MonoTy::Nullable(inner) => storage_free_type(ws, inner, visiting, depth + 1),
+        MonoTy::Tuple(parts) => parts.iter().all(|part| storage_free_type(ws, part, visiting, depth + 1)),
+        MonoTy::App { ctor: MonoCtor::Array, params } =>
+            params.len() == 1 && storage_free_type(ws, &params[0], visiting, depth + 1),
+        MonoTy::App { ctor: MonoCtor::Map, params } =>
+            params.len() == 2 && params.iter().all(|part| storage_free_type(ws, part, visiting, depth + 1)),
+        MonoTy::App { ctor: MonoCtor::Ref, .. } => false,
+        MonoTy::App { ctor: MonoCtor::Nominal(name), params } => {
+            if bone_semantic::prelude::is_intrinsic_key_in(*name, &[
+                "Ptr", "PtrU8", "PtrI8", "PtrU16", "PtrI16", "PtrU32",
+                "NativeBuffer", "NativeBufferU8", "NativeBufferI8", "NativeBufferU16",
+                "NativeBufferI16", "NativeBufferU32", "FlatVec",
+            ]) {
+                false
+            } else if let Some(sid) = ws.struct_by_name.get(name) {
+                let def = &ws.module(sid.module).structs[sid.def];
+                nominal_subst(ws, &def.generics, params).is_some_and(|subst| {
+                    def.fields.iter().all(|field| {
+                        convert_decl(ws, field.ty, &subst).ok().is_some_and(|field_ty|
+                            storage_free_type(ws, &field_ty, visiting, depth + 1))
+                    })
+                })
+            } else if let Some(eid) = ws.enums_by_name.get(name) {
+                let def = &ws.module(eid.module).enums[eid.def];
+                nominal_subst(ws, &def.generics, params).is_some_and(|subst| {
+                    def.variants.iter().all(|variant| {
+                        let fields: Vec<_> = match &variant.payload {
+                            VariantPayload::Unit => Vec::new(),
+                            VariantPayload::Tuple(fields) => fields.to_vec(),
+                            VariantPayload::Record(fields) => fields.iter().map(|field| field.ty).collect(),
+                        };
+                        fields.iter().all(|field| {
+                            convert_decl(ws, *field, &subst).ok().is_some_and(|field_ty|
+                                storage_free_type(ws, &field_ty, visiting, depth + 1))
+                        })
+                    })
+                })
+            } else if let Some(nid) = ws.newtypes_by_name.get(name) {
+                let def = &ws.module(nid.module).newtypes[nid.def];
+                nominal_subst(ws, &def.generics, params).is_some_and(|subst| {
+                    convert_decl(ws, def.wrapped, &subst).ok().is_some_and(|wrapped|
+                        storage_free_type(ws, &wrapped, visiting, depth + 1))
+                })
+            } else {
+                false
+            }
+        }
+    };
+    visiting.remove(ty);
+    safe
 }
 
 fn collect_dynamic_entries(
@@ -515,6 +607,7 @@ fn collect_dynamic_entries(
             owner: Some(owner_key),
             initializer_identity: Some(cell.init_hash),
             metadata: Some(StateMetadata::default()),
+            storage_free: false,
         });
     }
 
@@ -538,6 +631,7 @@ fn collect_dynamic_entries(
             owner: Some(logical),
             initializer_identity: None,
             metadata: Some(StateMetadata::default()),
+            storage_free: false,
         });
     }
 
@@ -545,7 +639,28 @@ fn collect_dynamic_entries(
 }
 
 pub fn global_identity(file: Ustr, name: Ustr) -> String {
-    format!("global:{}::{}", file, name)
+    format!("global:{}", logical_def_key(file, name))
+}
+
+/// The module a global belongs to, as the schema reports it. Entries are
+/// compared field by field for reload compatibility, so this follows identity:
+/// a v1 global's owner is its logical module (its DefKey's
+/// `<package>::<module path>` prefix), not the fragment that happens to declare
+/// it; a legacy global's owner is its file.
+pub fn global_owner(file: Ustr, name: Ustr) -> String {
+    match name.as_str().rfind("::") {
+        Some(cut) => name.as_str()[..cut].to_string(),
+        None => file.to_string(),
+    }
+}
+
+/// The physical leaf names a global occupies, in the backend's own identifier
+/// namespace: a v1 DefKey is not an identifier, so the leaves are minted from
+/// the global's emitted SYMBOL. Lowering mints its `nobox` leaves the same way,
+/// so a MIR global name and a schema leaf name are the same string.
+pub fn physical_leaf_names(plan: &GlobalPlan, name: Ustr) -> Vec<Ustr> {
+    let symbol = symbol_of_key(name);
+    plan.leaf_names(symbol).unwrap_or_else(|| vec![symbol])
 }
 
 pub fn static_identity(owner: &str, name: Ustr, ordinal: u32) -> String {
@@ -572,9 +687,9 @@ pub fn global_state_slots(
                     identity: global_identity(module.file, global.name),
                 }
             })?;
-            let names = plan
-                .leaf_names(global.name)
-                .unwrap_or_else(|| vec![global.name]);
+            // Keyed on the emitted symbol, which is what both the schema's
+            // `physical` names and a lookup from codegen carry.
+            let names = physical_leaf_names(&plan, global.name);
             let multi_leaf = names.len() != 1;
             let identity = global_identity(module.file, global.name);
             for (index, name) in names.into_iter().enumerate() {

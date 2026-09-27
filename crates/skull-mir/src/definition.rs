@@ -13,7 +13,7 @@ pub fn is_artifact_definition(decorator: &bone_semantic::hir::DecoratorDef) -> b
     decorator
         .annotations
         .iter()
-        .any(|ann| ann.name.name.as_str() == "artifact_definition")
+        .any(|ann| ann.is_builtin("artifact_definition"))
 }
 
 pub fn is_compiler_owned_decorator(decorator: &bone_semantic::hir::DecoratorDef) -> bool {
@@ -21,7 +21,7 @@ pub fn is_compiler_owned_decorator(decorator: &bone_semantic::hir::DecoratorDef)
         || decorator
             .annotations
             .iter()
-            .any(|ann| ann.name.name.as_str() == "lifecycle")
+            .any(|ann| ann.is_builtin("lifecycle"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +74,7 @@ fn annotation<'a>(
     annotations: &'a [bone_semantic::hir::Annotation],
     name: &str,
 ) -> Result<Option<&'a bone_semantic::hir::Annotation>, CompilerError> {
-    let mut found = annotations.iter().filter(|ann| ann.name.name.as_str() == name);
+    let mut found = annotations.iter().filter(|ann| ann.is_builtin(name));
     let first = found.next();
     if let Some(second) = found.next() {
         return Err(CompilerError::new_with_label(
@@ -112,7 +112,7 @@ fn artifact_definition_type(ws: &Workspace, return_ty: TyId) -> Option<TyId> {
     else {
         return None;
     };
-    if name != Ustr::from("ArtifactDefinition") {
+    if !bone_semantic::prelude::is_intrinsic_key(name, "ArtifactDefinition") {
         return None;
     }
     let mut params = params.into_iter();
@@ -126,7 +126,7 @@ fn metadata<'a>(
     let mut found = decorator
         .annotations
         .iter()
-        .filter(|ann| ann.name.name.as_str() == "artifact_definition");
+        .filter(|ann| ann.is_builtin("artifact_definition"));
     let first = found.next();
     if let Some(second) = found.next() {
         return Err(CompilerError::new_with_label(
@@ -212,7 +212,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
             let Some(ann) = metadata(decorator)? else { continue };
             census.declarations += 1;
             let role = role_for(ws, decorator, ann)?;
-            if roles.insert(decorator.name, role).is_some() {
+            if roles.insert(decorator.def_key, role).is_some() {
                 return Err(CompilerError::new_with_label(
                     ann.span,
                     format!("duplicate artifact definition decorator `{}`", decorator.name),
@@ -264,7 +264,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                 || !function
                     .annotations
                     .iter()
-                    .any(|candidate| candidate.name.name.as_str() == "intrinsic")
+                    .any(|candidate| candidate.is_builtin("intrinsic"))
             {
                 return Err(CompilerError::new_with_label(
                     function.span,
@@ -329,7 +329,8 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (fid, function) in module.functions.iter() {
             for application in &function.annotations {
-                let Some(role) = roles.get(&application.name.name) else { continue };
+                let application_key = application.resolved_name.unwrap_or(application.name.name);
+                let Some(role) = roles.get(&application_key) else { continue };
                 census.applications += 1;
                 if !function.generics.is_empty() || !function.param_decls.is_empty() {
                     return Err(CompilerError::new_with_label(

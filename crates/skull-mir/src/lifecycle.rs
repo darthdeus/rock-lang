@@ -60,6 +60,7 @@ pub struct LifecycleEntry {
     pub replay_role: LifecycleReplayRole,
     pub declaration_ordinal: usize,
     pub qualification: LifecycleQualification,
+    pub sim_wires: Vec<Ustr>,
     pub body_fingerprint: u64,
 }
 
@@ -94,6 +95,7 @@ impl LifecyclePlan {
                 || old.stage != candidate.stage
                 || old.replay_role != candidate.replay_role
                 || old.declaration_ordinal != candidate.declaration_ordinal
+                || old.sim_wires != candidate.sim_wires
                 || qualification_structure_changed(&old.qualification, &candidate.qualification)
         })
     }
@@ -132,7 +134,7 @@ impl LifecycleQualification {
     }
 }
 
-pub const LIFECYCLE_PHASES: [&str; 11] = [
+pub const LIFECYCLE_PHASES: [&str; 12] = [
     "early_init",
     "init",
     "late_init",
@@ -144,6 +146,7 @@ pub const LIFECYCLE_PHASES: [&str; 11] = [
     "post_imgui_draw",
     "reset",
     "shutdown",
+    "window_resized",
 ];
 
 fn phase_rank(phase: Ustr) -> Option<u8> {
@@ -151,6 +154,35 @@ fn phase_rank(phase: Ustr) -> Option<u8> {
         .iter()
         .position(|candidate| *candidate == phase.as_str())
         .map(|rank| rank as u8)
+}
+
+pub fn sim_wire_name(function: &bone_semantic::hir::Function) -> Option<Ustr> {
+    let annotation = function
+        .annotations
+        .iter()
+        .find(|annotation| annotation.is_builtin("sim"))?;
+    Some(match annotation.args.first().map(|argument| &argument.value) {
+        Some(AnnoValue::String(name)) => *name,
+        _ => function.name,
+    })
+}
+
+fn is_sim_fixture_module(file: &str) -> bool {
+    let mut previous = "";
+    for part in file.split(['/', '\\']) {
+        if previous == "tests" && part == "sims" {
+            return true;
+        }
+        previous = part;
+    }
+    false
+}
+
+fn is_frame_phase(phase: Ustr) -> bool {
+    matches!(
+        phase.as_str(),
+        "update" | "late_update" | "draw" | "late_draw" | "post_imgui_draw"
+    )
 }
 
 /// The one emitted identity for a validated typed Scene lifecycle root. The
@@ -179,7 +211,7 @@ fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> 
 fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -> Option<i64> {
     match body.expr_arena[e] {
         Expr::Int(n) => Some(n),
-        Expr::UnaryMinus(inner) => int_expr(body, inner)?.checked_neg(),
+        Expr::UnaryMinus(inner, _) => int_expr(body, inner)?.checked_neg(),
         _ => None,
     }
 }
@@ -308,19 +340,23 @@ fn ordered_global_locations(
 fn wire_dependency_identities(
     ws: &Workspace,
     names: &[skull_parser::Ident],
+    resolved_names: Option<&[Ustr]>,
     span: bone_semantic::prelude::Span,
 ) -> Result<Vec<CodeIdentity>, CompilerError> {
     let mut seen = std::collections::HashSet::new();
     let mut identities = Vec::with_capacity(names.len());
-    for name in names {
-        if !seen.insert(name.name) {
+    for (index, name) in names.iter().enumerate() {
+        let key = resolved_names
+            .and_then(|resolved| resolved.get(index).copied())
+            .unwrap_or(name.name);
+        if !seen.insert(key) {
             return Err(CompilerError::new_with_label(
                 span,
                 format!("@wire(onchange=...) repeats dependency `{}`", name.name),
             ));
         }
-        let locations = global_locations(ws, name.name);
-        if !locations.is_empty() && user_function_named(ws, name.name) {
+        let locations = global_locations(ws, key);
+        if !locations.is_empty() && user_function_named(ws, key) {
             return Err(CompilerError::new_with_label(
                 name.span,
                 format!("@wire dependency `{}` has an ambiguous identity", name.name),
@@ -328,7 +364,7 @@ fn wire_dependency_identities(
         }
         let (module, global) = match locations.as_slice() {
             [] => {
-                if user_function_named(ws, name.name) {
+                if user_function_named(ws, key) {
                     return Err(CompilerError::new_with_label(
                         name.span,
                         format!("@wire dependency `{}` names a function; expected a top-level const", name.name),
@@ -401,7 +437,7 @@ fn dependency_names_for_const(
             && ws.functions_by_name.get(&name).is_some_and(|functions| {
                 functions.iter().any(|(module, function)| {
                     *module != ModuleId::builtin()
-                        && bone_semantic::hir::operator_entry(name.as_str()).is_none()
+                        && bone_semantic::hir::operator_entry(crate::mangle::declared_name(name.as_str())).is_none()
                         && !crate::intrinsics::is_intrinsic(&ws.module(*module).functions[*function])
                 })
             })
@@ -454,8 +490,13 @@ fn dependency_closure(
 fn wire_qualification(
     ws: &Workspace,
     app: &bone_semantic::hir::Annotation,
+    phase: Ustr,
 ) -> Result<LifecycleQualification, CompilerError> {
-    if app.name.name.as_str() != "wire" {
+    // `wire` is a compiler-owned lifecycle role, not a globally reserved
+    // annotation spelling. Its qualification follows the admitted role's
+    // metadata, so a v1 alias keeps the behavior while an unrelated decorator
+    // named `wire` does not.
+    if phase != "wire" {
         return Ok(LifecycleQualification::Plain);
     }
     if app.args.is_empty() {
@@ -481,7 +522,7 @@ fn wire_qualification(
             ));
         }
     };
-    let declared = wire_dependency_identities(ws, names, app.span)?;
+    let declared = wire_dependency_identities(ws, names, app.resolved_ident_list.as_deref(), app.span)?;
     let dependencies = dependency_closure(ws, &declared)?
         .into_iter()
         .map(|identity| LifecycleDependency { identity, fingerprint: 0 })
@@ -539,6 +580,21 @@ pub fn collect_with_artifact(
 }
 
 pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
+    let sim_wires_by_module = ws
+        .modules
+        .iter()
+        .filter(|module| {
+            module.id != ModuleId::builtin() && is_sim_fixture_module(module.file.as_str())
+        })
+        .filter_map(|module| {
+            let wires = module
+                .functions
+                .values()
+                .filter_map(sim_wire_name)
+                .collect::<Vec<_>>();
+            (!wires.is_empty()).then_some((module.id, wires))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let mut roles = std::collections::HashMap::new();
     let mut census = LifecycleCensus::default();
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
@@ -546,7 +602,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
             let Some(meta) = deco
                 .annotations
                 .iter()
-                .find(|a| a.name.name.as_str() == "lifecycle")
+                .find(|a| a.is_builtin("lifecycle"))
             else {
                 continue;
             };
@@ -593,19 +649,31 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     ));
                 }
             };
-            roles.insert(deco.name, (module.id, did, phase, owner, stage_index, replay_param));
+            roles.insert(
+                deco.def_key,
+                (module.id, did, phase, owner, stage_index, replay_param),
+            );
         }
     }
 
     let mut entries = Vec::new();
     let mut ordinal = 0usize;
+    let mut seen = std::collections::HashSet::<(CodeIdentity, Ustr)>::new();
     for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (fid, f) in module.functions.iter() {
             for app in &f.annotations {
-                let Some(&(dmid, did, phase, owner, stage_index, replay_param)) = roles.get(&app.name.name)
+                let app_key = app.resolved_name.unwrap_or(app.name.name);
+                let Some(&(dmid, did, phase, owner, stage_index, replay_param)) = roles.get(&app_key)
                 else {
                     continue;
                 };
+                let identity = CodeIdentity::Named(Instance::base(FuncRef {
+                    module: module.id,
+                    func: fid,
+                }));
+                if !seen.insert((identity.clone(), app_key)) {
+                    continue;
+                }
                 census.applications += 1;
                 let root_type = match owner.as_str() {
                     "session" => {
@@ -741,7 +809,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     0
                 };
                 let replay_role = lifecycle_replay_role(ws, dmid, did, app, replay_param)?;
-                let qualification = wire_qualification(ws, app)?;
+                let qualification = wire_qualification(ws, app, phase)?;
                 if qualification.is_gated() {
                     census.gated += 1;
                     census.dependency_edges += qualification.dependencies().len();
@@ -752,15 +820,17 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     phase,
                     owner,
                     root_type,
-                    identity: CodeIdentity::Named(Instance::base(FuncRef {
-                        module: module.id,
-                        func: fid,
-                    })),
+                    identity,
                     diagnostic_name: f.name,
                     stage,
                     replay_role,
                     declaration_ordinal: ordinal,
                     qualification,
+                    sim_wires: if is_frame_phase(phase) {
+                        sim_wires_by_module.get(&module.id).cloned().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
                     body_fingerprint: 0,
                 });
                 ordinal += 1;
@@ -847,7 +917,7 @@ mod tests {
         let annotation = function
             .annotations
             .iter()
-            .find(|annotation| annotation.name.name.as_str() == "wire")
+            .find(|annotation| annotation.is_builtin("wire"))
             .expect("wire annotation");
         let argument = annotation
             .args
@@ -965,6 +1035,57 @@ mod tests {
         let plan = collect(&ws).expect("plan");
         assert_eq!(plan.entries.len(), 2);
         assert_ne!(plan.entries[0].identity, plan.entries[1].identity);
+    }
+
+    #[test]
+    fn frame_hooks_in_sim_modules_are_scoped_to_that_modules_wire_names() {
+        let ws = workspace(&[
+            (
+                "roles.rock",
+                "@lifecycle(phase=\"update\", owner=\"session\") deco init tick {}",
+            ),
+            (
+                "/repo/game/tests/sims/owned.rock",
+                r#"
+                @tick fn owned_tick() {}
+                @sim("first-wire") fn first_sim() {}
+                @sim fn second_sim() {}
+                "#,
+            ),
+            (
+                "/repo/game/src/gameplay.rock",
+                r#"
+                @tick fn production_tick() {}
+                @sim fn embedded_diagnostic() {}
+                "#,
+            ),
+        ]);
+        let plan = collect(&ws).expect("plan");
+        let owned = plan
+            .entries
+            .iter()
+            .find(|entry| entry.diagnostic_name.as_str() == "owned_tick")
+            .expect("sim-owned lifecycle entry");
+        assert_eq!(
+            owned.sim_wires.iter().map(Ustr::as_str).collect::<Vec<_>>(),
+            vec!["first-wire", "second_sim"]
+        );
+        let production = plan
+            .entries
+            .iter()
+            .find(|entry| entry.diagnostic_name.as_str() == "production_tick")
+            .expect("production lifecycle entry");
+        assert!(production.sim_wires.is_empty());
+
+        let mut changed = plan.clone();
+        changed
+            .entries
+            .iter_mut()
+            .find(|entry| entry.diagnostic_name.as_str() == "owned_tick")
+            .expect("sim-owned lifecycle entry")
+            .sim_wires
+            .pop();
+        assert!(plan.structure_changed(&changed));
     }
 
     #[test]

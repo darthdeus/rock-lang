@@ -44,7 +44,7 @@ impl Builder<'_> {
                 payload,
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(n), ..
-                } if n.as_str() == "FlatVec"
+                } if bone_semantic::prelude::is_intrinsic_key(*n, "FlatVec")
             );
         }
         false
@@ -60,11 +60,15 @@ impl Builder<'_> {
         let family = match concrete.peel_nullable().0 {
             MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name), ..
-            } => match name.as_str() {
-                "NativeBuffer" => ContainerFamily::NativeBuffer,
-                "FlatVec" => ContainerFamily::FlatVec,
-                _ => return Ok(None),
-            },
+            } => {
+                if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") {
+                    ContainerFamily::NativeBuffer
+                } else if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") {
+                    ContainerFamily::FlatVec
+                } else {
+                    return Ok(None);
+                }
+            }
             _ => return Ok(None),
         };
         let arena = self.scx.rep_arena();
@@ -138,10 +142,13 @@ impl Builder<'_> {
     /// backing. An unresolved / generic element is NOT eligible -- the columns
     /// need a concrete value-struct leaf list, and an opaque `T` has none.
     pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
-        Ok(match self.vec_column_elem_of(e)? {
-            Some(elem) => ContainerKind::VecValueColumns(elem),
-            None => ContainerKind::Vec,
-        })
+        if let Some(elem) = self.vec_column_elem_of(e)? {
+            return Ok(ContainerKind::VecValueColumns(elem));
+        }
+        if let Some(elem) = self.vec_strided_elem_of(e)? {
+            return Ok(ContainerKind::VecValueStrided(elem));
+        }
+        Ok(ContainerKind::Vec)
     }
 
     /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
@@ -158,6 +165,37 @@ impl Builder<'_> {
         Ok(self
             .container_plan_for(e, ContainerFamily::Vec)?
             .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
+    }
+
+    pub(crate) fn vec_column_elem_for_type(
+        &self,
+        ty: &MonoTy,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
+            return Ok(None);
+        }
+        self.container_plan_for_type(ty, ContainerFamily::Vec)
+            .map(|plan| plan.column_elem(&self.scx.rep_arena()))
+    }
+
+    pub(crate) fn vec_strided_elem_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        Ok(self
+            .container_plan_for(e, ContainerFamily::Vec)?
+            .and_then(|plan| plan.strided_elem(&self.scx.rep_arena())))
+    }
+
+    pub(crate) fn vec_strided_elem_for_type(
+        &self,
+        ty: &MonoTy,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
+            return Ok(None);
+        }
+        self.container_plan_for_type(ty, ContainerFamily::Vec)
+            .map(|plan| plan.strided_elem(&self.scx.rep_arena()))
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the
@@ -279,7 +317,7 @@ impl Builder<'_> {
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
-                } if is_native_buffer(name.as_str()) => Ok(self.nb_kind(base)?),
+                } if is_native_buffer(*name) => Ok(self.nb_kind(base)?),
                 _ => Err(self.gap_here("concrete type is not an indexable container")),
             };
         }

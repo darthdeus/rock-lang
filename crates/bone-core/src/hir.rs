@@ -4,6 +4,7 @@ use rust_lapper::Interval;
 use skull_parser::Ident;
 pub use skull_parser::FnBackend;
 
+use crate::modules::NsVisibility;
 use crate::prelude::*;
 
 #[derive(Copy, Clone, Debug)]
@@ -114,11 +115,14 @@ pub enum TypeCtor {
 
 impl TypeCtor {
     pub fn for_name(name: Ustr) -> TypeCtor {
-        match name.as_str() {
-            "Vec" => TypeCtor::Array,
-            "Map" => TypeCtor::Map,
-            "Ref" => TypeCtor::Ref,
-            _ => TypeCtor::Nominal(name),
+        if crate::modules::is_intrinsic_key(name, "Vec") {
+            TypeCtor::Array
+        } else if crate::modules::is_intrinsic_key(name, "Map") {
+            TypeCtor::Map
+        } else if crate::modules::is_intrinsic_key(name, "Ref") {
+            TypeCtor::Ref
+        } else {
+            TypeCtor::Nominal(name)
         }
     }
 }
@@ -196,11 +200,21 @@ pub struct Body {
     // TODO: make this IdxMap instead and A/B benchmark?
     pub arg_names: FxHashMap<Idx<Expr>, Ustr>,
     pub method_call_recvs: FxHashSet<Idx<Expr>>,
+    /// The method name as written at `recv.name(..)` / `recv?.name(..)`,
+    /// keyed by the receiver expr. A fn-typed FIELD of that name wins over the
+    /// callee family (spec 8.4), and in v1 the family's key is a DefKey or an
+    /// alias target, not the written name.
+    pub method_names: FxHashMap<Idx<Expr>, Ustr>,
     /// Call args written as a struct spread `..op` (keyed by the operand's expr
     /// Idx). The operand's fields expand into named args at this position;
     /// resolved in bone-inference, codegen'd in skull-mir. Never also in
     /// `arg_names`.
     pub spread_args: FxHashSet<Idx<Expr>>,
+    /// In a v1 fragment, an `Expr::Global` naming a legacy callable reached
+    /// through the std view or a legacy provider's view, taken as a value:
+    /// the view's package (`FamilyMember::owner`), since the bare key is
+    /// shared by every legacy file defining the name.
+    pub value_owners: FxHashMap<Idx<Expr>, crate::modules::PackageId>,
 
     // Owner's body expression:
     // - fn body (none for lua/extern)
@@ -223,6 +237,35 @@ pub struct Body {
     pub node_index_cell: OnceLock<Lapper<usize, NodeRef>>,
 
     pub node_intervals: Vec<Interval<usize, NodeRef>>,
+
+    /// Each segment of every modules-v1 path this body spells, as the
+    /// resolver resolved it at lowering ([`PathSegmentRef`]).
+    pub path_segments: Vec<PathSegmentRef>,
+}
+
+/// One segment of a modules-v1 path as the resolver resolved it at lowering
+/// (plan 2.3: resolver outputs are recorded on the HIR; consumers do not
+/// re-resolve). The node the path lowered to carries its final target; this
+/// record adds where each segment is spelled and what the segments before
+/// the last walked through, so an editor can navigate and rename by segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathSegmentRef {
+    pub span: Span,
+    pub target: SegmentTarget,
+    /// The local name an import binds (`use a::f as g;` -- the `g`), not a
+    /// spelling of the target's own name.
+    pub alias: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SegmentTarget {
+    /// A module the path walked into: its package and node key (`""` for a
+    /// package root).
+    Module { package: crate::modules::PackageId, node: Ustr },
+    /// A definition, by DefKey.
+    Def(Ustr),
+    /// An enum variant, by its enum's DefKey.
+    Variant { enum_key: Ustr, variant: Ustr },
 }
 
 impl Default for Body {
@@ -252,7 +295,9 @@ impl Default for Body {
 
             arg_names: Default::default(),
             method_call_recvs: Default::default(),
+            method_names: Default::default(),
             spread_args: Default::default(),
+            value_owners: Default::default(),
 
             root: Default::default(),
             root_scope: None,
@@ -266,6 +311,8 @@ impl Default for Body {
 
             node_index_cell: Default::default(),
             node_intervals: Default::default(),
+
+            path_segments: Default::default(),
         }
     }
 }
@@ -367,6 +414,21 @@ pub struct Module {
     /// a fresh module, so it is naturally correct either way.
     pub lowering_errors: FxHashMap<BodyOwner, Vec<CompilerError>>,
     pub interface_errors: Vec<CompilerError>,
+    /// Every namespace fact this module's lowering read (plan 2.6). A full
+    /// lowering replaces the set; the one-body fast path only adds to it, so
+    /// a superset is kept and an extra re-lower is the worst it costs.
+    pub scope_probes: FxHashSet<crate::modules::ScopeProbe>,
+
+    /// The members of every `CallFamily::Merged` this module's bodies call,
+    /// by bare name. A bare name's family is a fact of the file (its imports
+    /// and the namespace tree), so every body that calls it records the same
+    /// members, and a body-only re-lower overwrites them in place.
+    pub call_families: FxHashMap<Ustr, Vec<FamilyMember>>,
+
+    /// Path segments spelled outside any body: `use` items and the
+    /// interface positions (signatures, fields, globals) of a v1 fragment
+    /// (see [`PathSegmentRef`]).
+    pub path_segments: Vec<PathSegmentRef>,
 }
 
 impl Default for Module {
@@ -406,6 +468,11 @@ impl Default for Module {
 
             lowering_errors: Default::default(),
             interface_errors: Default::default(),
+            scope_probes: Default::default(),
+
+            call_families: Default::default(),
+
+            path_segments: Default::default(),
         }
     }
 }
@@ -511,6 +578,20 @@ pub struct Annotation {
     pub span: Span,
     pub name: Ident,
     pub args: Vec<AnnoArg>,
+    /// Canonical v1 decorator identity when this name resolved through the
+    /// module namespace. `None` preserves legacy and compiler-owned names.
+    pub resolved_name: Option<Ustr>,
+    /// Canonical v1 identities for the identifiers in a builtin structured
+    /// argument such as `@wire(onchange=[CONST])`.
+    pub resolved_ident_list: Option<Vec<Ustr>>,
+}
+
+impl Annotation {
+    /// Compiler-owned behavior is attached only to an un-resolved spelling.
+    /// A user decorator may legally have the same source name as a builtin.
+    pub fn is_builtin(&self, name: &str) -> bool {
+        self.name.name.as_str() == name && self.resolved_name.is_none()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -608,10 +689,14 @@ pub enum Expr {
     Tuple(IdxRange<Expr>),
 
     InterpolatedString(IdxRange<InterpPart>),
-    Not(Idx<Expr>),
+    /// `!x`. The family is `__not`'s, decided at lowering like a binary
+    /// operator's; inference reads it only for a non-bool operand.
+    Not(Idx<Expr>, CallFamily),
     BitNot(Idx<Expr>),
 
-    UnaryMinus(Idx<Expr>),
+    /// `-x`. The family is `__unm`'s, decided at lowering; inference reads
+    /// it only for an operand that is not a number or a newtype.
+    UnaryMinus(Idx<Expr>, CallFamily),
 
     IncDec {
         target: Idx<Expr>,
@@ -660,6 +745,10 @@ pub enum Expr {
         receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
+        /// Resolver family for `method`, same shape as `Expr::Call` (spec 8.4:
+        /// UFCS and the bare call select the same family); `family.key()` is
+        /// `method`.
+        family: CallFamily,
     },
 
     TupleIndex {
@@ -696,6 +785,12 @@ pub enum Expr {
         /// Explicit type arguments from `f<A, B>(...)`; empty when generic
         /// inference supplies the callee's instance.
         generic_args: IdxRange<TypeExpr>,
+        /// Resolver family (plan 2.3). Legacy calls use `CallFamily::Legacy`;
+        /// v1 calls carry the DefKey plus the shadowed losing-tier origin.
+        /// `family.key()` is the same key as `Callee::Unresolved.name`, which
+        /// the MIR backend still reads; M4 moves backend identity onto the
+        /// family and drops the second copy.
+        family: CallFamily,
     },
 
     Array(IdxRange<Expr>),
@@ -735,10 +830,16 @@ pub enum Expr {
         value: Idx<Expr>,
     },
 
+    /// `target op= value` where `target` has no single place to rewrite as
+    /// `target = target op value` (a safe-nav chain). `op_fn` is the
+    /// operator's glyph function, which scalar arithmetic reads; `family` is
+    /// the overload family `target op value` resolves through, decided at
+    /// lowering exactly as for the binary operator.
     CompoundAssign {
         target: Idx<Expr>,
         op_fn: Ustr,
         value: Idx<Expr>,
+        family: CallFamily,
     },
 
     Match {
@@ -752,6 +853,77 @@ pub enum Callee {
     Unresolved { name: Ustr, name_span: Span },
     Local(Idx<BindingInfo>),
     Value(Idx<Expr>),
+}
+
+/// One member of a v1 call family: the overloads registered under `key`.
+/// A legacy definition's key is its bare name, shared by every legacy file
+/// that defines the name and by the standard library, so a member a v1
+/// fragment reached through the std view or a legacy provider's view names
+/// that view's package in `owner`, and only the overloads its own files
+/// define belong to the member (spec 3.2, 5). `None` for a v1 DefKey, which
+/// only its definition carries.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FamilyMember {
+    pub key: Ustr,
+    pub owner: Option<crate::modules::PackageId>,
+    pub tier: FamilyTier,
+}
+
+/// The lookup tier that contributed a family member (spec 8.3 tiers 2-5).
+/// A v1 callee family spans every tier from the first one that binds the
+/// name; fit ranks the whole family and the tier breaks only an exact
+/// best-fit tie, nearer tier first. A legacy family is one flat tier.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FamilyTier {
+    Legacy,
+    Own,
+    Imports,
+    Globs,
+    Std,
+}
+
+/// Overload family selected by the resolver (plan 2.3 / M2 step 5).
+/// `resolve_callee` consumes this rather than a spelled last segment.
+#[derive(Copy, Clone, Debug)]
+pub enum CallFamily {
+    /// Legacy compilation unit: workspace-map lookup by bare name.
+    Legacy(Ustr),
+    /// v1: the one definition the tiers bind, by canonical DefKey. `owner`
+    /// is as for [`FamilyMember`].
+    Resolved { key: Ustr, owner: Option<crate::modules::PackageId> },
+    /// A bare name whose overload family spans several definitions, in
+    /// either dialect: legacy callables merged with projected or imported v1
+    /// ones (spec 3.2), or a v1 family spanning the lookup tiers (spec 8.3,
+    /// 8.5). Lowering decides the member keys and records them under `name`
+    /// in `Module::call_families` of the module lowered from `file`; `Expr`
+    /// is `Copy`, so the family carries only that address. A v1 unary
+    /// operator no tier binds is a family with no members: a scalar operand
+    /// never reads it, any other has no overload.
+    Merged { name: Ustr, file: Ustr },
+}
+
+impl CallFamily {
+    /// The family's spelling: its one key, or the bare name of a merged
+    /// family.
+    pub fn key(&self) -> Ustr {
+        match self {
+            CallFamily::Legacy(n) => *n,
+            CallFamily::Resolved { key, .. } => *key,
+            CallFamily::Merged { name, .. } => *name,
+        }
+    }
+
+    pub fn from_name(name: Ustr) -> Self {
+        CallFamily::Legacy(name)
+    }
+
+    pub fn resolved(key: Ustr, owner: Option<crate::modules::PackageId>) -> Self {
+        CallFamily::Resolved { key, owner }
+    }
+
+    pub fn merged(name: Ustr, file: Ustr) -> Self {
+        CallFamily::Merged { name, file }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -773,8 +945,10 @@ pub enum BinOp {
     Shr,
 }
 
-/// Every operator symbol the parser can mint a definition for, as
-/// `(fn name, symbol as written, may a user overload it)`.
+/// Every binary/operator declaration name the parser can mint, as
+/// `(fn name, symbol as written, may a user overload it)`. One-parameter `-`
+/// and `!` declarations select the prefix names in `UNARY_OPERATOR_FNS`
+/// instead.
 ///
 /// Overloadable means exactly one thing: the operator's USE lowers to a call
 /// resolved by name, so a user fn can be found there. `+ - * / % ./` do.
@@ -784,9 +958,10 @@ pub enum BinOp {
 /// of emitting a fn nothing calls; before it did, `operator ==` silently left
 /// structural equality in place with no diagnostic at any stage.
 ///
-/// This table must stay total over the parser's symbol match
-/// (`skull-parser/src/parser.rs`, `parse_operator`). `operator_table_covers_parser`
-/// in bone-core's tests asserts that by spelling every symbol.
+/// This table must stay total over the parser's symbol match for binary
+/// declarations (`skull-parser/src/parser.rs`, `parse_operator`). The
+/// `operator_table_matches_the_parser` test spells every symbol with its
+/// binary arity.
 pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
     ("__op_add", "+", true),
     ("__op_sub", "-", true),
@@ -812,6 +987,12 @@ pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
     ("__op_index", "[]", false),
 ];
 
+/// The function names selected by the prefix forms of the two glyphs that
+/// have a unary spelling. They are separate from `OPERATOR_FNS`: the latter
+/// remains the table for binary/operator declarations and non-overloadable
+/// reserved symbols, while these names are ordinary callable families too.
+pub const UNARY_OPERATOR_FNS: &[(&str, &str)] = &[("__unm", "-"), ("__not", "!")];
+
 
 /// `None` for a name that is not an operator fn at all.
 pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {
@@ -819,6 +1000,14 @@ pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {
         .iter()
         .find(|(fn_name, _, _)| *fn_name == name)
         .map(|(_, symbol, overloadable)| (*symbol, *overloadable))
+}
+
+/// `None` for a name that is not the prefix family of `-` or `!`.
+pub fn unary_operator_entry(name: &str) -> Option<&'static str> {
+    UNARY_OPERATOR_FNS
+        .iter()
+        .find(|(fn_name, _)| *fn_name == name)
+        .map(|(_, symbol)| *symbol)
 }
 
 /// The symbols a user may write an `operator` definition for, for diagnostics.
@@ -896,6 +1085,9 @@ pub enum Statement {
 #[derive(Clone, Debug)]
 pub struct DecoratorDef {
     pub name: Ustr,
+    /// Canonical v1 identity used by registries and generated wrappers. Bare
+    /// legacy decorators keep their source name here.
+    pub def_key: Ustr,
     pub span: Span,
     pub param_decls: Vec<ParamDecl>,
     pub num_required: usize,
@@ -909,9 +1101,32 @@ pub struct StructDef {
     pub name_span: Span,
     pub is_value: bool,
     pub is_nobox: bool,
+    /// `@nomangle`: the emitted type symbol (C typedef, `__ty` tag) is the
+    /// declared name even under modules v1, for inline Lua that spells it.
+    pub nomangle: bool,
     pub span: Span,
     pub generics: Vec<TyId>,
     pub fields: Vec<StructFieldDef>,
+    /// `@host_resource` -- see [`HostResource`].
+    pub host_resource: Option<HostResource>,
+}
+
+/// A type declared `@host_resource`: it NAMES something the host owns rather
+/// than holding the thing itself, so its value is meaningless to a process
+/// that did not mint it.
+///
+/// One declaration, on the type, with two consumers that used to keep their
+/// own lists: the `host_resource_in_game_memory` lint, which rejects such a
+/// type reachable from a `game`-memory global
+/// (`docs/state-ownership-plan.md` R4), and
+/// `__stone_host_projection_class`, which reads `ledger_class` back out of
+/// `__ROCK_TYPE_TABLE` at runtime.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct HostResource {
+    /// The native ledger class (`stone-rs`'s `native_ledger`) whose registry
+    /// can be asked whether one of these handles is still live, or empty for
+    /// a host resource the ledger does not track.
+    pub ledger_class: Ustr,
 }
 
 #[derive(Clone, Debug)]
@@ -926,6 +1141,10 @@ pub struct StructFieldDef {
     /// (docs/scalarization-and-boxing-design.md S 6). Enum record variants
     /// cannot carry it -- always false there.
     pub is_embed: bool,
+    /// Getter visibility (spec 9/10). Default is public.
+    pub read_vis: NsVisibility,
+    /// Setter visibility (spec 10). `private(set)` restricts this to owner subtree.
+    pub write_vis: NsVisibility,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -942,6 +1161,8 @@ pub struct EnumDef {
     pub span: Span,
     pub generics: Vec<TyId>,
     pub variants: Vec<EnumVariantDef>,
+    /// `@host_resource` -- see [`HostResource`].
+    pub host_resource: Option<HostResource>,
 }
 
 #[derive(Clone, Debug)]
@@ -973,6 +1194,10 @@ pub struct GlobalDef {
     pub span: Span,
     pub is_const: bool,
     pub state_metadata: StateMetadata,
+    /// Set when this declaration carries an `@state` that resolves to its
+    /// unit's class anyway. `state_metadata` alone cannot say so: it is the
+    /// same value whether the annotation or the class produced it.
+    pub redundant_state: Option<RedundantStateAnnotation>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -1065,6 +1290,64 @@ impl Default for StateMetadata {
             realization: StateRealization::FreshSession,
         }
     }
+}
+
+impl StateMetadata {
+    /// What a memory class gives every `global` in its unit that says nothing
+    /// itself (`docs/state-ownership-plan.md` R2). ONE oracle: lowering builds
+    /// the unit default from this, and `redundant_state_annotation` asks
+    /// lowering rather than restating the table -- a second copy is free to
+    /// drift and would report a deletion the compiler does not agree with.
+    pub fn for_memory_class(class: skull_parser::MemoryClass) -> Self {
+        use skull_parser::MemoryClass;
+        match class {
+            MemoryClass::Game => Self {
+                ownership: StateOwnership::Session,
+                world: StateWorldPolicy::Include,
+                realization: StateRealization::FreshSession,
+            },
+            MemoryClass::Platform => Self {
+                ownership: StateOwnership::HostProjection,
+                world: StateWorldPolicy::Exclude,
+                realization: StateRealization::RebuildHostProjection,
+            },
+            MemoryClass::Debug => Self {
+                ownership: StateOwnership::RunnerDiagnostic,
+                world: StateWorldPolicy::Exclude,
+                realization: StateRealization::RunnerRebind,
+            },
+        }
+    }
+}
+
+/// Where the memory class a declaration was measured against was declared.
+/// A diagnostic that asks for a line to be deleted has to point at the thing
+/// that already says it, and in modules-v1 several FILES contribute to one
+/// logical module -- each with its own possible `@memory` header -- so this
+/// belongs to the declaration, not to the module.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MemoryClassSite {
+    /// A `@memory(<class>)` file header, at this span.
+    Header(Span),
+    /// The owning package's class, from its `stick.toml`. Carries the package's
+    /// `self_name`; a package that declares no `[language] memory` is `game`,
+    /// which is still the package's class.
+    Package(Ustr),
+    /// No package owns this file (a standalone or editor source), so `game` is
+    /// the language default.
+    LanguageDefault,
+}
+
+/// A `global` whose `@state` resolves to exactly what its unit's memory class
+/// already gives it. Recorded by lowering, which is the only place that holds
+/// both sides of the comparison, and reported by the `redundant_state_annotation`
+/// lint.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RedundantStateAnnotation {
+    /// The `@state` annotation itself -- what the author deletes.
+    pub span: Span,
+    pub class: skull_parser::MemoryClass,
+    pub site: MemoryClassSite,
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn root() -> PathBuf {
@@ -16,19 +16,6 @@ fn rock_bin() -> PathBuf {
 
 fn toml_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn game_key(project: &Path) -> String {
-    project
-        .strip_prefix(root())
-        .unwrap()
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 fn project_fixture(name: &str, main: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -56,7 +43,7 @@ fn project_fixture(name: &str, main: &str) -> (tempfile::TempDir, PathBuf, PathB
 }
 
 #[test]
-fn stick_asset_overlays_feed_native_preamble_and_web_staging() {
+fn stick_asset_overlays_feed_native_preamble() {
     let (_scratch, project, overlay) = project_fixture("overlay-default-", "fn main() {}\n");
     std::fs::write(overlay.join("assets/sfx/configured.txt"), "configured").unwrap();
     let lua = project.join("main.lua");
@@ -79,23 +66,6 @@ fn stick_asset_overlays_feed_native_preamble_and_web_staging() {
         emitted.lines().take(8).collect::<Vec<_>>().join("\n")
     );
 
-    let web = project.join("web-out");
-    let build = Command::new(rock_bin())
-        .current_dir(root())
-        .args(["web", project.to_str().unwrap(), "--out", web.to_str().unwrap()])
-        .output()
-        .expect("web configured-overlay fixture");
-    assert!(
-        build.status.success(),
-        "web failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&build.stdout),
-        String::from_utf8_lossy(&build.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(web.join(game_key(&project)).join("assets/sfx/configured.txt"))
-            .unwrap(),
-        "configured"
-    );
 }
 
 #[test]
@@ -127,57 +97,31 @@ fn native_preamble_clears_removed_stick_overlay_defaults() {
 }
 
 #[test]
-fn web_directory_listing_executes_the_shared_contract() {
-    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let (_scratch, project, _overlay) = project_fixture("overlay-web-list-", "fn main() {}\n");
-    let key = game_key(&project);
-    let backslash = key.replace('/', "\\\\");
-    std::fs::write(
-        project.join("main.rock"),
-        format!(
-            r#"fn main() {{
-    let direct = stone_list_directory("{backslash}\\assets\\sfx")
-    if direct == null {{
-        print("direct=null")
-    }} else {{
-        print("direct={{direct.unwrap().len}}")
-        for name in direct.unwrap() {{ print("name={{name}}") }}
-    }}
-    for path in asset_list_dir("assets/sfx") {{ print("logical={{path}}") }}
-}}
-"#,
-        ),
-    )
-    .unwrap();
-    let out = project.join("web-out");
-    let build = Command::new(rock_bin())
+fn explicit_empty_overlay_environment_suppresses_stick_defaults_in_preamble() {
+    let (_scratch, project, overlay) = project_fixture("overlay-default-env-", "fn main() {}\n");
+    let lua = project.join("main.lua");
+    let compile = Command::new(rock_bin())
         .current_dir(root())
-        .args(["web", project.to_str().unwrap(), "--out", out.to_str().unwrap()])
+        .env("ROCK_ASSET_OVERLAYS", "")
+        .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])
         .output()
-        .expect("build web listing fixture");
-    assert!(build.status.success(), "web failed:\n{}", String::from_utf8_lossy(&build.stderr));
-
-    let game_js = out.join("game.js");
-    let mut js = std::fs::read_to_string(&game_js).unwrap();
-    let boot = js.find("var __ROCK_WEB_READY =").expect("web boot line");
-    let injected = format!(
-        "__ROCK_WEB_ASSETS[{a:?}] = new Uint8Array([1]);\n\
-         __ROCK_WEB_ASSETS[{z:?}] = new Uint8Array([2]);\n",
-        a = format!("{key}/assets/sfx/a.wav"),
-        z = format!("{key}/assets/sfx/z.wav"),
+        .expect("compile overlay environment fixture");
+    assert!(
+        compile.status.success(),
+        "compile failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&compile.stdout),
+        String::from_utf8_lossy(&compile.stderr)
     );
-    js.insert_str(boot, &injected);
-    js.insert_str(0, "globalThis.__STONE_WEB_FAKE_ENV = {};\n");
-    std::fs::write(&game_js, js).unwrap();
-
-    let run = Command::new("node").arg(&game_js).output().expect("run web listing fixture");
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(run.status.success(), "game.js failed:\n{}", String::from_utf8_lossy(&run.stderr));
-    assert_eq!(
-        stdout.trim(),
-        "direct=2\nname=a.wav\nname=z.wav\nlogical=assets/sfx/a.wav\nlogical=assets/sfx/z.wav"
+    let emitted = std::fs::read_to_string(&lua).unwrap();
+    assert!(
+        emitted.contains("__ROCK_ASSET_OVERLAY_DEFAULTS = {}"),
+        "an explicit empty overlay environment must suppress the private default {}\n{}",
+        overlay.display(),
+        emitted.lines().take(8).collect::<Vec<_>>().join("\n")
+    );
+    assert!(
+        !emitted.contains(&overlay.to_string_lossy().replace('\\', "\\\\")),
+        "private overlay path leaked into the preamble:\n{}",
+        emitted.lines().take(8).collect::<Vec<_>>().join("\n")
     );
 }

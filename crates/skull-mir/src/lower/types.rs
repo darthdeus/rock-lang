@@ -20,6 +20,17 @@ impl Builder<'_> {
         self.dispatch().concrete_expr_ty(e)
     }
 
+    pub(crate) fn concrete_struct_field_ty(
+        &self,
+        literal: Idx<Expr>,
+        field: Ustr,
+    ) -> Option<Rc<MonoTy>> {
+        self.dispatch()
+            .concrete_types
+            .and_then(|tables| tables.struct_field_type(literal, field))
+            .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::Dispatch))
+    }
+
     pub(crate) fn concrete_ty_id(&self, ty: TyId) -> Option<Rc<MonoTy>> {
         self.dispatch().concrete_ty(ty)
     }
@@ -136,6 +147,9 @@ impl Builder<'_> {
                 if let Some(elem) = self.vec_column_elem_of(base)? {
                     return Ok(Some(elem.representation()));
                 }
+                if let Some(elem) = self.vec_strided_elem_of(base)? {
+                    return Ok(Some(elem.representation()));
+                }
                 if let Some(elem) = self.map_column_value_of(base)? {
                     return Ok(Some(elem.representation()));
                 }
@@ -162,6 +176,11 @@ impl Builder<'_> {
                         {
                             return Ok(Some(elem.representation()));
                         }
+                        if let Some(&recv) = arg_idxs.first()
+                            && let Some(elem) = self.vec_strided_elem_of(recv)?
+                        {
+                            return Ok(Some(elem.representation()));
+                        }
                     }
                     if matches!(name.as_str(), "get" | "map_get") {
                         if let Some(&recv) = arg_idxs.first()
@@ -170,7 +189,8 @@ impl Builder<'_> {
                             return Ok(Some(elem.representation()));
                         }
                     }
-                    if self.resolve_funcref(e, *name).is_ok()
+                    if self.fn_field_of_call(e).is_none()
+                        && self.resolve_funcref(e, *name).is_ok()
                         && let Some(owner) = self.concrete_callee_for_site(e)?
                     {
                         let abi = self.callee_abi_plan_for_instance(&owner)?;
@@ -653,46 +673,25 @@ impl Builder<'_> {
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
             return Ok(Some(RetSlot::Nested(shape)));
         }
-        let Some(mut shape) = self.nobox_value_shape_of(e)? else { return Ok(None) };
-        // A join's shape must represent every value that reaches it, and the
-        // arms are right here. `if c { P { .. } } else { null }` infers as plain
-        // `P` -- the `null` arm does not widen it -- so reading nullability off
-        // the join EXPRESSION alone plans a shape with no presence leaf, and the
-        // null arm then splits nil into fields and faults. Widening from the arms
-        // cannot manufacture a phantom presence slot the way keying on a foreign
-        // expression's nullability would: an arm that can be null is a value the
-        // join has to carry, and if the sink is non-nullable bone has already
-        // rejected the program.
-        if !shape.nullable && self.join_arm_is_nullable(e) {
-            shape.nullable = true;
-        }
-        Ok(Some(RetSlot::Leaves(shape)))
-    }
-
-    /// Whether any arm of a join expression can produce `null`. Arms are blocks,
-    /// so each is peeled to its tail value before asking.
-    fn join_arm_is_nullable(&self, e: Idx<Expr>) -> bool {
-        let arms: Vec<Idx<Expr>> = match &self.body.expr_arena[e] {
-            Expr::If { then_branch, else_branch, .. } => {
-                std::iter::once(*then_branch).chain(*else_branch).collect()
+        let shape = match self.nobox_value_shape_of(e)? {
+            Some(shape) => shape,
+            None => {
+                let Some(name) = self.value_struct_of(e) else { return Ok(None) };
+                if self.scx.values_first_class
+                    || !planned_value_contains_flat_enum(self.ws, name)
+                {
+                    return Ok(None);
+                }
+                let Some(rep) = self.expr_rep_id(e, RepUse::Value, false)? else {
+                    return Ok(None);
+                };
+                let Some(shape) = self.scx.rep_arena().value_shape(rep) else {
+                    return Ok(None);
+                };
+                shape
             }
-            Expr::Match { arms, .. } => {
-                arms.clone().map(|a| self.body.match_arm_arena[a].body).collect()
-            }
-            _ => return false,
         };
-        arms.into_iter().any(|a| {
-            let v = self.peel_block_tail(a);
-            self.is_null_lit(v) || self.expr_is_nullable(v)
-        })
-    }
-
-    /// A block arm's value is its tail; anything else is its own value.
-    fn peel_block_tail(&self, e: Idx<Expr>) -> Idx<Expr> {
-        match &self.body.expr_arena[e] {
-            Expr::Block { tail: Some(t), .. } => self.peel_block_tail(*t),
-            _ => e,
-        }
+        Ok(Some(RetSlot::Leaves(shape)))
     }
 
     /// The slot layout of a tuple's BOX: `Some` exactly when some element splats,
@@ -792,7 +791,7 @@ impl Builder<'_> {
                 "`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string(),
             ));
         };
-        if nb.as_str() != "NativeBuffer" {
+        if !bone_semantic::prelude::is_intrinsic_key(*nb, "NativeBuffer") {
             return Err(CompilerError::new_with_label(
                 span,
                 format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"),
@@ -852,7 +851,7 @@ impl Builder<'_> {
         else {
             return None;
         };
-        if name.as_str() != "Coroutine" {
+        if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
             return None;
         }
         let Some(MonoTy::App {

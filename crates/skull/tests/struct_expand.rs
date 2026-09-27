@@ -37,9 +37,13 @@ fn expands_to_literal_pairs_in_declaration_order() {
     assert!(ia < ic && ic < ip, "keys must appear in declaration order:\n{body}");
 
     // One variant box per field, structurally chosen (float->F, int->I, Vec2->Vv).
-    for needle in ["__variant = \"F\"", "__variant = \"I\"", "__variant = \"Vv\""] {
+    for needle in ["__variant = (\"F\")", "__variant = (\"I\")", "__variant = (\"Vv\")"] {
         assert!(body.contains(needle), "missing `{needle}` in:\n{body}");
     }
+    // The flat enum stores a value-struct payload spread over its slots, as a
+    // source `U::Vv(V2 { .. })` does; a boxed `V2_ct` there is read back by the
+    // match as the first slot alone.
+    assert!(!body.contains("V2_ct("), "the Vv payload was boxed, not spread:\n{body}");
 
     // The phantom body is never called or inlined -- the call is fully replaced.
     assert!(!body.contains("phantom body"), "phantom body leaked into build():\n{body}");
@@ -146,18 +150,14 @@ fn build(t: float, c: NV2) -> int {
 }
 "#;
 
-/// A `nobox` payload at the expansion is the SAME boundary the `uniform(x: Vec2)`
-/// overload marks with an explicit `materialize`: the enum is table-backed, so
-/// the payload has nowhere to live but a box. The expansion mints that box
-/// itself, so it must mint the AUTHORIZED one -- there is no source line for the
-/// author to mark, and an implicit box here rejects a legitimate program
+/// A `nobox` payload at the expansion spreads into the flat enum's slots, as a
+/// source ctor stores it, so no box is minted at all. Emitting at all is the
+/// other half: an implicit box here used to reject a legitimate program
 /// (`bitgun_queue_heat_shimmer`'s `pass_uniforms`).
 #[test]
-fn a_nobox_payload_is_authorized_at_the_expansion() {
+fn a_nobox_payload_spreads_into_the_flat_slots() {
     let lua = emit_module(NOBOX_PAYLOAD);
     let body = function_body(&lua, "build");
-    assert!(
-        body.contains("NV2_ct("),
-        "the payload box must still be emitted, just authorized:\n{body}"
-    );
+    assert!(body.contains("__variant = (\"Vv\")"), "missing the Vv variant in:\n{body}");
+    assert!(!body.contains("NV2_ct("), "the nobox payload was boxed, not spread:\n{body}");
 }

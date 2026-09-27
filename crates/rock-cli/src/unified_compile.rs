@@ -10,39 +10,66 @@ pub enum SourceSpec {
     Files(Vec<PathBuf>),
 }
 
+fn stamp_package(file: &Arc<AtomicRefCell<SourceFile>>, node: &PackageNode) {
+    let mut f = file.borrow_mut();
+    f.package = Some(rock_core::source_code::PackageTag {
+        id: node.id.0,
+        self_name: node.self_name.clone(),
+    });
+    f.dialect = node.dialect;
+    f.memory_class = node.memory_class;
+    f.global_policy = node.global_policy;
+}
+
 /// Discover sources based on source specification
 pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
     match source_spec {
         SourceSpec::Directory(project_dir) => {
             // Check for stick.toml to pick up project settings
             if let Some((config_path, stick_config)) = StickConfig::find_from_dir(project_dir)? {
-                let project_sources = SourceFiles::from_dir_preprocessed(project_dir)?;
+                let manifest_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
+                let graph = PackageGraph::build_with_channel(
+                    &manifest_dir,
+                    &stick_config,
+                    &rock_host::stick::resolved_channel_for(&stick_config),
+                )?;
                 let mut dependency_files = Vec::new();
 
-                // Resolve and load dependencies
-                if !stick_config.dependencies.is_empty() {
-                    let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
-                    let mut resolver = rock_host::stick::resolver::DependencyResolver::new(root_path);
-                    let resolved_deps = resolver.resolve(&stick_config)?;
-
-                    // Load files from each dependency
-                    for dep in resolved_deps {
-                        let dep_sources = SourceFiles::from_dir_preprocessed(&dep.path)?;
-                        // Dependencies load before the project. Global initializers are
-                        // module-load effects, so a library must be ready before a
-                        // consuming game's global initializer on both emitters.
-                        for file in dep_sources.files {
-                            // Skip files with #script directive (test/example files in library dependencies)
-                            if !file.borrow().is_script {
-                                dependency_files.push(file);
-                            }
+                // Load each dependency package's files in graph load order
+                // (providers before consumers), then the root package's files
+                // last. Global initializers are module-load effects, so a
+                // library must be ready before a consuming game's global
+                // initializer on both emitters.
+                for id in graph.load_order() {
+                    let node = graph.package(*id);
+                    // The root package loads from the INVOKED directory, which
+                    // can be a subdirectory of its manifest root; dependencies
+                    // always load their whole root.
+                    let load_dir = if *id == graph.root() {
+                        project_dir.clone()
+                    } else {
+                        node.root.clone()
+                    };
+                    let selected = graph.selected_rock_files(*id, &load_dir)?;
+                    let package_sources = SourceFiles::from_multiple_paths(&selected, true)?;
+                    for file in package_sources.files {
+                        // Skip files with #script directive (test/example files in library dependencies)
+                        if !file.borrow().is_script || *id == graph.root() {
+                            stamp_package(&file, node);
+                            dependency_files.push(file);
                         }
-
                     }
                 }
 
-                dependency_files.extend(project_sources.files);
-                Ok(SourceFiles { files: dependency_files })
+                let package_roots = graph
+                    .packages()
+                    .iter()
+                    .map(|node| (node.id.0, node.root.clone()))
+                    .collect();
+                Ok(SourceFiles {
+                    files: dependency_files,
+                    package_roots,
+                })
             } else {
                 // No stick.toml - check if there's exactly one .rock file
                 let rock_files = rock_host::project::find_rock_files_at_path(project_dir)?;
@@ -70,8 +97,16 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
     }
 }
 
-/// Build a package map (package_name, absolute_path) from the project's stick.toml.
-/// The main project's own name and path are included first, followed by each dependency.
+/// Build the package map (package_name, absolute_path) used by StateSchema
+/// metadata grouping, from the one package graph. The root package comes
+/// first, then each dependency in graph load order; transitive packages the
+/// root does not name directly are appended under their own names.
+///
+/// The names intentionally preserve the strings the pre-graph loader
+/// emitted: the root's manifest name lowercased and dependency keys as
+/// written, because these strings are embedded in emitted StateSchema
+/// metadata and legacy artifacts must stay byte-identical through M4 (the
+/// v1 package identity replaces them; see docs/unfuck-backlog.md).
 /// Returns an empty Vec if there is no stick.toml or no dependencies.
 pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
     let project_dir = match source_spec {
@@ -90,7 +125,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
     // will be wrong; surface to stderr the same way the resolver
     // failure below does. Don't propagate -- `discover_sources` ran
     // earlier and already propagated any real failures.
-    let (config_path, stick_config) = match StickConfig::find_from_dir(&project_dir) {
+    let (config_path, _stick_config) = match StickConfig::find_from_dir(&project_dir) {
         Ok(Some(pair)) => pair,
         Ok(None) => return Vec::new(),
         Err(e) => {
@@ -103,38 +138,42 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
         }
     };
 
-    let root_path = config_path.parent().unwrap_or(&config_path).to_path_buf();
-    // Canonicalize to absolute path so it matches the absolute ModuleId paths in the assembler.
-    let abs_root = root_path.canonicalize().unwrap_or_else(|_| root_path.clone());
-    let mut map = Vec::new();
-
-    // Main project first
-    map.push((stick_config.package.name.to_lowercase(), abs_root.clone()));
-
-    // Each resolved dependency. `discover_sources` runs the same
-    // resolver earlier in the same compile and propagates errors, so
-    // by the time we get here the resolve has already succeeded once.
-    // If it fails now (transient FS race, stick.toml rewritten mid-
-    // build), surface it -- the package map feeds StateSchema metadata
-    // grouping in codegen, and silently dropping deps would produce
-    // a subtly-wrong runtime.
-    if !stick_config.dependencies.is_empty() {
-        let mut resolver = rock_host::stick::resolver::DependencyResolver::new(abs_root);
-        match resolver.resolve(&stick_config) {
-            Ok(resolved_deps) => {
-                for dep in resolved_deps {
-                    let abs_dep = dep.path.canonicalize().unwrap_or(dep.path);
-                    map.push((dep.name, abs_dep));
-                }
-            }
-            Err(e) => {
-                log::warn!(target: "COMPILE",
-                    "build_package_map: dependency resolver failed: {}. \
-                     StateSchema package metadata will be incomplete.",
-                    e
-                );
-            }
+    let manifest_dir = config_path.parent().unwrap_or(&config_path).to_path_buf();
+    let graph = match PackageGraph::build(&manifest_dir) {
+        Ok(graph) => graph,
+        Err(e) => {
+            log::warn!(target: "COMPILE",
+                "build_package_map: package graph resolution failed: {}. \
+                 StateSchema package metadata will be incomplete.",
+                e
+            );
+            return Vec::new();
         }
+    };
+
+    let root_node = graph.package(graph.root());
+    // Legacy metadata spelled the root's name lowercased; see doc comment.
+    let mut map = vec![(root_node.manifest_name.to_lowercase(), root_node.root.clone())];
+
+    let mut mapped: Vec<PackageId> = Vec::new();
+    for edge in &root_node.dependencies {
+        if mapped.contains(&edge.target) {
+            continue;
+        }
+        mapped.push(edge.target);
+        // Dependency keys as written, pre-graph spelling (see doc comment).
+        map.push((edge.declared_key.clone(), graph.package(edge.target).root.clone()));
+    }
+    // Transitive packages have no root-edge name; name them by their own
+    // manifest name so their globals still group instead of reading as
+    // unowned.
+    for id in graph.load_order() {
+        if *id == graph.root() || mapped.contains(id) {
+            continue;
+        }
+        mapped.push(*id);
+        let node = graph.package(*id);
+        map.push((node.manifest_name.to_lowercase(), node.root.clone()));
     }
 
     map

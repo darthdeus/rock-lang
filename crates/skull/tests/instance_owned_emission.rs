@@ -4,22 +4,20 @@
 //! Every assertion here reads emitted DEFINITION HEADERS or a CALL BODY, never
 //! a bare name match: the callee's own definition line contains its symbol, so
 //! `lua.contains("identity_int")` is green whether or not any call site reaches
-//! it. Definitions are counted from `\nfunction <sym>(` headers; call spellings
-//! are read out of the caller's body via `function_body`.
+//! it. Definitions are counted from the harness's shape-aware header scan
+//! (`common::definition_names`, which reads both the global-lookup
+//! `function <sym>(` and the callee-bound `__rock_mk_<sym> = function(`); call
+//! spellings are read out of the caller's body via `function_body`.
 
 mod common;
-use common::{emit_module, function_body, ws_with_stdlib};
+use common::{definition_names, emit_module, function_body, ws_with_stdlib};
 
-/// Every emitted top-level definition symbol, from its `function <sym>(`
-/// header. The header IS the definition, so this cannot be satisfied by a
-/// mention inside some other body.
+/// Every emitted top-level definition symbol, from its definition header in
+/// whichever callee shape the build emits (`function <sym>(` or the bound
+/// `__rock_mk_<sym> = function(`). The header IS the definition, so this cannot
+/// be satisfied by a mention inside some other body.
 fn definition_symbols(lua: &str) -> Vec<String> {
-    lua.match_indices("\nfunction ")
-        .map(|(i, m)| {
-            let rest = &lua[i + m.len()..];
-            rest[..rest.find('(').expect("fn header has `(`")].to_string()
-        })
-        .collect()
+    definition_names(lua).into_iter().map(str::to_string).collect()
 }
 
 /// The definition symbols derived from source fn `name` -- its own mangling and
@@ -176,9 +174,16 @@ fn main() {
 /// construction and pass on a call to a nil global.
 fn iter_called_in(lua: &str, caller: &str) -> String {
     let body = function_body(lua, caller);
-    let at = body.find("iter_").unwrap_or_else(|| panic!("no `iter` call in `{caller}`:\n{body}"));
-    let rest = &body[at..];
-    rest[..rest.find('(').expect("a call has `(`")].to_string()
+    // A CALL, not a binding. Under the bound callee shape the definition header
+    // names every callee as a factory PARAMETER, so the first `iter_` in the
+    // text is the upvalue that receives the symbol rather than a call to it.
+    body.match_indices("iter_")
+        .find_map(|(at, _)| {
+            let rest = &body[at..];
+            let name = &rest[..rest.find('(')?];
+            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_').then(|| name.to_string())
+        })
+        .unwrap_or_else(|| panic!("no `iter` call in `{caller}`:\n{body}"))
 }
 
 /// An `iter` witness names an INSTANCE in both call forms it has.

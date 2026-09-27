@@ -13,21 +13,14 @@ fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
-fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
-}
-
 /// Writes `src` into a fresh tempdir and runs `rock test` on it, returning
 /// (combined output, exit-status-success).
-fn run_test(src: &str, backend: Option<&str>) -> (String, bool) {
+fn run_test(src: &str) -> (String, bool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("probe.rock");
     std::fs::write(&file, src).expect("write probe");
     let mut cmd = Command::new(rock_bin());
     cmd.arg("test").arg(&file);
-    if let Some(b) = backend {
-        cmd.arg("--backend").arg(b);
-    }
     let out = cmd.output().expect("spawn rock");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -57,34 +50,20 @@ fn genuinely_passing() {
 
 #[test]
 fn failing_assert_exits_nonzero() {
-    let (text, ok) = run_test(FAILING_ASSERT, None);
+    let (text, ok) = run_test(FAILING_ASSERT);
     assert!(text.contains("1 failed"), "expected the failure to be counted:\n{text}");
     assert!(!ok, "a failing @test must exit nonzero:\n{text}");
 }
 
 #[test]
 fn failing_output_mismatch_exits_nonzero() {
-    let (text, ok) = run_test(FAILING_OUTPUT, None);
+    let (text, ok) = run_test(FAILING_OUTPUT);
     assert!(!ok, "an @test(output=..) mismatch must exit nonzero:\n{text}");
 }
 
 #[test]
 fn passing_test_exits_zero() {
-    let (text, ok) = run_test(PASSING, None);
+    let (text, ok) = run_test(PASSING);
     assert!(text.contains("1/1 @tests passed"), "expected a clean pass:\n{text}");
     assert!(ok, "a passing @test must exit zero:\n{text}");
-}
-
-/// The two backends disagreed on this: js exited 1 while skull exited 0 for the
-/// same failing input. Pin the agreement so a future divergence is loud.
-#[test]
-fn js_backend_agrees_on_exit_status() {
-    if !node_available() {
-        eprintln!("SKIP js_backend_agrees_on_exit_status: node not available");
-        return;
-    }
-    let (text, ok) = run_test(FAILING_ASSERT, Some("js"));
-    assert!(!ok, "js: a failing @test must exit nonzero:\n{text}");
-    let (text, ok) = run_test(PASSING, Some("js"));
-    assert!(ok, "js: a passing @test must exit zero:\n{text}");
 }

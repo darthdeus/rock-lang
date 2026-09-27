@@ -90,12 +90,67 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
     Some(out)
 }
 
-/// Max leaf count that stores as columns. Above it, columns fall off a measured
-/// write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86; 17.1x / 11.7x on
-/// arm64) and strided AoS wins -- so a wider type keeps today's representation
-/// rather than silently taking the slow layout. Every collection site in the
-/// tree is K <= 4. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
+/// Max leaf count that stores an unmarked value in columns. Above it, columns
+/// fall off a measured write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86;
+/// 17.1x / 11.7x on arm64), so an unmarked wider type stays boxed. An explicit
+/// `nobox` guarantee bypasses this heuristic because boxing is not a legal
+/// fallback. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
+
+pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
+    fn dense_payload_ty(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> bool {
+        match static_ty(ws, ty) {
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float)) => true,
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(child),
+                ..
+            }) if payload_free_enum_variants(ws, child).is_some() => true,
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(child),
+                ..
+            }) => {
+                let Some(sid) = ws.struct_by_name.get(&child) else {
+                    return false;
+                };
+                let decl = &ws.modules[sid.module.index()].structs[sid.def];
+                if !decl.is_value || visiting.contains(&child) {
+                    return false;
+                }
+                visiting.push(child);
+                let dense = decl
+                    .fields
+                    .iter()
+                    .all(|field| dense_payload_ty(ws, field.ty, visiting));
+                visiting.pop();
+                dense
+            }
+            _ => false,
+        }
+    }
+
+    let Some(plan) = EnumPlan::for_name(ws, name) else {
+        return false;
+    };
+    let Some(shape) = plan.flat() else {
+        return false;
+    };
+    if shape.leaf_count() <= MAX_COLUMN_LEAVES {
+        return false;
+    }
+    let Some(eid) = ws.enums_by_name.get(&name) else {
+        return false;
+    };
+    ws.modules[eid.module.index()].enums[eid.def]
+        .variants
+        .iter()
+        .all(|variant| match &variant.payload {
+            VariantPayload::Unit => true,
+            VariantPayload::Tuple(tys) => tys
+                .iter()
+                .all(|ty| dense_payload_ty(ws, *ty, &mut vec![name])),
+            VariantPayload::Record(_) => false,
+        })
+}
 
 /// The column KEYS of `shape`, presence first when the element type is nullable.
 ///
@@ -312,7 +367,9 @@ pub fn nb_prim_storage_lua() -> String {
 /// derived from the layout its caller ALREADY validated. Takes the checked
 /// leaves and size rather than re-walking: the emitter needs one layout per
 /// struct and the registry is a second view of it, not a second computation.
-pub fn nb_value_storage_lua(elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
+pub fn nb_value_storage_lua(ws: &Workspace, elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
+    // `__rock_nb_storage` runs `ffi.typeof` on this name: a C type, not a DefKey.
+    let elem = crate::mangle::type_symbol(ws, elem);
     let mut views: Vec<&'static str> = Vec::new();
     for l in leaves {
         if !views.contains(&l.cty) {
@@ -375,11 +432,12 @@ pub(crate) fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafS
         return None;
     }
     let mut out = Vec::new();
-    let (size, align) = planned_layout_rec(&plan, "", 0, "", &mut out)?;
+    let (size, align) = planned_layout_rec(ws, &plan, "", 0, "", &mut out)?;
     Some((out, size, align))
 }
 
 fn planned_layout_rec(
+    ws: &Workspace,
     plan: &PlannedValue,
     prefix: &str,
     base: usize,
@@ -397,7 +455,7 @@ fn planned_layout_rec(
                     path: leaf_path(prefix, field.as_str()),
                     cty,
                     byte_off: off,
-                    offsetof_expr: join_offsetof(ofs, plan.name, field.as_str()),
+                    offsetof_expr: join_offsetof(ws, ofs, plan.name, field.as_str()),
                 });
                 off += size;
                 align = align.max(field_align);
@@ -405,16 +463,19 @@ fn planned_layout_rec(
             PlannedField::Nested(child) => {
                 let child_base = round_up(off, planned_alignment(child)?);
                 let (size, child_align) = planned_layout_rec(
+                    ws,
                     child,
                     &format!("{}{field}.", prefix),
                     child_base,
-                    &join_offsetof(ofs, plan.name, field.as_str()),
+                    &join_offsetof(ws, ofs, plan.name, field.as_str()),
                     out,
                 )?;
                 off = child_base + size;
                 align = align.max(child_align);
             }
-            PlannedField::Nullable(_) | PlannedField::Opaque => return None,
+            PlannedField::FlatEnum(_) | PlannedField::Nullable(_) | PlannedField::Opaque => {
+                return None;
+            }
         }
     }
     Some((round_up(off - base, align), align))
@@ -425,14 +486,18 @@ fn planned_alignment(plan: &PlannedValue) -> Option<usize> {
         let field_align = match field {
             PlannedField::Primitive(cty) => c_prim_size_align(cty)?.1,
             PlannedField::Nested(child) => planned_alignment(child)?,
-            PlannedField::Nullable(_) | PlannedField::Opaque => return None,
+            PlannedField::FlatEnum(_) | PlannedField::Nullable(_) | PlannedField::Opaque => {
+                return None;
+            }
         };
         Some(align.max(field_align))
     })
 }
 
-/// Extend an `ffi.offsetof` composition by one field hop.
-pub(crate) fn join_offsetof(prefix: &str, owner: Ustr, field: &str) -> String {
+/// Extend an `ffi.offsetof` composition by one field hop. `owner` names a C
+/// TYPE, so a v1 nominal contributes its emitted symbol, never its DefKey.
+pub(crate) fn join_offsetof(ws: &Workspace, prefix: &str, owner: Ustr, field: &str) -> String {
+    let owner = crate::mangle::type_symbol(ws, owner);
     let hop = format!("ffi.offsetof(\"{owner}\", \"{field}\")");
     if prefix.is_empty() {
         hop
@@ -496,6 +561,7 @@ impl ValueShape {
 pub(crate) enum PlannedField {
     Primitive(&'static str),
     Nested(Box<PlannedValue>),
+    FlatEnum(ValueShape),
     Nullable(Box<PlannedValue>),
     Opaque,
 }
@@ -522,6 +588,8 @@ fn planned_shape(
             PlannedField::Primitive(_) => FieldShape::Prim,
             PlannedField::Opaque if gc => FieldShape::Prim,
             PlannedField::Opaque => return None,
+            PlannedField::FlatEnum(shape) if gc => FieldShape::Nested(shape.clone()),
+            PlannedField::FlatEnum(_) => return None,
             PlannedField::Nested(child) => {
                 let child = if gc {
                     child.shape.clone().or_else(|| child.gc_shape.clone())
@@ -600,6 +668,14 @@ fn planned_value_rec(
                 PlannedField::Primitive("int")
             }
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. }) => {
+                if let Some(flat) =
+                    EnumPlan::for_name(ws, child).and_then(|plan| plan.flat().cloned())
+                {
+                    cdata = false;
+                    scalarizable = false;
+                    fields.push((field.name, PlannedField::FlatEnum(flat.value_shape())));
+                    continue;
+                }
                 let Some(child_plan) = planned_value_rec(ws, child, visiting) else {
                     cdata = false;
                     scalarizable = false;
@@ -666,6 +742,18 @@ pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> 
     planned_value_rec(ws, name, &mut Vec::new())
 }
 
+pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bool {
+    fn contains(plan: &PlannedValue) -> bool {
+        plan.fields.iter().any(|(_, field)| match field {
+            PlannedField::FlatEnum(_) => true,
+            PlannedField::Nested(child) | PlannedField::Nullable(child) => contains(child),
+            PlannedField::Primitive(_) | PlannedField::Opaque => false,
+        })
+    }
+
+    planned_value(ws, name).is_some_and(|plan| contains(&plan))
+}
+
 /// `Some(ordered variant names)` iff `name` is a PAYLOAD-FREE enum (every variant
 /// `Unit`) — the tier-1 scalarizable case. The index is the variant's int tag.
 pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
@@ -689,6 +777,38 @@ pub(crate) fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) ->
         .iter()
         .position(|v| *v == variant)
         .map(|p| p as i64)
+}
+
+/// Whether a box a pack mints is the ordinary implicit one or the box
+/// `materialize(v)` asked for. The two RENDER identically; only the `nobox`
+/// guarantee distinguishes them, and it does so through the instruction the
+/// ctor lands in. Carried through the whole tree, so the nested boxes an
+/// explicit box has to build to exist are authorized with it.
+///
+/// This is the mint-time half of the authorization; `authorize_nobox_box` is the
+/// after-the-fact half, for a boundary (`@gpu_only`) whose arguments are already
+/// lowered by the time the compiler decides to sanction their box.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoxKind {
+    Implicit,
+    Explicit,
+}
+
+impl BoxKind {
+    pub(crate) fn value_ctor(
+        self,
+        name: Ustr,
+        representation: RepId,
+        form: ValueCtorForm,
+        fields: Vec<(Ustr, Idx<Inst>)>,
+    ) -> Inst {
+        match self {
+            BoxKind::Implicit => Inst::MakeValueStruct { name, representation, form, fields },
+            BoxKind::Explicit => {
+                Inst::MaterializeValueStruct { name, representation, form, fields }
+            }
+        }
+    }
 }
 
 /// The runtime carrier threaded through lowering: a value struct lives as an
@@ -761,6 +881,7 @@ pub(crate) enum SafeNavRecv {
 pub(crate) enum SpreadDest {
     Container(ContainerKind),
     Columns(ColumnElem),
+    Strided(ColumnElem),
 }
 
 /// The result repr of a swizzle: one selected component is the bare scalar;
@@ -2039,6 +2160,11 @@ impl FlatSlot {
 }
 
 impl EnumFlatShape {
+    /// Named physical columns shared by this enum's record variants.
+    pub fn record_fields(&self) -> &[Ustr] {
+        &self.record_fields
+    }
+
     /// Total positional SLOTS -- `_0 .. _{tuple_width-1}`. Distinct from the
     /// position count (`slots.len()`): a `nobox` position spans several.
     pub fn tuple_width(&self) -> usize {
@@ -2067,10 +2193,6 @@ impl EnumFlatShape {
 
     pub fn position_leaf_paths(&self, pos: usize, name: Ustr) -> Option<Vec<Ustr>> {
         self.position_shape(pos, Some(name)).map(value_leaf_paths)
-    }
-
-    pub fn record_fields(&self) -> &[Ustr] {
-        &self.record_fields
     }
 
     /// The number of scalar leaves this enum threads as across a call: the
@@ -2374,7 +2496,7 @@ pub fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<Yield
     else {
         return None;
     };
-    if name.as_str() != "Coroutine" {
+    if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
         return None;
     }
     let MonoTy::App {

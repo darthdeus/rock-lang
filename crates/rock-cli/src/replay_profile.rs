@@ -33,6 +33,10 @@ struct PlaybackRow {
     stream_upload_bytes: u64,
     streamed_vertices: u64,
     sections: Vec<PlaybackSection>,
+    image_replay_wait_us: u64,
+    image_upload_calls: u64,
+    image_upload_bytes: u64,
+    image_load_calls: u64,
 }
 
 fn parse_usize(value: &str, field: &str) -> Result<usize> {
@@ -89,7 +93,11 @@ fn parse_wire_row(line: &str) -> Result<PlaybackRow> {
         bail!("malformed replay profile row");
     }
     let section_count = parse_usize(fields[16], "section count")?;
-    if section_count > 12 || fields.len() != 17 + section_count * 3 {
+    if section_count > 12 {
+        bail!("malformed replay profile section population");
+    }
+    let tail = 17 + section_count * 3;
+    if fields.len() != tail && fields.len() != tail + 4 {
         bail!("malformed replay profile section population");
     }
     let gc = match fields[9] {
@@ -99,7 +107,7 @@ fn parse_wire_row(line: &str) -> Result<PlaybackRow> {
     };
     let mut names = HashSet::new();
     let mut sections = Vec::with_capacity(section_count);
-    for section in fields[17..].chunks_exact(3) {
+    for section in fields[17..tail].chunks_exact(3) {
         let name = decode_hex(section[0], "section name")?;
         let calls = parse_u64(section[2], "section calls")?;
         if name.is_empty() || calls == 0 || !names.insert(name.clone()) {
@@ -128,6 +136,10 @@ fn parse_wire_row(line: &str) -> Result<PlaybackRow> {
         stream_upload_bytes: parse_u64(fields[14], "stream upload bytes")?,
         streamed_vertices: parse_u64(fields[15], "streamed vertices")?,
         sections,
+        image_replay_wait_us: if fields.len() > tail { parse_u64(fields[tail], "image replay wait")? } else { 0 },
+        image_upload_calls: if fields.len() > tail { parse_u64(fields[tail + 1], "image upload calls")? } else { 0 },
+        image_upload_bytes: if fields.len() > tail { parse_u64(fields[tail + 2], "image upload bytes")? } else { 0 },
+        image_load_calls: if fields.len() > tail { parse_u64(fields[tail + 3], "image load calls")? } else { 0 },
     })
 }
 
@@ -152,6 +164,20 @@ fn recorded_profile_json(profile: Option<&RecordedProfile>) -> Value {
                 "calls": section.calls,
             })).collect::<Vec<_>>(),
         })
+    })
+}
+
+/// The tick the engine's checkpoint compare first found divergent, if any.
+/// The engine reports only the first (every later checkpoint on a drifted run
+/// diverges too), so the first match is the answer.
+fn first_divergent_tick(stderr: &[u8]) -> Option<u64> {
+    String::from_utf8_lossy(stderr).lines().find_map(|line| {
+        let rest = line.split("desync at tick ").nth(1)?;
+        let digits = rest
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())?;
+        digits.parse::<u64>().ok()
     })
 }
 
@@ -182,12 +208,24 @@ pub(crate) fn run(
     let requested_frames = to - from + 1;
     let compiled = compile_game_for_run(backend, game, &output)?;
     let playback_source = crate::stone::replay_source_for(game)?;
-    if replay.build != compiled.artifact_fingerprint {
-        bail!(
-            "replay Artifact mismatch: replay={}, current={}; exact playback is required",
+    // Drift is the expected case, not a rejection: a replay is an input log we
+    // re-run to MEASURE, and refusing every moved build would cost far more
+    // runs than the drift costs accuracy. Every row this run emits is labelled
+    // `exact_artifact: false` so its numbers cannot be read as an exact run's.
+    let exact_artifact = replay.build == compiled.artifact_fingerprint;
+    if !exact_artifact {
+        log::warn!(
+            target: "REPLAY",
+            "replay Artifact differs: replay={}, current={}; playback may diverge and its rows are labelled exact_artifact=false",
             replay.build,
             compiled.artifact_fingerprint
         );
+        if replay.checkpoint_interval == 0 {
+            log::warn!(
+                target: "REPLAY",
+                "this recording carries no desync checkpoints, so drift cannot be located: the rows are labelled inexact but no divergent tick can be named"
+            );
+        }
     }
     if replay.source != playback_source {
         bail!(
@@ -209,7 +247,10 @@ pub(crate) fn run(
     let mut any_failure = false;
 
     for run_index in 1..=runs {
-        let mut cmd = rock_host::project::build_luajit_command(&compiled.lua_file, app_args);
+        let mut cmd = crate::headless_scope::headless_command(rock_host::project::build_luajit_command(
+            &compiled.lua_file,
+            app_args,
+        ));
         cmd.env("FRAME_COUNT", (to + 1).to_string())
             .env("STONE_HEADLESS", "1")
             .env("STONE_REPLAY", replay_path)
@@ -298,7 +339,7 @@ pub(crate) fn run(
                         "playback_revision": row.revision,
                         "replay_build": replay.build,
                         "playback_build": compiled.artifact_fingerprint,
-                        "exact_artifact": true,
+                        "exact_artifact": exact_artifact,
                         "same_revision": replay.revision.is_empty() || replay.revision == row.revision,
                     },
                     "ordinal": row.ordinal,
@@ -309,6 +350,10 @@ pub(crate) fn run(
                         "logic_us": row.logic_us,
                         "render_us": row.render_us,
                         "present_us": row.present_us,
+                        "image_replay_wait_us": row.image_replay_wait_us,
+                        "image_upload_calls": row.image_upload_calls,
+                        "image_upload_bytes": row.image_upload_bytes,
+                        "image_load_calls": row.image_load_calls,
                     },
                     "input": {
                         "pressed_keys": set_difference(&current.keys, previous_keys),
@@ -355,6 +400,13 @@ pub(crate) fn run(
             );
         }
 
+        let divergent_tick = first_divergent_tick(&result.output.stderr);
+        if let Some(tick) = divergent_tick {
+            log::warn!(
+                target: "REPLAY",
+                "run {run_index} diverged from the recording at tick {tick}; its numbers describe a drifted simulation"
+            );
+        }
         let expected = (from..=to).collect::<Vec<_>>();
         let observed = parsed.iter().map(|row| row.ordinal).collect::<Vec<_>>();
         let status = if result.timed_out {
@@ -384,7 +436,7 @@ pub(crate) fn run(
                     "playback_revision": playback_revision,
                     "replay_build": replay.build,
                     "playback_build": compiled.artifact_fingerprint,
-                    "exact_artifact": true,
+                    "exact_artifact": exact_artifact,
                     "same_revision": replay.revision.is_empty()
                         || (!playback_revision.is_empty() && replay.revision == playback_revision),
                 },
@@ -396,7 +448,18 @@ pub(crate) fn run(
                 "exit_code": result.output.status.code(),
                 "timed_out": result.timed_out,
                 "error": parse_error,
-                "stderr_tail": if status == "complete" { String::new() } else { stderr_tail(&result.output.stderr) },
+                // A recording without checkpoints has no desync oracle at all,
+                // so `first_divergent_tick: null` there means UNKNOWN, not clean.
+                "divergence": {
+                    "checkpoint_interval": replay.checkpoint_interval,
+                    "detectable": replay.checkpoint_interval > 0,
+                    "first_divergent_tick": divergent_tick,
+                },
+                "stderr_tail": if status == "complete" && divergent_tick.is_none() {
+                    String::new()
+                } else {
+                    stderr_tail(&result.output.stderr)
+                },
             }))?
         );
     }
@@ -426,10 +489,22 @@ mod tests {
     }
 
     #[test]
+    fn wire_parser_preserves_image_work_and_wait_attribution() {
+        let legacy = "ROCK_REPLAY_PROFILE_ROW 2 616263 10 2 7 1 100 20 0 0 3 1 2 48 12 0";
+        assert_eq!(parse_wire_row(legacy).unwrap().image_replay_wait_us, 0);
+        let row = parse_wire_row(&format!("{legacy} 11 2 4096 3")).unwrap();
+        assert_eq!((row.image_replay_wait_us, row.image_upload_calls,
+            row.image_upload_bytes, row.image_load_calls), (11, 2, 4096, 3));
+        assert!(parse_wire_row(&format!("{legacy} 11 2 4096")).is_err());
+        assert!(parse_wire_row(&format!("{legacy} -1 2 4096 3")).is_err());
+    }
+
+    #[test]
     fn zero_runs_and_future_replay_versions_fail_closed() {
         assert!(validate_runs(0).is_err());
         assert!(validate_runs(1).is_ok());
-        assert!(ReplayReport::parse("STONE_REPLAY 14").is_err());
+        assert!(ReplayReport::parse("STONE_REPLAY 18").unwrap_err().to_string()
+            .contains("unsupported replay version 18"));
         assert!(parse_range("0-0", 0).is_err());
     }
 }

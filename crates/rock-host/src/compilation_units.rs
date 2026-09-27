@@ -43,7 +43,16 @@ pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnal
     let mut test_util_files = Vec::new();
 
     let dir_path_ref = dir_path.as_ref();
-    let rock_files = crate::project::find_rock_files_at_path(dir_path_ref)?;
+    let rock_files = if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(dir_path_ref)? {
+        let root = manifest.parent().unwrap_or(&manifest);
+        let graph = crate::stick::graph::PackageGraph::build_with_channel(
+            root, &config, &crate::stick::resolved_channel_for(&config),
+        )?;
+        graph.selected_rock_files(graph.root(), dir_path_ref)?
+            .into_iter().map(|path| path.to_string_lossy().into_owned()).collect()
+    } else {
+        crate::project::find_rock_files_at_path(dir_path_ref)?
+    };
 
     // Check if this is a tests directory or a directory without a project
     let is_tests_directory = dir_path_ref
@@ -195,47 +204,72 @@ pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Resul
     }
 }
 
+/// The owning package and source facts `graph` gives the file at the canonical
+/// `path`: what the loader stamps on every file it loads, and what a host
+/// declares for a file that enters an incremental session after its load
+/// (the editor opening a new file). `None` when no package owns the path: a
+/// standalone source, legacy and unowned.
+pub fn source_facts(
+    graph: &crate::stick::graph::PackageGraph,
+    path: &Path,
+) -> Option<(
+    rock_core::source_code::PackageTag,
+    rock_core::source_code::Dialect,
+    rock_core::source_code::MemoryClass,
+    rock_core::source_code::GlobalPolicy,
+)> {
+    let owner = graph.package_of_file(path)?;
+    if !graph.includes_file(owner, path) {
+        return None;
+    }
+    let node = graph.package(owner);
+    Some((
+        rock_core::source_code::PackageTag { id: node.id.0, self_name: node.self_name.clone() },
+        node.dialect,
+        node.memory_class,
+        node.global_policy,
+    ))
+}
+
 /// Load SourceFiles based on a compilation unit
 pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<SourceFiles> {
     match unit {
         CompilationUnit::Project(files) => {
             // Load stick.toml dependencies for project compilation
             let mut all_files = Vec::new();
+            let mut graph = None;
 
             // Try to find stick.toml in the project directory
             if let Some(first_file) = files.first() {
                 if let Some(project_dir) = first_file.parent() {
                     if let Some((stick_path, stick_config)) = crate::stick::StickConfig::find_from_dir(project_dir)? {
-                        // Load dependencies from stick.toml
+                        // Resolve every package through the one graph, so the
+                        // LSP's file set matches a real compile on the same
+                        // channel: recursive, manifest-relative, channel-filtered.
+                        let channel = crate::stick::resolved_channel_for(&stick_config);
                         let stick_dir = stick_path.parent().unwrap_or(&stick_path);
+                        let resolved = crate::stick::graph::PackageGraph::build_with_channel(
+                            stick_dir,
+                            &stick_config,
+                            &channel,
+                        )?;
 
-                        for (dep_name, dep) in &stick_config.dependencies {
-                            // Resolve dependency path
-                            let dep_path = match dep {
-                                crate::stick::Dependency::Path(path) => {
-                                    stick_dir.join(path)
-                                }
-                                crate::stick::Dependency::Detailed(detailed) => {
-                                    stick_dir.join(&detailed.path)
-                                }
-                            };
+                        for id in resolved.load_order() {
+                            if *id == resolved.root() {
+                                continue;
+                            }
+                            let node = resolved.package(*id);
+                            let dep_files = resolved.selected_rock_files(*id, &node.root)?;
 
-                            if dep_path.exists() && dep_path.is_dir() {
-                                // Load all .rock files from the dependency directory
-                                let dep_files = crate::project::find_rock_files_at_path(&dep_path)?;
-
-                                // Filter out script files
-                                for dep_file_path in dep_files {
-                                    let path = PathBuf::from(&dep_file_path);
-                                    let source = source_file_new(&path)?;
-                                    if !source.is_script {
-                                        all_files.push(path);
-                                    }
+                            // Filter out script files
+                            for path in dep_files {
+                                let source = source_file_new(&path)?;
+                                if !source.is_script {
+                                    all_files.push(path);
                                 }
-                            } else {
-                                eprintln!("Warning: Dependency '{}' not found at {:?}", dep_name, dep_path);
                             }
                         }
+                        graph = Some(resolved);
                     }
                 }
             }
@@ -244,7 +278,31 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
             // ready before a consuming project's global initializers.
             all_files.extend(files.clone());
 
-            load_sources_from_paths(&all_files)
+            let mut sources = load_sources_from_paths(&all_files)?;
+
+            // Stamp package and dialect facts from the graph onto every file
+            // it owns, so downstream consumers (parser dialect selection,
+            // module scoping) never infer ownership from inclusion order.
+            if let Some(graph) = graph.as_ref() {
+                sources.set_package_roots(
+                    graph
+                        .packages()
+                        .iter()
+                        .map(|node| (node.id.0, node.root.clone())),
+                );
+                for file in &sources.files {
+                    let path = file.borrow().file.to_id_path();
+                    if let Some((package, dialect, memory_class, global_policy)) = source_facts(graph, Path::new(&path)) {
+                        let mut f = file.borrow_mut();
+                        f.package = Some(package);
+                        f.dialect = dialect;
+                        f.memory_class = memory_class;
+                        f.global_policy = global_policy;
+                    }
+                }
+            }
+
+            Ok(sources)
         }
         CompilationUnit::Script { file, used_packages } => {
             if used_packages.is_empty() {
@@ -327,7 +385,10 @@ fn load_sources_from_paths(paths: &[PathBuf]) -> Result<SourceFiles> {
         sources.push(Arc::new(AtomicRefCell::new(source_file)));
     }
 
-    Ok(SourceFiles { files: sources })
+    Ok(SourceFiles {
+        files: sources,
+        package_roots: Vec::new(),
+    })
 }
 
 /// True iff the file's first non-blank line is `//! @no_check`.

@@ -1,0 +1,26 @@
+fn main() {
+    stone_run_game(GameConfig {
+        title: "sim-memory-cap",
+        width: 640,
+        height: 360,
+        vsync: 0,
+        clear_color: color(0.0, 0.0, 0.0, 1.0),
+        esc_quits: true,
+        cap_height_fonts: true,
+    })
+}
+
+global MEMORY_CAP_HOARD: [[int]] = []
+
+// Grows without bound until something outside the game stops it.
+@sim_env("FRAME_COUNT", "100000")
+@sim
+co fn memory_cap_stops_a_runaway() -> Coroutine<Wait> {
+    start_game "sim-memory-cap"
+    while true {
+        let chunk: [int] = []
+        for i in 0..200000 { chunk.push(i) }
+        MEMORY_CAP_HOARD.push(chunk)
+        yield wait_frame()
+    }
+}

@@ -195,8 +195,96 @@ fn replay_profile_preserves_an_incomplete_run_instead_of_ranking_it_as_zero() {
     );
 }
 
+/// End to end: a drifted run names the tick it drifted at. The recording keeps
+/// its desync checkpoints, one recorded hash is tampered with (standing in for
+/// a simulation that actually drifts), and the build id is moved so the run is
+/// labelled inexact. The profiler must still emit its range AND report the
+/// divergent tick, because a benchmark number from a drifted run is only
+/// readable next to where it drifted.
 #[test]
-fn replay_profile_rejects_a_different_artifact_before_spawning_playback() {
+fn replay_profile_reports_the_tick_a_drifted_run_diverged_at() {
+    let dir = tempfile::tempdir().expect("replay divergence scratch");
+    let replay = dir.path().join("divergent.replay");
+    let recorded = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", "bitgun", "-n", "30",
+            "--record", replay.to_str().unwrap(),
+            "--checkpoint-interval", "10",
+            "--output", dir.path().join("record-out").to_str().unwrap(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("record replay");
+    assert!(
+        recorded.status.success(),
+        "record failed:\n{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+
+    let text = std::fs::read_to_string(&replay).unwrap();
+    let checkpoint = text
+        .lines()
+        .find(|line| line.starts_with("c "))
+        .expect("K=10 over 30 frames must emit checkpoints")
+        .to_string();
+    let fields = checkpoint.split(' ').collect::<Vec<_>>();
+    let (tick, name) = (fields[1].to_string(), fields[2].to_string());
+    let build_line = text.lines().find(|line| line.starts_with("build ")).unwrap();
+    let tampered = text
+        .replacen(&checkpoint, &format!("c {tick} {name} deadbeefdeadbeef"), 1)
+        .replacen(build_line, "build ffffffffffffffff", 1);
+    std::fs::write(&replay, tampered).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "replay-profile", "bitgun", replay.to_str().unwrap(),
+            "--range", "12-14",
+            "--output", dir.path().join("profile-out").to_str().unwrap(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("profile drifted replay");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "a drifted run must still complete its range\nstderr:\n{stderr}"
+    );
+    let rows = String::from_utf8(output.stdout)
+        .expect("UTF-8 profile output")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSONL row"))
+        .collect::<Vec<_>>();
+    let terminal = rows
+        .iter()
+        .find(|row| row["kind"] == "run")
+        .expect("terminal row");
+    assert_eq!(terminal["status"], "complete");
+    assert_eq!(terminal["identity"]["exact_artifact"], false);
+    assert_eq!(terminal["divergence"]["checkpoint_interval"], 10);
+    assert_eq!(
+        terminal["divergence"]["first_divergent_tick"].as_u64(),
+        Some(tick.parse::<u64>().unwrap()),
+        "the terminal row must name the tick the run drifted at: {terminal:#?}"
+    );
+    assert!(
+        terminal["stderr_tail"].as_str().unwrap().contains("desync"),
+        "a divergent run keeps its diagnostic evidence: {terminal:#?}"
+    );
+    assert!(
+        stderr.contains(&format!("diverged from the recording at tick {tick}")),
+        "the operator must be told at the terminal too: {stderr}"
+    );
+}
+
+/// A recording whose Artifact has moved still profiles: divergence is the
+/// accepted default and only the LABEL has to be honest, so the run warns,
+/// measures its range, and stamps `exact_artifact: false` on every row it
+/// emits. The old behavior -- rejecting before spawning playback -- cost every
+/// benchmark run on a changed build.
+#[test]
+fn replay_profile_warns_and_labels_a_different_artifact_instead_of_rejecting() {
     let dir = tempfile::tempdir().expect("replay profile identity scratch");
     let replay = record_fixture(dir.path());
     let text = std::fs::read_to_string(&replay).unwrap();
@@ -216,17 +304,48 @@ fn replay_profile_rejects_a_different_artifact_before_spawning_playback() {
             "--output",
             dir.path().join("profile-out").to_str().unwrap(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("profile mismatched replay");
-    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
-        output.stdout.is_empty(),
-        "mismatch must reject before a measured row exists"
+        output.status.success(),
+        "a moved Artifact must still profile:\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("replay Artifact mismatch"),
-        "mismatch must name both identities: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("replay Artifact differs")
+            && stderr.contains("ffffffffffffffff"),
+        "the warning must name both identities: {stderr}"
+    );
+    let rows = String::from_utf8(output.stdout)
+        .expect("UTF-8 profile output")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSONL row"))
+        .collect::<Vec<_>>();
+    assert!(
+        rows.iter().any(|row| row["kind"] == "frame"),
+        "the drifted run must still produce measured rows: {rows:#?}"
+    );
+    let terminal = rows
+        .iter()
+        .find(|row| row["kind"] == "run")
+        .expect("terminal row");
+    assert_eq!(terminal["status"], "complete");
+    for row in &rows {
+        assert_eq!(
+            row["identity"]["exact_artifact"], false,
+            "every row of a drifted run must be labelled inexact: {row:#?}"
+        );
+        assert_eq!(row["identity"]["replay_build"], "ffffffffffffffff");
+        assert_ne!(
+            row["identity"]["replay_build"],
+            row["identity"]["playback_build"]
+        );
+    }
+    assert!(
+        terminal["divergence"]["detectable"].as_bool().unwrap(),
+        "the fixture records checkpoints, so drift is locatable: {terminal:#?}"
     );
 }

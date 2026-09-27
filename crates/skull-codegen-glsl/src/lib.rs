@@ -41,12 +41,13 @@ use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::lower::{ScalarCtx, SpecSubst};
 use skull_mir::instance::Instance;
+use skull_mir::mangle::{declared_name, symbol_of_key};
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
     FragmentOutput, LogicalSampler, ShaderIR, ShaderStageIr,
     LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, LogicalVarying,
-    LogicalVertexInput, ShaderInstance, ShaderInterfacePlan, ShaderStage,
+    LogicalVertexInput, NominalType, ShaderInstance, ShaderInterfacePlan, ShaderStage,
     ShaderStage as IrStage, UniformRole,
     VertexRate,
 };
@@ -269,7 +270,7 @@ fn fold_const_expr(
         Expr::Int(i) => Some(Lit::Int(i)),
         Expr::Float(f) => Some(Lit::Float(f.into_inner())),
         Expr::Bool(b) => Some(Lit::Bool(b)),
-        Expr::UnaryMinus(inner) => match fold_const_expr(ws, module, body, inner, depth)? {
+        Expr::UnaryMinus(inner, _) => match fold_const_expr(ws, module, body, inner, depth)? {
             Lit::Int(i) => Some(Lit::Int(-i)),
             Lit::Float(f) => Some(Lit::Float(-f)),
             _ => None,
@@ -513,6 +514,8 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
     ("frag_coord", 0, "gl_FragCoord"),
     ("fwidth", 1, "fwidth($1)"),
+    ("dfdx", 1, "dFdx($1)"),
+    ("dfdy", 1, "dFdy($1)"),
     ("discard", 0, "discard"),
     ("vertex_id", 0, "gl_VertexID"),
     // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
@@ -536,7 +539,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
 /// a GLSL fn definition. Backs [`GlslIntrinsics::lookup`].
 fn intrinsic_template(f: &Function) -> Option<&'static str> {
-    let n = f.name.as_str();
+    let n = declared_name(f.name.as_str());
     let arity = f.param_decls.iter().count();
     GLSL_INTRINSICS
         .iter()
@@ -570,7 +573,7 @@ impl IntrinsicTable for GlslIntrinsics {
 /// this predicate: lowering turns them into native MIR instructions.
 pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
-        || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
+        || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.iter().count() == 2)
 }
 
 /// The graph sees HIR call obligations before scalar operators are lowered away,
@@ -585,7 +588,7 @@ pub fn renders_inline_instance(
     if GlslIntrinsics.lookup(f).is_some() {
         return true;
     }
-    if vec_op_symbol(f.name.as_str()).is_none() || f.param_decls.iter().count() != 2 {
+    if vec_op_symbol(declared_name(f.name.as_str())).is_none() || f.param_decls.iter().count() != 2 {
         return false;
     }
     let subst = inst.subst(ws, interner);
@@ -609,7 +612,7 @@ pub fn is_lowered_native_operator(
     interner: &MonoInterner,
 ) -> bool {
     if !matches!(
-        f.name.as_str(),
+        declared_name(f.name.as_str()),
         "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_idiv" | "__op_mod"
     ) || f.param_decls.iter().count() != 2
         || renders_inline_instance(ws, f, inst, interner)
@@ -941,7 +944,7 @@ fn emit_fn_def_with(
     let name = if emits_main {
         "main".to_string()
     } else if entry.is_some() {
-        f.name.as_str().to_string()
+        symbol_of_key(f.name).to_string()
     } else {
         glsl_name(ws, interner, inst)
     };
@@ -1129,7 +1132,19 @@ impl FnEmit<'_> {
     fn assign_cell_names(&mut self) {
         let mut used: HashSet<String> = HashSet::default();
         for (cid, cell) in self.f.cells.iter() {
-            let base = cell.name.map(|n| n.as_str().to_string()).unwrap_or_else(|| format!("t{}", cid.into_raw().into_u32()));
+            let base = cell
+                .name
+                .map(|n| {
+                    let mut s = n.as_str().to_string();
+                    if let Some(stripped) = s.strip_prefix("__rock_") {
+                        s = stripped.to_string();
+                    }
+                    while s.contains("__") {
+                        s = s.replace("__", "_");
+                    }
+                    s
+                })
+                .unwrap_or_else(|| format!("t{}", cid.into_raw().into_u32()));
             let mut name = base.clone();
             let mut k = 0;
             while used.contains(&name) {
@@ -1445,7 +1460,7 @@ impl FnEmit<'_> {
                         // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
                         // GLSL's result type is the argument type. Load-bearing under
                         // ES300, which has no implicit int->float on assignment.
-                        None if matches!(cf.name.as_str(), "min" | "max" | "clamp" | "abs")
+                        None if matches!(declared_name(cf.name.as_str()), "min" | "max" | "clamp" | "abs")
                             && !args.is_empty() =>
                         {
                             self.ty_of(args[0])?
@@ -1542,8 +1557,8 @@ impl FnEmit<'_> {
                 self.render_val_t(*b, GlslTy::Float)?
             ),
             // GLSL int / and % are undefined on negatives -> floored helpers.
-            Inst::IntDiv(a, b) => format!("__rock_idiv({}, {})", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::IntMod(a, b) => format!("__rock_imod({}, {})", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::IntDiv(a, b) => format!("rock_idiv({}, {})", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::IntMod(a, b) => format!("rock_imod({}, {})", self.render_val(*a)?, self.render_val(*b)?),
             Inst::IntLt(a, b) => bin(a, "<", b, self)?,
             Inst::FloatLt(a, b) => fbin(a, "<", b, self)?,
             Inst::IntLeq(a, b) => bin(a, "<=", b, self)?,
@@ -1634,7 +1649,7 @@ impl FnEmit<'_> {
         let cf = &self.ws.module(func.module).functions[func.func];
         let callee = self.callee_inst(iid);
         let param_types = self.call_param_types(iid, cf)?;
-        let name = cf.name.as_str();
+        let name = declared_name(cf.name.as_str());
         // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
         // operand (`*(Vec2, int)`) is cast to float (GLSL has no vec*int).
         if let Some(sym) = vec_op_symbol(name) {
@@ -1930,6 +1945,7 @@ impl FnEmit<'_> {
                 let s = self.render_val_t(val, want)?;
                 self.push(&format!("{target} = {s};"));
             }
+            self.push("return;");
             return Ok(());
         }
         match vs {
@@ -2121,12 +2137,12 @@ fn helper_prelude(uses_idiv: bool, uses_imod: bool) -> String {
     let mut s = String::new();
     if uses_idiv {
         s.push_str(
-            "int __rock_idiv(int a, int b) {\n  return int(floor(float(a) / float(b)));\n}\n",
+            "int rock_idiv(int a, int b) {\n  return int(floor(float(a) / float(b)));\n}\n",
         );
     }
     if uses_imod {
         s.push_str(
-            "int __rock_imod(int a, int b) {\n  return a - b * int(floor(float(a) / float(b)));\n}\n",
+            "int rock_imod(int a, int b) {\n  return a - b * int(floor(float(a) / float(b)));\n}\n",
         );
     }
     s
@@ -2794,12 +2810,13 @@ pub struct BlockWire<'a> {
 
 impl<'a> BlockWire<'a> {
     pub fn of(
-        scalar: impl Iterator<Item = &'a (u32, UniformBlockPlan)>,
+        scalar: impl Iterator<Item = &'a (u32, GlslUniformBlock)>,
         arrays: impl Iterator<Item = &'a (u32, UniformArrayBlockPlan)>,
     ) -> Self {
         let mut w = BlockWire::default();
-        for (binding, p) in scalar {
-            w.names.push(p.struct_name.as_str());
+        for (binding, block) in scalar {
+            let p = &block.plan;
+            w.names.push(block.name.as_str());
             w.bindings.push(*binding as i64);
             w.sizes.push(p.size as i64);
             w.fingerprints.push(p.fingerprint() as i64);
@@ -2816,7 +2833,7 @@ impl<'a> BlockWire<'a> {
             }
         }
         for (binding, p) in arrays {
-            w.names.push(p.block_name.as_str());
+            w.names.push(symbol_of_key(p.block_name).as_str());
             w.bindings.push(*binding as i64);
             w.sizes.push(p.size as i64);
             w.fingerprints.push(p.fingerprint() as i64);
@@ -2949,11 +2966,12 @@ fn validate_abi(
     if let Some(w) = expected.windows(2).find(|w| w[0].0 == w[1].0) {
         return Err(err(span, format!(
             "internal: the interface declares two uniform groups at binding {} (`{}` and `{}`)",
-            w[0].0, w[0].1.struct_name, w[1].1.struct_name
+            w[0].0, w[0].1.struct_name.key, w[1].1.struct_name.key
         )));
     }
     let mut seen: HashSet<u32> = HashSet::default();
-    for (b, plan) in &abi.uniform_blocks {
+    for (b, block) in &abi.uniform_blocks {
+        let plan = &block.plan;
         if !seen.insert(*b) {
             return Err(err(span, format!(
                 "internal: the GLSL ABI plan holds more than one uniform block at binding {b}"
@@ -2965,10 +2983,11 @@ fn validate_abi(
                  interface group claims"
             )));
         };
-        if plan.struct_name != g.struct_name {
+        if (plan.struct_name, block.name) != (g.struct_name.key, g.struct_name.symbol) {
             return Err(err(span, format!(
-                "internal: binding {b} holds block `{}` but the interface's group there is `{}`",
-                plan.struct_name, g.struct_name
+                "internal: binding {b} holds block `{}` (`{}`) but the interface's group there is \
+                 `{}` (`{}`)",
+                plan.struct_name, block.name, g.struct_name.key, g.struct_name.symbol
             )));
         }
         let laid: Vec<(Ustr, WireKind)> = plan.members.iter().map(|m| (m.name, m.kind)).collect();
@@ -2985,7 +3004,7 @@ fn validate_abi(
             return Err(err(span, format!(
                 "internal: the interface declares group `{}` at binding {b}, which the GLSL ABI \
                  plan has no block for -- its members would be referenced without being declared",
-                g.struct_name
+                g.struct_name.key
             )));
         }
     }
@@ -3120,8 +3139,8 @@ fn validate_abi(
 /// referencing what it never declared is a driver compile error with no
 /// compiler diagnostic at all.
 struct StageAbi<'a> {
-    uniform_block: Option<&'a UniformBlockPlan>,
-    engine_block: Option<&'a UniformBlockPlan>,
+    uniform_block: Option<&'a GlslUniformBlock>,
+    engine_block: Option<&'a GlslUniformBlock>,
     array_block: Option<&'a UniformArrayBlockPlan>,
     samplers: Vec<(Ustr, SamplerKind)>,
 }
@@ -3348,7 +3367,7 @@ fn logical_uniform_group(
 ) -> Result<LogicalUniformGroup, CompilerError> {
     Ok(LogicalUniformGroup {
         role,
-        struct_name,
+        struct_name: NominalType::of(ws, struct_name),
         members: logical_members(ws, struct_name, span)?,
     })
 }
@@ -3368,7 +3387,7 @@ fn logical_textures(
     }
     let ts = texture_slots(ws, g).map_err(|e| err(span, e.message))?;
     Ok(Some(LogicalTextureGroup {
-        struct_name: Some(g),
+        struct_name: Some(NominalType::of(ws, g)),
         samplers: ts.slots.iter().map(|s| (s.name, s.kind)).collect(),
         stages,
     }))
@@ -3398,7 +3417,7 @@ pub struct ShaderAbiPlan {
     ///
     /// The single authority for each block's bytes: the GLSL declaration, the
     /// CPU packer and the link-time driver assertion all read it.
-    pub uniform_blocks: Vec<(u32, UniformBlockPlan)>,
+    pub uniform_blocks: Vec<(u32, GlslUniformBlock)>,
     /// `UniformArray<T>` blocks with their bindings -- one per stage that
     /// declares `@size(N)` params.
     ///
@@ -3460,11 +3479,11 @@ impl ShaderAbiPlan {
         // a layout is a function of the member list, which is what lets a
         // perturbed interface produce a perturbed layout and a second target
         // lay the same members out its own way.
-        let mut uniform_blocks: Vec<(u32, UniformBlockPlan)> = Vec::new();
+        let mut uniform_blocks: Vec<(u32, GlslUniformBlock)> = Vec::new();
         for g in &iface.uniform_groups {
-            let plan = skull_mir::gpu_layout::std140_block(g.struct_name, &g.members, Some(span))
+            let plan = skull_mir::gpu_layout::std140_block(g.struct_name.key, &g.members, Some(span))
                 .map_err(|e| err(span, e.message))?;
-            uniform_blocks.push((binding(g.role), plan));
+            uniform_blocks.push((binding(g.role), GlslUniformBlock { name: g.struct_name.symbol, plan }));
         }
         uniform_blocks.sort_by_key(|(b, _)| *b);
 
@@ -3498,8 +3517,18 @@ impl ShaderAbiPlan {
     }
 
     pub fn block_at(&self, binding: u32) -> Option<&UniformBlockPlan> {
-        self.uniform_blocks.iter().find(|(b, _)| *b == binding).map(|(_, p)| p)
+        self.uniform_blocks.iter().find(|(b, _)| *b == binding).map(|(_, p)| &p.plan)
     }
+}
+
+/// One std140 block of a GLSL program. `name` is the group type's symbol, which
+/// the declaration, the block wire and the semantic wire all spell; the plan's
+/// `struct_name` stays the DefKey, because the fingerprint hashes it and the CPU
+/// packer's plan of the same type must hash the same bytes.
+#[derive(Clone, Debug)]
+pub struct GlslUniformBlock {
+    pub name: Ustr,
+    pub plan: UniformBlockPlan,
 }
 
 /// How many attribute LOCATIONS one attribute kind occupies. Every kind
@@ -3507,6 +3536,37 @@ impl ShaderAbiPlan {
 /// this is a function rather than an `enumerate()` index.
 fn attr_location_span(_k: AttrKind) -> u32 {
     1
+}
+
+/// Texture image units every GLSL target guarantees per stage: GL 4.1 core
+/// (Apple's only desktop context) and GLES 3.0 both promise 16. Desktop Linux
+/// drivers allow more, so a program over it linked there and failed to link
+/// on a Mac; checking at compile time makes every host refuse it.
+pub const GLSL_STAGE_SAMPLER_BUDGET: usize = 16;
+
+/// Refuse a stage that declares more samplers than every GLSL target has
+/// units for. Counts DECLARED samplers (group plus bare) rather than the ones
+/// a driver keeps active: the budget has to hold before any optimizer runs.
+fn check_stage_sampler_budget(
+    iface: &ShaderInterfacePlan,
+    stage: IrStage,
+    entry: &str,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let count = iface.stage_samplers(stage).len();
+    if count <= GLSL_STAGE_SAMPLER_BUDGET {
+        return Ok(());
+    }
+    let name = match stage {
+        IrStage::Vertex => "vertex",
+        IrStage::Fragment => "fragment",
+        IrStage::Compute => "compute",
+    };
+    Err(err(span, format!(
+        "shader `{entry}`: the {name} stage declares {count} samplers, over the \
+         {GLSL_STAGE_SAMPLER_BUDGET} texture units GL 4.1 core (macOS) and GLES 3.0 guarantee \
+         per stage -- pack inputs into shared textures"
+    )))
 }
 
 pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
@@ -3522,7 +3582,7 @@ pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: u32 = 4;
 /// other. A collision with a user's `@uniform` group name is possible and is
 /// rejected (`check_block_name_collisions`), never renamed around.
 fn array_block_name(entry: Ustr) -> Ustr {
-    Ustr::from(&format!("{entry}_Arrays"))
+    Ustr::from(&format!("{}_Arrays", symbol_of_key(entry)))
 }
 
 /// **One stage's validated plan**: its lowered body, the emittable helpers it
@@ -3767,6 +3827,7 @@ fn plan_shader_entry_inner(
         ..Default::default()
     };
     skull_codegen_shader::check_entry_collisions(&interface, f.name_span)?;
+    check_stage_sampler_budget(&interface, IrStage::Fragment, &f.name, f.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
     let shape = entry_shape(&class.global_params, &class.sampler_params, &interface);
     Ok(EntryPlan { fref, shape, stage, interface, abi })
@@ -3891,7 +3952,10 @@ fn render_shader_entry(
         Some(entry_plan),
     )?);
     px.push('\n');
-    px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
+    px.push_str(&format!(
+        "void main() {{\n  FragColor = {}(TexCoord);\n}}\n",
+        symbol_of_key(f.name)
+    ));
 
     // Both stages carry the profile's precision preamble: ES requires an
     // explicit fragment float precision, and the vertex declarations are
@@ -4105,7 +4169,10 @@ fn classify_array_param(
 /// declaration and a layout drift into disagreeing, and "one layout authority"
 /// would stop being true the moment it existed.
 fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
-    let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
+    let mut s = format!(
+        "layout(std140) uniform {} {{\n",
+        symbol_of_key(plan.block_name)
+    );
     for m in &plan.members {
         s.push_str(&format!("    {} {}[{}];\n", wire_glsl_ty(m.elem), m.name, m.capacity));
     }
@@ -4145,9 +4212,9 @@ fn wire_glsl_ty(k: WireKind) -> &'static str {
 /// single-oracle rule `VertexShape.attrs` follows for attributes. The driver
 /// resolves members by name, so the names here and the offsets the packer writes
 /// must come from one place or they can drift silently.
-fn uniform_block_decl(plan: &UniformBlockPlan) -> String {
-    let mut s = format!("layout(std140) uniform {} {{\n", plan.struct_name);
-    for m in &plan.members {
+fn uniform_block_decl(block: &GlslUniformBlock) -> String {
+    let mut s = format!("layout(std140) uniform {} {{\n", block.name);
+    for m in &block.plan.members {
         s.push_str(&format!("    {} {};\n", wire_glsl_ty(m.kind), m.name));
     }
     s.push_str("};\n");
@@ -4334,7 +4401,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
             .ok_or_else(|| err(span, "shader vertex: attribute param must be a value struct"))?;
         let va = vertex_attrs(ws, sname).map_err(|e| err(span, e.message))?;
         inputs.push(LogicalVertexInput {
-            struct_name: sname,
+            struct_name: NominalType::of(ws, sname),
             rate: if n < instanced_from { VertexRate::PerVertex } else { VertexRate::PerInstance },
             attrs: va.attrs.iter().map(|a| (a.name, a.kind)).collect(),
         });
@@ -4713,7 +4780,7 @@ fn emit_fragment_stage(
         out.push('\n');
         out.push_str(&format!(
             "void main() {{\n  FragColor = {}();\n}}\n",
-            ws.module(fref.module).functions[fref.func].name
+            symbol_of_key(ws.module(fref.module).functions[fref.func].name)
         ));
     }
     Ok((out, dependencies))
@@ -4788,7 +4855,7 @@ fn check_pipeline_collisions(
 /// different name instead is the fallback this repo does not take -- the
 /// compiler's job is to refuse the program.
 fn check_block_name_collisions<'a>(
-    scalar: impl Iterator<Item = &'a UniformBlockPlan>,
+    scalar: impl Iterator<Item = &'a GlslUniformBlock>,
     arrays: impl Iterator<Item = &'a UniformArrayBlockPlan>,
     span: Span,
 ) -> Result<(), CompilerError> {
@@ -4797,14 +4864,14 @@ fn check_block_name_collisions<'a>(
     // scalar list is deduped by identity before the census rather than after --
     // otherwise it collides with itself.
     let names = scalar
-        .map(|p| p.struct_name)
+        .map(|p| (p.plan.struct_name, p.name))
         .collect::<HashSet<_>>()
         .into_iter()
-        .chain(arrays.map(|p| p.block_name));
-    for n in names {
-        if !seen.insert(n) {
+        .chain(arrays.map(|p| (p.block_name, symbol_of_key(p.block_name))));
+    for (logical, physical) in names {
+        if !seen.insert(physical) {
             return Err(err(span, format!(
-                "shader pipeline: uniform block name `{n}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
+                "shader pipeline: uniform block name `{logical}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
             )));
         }
     }
@@ -5009,6 +5076,8 @@ fn plan_shader_pipeline_inner(
     };
 
     check_pipeline_collisions(&interface, vf.name_span)?;
+    check_stage_sampler_budget(&interface, IrStage::Vertex, &vf.name, vf.name_span)?;
+    check_stage_sampler_budget(&interface, IrStage::Fragment, &ff.name, ff.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, vf.name_span)?;
     check_block_name_collisions(
         abi.uniform_blocks.iter().map(|(_, p)| p),
@@ -5197,7 +5266,7 @@ impl ValueTestRet {
 }
 
 /// A complete GLSL shader pair driving one `@test(returns = ...)` value test
-/// (`docs/multi-backend-testing-plan.md` G1). The fragment shader wraps the
+/// (`docs/backends.md`). The fragment shader wraps the
 /// emitted root fn and writes its scalar result to `layout(location = 0)`; the
 /// vertex shader draws a fullscreen triangle (no vertex attributes). Both carry
 /// the profile's `#version` line so the GL runner compiles them as one program.
@@ -5459,6 +5528,11 @@ mod assertion_flip_tests {
         assert!(out.contains("doubled_float_ret_float("), "{out}");
     }
 
+    /// A legacy-spelled type: its key is already its symbol.
+    fn nominal(name: &str) -> NominalType {
+        NominalType { key: Ustr::from(name), symbol: Ustr::from(name) }
+    }
+
     /// A fragment-only interface with an engine group, a stage group, an array
     /// group and two samplers -- one of every physical entry, so each arm below
     /// perturbs exactly one of them.
@@ -5470,12 +5544,12 @@ mod assertion_flip_tests {
             uniform_groups: vec![
                 LogicalUniformGroup {
                     role: UniformRole::Engine,
-                    struct_name: Ustr::from("EngineU"),
+                    struct_name: nominal("EngineU"),
                     members: vec![(Ustr::from("time"), WireKind::F32)],
                 },
                 LogicalUniformGroup {
                     role: UniformRole::Stage(IrStage::Fragment),
-                    struct_name: Ustr::from("FragU"),
+                    struct_name: nominal("FragU"),
                     members: vec![(Ustr::from("cutoff"), WireKind::F32)],
                 },
             ],
@@ -5490,7 +5564,7 @@ mod assertion_flip_tests {
                 }],
             }],
             textures: Some(LogicalTextureGroup {
-                struct_name: Some(Ustr::from("Tex")),
+                struct_name: Some(nominal("Tex")),
                 samplers: vec![
                     (Ustr::from("a"), SamplerKind::Float),
                     (Ustr::from("b"), SamplerKind::Float),
@@ -5568,10 +5642,21 @@ mod assertion_flip_tests {
         let mut m = abi.clone();
         for (b, p) in m.uniform_blocks.iter_mut() {
             if *b == UNIFORM_BLOCK_BINDING_FRAGMENT {
-                p.members[0].name = Ustr::from("renamed");
+                p.plan.members[0].name = Ustr::from("renamed");
             }
         }
         assert!(reject(&m, "a renamed member").contains("but the interface declares"));
+
+        // WRONG NAME on the right block: the declaration and the block wire
+        // spell `name`, and the semantic wire spells the group's symbol, so the
+        // runtime's by-name join would miss.
+        let mut m = abi.clone();
+        for (b, p) in m.uniform_blocks.iter_mut() {
+            if *b == UNIFORM_BLOCK_BINDING_FRAGMENT {
+                p.name = Ustr::from("FragU_renamed");
+            }
+        }
+        assert!(reject(&m, "a renamed block").contains("FragU_renamed"));
 
         // WRONG CAPACITY in an array block -- what an `@size(N)` change moves,
         // and what a block-name check alone cannot see.
@@ -5645,7 +5730,7 @@ mod assertion_flip_tests {
         let iface = ShaderInterfacePlan {
             stages: vec![IrStage::Vertex],
             vertex_inputs: vec![LogicalVertexInput {
-                struct_name: Ustr::from("V"),
+                struct_name: nominal("V"),
                 rate: VertexRate::PerVertex,
                 attrs: vec![
                     (Ustr::from("a"), AttrKind::F32x2),
@@ -5731,7 +5816,7 @@ mod assertion_flip_tests {
         let mut two_roles = base.clone();
         two_roles.uniform_groups.push(LogicalUniformGroup {
             role: UniformRole::Stage(IrStage::Fragment),
-            struct_name: Ustr::from("OtherU"),
+            struct_name: nominal("OtherU"),
             members: vec![(Ustr::from("x"), WireKind::F32)],
         });
         let msg = validate_abi(&two_roles, &abi, Span::default())

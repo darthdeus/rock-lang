@@ -3217,6 +3217,9 @@ pub fn validate_no_residual_bound_calls(
             }
         }
     }
+    for nested in &mf.nested_fns {
+        validate_no_residual_bound_calls(ws, f, nested)?;
+    }
     Ok(())
 }
 

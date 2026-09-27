@@ -22,8 +22,8 @@ use comfy_la_arena::Idx;
 use crate::scope::{non_dominating_by_value_captures, Ownership, ScopeId, ScopeTree};
 use skull_mir::cfg::reachable_blocks_from;
 use skull_mir::code_identity::{
-    CaptureField, CaptureMode, CaptureSchema, CodeCompatibility, CodeIdentity, FrameSchema,
-    LambdaSiteId, LambdaTopologyFingerprint,
+    CaptureField, CaptureIdentity, CaptureMode, CaptureSchema, CodeCompatibility, CodeIdentity,
+    FrameSchema, LambdaSiteId, LambdaTopologyFingerprint,
 };
 use skull_mir::mir::*;
 use ustr::Ustr;
@@ -542,10 +542,8 @@ fn capture_schema(
     let fields = captures
         .iter()
         .map(|cell| {
-            let name = mf.cells[*cell]
-                .name
-                .unwrap_or_else(|| Ustr::from("<unknown-capture>"));
-            if name == "<unknown-capture>" || !seen.insert(name) {
+            let identity = mf.cells[*cell].capture_identity.clone();
+            if identity.as_ref().is_none_or(|identity| !seen.insert(identity.clone())) {
                 complete = false;
             }
             let mode = if frame.is_some_and(|f| f.s_cell == *cell || f.fields.contains(cell)) {
@@ -555,7 +553,12 @@ fn capture_schema(
             } else {
                 CaptureMode::ByValue
             };
-            CaptureField { name, mode }
+            CaptureField {
+                identity: identity.unwrap_or(CaptureIdentity::Generated {
+                    role: Ustr::from("<unknown-capture>"),
+                }),
+                mode,
+            }
         })
         .collect();
     CaptureSchema { fields, complete }

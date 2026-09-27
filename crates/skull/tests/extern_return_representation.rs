@@ -42,6 +42,7 @@ extern(ffi, "m") fn ret_outer_float() -> Outer<float>
 extern(ffi, "m") fn ret_ratio() -> Ratio
 extern(ffi, "m") fn ret_boxed_float() -> Boxed<float>
 extern(ffi, "m") fn ret_flag() -> Flag
+extern(ffi, "m") fn ret_bool() -> bool
 extern(ffi, "m") fn ret_void()
 
 fn main() {
@@ -90,20 +91,20 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
     ] {
         let w = wrapper(&lua, name);
         assert!(
-            w.contains(&format!("return tonumber(m.{name}(")),
+            w.contains(&format!("local __rock_ret = tonumber(m.{name}(")) && w.contains("return __rock_ret"),
             "`{name}` bottoms out at an int representation, so its return must be a \
              Rock number and not whatever the C ABI handed back:\n{w}"
         );
     }
 
-    // `float` and `bool` never arrive as cdata from LuaJIT, so coercing them
-    // would be cost with no property behind it -- and a blanket `tonumber` would
-    // silently turn a `bool` return into 1/0. `ret_boxed_float` is the arm that
-    // separates "substitutes correctly" from "coerces every newtype".
-    for name in ["ret_ratio", "ret_boxed_float", "ret_outer_float", "ret_flag"] {
+    // `float` never arrives as cdata from LuaJIT, so coercing it would be cost
+    // with no property behind it -- and a blanket `tonumber` would silently turn
+    // a `bool` return into 1/0. `ret_boxed_float` is the arm that separates
+    // "substitutes correctly" from "coerces every newtype".
+    for name in ["ret_ratio", "ret_boxed_float", "ret_outer_float"] {
         let w = wrapper(&lua, name);
         assert!(
-            w.contains(&format!("return m.{name}(")) && !w.contains("tonumber"),
+            w.contains(&format!("local __rock_ret = m.{name}(")) && !w.contains("tonumber"),
             "`{name}` bottoms out at a representation LuaJIT already hands back as a \
              Lua value; it must cross unchanged:\n{w}"
         );
@@ -111,6 +112,38 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
 
     let w = wrapper(&lua, "ret_void");
     assert!(!w.contains("return"), "a void extern returns nothing:\n{w}");
+}
+
+/// A `-> bool` extern's C return is declared `uint8_t`, so the wrapper owes the
+/// declaration a LUA BOOLEAN and the byte has to be compared. This is the same
+/// rule `Int` follows, not a second one: the `cdef` is opaque, the declaration
+/// is the contract, and the wrapper pays whatever the contract costs.
+///
+/// The `uint8_t` spelling is forced by LuaJIT: `crec_call` can only record a
+/// `bool`-returning C call with a Lua frame inside the trace above it, which a
+/// trace rooted at this one-line wrapper never has, so every such wrapper
+/// aborted `NYI: unsupported C function type` on becoming a trace root.
+///
+/// `ret_flag` is here and not with the pass-through group because a `newtype`
+/// is a representation ALIAS: `newtype Flag(bool)` is a `bool` at the boundary,
+/// and a better-typed declaration must not be the loophole that reintroduces
+/// the raw byte.
+#[test]
+fn a_bool_representation_is_compared_to_the_byte_the_cdef_returns() {
+    let lua = emit_module(SRC);
+
+    for name in ["ret_bool", "ret_flag"] {
+        let w = wrapper(&lua, name);
+        assert!(
+            w.contains(&format!("return m.{name}(")) && w.trim_end().ends_with("~= 0"),
+            "`{name}` bottoms out at a bool representation, so its wrapper must turn \
+             the `uint8_t` the cdef returns into a Lua boolean:\n{w}"
+        );
+        assert!(
+            !w.contains("tonumber"),
+            "`{name}` is a boolean, not a number:\n{w}"
+        );
+    }
 }
 
 /// A generic is unrealizable only when nothing BOUND it. `Boxed<T>` on a generic
@@ -172,4 +205,104 @@ fn main() { print("x") }
         "a generic cycle must be reported as a cycle rather than as an exhausted \
          alias chain, got:\n{msg}"
     );
+}
+
+/// A wrapper whose body is `return lib.f(..)` is a `CALLT` into C, and a root
+/// trace that leaves the function through it aborts `leaving loop in root
+/// trace` (`rec_ret` requires a real `RET`). Every value-returning wrapper
+/// binds the result to a local and returns that instead; measured 166 -> 0
+/// aborts on the shipped LuaJIT (docs/backends.md, "Wrapper return").
+#[test]
+fn every_value_returning_wrapper_returns_through_a_local() {
+    let lua = emit_module(SRC);
+    for name in [
+        "ret_int", "ret_handle", "ret_alias", "ret_boxed", "ret_deep", "ret_wrap",
+        "ret_outer", "ret_twice", "ret_ratio", "ret_boxed_float", "ret_outer_float",
+    ] {
+        let w = wrapper(&lua, name);
+        let tail = w.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("return m.") || t.starts_with("return tonumber(") || t.starts_with("return ffi.new(")
+        });
+        assert!(!tail, "`{name}` still returns through a tail call into C:\n{w}");
+        assert!(w.contains("return __rock_ret"), "`{name}` must return the bound local:\n{w}");
+    }
+}
+
+#[test]
+fn an_omitted_extern_literal_default_is_passed_and_filled_in_the_wrapper() {
+    let lua = emit_module(
+        r#"
+extern(ffi, "m") fn poll(id: int, wait: bool = false) -> int
+fn go() -> int { poll(-1) }
+"#,
+    );
+    let w = wrapper(&lua, "poll");
+    assert!(
+        w.contains("if wait == nil then wait = false end"),
+        "the FFI wrapper must fill an omitted literal default before the C call:\n{w}"
+    );
+    let go = crate::common::function_body(&lua, "go");
+    assert!(
+        go.contains("poll((-1), (false))"),
+        "a direct omitted call must pass the literal default:\n{go}"
+    );
+}
+
+/// A modules-v1 extern is registered under its DefKey, but its wrapper is the
+/// published surface name (call sites spell it that way) and its C symbol is
+/// the declared name. Spelling either with the key emits `function
+/// pkg::ret_int()`, which is not Lua.
+#[test]
+fn a_v1_extern_wrapper_uses_the_declared_symbol() {
+    let emitted = crate::common::emit_v1_package(
+        "v1extern",
+        &[crate::common::V1Fragment {
+            file: "main.rock",
+            src: r#"
+extern(ffi, "m") fn ret_int() -> int
+extern(ffi, "m") fn ret_bool() -> bool
+pub fn probe() -> string { return "{ret_int()} {ret_bool()}" }
+fn main() {}
+"#,
+        }],
+    );
+    let out = crate::common::run_luajit(
+        &format!(
+            "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
+            emitted.lua
+        ),
+        "v1_extern_wrapper",
+    );
+    assert_eq!(out, "7\ttrue");
+}
+
+/// A v1 extern returning a value struct allocates its out-parameter by the
+/// struct's C typedef, which is the minted type symbol, not the DefKey
+/// (`ffi.new("pkg::Pair[1]")` is not a C declaration).
+#[test]
+fn a_v1_extern_value_return_allocates_by_the_type_symbol() {
+    let emitted = crate::common::emit_v1_package(
+        "v1extval",
+        &[crate::common::V1Fragment {
+            file: "main.rock",
+            src: r#"
+pub value Pair { a: float, b: float }
+extern(ffi, "m") fn get_pair() -> Pair
+pub @nomangle fn probe() -> string {
+    let p = get_pair()
+    return "{p.a + p.b}"
+}
+fn main() {}
+"#,
+        }],
+    );
+    let out = crate::common::run_luajit(
+        &format!(
+            "m = {{ get_pair = function(out) out[0].a = 3; out[0].b = 4 end }}\n{}\nprint(probe())\n",
+            emitted.lua
+        ),
+        "v1_extern_value_return",
+    );
+    assert_eq!(out, "7");
 }

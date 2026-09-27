@@ -4,7 +4,93 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 pub mod build_vars;
-pub mod resolver;
+pub mod graph;
+
+/// The `[language]` manifest table. Absent, or `modules = "legacy"`, keeps
+/// today's flat compilation behavior; `modules = "v1"` opts the package into
+/// the modules-v1 grammar and scoping rules. Any other value is a load error
+/// rather than a silent legacy fallback.
+///
+/// `memory` declares the package's memory class
+/// (`docs/state-ownership-plan.md` R2): which store an unannotated `global`
+/// belongs to. Absent = `"game"`, today's Session default, so every package
+/// that does not say otherwise is unchanged.
+/// `globals` declares whether the package may own mutable global storage.
+/// Absent = `"any"`; `"none"` is the simulation-package boundary from R5.
+#[derive(Debug, Clone)]
+pub struct LanguageConfig {
+    pub modules: rock_core::source_code::Dialect,
+    pub memory: rock_core::source_code::MemoryClass,
+    pub globals: rock_core::source_code::GlobalPolicy,
+}
+
+impl Default for LanguageConfig {
+    fn default() -> Self {
+        Self {
+            modules: rock_core::source_code::Dialect::Legacy,
+            memory: rock_core::source_code::MemoryClass::Game,
+            globals: rock_core::source_code::GlobalPolicy::Any,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LanguageConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = LanguageConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "a table with modules, memory and/or globals keys")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<LanguageConfig, A::Error> {
+                let mut modules = rock_core::source_code::Dialect::Legacy;
+                let mut memory = rock_core::source_code::MemoryClass::Game;
+                let mut globals = rock_core::source_code::GlobalPolicy::Any;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "modules" => {
+                            let value = map.next_value::<String>()?;
+                            modules = match value.as_str() {
+                                "legacy" => rock_core::source_code::Dialect::Legacy,
+                                "v1" => rock_core::source_code::Dialect::V1,
+                                other => {
+                                    return Err(serde::de::Error::custom(format!(
+                                        "unknown `[language] modules` value `{other}`; known values: \"legacy\", \"v1\""
+                                    )));
+                                }
+                            };
+                        }
+                        "memory" => {
+                            let value = map.next_value::<String>()?;
+                            memory = rock_core::source_code::MemoryClass::parse(&value).ok_or_else(|| {
+                                serde::de::Error::custom(format!(
+                                    "unknown memory class `{value}` in `[language] memory`; known values: {}",
+                                    rock_core::source_code::MemoryClass::NAMES.join(", ")
+                                ))
+                            })?;
+                        }
+                        "globals" => {
+                            let value = map.next_value::<String>()?;
+                            globals = rock_core::source_code::GlobalPolicy::parse(&value).ok_or_else(|| {
+                                serde::de::Error::custom(format!(
+                                    "unknown globals policy `{value}` in `[language] globals`; known values: {}",
+                                    rock_core::source_code::GlobalPolicy::NAMES.join(", ")
+                                ))
+                            })?;
+                        }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [language]; known keys: modules, memory, globals"
+                            )));
+                        }
+                    }
+                }
+                Ok(LanguageConfig { modules, memory, globals })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct StickConfig {
@@ -33,7 +119,46 @@ pub struct StickConfig {
     pub assets: Option<AssetsConfig>,
     /// Optional compiler-owned sound project declaration.
     pub sound: Option<SoundConfig>,
+    /// Source-language selection for this package. `None` = legacy.
+    pub language: Option<LanguageConfig>,
     pub dependencies: HashMap<String, Dependency>,
+    /// Optional implementation directories that retain this package's owner.
+    pub source_groups: HashMap<String, SourceGroupConfig>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceGroupConfig {
+    pub directory: String,
+    pub channels: Vec<String>,
+}
+
+impl StickConfig {
+    /// This package's declared memory class. Missing `[language]` is `game`,
+    /// which is today's behavior for every unannotated global.
+    pub fn memory_class(&self) -> rock_core::source_code::MemoryClass {
+        self.language
+            .as_ref()
+            .map(|l| l.memory)
+            .unwrap_or(rock_core::source_code::MemoryClass::Game)
+    }
+
+    /// This package's mutable-global policy. Missing `[language]` or missing
+    /// `globals` keeps today's permissive behavior.
+    pub fn global_policy(&self) -> rock_core::source_code::GlobalPolicy {
+        self.language
+            .as_ref()
+            .map(|l| l.globals)
+            .unwrap_or(rock_core::source_code::GlobalPolicy::Any)
+    }
+
+    /// This package's source dialect. Missing `[language]` is legacy.
+    pub fn dialect(&self) -> rock_core::source_code::Dialect {
+        self.language
+            .as_ref()
+            .map(|l| l.modules)
+            .unwrap_or(rock_core::source_code::Dialect::Legacy)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -73,6 +198,7 @@ pub struct BuildVar {
 #[derive(Debug, Clone, Default)]
 pub struct ReleaseConfig {
     pub assets: Option<Vec<String>>,
+    pub overlay_assets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,7 +211,7 @@ pub struct SoundConfig {
     pub project: String,
 }
 
-pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
+pub const KNOWN_BUILD_BUILTINS: [&str; 3] = ["channel", "platform", "source_revision"];
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -127,6 +253,60 @@ pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOv
     let previous = *slot;
     *slot = backend;
     RendererOverrideGuard { previous }
+}
+
+/// The invocation's channel selection, recorded once by the CLI before
+/// dispatch. rock-host consumers of the channel (dependency resolution, source
+/// loading) cannot read rock-cli's comptime selection, so the CLI mirrors the
+/// same values here. Explicit `--channel` and a command-implied channel arrive
+/// separately; resolution applies the same precedence as `resolve_build_vars`.
+static INVOCATION_CHANNELS: OnceLock<Mutex<(Option<String>, Option<String>)>> = OnceLock::new();
+
+fn invocation_channels_slot() -> &'static Mutex<(Option<String>, Option<String>)> {
+    INVOCATION_CHANNELS.get_or_init(|| Mutex::new((None, None)))
+}
+
+pub fn set_invocation_channel(explicit: Option<String>, implied: Option<String>) {
+    *invocation_channels_slot().lock().expect("invocation channel lock") = (explicit, implied);
+}
+
+/// Resolve the channel a manifest's channel-scoped selections evaluate
+/// against: explicit `--channel` > command-implied channel (when the project
+/// declares it) > the project's `default_channel` > `"dev"`. Mirrors
+/// `resolve_build_vars` so a dependency filter and a build var can never
+/// disagree about which channel a build is on.
+pub fn resolved_channel_for(cfg: &StickConfig) -> String {
+    let (explicit, implied) = invocation_channels_slot()
+        .lock()
+        .expect("invocation channel lock")
+        .clone();
+    if let Some(channel) = explicit {
+        return channel;
+    }
+    if let Some(channel) = implied {
+        if cfg
+            .build
+            .as_ref()
+            .is_some_and(|b| b.channels.iter().any(|c| c == &channel))
+        {
+            return channel;
+        }
+    }
+    cfg.build
+        .as_ref()
+        .and_then(|b| b.default_channel.clone())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
+/// True when `dep` compiles into a build on `channel`. A dependency with no
+/// declared channels is unscoped and matches everywhere.
+pub fn dependency_matches_channel(dep: &Dependency, channel: &str) -> bool {
+    match dep {
+        Dependency::Path(_) => true,
+        Dependency::Detailed(detailed) => {
+            detailed.channels.is_empty() || detailed.channels.iter().any(|c| c == channel)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +397,15 @@ pub enum Dependency {
 #[derive(Debug, Clone)]
 pub struct DetailedDependency {
     pub path: String,
+    /// Channels the dependency compiles into. Empty = every channel. This is
+    /// the declared gate for development-only packages (the MAG agent bridge):
+    /// a shipping channel excludes the package from the compile set entirely,
+    /// so generated shipping code carries none of its symbols.
+    pub channels: Vec<String>,
+    /// Authorizes a v1 consumer's dependency edge to a legacy provider
+    /// (modules spec 3.2). Rejected when the edge lacks it; a removable
+    /// warning when the provider is already v1.
+    pub allow_legacy: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,14 +443,22 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<DetailedDependency, A::Error> {
                 let mut path: Option<String> = None;
+                let mut channels: Vec<String> = Vec::new();
+                let mut allow_legacy = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => { path = Some(map.next_value()?); }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        "channels" => { channels = map.next_value()?; }
+                        "allow_legacy" => { allow_legacy = map.next_value()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in dependency; known keys: path, channels, allow_legacy"
+                            )));
+                        }
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(DetailedDependency { path })
+                Ok(DetailedDependency { path, channels, allow_legacy })
             }
         }
         d.deserialize_map(Vis)
@@ -284,14 +481,22 @@ impl<'de> serde::Deserialize<'de> for Dependency {
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Dependency, A::Error> {
                 let mut path: Option<String> = None;
+                let mut channels: Vec<String> = Vec::new();
+                let mut allow_legacy = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => { path = Some(map.next_value()?); }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        "channels" => { channels = map.next_value()?; }
+                        "allow_legacy" => { allow_legacy = map.next_value()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in dependency; known keys: path, channels, allow_legacy"
+                            )));
+                        }
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(Dependency::Detailed(DetailedDependency { path }))
+                Ok(Dependency::Detailed(DetailedDependency { path, channels, allow_legacy }))
             }
         }
         d.deserialize_any(Vis)
@@ -406,9 +611,10 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "assets" => { release.assets = Some(map.next_value()?); }
+                        "overlay_assets" => { release.overlay_assets = Some(map.next_value()?); }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [release]; known keys: assets"
+                                "unknown key `{other}` in [release]; known keys: assets, overlay_assets"
                             )));
                         }
                     }
@@ -547,7 +753,9 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut release: Option<ReleaseConfig> = None;
                 let mut assets: Option<AssetsConfig> = None;
                 let mut sound: Option<SoundConfig> = None;
+                let mut language: Option<LanguageConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
+                let mut source_groups: HashMap<String, SourceGroupConfig> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "package" => { package = Some(map.next_value()?); }
@@ -558,12 +766,14 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "engine" => { engine = map.next_value()?; }
                         "renderer" => { renderer = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
+                        "language" => { language = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
+                        "source_groups" => { source_groups = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, build, release, assets, sound, language, dependencies, source_groups })
             }
         }
         d.deserialize_map(Vis)
@@ -790,6 +1000,27 @@ impl StickConfig {
                     }
                 }
             }
+            if let Some(optional_channels) = var.optional_channels.as_deref() {
+                if var.cmd.is_none() {
+                    anyhow::bail!(
+                        "[build.vars] {name} declares optional_channels but has no cmd source"
+                    );
+                }
+                if var.default.is_none() {
+                    anyhow::bail!(
+                        "[build.vars] {name} declares optional_channels but has no default"
+                    );
+                }
+                for chan in optional_channels {
+                    if !build.channels.iter().any(|c| c == chan) {
+                        anyhow::bail!(
+                            "[build.vars] {name} declares optional channel {:?}, which is not in [build] channels {:?}",
+                            chan,
+                            build.channels
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -826,7 +1057,37 @@ impl StickConfig {
         Ok(assets)
     }
 
+    pub fn release_overlay_assets(&self) -> Result<Vec<String>> {
+        let assets = self
+            .release
+            .as_ref()
+            .and_then(|release| release.overlay_assets.clone())
+            .unwrap_or_default();
+        for rel in &assets {
+            let path = Path::new(rel);
+            if !rel.starts_with("assets/")
+                || rel.contains('\\')
+                || path.is_absolute()
+                || path.components().any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "stick.toml: [release].overlay_assets entry {:?} must be a canonical assets-relative file",
+                    rel
+                );
+            }
+        }
+        Ok(assets)
+    }
+
     pub fn asset_overlay_defaults(&self, project_dir: &Path) -> Result<Vec<PathBuf>> {
+        self.asset_overlay_defaults_with_vault(project_dir, &crate::art_vault::root)
+    }
+
+    fn asset_overlay_defaults_with_vault(
+        &self,
+        project_dir: &Path,
+        vault: &dyn Fn() -> Result<PathBuf>,
+    ) -> Result<Vec<PathBuf>> {
         let Some(assets) = &self.assets else {
             return Ok(Vec::new());
         };
@@ -844,7 +1105,12 @@ impl StickConfig {
                 if raw.is_empty() {
                     anyhow::bail!("stick.toml: [assets].overlays entries must not be empty");
                 }
-                let expanded = if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
+                let vault_path = crate::art_vault::expand_token(raw, vault).map_err(|e| {
+                    anyhow::anyhow!("stick.toml: cannot expand [assets].overlays entry {raw:?}: {e}")
+                })?;
+                let expanded = if let Some(path) = vault_path {
+                    path
+                } else if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
                     let home = std::env::var_os("HOME")
                         .or_else(|| std::env::var_os("USERPROFILE"))
                         .ok_or_else(|| anyhow::anyhow!(
@@ -1074,6 +1340,261 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_scoped_dependency_parses_its_channel_list() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[dependencies]\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
+        )
+        .expect("channel-scoped dependency parses");
+        let Dependency::Detailed(dep) = &cfg.dependencies["dev-only"] else {
+            panic!("inline table dependency must parse as detailed");
+        };
+        assert_eq!(dep.path, "../dep");
+        assert_eq!(dep.channels, vec!["dev".to_string()]);
+    }
+
+    #[test]
+    fn a_path_dependency_has_no_channel_scope() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[dependencies]\ncore = \"../core\"\n",
+        )
+        .expect("path dependency parses");
+        assert!(matches!(cfg.dependencies["core"], Dependency::Path(_)));
+    }
+
+    #[test]
+    fn a_channel_scoped_dependency_resolves_only_on_a_matching_channel() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let dep = workspace.path().join("dep");
+        fs_err::create_dir_all(&consumer).unwrap();
+        fs_err::create_dir_all(&dep).unwrap();
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
+        )
+        .unwrap();
+        fs_err::write(
+            dep.join("stick.toml"),
+            "[package]\nname = \"dep\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let dev = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev")
+            .expect("dev resolve");
+        assert_eq!(
+            dev.package(dev.root()).dependencies.len(),
+            1,
+            "matching channel includes the scoped dep"
+        );
+
+        let steam = graph::PackageGraph::build_with_channel(&consumer, &cfg, "steam")
+            .expect("steam resolve");
+        assert!(
+            steam.package(steam.root()).dependencies.is_empty(),
+            "non-matching channel excludes the scoped dep"
+        );
+    }
+
+    #[test]
+    fn an_unscoped_dependency_resolves_on_every_channel() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let dep = workspace.path().join("dep");
+        fs_err::create_dir_all(&consumer).unwrap();
+        fs_err::create_dir_all(&dep).unwrap();
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\ncore = \"../dep\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            dep.join("stick.toml"),
+            "[package]\nname = \"dep\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        for channel in ["dev", "steam", "itch"] {
+            let resolved =
+                graph::PackageGraph::build_with_channel(&consumer, &cfg, channel)
+                    .expect("resolve");
+            assert_eq!(
+                resolved.package(resolved.root()).dependencies.len(),
+                1,
+                "unscoped dep resolves on {channel}"
+            );
+        }
+    }
+
+    /// A three-package chain, consumer -> mid -> leaf, where the consumer
+    /// declares only `mid`. Without transitive resolution `leaf` is silently
+    /// dropped from the module set and every symbol it defines is an undefined
+    /// name at type-check time, which is what made a shared core package
+    /// impossible without editing every consumer's manifest.
+    #[test]
+    fn a_transitive_dependency_resolves_through_its_parent() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let mid = workspace.path().join("mid");
+        let leaf = workspace.path().join("leaf");
+        for dir in [&consumer, &mid, &leaf] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../mid\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            mid.join("stick.toml"),
+            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = \"../leaf\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            leaf.join("stick.toml"),
+            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
+        let names: Vec<&str> = graph
+            .load_order()
+            .iter()
+            .filter(|id| **id != graph.root())
+            .map(|id| graph.package(*id).manifest_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["leaf", "mid"],
+            "a transitive dependency is resolved, and before the package that needs it"
+        );
+    }
+
+    /// The path in a dependency's manifest is relative to THAT manifest, not to
+    /// the root project. A chain that only works when every package sits in one
+    /// flat directory would pass the test above and still break on the real
+    /// tree, where libs/ and games/ are nested at different depths.
+    #[test]
+    fn a_transitive_path_resolves_against_its_own_manifest() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("games").join("consumer");
+        let mid = workspace.path().join("libs").join("mid");
+        let leaf = workspace.path().join("leaf");
+        for dir in [&consumer, &mid, &leaf] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../../libs/mid\"\n",
+        )
+        .unwrap();
+        // "../../leaf" from libs/mid. Read against the root it would be wrong.
+        fs_err::write(
+            mid.join("stick.toml"),
+            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = \"../../leaf\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            leaf.join("stick.toml"),
+            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev").expect("resolve");
+        let found = graph
+            .packages()
+            .iter()
+            .find(|p| p.manifest_name == "leaf")
+            .expect("the transitive leaf resolves");
+        assert_eq!(
+            found.root.canonicalize().unwrap(),
+            leaf.canonicalize().unwrap(),
+            "the leaf resolves to the path its own manifest names"
+        );
+    }
+
+    /// Channel scoping has to survive the extra hop, or a dev-only package
+    /// reached through a library would ship in a release build.
+    #[test]
+    fn a_channel_scoped_transitive_dependency_keeps_its_scope() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let mid = workspace.path().join("mid");
+        let leaf = workspace.path().join("leaf");
+        for dir in [&consumer, &mid, &leaf] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\nmid = \"../mid\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            mid.join("stick.toml"),
+            "[package]\nname = \"mid\"\ntype = \"lib\"\n[dependencies]\nleaf = { path = \"../leaf\", channels = [\"dev\"] }\n",
+        )
+        .unwrap();
+        fs_err::write(
+            leaf.join("stick.toml"),
+            "[package]\nname = \"leaf\"\ntype = \"lib\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let names_on = |channel: &str| -> Vec<String> {
+            let graph = graph::PackageGraph::build_with_channel(&consumer, &cfg, channel).expect("resolve");
+            graph.packages().iter().map(|p| p.manifest_name.clone()).collect()
+        };
+        let dev_names = names_on("dev");
+        assert!(dev_names.contains(&"leaf".to_string()), "dev keeps the scoped leaf");
+
+        let steam_names = names_on("steam");
+        assert!(
+            !steam_names.contains(&"leaf".to_string()),
+            "a dev-only package reached through a library stays out of a release build"
+        );
+        assert!(steam_names.contains(&"mid".to_string()), "the library itself still resolves");
+    }
+
+    /// A cycle through a transitive edge must be reported, not looped on.
+    #[test]
+    fn a_dependency_cycle_is_reported() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let consumer = workspace.path().join("consumer");
+        let a = workspace.path().join("a");
+        let b = workspace.path().join("b");
+        for dir in [&consumer, &a, &b] {
+            fs_err::create_dir_all(dir).unwrap();
+        }
+        fs_err::write(
+            consumer.join("stick.toml"),
+            "[package]\nname = \"consumer\"\n[dependencies]\na = \"../a\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            a.join("stick.toml"),
+            "[package]\nname = \"a\"\ntype = \"lib\"\n[dependencies]\nb = \"../b\"\n",
+        )
+        .unwrap();
+        fs_err::write(
+            b.join("stick.toml"),
+            "[package]\nname = \"b\"\ntype = \"lib\"\n[dependencies]\na = \"../a\"\n",
+        )
+        .unwrap();
+
+        let cfg = StickConfig::from_path(&consumer.join("stick.toml")).unwrap();
+        let err = graph::PackageGraph::build_with_channel(&consumer, &cfg, "dev")
+            .expect_err("a cycle is an error, not a hang");
+        assert!(
+            err.to_string().contains("circular") && err.to_string().contains("a -> b -> a"),
+            "the error names the cycle, got: {err}"
+        );
+    }
+
+    #[test]
     fn package_version_defaults_when_missing() {
         // Minimal stick.toml without a version field used to crash
         // rock-lsp ~100ms after initialize. Now parses cleanly with
@@ -1127,6 +1648,14 @@ mod tests {
         cfg.validate_engine_needs().expect("wgpu is a known need");
         assert!(cfg.needs_engine_lib("wgpu"));
         assert!(!cfg.needs_engine_lib("video"));
+    }
+
+    #[test]
+    fn validate_engine_needs_accepts_3d() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[engine]\nneeds = [\"3d\"]\n",
+        ).unwrap();
+        cfg.validate_engine_needs().expect("3d is a known need");
     }
 
     #[test]
@@ -1287,6 +1816,7 @@ mod tests {
         let cfg = StickConfig::new_from_str(concat!(
             "[package]\nname = \"x\"\n",
             "[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
+            "overlay_assets = [\"assets/particles/blood.png\"]\n",
         ))
         .expect("release section must parse");
         assert_eq!(
@@ -1295,6 +1825,10 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(cfg.release_assets(dir.path()).unwrap(), vec!["assets", "saves/level.json"]);
+        assert_eq!(
+            cfg.release_overlay_assets().unwrap(),
+            vec!["assets/particles/blood.png"]
+        );
     }
 
     #[test]
@@ -1340,19 +1874,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = cfg.release_assets(dir.path()).expect_err("asset escape must reject");
         assert!(format!("{err}").contains("outside"), "error names the escape: {err}");
+
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[release]\noverlay_assets = [\"../outside.png\"]\n",
+        )
+        .expect("overlay path validation happens when selecting assets");
+        let err = cfg.release_overlay_assets().expect_err("overlay asset escape must reject");
+        assert!(format!("{err}").contains("outside.png"), "error names the escape: {err}");
     }
 
     #[test]
     fn asset_overlay_defaults_resolve_relative_and_home_paths() {
         let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().canonicalize().unwrap();
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[assets]\noverlays = [\"../shared\", \"~/rock-assets\"]\n",
         )
         .unwrap();
         let resolved = cfg.asset_overlay_defaults(project.path()).unwrap();
-        assert_eq!(resolved[0], project.path().join("../shared"));
+        assert_eq!(resolved[0], project_path.join("../shared"));
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap();
         assert_eq!(resolved[1], PathBuf::from(home).join("rock-assets"));
+    }
+
+    #[test]
+    fn asset_overlay_defaults_expand_the_vault_token() {
+        let project = tempfile::tempdir().unwrap();
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[assets]\noverlays = [\"$GAME_ART_VAULT/mag\"]\n",
+        )
+        .unwrap();
+        let resolved = cfg
+            .asset_overlay_defaults_with_vault(project.path(), &|| Ok(PathBuf::from("/machine/vault")))
+            .unwrap();
+        assert_eq!(resolved, vec![PathBuf::from("/machine/vault/mag")]);
+        let err = cfg
+            .asset_overlay_defaults_with_vault(project.path(), &|| anyhow::bail!("game-art vault not found"))
+            .unwrap_err();
+        // The CLI prints only the outermost message, so the cause must be in it.
+        assert!(err.to_string().contains("game-art vault not found"), "{err}");
     }
 
     #[test]

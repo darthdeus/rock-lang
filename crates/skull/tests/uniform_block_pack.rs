@@ -9,7 +9,7 @@
 //! the divergence is visible as a skipped index rather than as a number that
 //! happens to agree.
 
-use crate::common::{bone_rejections, emit_module, run_luajit};
+use crate::common::{bone_rejections, emit_module, function_body, run_luajit};
 
 const CANONICAL_VALUES: &str = r#"
 value ProbeUniform {
@@ -50,7 +50,7 @@ fn uniform_values_expands_to_canonical_leaves() {
     }
     for variant in ["Float", "Bool", "Int", "Uint"] {
         assert!(
-            body.contains(&format!("__variant = \"{variant}\"")),
+            body.contains(&format!("__variant = (\"{variant}\")")),
             "canonical `{variant}` leaf was not built:\n{body}"
         );
     }
@@ -77,10 +77,7 @@ fn main() {
 /// intrinsic's own dead Lua definition is still emitted (nothing calls it), so
 /// module-wide substring checks would match it and prove nothing.
 fn main_body(lua: &str) -> String {
-    let at = lua.find("\nfunction main()").expect("main is emitted");
-    let rest = &lua[at + 1..];
-    let end = rest.find("\nend").expect("main has an end");
-    rest[..end].to_string()
+    function_body(lua, "main").to_string()
 }
 
 /// The store indices are the std140 offsets divided by four, as literals.
@@ -335,4 +332,65 @@ fn main() {
         "expected a real fingerprint, ZERO constructor calls for it, and one \
          call once the value is genuinely packed"
     );
+}
+
+/// A block packed out of a GLOBAL is read one leaf at a time, each leaf loaded
+/// right before its own store. Lowering the whole value first loads every leaf
+/// into a register before the first store, and in a trace that keeps all of
+/// them live in every exit snapshot taken during the pack -- the engine block's
+/// 41 leaves against LuaJIT's 16-register side-trace budget
+/// (docs/trace-pressure-work-plan.md). Pinned by register count: the packing
+/// function must declare fewer registers than the block has leaves.
+const GLOBAL_SOURCE: &str = r#"
+// `Mat4` is stored as a flat leaf table (keys like `c0.x`) while `Vec4`
+// nests, so the two storage conventions are both read through here.
+value Wide { a: Vec4, b: Vec4, c: Vec4, d: Vec4, m: Mat4 }
+
+global BLOCK: Wide = Wide {
+    a: v(1.0, 2.0, 3.0, 4.0), b: v(5.0, 6.0, 7.0, 8.0),
+    c: v(9.0, 10.0, 11.0, 12.0), d: v(13.0, 14.0, 15.0, 16.0),
+    m: Mat4 {
+        c0: v(17.0, 0.0, 0.0, 0.0), c1: v(0.0, 18.0, 0.0, 0.0),
+        c2: v(0.0, 0.0, 19.0, 0.0), c3: v(0.0, 0.0, 0.0, 20.0),
+    },
+}
+
+fn pack_global(f: Ptr<float>, i: Ptr<int>) {
+    pack_uniform_block(f, i, BLOCK)
+}
+
+fn main() {
+    let f = native_buffer_float(32)
+    let i = native_buffer_int(32)
+    pack_global(f.ptr, i.ptr)
+    print(f.get(0).unwrap())
+    print(f.get(5).unwrap())
+    print(f.get(15).unwrap())
+    print(f.get(16).unwrap())
+    print(f.get(31).unwrap())
+}
+"#;
+
+fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
+    let at = lua.find(&format!("\nfunction {name}")).unwrap_or_else(|| panic!("{name} is emitted"));
+    let rest = &lua[at + 1..];
+    let end = rest.find("\nend").expect("function has an end");
+    &rest[..end]
+}
+
+#[test]
+fn a_global_block_packs_one_leaf_at_a_time() {
+    let lua = emit_module(GLOBAL_SOURCE);
+    let body = fn_body(&lua, "pack_global");
+    let decl = body
+        .lines()
+        .find(|l| l.trim_start().starts_with("local "))
+        .unwrap_or_else(|| panic!("no local declaration in:\n{body}"));
+    let registers = decl.split(',').filter(|n| n.trim().starts_with('r') || n.trim().starts_with("local r")).count();
+    assert!(
+        registers < 32,
+        "{registers} registers for a 32-leaf block: every leaf is loaded before the first store:\n{body}"
+    );
+    let out = run_luajit(&format!("{lua}\nmain()\n"), "global_block_pack");
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "6", "16", "17", "20"]);
 }

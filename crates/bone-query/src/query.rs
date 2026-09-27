@@ -157,7 +157,7 @@ fn type_def_target_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Sp
         hir::TypeExpr::App {
             ctor: hir::TypeCtor::Nominal(name),
             params,
-        } if name.as_str() == "Coroutine" => {
+        } if is_intrinsic_key(*name, "Coroutine") => {
             let yield_ty = params.into_iter().next()?;
             type_def_target_ty(ws, bi, ty.with_idx(yield_ty))
         }
@@ -257,10 +257,9 @@ fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span>
 
 /// Stdlib landmark for a builtin type name with no nominal declaration.
 fn builtin_type_landmark(name: Ustr, ws: &Workspace) -> Option<Span> {
-    match name.as_str() {
-        "Coroutine" => def_of_name(ws, ustr("resume")),
-        _ => None,
-    }
+    is_intrinsic_key(name, "Coroutine")
+        .then(|| def_of_name(ws, ustr("resume")))
+        .flatten()
 }
 
 /// Hover content + highlight span at `offset`, formatted to rock's hover
@@ -307,6 +306,7 @@ pub fn hover_at(
     sources: Option<&SourceMap>,
 ) -> Option<(String, Span)> {
     let module = ws.modules.get(mid.index())?;
+    let frag = ws.fragment_scopes.get(&module.file);
 
     // Body-level nodes: values, calls, struct-literal heads.
     if let Some(owner) = module.body_at(offset) {
@@ -363,7 +363,7 @@ pub fn hover_at(
                             } => {
                                 let selected = bi.resolved_overload_calls.get(&e).copied();
                                 if let Some(h) =
-                                    render_call_overloads_hover(ws, *name, selected, sources)
+                                    render_call_overloads_hover(ws, *name, selected, frag, sources)
                                 {
                                     return Some((h, *name_span));
                                 }
@@ -521,12 +521,17 @@ fn render_call_overloads_hover(
     ws: &Workspace,
     name: Ustr,
     selected: Option<(ModuleId, Idx<Function>)>,
+    frag: Option<&bone_core::modules::FragmentScope>,
     sources: Option<&SourceMap>,
 ) -> Option<String> {
     let mut all: Vec<(ModuleId, Idx<Function>)> = Vec::new();
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
-            all.extend(fns.iter().copied());
+            all.extend(fns.iter().copied().filter(|&(fmid, fid)| {
+                frag.is_none_or(|frag| {
+                    crate::modules_scope::callable_member_admitted(ws, frag, name, fmid, fid)
+                })
+            }));
         }
     }
     if all.is_empty() {
@@ -795,6 +800,65 @@ fn render_struct_def(ws: &Workspace, name: Ustr) -> Option<String> {
     }
     out.push('}');
     Some(out)
+}
+
+/// The modules-v1 path segment under `offset` in module `mid`, as lowering
+/// recorded it ([`hir::PathSegmentRef`]): the enclosing body's segments,
+/// then the module's own (`use` items, signatures, fields).
+pub fn path_segment_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<hir::PathSegmentRef> {
+    let module = ws.modules.get(mid.index())?;
+    let hit = |seg: &&hir::PathSegmentRef| span_contains(&seg.span, offset);
+    module
+        .body_at(offset)
+        .and_then(|owner| module.bodies.get(&owner))
+        .and_then(|body| body.path_segments.iter().find(hit))
+        .or_else(|| module.path_segments.iter().find(hit))
+        .copied()
+}
+
+/// The declaration a path segment's definition target names. A module
+/// target has no declaration in the workspace (its headers live in the
+/// source), so it is `None` here.
+pub fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> Option<Span> {
+    match target {
+        // A callable lands on its (first overload's) name, like a call does.
+        hir::SegmentTarget::Def(key) => match ws.functions_by_name.get(&key).and_then(|l| l.first()) {
+            Some(&(fmid, fid)) => Some(ws.module(fmid).functions[fid].name_span),
+            None => def_of_name(ws, key),
+        },
+        hir::SegmentTarget::Variant { enum_key, variant } => variant_def_span(ws, Some(enum_key), variant),
+        hir::SegmentTarget::Module { .. } => None,
+    }
+}
+
+/// Every recorded path segment, in every module and body, that resolved to
+/// `target` ([`hir::PathSegmentRef`]).
+pub fn segments_naming(ws: &Workspace, target: hir::SegmentTarget) -> Vec<hir::PathSegmentRef> {
+    let mut out = Vec::new();
+    for m in ws.modules.iter() {
+        out.extend(m.path_segments.iter().filter(|s| s.target == target));
+        for body in m.bodies.values() {
+            out.extend(body.path_segments.iter().filter(|s| s.target == target));
+        }
+    }
+    out
+}
+
+/// The modules-v1 definition whose declaration [`segment_target_def`]
+/// reports as `decl`: the definition a navigation landed on.
+pub fn v1_def_declared_at(ws: &Workspace, decl: &Span) -> Option<Ustr> {
+    ws.defs
+        .keys()
+        .copied()
+        .find(|key| segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl))
+}
+
+/// The modules-v1 definition whose declared name covers `offset` of `file`.
+pub fn v1_def_named_at(ws: &Workspace, file: Ustr, offset: usize) -> Option<Ustr> {
+    ws.defs.keys().copied().find(|key| {
+        segment_target_def(ws, hir::SegmentTarget::Def(*key))
+            .is_some_and(|d| d.file == file && span_contains(&d, offset))
+    })
 }
 
 fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
@@ -1194,15 +1258,16 @@ fn decorator_at<'t>(
             &d.span,
         ) {
             if span_contains(&sp, offset) {
-                return Some(d.name);
+                return Some(d.def_key);
             }
         }
     }
 
     for f in module.functions.values() {
         for a in &f.annotations {
-            if span_contains(&a.name.span, offset) && decorator_declared(ws, a.name.name) {
-                return Some(a.name.name);
+            let key = a.resolved_name.unwrap_or(a.name.name);
+            if span_contains(&a.name.span, offset) && decorator_declared(ws, key) {
+                return Some(key);
             }
         }
     }
@@ -1213,7 +1278,7 @@ fn decorator_at<'t>(
 fn decorator_declared(ws: &Workspace, name: Ustr) -> bool {
     ws.modules
         .iter()
-        .any(|m| m.decorators.values().any(|d| d.name == name))
+        .any(|m| m.decorators.values().any(|d| d.def_key == name))
 }
 
 /// Every reference to decorator `name`: each `deco` declaration's name token
@@ -1231,7 +1296,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
 
     for m in ws.modules.iter() {
         for d in m.decorators.values() {
-            if d.name != name {
+            if d.def_key != name {
                 continue;
             }
             let Some(text) = text_of(d.span.file.as_str()) else { continue };
@@ -1239,7 +1304,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
                 text,
                 d.span.offset_range.0,
                 d.span.offset_range.1,
-                name.as_str(),
+                d.name.as_str(),
                 &d.span,
             ) {
                 push(sp);
@@ -1247,7 +1312,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
         }
         for f in m.functions.values() {
             for a in &f.annotations {
-                if a.name.name == name {
+                if a.resolved_name.unwrap_or(a.name.name) == name {
                     push(a.name.span);
                 }
             }
@@ -1551,7 +1616,10 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                     .copied()
                                     .and_then(|t| struct_app_args(ws, bi, t))
                                     .and_then(|(ctor, args)| {
-                                        matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef")
+                                        is_intrinsic_key_in(
+                                            ctor,
+                                            &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
+                                        )
                                             .then(|| args.into_iter().next())
                                             .flatten()
                                     })
@@ -2595,7 +2663,22 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
         K::Bool => "bool".to_string(),
         K::Ref(target) => format!("ref {}", render_type_expr(ast, *target)),
         K::Ident(id) => id.name.to_string(),
+        K::Path(path) => {
+            let root = if path.from_root { "::" } else { "" };
+            format!(
+                "{root}{}",
+                path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::")
+            )
+        }
         K::Array(el) => format!("[{}]", render_type_expr(ast, *el)),
+        K::AppPath { ctor, args } => {
+            let root = if ctor.from_root { "::" } else { "" };
+            format!(
+                "{root}{}<{}>",
+                ctor.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("::"),
+                join(args)
+            )
+        }
         K::App { ctor, args } => format!("{}<{}>", ctor.name, join(args)),
         K::Tuple(els) => format!("({})", join(els)),
         K::Function { params, ret } => {
@@ -2907,7 +2990,7 @@ pub(crate) fn receiver_vec_elem(
 /// a `FieldRef` whose first arg isn't a nominal struct).
 fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
     let (ctor, args) = struct_app_args(ws, bi, ty)?;
-    if !matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
+    if !is_intrinsic_key_in(ctor, &["FieldRef", "ReadFieldRef", "WriteFieldRef"]) {
         return None;
     }
     let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;
@@ -3717,6 +3800,18 @@ pub struct UfcsMethod {
 /// `[string]` receiver still gets `join([string])`. `None` (nominal receivers,
 /// or an unresolved Vec element) keeps name-only matching.
 pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<UfcsMethod> {
+    ufcs_methods_in_scope(ws, name, recv_elem, None)
+}
+
+/// Scope-aware UFCS method enumeration. The unscoped wrapper remains for
+/// legacy callers; v1 completion passes its fragment so private overload
+/// members cannot leak into method candidates.
+pub fn ufcs_methods_in_scope(
+    ws: &Workspace,
+    name: Ustr,
+    recv_elem: Option<&str>,
+    frag: Option<&bone_core::modules::FragmentScope>,
+) -> Vec<UfcsMethod> {
     let mut out = Vec::new();
     // Overloads collapse to one method item (identical label + insert --
     // the duplicate is popup noise), first-wins to match the general path's
@@ -3727,10 +3822,15 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<
     // is `it: I` with `<I: Iterator<..>>` -- not a nominal match, but UFCS-legal
     // (`it.enumerate()`). Gated on the receiver structurally satisfying
     // `Iterator` (bone's rule: a `next(recv) -> (bool, E)` in scope).
-    let recv_is_iter = receiver_is_iterator(ws, name);
+    let recv_is_iter = receiver_is_iterator(ws, name, frag);
     for m in ws.modules.iter() {
-        for f in m.functions.values() {
+        for (fid, f) in m.functions.iter() {
             if f.name.as_str().starts_with("__") {
+                continue;
+            }
+            if frag.is_some_and(|frag| {
+                !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid)
+            }) {
                 continue;
             }
             if let Some(p0) = f.param_decls.first() {
@@ -3763,13 +3863,22 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<
 /// Whether receiver struct `name` structurally satisfies `Iterator` -- bone's
 /// rule (`bone-inference/src/iter.rs`): a `next(name) -> (bool, E)` resolves.
 /// Gates the generic `Iterator`-bounded UFCS combinators.
-fn receiver_is_iterator(ws: &Workspace, name: Ustr) -> bool {
-    ws.modules.iter().flat_map(|m| m.functions.values()).any(|f| {
-        f.name.as_str() == "next"
-            && f.param_decls
-                .first()
-                .is_some_and(|p0| struct_name_of_ty(ws, None, p0.ty) == Some(name))
-            && f.return_ty.is_some_and(|rt| ty_is_bool_first_pair(ws, rt))
+fn receiver_is_iterator(
+    ws: &Workspace,
+    name: Ustr,
+    frag: Option<&bone_core::modules::FragmentScope>,
+) -> bool {
+    ws.modules.iter().any(|m| {
+        m.functions.iter().any(|(fid, f)| {
+            f.name.as_str() == "next"
+                && !frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid)
+                })
+                && f.param_decls
+                    .first()
+                    .is_some_and(|p0| struct_name_of_ty(ws, None, p0.ty) == Some(name))
+                && f.return_ty.is_some_and(|rt| ty_is_bool_first_pair(ws, rt))
+        })
     })
 }
 
@@ -4399,6 +4508,9 @@ pub struct CompletionEntry {
     pub name: ustr::Ustr,
     pub kind: SymCat,
     pub detail: Option<String>,
+    /// Canonical function key used to retrieve deferred signature detail.
+    /// This differs from `name` for an imported alias in a modules-v1 scope.
+    pub signature_key: Option<ustr::Ustr>,
     /// The candidate's type when one is knowable: locals/params carry their
     /// inferred/declared TyId (Locals index the cursor body's inference --
     /// only resolvable against a Gamma seeded from that body), globals their
@@ -4459,6 +4571,125 @@ pub struct SignatureEntry {
 /// completion: in an expression slot a user enum is offered as its qualified
 /// `Enum::Variant` values (the bare name isn't a usable value); in a type slot
 /// the bare `Enum` name is offered instead. Mirrors rock-lsp.
+/// [`completion`]'s global candidates in a modules-v1 fragment: each name
+/// the fragment's tiers bind (`modules_scope::bound_names`), offered under
+/// that name with the entry shape of the definition it binds.
+fn v1_scope_entries(
+    ws: &Workspace,
+    frag: &bone_core::modules::FragmentScope,
+    expr_position: bool,
+    pfx: &[u8],
+    show_private: bool,
+    seen: &mut std::collections::HashSet<ustr::Ustr>,
+    out: &mut Vec<CompletionEntry>,
+) {
+    // A type name may match through its variants' names, so it passes here
+    // and `key_entries` filters per variant.
+    let admit = |name: &str| {
+        (!name.starts_with('_') || show_private)
+            && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
+                || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
+    };
+    for (name, key) in crate::modules_scope::bound_names(ws, frag, admit) {
+        for e in key_entries_in_scope(ws, Some(frag), name, key, expr_position, pfx, show_private) {
+            if seen.insert(e.name) {
+                out.push(e);
+            }
+        }
+    }
+}
+
+/// The completion entries for a definition `key`, optionally filtered at a
+/// modules-v1 access site. `None` preserves the legacy/global query behavior.
+pub(crate) fn key_entries_in_scope(
+    ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    name: ustr::Ustr,
+    key: ustr::Ustr,
+    expr_position: bool,
+    pfx: &[u8],
+    show_private: bool,
+) -> Vec<CompletionEntry> {
+    let visible = |n: &str| !n.starts_with('_') || show_private;
+    let matches = |n: &str| visible(n) && crate::completion::match_policy::admit(n.as_bytes(), pfx);
+    let file_of = |mid: ModuleId| ws.module(mid).file;
+    let entry = |name: ustr::Ustr, kind: SymCat, def_file: ustr::Ustr| CompletionEntry {
+        name,
+        kind,
+        detail: None,
+        signature_key: None,
+        ty: None,
+        takes_params: false,
+        variant_shape: None,
+        test_scoped: is_test_path(def_file.as_str()) || name.as_str().starts_with("test_"),
+        def_file,
+        rec: 0,
+    };
+    let mut out = Vec::new();
+    if let Some((fmid, fid)) = ws.functions_by_name.get(&key).and_then(|l| {
+        l.iter().copied().find(|&(fmid, fid)| {
+            frag.is_none_or(|frag| {
+                crate::modules_scope::callable_member_admitted(ws, frag, key, fmid, fid)
+            })
+        })
+    }) {
+        if expr_position && matches(name.as_str()) {
+            out.push(CompletionEntry {
+                detail: Some(crate::query::render_fn_signature(
+                    ws,
+                    name,
+                    &ws.module(fmid).functions[fid],
+                )),
+                signature_key: Some(key),
+                takes_params: !ws.module(fmid).functions[fid].param_decls.is_empty(),
+                ..entry(name, SymCat::Function, file_of(fmid))
+            });
+        }
+    } else if let Some(sid) = ws.struct_by_name.get(&key) {
+        if matches(name.as_str()) {
+            out.push(entry(name, SymCat::Struct, file_of(sid.module)));
+        }
+    } else if let Some(eid) = ws.enums_by_name.get(&key) {
+        let def_file = file_of(eid.module);
+        if expr_position && !def_file.as_str().starts_with('<') {
+            for v in ws.module(eid.module).enums[eid.def].variants.iter() {
+                let qualified = format!("{name}::{}", v.name);
+                let hit = pfx.is_empty()
+                    || crate::completion::match_policy::admit(v.name.as_bytes(), pfx)
+                    || crate::completion::match_policy::admit(qualified.as_bytes(), pfx);
+                if hit && visible(v.name.as_str()) {
+                    out.push(CompletionEntry {
+                        detail: Some(name.to_string()),
+                        variant_shape: Some(VariantShape::of(&v.payload)),
+                        ..entry(ustr::Ustr::from(qualified.as_str()), SymCat::Variant, def_file)
+                    });
+                }
+            }
+        } else if matches(name.as_str()) {
+            out.push(entry(name, SymCat::Enum, def_file));
+        }
+    } else if let Some(nid) = ws.newtypes_by_name.get(&key) {
+        if matches(name.as_str()) {
+            out.push(entry(name, SymCat::Newtype, file_of(nid.module)));
+        }
+    } else if let Some(&ty) = ws.globals_by_name.get(&key) {
+        if expr_position && matches(name.as_str()) {
+            let rendered = ws.render(None, ty);
+            let def_file = ws
+                .modules
+                .iter()
+                .find(|m| m.global_by_name.contains_key(&key))
+                .map_or_else(|| ustr::Ustr::from("<builtin>"), |m| m.file);
+            out.push(CompletionEntry {
+                detail: (!rendered.is_empty()).then_some(rendered),
+                ty: Some(ty),
+                ..entry(name, SymCat::Global, def_file)
+            });
+        }
+    }
+    out
+}
+
 pub fn completion(
     ws: &Workspace,
     mid: ModuleId,
@@ -4524,6 +4755,7 @@ pub fn completion(
                         BindingKind::Let | BindingKind::Static | BindingKind::Fn => SymCat::Local,
                     },
                     detail: (!ty.is_empty()).then_some(ty),
+                    signature_key: None,
                     ty: ty_id,
                     takes_params: false,
                     variant_shape: None,
@@ -4535,7 +4767,13 @@ pub fn completion(
         }
     }
 
-    for m in ws.modules.iter() {
+    // A modules-v1 fragment offers what its tiers bind, spelled by the name
+    // they bind it under -- not every definition of the workspace by key.
+    let v1 = crate::modules_scope::fragment(ws, req_file);
+    if let Some(frag) = v1 {
+        v1_scope_entries(ws, frag, expr_position, pfx, show_private, &mut seen, &mut out);
+    }
+    for m in ws.modules.iter().filter(|_| v1.is_none()) {
         // Test-scoped iff defined under a `tests/` path segment or
         // `test_`-named -- the facade demotes these outside test files.
         let m_test = is_test_path(m.file.as_str());
@@ -4558,6 +4796,7 @@ pub fn completion(
                 // (from `BoneProject::fn_sigs`) only for the post-cap survivors,
                 // not rendered or cloned for every workspace function here.
                 detail: None,
+                signature_key: Some(*name),
                 ty: None,
                 takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
                 variant_shape: None,
@@ -4568,7 +4807,7 @@ pub fn completion(
         }
         for name in m.struct_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         // A user enum in an expression slot is offered as its qualified
@@ -4600,6 +4839,7 @@ pub fn completion(
                             name: qn,
                             kind: SymCat::Variant,
                             detail: Some(name.to_string()),
+                            signature_key: None,
                             ty: None,
                             takes_params: false,
                             variant_shape: Some(VariantShape::of(&v.payload)),
@@ -4610,12 +4850,12 @@ pub fn completion(
                     }
                 }
             } else if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for name in m.newtypes_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for (name, gidx) in m.global_by_name.iter() {
@@ -4631,6 +4871,7 @@ pub fn completion(
                     name: *name,
                     kind: SymCat::Global,
                     detail: (!ty.is_empty()).then_some(ty),
+                    signature_key: None,
                     ty: Some(m.globals[*gidx].ty),
                     takes_params: false,
                     variant_shape: None,
@@ -4655,6 +4896,7 @@ pub fn completion(
                     name: n,
                     kind: SymCat::Struct,
                     detail: None,
+                    signature_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -4676,6 +4918,7 @@ pub fn completion(
                     name: n,
                     kind: SymCat::Keyword,
                     detail: None,
+                    signature_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -4875,6 +5118,7 @@ pub fn signature_help(
     sources: Option<&SourceMap>,
 ) -> Option<(Vec<SignatureEntry>, Span)> {
     let module = ws.modules.get(mid.index())?;
+    let frag = ws.fragment_scopes.get(&module.file);
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
 
@@ -4920,7 +5164,7 @@ pub fn signature_help(
                     let first = args.clone().next()?;
                     nominal_name_of_ty(ws, Some(bi), *bi.expr_types.get(first)?)
                 });
-            let sigs = functions_named(ws, *name, sources, recv_nominal);
+            let sigs = functions_named(ws, *name, sources, recv_nominal, frag);
             (!sigs.is_empty()).then_some((sigs, call_span))
         }
         hir::Expr::StructLiteral { name, .. } => {
@@ -4961,12 +5205,18 @@ fn functions_named(
     name: Ustr,
     sources: Option<&SourceMap>,
     recv_nominal: Option<Ustr>,
+    frag: Option<&bone_core::modules::FragmentScope>,
 ) -> Vec<SignatureEntry> {
     let mut all = Vec::new();
     let mut matched = Vec::new();
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
             for (fmid, fid) in fns {
+                if frag.is_some_and(|frag| {
+                    !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
+                }) {
+                    continue;
+                }
                 let entry = fn_sig_entry(ws, *fmid, *fid, sources);
                 if let Some(recv) = recv_nominal {
                     let p0 = ws.modules[fmid.index()].functions[*fid].param_decls.first();

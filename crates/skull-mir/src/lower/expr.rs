@@ -4,6 +4,14 @@ use super::*;
 
 impl Builder<'_> {
     pub(crate) fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        self.lower_expr_with_expected(e, None)
+    }
+
+    pub(crate) fn lower_expr_with_expected(
+        &mut self,
+        e: Idx<Expr>,
+        expected: Option<&crate::monoty::MonoTy>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         // Source cursor for instruction-level diagnostics: whatever is lowered
         // from here down came from `e` unless a nested `lower_expr` narrows it,
         // and the restore puts the enclosing expression back on the way out.
@@ -13,11 +21,27 @@ impl Builder<'_> {
         // expression back, so a call always carries the innermost expression
         // that produced it -- which is the key `ConcreteBody` is built on.
         let outer_expr = self.cur_expr.replace(e);
-        let v = self.lower_expr_inner(e);
+        let v = match self.body.expr_arena[e].clone() {
+            Expr::Array(elems)
+                if expected.is_some_and(|ty| {
+                    ContainerPlan::matches_type(ContainerFamily::Vec, ty)
+                }) => self.lower_array_literal_with_expected(e, elems, expected),
+            _ => self.lower_expr_inner(e),
+        };
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         let v = v?;
-        if matches!(
+        // A transparent newtype constructor returns its argument's MIR value.
+        // Keep the argument constructor's logical type on that shared value.
+        let is_newtype_constructor = matches!(
+            &self.body.expr_arena[e],
+            Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } if args.len() == 1 && self.ws.newtypes_by_name.contains_key(name)
+        );
+        if !is_newtype_constructor && matches!(
             self.f.insts[v],
             Inst::MakeValueStruct { .. }
                 | Inst::MaterializeValueStruct { .. }
@@ -227,7 +251,7 @@ impl Builder<'_> {
 
             // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
             // records the target on `e`); a scalar uses the native op.
-            Expr::Not(x) => {
+            Expr::Not(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
@@ -244,7 +268,7 @@ impl Builder<'_> {
                     None => Ok(self.emit_cur(Inst::BitNot(v))),
                 }
             }
-            Expr::UnaryMinus(x) => {
+            Expr::UnaryMinus(x, _) => {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
@@ -330,6 +354,7 @@ impl Builder<'_> {
                 // synthesizable node), so the type predicates below see nothing
                 // while the storage still has no element slot to name.
                 if self.vec_column_elem_of(base)?.is_some()
+                    || self.vec_strided_elem_of(base)?.is_some()
                     || (!self.scx.values_first_class
                         && (self.value_struct_of(e).is_some()
                             || self.nullable_place_value_of(e)?.is_some()))
@@ -401,6 +426,7 @@ impl Builder<'_> {
                 target,
                 op_fn,
                 value,
+                ..
             } => {
                 self.lower_compound_assign_effect(e, target, op_fn, value)?;
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
@@ -682,7 +708,16 @@ impl Builder<'_> {
                 value,
                 then_branch,
                 else_branch,
-            } => self.lower_if_let(pattern, value, then_branch, else_branch),
+            } => {
+                let repr = self.lower_if_let(
+                    pattern,
+                    value,
+                    then_branch,
+                    else_branch,
+                    None,
+                )?;
+                self.pack(repr)
+            }
 
             Expr::IncDec { target, decrement, postfix } => {
                 self.lower_incdec(target, decrement, postfix)
@@ -710,7 +745,7 @@ impl Builder<'_> {
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
             }
 
-            Expr::SafeNavCall { receiver, method, args } => {
+            Expr::SafeNavCall { receiver, method, args, .. } => {
                 self.lower_safe_nav_call(e, receiver, method, args)
             }
             Expr::SafeNavLet { receiver, binding, body } => {
@@ -760,6 +795,12 @@ impl Builder<'_> {
                 ))
             }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            // A leaf of a column-stored or strided element has no slot to name;
+            // read it. A leaf that can be a place base holds a reference
+            // (`xs[i].o` in `xs[i].o.hp = v`), so the read is that object.
+            Expr::FieldAccess { base, field } if self.flat_leaf_path(base, field)?.is_some() => {
+                self.lower_expr(e)
+            }
             // A swizzle and a flattened-enum field are not places (both
             // materialize a fresh value); leave them to the rvalue path, which
             // rejects or copies as it does today.
@@ -873,7 +914,8 @@ impl Builder<'_> {
                     .binds
                     .get(&raw(b))
                     .ok_or_else(|| gap("assignment to an unbound variable"))?;
-                let v = self.lower_expr(value)?;
+                let expected = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
+                let v = self.lower_expr_with_expected(value, expected.as_deref())?;
                 let v = self.coerced_to_binding(v, value, b);
                 self.emit_cur(Inst::Store { cell, value: v });
             }
@@ -885,11 +927,15 @@ impl Builder<'_> {
                 self.nobox_global_store(&leaves, shape, value)?;
             }
             Expr::FieldAccess { base, field } => {
-                // `xs[i].x = v` on a column-stored Vec: there is no element slot
-                // to take a place base of, so the write lands directly in the
-                // leaf's own column.
-                if let Some((vec, idx, elem)) = self.column_index_place(base)? {
-                    return self.column_leaf_store(vec, idx, elem, field, value);
+                // `xs[i].x = v` / `xs[i].at.x = v` on a column-stored or strided
+                // Vec: there is no element slot to take a place base of, so the
+                // write lands directly in the leaf named by the dotted path.
+                let (root, path) = self.flat_leaf_path(base, field)?.unwrap_or((base, field));
+                if let Some((vec, idx, elem)) = self.column_index_place(root)? {
+                    return self.column_leaf_store(vec, idx, elem, path, value);
+                }
+                if let Some((vec, idx, elem)) = self.strided_index_place(root)? {
+                    return self.strided_leaf_store(vec, idx, elem, path, value);
                 }
                 // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
                 // leaf-addressed NativeBuffer: there is no element slot to take a
@@ -943,7 +989,8 @@ impl Builder<'_> {
                     self.store_flat_cells(b, key, cells);
                     return Ok(());
                 }
-                let v = self.lower_expr(value)?;
+                let expected = self.concrete_expr_ty(target);
+                let v = self.lower_expr_with_expected(value, expected.as_deref())?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
                     field: key,
@@ -964,6 +1011,9 @@ impl Builder<'_> {
                 // boxed. Mirrors `column_element_repr` on the read side.
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return s.column_element_store(b, i, value, elem);
+                }
+                if let ContainerKind::VecValueStrided(elem) = kind {
+                    return s.strided_element_store(b, i, value, elem);
                 }
                 // A column-stored Map has no slot at the key either: the write
                 // goes through the spine to a slot, then leaf-wise into `data`.
@@ -1246,10 +1296,13 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<ValueBundle, CompilerError> {
-        let value = if let Some(plan) = self.struct_field_fn_rep_plan(receiver, method)? {
+        let value = if let Some(field) = self.fn_field_of_call(e) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
-            let fieldv = self.emit_cur(Inst::Field { base: recv, field: method });
+            let plan = self
+                .struct_field_fn_rep_plan(receiver, field)?
+                .ok_or_else(|| gap("inferred safe-nav fn-field call has no representation plan"))?;
+            let fieldv = self.emit_cur(Inst::Field { base: recv, field });
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
             self.indirect_call_by_plan(plan, fieldv, &arg_idxs)?
         } else {
@@ -1512,7 +1565,12 @@ impl Builder<'_> {
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
         self.safe_nav_repr(receiver, shape, |s, recv| {
-            let cell = s.f.new_cell(Some(s.body.binding_arena[binding].name));
+            let cell = s.new_binding_cell(
+                binding,
+                s.body.binding_arena[binding].name,
+                s.binding_ty(binding),
+                Ustr::from(""),
+            );
             s.emit_cur(Inst::Store { cell, value: recv });
             s.binds.insert(raw(binding), cell);
             s.lower_expr_repr(body)
@@ -1597,7 +1655,12 @@ impl Builder<'_> {
 
         self.cur = let_bb;
         let recv_v = self.safe_nav_present_value(recv)?;
-        let cell = self.f.new_cell(Some(self.body.binding_arena[binding].name));
+        let cell = self.new_binding_cell(
+            binding,
+            self.body.binding_arena[binding].name,
+            self.binding_ty(binding),
+            Ustr::from(""),
+        );
         self.emit_cur(Inst::Store { cell, value: recv_v });
         self.binds.insert(raw(binding), cell);
         let bv = self.lower_expr(body)?;
@@ -1644,26 +1707,107 @@ impl Builder<'_> {
         }))
     }
 
+    pub(crate) fn strided_vec_literal(
+        &mut self,
+        elems: &[Idx<Expr>],
+        elem: ColumnElem,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let stride = shape.leaf_count();
+        let mut values = Vec::with_capacity(elems.len() * stride);
+        for &expr in elems {
+            let bundle = self.lower_expr_repr(expr)?;
+            let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided literal")?;
+            if leaves.len() != stride {
+                return Err(gap(format!(
+                    "strided literal arity mismatch for [{}]: {} leaves vs {stride} slots",
+                    elem.name,
+                    leaves.len()
+                )));
+            }
+            if self.strided_stores_raw(elem) {
+                values.extend(leaves);
+            } else {
+                values.extend(
+                    leaves
+                        .into_iter()
+                        .map(|leaf| self.emit_cur(Inst::VecStrideNilToFalse(leaf))),
+                );
+            }
+        }
+        let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
+        Ok(self.emit_cur(Inst::MakeVecStrided {
+            elem: elem.name,
+            representation: elem.representation(),
+            nobox: elem.is_nobox(),
+            stride,
+            values,
+            len: elems.len(),
+            capacity,
+        }))
+    }
+
     pub(crate) fn lower_array_literal(
         &mut self,
         lit: Idx<Expr>,
         elems: IdxRange<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        self.lower_array_literal_with_expected(lit, elems, None)
+    }
+
+    fn lower_array_literal_with_expected(
+        &mut self,
+        lit: Idx<Expr>,
+        elems: IdxRange<Expr>,
+        expected: Option<&crate::monoty::MonoTy>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let idxs: Vec<Idx<Expr>> = elems.into_iter().collect();
         let has_spread = idxs
             .iter()
             .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
         if !has_spread {
+            let strided_elem = match expected {
+                Some(ty) => self.vec_strided_elem_for_type(ty)?,
+                None => self.vec_strided_elem_of(lit)?,
+            };
+            if let Some(elem) = strided_elem {
+                return self.strided_vec_literal(&idxs, elem);
+            }
             // Column storage: transpose the literal's elements into one array
             // per leaf. Each element lowers as a repr, so no element box is
             // built even for a literal with entries.
-            if let Some(elem) = self.vec_column_elem_of(lit)? {
+            let column_elem = match expected {
+                Some(ty) => self.vec_column_elem_for_type(ty)?,
+                None => self.vec_column_elem_of(lit)?,
+            };
+            if let Some(elem) = column_elem {
                 return self.column_vec_literal(&idxs, elem);
             }
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        if let Some(elem) = self.vec_column_elem_of(lit)? {
+        let strided_elem = match expected {
+            Some(ty) => self.vec_strided_elem_for_type(ty)?,
+            None => self.vec_strided_elem_of(lit)?,
+        };
+        if let Some(elem) = strided_elem {
+            let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+            let arr = self.empty_strided_vec(elem, capacity)?;
+            for &expr in &idxs {
+                if let Expr::Spread(inner) = self.body.expr_arena[expr] {
+                    self.spread_into(arr, inner, SpreadDest::Strided(elem))?;
+                } else {
+                    let bundle = self.lower_expr_repr(expr)?;
+                    self.strided_append_bundle(arr, &bundle, elem)?;
+                }
+            }
+            return Ok(arr);
+        }
+        let column_elem = match expected {
+            Some(ty) => self.vec_column_elem_for_type(ty)?,
+            None => self.vec_column_elem_of(lit)?,
+        };
+        if let Some(elem) = column_elem {
             let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
             let arr = self.empty_column_vec(elem, capacity)?;
             for &e in &idxs {
@@ -1701,6 +1845,7 @@ impl Builder<'_> {
                 Ok(())
             }
             SpreadDest::Columns(elem) => self.column_append_bundle(arr, &bundle, elem),
+            SpreadDest::Strided(elem) => self.strided_append_bundle(arr, &bundle, elem),
         }
     }
 
@@ -1721,6 +1866,11 @@ impl Builder<'_> {
                 ValueBundle::new(elem.representation(), value),
                 dest,
             ),
+            SpreadDest::Strided(elem) => self.append_spread_bundle(
+                arr,
+                ValueBundle::new(elem.representation(), value),
+                dest,
+            ),
         }
     }
 
@@ -1733,14 +1883,17 @@ impl Builder<'_> {
         inner: Idx<Expr>,
         dest: SpreadDest,
     ) -> Result<(), CompilerError> {
-        if let (SpreadDest::Columns(elem), Expr::Tuple(elements)) =
-            (dest, self.body.expr_arena[inner])
-        {
-            for element in elements {
-                let bundle = self.lower_expr_repr(element)?;
-                self.column_append_bundle(arr, &bundle, elem)?;
+        if let Expr::Tuple(elements) = self.body.expr_arena[inner] {
+            match dest {
+                SpreadDest::Columns(_) | SpreadDest::Strided(_) => {
+                    for element in elements {
+                        let bundle = self.lower_expr_repr(element)?;
+                        self.append_spread_bundle(arr, bundle, dest)?;
+                    }
+                    return Ok(());
+                }
+                SpreadDest::Container(_) => {}
             }
-            return Ok(());
         }
         let v = self.lower_expr(inner)?;
         if let Some(ty) = self.concrete_expr_ty(inner) {

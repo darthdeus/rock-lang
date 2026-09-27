@@ -1256,7 +1256,7 @@ fn engine_block_binds_at_index_zero() {
     let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, "e_vert", "e_frag", GlslProfile::Core330)
         .expect("emit");
     let bound: Vec<(u32, &str)> =
-        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
+        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.plan.struct_name.as_str())).collect();
     assert_eq!(bound, vec![(0, "EngineU"), (1, "GrassVertU"), (2, "UiFragU")], "role -> binding");
 }
 
@@ -1440,7 +1440,128 @@ fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
     )
     .expect("emit");
     let bound: Vec<(u32, &str)> =
-        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
+        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.plan.struct_name.as_str())).collect();
     assert_eq!(bound, vec![(1, "UiVertU"), (2, "UiFragU")], "role -> binding");
     assert!(!em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0), "slot 0 is the engine's");
+}
+
+#[test]
+fn builtin_dfdx_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let w = dfdx(tc.x)
+            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("dFdx(tc.x)"), "got:\n{glsl}");
+}
+
+#[test]
+fn builtin_dfdy_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let w = dfdy(tc.x)
+            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("dFdy(tc.x)"), "got:\n{glsl}");
+}
+
+#[test]
+fn reject_dfdx_in_vertex() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let w = dfdx(a.aPos.x)
+            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "fragment");
+}
+
+#[test]
+fn reject_dfdy_in_vertex() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let w = dfdy(a.aPos.x)
+            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "fragment");
+}
+
+#[test]
+fn mrt_early_return_terminates_the_entry() {
+    let source = MRT_SRC.replace(
+        "let c = texture(uTexture, vary.TexCoord)",
+        "if vary.EntityId > 0.0 { return SpriteOut { FragColor: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 }, FragId: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 } } }\nlet c = texture(uTexture, vary.TexCoord)",
+    );
+    let glsl = emit_pipeline(&source, "vt", "fr").expect("emit");
+    let branch = glsl.split("if (").last().expect("conditional entry");
+    let end = branch.find('}').expect("branch end");
+    assert!(branch[..end].contains("return;"), "MRT branch must not fall through:\n{glsl}");
+}
+
+// --- per-stage sampler budget ---------------------------------------------
+// GL 4.1 core (macOS) and GLES 3.0 guarantee 16 texture image units per
+// stage. Linux drivers allow more, so a shader over the budget linked there
+// and failed only on a Mac.
+
+fn sampler_group_src(n: usize) -> String {
+    let fields: Vec<String> = (0..n).map(|i| format!("s{i}: Sampler2D")).collect();
+    let reads: Vec<String> = (0..n).map(|i| format!("acc += texture(t.s{i}, uv).x")).collect();
+    format!(
+        r#"
+        struct ManyTex {{ {} }}
+        value Quad {{ aPos: Vec2, aUv: Vec2 }}
+        value Vary {{ position: Vec4, uv: Vec2 }}
+        @shader(vertex)
+        fn many_vs(@attr a: Quad) -> Vary {{ return Vary {{ position: v(a.aPos, 0.0, 1.0), uv: a.aUv }} }}
+        @shader(fragment)
+        fn many_fs(vary: Vary, @textures t: ManyTex) -> Vec4 {{
+            let uv = vary.uv
+            let acc = 0.0
+            {}
+            return Vec4 {{ x: acc, y: 0.0, z: 0.0, w: 1.0 }}
+        }}
+        @shader(fragment)
+        fn many_entry(@textures t: ManyTex, uv: Vec2) -> Vec4 {{
+            let acc = 0.0
+            {}
+            return Vec4 {{ x: acc, y: 0.0, z: 0.0, w: 1.0 }}
+        }}
+    "#,
+        fields.join(", "),
+        reads.join("\n            "),
+        reads.join("\n            ")
+    )
+}
+
+#[test]
+fn fragment_stage_at_sixteen_samplers_emits() {
+    let src = sampler_group_src(16);
+    emit_pipeline(&src, "many_vs", "many_fs").expect("16 samplers fit every GLSL target");
+    emit_entry(&src, "many_entry").expect("16 samplers fit every GLSL target");
+}
+
+#[test]
+fn fragment_stage_over_sixteen_samplers_rejects_naming_the_shader() {
+    let src = sampler_group_src(17);
+    let e = emit_pipeline(&src, "many_vs", "many_fs").expect_err("17 samplers must reject");
+    assert!(e.contains("many_fs") && e.contains("17 samplers") && e.contains("16"), "got: {e}");
+    let e = emit_entry(&src, "many_entry").expect_err("17 samplers must reject");
+    assert!(e.contains("many_entry") && e.contains("17 samplers") && e.contains("16"), "got: {e}");
 }

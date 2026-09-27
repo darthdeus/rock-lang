@@ -12,6 +12,82 @@ pub(crate) struct ReplayInput {
     pub(crate) buttons: Vec<i64>,
     pub(crate) pad_buttons: Vec<String>,
     pub(crate) pad_axes: Vec<(String, String)>,
+    pub(crate) input_details: Option<RecordedInputDetails>,
+    pub(crate) image_publications: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordedInputDetails {
+    pressed_keys: Vec<String>,
+    repeated_keys: Vec<String>,
+    pressed_buttons: Vec<i64>,
+    released_buttons: Vec<i64>,
+    text_input: Option<String>,
+}
+
+// Mirrors the runtime's versioned input projection schema; reject a corrupt
+// field before replay-profile can treat a partial observation as complete.
+fn parse_input_details(fields: &[&str], line: usize, version: u32) -> Result<RecordedInputDetails> {
+    let expected = if version >= 17 { 15 } else { 14 };
+    if fields.len() != expected || !matches!(fields[13], "0" | "1") {
+        bail!("line {line}: malformed input detail row");
+    }
+    let mut details = RecordedInputDetails::default();
+    for index in 1..=11 {
+        let field = fields[index + 1];
+        if field == "-" { continue; }
+        let mut seen = HashSet::new();
+        for entry in field.split(',') {
+            let (encoded, value) = entry.split_once('=').with_context(||
+                format!("line {line}: malformed input detail entry"))?;
+            let key = if index == 3 || index == 4 {
+                let key = parse_u64(encoded, line, "input mouse button")?;
+                if key == 0 || key > 255 || !encoded.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!("line {line}: invalid input mouse button");
+                }
+                key.to_string()
+            } else {
+                let key = decode_hex(encoded, line, "input identity")?;
+                if key.is_empty() || key.bytes().any(|b| b == 0 || b.is_ascii_whitespace()) {
+                    bail!("line {line}: invalid input identity");
+                }
+                key
+            };
+            if !seen.insert(key.clone()) { bail!("line {line}: duplicate input identity"); }
+            match index {
+                8 => {
+                    let modifier = parse_u64(value, line, "input modifier")?;
+                    if modifier > 65535 || !value.bytes().all(|b| b.is_ascii_digit()) {
+                        bail!("line {line}: invalid input modifier");
+                    }
+                }
+                11 => {
+                    let motion: f64 = value.parse().with_context(||
+                        format!("line {line}: invalid input axis motion"))?;
+                    if !motion.is_finite() || !(-1.0..=1.0).contains(&motion) {
+                        bail!("line {line}: invalid input axis motion");
+                    }
+                }
+                _ if value != "1" => bail!("line {line}: invalid input edge flag"),
+                _ => {}
+            }
+            match index {
+                1 => details.pressed_keys.push(key),
+                2 => details.repeated_keys.push(key),
+                3 => details.pressed_buttons.push(key.parse().unwrap()),
+                4 => details.released_buttons.push(key.parse().unwrap()),
+                _ => {}
+            }
+        }
+    }
+    if version >= 17 {
+        details.text_input = Some(if fields[14] == "-" {
+            String::new()
+        } else {
+            decode_hex(fields[14], line, "text input")?
+        });
+    }
+    Ok(details)
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +134,14 @@ pub struct RecordedImageResources {
     pub paths: Vec<RecordedImagePath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedJobDecision {
+    pub(crate) tick: usize,
+    pub(crate) kind: String,
+    pub(crate) key: u64,
+    pub(crate) ready: bool,
+}
+
 #[derive(Debug)]
 pub struct ReplayReport {
     pub(crate) version: u32,
@@ -66,10 +150,14 @@ pub struct ReplayReport {
     pub(crate) source: String,
     pub(crate) revision: String,
     pub(crate) build: String,
+    /// Recorded desync-checkpoint cadence in ticks; 0 means the recording
+    /// carries no checkpoints, so a divergent playback cannot be detected.
+    pub(crate) checkpoint_interval: usize,
     pub(crate) inputs: Vec<ReplayInput>,
     pub(crate) timings: Vec<ReplayTiming>,
     pub(crate) profiles: HashMap<usize, RecordedProfile>,
     pub(crate) image_resources: HashMap<usize, RecordedImageResources>,
+    pub(crate) job_decisions: Vec<RecordedJobDecision>,
 }
 
 #[derive(Debug)]
@@ -85,6 +173,7 @@ pub struct TopFrame {
     pub released_keys: Vec<String>,
     pub pressed_buttons: Vec<i64>,
     pub released_buttons: Vec<i64>,
+    pub text_input: String,
     pub profile: Option<RecordedProfile>,
     pub image_resources: Option<RecordedImageResources>,
 }
@@ -105,6 +194,14 @@ pub struct ImageResourceFrame {
 }
 
 #[derive(Debug)]
+pub struct RepeatedImageLoad {
+    pub path: String,
+    pub loads: usize,
+    pub failures: usize,
+    pub ordinals: Vec<usize>,
+}
+
+#[derive(Debug)]
 pub struct ReplayAnalysis {
     pub version: u32,
     pub seed: Option<i64>,
@@ -121,10 +218,21 @@ pub struct ReplayAnalysis {
     pub top: Vec<TopFrame>,
     pub clusters: Vec<SlowCluster>,
     pub image_resource_frames: Vec<ImageResourceFrame>,
+    pub repeated_image_loads: Vec<RepeatedImageLoad>,
 }
 
 fn parse_u64(value: &str, line: usize, field: &str) -> Result<u64> {
     value.parse::<u64>().with_context(|| format!("line {line}: invalid {field} `{value}`"))
+}
+
+const MAX_REPLAY_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn parse_positive_key(value: &str, line: usize) -> Result<u64> {
+    let key = parse_u64(value, line, "job decision key")?;
+    if key == 0 || key > MAX_REPLAY_INTEGER {
+        bail!("line {line}: job decision key must be positive and at most {MAX_REPLAY_INTEGER}");
+    }
+    Ok(key)
 }
 
 fn decode_hex(value: &str, line: usize, field: &str) -> Result<String> {
@@ -153,7 +261,7 @@ impl ReplayReport {
             .context("not a replay log")?
             .parse::<u32>()
             .context("malformed replay version")?;
-        if !(1..=13).contains(&version) {
+        if !(1..=rock_replay_protocol::REPLAY_VERSION).contains(&version) {
             bail!("unsupported replay version {version}");
         }
         let mut report = Self {
@@ -163,10 +271,12 @@ impl ReplayReport {
             source: String::new(),
             revision: String::new(),
             build: String::new(),
+            checkpoint_interval: 0,
             inputs: Vec::new(),
             timings: Vec::new(),
             profiles: HashMap::new(),
             image_resources: HashMap::new(),
+            job_decisions: Vec::new(),
         };
         let mut timing_ordinals = HashSet::new();
 
@@ -191,6 +301,14 @@ impl ReplayReport {
                     report.revision = decode_hex(fields[1], line_number, "replay revision")?;
                 }
                 "build" if fields.len() == 2 => report.build = fields[1].to_string(),
+                "checkpoint" if fields.len() == 2 => {
+                    report.checkpoint_interval = usize::try_from(
+                        parse_u64(fields[1], line_number, "checkpoint interval")?,
+                    )
+                    .with_context(|| {
+                        format!("line {line_number}: checkpoint interval does not fit usize")
+                    })?;
+                }
                 "t" => {
                     if fields.len() < 8 || fields.len() > 10 {
                         bail!("line {line_number}: malformed replay observation");
@@ -203,6 +321,8 @@ impl ReplayReport {
                     let pad_buttons = fields.get(8).copied().unwrap_or("-");
                     let pad_axes = fields.get(9).copied().unwrap_or("-");
                     report.inputs.push(ReplayInput {
+                        input_details: None,
+                        image_publications: None,
                         mouse_x: fields[2].to_string(),
                         mouse_y: fields[3].to_string(),
                         wheel: fields[4].parse::<i64>().with_context(|| {
@@ -223,6 +343,35 @@ impl ReplayReport {
                             Ok((axis.to_string(), magnitude.to_string()))
                         })?,
                     });
+                }
+                "a" => {
+                    if report.version < 15 { bail!("line {line_number}: input details require v15"); }
+                    let details = parse_input_details(&fields, line_number, report.version)?;
+                    let tick = parse_u64(fields[1], line_number, "input detail tick")?;
+                    if !fields[1].bytes().all(|b| b.is_ascii_digit())
+                        || report.inputs.is_empty() || tick != (report.inputs.len() - 1) as u64 {
+                        bail!("line {line_number}: orphaned input detail row");
+                    }
+                    let input = report.inputs.last_mut().unwrap();
+                    if input.input_details.replace(details).is_some() {
+                        bail!("line {line_number}: duplicate input detail row");
+                    }
+                }
+                "u" => {
+                    if report.version < 16 || fields.len() != 3 {
+                        bail!("line {line_number}: malformed image publication row");
+                    }
+                    let tick = parse_u64(fields[1], line_number, "image publication tick")?;
+                    if !fields[1].bytes().all(|b| b.is_ascii_digit())
+                        || report.inputs.is_empty() || tick != (report.inputs.len() - 1) as u64 {
+                        bail!("line {line_number}: orphaned image publication row");
+                    }
+                    let data = decode_hex(fields[2], line_number, "image publications")?;
+                    rock_replay_protocol::validate_image_events(&data)
+                        .map_err(|e| anyhow::anyhow!("line {line_number}: {e}"))?;
+                    if report.inputs.last_mut().unwrap().image_publications.replace(data).is_some() {
+                        bail!("line {line_number}: duplicate image publication row");
+                    }
                 }
                 "p" => {
                     if fields.len() != 7 {
@@ -328,10 +477,45 @@ impl ReplayReport {
                         bail!("line {line_number}: duplicate image resource row for observation {ordinal}");
                     }
                 }
+                "j" => {
+                    if report.version < 14 {
+                        bail!("line {line_number}: job decision rows require replay version 14");
+                    }
+                    if fields.len() != 5 {
+                        bail!("line {line_number}: malformed job decision row");
+                    }
+                    let tick = usize::try_from(parse_u64(fields[1], line_number, "job decision tick")?)
+                        .with_context(|| format!("line {line_number}: job decision tick does not fit usize"))?;
+                    if report.inputs.len().checked_sub(1) != Some(tick) {
+                        bail!("line {line_number}: job decision tick {tick} is not the current recorded observation");
+                    }
+                    let kind = fields[2];
+                    if kind.is_empty() || kind.chars().any(char::is_whitespace) {
+                        bail!("line {line_number}: job decision kind must be one token");
+                    }
+                    let key = parse_positive_key(fields[3], line_number)?;
+                    let ready = match fields[4] {
+                        "0" => false,
+                        "1" => true,
+                        value => bail!("line {line_number}: invalid job decision readiness `{value}`"),
+                    };
+                    report.job_decisions.push(RecordedJobDecision {
+                        tick,
+                        kind: kind.to_string(),
+                        key,
+                        ready,
+                    });
+                }
                 _ => {}
             }
         }
 
+        if report.version >= 16 && report.inputs.iter().any(|input| input.image_publications.is_none()) {
+            bail!("v16 replay is missing image publications");
+        }
+        if report.version >= 15 && report.inputs.iter().any(|input| input.input_details.is_none()) {
+            bail!("v15 replay is missing input details");
+        }
         if report.version >= 12 && report.source.is_empty() {
             bail!("v12+ replay is missing its project source");
         }
@@ -369,10 +553,24 @@ impl ReplayReport {
             let previous = row.ordinal.checked_sub(1).and_then(|i| self.inputs.get(i));
             let previous_keys = previous.map(|input| input.keys.as_slice()).unwrap_or(&[]);
             let previous_buttons = previous.map(|input| input.buttons.as_slice()).unwrap_or(&[]);
-            let pressed_keys = difference(&current.keys, previous_keys);
-            let released_keys = difference(previous_keys, &current.keys);
-            let pressed_buttons = difference(&current.buttons, previous_buttons);
-            let released_buttons = difference(previous_buttons, &current.buttons);
+            let mut pressed_keys = difference(&current.keys, previous_keys);
+            let mut released_keys = difference(previous_keys, &current.keys);
+            let mut pressed_buttons = difference(&current.buttons, previous_buttons);
+            let mut released_buttons = difference(previous_buttons, &current.buttons);
+            let text_input = current.input_details.as_ref()
+                .and_then(|details| details.text_input.clone()).unwrap_or_default();
+            if let Some(details) = &current.input_details {
+                pressed_keys.retain(|key| !details.repeated_keys.contains(key));
+                pressed_keys.extend(details.pressed_keys.iter().cloned());
+                released_keys.extend(details.pressed_keys.iter()
+                    .filter(|key| !current.keys.contains(key)).cloned());
+                pressed_buttons.extend(&details.pressed_buttons);
+                released_buttons.extend(&details.released_buttons);
+                pressed_keys.sort(); pressed_keys.dedup();
+                released_keys.sort(); released_keys.dedup();
+                pressed_buttons.sort(); pressed_buttons.dedup();
+                released_buttons.sort(); released_buttons.dedup();
+            }
             let phases = [
                 ("logic", row.logic_us),
                 ("render", row.render_us),
@@ -396,6 +594,7 @@ impl ReplayReport {
                 released_keys,
                 pressed_buttons,
                 released_buttons,
+                text_input,
                 profile: self.profiles.get(&row.ordinal).cloned(),
                 image_resources: self.image_resources.get(&row.ordinal).cloned(),
             }
@@ -433,6 +632,23 @@ impl ReplayReport {
             })
             .collect::<Vec<_>>();
         image_resource_frames.sort_by_key(|row| row.ordinal);
+        let mut loads_by_path: HashMap<String, (usize, usize, Vec<usize>)> = HashMap::new();
+        for row in &image_resource_frames {
+            for path in &row.resources.paths {
+                let entry = loads_by_path.entry(path.path.clone()).or_default();
+                entry.0 += 1;
+                if !path.succeeded { entry.1 += 1; }
+                entry.2.push(row.ordinal);
+            }
+        }
+        let mut repeated_image_loads = loads_by_path.into_iter()
+            .filter_map(|(path, (loads, failures, ordinals))| {
+                (loads > 1).then_some(RepeatedImageLoad { path, loads, failures, ordinals })
+            })
+            .collect::<Vec<_>>();
+        repeated_image_loads.sort_by(|left, right| {
+            right.loads.cmp(&left.loads).then_with(|| left.path.cmp(&right.path))
+        });
 
         Ok(ReplayAnalysis {
             version: self.version,
@@ -450,6 +666,7 @@ impl ReplayReport {
             top,
             clusters,
             image_resource_frames,
+            repeated_image_loads,
         })
     }
 }
@@ -474,6 +691,7 @@ impl ReplayAnalysis {
                 "released_keys": row.released_keys,
                 "pressed_buttons": row.pressed_buttons,
                 "released_buttons": row.released_buttons,
+                "text": row.text_input,
             },
             "recorded_profile": row.profile.as_ref().map(|profile| serde_json::json!({
                 "heap_bytes": profile.heap_bytes,
@@ -523,6 +741,14 @@ impl ReplayAnalysis {
                 "succeeded": path.succeeded,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>();
+        let repeated_image_loads = self.repeated_image_loads.iter().map(|row| serde_json::json!({
+            "path": row.path,
+            "loads": row.loads,
+            "failures": row.failures,
+            "first_ordinal": row.ordinals[0],
+            "last_ordinal": row.ordinals[row.ordinals.len() - 1],
+            "ordinals": row.ordinals,
+        })).collect::<Vec<_>>();
         Ok(serde_json::to_string_pretty(&serde_json::json!({
             "format": "rock.replay-report.v1",
             "replay": {
@@ -540,6 +766,7 @@ impl ReplayAnalysis {
             "top_frames": top,
             "slow_clusters": clusters,
             "image_resource_frames": image_resource_frames,
+            "repeated_image_loads": repeated_image_loads,
         }))?)
     }
 
@@ -615,6 +842,21 @@ impl ReplayAnalysis {
                 }
             }
         }
+        out.push_str("\nRepeated image loads:\n");
+        if self.repeated_image_loads.is_empty() {
+            out.push_str("  none\n");
+        } else {
+            for row in &self.repeated_image_loads {
+                out.push_str(&format!(
+                    "  {} load(s), {} failure(s), ordinals {}: {}\n",
+                    row.loads,
+                    row.failures,
+                    row.ordinals.iter().map(|ordinal| ordinal.to_string())
+                        .collect::<Vec<_>>().join(","),
+                    row.path,
+                ));
+            }
+        }
         out.push_str("\nImage resource frames:\n");
         if self.image_resource_frames.is_empty() {
             out.push_str("  none\n");
@@ -684,7 +926,8 @@ p 2 2 50000 12000 35000 3000\n\
 i 2 2 1 0 16777216 1500 1 16777216 9000 2000 1 1 6173736574732f7666782f666c616d65737472696b652e706e67\n\
 s 2 2 1000 200 0 0 1 64726177 30000 4\n\
 t 0x1p-6 0x0p+0 0x0p+0 0 0 - - - -\n\
-p 3 3 11000 4000 6000 1000";
+p 3 3 11000 4000 6000 1000\n\
+i 3 3 1 0 16777216 900 0 0 0 0 1 1 6173736574732f7666782f666c616d65737472696b652e706e67";
 
     #[test]
     fn report_ranks_frames_clusters_suggested_ranges_and_input_changes() {
@@ -715,6 +958,11 @@ p 3 3 11000 4000 6000 1000";
         assert_eq!(value["top_frames"][0]["image_resources"]["paths"][0]["path"],
             "assets/vfx/flamestrike.png");
         assert_eq!(value["image_resource_frames"][0]["ordinal"], 2);
+        assert_eq!(value["repeated_image_loads"][0]["path"],
+            "assets/vfx/flamestrike.png");
+        assert_eq!(value["repeated_image_loads"][0]["loads"], 2);
+        assert_eq!(value["repeated_image_loads"][0]["first_ordinal"], 2);
+        assert_eq!(value["repeated_image_loads"][0]["last_ordinal"], 3);
     }
 
     #[test]

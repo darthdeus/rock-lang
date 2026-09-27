@@ -1,6 +1,6 @@
 //! Shared-branch-tail structuring (T8c). The single `unstructured control flow
 //! (shared branch tail)` reject conflated three CFG-shape classes; each is now
-//! structured by its own technique (spec: docs/multi-backend-testing-plan.md
+//! structured by its own technique (spec: docs/backends.md
 //! "T8c spec"). The node-executed value checks are the correctness oracle; the
 //! mutation tests confirm the structuring is load-bearing (drop an arm / mistarget
 //! a labeled continue -> a wrong result, not a silent pass).

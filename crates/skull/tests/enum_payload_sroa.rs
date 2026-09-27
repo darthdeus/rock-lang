@@ -40,11 +40,7 @@ fn main() { t() }
 #[test]
 fn nonescaping_payload_enum_does_not_allocate_table() {
     let lua = emit_module(SRC);
-    let body = lua
-        .split("\nfunction classify")
-        .nth(1)
-        .and_then(|s| s.split("\nfunction ").next())
-        .expect("classify body");
+    let body = crate::common::function_body(&lua, "classify");
     // The `MakeEnum` table literal must be GONE from the hot body. (`= "Circle"`
     // survives as a scalarized field-cell store; only the `{__variant = ` TABLE
     // construction is the allocation we remove.)
@@ -295,4 +291,173 @@ fn tuple_match_materializes_a_bound_enum_that_escapes() {
 fn tuple_enum_match_runs_correctly() {
     let Some(stdout) = run_t(TUPLE_ENUM_MATCH) else { return };
     assert_eq!(stdout, "true false true false 1 Key", "got {stdout:?}");
+}
+
+const NOBOX_NESTED_ENUM_FIELDS: &str = r#"
+enum Payload { Damage(float), Text(string) }
+enum Subject { None, Mob(int) }
+enum Source { Player, Named(string) }
+
+nobox value Event {
+    payload: Payload,
+    subject: Subject,
+    source: Source,
+    label: string,
+}
+
+fn make_event(n: int) -> Event {
+    return Event {
+        payload: Payload::Damage(n as float),
+        subject: Subject::Mob(n),
+        source: Source::Named("player"),
+        label: "hit",
+    }
+}
+
+fn consume_event(event: Event) -> int {
+    let amount = match event.payload {
+        Payload::Damage(value) => value as int,
+        Payload::Text(text) => text.len(),
+    }
+    let subject = match event.subject {
+        Subject::None => 0,
+        Subject::Mob(id) => id,
+    }
+    let source = match event.source {
+        Source::Player => 0,
+        Source::Named(name) => name.len(),
+    }
+    return amount + subject + source + event.label.len()
+}
+
+fn route_event(n: int) -> int { return consume_event(make_event(n)) }
+
+@test(output = "17")
+fn t() { print(route_event(4)) }
+
+fn main() { t() }
+"#;
+
+#[test]
+fn nested_flat_enums_cross_a_nobox_value_wire_without_boxes() {
+    let lua = emit_module(NOBOX_NESTED_ENUM_FIELDS);
+    let make = function_body(&lua, "make_event");
+    assert!(
+        !make.contains("{__variant = "),
+        "nested flat enums must ride the outer nobox return wire as leaves:\n{make}"
+    );
+    let route = function_body(&lua, "route_event");
+    assert!(
+        !route.contains("{__variant = "),
+        "an immediately forwarded nobox event must not rebuild nested enums:\n{route}"
+    );
+}
+
+#[test]
+fn nested_flat_enums_in_a_nobox_value_run_correctly() {
+    let Some(stdout) = run_t(NOBOX_NESTED_ENUM_FIELDS) else { return };
+    assert_eq!(stdout, "17", "got {stdout:?}");
+}
+
+const NOBOX_NESTED_ENUM_ESCAPE: &str = r#"
+enum Payload { Damage(float), Text(string) }
+
+nobox value Event {
+    payload: Payload,
+    label: string,
+}
+
+fn retain_payload(event: Event) -> [Payload] { return [event.payload] }
+
+@test(output = "8")
+fn t() {
+    let retained = retain_payload(Event { payload: Payload::Damage(8.0), label: "hit" })
+    print(match retained[0] {
+        Payload::Damage(value) => value as int,
+        Payload::Text(text) => text.len(),
+    })
+}
+
+fn main() { t() }
+"#;
+
+#[test]
+fn nested_flat_enum_still_materializes_at_vector_escape() {
+    let lua = emit_module(NOBOX_NESTED_ENUM_ESCAPE);
+    let retain = function_body(&lua, "retain_payload");
+    assert!(
+        retain.contains("{__variant = "),
+        "a nested enum retained in a vector must still materialize:\n{retain}"
+    );
+}
+
+#[test]
+fn nested_flat_enum_escape_runs_correctly() {
+    let Some(stdout) = run_t(NOBOX_NESTED_ENUM_ESCAPE) else { return };
+    assert_eq!(stdout, "8", "got {stdout:?}");
+}
+
+const VALUE_NESTED_ENUM_FIELDS: &str = r#"
+enum Left { A, B }
+enum Right { C, D }
+enum Kind { Plain, Left(Left), Right(Right) }
+
+value Row {
+    kind: Kind,
+    key: string,
+    count: int,
+}
+
+fn make_row(kind: Kind, n: int) -> Row {
+    return match kind {
+        Kind::Plain => Row { kind, key: "plain", count: n + 1 },
+        Kind::Left(_) => Row { kind, key: "left", count: n + 1 },
+        Kind::Right(_) => Row { kind, key: "right", count: n + 1 },
+    }
+}
+
+fn consume_row(row: Row) -> int {
+    return match row.kind {
+        Kind::Plain => row.count,
+        Kind::Left(value) => match value {
+            Left::A => row.count,
+            Left::B => row.count + 4,
+        },
+        Kind::Right(_) => row.count,
+    }
+}
+
+fn route_row(n: int) -> int { return consume_row(make_row(Kind::Left(Left::B), n)) }
+
+fn store_row(n: int) -> int {
+    let rows: [Row] = []
+    rows.push(make_row(Kind::Left(Left::B), n))
+    return consume_row(rows[0])
+}
+
+@test(output = "9 9")
+fn t() { print("{route_row(4)} {store_row(4)}") }
+
+fn main() { t() }
+"#;
+
+#[test]
+fn nested_flat_enums_cross_an_ordinary_value_wire_without_boxes() {
+    let lua = emit_module(VALUE_NESTED_ENUM_FIELDS);
+    let make = function_body(&lua, "make_row");
+    assert!(
+        !make.contains("{__variant = "),
+        "nested flat enums must ride an ordinary value return wire as leaves:\n{make}"
+    );
+    let route = function_body(&lua, "route_row");
+    assert!(
+        !route.contains("{__variant = "),
+        "an immediately forwarded ordinary value must not rebuild nested enums:\n{route}"
+    );
+}
+
+#[test]
+fn nested_flat_enums_in_an_ordinary_value_run_correctly() {
+    let Some(stdout) = run_t(VALUE_NESTED_ENUM_FIELDS) else { return };
+    assert_eq!(stdout, "9 9", "got {stdout:?}");
 }

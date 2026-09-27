@@ -1,0 +1,31 @@
+// Prefix operator probes must report the unary result at the operator while
+// retaining the operand type at the operand and binary operator positions.
+//- prefix_operator_result_type
+struct PrefixOperand { value: int }
+
+fn __unm(value: PrefixOperand) -> float {
+    1.0
+}
+
+fn __not(value: PrefixOperand) -> string {
+    "not"
+}
+
+fn f() -> string {
+    let operand = PrefixOperand { value: 1 }
+    let negated = -operand
+                //^ float
+                 //^ PrefixOperand
+    let noted = !operand
+              //^ string
+               //^ PrefixOperand
+    let _ = -PrefixOperand { value: 1 }
+          //^ float
+           //^ PrefixOperand
+    !PrefixOperand { value: 1 }
+  //^ string
+   //^ PrefixOperand
+    let total = operand.value < 1
+                            //^ bool
+    noted
+}

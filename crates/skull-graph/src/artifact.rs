@@ -194,6 +194,7 @@ pub struct ArtifactRequest<'a> {
     /// so they are an INPUT, never re-derived here from the graph's contents.
     pub roots: &'a [FuncRef],
     pub symbols: &'a dyn SymbolPlanner,
+    scalar_context: Option<&'a skull_mir::lower::ScalarCtx>,
 }
 
 impl<'a> ArtifactRequest<'a> {
@@ -208,7 +209,31 @@ impl<'a> ArtifactRequest<'a> {
             spec,
             roots,
             symbols: &LogicalSymbols,
+            scalar_context: None,
         }
+    }
+
+    pub fn with_scalar_context(mut self, context: &'a skull_mir::lower::ScalarCtx) -> Self {
+        self.scalar_context = Some(context);
+        self
+    }
+
+    fn scalar_context<'b>(
+        &'b self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        local: &'b std::cell::OnceCell<skull_mir::lower::ScalarCtx>,
+    ) -> Option<&'b skull_mir::lower::ScalarCtx> {
+        let backend = self.spec.execution.backend?;
+        if let Some(context) = self.scalar_context {
+            assert_eq!(context.target(), backend, "artifact scalar context backend mismatch");
+            assert!(std::ptr::eq(context.interner(), g.interner().as_ref()),
+                "artifact scalar context must share the graph interner");
+            return Some(context);
+        }
+        // Standalone graph consumers have no emission context to retain.
+        Some(local.get_or_init(|| skull_mir::lower::ScalarCtx::new(ws)
+            .with_target(backend).sharing(g.interner().clone())))
     }
 
     pub fn with_mappings(mut self, m: ArtifactMappings<'a>) -> Self {
@@ -637,6 +662,7 @@ pub struct ArtifactUpdateStats {
     /// keeps this at zero; a nonzero value is a structural finding, not a
     /// timing claim.
     pub broad_scans: usize,
+    pub scalar_context_builds: usize,
 }
 
 fn severed_order(left: &Severed, right: &Severed) -> std::cmp::Ordering {
@@ -816,6 +842,7 @@ impl ArtifactView {
                 root_entries_examined: 0,
                 local_index_rows_examined,
                 broad_scans,
+                scalar_context_builds: 0,
             };
         }
 
@@ -944,6 +971,7 @@ impl ArtifactView {
                 root_entries_examined,
                 local_index_rows_examined,
                 broad_scans,
+                scalar_context_builds: 0,
             };
         }
 
@@ -1014,12 +1042,13 @@ impl ArtifactView {
             local_index_rows_examined += 1;
             self.index.site_counts.remove(i);
         }
+        let scalar_context = std::cell::OnceCell::new();
         for i in dirty.iter().filter(|i| g.instances.contains(*i)) {
             local_index_rows_examined += 1;
             let Some(result) = self.index.realizable.get(i).copied() else { continue };
             if reachable_dirty.contains(i) {
                 let realized = result.expect("retained artifact instance must be realizable");
-                self.install_instance_output(ws, g, req, i, realized);
+                self.install_instance_output(ws, g, req, i, realized, &scalar_context);
                 let declared = self.index.root_decls.contains(&DeclKey(i.func));
                 if declared || g.is_always_emitted_target(i) {
                     self.roots.insert(i.clone());
@@ -1092,6 +1121,7 @@ impl ArtifactView {
             root_entries_examined,
             local_index_rows_examined,
             broad_scans,
+            scalar_context_builds: usize::from(scalar_context.get().is_some()),
         }
     }
 
@@ -1155,6 +1185,7 @@ impl ArtifactView {
         req: &ArtifactRequest<'_>,
         i: &Instance,
         realized: Realized,
+        scalar_context: &std::cell::OnceCell<skull_mir::lower::ScalarCtx>,
     ) {
         let symbol = req.symbols.symbol(ws, g, i, realized);
         self.symbols.insert(i.clone(), symbol.clone());
@@ -1193,18 +1224,14 @@ impl ArtifactView {
         if g.concreteness(i) == Concreteness::Missing {
             self.missing_substitutions.insert(i.clone());
         }
-        if let Some(scx) = req.spec.execution.backend.map(|b| {
-            skull_mir::lower::ScalarCtx::new(ws)
-                .with_target(b)
-                .sharing(g.interner().clone())
-        }) {
-            if matches!(realized.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
+        if matches!(realized.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
+            if let Some(scx) = req.scalar_context(ws, g, scalar_context) {
                 if let Ok(signature) = crate::concrete_body::concrete_signature_for_instance(ws, g, i) {
                     let selected = Instance { func: realized.decl, args: i.args.clone() };
                     self.publisher_lanes.insert(
                         i.clone(),
                         skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
-                            ws, &scx, &selected, &signature,
+                            ws, scx, &selected, &signature,
                         )
                         .result_lanes(),
                     );
@@ -2231,15 +2258,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // The result-lane width of every foreign body this artifact emits. Asked of
     // the SELECTED declaration -- the one whose body is emitted -- under this
     // artifact's own execution backend.
-    let scx = req
-        .spec
-        .execution
-        .backend
-        .map(|b| {
-            skull_mir::lower::ScalarCtx::new(ws)
-                .with_target(b)
-                .sharing(g.interner().clone())
-        });
+    let scalar_context = std::cell::OnceCell::new();
+    let scx = req.scalar_context(ws, g, &scalar_context);
     // ...under THAT INSTANCE's own substitution, which is what makes the width
     // a property of the instance and not of the declaration: `-> T` is one
     // boxed slot on the declaration and two lanes at `T = (bool, float)`, and

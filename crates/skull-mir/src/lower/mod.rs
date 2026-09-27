@@ -334,6 +334,7 @@ pub use abi::{
     RepArena, RepArenaStats, RepError,
     RepId, RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
+    SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT,
 };
 
 mod struct_plan;
@@ -438,6 +439,14 @@ struct FlatCells {
     tag: Idx<Inst>,
     positional: Vec<Idx<Inst>>,
     named: Vec<(Ustr, Idx<Inst>)>,
+}
+
+/// One positional payload of a flat-enum construction: a source argument,
+/// lowered in place so it keeps its evaluation order, or a value the compiler
+/// already lowered (a `@struct_expand` field).
+enum FlatPayload {
+    Expr(Idx<Expr>),
+    Repr(ValueRepr),
 }
 
 /// A `match`/`if let`/`while let` scrutinee: either an ordinary lowered value, or a
@@ -1055,16 +1064,18 @@ fn raw(b: Idx<BindingInfo>) -> u32 {
 }
 
 /// The `NativeBuffer*` nominal type names (T-typed + phantom-size variants).
-fn is_native_buffer(name: &str) -> bool {
-    matches!(
+fn is_native_buffer(name: Ustr) -> bool {
+    bone_semantic::prelude::is_intrinsic_key_in(
         name,
-        "NativeBuffer"
-            | "NativeBufferU8"
-            | "NativeBufferI8"
-            | "NativeBufferU16"
-            | "NativeBufferI16"
-            | "NativeBufferU32"
-            | "NativeBufferI32"
+        &[
+            "NativeBuffer",
+            "NativeBufferU8",
+            "NativeBufferI8",
+            "NativeBufferU16",
+            "NativeBufferI16",
+            "NativeBufferU32",
+            "NativeBufferI32",
+        ],
     )
 }
 
@@ -1201,9 +1212,9 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 }
             }
         }
-        Expr::Not(i)
+        Expr::Not(i, _)
         | Expr::BitNot(i)
-        | Expr::UnaryMinus(i)
+        | Expr::UnaryMinus(i, _)
         | Expr::Spread(i)
         | Expr::YieldDelegate(i) => {
             tag!(14);
@@ -1266,7 +1277,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             go!(target);
             go!(value);
         }
-        Expr::CompoundAssign { target, op_fn, value } => {
+        Expr::CompoundAssign { target, op_fn, value, .. } => {
             tag!(32);
             op_fn.hash(h);
             go!(target);
@@ -1332,7 +1343,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(x);
             }
         }
-        Expr::SafeNavCall { receiver, method, args } => {
+        Expr::SafeNavCall { receiver, method, args, .. } => {
             tag!(39);
             method.hash(h);
             go!(receiver);
@@ -1545,9 +1556,13 @@ fn lower_body(
     // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
     // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
     // rewrites it into the stackless state machine.
-    let resume_arg = func
-        .is_coroutine
-        .then(|| f.new_cell(Some(Ustr::from("__resume_arg"))));
+    let resume_arg = func.is_coroutine.then(|| {
+        let cell = f.new_cell(Some(Ustr::from("__resume_arg")));
+        f.cells[cell].capture_identity = Some(crate::code_identity::CaptureIdentity::Generated {
+            role: Ustr::from("coroutine-resume-arg"),
+        });
+        cell
+    });
     f.is_coroutine = func.is_coroutine;
     f.resume_arg = resume_arg;
     let cur = f.entry();
@@ -2007,7 +2022,7 @@ fn lower_decorator_inner(
         crate::code_identity::CodeOwner::Artifact {
             kind: crate::code_identity::CodeOwnerKind::Decorator,
             module: module.file,
-            name: module.decorators[did].name,
+            name: module.decorators[did].def_key,
         },
     ));
     f.rep_arena = Some(scx.rep_arena());
@@ -2062,7 +2077,12 @@ fn lower_decorator_inner(
         presence_only: None,
     };
     // `target` is param 0, then the decorator's declared params.
-    let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
+    let tcell = b.new_binding_cell(
+        target,
+        b.body.binding_arena[target].name,
+        b.binding_ty(target),
+        Ustr::from(""),
+    );
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
     b.lower_params()?;
@@ -2205,6 +2225,20 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    fn new_binding_cell(
+        &mut self,
+        binding: Idx<BindingInfo>,
+        name: Ustr,
+        ty: Option<TyId>,
+        projection: Ustr,
+    ) -> Idx<Cell> {
+        let cell = self.f.new_cell_typed(Some(name), ty);
+        self.f.cells[cell].capture_identity =
+            crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[binding].span)
+                .map(|site| crate::code_identity::CaptureIdentity::Binding { site, projection });
+        cell
+    }
+
     fn rep_slot(&self, id: RepId) -> RetSlot {
         self.scx.rep_arena().ret_slot(id)
     }
@@ -2487,7 +2521,7 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
-            let cell = self.f.new_cell_typed(Some(name), cty);
+            let cell = self.new_binding_cell(pb, name, cty, Ustr::from(""));
             self.f.params.push(cell);
             self.binds.insert(raw(pb), cell);
             return Ok(());
@@ -2497,22 +2531,24 @@ impl Builder<'_> {
                 let owner = self
                     .binding_ty(pb)
                     .and_then(|ty| self.concrete_ty_id(ty));
-                self
-                .new_flat_enum_cells(name, shape, owner.as_deref())?
-                .unwrap_or_else(|| {
+                self.new_flat_enum_cells(pb, name, shape, owner.as_deref())?.unwrap_or_else(|| {
                     (0..slot.slot_count())
-                        .map(|li| {
-                            self.f
-                                .new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())))
-                        })
+                        .map(|li| self.new_binding_cell(
+                            pb,
+                            Ustr::from(format!("{name}__{li}").as_str()),
+                            None,
+                            Ustr::from(li.to_string().as_str()),
+                        ))
                         .collect()
                 })
             }
             RetSlot::Nested(_) | RetSlot::Opaque => (0..slot.slot_count())
-                .map(|li| {
-                    self.f
-                        .new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())))
-                })
+                .map(|li| self.new_binding_cell(
+                    pb,
+                    Ustr::from(format!("{name}__{li}").as_str()),
+                    None,
+                    Ustr::from(li.to_string().as_str()),
+                ))
                 .collect(),
         };
         if cells.len() != slot.slot_count() {
@@ -2535,11 +2571,88 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// The callee's parameter defaults that are plain scalar literals, by param
+    /// index, read from the callee body's own arena. A DIRECT call passes these
+    /// explicitly (`trailing_default_args`, `slotted_call_args`,
+    /// `reorder_named_args`), so the callee's default-fill prologue below is
+    /// never the direction a trace takes: with the caller's floats live, that
+    /// nil branch was a doomed side exit at every float-heavy callee with a
+    /// defaulted param (`docs/trace-pressure-work-plan.md`, "Default fill").
+    /// `null` stays `None` -- omitted already IS null -- and a non-literal
+    /// default (a global, a ctor) stays the callee's to evaluate.
+    pub(crate) fn literal_param_defaults(&self, func: FuncRef) -> Vec<Option<Lit>> {
+        let module = self.ws.module(func.module);
+        let decl = &module.functions[func.func];
+        let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else {
+            return Vec::new();
+        };
+        if decl.is_variadic {
+            return Vec::new();
+        }
+        body.param_defaults
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let e = (*d)?;
+                let pd = decl.param_decls.get(i)?;
+                Some(match body.expr_arena[e] {
+                    Expr::Int(v) => {
+                        if pd.ty == self.ws.builtins.uint() {
+                            Lit::Uint(v as u32)
+                        } else {
+                            Lit::Int(v)
+                        }
+                    }
+                    Expr::Float(of) => Lit::Float(of.0),
+                    Expr::Bool(b) => Lit::Bool(b),
+                    Expr::String(s) => Lit::Str(s),
+                    _ => return None,
+                })
+            })
+            .collect()
+    }
+
+    /// Explicit values for the parameters a positional call left off the end:
+    /// a literal default becomes a constant, a parameter without one keeps its
+    /// nil (one per wire slot) so the callee fills it, and the trailing nils Lua
+    /// would supply anyway are dropped. `param_shapes` is the scalar ABI's slot
+    /// table; `None` is the boxed ABI (one slot each).
+    pub(crate) fn trailing_default_args(
+        &mut self,
+        func: FuncRef,
+        provided: usize,
+        param_shapes: Option<&[RetSlot]>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let defaults = self.literal_param_defaults(func);
+        let slots_of = |i: usize| param_shapes.and_then(|s| s.get(i)).map_or(1, |s| s.slot_count());
+        let last = (provided..defaults.len())
+            .rev()
+            .find(|&i| defaults[i].is_some() && slots_of(i) == 1);
+        let Some(last) = last else { return Ok(Vec::new()) };
+        let mut out = Vec::new();
+        for i in provided..=last {
+            match &defaults[i] {
+                Some(lit) if slots_of(i) == 1 => {
+                    let lit = lit.clone();
+                    out.push(self.emit_cur(Inst::Const(lit)));
+                }
+                _ => {
+                    for _ in 0..slots_of(i) {
+                        out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Callee-side default fill: an omitted argument arrives as Lua `nil`, so for
     /// each defaulted param emit `if cell == nil { cell = <default> }` at the top
     /// of the body (rock's convention — the default expr lives in THIS body's
-    /// arena). A trailing omitted arg is simply not passed (Lua nils it); a
-    /// named-arg gap is passed an explicit nil by the call site.
+    /// arena). A direct call passes a literal scalar default itself
+    /// (`literal_param_defaults`), so this prologue is reached with nil only from
+    /// a call the emitter could not see; a `null` default on a scalar cell emits
+    /// nothing, since omitted already is null.
     fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         let defaults = self.body.param_defaults.clone();
@@ -2573,6 +2686,9 @@ impl Builder<'_> {
                 continue;
             }
             let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
+            if matches!(self.body.expr_arena[*def], Expr::Null) {
+                continue;
+            }
             self.f.mark_default_param(cell);
             let cur = self.emit_cur(Inst::Load(cell));
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -2582,7 +2698,8 @@ impl Builder<'_> {
             let join = self.f.new_block();
             self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
             self.cur = then_bb;
-            let dv = self.lower_expr(*def)?;
+            let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
+            let dv = self.lower_expr_with_expected(*def, expected.as_deref())?;
             self.f.param_default_values.insert(i, vec![dv]);
             self.emit_cur(Inst::Store { cell, value: dv });
             self.f.set_term(self.cur, Term::Goto(join));
@@ -2655,7 +2772,7 @@ impl Builder<'_> {
         else {
             return Ok(())
         };
-        if name.as_str() != "Coroutine" {
+        if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
             return Ok(())
         }
         let Some(result) = params.get(1) else { return Ok(()) };
@@ -2742,7 +2859,12 @@ impl Builder<'_> {
             let v = self.lower_expr(e)?;
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
-        let v = self.lower_expr(e)?;
+        let expected = self
+            .concrete_plan
+            .signature
+            .result
+            .map(|result| self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering));
+        let v = self.lower_expr_with_expected(e, expected.as_deref())?;
         let v = match self.concrete_plan.signature.result {
             Some(result) => {
                 let result = self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering);
@@ -3234,7 +3356,7 @@ pub struct ComputeCollection {
 /// A local read of the annotation (skull-codegen-glsl has the same helper, but
 /// skull-mir must not depend on it -- the layering constraint).
 fn shader_stage_of(f: &Function) -> Option<&'static str> {
-    let ann = f.annotations.iter().find(|a| a.name.name.as_str() == "shader")?;
+    let ann = f.annotations.iter().find(|a| a.is_builtin("shader"))?;
     match ann.args.first().map(|a| &a.value) {
         Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
         Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
@@ -3319,7 +3441,7 @@ fn resolve_shader_arg(
                 .param_decls
                 .iter()
                 .flat_map(|param| param.annotations.iter())
-                .find(|annotation| annotation.name.name.as_str() == "storage")
+                .find(|annotation| annotation.is_builtin("storage"))
             {
                 return Err(CompilerError::new_with_label(
                     annotation.span,
@@ -4073,7 +4195,10 @@ fn function_has_gpu_resource_param(ws: &Workspace, function: &Function) -> bool 
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
             return false;
         };
-        matches!(name.as_str(), "StorageBuffer" | "AtomicStorageBuffer" | "WorkgroupArray")
+        bone_semantic::prelude::is_intrinsic_key_in(
+            name,
+            &["StorageBuffer", "AtomicStorageBuffer", "WorkgroupArray"],
+        )
     })
 }
 
@@ -4082,13 +4207,13 @@ fn is_workgroup_array_type(ws: &Workspace, ty: TyId) -> bool {
     let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
         return false;
     };
-    name.as_str() == "WorkgroupArray"
+    bone_semantic::prelude::is_intrinsic_key(name, "WorkgroupArray")
 }
 
 fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
     match body.expr_arena[e] {
         Expr::Int(v) => Some(v),
-        Expr::UnaryMinus(inner) => match body.expr_arena[inner] {
+        Expr::UnaryMinus(inner, _) => match body.expr_arena[inner] {
             Expr::Int(v) => Some(-v),
             _ => None,
         },

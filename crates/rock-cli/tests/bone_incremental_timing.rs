@@ -28,7 +28,7 @@ fn warm_stdlib() -> Vec<skull_parser::Ast> {
 /// Discover a project the same way `rock watch --backend bone` does: resolve
 /// `stick.toml` deps (the stone engine etc.), so cross-module types like `Vec2`
 /// are present. Mirrors `bone_watch`'s file-set construction.
-fn project_files(path: &str) -> Vec<(String, String)> {
+fn project_files(path: &str) -> Vec<bone_incremental::session::SessionFile> {
     let source_spec = rock_cli::common::path_to_source_spec(path);
     let sources =
         rock_cli::unified_compile::discover_sources(&source_spec).expect("discovery succeeds");
@@ -37,7 +37,14 @@ fn project_files(path: &str) -> Vec<(String, String)> {
         .iter()
         .map(|f| {
             let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
+            bone_incremental::session::SessionFile {
+                path: f.file.to_id_path(),
+                text: f.contents.clone(),
+                dialect: f.dialect,
+                package: f.package.clone(),
+                memory_class: f.memory_class,
+                global_policy: f.global_policy,
+            }
         })
         .collect()
 }
@@ -56,7 +63,7 @@ fn measure_body_edit_phase_breakdown() {
     let files = project_files(&proj);
     assert!(files.len() > 1, "{proj_rel} should have several modules");
 
-    let mut session = bone_incremental::session::Session::new(warm, files.clone())
+    let mut session = bone_incremental::session::Session::new(warm, files.clone(), &bone_core::modules::NsAliases::default())
         .unwrap_or_else(|e| panic!("session warm failed: {}", e.message));
 
     // The module we will edit, and a single-body edit inside it (signature
@@ -64,19 +71,19 @@ fn measure_body_edit_phase_breakdown() {
     // that body's hash and nothing else's.
     let target = files
         .iter()
-        .find(|(p, _)| p.ends_with(&file_suffix))
+        .find(|f| f.path.ends_with(&file_suffix))
         .unwrap_or_else(|| panic!("{file_suffix} present in {proj_rel}"));
     let needle = needle.as_str();
-    assert_eq!(target.1.matches(needle).count(), 1, "edit anchor must be unique");
-    let edited = target.1.replace(needle, &format!("{needle} // bench-edit"));
+    assert_eq!(target.text.matches(needle).count(), 1, "edit anchor must be unique");
+    let edited = target.text.replace(needle, &format!("{needle} // bench-edit"));
 
     // Warm the update path once (first edit allocates caches, ramps clocks),
     // then measure a second, content-distinct edit.
-    let _ = session.update_file(&target.0, &edited).unwrap();
-    let edited2 = target.1.replace(needle, &format!("{needle} // bench-edit-2"));
+    let _ = session.update_file(&target.path, &edited).unwrap();
+    let edited2 = target.text.replace(needle, &format!("{needle} // bench-edit-2"));
 
     let t = Instant::now();
-    let result = session.update_file(&target.0, &edited2).unwrap();
+    let result = session.update_file(&target.path, &edited2).unwrap();
     let wall = t.elapsed().as_secs_f64() * 1000.0;
 
     println!("\n=== bone body-edit phase breakdown ({proj_rel}/{file_suffix}) ===");
@@ -104,7 +111,7 @@ fn emit_overlay_changed_fn_plus_code_slot_accumulates() {
     let warm = warm_stdlib();
     let proj = concat!(env!("CARGO_MANIFEST_DIR"), "/../../games/match3");
     let files = project_files(proj);
-    let mut session = bone_incremental::session::Session::new(warm, files.clone())
+    let mut session = bone_incremental::session::Session::new(warm, files.clone(), &bone_core::modules::NsAliases::default())
         .unwrap_or_else(|e| panic!("session warm failed: {}", e.message));
 
     let (_baseline, mut cache) = {
@@ -115,14 +122,14 @@ fn emit_overlay_changed_fn_plus_code_slot_accumulates() {
 
     let target = files
         .iter()
-        .find(|(p, _)| p.ends_with("main.rock"))
+        .find(|f| f.path.ends_with("main.rock"))
         .expect("match3 main.rock");
     let needle = "return random_int(0, NUM_TILE_TYPES)";
-    assert_eq!(target.1.matches(needle).count(), 1, "edit anchor unique");
+    assert_eq!(target.text.matches(needle).count(), 1, "edit anchor unique");
 
     // First body edit -> overlay carries the changed fn + its slot publication.
-    let edit1 = target.1.replace(needle, &format!("{needle} // overlay-test-1"));
-    let r1 = session.update_file(&target.0, &edit1).expect("update 1");
+    let edit1 = target.text.replace(needle, &format!("{needle} // overlay-test-1"));
+    let r1 = session.update_file(&target.path, &edit1).expect("update 1");
     assert_eq!(r1.tier, bone_incremental::session::UpdateTier::BodyOnly, "body edit");
     let ov1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred)
         .expect("emit_overlay");
@@ -135,9 +142,9 @@ fn emit_overlay_changed_fn_plus_code_slot_accumulates() {
     // Second body edit in a DIFFERENT spot -> overlay accumulates (still has the
     // first fn's redefinition too).
     let needle2 = "return grid[y * GRID_W + x]";
-    if target.1.matches(needle2).count() == 1 {
+    if target.text.matches(needle2).count() == 1 {
         let edit2 = edit1.replace(needle2, &format!("{needle2} // overlay-test-2"));
-        let r2 = session.update_file(&target.0, &edit2).expect("update 2");
+        let r2 = session.update_file(&target.path, &edit2).expect("update 2");
         let ov2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred)
             .expect("emit_overlay");
         assert!(

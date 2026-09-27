@@ -109,6 +109,78 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   return reserved > physical ? reserved : physical;
 """
 
+@nomangle inline(js) fn __rock_stride_capacity(
+  reserved: int,
+  physical: int,
+  stride: int
+) -> int = "return Math.max(reserved, Math.floor(physical / stride));"
+
+@nomangle inline(js) fn __rock_stride_insert(
+  data: any,
+  lua_index: int,
+  len: int,
+  stride: int
+) = """
+  var start = (lua_index - 1) * stride;
+  for (var i = len * stride - 1; i >= start; i--) data[i + stride] = data[i];
+  for (var i = start; i < start + stride; i++) data[i] = false;
+"""
+
+@nomangle inline(js) fn __rock_stride_copy(data: any, len: int, stride: int) -> any =
+  "return data.slice(0, len * stride);"
+
+@nomangle inline(js) fn __rock_stride_sort(
+  vec: any,
+  key_fn: any,
+  stride: int
+) = """
+  var n = vec.len || 0, data = vec._data, order = [];
+  for (var i = 0; i < n; i++) order.push(i);
+  function key_at(row) {
+    return __rock_call(key_fn, __rock_materialize_strided_element(vec, row));
+  }
+  order.sort(function(a, b) {
+    var ka = key_at(a), kb = key_at(b);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+  var sorted = [];
+  for (var row = 0; row < n; row++) {
+    var source = order[row] * stride, target = row * stride;
+    for (var j = 0; j < stride; j++) sorted[target + j] = data[source + j];
+  }
+  for (var i = 0; i < n * stride; i++) data[i] = sorted[i];
+"""
+
+@nomangle inline(js) fn __rock_stride_sort_leaves(vec: any, key_fn: any, stride: int) = """
+  var n = vec.len || 0, data = vec._data, order = [];
+  for (var i = 0; i < n; i++) order.push(i);
+  function key_at(row) {
+    var args = [key_fn], base = row * stride;
+    for (var j = 0; j < stride; j++) args.push(data[base + j]);
+    return __rock_call.apply(null, args);
+  }
+  order.sort(function(a, b) {
+    var ka = key_at(a), kb = key_at(b);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+  var sorted = [];
+  for (var row = 0; row < n; row++) {
+    var source = order[row] * stride, target = row * stride;
+    for (var j = 0; j < stride; j++) sorted[target + j] = data[source + j];
+  }
+  for (var i = 0; i < n * stride; i++) data[i] = sorted[i];
+"""
+
+@nomangle inline(js) fn __rock_materialize_strided_element(vec: any, index: int) -> any = """
+  var h = vec["@vec"], base = index * h.stride;
+  var out = { __variant: vec._data[base], __ty: h.elem };
+  for (var j = 1; j < h.stride; j++) {
+    var value = vec._data[base + j];
+    if (value !== false) out[j - 1] = value;
+  }
+  return out;
+"""
+
 @nomangle inline(js) fn __rock_is_column_vec(v: any) -> bool = """
   if (v === null || typeof v !== "object" || v.__ty !== "Vec") return false;
   var h = v["@vec"];

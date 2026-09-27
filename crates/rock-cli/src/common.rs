@@ -24,6 +24,7 @@ pub fn compile_game_for_run(
     use std::collections::HashSet;
 
     rock_host::project::ensure_workspace_root()?;
+    crate::skull_backend::ensure_renderer_feature(path)?;
     crate::package::prepare_sound_bank(path)?;
     rock_host::engine_build::build_engine_libs(path)?;
 

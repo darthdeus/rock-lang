@@ -72,7 +72,8 @@ impl Builder<'_> {
                 let v = match by_value.get(&key) {
                     Some(&v) => v,
                     None => {
-                        let v = self.lower_expr(lf.value)?;
+                        let expected = self.concrete_struct_field_ty(e, lf.name);
+                        let v = self.lower_expr_with_expected(lf.value, expected.as_deref())?;
                         by_value.insert(key, v);
                         v
                     }
@@ -166,7 +167,7 @@ impl Builder<'_> {
         name: Ustr,
         mut fields: Vec<(Ustr, Idx<Inst>)>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if name.as_str() != "NativeBuffer" {
+        if !bone_semantic::prelude::is_intrinsic_key(name, "NativeBuffer") {
             return Ok(fields);
         }
         // The element comes from the literal's own inferred type, the same
@@ -345,22 +346,12 @@ impl Builder<'_> {
         )
     }
 
-    /// Whether `recv`'s static type is a struct with a fn-typed field named
-    /// `field` — recovers a `recv.field(args)` UFCS call that bone left as an
-    /// unresolved call `field` (it's really an indirect call through the field).
-    pub(crate) fn struct_field_is_fn(&self, recv: Idx<Expr>, field: Ustr) -> bool {
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(recv) else {
-            return false;
-        };
-        let Some(sid) = self.ws.struct_by_name.get(&sname) else {
-            return false;
-        };
-        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        sd.fields
-            .iter()
-            .find(|f| f.name == field)
-            .map(|f| matches!(self.resolve_ty(f.ty), Some(TypeExpr::Function { .. })))
-            .unwrap_or(false)
+    /// The fn-typed field call `e` goes through, if inference resolved it to
+    /// one (`BodyInference::fn_field_calls`): only method syntax does, so a
+    /// call written by name reaches the function even when its first
+    /// argument has a fn-typed field of that name.
+    pub(crate) fn fn_field_of_call(&self, e: Idx<Expr>) -> Option<Ustr> {
+        self.inf?.fn_field_calls.get(&e).copied()
     }
 
     pub(crate) fn struct_field_fn_rep_plan(
@@ -405,7 +396,12 @@ impl Builder<'_> {
         struct_name: Ustr,
         field: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.with_struct_default(struct_name, field, |s, def| s.lower_expr(def))
+        let expected = self
+            .cur_expr
+            .and_then(|literal| self.concrete_struct_field_ty(literal, field));
+        self.with_struct_default(struct_name, field, |s, def| {
+            s.lower_expr_with_expected(def, expected.as_deref())
+        })
     }
 
     /// The declaring struct's generic ARGUMENTS at this injection.
@@ -634,74 +630,21 @@ impl Builder<'_> {
         ))
     }
 
+    /// The box `materialize(v)` asks for: the ordinary whole-value pack, with
+    /// every ctor it mints marked EXPLICIT so the guarantee's verifier lets it
+    /// through. Routing it through `pack` rather than a second recursion is what
+    /// gives the explicit box the tiers the implicit one already had -- the
+    /// GC-table, leaf-table and flat-enum arms.
+    ///
+    /// An ABSENT value has no leaves to build from -- the ctor would get nil per
+    /// field and fail the cdata conversion -- so a presence-carrying group
+    /// branches: nil when absent, the ctor when present. The branch is legal
+    /// HERE precisely because it is not legal in `repack_bound_next_element`:
+    /// there the present arm would be an implicit materialization the mark
+    /// forbids, while `materialize` IS the authorized box, so building one is
+    /// the request.
     pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
-        match repr {
-            ValueRepr::Scalar(value) => Ok(value),
-            ValueRepr::Tuple { parts, .. } => {
-                let vs = parts
-                    .into_iter()
-                    .map(|p| self.materialize_repr(p))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(self.emit_cur(Inst::MakeTuple(vs)))
-            }
-            // An ABSENT value has no leaves to build from -- the ctor would get
-            // nil per field and fail the cdata conversion -- so a presence-carrying
-            // group branches: nil when absent, the ctor when present.
-            //
-            // The branch is legal HERE precisely because it is not legal in
-            // `repack_bound_next_element`: there the present arm would be an
-            // implicit materialization the mark forbids, while `materialize` IS
-            // the authorized box, so building one is the request.
-            ValueRepr::Group { name, parts, present: Some(present) } => {
-                let result = self.f.new_cell(None);
-                let absent_bb = self.f.new_block();
-                let present_bb = self.f.new_block();
-                let join = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch { cond: present, then_bb: present_bb, else_bb: absent_bb },
-                );
-
-                self.cur = absent_bb;
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                self.emit_cur(Inst::Store { cell: result, value: nil });
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = present_bb;
-                let boxed = self.materialize_group(name, parts)?;
-                self.emit_cur(Inst::Store { cell: result, value: boxed });
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = join;
-                Ok(self.emit_cur(Inst::Load(result)))
-            }
-            ValueRepr::Group { name, parts, .. } => self.materialize_group(name, parts),
-        }
-    }
-
-    fn materialize_group(
-        &mut self,
-        name: Ustr,
-        parts: Vec<ValueRepr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let representation = self.nominal_value_representation(name)?;
-        let names = struct_field_names(self.ws, name);
-        let fields = parts
-            .into_iter()
-            .enumerate()
-            .map(|(i, part)| -> Result<(Ustr, Idx<Inst>), CompilerError> {
-                let field = *names
-                    .get(i)
-                    .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
-                Ok((field, self.materialize_repr(part)?))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(self.emit_cur(Inst::MaterializeValueStruct {
-            name,
-            representation,
-            form: ValueCtorForm::Declared,
-            fields,
-        }))
+        self.pack_maybe_absent_boxed(repr, BoxKind::Explicit)
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
@@ -768,15 +711,7 @@ impl Builder<'_> {
 
         let mut tuples = Vec::with_capacity(fields.len());
         for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
-            let payload = self.pack(parts[i].clone())?;
-            // The pairs enum is table-backed when any payload is non-scalar, so a
-            // `nobox` payload has nowhere to live but a box -- the same boundary
-            // `uniform(x: Vec2)` marks with an explicit `materialize`. Here the
-            // compiler mints the box itself and there is no source line to mark,
-            // so it mints the AUTHORIZED one rather than rejecting a program the
-            // hand-written overload accepts.
-            self.authorize_nobox_box(payload);
-            let variant_v = self.make_single_payload_variant(enum_name, variant, payload)?;
+            let variant_v = self.make_single_payload_variant(enum_name, variant, parts[i].clone())?;
             let key = self.emit_cur(Inst::Const(Lit::Str(*field)));
             let tup = self.emit_cur(Inst::MakeTuple(vec![key, variant_v]));
             tuples.push(tup);
@@ -897,12 +832,37 @@ impl Builder<'_> {
         let Some(struct_name) = self.value_struct_name_of(u_e) else {
             return Err(reject(u_span, uniform_expand_arg_msg(fname)));
         };
-        let repr = self.lower_expr_repr(u_e)?;
         let plan = uniform_block_checked(self.ws, struct_name)
             .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
-
-        let leaves = self.repr_to_leaves_bundle(&repr)?;
         let stores = plan.leaf_stores();
+
+        // A block held in a GLOBAL is read one leaf at a time, each leaf
+        // loaded right before its own store, so at most the box and one leaf
+        // are live at any store. The whole-value read below loads every leaf
+        // into a register before the first store; inside a trace that keeps
+        // all of them (41 for the engine block) live in every exit snapshot
+        // taken during the pack, against a 16-register side-trace budget
+        // (docs/trace-pressure-work-plan.md).
+        if let Some(source) = self.global_uniform_source(u_e, struct_name)? {
+            let leaf_count = source.leaf_count();
+            if leaf_count != stores.len() {
+                return Err(reject(
+                    u_span,
+                    format!(
+                        "`@uniform_expand`: `{struct_name}` has {leaf_count} leaves but its std140 \
+                         plan has {} slots",
+                        stores.len()
+                    ),
+                ));
+            }
+            for (i, store) in stores.iter().enumerate() {
+                let leaf = self.global_uniform_leaf(&source, i);
+                self.emit_uniform_leaf_store(fv, iv, leaf, store);
+            }
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+        }
+
+        let leaves = self.uniform_block_leaves(u_e, struct_name)?;
         // `uniform_block_checked` already proved the two walkers agree on the
         // leaf PATH sequence, so this can only differ if the repr handed back a
         // different leaf count than the shape describes.
@@ -918,27 +878,103 @@ impl Builder<'_> {
             ));
         }
 
-        for (leaf, store) in leaves.iter().zip(stores) {
-            // `LeafStore.offset` is a BYTE offset; a leaf view indexes in units
-            // of its own primitive, and every std140 slot here is 4-byte.
-            let idx = self.emit_cur(Inst::Const(Lit::Int((store.offset / 4) as i64)));
-            let base = match store.view {
-                crate::gpu_layout::WireView::Float => fv,
-                crate::gpu_layout::WireView::Int => iv,
-                crate::gpu_layout::WireView::Uint => iv,
-            };
-            let leaf = match store.view {
-                crate::gpu_layout::WireView::Uint => self.emit_cur(Inst::UintBitcastInt(*leaf)),
-                _ => *leaf,
-            };
-            self.emit_cur(Inst::StoreIndex {
-                base,
-                index: idx,
-                value: leaf,
-                kind: ContainerKind::NativeBufferLeaf,
-            });
+        for (leaf, store) in leaves.iter().zip(&stores) {
+            self.emit_uniform_leaf_store(fv, iv, *leaf, store);
         }
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// The leaves of a uniform-block argument, whatever WIRE its expression
+    /// arrived on.
+    ///
+    /// A uniform block's packing is a property of its TYPE
+    /// (`docs/luajit-wide-value-abi.md` gate 4), so the leaf shape comes from
+    /// the nominal rather than from the argument's `RepPlan`. It has to: an
+    /// ordinary `value` wider than the ABI cut crosses a Rock-to-Rock call as
+    /// one boxed slot, and that slot's plan is `Opaque` -- it carries no leaf
+    /// list of its own, exactly as a global's boxed cdata does on the path
+    /// just above. Reading the box field by field is what `repr_to_leaves_shape`
+    /// already does for every other boxed source.
+    fn uniform_block_leaves(
+        &mut self,
+        u_e: Idx<Expr>,
+        struct_name: Ustr,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let repr = self.lower_expr_repr(u_e)?;
+        if self.scx.rep_arena().value_shape(repr.representation()).is_some() {
+            return self.repr_to_leaves_bundle(&repr);
+        }
+        let shape = self.nominal_rep_shape_required(struct_name, false)?;
+        self.repr_to_leaves_shape(repr.value(), &shape)
+    }
+
+    /// One std140 slot of a uniform block: a direct typed store of `leaf`
+    /// through the view its wire type selects.
+    fn emit_uniform_leaf_store(
+        &mut self,
+        fv: Idx<Inst>,
+        iv: Idx<Inst>,
+        leaf: Idx<Inst>,
+        store: &crate::gpu_layout::LeafStore,
+    ) {
+        // `LeafStore.offset` is a BYTE offset; a leaf view indexes in units
+        // of its own primitive, and every std140 slot here is 4-byte.
+        let idx = self.emit_cur(Inst::Const(Lit::Int((store.offset / 4) as i64)));
+        let base = match store.view {
+            crate::gpu_layout::WireView::Float => fv,
+            crate::gpu_layout::WireView::Int => iv,
+            crate::gpu_layout::WireView::Uint => iv,
+        };
+        let leaf = match store.view {
+            crate::gpu_layout::WireView::Uint => self.emit_cur(Inst::UintBitcastInt(leaf)),
+            _ => leaf,
+        };
+        self.emit_cur(Inst::StoreIndex {
+            base,
+            index: idx,
+            value: leaf,
+            kind: ContainerKind::NativeBufferLeaf,
+        });
+    }
+
+    /// `u` as a global place the packer can read leaf by leaf, or `None` when
+    /// `u` is anything else (a local group, a literal, a call result), which
+    /// takes the whole-value path. A global whose shape has a nullable or enum
+    /// child is left to that path too: those leaves need presence branches or
+    /// a tag spread, and no uniform block carries either.
+    fn global_uniform_source(
+        &mut self,
+        u_e: Idx<Expr>,
+        struct_name: Ustr,
+    ) -> Result<Option<GlobalUniformSource>, CompilerError> {
+        let Expr::Global(name) = self.body.expr_arena[u_e].clone() else {
+            return Ok(None);
+        };
+        if let Some((leaves, Some(_))) = self.nobox_global_place(u_e)? {
+            return Ok(Some(GlobalUniformSource::LeafGlobals(leaves)));
+        }
+        let shape = self.nominal_rep_shape_required(struct_name, false)?;
+        if !self.shape_is_plain_keys(&shape) {
+            return Ok(None);
+        }
+        // The key paths `cdata_leaves` reads a box with, one leaf at a time.
+        let paths = self.boxed_leaf_paths(&shape)?;
+        let boxed = self.emit_cur(Inst::Global(name));
+        Ok(Some(GlobalUniformSource::Boxed { boxed, paths }))
+    }
+
+    /// Load leaf `i` of a global uniform source, at the point of the call.
+    fn global_uniform_leaf(&mut self, source: &GlobalUniformSource, i: usize) -> Idx<Inst> {
+        match source {
+            GlobalUniformSource::LeafGlobals(leaves) => self.emit_cur(Inst::Global(leaves[i])),
+            GlobalUniformSource::Boxed { boxed, paths } => {
+                let mut v = *boxed;
+                for field in &paths[i] {
+                    v = self.emit_cur(Inst::Field { base: v, field: *field });
+                }
+                v
+            }
+        }
     }
 
     /// `@uniform_values` -> a typed packet of logical scalar leaves. The
@@ -976,16 +1012,7 @@ impl Builder<'_> {
         };
         let packet = uniform_values_return_shape(self.ws, block_name)
             .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
-        let repr = self.lower_expr_repr(*u_e)?;
-        // An ordinary direct call returns one opaque value slot even when its
-        // concrete type is a value struct. This macro reads that value's fields,
-        // so attach the type's value plan without changing the carrier.
-        let repr = if self.scx.rep_arena().value_shape(repr.representation()).is_none() {
-            ValueBundle::new(self.nominal_value_representation(struct_name)?, repr.into_value())
-        } else {
-            repr
-        };
-        let leaves = self.repr_to_leaves_bundle(&repr)?;
+        let leaves = self.uniform_block_leaves(*u_e, struct_name)?;
         let expected: Vec<crate::gpu_layout::WireKind> = members
             .iter()
             .flat_map(|(_, kind)| std::iter::repeat(*kind).take(kind.leaf_suffixes().len()))
@@ -1012,7 +1039,7 @@ impl Builder<'_> {
                 | crate::gpu_layout::WireKind::F32x4
                 | crate::gpu_layout::WireKind::Mat4 => packet.float_variant,
             };
-            canonical.push(self.make_single_payload_variant(packet.leaf_enum, variant, leaf)?);
+            canonical.push(self.make_single_payload_variant(packet.leaf_enum, variant, ValueRepr::Scalar(leaf))?);
         }
         let fingerprint = self.emit_cur(Inst::Const(Lit::Int(
             crate::shader_ir::semantic_uniform_group_fingerprint(struct_name, &members) as i64,
@@ -1078,16 +1105,28 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(v))
     }
 
-    /// Construct `enum_name::variant(payload)` for a variant with a single
-    /// positional payload, mirroring [`Self::lower_enum_variant`]'s
-    /// representation choice (cdata `<Enum>_ct` when the enum is cdata-eligible,
-    /// else the boxed `{__variant}` table).
+    /// Construct `enum_name::variant(payload)` for a compiler-built variant with
+    /// a single positional payload, through the same representation a source
+    /// ctor takes: cdata `<Enum>_ct` when the enum is cdata-eligible, the flat
+    /// cells (a scalarizable payload spread into its slots) when it is flat.
     pub(crate) fn make_single_payload_variant(
         &mut self,
         enum_name: Ustr,
         variant: Ustr,
-        payload: Idx<Inst>,
+        payload: ValueRepr,
     ) -> Result<Idx<Inst>, CompilerError> {
+        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.flat().cloned()) {
+            let cells = self.flat_ctor_cells(&shape, variant, vec![FlatPayload::Repr(payload)], Vec::new())?;
+            let r = self.flat_cells_to_repr(&shape, cells);
+            return self.pack(r);
+        }
+        // A payload the enum cannot hold unboxed has nowhere to live but a box --
+        // the same boundary `uniform(x: Vec2)` marks with an explicit
+        // `materialize`. The compiler mints this box itself and there is no
+        // source line to mark, so it mints the AUTHORIZED one rather than
+        // rejecting a program the hand-written overload accepts.
+        let payload = self.pack(payload)?;
+        self.authorize_nobox_box(payload);
         if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
             let tag = shape
                 .tag_of(variant)
@@ -1143,7 +1182,9 @@ impl Builder<'_> {
             // INTERNED singleton table (emitted by `enum_runtime_defs`): the
             // enum still has payload variants, so its values stay tables, and the
             // singleton is reference-equal across uses + usable as a Map key.
-            let g = Ustr::from(format!("__rock_enum_{enum_name}_{variant}").as_str());
+            let g = Ustr::from(
+                format!("__rock_enum_{}_{variant}", crate::mangle::type_symbol(self.ws, enum_name)).as_str(),
+            );
             return Ok(self.emit_cur(Inst::Global(g)));
         }
         let (positional, named) = match args {
@@ -1198,5 +1239,22 @@ impl Builder<'_> {
             })
             .collect();
         swizzle_group(parts)
+    }
+}
+
+/// Where a global uniform block's leaves are read from, leaf by leaf.
+enum GlobalUniformSource {
+    /// A `nobox` global: one scalar global per leaf.
+    LeafGlobals(Vec<Ustr>),
+    /// A boxed global: the box plus each leaf's field path into it.
+    Boxed { boxed: Idx<Inst>, paths: Vec<Vec<Ustr>> },
+}
+
+impl GlobalUniformSource {
+    fn leaf_count(&self) -> usize {
+        match self {
+            GlobalUniformSource::LeafGlobals(leaves) => leaves.len(),
+            GlobalUniformSource::Boxed { paths, .. } => paths.len(),
+        }
     }
 }

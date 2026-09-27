@@ -20,8 +20,11 @@ path = "src/main.rs"
 # to serial, so a front-end profile (rock iter-parse / iter-tokenize) has no
 # rayon pool/teardown frames either. See `just samply-bone-seq`.
 sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequential", "rock-lsp/sequential"]
+backend-js = ["dep:skull-codegen-js"]
+renderer-wgpu = ["skull/renderer-wgpu"]
 
 [dependencies]
+rock-replay-protocol = { path = "../rock-replay-protocol" }
 rock-host = { path = "../rock-host" }
 sound-core = { path = "../sound-core" }
 rock-log = { path = "../rock-log" }
@@ -37,7 +40,7 @@ bone-query = { path = "../bone-query" }
 rock-lsp = { path = "../rock-lsp" }
 skull = { path = "../skull" }
 skull-codegen-glsl = { path = "../skull-codegen-glsl" }
-skull-codegen-js = { path = "../skull-codegen-js" }
+skull-codegen-js = { path = "../skull-codegen-js", optional = true }
 skull-codegen-c = { path = "../skull-codegen-c" }
 skull-mir = { path = "../skull-mir" }
 lsp-types = { path = "../lsp-types-manual", package = "lsp-types-manual" }
@@ -95,3 +98,13 @@ path = "tests/main.rs"
 [[test]]
 name = "rock_cli_heavy"
 path = "tests/main_heavy.rs"
+
+[[test]]
+name = "rock_cli_js"
+path = "tests/main_js.rs"
+required-features = ["backend-js"]
+
+[[test]]
+name = "rock_cli_wgpu"
+path = "tests/main_wgpu.rs"
+required-features = ["renderer-wgpu"]

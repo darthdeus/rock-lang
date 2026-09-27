@@ -477,11 +477,11 @@ struct NativeBufferU16 { ptr: PtrU16, len: int }
 struct NativeBufferI16 { ptr: PtrI16, len: int }
 struct NativeBufferU32 { ptr: PtrU32, len: int }
 
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return ffi.new("uint8_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return ffi.new("int8_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return ffi.new("uint16_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'local r = ffi.new("uint8_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'local r = ffi.new("int8_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'local r = ffi.new("uint16_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'local r = ffi.new("int16_t[?]", n); return r'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'local r = ffi.new("uint32_t[?]", n); return r'
 
 fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
 fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
@@ -639,6 +639,69 @@ value SceneBuilder {
     return obj.__ty
 """
 
+// --- weak-keyed caches beside an owner ---------------------------------------
+//
+// A value a struct can rebuild from the state beside it, parked next to the
+// owner instead of inside it. A plain field would be captured with the rest of
+// the object; these entries are captured nowhere.
+//
+// The backing tables live in `_G`, never in a Rock global, and that is the
+// point: a Rock global would be Session state, imaged into every keyframe and
+// mixed into the replay desync hash, which is exactly what a rebuildable value
+// must stay out of. `name` IS the `_G` key of one cache's own table, and it is
+// a constant at each call site, never built at the call -- so a hit is the same
+// two table reads a hand-written shim does. Namespace it with a dot
+// (`mag.blocker_index`), which no identifier-shaped global can collide with.
+//
+// Owner keys are WEAK, so an entry dies with its owner and never keeps one
+// alive. Two consequences the caller owns: a restore that replaces the owner
+// object reads as a MISS, which is the rebuild every accessor here already
+// does; and the stored value must hold no reference back to its owner, or the
+// pair survives for the life of the process.
+//
+// `weak_cache_builds` counts stores, so it is the rebuild witness a test reads.
+// A cache that rebuilds its value in place stores it again to record that.
+// `weak_cache_live` counts entries still held, which is what makes the weak
+// keying observable.
+inline(lua) fn weak_cache_get<K, V>(name: string, owner: K) -> V? = """
+    local cache = _G[name]
+    if not cache then return nil end
+    return cache[owner]
+"""
+
+inline(lua) fn weak_cache_put<K, V>(name: string, owner: K, value: V) = """
+    local cache = _G[name]
+    if not cache then
+        cache = setmetatable({}, { __mode = "k" })
+        _G[name] = cache
+    end
+    cache[owner] = value
+    local counts = _G.__rock_weak_cache_builds
+    if not counts then
+        counts = {}
+        _G.__rock_weak_cache_builds = counts
+    end
+    counts[name] = (counts[name] or 0) + 1
+"""
+
+inline(lua) fn weak_cache_drop<K>(name: string, owner: K) = """
+    local cache = _G[name]
+    if cache then cache[owner] = nil end
+"""
+
+inline(lua) fn weak_cache_builds(name: string) -> int = """
+    local counts = _G.__rock_weak_cache_builds
+    return counts and counts[name] or 0
+"""
+
+inline(lua) fn weak_cache_live(name: string) -> int = """
+    local cache = _G[name]
+    if not cache then return 0 end
+    local n = 0
+    for _ in pairs(cache) do n = n + 1 end
+    return n
+"""
+
 // A Rock CodeRef slot or env record is the callable value in skull output.
 // Every generic table-walker (__op_eq, inspect, serialize) must treat it as an
 // opaque callable LEAF, not a data table. The classification itself lives in
@@ -729,7 +792,64 @@ deco init on_reload {
     end
 """
 
+// The first `n` elements of two NativeBuffers compared as bytes. Serves
+// __op_eq's FlatVec and NativeBuffer cases; see the caveat there.
+@nomangle inline(lua) fn __rock_native_buffer_prefix_eq(x: any, y: any, n: int) -> bool = """
+    if n <= 0 then return true end
+    if type(x) ~= "table" or type(y) ~= "table" then return false end
+    if x.ptr == nil or y.ptr == nil then return x.ptr == y.ptr end
+    if x.ptr == y.ptr then return true end
+    local esz = ffi.sizeof(x.ptr[0])
+    if esz ~= ffi.sizeof(y.ptr[0]) then return false end
+    return ffi.string(x.ptr, n * esz) == ffi.string(y.ptr, n * esz)
+"""
+
 // Generic operator functions using different names to avoid compiler conflicts
+// Physical field selection shared by the copy, image, JSON, census, inspect,
+// and equality walkers. Their value operations and ordering remain local.
+@nomangle inline(lua) fn __rock_field_selected(obj: any, key: any, mode: string, views: any) -> bool = """
+    if mode == "copy" or mode == "census" then return true end
+    if mode == "image" then
+        return key ~= "__stone_image_storage_shape"
+            and key ~= "__stone_image_code_env"
+            and not (views and views[key])
+    end
+    if mode == "equality" then return key ~= "__ty" end
+    if mode == "map" then return type(key) == "string" end
+    if mode == "json" then
+        return type(key) == "string"
+            and key ~= "__ty" and key ~= "__variant"
+            and not (_G.__ROCK_LEAF_VIEWS and _G.__ROCK_LEAF_VIEWS[key])
+    end
+    if mode == "inspect" then
+        return key ~= "__ty" and key ~= "__variant"
+            and not (_G.__ROCK_LEAF_VIEWS and _G.__ROCK_LEAF_VIEWS[key])
+            and not (type(key) == "string" and string.find(key, ".", 1, true))
+    end
+    error("unknown Rock field walk mode: " .. tostring(mode), 0)
+"""
+
+@nomangle inline(lua) fn __rock_field_keys(obj: any, mode: string) -> any = """
+    local keys = {}
+    for key in pairs(obj) do
+        if __rock_field_selected(obj, key, mode, nil) then
+            keys[#keys + 1] = key
+        end
+    end
+    return keys
+"""
+
+@nomangle inline(lua) fn __rock_field_declaration(obj: any) -> any = """
+    local name = obj.__ty
+    local types = _G.__ROCK_TYPE_TABLE
+    return type(name) == "string" and types and types[name] or nil
+"""
+
+@nomangle inline(lua) fn __rock_field_pairs(obj: any, mode: string) -> any = """
+    if mode == "copy" then return pairs(obj) end
+    error("unknown unsorted Rock field walk mode: " .. tostring(mode), 0)
+"""
+
 @nomangle inline(lua) fn __op_eq(a: any, b: any) -> bool = """
     -- Primitive fast path
     if type(a) ~= "table" or type(b) ~= "table" then
@@ -757,6 +877,70 @@ deco init on_reload {
         return false
     end
 
+    -- Vec equality is over its live elements, not its backing capacity or
+    -- representation metadata. Each element type has one compiler-selected
+    -- representation, so unequal representations cannot be values of the same
+    -- concrete Vec type.
+    if type_a == "Vec" or type_b == "Vec" then
+        if type_a ~= "Vec" or type_b ~= "Vec" or a.len ~= b.len then
+            return false
+        end
+        local ah, bh = rawget(a, "@vec"), rawget(b, "@vec")
+        local ar = type(ah) == "table" and ah.repr or "boxed"
+        local br = type(bh) == "table" and bh.repr or "boxed"
+        if ar ~= br then return false end
+        if ar == "strided" then
+            if ah.elem ~= bh.elem or ah.stride ~= bh.stride then return false end
+            for i = 1, a.len * ah.stride do
+                if not __op_eq(a._data[i], b._data[i]) then return false end
+            end
+            return true
+        end
+        if ar == "columns" then
+            if ah.elem ~= bh.elem then return false end
+            for k, col in pairs(a) do
+                if k ~= "len" and k ~= "__ty" and k ~= "@vec" then
+                    local other = b[k]
+                    if type(col) ~= "table" or type(other) ~= "table" then return false end
+                    for i = 1, a.len do
+                        if not __op_eq(col[i], other[i]) then return false end
+                    end
+                end
+            end
+            for k, _ in pairs(b) do
+                if k ~= "len" and k ~= "__ty" and k ~= "@vec" and a[k] == nil then
+                    return false
+                end
+            end
+            return true
+        end
+        if type(a._data) ~= "table" or type(b._data) ~= "table" then return false end
+        for i = 1, a.len do
+            if not __op_eq(a._data[i], b._data[i]) then return false end
+        end
+        return true
+    end
+
+    -- FlatVec / NativeBuffer equality is over the first `len` elements'
+    -- BYTES: the elements are FFI-clean value structs (or primitives) living
+    -- inline in one C array, so byte equality is their value equality, with
+    -- the one caveat that a float compares bitwise here (0.0 ~= -0.0, NaN ==
+    -- NaN). Without this case the generic walk reached the NativeBuffer's
+    -- cdata pointer, which the primitive fast path compares by ADDRESS, so
+    -- two FlatVecs with equal contents were never equal.
+    if type_a == "FlatVec" or type_b == "FlatVec" then
+        if type_a ~= "FlatVec" or type_b ~= "FlatVec" or a.len ~= b.len then
+            return false
+        end
+        return __rock_native_buffer_prefix_eq(a.buf, b.buf, a.len)
+    end
+    if type_a == "NativeBuffer" or type_b == "NativeBuffer" then
+        if type_a ~= "NativeBuffer" or type_b ~= "NativeBuffer" or a.len ~= b.len then
+            return false
+        end
+        return __rock_native_buffer_prefix_eq(a, b, a.len)
+    end
+
     -- A GC-carrying value struct (table repr) carries a per-type `__eq`
     -- metatable that is the AUTHORITY: scalar/value fields structural, GC-ref
     -- fields BY REFERENCE. The `a == b` reference check above already invoked it
@@ -773,16 +957,10 @@ deco init on_reload {
     -- `value` structs never reach here (they hit the primitive `==` fast path
     -- above -- a byte-value compare).
     for k, v in pairs(a) do
-        if k ~= "__ty" then
-            if not __op_eq(v, b[k]) then
-                return false
-            end
-        end
+        if __rock_field_selected(a, k, "equality", nil) and not __op_eq(v, b[k]) then return false end
     end
     for k, v in pairs(b) do
-        if k ~= "__ty" and a[k] == nil then
-            return false
-        end
+        if __rock_field_selected(b, k, "equality", nil) and a[k] == nil then return false end
     end
     return true
 """
@@ -1112,6 +1290,17 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 // Bounds-checked indexing helpers, emitted by codegen for `xs[i]` reads and
 // stores (the __nb_checked_* pattern; release stripping is the same future
 // release-mode work). `.get(i)` above is the null-returning form.
+//
+// Under the inline index shape (`ROCK_SKULL_INDEX_SHAPE`, docs/backends.md)
+// codegen spells the check itself and calls only this cold function on the
+// failing path, so no indexing function carries the message text and no trace
+// records a helper frame. The `__vec_checked_*` calls remain for operands the
+// emitter cannot name twice.
+@nomangle inline(lua) fn __rock_vec_oob(vec: any, i: int) = """
+    error("Vec index out of bounds: index " .. tostring(i) ..
+          " is outside [0, " .. tostring(vec.len) .. ")")
+"""
+
 @nomangle inline(lua) fn __vec_checked_get(vec: any, i: int) -> any = """
     if i < 0 or i >= vec.len then
         error("Vec index out of bounds: index " .. tostring(i) ..
@@ -1366,11 +1555,42 @@ inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
-    return math.floor(value)
+    local r = math.floor(value)
+    return r
 """
 inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
+
+// The one answer to "which compiler-minted value cdata is this": the
+// `__ROCK_C_STRUCT` row whose ctype `x` (a cdata) has, or nil. The registry is
+// keyed by NAME, so the honest question is a linear `ffi.istype` scan over
+// every row (~150 in MAG, 27us a scan); the sim boundary restore asked it
+// ~1,300 times per crossing. The answer is a function of the ctype alone, so
+// it is memoized per CTypeID, negatives included (`false`; most asks are
+// negatives -- storage arrays and boxed scalars). The registry emitter resets
+// the memo whenever it (re)emits rows, so an entry never outlives its row.
+@nomangle inline(lua) fn __rock_c_struct_of(x: any) -> any = """
+    local reg = _G.__ROCK_C_STRUCT
+    if not reg then return nil end
+    local memo = _G.__ROCK_C_STRUCT_BY_CTYPE
+    if not memo then
+        memo = {}
+        _G.__ROCK_C_STRUCT_BY_CTYPE = memo
+    end
+    local id = tonumber(ffi.typeof(x))
+    local hit = memo[id]
+    if hit ~= nil then return hit or nil end
+    hit = false
+    for _, info in pairs(reg) do
+        if ffi.istype(info.name, x) then
+            hit = info
+            break
+        end
+    end
+    memo[id] = hit
+    return hit or nil
+"""
 
 // Aliasing-preserving, cycle-safe deep copy. `seen` maps each already-copied
 // source table to its copy; recording `seen[obj] = copy` BEFORE recursing
@@ -1380,12 +1600,23 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // so the wrapper doesn't allocate a fresh closure per copy; @nomangle because
 // it recurses by name and is called from deepcopy's body.
 @nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
-    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
-        for _, info in pairs(_G.__ROCK_C_STRUCT) do
-            if ffi.istype(info.name, obj) then
-                return info.copy(obj)
+    if type(obj) == "cdata" then
+        local info = __rock_c_struct_of(obj)
+        if info then return info.copy(obj) end
+        local storage = _G.__ROCK_NB_STORAGE
+        local desc = storage and storage[tostring(ffi.typeof(obj))]
+        if desc then
+            if seen[obj] then return seen[obj] end
+            local bytes = ffi.sizeof(obj)
+            if bytes % desc.elem_size ~= 0 then
+                error("deepcopy: described storage has incomplete elements", 0)
             end
+            local copy = ffi.new(desc.ctype .. "[?]", bytes / desc.elem_size)
+            seen[obj] = copy
+            ffi.copy(copy, obj, bytes)
+            return copy
         end
+        -- Foreign pointers have no owned storage description to copy.
         return obj
     end
     if type(obj) ~= "table" then
@@ -1397,9 +1628,32 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
     local copy = {}
     seen[obj] = copy
-    for k, v in pairs(obj) do
+    local storage_views
+    local storage = _G.__ROCK_NB_STORAGE
+    for k, v in __rock_field_pairs(obj, "copy") do
         -- copy *both* key and value, in case either is a table.
-        copy[__rock_deepcopy_value(k, seen)] = __rock_deepcopy_value(v, seen)
+        local copied_key = __rock_deepcopy_value(k, seen)
+        local copied_value = __rock_deepcopy_value(v, seen)
+        copy[copied_key] = copied_value
+        if storage and type(v) == "cdata" then
+            local desc = storage[tostring(ffi.typeof(v))]
+            if desc and next(desc.views) then
+                storage_views = storage_views or {}
+                storage_views[#storage_views + 1] = { source = v, target = copied_value, views = desc.views }
+            end
+        end
+    end
+    if storage_views then
+        for _, shape in ipairs(storage_views) do
+            local base = ffi.cast("uintptr_t", shape.source)
+            for field, cast_ty in pairs(shape.views) do
+                local view = rawget(obj, field)
+                if type(view) == "cdata" and ffi.istype(cast_ty, view)
+                    and ffi.cast("uintptr_t", view) == base then
+                    copy[field] = ffi.cast(cast_ty, shape.target)
+                end
+            end
+        end
     end
     -- Preserve the metatable: a capturing lambda is an env record carrying
     -- `__rock_fn_mt` (its `__call` is what makes it invokable) -- a copy that
@@ -1704,11 +1958,121 @@ inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     return physical
 """
 
+@nomangle inline(lua) fn __rock_stride_capacity(
+    reserved: int,
+    physical: int,
+    stride: int
+) -> int = """
+    local populated = math.floor(physical / stride)
+    if reserved > populated then return reserved end
+    return populated
+"""
+
+@nomangle inline(lua) fn __rock_stride_insert(
+    data: any,
+    lua_index: int,
+    len: int,
+    stride: int
+) = """
+    local start = (lua_index - 1) * stride + 1
+    for i = len * stride, start, -1 do data[i + stride] = data[i] end
+    for i = start, start + stride - 1 do data[i] = false end
+"""
+
+@nomangle inline(lua) fn __rock_stride_copy(data: any, len: int, stride: int) -> any = """
+    local copy = {}
+    for i = 1, len * stride do copy[i] = data[i] end
+    return copy
+"""
+
+@nomangle inline(lua) fn __rock_stride_sort(
+    vec: any,
+    key_fn: any,
+    stride: int
+) = """
+    local n, data = vec.len or 0, vec._data
+    local order = {}
+    for i = 1, n do order[i] = i end
+    local function key_at(row)
+        return key_fn(__rock_materialize_strided_element(vec, row))
+    end
+    table.sort(order, function(a, b) return key_at(a) < key_at(b) end)
+    local sorted = {}
+    for row = 1, n do
+        local source = (order[row] - 1) * stride
+        local target = (row - 1) * stride
+        for j = 1, stride do sorted[target + j] = data[source + j] end
+    end
+    for i = 1, n * stride do data[i] = sorted[i] end
+"""
+
+// The strided twin of `__rock_col_sort_leaves`: a key fn over a `nobox` row
+// takes the row's leaves, in row order, so no element is built. Leaves are
+// copied with explicit bounds because a raw row may hold nil.
+@nomangle inline(lua) fn __rock_stride_sort_leaves(vec: any, key_fn: any, stride: int) = """
+    local n, data = vec.len or 0, vec._data
+    local order = {}
+    for i = 1, n do order[i] = i end
+    local function key_at(row)
+        local base = (row - 1) * stride
+        return key_fn(unpack(data, base + 1, base + stride))
+    end
+    table.sort(order, function(a, b) return key_at(a) < key_at(b) end)
+    local sorted = {}
+    for row = 1, n do
+        local source = (order[row] - 1) * stride
+        local target = (row - 1) * stride
+        for j = 1, stride do sorted[target + j] = data[source + j] end
+    end
+    for i = 1, n * stride do data[i] = sorted[i] end
+"""
+
 // Whether `v` is a column-stored Vec.
 @nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
     if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
     local h = rawget(v, "@vec")
     return type(h) == "table" and h.repr == "columns"
+"""
+
+@nomangle inline(lua) fn __rock_is_strided_vec(v: any) -> bool = """
+    if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
+    local h = rawget(v, "@vec")
+    return type(h) == "table" and h.repr == "strided"
+"""
+
+@nomangle inline(lua) fn __rock_materialize_strided_element(vec: any, index: int) -> any = """
+    local h = rawget(vec, "@vec")
+    if type(h) ~= "table" or h.repr ~= "strided" then
+        error("expected strided Vec")
+    end
+    local base = (index - 1) * h.stride
+    local out = { __variant = vec._data[base + 1], __ty = h.elem }
+    for j = 2, h.stride do
+        local value = vec._data[base + j]
+        if value ~= false then out[j - 1] = value end
+    end
+    return out
+"""
+
+// A read-only view of a strided `nobox` struct row Vec in column form:
+// `view[path][index]` reads that leaf of element `index`. `offsets` maps each
+// leaf path to its 1-based offset in the row (`__ROCK_STRIDED_ROWS`, emitted
+// from the same plan the lowering stores by). Reflection-only: it builds tables.
+@nomangle inline(lua) fn __rock_strided_column_view(vec: any, offsets: any) -> any = """
+    local stride, data = rawget(vec, "@vec").stride, vec._data
+    return setmetatable({}, {__index = function(_, path)
+        local offset = offsets[path]
+        if offset == nil then return nil end
+        return setmetatable({}, {__index = function(_, index)
+            return data[(index - 1) * stride + offset]
+        end})
+    end})
+"""
+
+@nomangle inline(lua) fn __rock_vec_strided_elements(vec: any) -> any = """
+    local out = {}
+    for i = 1, vec.len or 0 do out[i] = __rock_materialize_strided_element(vec, i) end
+    return out
 """
 
 // The sorted leaf paths of a column Vec -- the shared key discovery, so zip and
@@ -1897,10 +2261,13 @@ const EPSILON: float = 0.0000001
     -- Vec type
     -- The explicit column marker wins even when the element itself has an
     -- `_data` leaf column.
-    if type_name == "Vec" and t.len and (t._data or __rock_is_column_vec(t)) then
+    if type_name == "Vec" and t.len and
+            (t._data or __rock_is_column_vec(t) or __rock_is_strided_vec(t)) then
         local elems
         if __rock_is_column_vec(t) then
             elems = __rock_vec_column_elements(t)
+        elseif __rock_is_strided_vec(t) then
+            elems = __rock_vec_strided_elements(t)
         else
             elems = t._data
         end
@@ -1940,26 +2307,14 @@ const EPSILON: float = 0.0000001
         result = "{ " .. table.concat(parts, ", ") .. " }"
     else
         -- Collect and sort keys, skipping metadata
-        local keys = {}
+        local keys = __rock_field_keys(t, "inspect")
         local seen = {}
-        for k, _ in pairs(t) do
-            -- A dotted key is a compiler-minted PHYSICAL slot (an `embed` leaf,
-            -- a flattened enum's discriminant/payload). It has no source-level
-            -- name, so it is never shown; the declared field it belongs to is
-            -- rendered from the leaves instead. A leaf VIEW is likewise derived
-            -- -- an ffi.cast pointer over the buffer's own storage -- and would
-            -- render as a run-varying address, so it is skipped for the same
-            -- reason serialization skips it (`__ROCK_LEAF_VIEWS`).
-            if k ~= "__variant" and k ~= "__ty"
-               and not _G.__ROCK_LEAF_VIEWS[k]
-               and not (type(k) == "string" and string.find(k, ".", 1, true)) then
-                keys[#keys + 1] = k
-                seen[k] = true
-            end
+        for _, k in ipairs(keys) do
+            seen[k] = true
         end
         -- A null field is an ABSENT key, so `pairs` alone under-reports a
         -- struct's shape. Declared fields come from the type table instead.
-        local decl = type_name and _G.__ROCK_TYPE_TABLE[type_name]
+        local decl = type_name and __rock_field_declaration(t)
         local embed_vals = nil
         if decl and not t.__variant then
             for i = 1, #decl.fields do
@@ -2067,12 +2422,9 @@ const EPSILON: float = 0.0000001
 """
 
 @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
-    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
-        for _, info in pairs(_G.__ROCK_C_STRUCT) do
-            if ffi.istype(info.name, obj) then
-                return info.inspect(obj)
-            end
-        end
+    if type(obj) == "cdata" then
+        local info = __rock_c_struct_of(obj)
+        if info then return info.inspect(obj) end
         return tostring(obj)
     end
 
@@ -2106,7 +2458,8 @@ const EPSILON: float = 0.0000001
 @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
-        return string.format("%.2g", v)
+        local r = string.format("%.2g", v)
+        return r
     else
         local s = string.format("%.4f", v)
         s = s:gsub("0+$", "")
@@ -2118,25 +2471,57 @@ const EPSILON: float = 0.0000001
 
 // Math functions
 // random / random_range / random_int / random_seed read and mutate the
-// splitmix64 RNG state (`__rock_rng_next`, seeded in skull's prelude) —
-// NotPure, intentionally no @pure. One stream: the state is a single
-// serializable uint64 counter, so replay/keyframe restore can round-trip it
+// 32-bit gameplay RNG state (`__rock_rng_next`, seeded in skull's prelude) —
+// NotPure, intentionally no @pure. Two streams: authoritative gameplay
+// (`random*`) and presentation (`presentation_random*`). Each state is a single
+// serializable number, so replay/keyframe restore can round-trip them
 // (docs/replay-scrub-plan.md).
-// 53-bit mantissa draw: top 53 bits of the next splitmix64 word / 2^53 gives
-// a uniform [0, 1) double (bit-identical across architectures — math.random
-// is not).
+// A 32-bit draw / 2^32 gives a uniform [0, 1) double.
 inline(lua) fn random() -> float = """
-    return tonumber(__rock_rng_next() / 2048ULL) * (1.0 / 9007199254740992.0)
+    return __rock_rng_next() * (1.0 / 4294967296.0)
 """
 fn random_range(min: float, max: float) -> float { return random() * (max - min) + min }
 inline(lua) fn random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
-    local z = __rock_rng_next()
-    return tonumber(z % ffi.cast("uint64_t", r)) + min
+    if r <= 4294967296 then return __rock_rng_next() % r + min end
+    local hi = __rock_rng_next()
+    local lo = __rock_rng_next()
+    return (hi * 2097152 + math.floor(lo / 2048)) % r + min
 """
 inline(lua) fn random_seed(seed: int) = """
     __rock_rng_seed(seed)
+"""
+inline(lua) fn random_get_state() -> int = """
+    return __rock_rng_state_get()
+"""
+inline(lua) fn random_set_state(state: int) = """
+    __rock_rng_state_set(state)
+"""
+
+// Presentation RNG
+// Independent stream for visual VFX, particles, audio detuning, and cosmetic UI.
+// Advances without shifting the authoritative gameplay RNG stream.
+inline(lua) fn presentation_random() -> float = """
+    return __rock_presentation_rng_next() * (1.0 / 4294967296.0)
+"""
+fn presentation_random_range(min: float, max: float) -> float { return presentation_random() * (max - min) + min }
+inline(lua) fn presentation_random_int(min: int, max: int) -> int = """
+    local r = max - min
+    if r <= 0 then return min end
+    if r <= 4294967296 then return __rock_presentation_rng_next() % r + min end
+    local hi = __rock_presentation_rng_next()
+    local lo = __rock_presentation_rng_next()
+    return (hi * 2097152 + math.floor(lo / 2048)) % r + min
+"""
+inline(lua) fn presentation_random_seed(seed: int) = """
+    __rock_presentation_rng_seed(seed)
+"""
+inline(lua) fn presentation_random_get_state() -> int = """
+    return __rock_presentation_rng_state_get()
+"""
+inline(lua) fn presentation_random_set_state(state: int) = """
+    __rock_presentation_rng_state_set(state)
 """
 @intrinsic @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
 @intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
@@ -2191,7 +2576,8 @@ fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
 @inline inline(lua) fn ffi_new(ty: string) -> any = "ffi.new(ty)"
 
 inline(lua) fn ffi_new_array(ty: string, size: int) -> any = """
-    return ffi.new(ty .. "[" .. size .. "]")
+    local r = ffi.new(ty .. "[" .. size .. "]")
+    return r
 """
 
 @inline inline(lua) fn ffi_new_with_init(ty: string, init: any) -> any = "ffi.new(ty, init)"
@@ -2207,11 +2593,13 @@ inline(lua) fn ffi_null() -> any = """
 """
 
 inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
+    local r
     if len then
-        return ffi.string(ptr, len)
+        r = ffi.string(ptr, len)
     else
-        return ffi.string(ptr)
+        r = ffi.string(ptr)
     end
+    return r
 """
 
 inline(lua) fn ffi_copy(dst: any, src: any, len: int?) = """
@@ -3009,6 +3397,18 @@ fn Vec<T>.sample(vec) -> T? {
     return vec_get(vec, index)
 }
 
+// The presentation-stream twin, paired the way stdlib/vec.rock pairs
+// random_dir/presentation_random_dir. A decorative caller needs this one: a
+// generic helper spells no stream at its call site, so drawing gameplay
+// randomness for a visual effect is invisible in review and shifts every later
+// gameplay roll.
+fn Vec<T>.presentation_sample(vec) -> T? {
+    let len = vec_len(vec)
+    if len == 0 { return null }
+    let index = presentation_random_int(0, len)
+    return vec_get(vec, index)
+}
+
 @intrinsic @pure fn lerp(a: float, b: float, t: float) -> float { return a + (b - a) * t }
 
 @intrinsic @pure fn fract(x: float) -> float { return x - floor(x) }
@@ -3166,8 +3566,11 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 
 
 @intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
-    -- Rock uses 0-based indexing, Lua uses 1-based
-    return string.sub(s, start + 1, end_idx)
+    -- Rock uses 0-based indexing, Lua uses 1-based. Bound, then return: a
+    -- `return string.sub(..)` tail call into C is a CALLT no root trace can
+    -- leave through (docs/backends.md, "Wrapper return").
+    local r = string.sub(s, start + 1, end_idx)
+    return r
 """
 
 @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
@@ -3231,7 +3634,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
             local strtod_l = ffi.C.strtod_l
             local function probe(str) return strtod_l(cast("const char*", str), nil, loc) end
             if probe("1.5") == 1.5 and probe("-3.25e2") == -325 and probe("2.5E-2") == 0.025 then
-                f = function(str, a, b) return strtod_l(cast("const char*", str) + a, nil, loc) end
+                f = function(str, a, b) local r = strtod_l(cast("const char*", str) + a, nil, loc); return r end
             end
         end
     end
@@ -3242,7 +3645,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
         local msg = "parse_float_at: no C-locale strtod_l on " .. tostring(ffi.os) .. "; using the portable path"
         local warn = _G.__stone_log
         if warn then warn(1, "STDLIB", msg) else io.stderr:write("[WARN] " .. msg .. "\\n") end
-        f = function(str, a, b) return tonumber(string.sub(str, a + 1, b)) end
+        f = function(str, a, b) local r = tonumber(string.sub(str, a + 1, b)); return r end
     end
     _G.__rock_parse_float_at = f
     return f
@@ -3286,7 +3689,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
 struct StringBuilder {}
 @intrinsic inline(lua) fn sb_new() -> StringBuilder = "return {}"
 @intrinsic inline(lua) fn sb_push(sb: StringBuilder, s: string) = "sb[#sb + 1] = s"
-@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "return table.concat(sb)"
+@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "local r = table.concat(sb); return r"
 
 fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
 inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
@@ -3314,7 +3717,8 @@ inline(lua) fn string.pad_left(s, width: int) -> string = """
 // right-aligned in a field of `width` chars (use 0 to skip padding).
 // Wraps `string.format("%<width>.<decimals>f", v)`.
 inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
-    return string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
+    local r = string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
+    return r
 """
 
 // Pattern-based string matching (Lua patterns, not regex)

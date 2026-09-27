@@ -192,7 +192,7 @@ fn collect_stats(
     let mut fns = Vec::new();
     for module in ws.modules.iter() {
         let file = module.file.as_str().to_string();
-        if file.starts_with("<bone-stdlib:") || !file.contains(proj_marker) {
+        if session.warm_mids.contains(&module.id) || !file.contains(proj_marker) {
             continue;
         }
         let text = read_survey_source(&file)?;
@@ -326,14 +326,7 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     // Session (for stats + tier ground-truth) + a BoneWorkspace (for LSP timing).
     let spec = crate::unified_compile::SourceSpec::Directory(dir.to_path_buf());
     let sources = crate::unified_compile::discover_sources(&spec)?;
-    let files: Vec<(String, String)> = sources
-        .files
-        .iter()
-        .map(|f| {
-            let f = f.borrow();
-            (f.file.to_id_path(), f.contents.clone())
-        })
-        .collect();
+    let files = crate::bone_backend::session_files(&sources);
     let mut session = crate::bone_backend::bone_session(files)
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
 

@@ -23,14 +23,30 @@ struct PackageContext {
     config: Option<rock_host::stick::StickConfig>,
 }
 
-fn package_context(project: &str) -> Result<PackageContext> {
-    rock_host::project::ensure_workspace_root()?;
-    let root = rock_host::project::find_workspace_root(&std::env::current_dir()?)
-        .ok_or_else(|| anyhow::anyhow!("package: cannot find the Rock workspace root"))?;
+pub(crate) struct SoundInspectionTarget {
+    pub root: PathBuf,
+    pub project: PathBuf,
+    pub game_key: String,
+    pub overlays: Vec<PathBuf>,
+}
+
+fn project_and_config(project: &str) -> Result<(PathBuf, Option<rock_host::stick::StickConfig>)> {
     let project_path = PathBuf::from(project);
     let project_abs = project_path
         .canonicalize()
-        .map_err(|e| anyhow::anyhow!("package: cannot resolve project {}: {e}", project_path.display()))?;
+        .map_err(|e| anyhow::anyhow!("cannot resolve project {}: {e}", project_path.display()))?;
+    let config = rock_host::stick::StickConfig::from_path_optional(&project_abs.join("stick.toml"))?;
+    if let Some(config) = config.as_ref() {
+        config.validate_build()?;
+    }
+    Ok((project_abs, config))
+}
+
+fn package_context(project: &str) -> Result<PackageContext> {
+    rock_host::project::ensure_workspace_root()?;
+    let (project_abs, config) = project_and_config(project)?;
+    let root = rock_host::project::find_source_root(&project_abs)
+        .ok_or_else(|| anyhow::anyhow!("package: cannot find the source workspace root for {}", project_abs.display()))?;
     let root_abs = root.canonicalize()?;
     let game_key = project_abs
         .strip_prefix(&root_abs)
@@ -39,10 +55,6 @@ fn package_context(project: &str) -> Result<PackageContext> {
         .replace('\\', "/");
     if game_key.is_empty() {
         anyhow::bail!("package: expected a game directory, got the workspace root");
-    }
-    let config = rock_host::stick::StickConfig::from_path_optional(&project_abs.join("stick.toml"))?;
-    if let Some(config) = config.as_ref() {
-        config.validate_build()?;
     }
     Ok(PackageContext {
         root: root_abs,
@@ -53,14 +65,21 @@ fn package_context(project: &str) -> Result<PackageContext> {
 }
 
 pub fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
-    let context = package_context(project)?;
-    let Some(sound) = context.config.as_ref().and_then(|config| config.sound.as_ref()) else {
+    let (_, config) = project_and_config(project)?;
+    if config.as_ref().and_then(|config| config.sound.as_ref()).is_none() {
         return Ok(None);
-    };
-    Ok(Some(declared_sound_project_path(&context.project, &sound.project)?.canonicalize()?))
+    }
+    let context = package_context(project)?;
+    rock_host::release::sound_project_path(&context.project, context.config.as_ref())?
+        .map(|path| path.canonicalize().map_err(Into::into))
+        .transpose()
 }
 
 pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
+    let (_, config) = project_and_config(project)?;
+    if config.as_ref().and_then(|config| config.sound.as_ref()).is_none() {
+        return Ok(None);
+    }
     let context = package_context(project)?;
     let overlays = rock_host::release::asset_overlay_roots(&context.project, context.config.as_ref())?;
     let mut selection = rock_host::release::AssetSelection::default();
@@ -70,15 +89,42 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
         context.config.as_ref(),
         &overlays,
         &mut selection,
+        MissingSoundAssets::Allow,
     )? else {
         return Ok(None);
     };
     let bank_path = context.project.join("assets/sound_bank.json");
+    match std::fs::read(&bank_path) {
+        Ok(existing) if existing == sound.bank_bytes => return Ok(Some(bank_path)),
+        Ok(_) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.into()),
+    }
     if let Some(parent) = bank_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     rock_host::project::write_atomic(&bank_path, &sound.bank_bytes)?;
     Ok(Some(bank_path))
+}
+
+pub(crate) fn prepare_sound_inspection_target(project: &str) -> Result<SoundInspectionTarget> {
+    let context = package_context(project)?;
+    if prepare_sound_bank(project)?.is_none() {
+        anyhow::bail!(
+            "sound-inspect: {} has no [sound].project declaration",
+            context.game_key,
+        );
+    }
+    let overlays = rock_host::release::asset_overlay_roots(
+        &context.project,
+        context.config.as_ref(),
+    )?;
+    Ok(SoundInspectionTarget {
+        root: context.root,
+        project: context.project,
+        game_key: context.game_key,
+        overlays,
+    })
 }
 
 pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
@@ -237,15 +283,63 @@ fn compile_declared_asset_banks(
     Option<CompiledSoundPackage>,
     Option<CompiledVisualPackage>,
 )> {
-    let sound = compile_sound_project(project_dir, game_key, config, overlays, &mut selection)?;
+    let sound = compile_sound_project(
+        project_dir,
+        game_key,
+        config,
+        overlays,
+        &mut selection,
+        MissingSoundAssets::Reject,
+    )?;
     let visual = compile_visual_bank(project_dir, game_key, overlays, &mut selection)?;
+    let loose_overlay = include_declared_overlay_assets(
+        project_dir,
+        game_key,
+        config,
+        overlays,
+        &mut selection,
+    )?;
     narrow_asset_overlay_selection(
         &mut selection,
         overlays,
         sound.as_ref(),
         visual.as_ref(),
+        &loose_overlay,
     );
     Ok((selection, sound, visual))
+}
+
+fn include_declared_overlay_assets(
+    project_dir: &Path,
+    game_key: &str,
+    config: Option<&rock_host::stick::StickConfig>,
+    overlays: &[PathBuf],
+    selection: &mut rock_host::release::AssetSelection,
+) -> Result<Vec<String>> {
+    let Some(config) = config else { return Ok(Vec::new()) };
+    let logical_keys = config.release_overlay_assets()?;
+    let mut dependencies = Vec::with_capacity(logical_keys.len());
+    for logical_key in logical_keys {
+        let asset = rock_host::release::resolve_asset_with_overlays(
+            project_dir,
+            game_key,
+            overlays,
+            &logical_key,
+        )?
+        .ok_or_else(|| anyhow::anyhow!(
+            "package: declared overlay asset does not exist: {logical_key}"
+        ))?;
+        if !overlays.iter().any(|overlay| asset.source.starts_with(overlay)) {
+            anyhow::bail!(
+                "package: declared overlay asset resolves outside configured overlays: {logical_key}"
+            );
+        }
+        dependencies.push(asset.key.clone());
+        rock_host::release::include_release_asset(selection, asset);
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    Ok(dependencies)
 }
 
 struct ReleaseSoundResolver<'a> {
@@ -268,17 +362,25 @@ impl AssetResolver for ReleaseSoundResolver<'_> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MissingSoundAssets {
+    Allow,
+    Reject,
+}
+
 fn compile_sound_project(
     project_dir: &Path,
     game_key: &str,
     config: Option<&rock_host::stick::StickConfig>,
     overlays: &[PathBuf],
     selection: &mut rock_host::release::AssetSelection,
+    missing_assets: MissingSoundAssets,
 ) -> Result<Option<CompiledSoundPackage>> {
     let Some(sound) = config.and_then(|config| config.sound.as_ref()) else {
         return Ok(None);
     };
-    let project_path = declared_sound_project_path(project_dir, &sound.project)?;
+    let project_path = rock_host::release::sound_project_path(project_dir, config)?
+        .ok_or_else(|| anyhow::anyhow!("package: sound project declaration disappeared"))?;
     let project_text = std::fs::read_to_string(&project_path).map_err(|error| {
         anyhow::anyhow!(
             "package: sound project {} could not be read: {error}",
@@ -292,7 +394,13 @@ fn compile_sound_project(
         game_key,
         overlays,
     };
-    let bank = sound_core::compile_project(&project, &resolver).map_err(|error| {
+    let bank = match missing_assets {
+        MissingSoundAssets::Allow => {
+            sound_core::compile_project_allowing_missing_assets(&project, &resolver)
+        }
+        MissingSoundAssets::Reject => sound_core::compile_project(&project, &resolver),
+    }
+    .map_err(|error| {
         anyhow::anyhow!("package: sound project {}: {error}", sound.project)
     })?;
     let bank_bytes = sound_core::serialize_runtime_bank(&bank)
@@ -304,8 +412,21 @@ fn compile_sound_project(
             game_key,
             overlays,
             dependency,
-        )?
-        .ok_or_else(|| anyhow::anyhow!("package: sound dependency is not stageable: {dependency}"))?;
+        )?;
+        let Some(asset) = asset else {
+            if missing_assets == MissingSoundAssets::Allow {
+                log::warn!(
+                    target: "SOUND",
+                    "sound project {} references missing asset {}; plays using it will be silent",
+                    sound.project,
+                    dependency,
+                );
+                continue;
+            }
+            return Err(anyhow::anyhow!(
+                "package: sound dependency is not stageable: {dependency}"
+            ));
+        };
         rock_host::release::include_release_asset(selection, asset);
         dependencies.push(format!("{game_key}/{dependency}"));
     }
@@ -325,12 +446,25 @@ fn compile_visual_bank(
     selection: &mut rock_host::release::AssetSelection,
 ) -> Result<Option<CompiledVisualPackage>> {
     let bank_logical_key = "assets/visual_bank.json";
-    let Some(bank_asset) = rock_host::release::resolve_asset_with_overlays(
+    let Some(bank_asset) = rock_host::release::resolve_worktree_asset(
         project_dir,
         game_key,
-        overlays,
         bank_logical_key,
     )? else {
+        let bank_key = format!("{game_key}/{bank_logical_key}");
+        selection.assets.retain(|asset| asset.key != bank_key);
+        if rock_host::release::resolve_asset_with_overlays(
+            project_dir,
+            game_key,
+            overlays,
+            bank_logical_key,
+        )?
+        .is_some()
+        {
+            anyhow::bail!(
+                "package: worktree visual bank is missing; refusing the overlay bank"
+            );
+        }
         return Ok(None);
     };
     let bytes = std::fs::read(&bank_asset.source)
@@ -361,7 +495,7 @@ fn compile_visual_bank(
         anyhow::bail!("package: visual bank dependencies must be sorted and unique");
     }
 
-    rock_host::release::include_release_asset(selection, bank_asset.clone());
+    rock_host::release::replace_release_asset(selection, bank_asset.clone());
     let mut dependencies = Vec::with_capacity(logical_dependencies.len());
     let mut fixed_output_keys = BTreeSet::new();
     for dependency in &logical_dependencies {
@@ -403,12 +537,14 @@ fn narrow_asset_overlay_selection(
     overlays: &[PathBuf],
     sound: Option<&CompiledSoundPackage>,
     visual: Option<&CompiledVisualPackage>,
+    loose_overlay: &[String],
 ) {
     let Some(visual) = visual else { return };
     let mut admitted = BTreeSet::new();
     if let Some(sound) = sound {
         admitted.extend(sound.dependencies.iter().cloned());
     }
+    admitted.extend(loose_overlay.iter().cloned());
     admitted.insert(visual.bank_key.clone());
     admitted.extend(visual.dependencies.iter().cloned());
     selection.assets.retain(|asset| {
@@ -421,31 +557,6 @@ fn narrow_asset_overlay_selection(
         }
         true
     });
-}
-
-fn declared_sound_project_path(project_dir: &Path, relative: &str) -> Result<PathBuf> {
-    let path = Path::new(relative);
-    if relative.trim().is_empty()
-        || path.is_absolute()
-        || relative.starts_with('~')
-        || relative.contains('\\')
-        || relative.as_bytes().get(1) == Some(&b':')
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        anyhow::bail!(
-            "package: [sound].project must be a non-empty relative path without traversal: {relative:?}"
-        );
-    }
-    let project_path = project_dir.join(path);
-    if !project_path.is_file() {
-        anyhow::bail!(
-            "package: declared sound project does not exist: {}",
-            project_path.display()
-        );
-    }
-    Ok(project_path)
 }
 
 fn write_sound_bank(
@@ -605,6 +716,170 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn development_bank_publishes_only_content_changes() {
+        let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
+        let fixture = tempfile::tempdir_in(workspace).unwrap();
+        std::fs::write(fixture.path().join("stick.toml"),
+            "[package]\nname = \"stable-sound-dev\"\n[sound]\nproject = \"sound_project.json\"\n").unwrap();
+        let project = fixture.path().join("sound_project.json");
+        let source = r#"{"version":1,"events":[{"id":"fixture.first","steps":[{"layers":[{"sources":["assets/missing.ogg"]}]}]}]}"#;
+        std::fs::write(&project, source).unwrap();
+        let path = fixture.path().to_str().unwrap();
+        let bank = prepare_sound_bank(path).unwrap().unwrap();
+        let original = std::fs::read(&bank).unwrap();
+        std::fs::File::options().write(true).open(&bank).unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000)).unwrap();
+        let timestamp = std::fs::metadata(&bank).unwrap().modified().unwrap();
+        assert_eq!(prepare_sound_bank(path).unwrap(), Some(bank.clone()));
+        assert_eq!(std::fs::read(&bank).unwrap(), original);
+        assert_eq!(std::fs::metadata(&bank).unwrap().modified().unwrap(), timestamp,
+            "identical compiler output must not trigger a running game's asset watcher");
+        std::fs::write(&project, source.replace("fixture.first", "fixture.second")).unwrap();
+        prepare_sound_bank(path).unwrap();
+        let changed = std::fs::read(&bank).unwrap();
+        assert_ne!(changed, original);
+        let value: Value = serde_json::from_slice(&changed).unwrap();
+        assert_eq!(value["events"][0]["id"], "fixture.second");
+    }
+
+    #[test]
+    fn external_project_without_sound_does_not_need_workspace_context() {
+        let fixture = tempfile::tempdir().expect("external fixture");
+        std::fs::write(
+            fixture.path().join("stick.toml"),
+            "[package]\nname = \"external-no-sound\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            sound_project_path_for(fixture.path().to_str().unwrap()).unwrap(),
+            None
+        );
+        assert_eq!(
+            prepare_sound_bank(fixture.path().to_str().unwrap()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn development_bank_allows_a_missing_sound_dependency() {
+        let workspace = rock_host::project::find_workspace_root(
+            &std::env::current_dir().expect("current directory"),
+        )
+        .expect("workspace root");
+        let fixture = tempfile::tempdir_in(workspace).expect("sound fixture");
+        std::fs::write(
+            fixture.path().join("stick.toml"),
+            "[package]\nname = \"missing-sound-dev\"\n\n[sound]\nproject = \"sound_project.json\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.path().join("sound_project.json"),
+            r#"{
+  "version": 1,
+  "events": [{"id": "fixture.event", "steps": [{"layers": [{"sources": ["assets/sfx/missing.ogg"]}]}]}]
+}
+"#,
+        )
+        .unwrap();
+
+        let bank_path = prepare_sound_bank(fixture.path().to_str().unwrap())
+            .expect("a missing sound must not prevent a development run")
+            .expect("fixture declares a sound bank");
+        let bank: Value = serde_json::from_slice(&std::fs::read(bank_path).unwrap()).unwrap();
+        assert_eq!(
+            bank["events"][0]["steps"][0]["layers"][0]["sources"],
+            json!(["assets/sfx/missing.ogg"])
+        );
+    }
+
+    #[test]
+    fn release_visual_bank_rejects_a_missing_dependency() {
+        let workspace = rock_host::project::find_workspace_root(
+            &std::env::current_dir().expect("current directory"),
+        )
+        .expect("workspace root");
+        let fixture = tempfile::tempdir_in(workspace).expect("visual fixture");
+        let overlay = fixture.path().join("overlay");
+        std::fs::create_dir_all(fixture.path().join("assets")).unwrap();
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(
+            fixture.path().join("assets/visual_bank.json"),
+            format!(
+                "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                "0".repeat(64),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            overlay.join("assets/visual_bank.json"),
+            format!(
+                "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                "0".repeat(64),
+            ),
+        )
+        .unwrap();
+
+        let mut selection = rock_host::release::AssetSelection::default();
+        let result = compile_visual_bank(
+            fixture.path(),
+            "fixture",
+            &[overlay],
+            &mut selection,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("release admission accepted a missing visual dependency"),
+        };
+        assert!(error.to_string().contains("visual dependency is not stageable"));
+    }
+
+    #[test]
+    fn release_visual_bank_prefers_the_worktree_bank_over_a_stale_overlay_bank() {
+        let workspace = rock_host::project::find_workspace_root(
+            &std::env::current_dir().expect("current directory"),
+        )
+        .expect("workspace root");
+        let fixture = tempfile::tempdir_in(workspace).expect("visual fixture");
+        let overlay = fixture.path().join("overlay");
+        let project_object = fixture
+            .path()
+            .join("assets/.eat/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        std::fs::create_dir_all(&project_object).unwrap();
+        std::fs::create_dir_all(overlay.join("assets")).unwrap();
+        std::fs::write(
+            fixture.path().join("assets/visual_bank.json"),
+            "{\"schema_version\":1,\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/image.png\"]}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_object.join("image.png"),
+            b"project-object",
+        )
+        .unwrap();
+        std::fs::write(
+            overlay.join("assets/visual_bank.json"),
+            "{\"schema_version\":1,\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}\n",
+        )
+        .unwrap();
+
+        let mut selection = rock_host::release::AssetSelection::default();
+        compile_visual_bank(
+            fixture.path(),
+            "fixture",
+            &[overlay],
+            &mut selection,
+        )
+        .expect("the project-owned bank should be selected");
+        let bank = selection
+            .assets
+            .iter()
+            .find(|asset| asset.key == "fixture/assets/visual_bank.json")
+            .expect("selected bank");
+        assert_eq!(bank.source, fixture.path().join("assets/visual_bank.json"));
+    }
+
+    #[test]
     fn secret_manifest_value_is_replaced_by_a_fingerprint() {
         let secret = "known-secret";
         assert_eq!(fingerprint(secret), format!("sha256:{:x}", Sha256::digest(secret.as_bytes())));
@@ -620,6 +895,7 @@ mod tests {
         let game = "mag";
         let generated = format!("{game}/assets/.eat/current/characters/mage/mage-idle.png");
         let sound_key = format!("{game}/assets/sfx/cast.ogg");
+        let loose_key = format!("{game}/assets/particles/blood.png");
         let bank_key = format!("{game}/assets/visual_bank.json");
         let mut selection = rock_host::release::AssetSelection {
             assets: vec![
@@ -627,6 +903,7 @@ mod tests {
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/.eat/stale/mage.png"), source: overlay.join("assets/.eat/stale/mage.png") },
                 rock_host::release::ReleaseAsset { key: bank_key.clone(), source: overlay.join("assets/visual_bank.json") },
                 rock_host::release::ReleaseAsset { key: sound_key.clone(), source: overlay.join("assets/sfx/cast.ogg") },
+                rock_host::release::ReleaseAsset { key: loose_key.clone(), source: overlay.join("assets/particles/blood.png") },
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/unrelated-sentinel.txt"), source: overlay.join("assets/unrelated-sentinel.txt") },
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/characters/mage/mage-idle.png"), source: PathBuf::from("/project/assets/characters/mage/mage-idle.png") },
                 rock_host::release::ReleaseAsset { key: format!("{game}/assets/ui/frame.png"), source: PathBuf::from("/project/assets/ui/frame.png") },
@@ -647,12 +924,19 @@ mod tests {
             fixed_output_keys: [format!("{game}/assets/characters/mage/mage-idle.png")].into(),
         };
 
-        narrow_asset_overlay_selection(&mut selection, &[overlay], Some(&sound), Some(&visual));
+        narrow_asset_overlay_selection(
+            &mut selection,
+            &[overlay],
+            Some(&sound),
+            Some(&visual),
+            std::slice::from_ref(&loose_key),
+        );
         let keys: BTreeSet<_> = selection.assets.iter().map(|asset| asset.key.as_str()).collect();
-        assert_eq!(keys.len(), 4, "admission and exclusion populations");
+        assert_eq!(keys.len(), 5, "admission and exclusion populations");
         assert!(keys.contains(generated.as_str()));
         assert!(keys.contains(bank_key.as_str()));
         assert!(keys.contains(sound_key.as_str()));
+        assert!(keys.contains(loose_key.as_str()));
         assert!(keys.contains("mag/assets/ui/frame.png"));
         assert!(!keys.iter().any(|key| key.contains("stale") || key.contains("sentinel")));
         assert!(!keys.contains("mag/assets/characters/mage/mage-idle.png"));

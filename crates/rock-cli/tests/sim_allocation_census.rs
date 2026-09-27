@@ -24,8 +24,8 @@ fn run_census(output: &Path) -> std::process::Output {
             "--allocation-census",
             output.to_str().expect("UTF-8 census path"),
             "testbed",
-            "sim_allocation_allocating",
-            "sim_allocation_control",
+            "testbed::sim_allocation_allocating",
+            "testbed::sim_allocation_control",
         ])
         .env("ROCK_SIM_TIMEOUT_SECS", "60")
         .output()
@@ -53,6 +53,8 @@ fn census_reports_exact_fixture_frames_and_keeps_both_arms() {
     assert_eq!(artifact["sensor"]["accounting"], "gross_lua_allocator_requests");
     assert_eq!(artifact["sensor"]["jit"], true);
     assert_eq!(artifact["sensor"]["trace_observer"], false);
+    assert_eq!(artifact["sensor"]["text_layout_sim_probes"], false);
+    assert_eq!(artifact["sensor"]["imgui_sim_probes"], false);
     assert_eq!(artifact["sensor"]["final_frame"], "after_deferred_stop_sim");
     let records = artifact["records"].as_array().expect("records array");
     assert_eq!(records.len(), 2, "examined population must match records");
@@ -70,10 +72,10 @@ fn census_reports_exact_fixture_frames_and_keeps_both_arms() {
         assert!(record["build_sha"].as_str().is_some_and(|sha| !sha.is_empty()), "{record}");
         assert!(record["allocation_calls_per_frame"].is_number(), "{record}");
         assert!(record["gross_kb_per_frame"].is_number(), "{record}");
-        if record["sim_name"] == "sim_allocation_allocating" {
+        if record["sim_name"] == "testbed::sim_allocation_allocating" {
             allocating_measured_kb = record["measured_gross_kb"].as_f64();
             allocating_calls_per_frame = record["allocation_calls_per_frame"].as_f64();
-        } else if record["sim_name"] == "sim_allocation_control" {
+        } else if record["sim_name"] == "testbed::sim_allocation_control" {
             control_calls_per_frame = record["allocation_calls_per_frame"].as_f64();
         }
     }

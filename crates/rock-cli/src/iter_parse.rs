@@ -60,7 +60,7 @@ fn discover_or_walk(path: &str) -> Result<SourceFiles> {
         }
     }
     paths.sort();
-    let mut sources = SourceFiles { files: vec![] };
+    let mut sources = SourceFiles::empty();
     for fp in &paths {
         let contents = fs_err::read_to_string(fp)?;
         let id = fp.to_string_lossy().into_owned();

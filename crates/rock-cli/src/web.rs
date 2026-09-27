@@ -1,6 +1,6 @@
 //! `rock web <project> [--out <dir>]` -- emit a static browser build
 //! (`index.html` + `game.js`) for a Rock project via the JS backend (stone-web
-//! Arc 2, `docs/stone-web-plan.md`).
+//! `docs/backends.md`).
 //!
 //! `game.js` is ONE classic script (the JS path is already classic/ES5-ish, no
 //! ESM): the same runtime prelude set the node path uses (`build_run_program`),
@@ -1069,6 +1069,7 @@ fn assemble_web_program(
     // Deterministic default seed (a game re-seeds via random_seed() itself);
     // Date.now() matches the node path's non-deterministic default.
     p.push_str("__rock_rng_seed(Date.now());\n");
+    p.push_str("__rock_presentation_rng_seed(Date.now() + 10007);\n");
     p.push_str(&emitted.program);
     p.push_str(register_lines);
     let manifest: Vec<String> = preload.iter().map(|s| crate::js_test::js_str(s)).collect();

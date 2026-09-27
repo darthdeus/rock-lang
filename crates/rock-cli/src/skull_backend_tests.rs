@@ -1,6 +1,29 @@
 use std::time::Duration;
 
 #[test]
+fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"iter-production-sources\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(dir.path().join("main.rock"), "fn main() { let value = 1 }\n")
+        .expect("main source");
+    std::fs::create_dir(dir.path().join("tests")).expect("tests dir");
+    std::fs::write(dir.path().join("tests/broken.rock"), "fn broken( {\n")
+        .expect("broken test source");
+
+    let sources = super::iter_incremental_sources(dir.path().to_str().unwrap())
+        .expect("discover profiler sources");
+    assert_eq!(sources.files.len(), 1);
+    assert!(sources
+        .files
+        .iter()
+        .all(|source| !source.borrow().file.to_id_path().contains("/tests/")));
+}
+
+#[test]
 fn nobox_reflection_uses_the_compiler_owned_lua_slots() {
     let source = r#"
 nobox value Probe { x: int, y: int }
@@ -37,6 +60,41 @@ fn main() {}
     assert!(bridge.contains("Place_lct("), "nested CData did not use its leaf ctor:\n{bridge}");
     assert!(bridge.contains("v.space.value"), "nested CData write did not read declared fields:\n{bridge}");
     assert!(!bridge.contains("v[\"space.value\"]"), "nested CData used a leaf-table key:\n{bridge}");
+}
+
+#[test]
+fn scoped_nobox_reflection_uses_the_emitted_type_symbol() {
+    let source = r#"
+pub nobox value Place { x: int, y: int }
+global LAST_PLACE: Place? = null
+fn main() {}
+"#;
+    let mut module = skull_parser::parse_module_with_dialect(
+        source,
+        ustr::Ustr::from("place.rock"),
+        skull_parser::Dialect::V1,
+    )
+    .expect("parse scoped nobox fixture");
+    module.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "mag_simulation".to_string(),
+    });
+    let mut aliases = bone_core::modules::NsAliases::default();
+    aliases.packages.push(bone_core::modules::PackageAliases {
+        id: 1,
+        self_name: ustr::Ustr::from("mag_simulation"),
+        aliases: vec![],
+    });
+    let workspace = bone_semantic::semantic_passes::semantic_pass_with_aliases(
+        &mut [module], &aliases,
+    )
+    .expect("typecheck scoped nobox fixture");
+    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
+    let bridge = super::build_state_nobox_accessors(&workspace, &scalar)
+        .expect("build scoped nobox reflection bridge");
+    let symbol = skull_mir::mangle::symbol_of_key(ustr::Ustr::from("mag_simulation::Place"));
+    assert!(bridge.contains(&format!("return {symbol}_ct(")), "scoped ctor did not use its emitted symbol:\n{bridge}");
+    assert!(!bridge.contains("mag_simulation::Place_ct("), "logical type key leaked into Lua:\n{bridge}");
 }
 
 #[test]
@@ -147,16 +205,15 @@ fn is_order_only(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod incremental_watch_tests {
-    //! End-to-end check that a real `bone_semantic::Session`'s `reinferred` list drives
-    //! `emit_incremental` to the same Lua a fresh full build produces — the watch
-    //! loop's correctness, minus the file-watching. Mirrors the in-skull oracle
-    //! (`skull/tests/incremental_emit.rs`) but through the actual Session edit
-    //! path used by `skull_watch`, so it also covers "is `reinferred` enough".
+    //! Session edit oracles for `emit_incremental`: byte identity with fresh builds
+    //! under global calls, and runtime values under bound calls whose cached ranks
+    //! can differ from a fresh build. Mirrors `skull/tests/incremental_emit.rs`
+    //! through the actual Session edit path, covering whether `reinferred` is enough.
 
     use crate::bone_backend::bone_session;
 
-    fn files(src: &str) -> Vec<(String, String)> {
-        vec![("main.rock".to_string(), src.to_string())]
+    fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
+        vec![bone_incremental::session::SessionFile::legacy("main.rock", src)]
     }
 
     #[test]
@@ -196,8 +253,8 @@ mod incremental_watch_tests {
         // inline dep — `deps` holds the callee's FuncRef across modules). Editing
         // a.rock re-infers only a's body, but skull must still re-emit b's caller.
         let mut session = bone_session(vec![
-            ("a.rock".into(), "@inline\nfn helper() -> int { 3 }".into()),
-            ("b.rock".into(), "fn caller() -> int { helper() }".into()),
+            bone_incremental::session::SessionFile::legacy("a.rock", "@inline\nfn helper() -> int { 3 }"),
+            bone_incremental::session::SessionFile::legacy("b.rock", "fn caller() -> int { helper() }"),
         ])
         .expect("session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
@@ -306,7 +363,7 @@ mod incremental_watch_tests {
     // type-valid by construction: every fn is `-> int`, every callee is a
     // lower-indexed fn so the graph is a DAG, no recursion), driving the REAL
     // `Session.update_file` -> `emit_incremental` path. After each edit it asserts
-    // the incremental assembly is byte-identical to `emit_full` of the SAME
+    // the global-shape assembly is byte-identical to `emit_full` of the SAME
     // (edited) workspace — the fresh build is the ground truth. A divergence means
     // a chunk that should have re-emitted (an inline-dependent caller) didn't.
 
@@ -358,7 +415,14 @@ mod incremental_watch_tests {
         i
     }
 
-    fn run_fuzz(seed: u64, n_fns: usize, steps: usize) {
+    fn assert_fuzz_values(lua: &str, calls: &str, expected: &str, context: &str) {
+        match super::exec_lua(&format!("{lua}\n{calls}")) {
+            super::ExecOutcome::Output(output) => assert_eq!(output.trim(), expected, "{context}"),
+            super::ExecOutcome::Errored(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, binding: skull::CalleeBindingMode) -> usize {
         let mut rng = Rng(seed.max(1));
         // Start: a mix of consts and call edges so inlining is exercised from step 0.
         let mut bodies: Vec<Body> = (0..n_fns)
@@ -373,8 +437,18 @@ mod incremental_watch_tests {
 
         let mut session = bone_session(files(&render(&bodies))).expect("fuzz session init");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_init, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("fuzz emit_full init");
+        let (_init, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
+            session.workspace(), mid, binding,
+        ).expect("fuzz emit_full init");
+        let calls = (0..n_fns).map(|i| {
+            let name = format!("f{i}");
+            let (_, function) = session.workspace().modules.iter()
+                .flat_map(|module| module.functions.iter())
+                .find(|(_, function)| function.name.as_str() == name)
+                .expect("fuzz function");
+            format!("print({}())\n", skull_mir::mangle::mangle_fn(session.workspace(), function))
+        }).collect::<String>();
+        let mut shape_differences = 0;
 
         for step in 0..steps {
             let changed = mutate(&mut bodies, &mut rng);
@@ -394,17 +468,36 @@ mod incremental_watch_tests {
             let incremental =
                 skull::mir_emit::emit_incremental(session.workspace(), &mut cache, &result.reinferred)
                     .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_incremental failed: {}", e.message));
-            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+            let fresh = skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_full failed: {}", e.message))
                 .0;
-
-            assert_eq!(
-                incremental.lua, fresh.lua,
-                "seed {seed} step {step}: incremental != fresh after editing f{changed} \
-                 (reinferred={} bodies)\n--- program ---\n{text}",
-                result.reinferred.len()
-            );
+            let context = format!("seed {seed} step {step}: edited f{changed}");
+            match binding {
+                skull::CalleeBindingMode::Global => assert!(
+                    incremental.lua == fresh.lua,
+                    "{context}: incremental != fresh (reinferred={} bodies): {}\n{text}",
+                    result.reinferred.len(),
+                    super::first_diff_line(&incremental.lua, &fresh.lua),
+                ),
+                skull::CalleeBindingMode::Upvalue => {
+                    // Reload keeps cached SCC ranks; fresh builds recompute them.
+                    // New edges can therefore differ in factory captures while
+                    // executing the same calls (docs/backends.md, Callee binding).
+                    shape_differences += usize::from(incremental.lua != fresh.lua);
+                    let mut values = Vec::<i64>::with_capacity(n_fns);
+                    for body in &bodies {
+                        values.push(match body {
+                            Body::Const(value) => *value,
+                            Body::Call(callee) => values[*callee],
+                        });
+                    }
+                    let expected = values.iter().map(i64::to_string).collect::<Vec<_>>().join("\n");
+                    assert_fuzz_values(&incremental.lua, &calls, &expected, &format!("{context}: incremental"));
+                    assert_fuzz_values(&fresh.lua, &calls, &expected, &format!("{context}: fresh"));
+                }
+            }
         }
+        shape_differences
     }
 
     #[test]
@@ -415,8 +508,21 @@ mod incremental_watch_tests {
         let steps: usize = std::env::var("SKULL_FUZZ_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
         let seeds: u64 = std::env::var("SKULL_FUZZ_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
         for seed in 1..=seeds {
-            run_fuzz(seed.wrapping_mul(2654435761), 16, steps);
+            run_fuzz(seed.wrapping_mul(2654435761), 16, steps, skull::CalleeBindingMode::Global);
         }
+    }
+
+    #[test]
+    fn fuzz_incremental_bound_calls_match_values() {
+        // Keep the original failing seed and graph size; execution is bounded
+        // because each edit launches LuaJIT for both incremental and fresh output.
+        let mut shape_differences = 0;
+        for seed in 1_u64..=2 {
+            shape_differences += run_fuzz(
+                seed.wrapping_mul(2654435761), 16, 12, skull::CalleeBindingMode::Upvalue,
+            );
+        }
+        assert!(shape_differences > 0, "fixture must exercise changed binding ranks");
     }
 }
 
@@ -445,7 +551,9 @@ mod overlay_runtime_tests {
     //! cache, and compose `frozen_baseline ++ overlay` against a fresh `emit_full`.
 
     use crate::bone_backend::bone_session;
+    use super::super::{SkullReload, SkullStone};
     use super::{emit_overlay_checked, exec_lua, normalize_stdout, ExecOutcome};
+    use std::path::Path;
 
     /// Standalone `@test`/synthetic programs have no engine. Stub the full-reload
     /// registry reset only when a fixture emits one; body overlays refresh the
@@ -462,6 +570,128 @@ mod overlay_runtime_tests {
     /// overlay so the overlay's fresh `main` wins over the stale baseline's.
     fn run_parts(parts: &[&str]) -> ExecOutcome {
         exec_lua(&parts.join("\n"))
+    }
+
+    /// Execute the files written by `SkullStone`, including the game entry
+    /// wrapper. The two small host hooks make this the same Lua artifact the
+    /// engine consumes while keeping the test independent of a renderer.
+    fn run_stone_artifacts(main_path: &Path, incremental_path: &Path, call_after_overlay: bool) -> String {
+        let main = std::fs::read_to_string(main_path).expect("read generated main.lua");
+        let overlay = std::fs::read_to_string(incremental_path).unwrap_or_default();
+        let tail = if call_after_overlay { "\nmain()\n" } else { "\n" };
+        let program = format!(
+            "function clear_all_systems() end\nfunction __rock_main_wrapper(f) f() end\n{main}\n{overlay}{tail}"
+        );
+        match exec_lua(&program) {
+            ExecOutcome::Output(output) => normalize_stdout(&output),
+            ExecOutcome::Errored(error) => panic!(
+                "generated SkullStone artifacts failed to execute:\n{error}\n--- main.lua ---\n{main}\n--- incremental.lua ---\n{overlay}"
+            ),
+        }
+    }
+
+    fn run_production_body_overlay(manifest: Option<&str>) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        if let Some(manifest) = manifest {
+            std::fs::write(dir.path().join("stick.toml"), manifest).expect("stick.toml");
+        }
+        let main_path = dir.path().join("main.lua");
+        let incremental_path = dir.path().join("incremental.lua");
+        let source_path = dir.path().join("main.rock");
+        let v0 = "fn probe() -> int { static value = 1\n value = value + 1\n value }\nfn main() { print(probe()) }\n";
+        let v1 = "fn probe() -> int { static value = 1\n value = value + 10\n value }\nfn main() { print(probe()) }\n";
+        std::fs::write(&source_path, v0).expect("initial source");
+        let mut stone = SkullStone::init(
+            dir.path().to_str().expect("tempdir path"),
+            &main_path,
+            &incremental_path,
+        )
+        .expect("initial production build");
+        assert!(!incremental_path.exists(), "initial load must not leave an overlay");
+
+        std::fs::write(&source_path, v1).expect("edited source");
+        let reload = stone
+            .recompile(std::slice::from_ref(&source_path), &main_path, &incremental_path)
+            .expect("body edit through production recompile");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "body edit must publish an overlay, got {reload:?}"
+        );
+        assert!(incremental_path.exists(), "body edit must write incremental.lua");
+
+        // The first call is made by main.lua's production entry wrapper. The
+        // second call happens after the overlay is loaded, so the static cell
+        // proves both changed code and retained state.
+        run_stone_artifacts(&main_path, &incremental_path, true)
+    }
+
+    #[test]
+    fn production_overlay_executes_v1_body_edit_and_preserves_state() {
+        let legacy = run_production_body_overlay(None);
+        assert_eq!(legacy.trim(), "2\n12", "legacy control must execute the overlay");
+
+        let v1 = run_production_body_overlay(Some(
+            "[package]\nname = \"overlay-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        ));
+        assert_eq!(v1.trim(), "2\n12", "v1 overlay must execute changed code with retained state");
+    }
+
+    #[test]
+    fn production_v1_namespace_edit_takes_full_reload_and_runs_new_definition() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"namespace-v1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        )
+        .expect("stick.toml");
+        let main_path = dir.path().join("main.lua");
+        let incremental_path = dir.path().join("incremental.lua");
+        let main_source = dir.path().join("main.rock");
+        let module_source = dir.path().join("a.rock");
+        std::fs::write(
+            &main_source,
+            "fn main() { print(a::bump(2)) }\n",
+        )
+        .expect("initial main source");
+        std::fs::write(
+            &module_source,
+            "mod a;\npub fn bump(n: int) -> int { n + 1 }\n",
+        )
+        .expect("initial module source");
+        let mut stone = SkullStone::init(
+            dir.path().to_str().expect("tempdir path"),
+            &main_path,
+            &incremental_path,
+        )
+        .expect("initial v1 namespace build");
+        let baseline = run_stone_artifacts(&main_path, &incremental_path, false);
+        assert_eq!(baseline.trim(), "3");
+
+        std::fs::write(
+            &main_source,
+            "fn main() { print(a::twice(3)) }\n",
+        )
+        .expect("edited main source");
+        std::fs::write(
+            &module_source,
+            "mod a;\npub fn bump(n: int) -> int { n + 1 }\npub fn twice(n: int) -> int { n * 2 }\n",
+        )
+        .expect("edited module source");
+        let reload = stone
+            .recompile(
+                &[module_source.clone(), main_source.clone()],
+                &main_path,
+                &incremental_path,
+            )
+            .expect("namespace edit through production recompile");
+        assert!(
+            matches!(reload, SkullReload::Full { .. }),
+            "a namespace-affecting edit must publish the supported full path, got {reload:?}"
+        );
+        assert!(!incremental_path.exists(), "full namespace reload must wipe the overlay");
+        let updated = run_stone_artifacts(&main_path, &incremental_path, false);
+        assert_eq!(updated.trim(), "6", "the full artifact must contain the new namespace definition");
+        assert_ne!(updated.trim(), baseline.trim(), "namespace edit must not serve stale output");
     }
 
     /// Assert the frozen-baseline+overlay execution matches the fresh full build
@@ -490,8 +720,42 @@ mod overlay_runtime_tests {
         }
     }
 
-    fn files(src: &str) -> Vec<(String, String)> {
-        vec![("main.rock".to_string(), src.to_string())]
+    fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
+        vec![bone_incremental::session::SessionFile::legacy("main.rock", src)]
+    }
+
+    #[test]
+    fn capture_identity_rejects_switching_between_shadowed_bindings() {
+        let v0 = "global CALLBACK: fn() -> int = () => 0\n\
+                  fn install() {\n  let value = 1\n  {\n    let value = 2\n    CALLBACK = () => value\n  }\n}\n\
+                  fn main() {}\n";
+        let v1 = "global CALLBACK: fn() -> int = () => 0\n\
+                  fn install() {\n  let value = 1\n  {\n    let other = 2\n    CALLBACK = () => value\n  }\n}\n\
+                  fn main() {}\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (_full, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "renaming a shadow binding is a body edit, got {:?}",
+            result.tier
+        );
+        let err = match skull::mir_emit::emit_overlay(
+            session.workspace(),
+            &mut cache,
+            &result.reinferred,
+        ) {
+            Ok(_) => panic!("the same lambda site adopted another binding's capture cell"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "a capture-binding switch must request a safe restart, got: {}",
+            err.message
+        );
     }
 
     /// The skull watcher's robustness contract: a BROKEN edit between two valid
@@ -916,7 +1180,7 @@ mod overlay_runtime_tests {
     // --- runtime accumulation fuzz: frozen v0 baseline + cumulative overlay -----
     //
     // The byte-identical fuzz (`incremental_watch_tests::fuzz_incremental_matches_fresh`)
-    // proves `emit_incremental` (full reassembly) == fresh. This one RUNS the
+    // proves global-shape `emit_incremental` (full reassembly) == fresh. This one RUNS the
     // OVERLAY: a single frozen `main.lua` (v0) plus an overlay that accumulates
     // EVERY change from v0 through vk -- never a full rebuild in between, the
     // worst case for the accumulation rule. After each edit, `frozen ++ overlay`
@@ -1093,7 +1357,9 @@ mod overlay_runtime_tests {
 
         let stub = stub_for(&full.lua);
         for t in &tests {
-            let call = format!("{}()", t.name);
+            // A Lua call site, so the EMITTED symbol (equal to the name for
+            // every legacy fn in this corpus, but not for a v1 one).
+            let call = format!("{}()", t.symbol);
             let composed = run_parts(&[&full.lua, stub, &overlay.lua, &call]);
             let fresh = run_parts(&[&full.lua, stub, &call]);
             match (composed, fresh) {
@@ -2259,7 +2525,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             return; // opt-in; the curated subset is the always-on gate
         }
         let root = std::env::var("SKULL_OVERLAY_ROOT").unwrap_or_else(|_| ws_path("tests"));
-        let files = super::super::collect_rock_files(&root).expect("collect");
+        let files = crate::bone_backend::collect_rock_files(&root).expect("collect");
         let files: Vec<String> = files.into_iter().filter(|f| !f.contains("/benches/")).collect();
         let t = sweep(&files);
         eprintln!(
@@ -2966,7 +3232,7 @@ fn main() { print(choose_a()); print(choose_b()) }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "renderer-wgpu"))]
 mod compute_registration_contract_tests {
     use super::super::{SkullReload, SkullStone};
     use std::path::PathBuf;
@@ -2997,6 +3263,11 @@ fn main() { }
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
         let rock = dir.path().join("main.rock");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"compute_contract\"\ntype = \"bin\"\n\n[renderer]\nbackend = \"wgpu\"\n",
+        )
+            .expect("renderer config");
         std::fs::write(&rock, source).expect("source");
         let stone = SkullStone::init(&root, &main, &incremental).expect("initial compile");
         (dir, stone, main, incremental, rock)
@@ -3710,32 +3981,40 @@ mod force_full_tests {
         let source = dir.path().join("main.rock");
         let stick = dir.path().join("stick.toml");
         std::fs::write(&source, "fn main() {}\n").unwrap();
-        let write_stick = |overlay: &str| {
+        let write_stick = |overlay: &std::path::Path| {
+            std::fs::create_dir_all(overlay).unwrap();
             std::fs::write(
                 &stick,
                 format!(
-                    "[package]\nname = \"preamble-refresh\"\n[assets]\noverlays = [{overlay:?}]\n"
+                    "[package]\nname = \"preamble-refresh\"\n[assets]\noverlays = [{:?}]\n",
+                    overlay.to_string_lossy()
                 ),
             )
             .unwrap();
         };
 
-        write_stick("/tmp/overlay-v1");
-        let mut skull = SkullStone::init(&dir_str, &main_lua, &incremental).expect("init");
-        assert!(std::fs::read_to_string(&main_lua).unwrap().contains("/tmp/overlay-v1"));
+        let overlay_v1 = dir.path().join("overlay-v1");
+        let overlay_v2 = dir.path().join("overlay-v2");
+        let overlay_v3 = dir.path().join("overlay-v3");
 
-        write_stick("/tmp/overlay-v2");
+        write_stick(&overlay_v1);
+        let mut skull = SkullStone::init(&dir_str, &main_lua, &incremental).expect("init");
+        assert!(std::fs::read_to_string(&main_lua)
+            .unwrap()
+            .contains(overlay_v1.to_str().unwrap()));
+
+        write_stick(&overlay_v2);
         let reload = skull.recompile(std::slice::from_ref(&stick), &main_lua, &incremental).unwrap();
         assert!(matches!(reload, SkullReload::Full { .. }));
         let rebuilt = std::fs::read_to_string(&main_lua).unwrap();
-        assert!(rebuilt.contains("/tmp/overlay-v2"));
-        assert!(!rebuilt.contains("/tmp/overlay-v1"));
+        assert!(rebuilt.contains(overlay_v2.to_str().unwrap()));
+        assert!(!rebuilt.contains(overlay_v1.to_str().unwrap()));
 
-        write_stick("/tmp/overlay-v3");
+        write_stick(&overlay_v3);
         skull.force_full(&main_lua, &incremental).unwrap();
         let forced = std::fs::read_to_string(&main_lua).unwrap();
-        assert!(forced.contains("/tmp/overlay-v3"));
-        assert!(!forced.contains("/tmp/overlay-v2"));
+        assert!(forced.contains(overlay_v3.to_str().unwrap()));
+        assert!(!forced.contains(overlay_v2.to_str().unwrap()));
     }
 
     /// init at v1 -> body-edit to v2 (writes the overlay) -> force_full. The
@@ -3983,6 +4262,13 @@ mod skull_stone_lint_snapshot_tests {
         let main = dir.path().join("main.lua");
         let incremental = dir.path().join("incremental.lua");
         let source = dir.path().join("main.rock");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"lint-output-locality\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("other.rock"), "fn other() -> int { 7 }\n")
+            .expect("other source");
         let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
         std::fs::write(&source, v1).expect("source");
@@ -4026,6 +4312,11 @@ mod skull_stone_lint_snapshot_tests {
         assert!(census.cache.output_refresh_requests > 0);
         assert!(census.cache.output_files_refreshed > 0);
         assert_eq!(census.cache.output_refresh_requests, 1);
+        assert!(census.cache.output_file_rows_read > 0);
+        assert!(
+            census.source_files_borrowed > census.cache.output_file_rows_read,
+            "finding output must visit populated rows, not every borrowed source"
+        );
         eprintln!(
             "skull-stone one-edit: elapsed_ms={elapsed_ms:.3} snapshots={} entries={} findings={} clone_ms={:.3}",
             census.cache_snapshots.snapshots,
@@ -4038,18 +4329,11 @@ mod skull_stone_lint_snapshot_tests {
     fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
         let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(root));
         let sources = crate::unified_compile::discover_sources(&spec).expect("discover");
-        let files: Vec<(String, String)> = sources
-            .files
-            .iter()
-            .map(|file| {
-                let file = file.borrow();
-                (file.file.to_id_path(), file.contents.clone())
-            })
-            .collect();
+        let files = crate::bone_backend::session_files(&sources);
         let target = files
             .iter()
-            .find(|(path, _)| path.ends_with(target_suffix))
-            .map(|(path, _)| path.clone())
+            .find(|f| f.path.ends_with(target_suffix))
+            .map(|f| f.path.clone())
             .expect("main source");
         let mut session = crate::bone_backend::bone_session_for_emission(
             files,
@@ -4102,14 +4386,30 @@ mod skull_stone_lint_snapshot_tests {
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
         std::fs::write(&source, v1).expect("source");
         let mut stone = SkullStone::init(&root, &main, &incremental).expect("init");
+        let initial_fingerprint = stone.artifact_fingerprint().to_string();
         let reload = stone
             .apply_edit(&source, v2, &main, &incremental)
             .expect("body edit");
         assert!(matches!(reload, SkullReload::Incremental { .. }), "reload: {reload:?}");
+        let incremental_fingerprint = stone.artifact_fingerprint().to_string();
+        assert_ne!(incremental_fingerprint, initial_fingerprint);
         let route_overlay = std::fs::read_to_string(&incremental).expect("route overlay");
         let direct = direct_overlay(&root, "main.rock", v2);
         assert!(!route_overlay.is_empty(), "overlay population must be nonzero");
         assert_eq!(route_overlay, direct, "lint-cache integration changed overlay bytes");
+        std::fs::write(&source, v2).expect("fresh source");
+        let fresh_outputs = tempfile::tempdir().expect("fresh outputs");
+        let fresh = SkullStone::init(
+            &root,
+            &fresh_outputs.path().join("main.lua"),
+            &fresh_outputs.path().join("incremental.lua"),
+        )
+        .expect("fresh edited project");
+        assert_eq!(
+            incremental_fingerprint,
+            fresh.artifact_fingerprint(),
+            "incremental fingerprint must equal the canonical fresh identity"
+        );
         if let Some(capture) = std::env::var_os("ROCK_STONE_OVERLAY_CAPTURE_DIR") {
             let capture = std::path::Path::new(&capture);
             std::fs::create_dir_all(capture).expect("capture dir");
@@ -4128,7 +4428,7 @@ mod skull_stone_lint_snapshot_tests {
         let project = std::path::PathBuf::from(project);
         let source = project.join("mobs.rock");
         let v1 = std::fs::read_to_string(&source).expect("MAG source");
-        let v2 = super::super::body_digit_flip(&v1, "update_mobs").expect("MAG edit");
+        let v2 = super::super::body_digit_flip(&v1, "Player.update_mobs").expect("MAG edit");
         let outputs = tempfile::tempdir().expect("output dir");
         let root = project.to_str().unwrap();
         let main = outputs.path().join("main.lua");
@@ -4215,7 +4515,7 @@ mod skull_stone_lint_snapshot_tests {
         );
         let source = project.join("mobs.rock");
         let v1 = std::fs::read_to_string(&source).expect("MAG source");
-        let v2 = super::super::body_digit_flip(&v1, "update_mobs").expect("MAG edit");
+        let v2 = super::super::body_digit_flip(&v1, "Player.update_mobs").expect("MAG edit");
         let outputs = tempfile::tempdir().expect("output dir");
         let root = project.to_str().unwrap();
         let main = outputs.path().join("main.lua");
@@ -4249,11 +4549,6 @@ mod skull_stone_lint_snapshot_tests {
         assert_eq!(census.cache.suppression_entry_parses, 0);
         assert_eq!(census.cache.output_refresh_requests, warmup + iters);
         assert!(census.cache.output_files_refreshed > 0);
-        assert!(census.cache.output_file_rows_read > 0);
-        assert!(
-            census.source_files_borrowed > census.cache.output_file_rows_read,
-            "finding output must visit populated rows, not every borrowed source"
-        );
         eprintln!(
             "skull-stone MAG apply_edit: mean={mean:.3} p50={:.3} p99={:.3} snapshots={} entries/edit={:.1} findings/edit={:.1} clone_ms={:.3} source_files={} output_files={} output_owners={}",
             percentile(50.0),
@@ -4434,5 +4729,28 @@ mod backend_stats_workspace_tests {
             !times.emit_phases.is_empty(),
             "successful timed emission must populate production phase attribution"
         );
+    }
+
+    #[test]
+    fn package_tests_dir_resolves_to_package_root() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"test-pkg\"\n",
+        )
+        .expect("stick.toml");
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).expect("create tests dir");
+        std::fs::write(tests_dir.join("foo_test.rock"), "@test fn t() { assert(true) }\n")
+            .expect("foo_test.rock");
+
+        let tests_str = tests_dir.to_string_lossy().to_string();
+        let resolved = crate::skull_backend::is_package_tests_dir(&tests_str);
+        assert_eq!(resolved, Some(dir.path().to_string_lossy().to_string()));
+
+        let unrelated_dir = tempfile::TempDir::new().expect("tempdir");
+        let bare_tests = unrelated_dir.path().join("tests");
+        std::fs::create_dir_all(&bare_tests).expect("create bare tests");
+        assert_eq!(crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()), None);
     }
 }

@@ -267,22 +267,22 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             },
         ) => {
             if ctor_a != ctor_b {
-                let a_str = gamma.workspace.render(Some(&gamma.out), a);
-                let b_str = gamma.workspace.render(Some(&gamma.out), b);
-
                 // Both sides are plain nominals (structs/enums with no type
                 // args) far more often than generics; "different generic
                 // constructors" is nonsense for those. Only mention generics
                 // when a side actually has type parameters.
-                if params_a.is_empty() && params_b.is_empty() {
-                    unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+                let detail = if params_a.is_empty() && params_b.is_empty() {
+                    ""
                 } else {
-                    unify_fail!(
-                        gamma,
-                        span,
-                        "type mismatch: expected `{b_str}`, found `{a_str}` (different type constructors)"
-                    )
-                }
+                    " (different type constructors)"
+                };
+                unify_fail!(
+                    gamma,
+                    span,
+                    "type mismatch: expected `{}`, found `{}`{detail}",
+                    gamma.workspace.render(Some(&gamma.out), b),
+                    gamma.workspace.render(Some(&gamma.out), a)
+                )
             }
 
             if params_a.len() != params_b.len() {
@@ -368,9 +368,13 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
         // `from`/`to` in that order), so `b` is the expected type and `a` the
         // found one -- matching the nominal-mismatch arm above.
         _ => {
-            let a_str = gamma.workspace.render(Some(&gamma.out), a);
-            let b_str = gamma.workspace.render(Some(&gamma.out), b);
-            unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+            unify_fail!(
+                gamma,
+                span,
+                "type mismatch: expected `{}`, found `{}`",
+                gamma.workspace.render(Some(&gamma.out), b),
+                gamma.workspace.render(Some(&gamma.out), a)
+            )
         }
     }
 
@@ -653,8 +657,62 @@ pub(crate) fn has_unbound_infer(gamma: &Gamma, ty: TyId) -> bool {
 }
 
 pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(), CompilerError> {
+    coerce_impl(gamma, from, to, span, false)
+}
+
+pub(crate) fn coerce_contextual_lambda(
+    gamma: &mut Gamma,
+    from: TyId,
+    to: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    coerce_impl(gamma, from, to, span, true)
+}
+
+fn coerce_impl(
+    gamma: &mut Gamma,
+    from: TyId,
+    to: TyId,
+    span: Span,
+    contextual_lambda: bool,
+) -> Result<(), CompilerError> {
     let from_r = resolve(gamma, from, span);
     let to_r = resolve(gamma, to, span);
+
+    // A stored function value keeps its declared return ABI. Lifting a `nobox`
+    // return into a nullable one adds a presence slot at indirect call sites.
+    // Lambda literals checked against the target type get that ABI directly.
+    let function_return = |ty: TyId| {
+        let ty = match *gamma.get(ty) {
+            TypeExpr::Nullable(inner) => ty.with_idx(inner),
+            _ => ty,
+        };
+        match *gamma.get(ty) {
+            TypeExpr::Function { ret, .. } => Some(ty.with_idx(ret)),
+            _ => None,
+        }
+    };
+    if !contextual_lambda
+        && let (Some(from_ret), Some(to_ret)) = (function_return(from_r), function_return(to_r))
+    {
+        let from_ret = resolve(gamma, from_ret, span);
+        let to_ret = resolve(gamma, to_ret, span);
+        if let TypeExpr::Nullable(inner) = *gamma.get(to_ret) {
+            let to_inner = resolve(gamma, to_ret.with_idx(inner), span);
+            if !matches!(gamma.get(from_ret), TypeExpr::Nullable(_))
+                && let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = *gamma.get(to_inner)
+                && resolve_struct(gamma, name).is_some_and(|sid| {
+                    gamma.workspace.module(sid.module).structs[sid.def].is_nobox
+                })
+                && gamma.trial(|g| unify(g, from_ret, to_inner, span).is_ok())
+            {
+                return Err(CompilerError::new_with_label(
+                    span,
+                    "a function returning a `nobox` value cannot be used as one returning a nullable value; wrap the call in a lambda with the target return type".to_string(),
+                ));
+            }
+        }
+    }
 
     if matches!(gamma.get(from_r), TypeExpr::Builtin(BuiltinTy::Never)) {
         return Ok(());
@@ -749,16 +807,19 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         TypeExpr::App { ctor: TypeCtor::Nominal(tname), params: tp },
     ) = (*gamma.get(from_r), *gamma.get(to_r))
     {
-        if fname.as_str() == "FieldRef"
-            && matches!(tname.as_str(), "ReadFieldRef" | "WriteFieldRef")
+        if bone_core::modules::is_intrinsic_key(fname, "FieldRef")
+            && bone_core::modules::is_intrinsic_key_in(
+                tname,
+                &["ReadFieldRef", "WriteFieldRef"],
+            )
         {
             let mut fi = fp.into_iter();
             let mut ti = tp.into_iter();
             let (ft, fv) = (from_r.with_idx(fi.next().unwrap()), from_r.with_idx(fi.next().unwrap()));
             let (tt, tv) = (to_r.with_idx(ti.next().unwrap()), to_r.with_idx(ti.next().unwrap()));
             unify(gamma, ft, tt, span)?;
-            return match tname.as_str() {
-                "WriteFieldRef" => unify(gamma, fv, tv, span),
+            return match bone_core::modules::is_intrinsic_key(tname, "WriteFieldRef") {
+                true => unify(gamma, fv, tv, span),
                 _ => coerce(gamma, fv, tv, span),
             };
         }
@@ -778,7 +839,7 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
             _ => from_r,
         };
 
-        return coerce(gamma, from_inner, to_inner, span);
+        return coerce_impl(gamma, from_inner, to_inner, span, contextual_lambda);
     }
 
     unify(gamma, from_r, to_r, span)
@@ -939,7 +1000,7 @@ pub(crate) fn tuple_of(gamma: &mut Gamma, elems: &[TyId], span: Span) -> TyId {
     TyId::Local(idx)
 }
 
-pub(crate) fn coerce_to_interface(
+pub fn coerce_to_interface(
     gamma: &mut Gamma,
     from: TyId,
     iname: Ustr,
@@ -949,24 +1010,80 @@ pub(crate) fn coerce_to_interface(
         CompilerError::new_with_label(span, format!("unknown interface `{iname}`"))
     })?;
 
-    let ifields: Vec<(Ustr, TyId)> = gamma.workspace.module(isid.module).structs[isid.def]
+    let ifields: Vec<(Ustr, TyId, NsVisibility)> = gamma.workspace.module(isid.module).structs[isid.def]
         .fields
         .iter()
-        .map(|f| (f.name, f.ty))
+        .map(|f| (f.name, f.ty, f.write_vis.clone()))
         .collect();
 
-    for (fname, fty) in ifields {
-        let actual = struct_field_ty(gamma, from, fname, span).map_err(|_| {
-            CompilerError::new_with_label(
-                span,
-                format!(
-                    "type {} does not have required field `{}` of interface `{}`",
-                    gamma.workspace.render(Some(&gamma.out), from),
-                    fname,
-                    iname
+    let from_peeled = match *gamma.get(from) {
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            params,
+        } => {
+            let mut params = params;
+            if let Some(inner) = params.next() {
+                from.with_idx(inner)
+            } else {
+                from
+            }
+        }
+        _ => from,
+    };
+    let from_key = match *gamma.get(from_peeled) {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => Some(name),
+        _ => None,
+    };
+
+    for (fname, fty, fwrite_vis) in ifields {
+        let actual = struct_field_ty(gamma, from, fname, span).map_err(|e| {
+            match e {
+                StructFieldError::MissingField { .. }
+                | StructFieldError::AccessDenied {
+                    denied: AccessDenied::NoSuchField { .. },
+                    ..
+                } => CompilerError::new_with_label(
+                    span,
+                    format!(
+                        "type {} does not have required field `{}` of interface `{}`",
+                        gamma.workspace.render(Some(&gamma.out), from),
+                        fname,
+                        iname
+                    ),
                 ),
-            )
+                other => other.into(),
+            }
         })?;
+
+        // Structural interface conformance capability check (spec 10.6):
+        // An external conversion cannot use a public getter to satisfy a publicly writable interface field.
+        if fwrite_vis == NsVisibility::Pub {
+            if let Some(skey) = from_key {
+                if gamma.workspace.interface_names.contains(&skey) {
+                    let from_sid = resolve_struct(gamma, skey).ok_or_else(|| {
+                        CompilerError::new_with_label(span, format!("unknown interface `{skey}`"))
+                    })?;
+                    let from_def = &gamma.workspace.module(from_sid.module).structs[from_sid.def];
+                    if let Some(ff) = from_def.fields.iter().find(|f| f.name == fname) {
+                        if ff.write_vis != NsVisibility::Pub {
+                            comp_error!(
+                                span,
+                                "field `{}` on interface `{}` is not writable",
+                                fname,
+                                skey
+                            );
+                        }
+                    }
+                } else {
+                    let site = gamma.access_site();
+                    field_access(gamma, skey, fname, site, FieldAccessNeed::Write)
+                        .map_err(|e| e.to_compiler_error(span))?;
+                }
+            }
+        }
 
         coerce(gamma, actual, fty, span)?;
     }

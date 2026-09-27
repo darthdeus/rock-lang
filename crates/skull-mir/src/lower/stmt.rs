@@ -24,7 +24,7 @@ impl Builder<'_> {
             *c += 1;
             v
         };
-        let cell = Ustr::from(format!("__static_{}_{}_{}", self.static_owner, sname, ctr).as_str());
+        let cell = Ustr::from(format!("__static_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str());
         let done_flag = Ustr::from(format!("{cell}__done").as_str());
         self.static_cells.insert(raw(name), cell);
 
@@ -59,7 +59,8 @@ impl Builder<'_> {
         self.f
             .set_term(self.cur, Term::Branch { cond: done_v, then_bb: join, else_bb: init_bb });
         self.cur = init_bb;
-        let v = self.lower_expr(value)?;
+        let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
+        let v = self.lower_expr_with_expected(value, expected.as_deref())?;
         self.emit_cur(Inst::StoreGlobal { name: cell, value: v });
         let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
         self.emit_cur(Inst::StoreGlobal { name: done_flag, value: t });
@@ -117,6 +118,14 @@ impl Builder<'_> {
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
 
+    /// The owner segment of a private global this body mints (a `static`
+    /// cell, a hoisted nested fn). A v1 owner is a DefKey, which is not an
+    /// identifier, so it takes the key's symbol form; a legacy owner is its
+    /// own symbol.
+    fn static_owner_symbol(&self) -> Ustr {
+        crate::mangle::symbol_of_key(self.static_owner)
+    }
+
     /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
     /// <name>_<ctr>`. The name is registered in `nested_fn_globals` BEFORE the
     /// body is lowered so self-recursion resolves; the child inherits the
@@ -134,7 +143,7 @@ impl Builder<'_> {
             *c += 1;
             v
         };
-        let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
+        let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str());
         let abi = self.nested_fn_abi(name, params, hoisted)?;
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
@@ -288,16 +297,15 @@ impl Builder<'_> {
                                 .binding_ty(name)
                                 .and_then(|ty| self.concrete_ty_id(ty));
                             let cells = self
-                                .new_flat_enum_cells(bname, &shape, owner.as_deref())?
+                                .new_flat_enum_cells(name, bname, &shape, owner.as_deref())?
                                 .unwrap_or_else(|| {
-                                    leaves
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(li, _)| {
-                                            self.f.new_cell(Some(Ustr::from(
-                                                format!("{bname}__{li}").as_str(),
-                                            )))
-                                        })
+                                    (0..leaves.len())
+                                        .map(|li| self.new_binding_cell(
+                                            name,
+                                            Ustr::from(format!("{bname}__{li}").as_str()),
+                                            None,
+                                            Ustr::from(li.to_string().as_str()),
+                                        ))
                                         .collect()
                                 });
                             if cells.len() != leaves.len() {
@@ -331,14 +339,20 @@ impl Builder<'_> {
                         let slots = self.tuple_repr_to_slots(r, &shape)?;
                             self.bind_tuple_slots(name, &slots, shape);
                         } else {
+                        let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                         let v = match opaque_repr {
                             Some(r) => self.pack(r.into_value())?,
                             None if self.binding_is_ref(name) => self.lower_place_base(value)?,
-                            None => self.lower_expr(value)?,
+                            None => self.lower_expr_with_expected(value, expected.as_deref())?,
                         };
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);
-                        let cell = self.f.new_cell_typed(Some(self.body.binding_arena[name].name), cty);
+                        let cell = self.new_binding_cell(
+                            name,
+                            self.body.binding_arena[name].name,
+                            cty,
+                            Ustr::from(""),
+                        );
                         if self.binding_is_nonnull_value_struct(name) {
                             self.f.mark_nonnull_value_struct(cell);
                         }
@@ -394,7 +408,12 @@ impl Builder<'_> {
                 // the inner, so `x` binds directly to the value.
                 Statement::LetNewtype { var, value, .. } => {
                     let v = self.lower_expr(value)?;
-                    let cell = self.f.new_cell(Some(self.body.binding_arena[var].name));
+                    let cell = self.new_binding_cell(
+                        var,
+                        self.body.binding_arena[var].name,
+                        self.binding_ty(var),
+                        Ustr::from(""),
+                    );
                     self.emit_cur(Inst::Store { cell, value: v });
                     self.binds.insert(raw(var), cell);
                 }
@@ -587,6 +606,7 @@ impl Builder<'_> {
                 target,
                 op_fn,
                 value,
+                ..
             } => self.lower_compound_assign_effect(e, target, op_fn, value),
             _ => {
                 self.lower_expr_repr(e)?;

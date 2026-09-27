@@ -21,6 +21,7 @@ bone-core = { path = "../bone-core" }
 bone-lower = { path = "../bone-lower" }
 bone-inference = { path = "../bone-inference" }
 skull-parser = { path = "../skull-parser"}
+rock-core = { path = "../rock-core" }
 
 test-utils = { path = "../test-utils" }
 

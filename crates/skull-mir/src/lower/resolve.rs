@@ -95,24 +95,18 @@ pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
 
 /// The backend-variant group containing `member`.
 ///
-/// This is bone's complete collapse rule: same name and rendered parameter
-/// signature, with every backend distinct. A repeated backend is a genuine
-/// overload ambiguity, so no group exists and the member stays by itself.
+/// This is bone's complete collapse rule: equal
+/// [`Workspace::backend_variant_key`], with every backend distinct. A repeated
+/// backend is a genuine overload ambiguity, so no group exists and the member
+/// stays by itself.
 pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
-    let mf = &ws.module(member.module).functions[member.func];
-    let member_sig: Vec<String> =
-        mf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
-    let Some(cands) = ws.functions_by_name.get(&mf.name) else { return vec![member] };
-    let mut group = Vec::new();
-    for &(mid, fid) in cands.iter() {
-        let f = &ws.module(mid).functions[fid];
-        if f.param_decls.len() != member_sig.len() {
-            continue;
-        }
-        if f.param_decls.iter().zip(&member_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
-            group.push(FuncRef { module: mid, func: fid });
-        }
-    }
+    let key = ws.backend_variant_key(member.module, member.func);
+    let Some(cands) = ws.functions_by_name.get(&key.0) else { return vec![member] };
+    let group: Vec<FuncRef> = cands
+        .iter()
+        .filter(|&&(mid, fid)| ws.backend_variant_key(mid, fid) == key)
+        .map(|&(mid, fid)| FuncRef { module: mid, func: fid })
+        .collect();
     let mut backends = std::collections::BTreeSet::new();
     if group.iter().all(|r| backends.insert(ws.module(r.module).functions[r.func].backend)) {
         group
@@ -202,6 +196,18 @@ impl Builder<'_> {
                     self.lower_if(cond, then_branch, else_branch)?,
                 )),
             },
+            Expr::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => self.lower_if_let(
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+                self.repr_join_slot(e)?,
+            ),
             Expr::Match { scrutinee, arms } => match self.repr_join_slot(e)? {
                 Some(shape) => self.lower_match_repr(scrutinee, arms, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_match(scrutinee, arms)?)),
@@ -213,7 +219,7 @@ impl Builder<'_> {
                 Some(shape) => self.safe_nav_field_repr(e, base, field, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
-            Expr::SafeNavCall { receiver, method, args } => match self.repr_join_slot(e)? {
+            Expr::SafeNavCall { receiver, method, args, .. } => match self.repr_join_slot(e)? {
                 Some(shape) => self.safe_nav_call_repr(e, receiver, method, args, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
@@ -449,6 +455,12 @@ impl Builder<'_> {
                 let i = self.lower_expr(index)?;
                 self.column_element_repr(b, i, elem).map(ValueBundle::into_value)
             }
+            Expr::Index { base, index } if self.vec_strided_elem_of(base)?.is_some() => {
+                let elem = self.vec_strided_elem_of(base)?.expect("guard matched");
+                let (b, _) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                self.strided_element_repr(b, i, elem).map(ValueBundle::into_value)
+            }
             // A value-struct ELEMENT read (`buf[i]`/`fv[i]`/`v[i]`) as an unboxed
             // Group of leaf reads off the checked slot: a leaf projection reads the
             // part live, while `pack` (a whole-value use -- let-bind, arg, return,
@@ -470,6 +482,9 @@ impl Builder<'_> {
                 // direct column reads. Bounds are checked ONCE for the element.
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return self.column_element_repr(b, i, elem).map(ValueBundle::into_value);
+                }
+                if let ContainerKind::VecValueStrided(elem) = kind {
+                    return self.strided_element_repr(b, i, elem).map(ValueBundle::into_value);
                 }
                 // A column-stored Map reaches its leaves the same way, one
                 // indirection out: the spine resolves the key to a slot, and the
@@ -542,7 +557,7 @@ impl Builder<'_> {
             .expect("a nullable shape carries its presence leaf first");
         let (present, lhs_values) = (*present, lhs_values.to_vec());
 
-        let cells: Vec<Idx<Cell>> = lhs_values.iter().map(|_| self.f.new_cell(None)).collect();
+        let cells: Vec<Idx<Cell>> = (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -556,7 +571,12 @@ impl Builder<'_> {
         self.store_bundle_and_join(&cells, &RetSlot::Leaves(shape.clone()), &rhs_bundle, join)?;
 
         self.cur = lhs_bb;
-        self.store_slots_and_join(&cells, &lhs_values, join)?;
+        let mut lhs_slots = Vec::with_capacity(cells.len());
+        if shape.nullable {
+            lhs_slots.push(self.emit_cur(Inst::Const(Lit::Bool(true))));
+        }
+        lhs_slots.extend(lhs_values);
+        self.store_slots_and_join(&cells, &lhs_slots, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
@@ -725,7 +745,6 @@ impl Builder<'_> {
                 }
                 continue;
             }
-            let v = self.lower_call_arg(e, a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
                     .iter()
@@ -743,24 +762,42 @@ impl Builder<'_> {
                     slots.len()
                 )));
             }
-            let v = match callee_inst
+            let t = match callee_inst
                 .map(|inst| self.concrete_callee_param_ty(e, inst, pidx))
                 .transpose()?
                 .flatten()
             {
-                Some(t) => self.coerced_mono(v, a, t.as_ref()),
+                Some(t) => t,
                 None => {
                     return Err(self.gap_here("concrete call has no callee parameter type"));
                 }
             };
+            let is_ref = self.is_ref_call_arg(e, a);
+            let v = if is_ref {
+                self.lower_place_base(a)?
+            } else {
+                let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+                self.coerced_mono(v, a, t.as_ref())
+            };
             slots[pidx] = Some(v);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
+        // A gap or trailing param with a literal default is passed that literal;
+        // any other gap is the callee's default-fill to see as nil.
+        let defaults = self.literal_param_defaults(func);
+        let hi = defaults
+            .iter()
+            .take(slots.len())
+            .rposition(|d| d.is_some())
+            .map_or(hi, |i| hi.max(i + 1));
         let mut out = Vec::with_capacity(hi);
-        for s in slots.into_iter().take(hi) {
+        for (i, s) in slots.into_iter().take(hi).enumerate() {
             out.push(match s {
                 Some(v) => v,
-                None => self.emit_cur(Inst::Const(Lit::Nil)),
+                None => match defaults.get(i).cloned().flatten() {
+                    Some(lit) => self.emit_cur(Inst::Const(lit)),
+                    None => self.emit_cur(Inst::Const(Lit::Nil)),
+                },
             });
         }
         Ok(out)

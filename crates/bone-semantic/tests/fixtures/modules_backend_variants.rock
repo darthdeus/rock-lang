@@ -1,0 +1,84 @@
+//! Backend-variant collapse at a call (`collapse_backend_variants` in
+//! bone-inference): candidates that share a name and a declared parameter
+//! signature, with every backend distinct, are one logical function and
+//! collapse to the lowest-ranked backend before scoring. Each section mixes
+//! backends so the collapse runs rather than its single-backend fast path.
+
+//- a_cross_backend_sibling_call_collapses
+//-- main.rock @pkg=game,1
+fn now(n: int) -> int {
+    n
+}
+
+extern(js) fn now(n: int) -> int
+
+fn use_it() -> int {
+    let t = now(1)
+            //^ int
+    t
+}
+
+//- different_signatures_stay_distinct_overloads
+//-- main.rock @pkg=game,1
+fn f(x: int) -> int {
+    x
+}
+
+extern(js) fn f(x: int) -> int
+
+fn f(x: string) -> string {
+    x
+}
+
+fn use_it() -> string {
+    let n = f(1)
+            //^ int
+    let s = f("a")
+            //^ string
+    s
+}
+
+//- a_repeated_backend_keeps_the_group_tied @fail=Ambiguous overload for `dup` with argument types (int)
+//-- main.rock @pkg=game,1
+inline(lua) fn dup(x: int) -> int = """return x + 1"""
+inline(lua) fn dup(x: int) -> int = """return x + 2"""
+extern(js) fn dup(x: int) -> int
+
+fn use_it() -> int {
+    dup(1)
+}
+
+//- a_merged_family_of_different_names_is_not_a_backend_group @fail=Ambiguous overload for `bump` with argument types (int)
+//-- provider.rock @pkg=provider,1 @v1
+pub fn bump(n: int) -> int {
+    n
+}
+
+//-- defs.rock @pkg=game,2
+inline(lua) fn bump(n: int) -> int = """return n"""
+
+//-- main.rock @pkg=game,2
+fn use_it() -> int {
+    bump(1)
+}
+
+//- the_collapse_sees_only_accessible_members
+//-- lib.rock @pkg=lib,1 @v1
+fn ping(n: int) -> int {
+    n
+}
+
+pub extern(js) fn ping(n: int) -> string
+
+fn inside() -> int {
+    let v = ping(1)
+            //^ int
+    v
+}
+
+//-- app.rock @pkg=app,2 @v1
+fn outside() -> string {
+    let v = lib::ping(1)
+            //^ string
+    v
+}

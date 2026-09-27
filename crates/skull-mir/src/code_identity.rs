@@ -20,6 +20,20 @@ use crate::mir::{
 };
 use crate::monoty::MonoInterner;
 
+/// The file-independent name of a definition, for the identities the runtime
+/// keys state on (plan 2.1). A modules-v1 definition's name IS its DefKey
+/// (`<package>::<module path>::<name>`, the only names carrying `::`), which
+/// already names the logical module, so the owning FRAGMENT is not part of its
+/// identity: moving a definition between two fragments of one module keeps its
+/// state and its code slot. A legacy definition is unique only within its file,
+/// so it keeps today's `<file>::<name>`.
+pub fn logical_def_key(file: Ustr, name: Ustr) -> String {
+    match name.as_str().contains("::") {
+        true => name.to_string(),
+        false => format!("{file}::{name}"),
+    }
+}
+
 /// The source location used to identify a lambda within one concrete owner.
 /// The start offset is stable when the lambda body changes; the enclosing
 /// topology fingerprint rejects edits that insert, remove or reorder sibling
@@ -117,12 +131,12 @@ impl CodeIdentity {
                 .map(|ty| ty.canonical())
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("{}::{}<{}>", module.file, function.name, args)
+            format!("{}<{}>", logical_def_key(module.file, function.name), args)
         };
         let owner_key = |owner: &CodeOwner| match owner {
             CodeOwner::Instance(instance) => instance_key(instance),
             CodeOwner::Artifact { kind, module, name } => {
-                format!("artifact:{kind:?}:{}::{name}", module)
+                format!("artifact:{kind:?}:{}", logical_def_key(*module, *name))
             }
         };
         match self {
@@ -181,12 +195,35 @@ pub enum CaptureMode {
     Frame,
 }
 
-/// One logical environment field. `name` is a source binding name when the
-/// compiler can prove it is unique; incomplete schemas fail compatibility
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum CaptureIdentity {
+    Binding { site: LambdaSiteId, projection: Ustr },
+    Generated { role: Ustr },
+}
+
+impl CaptureIdentity {
+    pub fn projected(&self, projection: Ustr) -> Self {
+        let append = |base: Ustr| {
+            if base.is_empty() {
+                projection
+            } else {
+                Ustr::from(format!("{base}.{projection}").as_str())
+            }
+        };
+        match self {
+            Self::Binding { site, projection: base } => {
+                Self::Binding { site: *site, projection: append(*base) }
+            }
+            Self::Generated { role } => Self::Generated { role: append(*role) },
+        }
+    }
+}
+
+/// One logical environment field. Incomplete schemas fail compatibility
 /// closed rather than pretending two unknown fields are interchangeable.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct CaptureField {
-    pub name: Ustr,
+    pub identity: CaptureIdentity,
     pub mode: CaptureMode,
 }
 
@@ -847,6 +884,11 @@ impl BodyHasher {
             ContainerKind::VecColumn => self.tag(4),
             ContainerKind::NativeBufferLeaf => self.tag(5),
             ContainerKind::Map => self.tag(6),
+            ContainerKind::VecValueStrided(elem) => {
+                self.tag(7);
+                self.column_elem(elem);
+            }
+            ContainerKind::VecStrideSlot => self.tag(8),
         }
     }
 
@@ -1000,6 +1042,46 @@ impl BodyHasher {
                 self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.inst_idx(*capacity);
+            }
+            Inst::MakeVecStrided {
+                elem,
+                representation,
+                nobox,
+                stride,
+                values,
+                len,
+                capacity,
+            } => {
+                self.tag(89);
+                self.string(elem.as_str());
+                self.rep_id(*representation);
+                self.boolean(*nobox);
+                self.hash.write_usize(*stride);
+                self.inst_list(values);
+                self.hash.write_usize(*len);
+                self.inst_idx(*capacity);
+            }
+            Inst::MakeVecStridedHeader {
+                elem,
+                representation,
+                nobox,
+                stride,
+                capacity,
+            } => {
+                self.tag(90);
+                self.string(elem.as_str());
+                self.rep_id(*representation);
+                self.boolean(*nobox);
+                self.hash.write_usize(*stride);
+                self.inst_idx(*capacity);
+            }
+            Inst::VecStrideNilToFalse(value) => {
+                self.tag(91);
+                self.inst_idx(*value);
+            }
+            Inst::VecStrideFalseToNil(value) => {
+                self.tag(92);
+                self.inst_idx(*value);
             }
             Inst::MakeStruct { ty, fields } => {
                 self.tag(68);

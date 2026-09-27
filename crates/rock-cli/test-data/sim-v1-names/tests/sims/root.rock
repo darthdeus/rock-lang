@@ -1,0 +1,15 @@
+@sim
+co fn unique_short_name() -> Coroutine<Wait> {
+    start_game "sim-v1-names"
+    await frame(2)
+    sim_expect(true, "ran")
+    stop_sim()
+}
+
+@sim
+co fn shared_short_name() -> Coroutine<Wait> {
+    start_game "sim-v1-names"
+    await frame(2)
+    sim_expect(true, "root ran")
+    stop_sim()
+}

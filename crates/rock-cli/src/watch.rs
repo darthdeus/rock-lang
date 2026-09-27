@@ -7,17 +7,47 @@ fn is_compiler_crate_dir(name: &str) -> bool {
         || name.starts_with("bone-")
 }
 
+pub(crate) fn loaded_source_watch_paths(project: &str, roots: &[(u32, PathBuf)]) -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from(project), rock_host::stdlib_loader::stdlib_dir()];
+    for (id, root) in roots {
+        // Discovery loads only the invoked directory for package zero.
+        paths.push(if *id == 0 { root.join("stick.toml") } else { root.clone() });
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub(crate) fn project_engine_watch_paths(project: &str) -> Vec<PathBuf> {
-    vec![
-        PathBuf::from(project),
-        rock_host::stdlib_loader::stdlib_dir(),
-        PathBuf::from("stone"),
-    ]
+    // Compilation may have failed before it retained a graph. Resolve the same
+    // channel-filtered graph so edits to a broken dependency can repair it.
+    let graph = (|| -> Result<Option<rock_host::stick::graph::PackageGraph>> {
+        let Some((config_path, config)) = rock_host::stick::StickConfig::find_from_dir(Path::new(project))? else {
+            return Ok(None);
+        };
+        Ok(Some(rock_host::stick::graph::PackageGraph::build_with_channel(
+            config_path.parent().unwrap_or(&config_path),
+            &config,
+            &rock_host::stick::resolved_channel_for(&config),
+        )?))
+    })();
+    let roots = match graph {
+        Ok(Some(graph)) => graph.packages().iter()
+            .map(|package| (package.id.0, package.root.clone())).collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            log::error!(target: "WATCH",
+                "cannot resolve dependency watch roots: {error}; watching the project until its manifest is repaired");
+            Vec::new()
+        }
+    };
+    loaded_source_watch_paths(project, &roots)
 }
 
 pub(crate) fn compiler_watch_paths() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("Cargo.toml"), PathBuf::from("Cargo.lock")];
-    if let Ok(entries) = std::fs::read_dir("crates") {
+    let root = PathBuf::from(rock_host::rock_dir());
+    let mut paths = vec![root.join("Cargo.toml"), root.join("Cargo.lock")];
+    if let Ok(entries) = std::fs::read_dir(root.join("crates")) {
         for entry in entries.flatten() {
             if is_compiler_crate_dir(&entry.file_name().to_string_lossy()) {
                 let crate_dir = entry.path();

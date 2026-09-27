@@ -1,0 +1,17 @@
+use stone::to_json_value;
+
+enum Mode { Slow, Fast }
+
+struct Holder {
+    mode: Mode,
+    n: int,
+}
+
+// A v1 enum's names table holds its DefKey path; the JSON variant is still
+// the bare variant name, as it is for a legacy enum.
+@test fn payload_free_v1_enum_field_serializes_its_variant_name() {
+    let s = to_json_value(Holder { mode: Mode::Fast, n: 3 })
+    assert(s.contains("\"__variant\":\"Fast\""), "variant text in {s}")
+}
+
+fn main() {}

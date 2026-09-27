@@ -26,3 +26,21 @@ fn f(a: int?) -> int {
 fn f(a: int?) -> bool {
     a < 1
 }
+
+//- if_nullable_else_lub
+fn f(cond: bool) {
+    let x = if cond { 7 } else { null }
+      //^ int?
+}
+
+//- nested_iflet_nullable_else_lub
+nobox value Place { x: int, y: int }
+fn f(grid: int?, cond: bool) {
+    let place = if let x = grid {
+        Place { x, y: 9 }
+    } else {
+        if cond { Place { x: 4, y: 8 } } else { null }
+    }
+    let result = place
+      //^ Place?
+}

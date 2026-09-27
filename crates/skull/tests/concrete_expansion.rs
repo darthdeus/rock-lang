@@ -162,8 +162,11 @@ fn main() {
 #[test]
 fn generic_struct_wrapper_uses_the_reached_concrete_instance() {
     let lua = try_emit_module(STRUCT_VALID).expect("valid concrete struct expansion");
-    assert!(lua.matches("function wrapped_").count() > 0, "no retained concrete wrapper body");
-    assert!(lua.contains("__variant = \"F\""), "no concrete struct expansion was emitted:\n{lua}");
+    assert!(
+        !crate::common::definitions_matching(&lua, "wrapped_").is_empty(),
+        "no retained concrete wrapper body"
+    );
+    assert!(lua.contains("__variant = (\"F\")"), "no concrete struct expansion was emitted:\n{lua}");
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "generic_struct_expand"), "1");
 }
 
@@ -177,7 +180,10 @@ fn invalid_concrete_struct_wrapper_rejects_at_the_expander() {
 #[test]
 fn unreachable_generic_struct_wrapper_is_not_source_rejected() {
     let lua = try_emit_module(STRUCT_UNREACHABLE).expect("unreachable generic expansion is inert");
-    assert!(lua.contains("function main"), "the reachable control did not emit:\n{lua}");
+    assert!(
+        !crate::common::definitions_matching(&lua, "main").is_empty(),
+        "the reachable control did not emit:\n{lua}"
+    );
 }
 
 #[test]
@@ -198,7 +204,10 @@ fn invalid_concrete_vertex_wrapper_rejects_at_the_expander() {
 #[test]
 fn generic_uniform_wrapper_matches_the_direct_fingerprint() {
     let lua = try_emit_module(UNIFORM_VALID).expect("valid concrete uniform expansion");
-    assert!(lua.matches("function generic_id_").count() > 0, "no retained concrete wrapper body");
+    assert!(
+        !crate::common::definitions_matching(&lua, "generic_id_").is_empty(),
+        "no retained concrete wrapper body"
+    );
     assert!(
         !function_body(&lua, "generic_id_").contains("uniform_block_id("),
         "the concrete wrapper still calls the compiler-owned expansion:\n{lua}"
@@ -219,7 +228,10 @@ fn invalid_concrete_uniform_wrapper_rejects_at_the_expander() {
 #[test]
 fn generic_uniform_values_wrapper_uses_the_reached_concrete_instance() {
     let lua = try_emit_module(UNIFORM_VALUES_VALID).expect("valid concrete uniform-values expansion");
-    assert!(lua.matches("function generic_values_").count() > 0, "no retained concrete wrapper body");
+    assert!(
+        !crate::common::definitions_matching(&lua, "generic_values_").is_empty(),
+        "no retained concrete wrapper body"
+    );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "generic_uniform_values"),
         "true\n6"

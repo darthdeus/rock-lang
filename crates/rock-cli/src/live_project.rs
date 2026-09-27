@@ -62,10 +62,12 @@ impl LiveProject {
         let sources = if include_tests {
             discovered
         } else {
-            discovered.production_only()
+            discovered
+                .production_only(Path::new(dir))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
         };
         let entry_path = entry_path(&sources)?;
-        let files = source_pairs(&sources);
+        let files = crate::bone_backend::session_files(&sources);
         // bone_session_for_emission resolves [build.vars] at construction, so
         // var commands run once per session build -- init and every
         // `rebuild_session` -- never per incremental update (the Session
@@ -137,7 +139,7 @@ impl LiveProject {
                 source.borrow_mut().contents = contents;
             }
         }
-        self.session = crate::bone_backend::bone_session(source_pairs(&self.sources)).map_err(|e| {
+        self.session = crate::bone_backend::bone_session(crate::bone_backend::session_files(&self.sources)).map_err(|e| {
             anyhow::anyhow!(
                 "{}",
                 crate::skull_backend::render_project_err(&self.sources, &e)
@@ -428,7 +430,9 @@ impl LiveProject {
         self.sources = if self.include_tests {
             discovered
         } else {
-            discovered.production_only()
+            discovered
+                .production_only(Path::new(&self.dir))
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
         };
         self.entry_path = entry_path(&self.sources)?;
         Ok(())
@@ -437,7 +441,7 @@ impl LiveProject {
     fn rebuild_session(&mut self) -> Result<()> {
         self.lint_cache.clear();
         self.session = crate::bone_backend::bone_session_for_emission(
-            source_pairs(&self.sources),
+            crate::bone_backend::session_files(&self.sources),
             Path::new(&self.dir),
         )
         .map_err(|error| {
@@ -489,6 +493,7 @@ impl LiveProject {
                     }
                 }
                 bone_incremental::session::UpdateTier::Interface
+                | bone_incremental::session::UpdateTier::Scope
                 | bone_incremental::session::UpdateTier::FullUser => {
                     changed = true;
                     full = true;
@@ -522,17 +527,6 @@ impl LiveProject {
             })
         }
     }
-}
-
-fn source_pairs(sources: &SourceFiles) -> Vec<(String, String)> {
-    sources
-        .files
-        .iter()
-        .map(|source| {
-            let source = source.borrow();
-            (source.file.to_id_path(), source.contents.clone())
-        })
-        .collect()
 }
 
 fn entry_path(sources: &SourceFiles) -> Result<String> {
@@ -676,5 +670,106 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
             .collect::<Vec<_>>();
         assert_eq!(after, before);
         assert!(after.iter().all(|finding| !finding.starts_with("transmute_of_nullable:")));
+    }
+
+    /// A session re-parses on every edit, so it has to KEEP each file's
+    /// dialect and owning package rather than re-derive them -- and it was
+    /// given neither. Every Session-backed route (`rock sim`, `rock stone`,
+    /// `rock watch`, the LSP) therefore read a v1 package as legacy source:
+    /// `pub fn` came back as `unsupported item start`, and the definitions it
+    /// could still parse had no package, so nothing resolved. Converting
+    /// `libs/chess-core` turned that into 830 type errors in `rock sim
+    /// chesslings` while `rock compile games/chesslings` was clean.
+    #[test]
+    fn a_v1_package_keeps_its_dialect_and_package_through_a_session() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"livev1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        )
+        .unwrap();
+        let main = dir.path().join("main.rock");
+        std::fs::write(&main, "fn main() {\n    print(\"n={a::bump(1)}\")\n}\n").unwrap();
+        std::fs::write(
+            dir.path().join("a.rock"),
+            "mod a;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n",
+        )
+        .unwrap();
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false)
+            .expect("a v1 package must build through a session");
+
+        // And keeps them across a re-parse: an edit re-runs the parser from the
+        // stored text, which is the half a one-shot stamp at init would miss.
+        project
+            .apply_edit(&main, "fn main() {\n    print(\"n={a::bump(2)}\")\n}\n")
+            .expect("a v1 edit must re-parse in its own dialect");
+    }
+
+    fn v1_live_project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf, LiveProject) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"livev1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        )
+        .unwrap();
+        let main = dir.path().join("main.rock");
+        std::fs::write(&main, "fn main() {\n    print(\"n={a::bump(1)}\")\n}\n").unwrap();
+        let a = dir.path().join("a.rock");
+        std::fs::write(&a, "mod a;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n").unwrap();
+        let project = LiveProject::init(dir.path().to_str().unwrap(), false)
+            .expect("a v1 package must build through a session");
+        (dir, main, a, project)
+    }
+
+    /// The namespace tree is built from the module set, so an edit that
+    /// changes what a v1 module declares has to reach it: a function added to
+    /// `a` is callable as `a::twice` from the next edit on.
+    #[test]
+    fn a_v1_definition_added_by_an_edit_is_resolvable() {
+        let (_dir, main, a, mut project) = v1_live_project();
+        project
+            .apply_edit(
+                &a,
+                "mod a;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n\npub fn twice(n: int) -> int {\n    n * 2\n}\n",
+            )
+            .expect("adding a pub fn to a v1 module is a valid edit");
+        project
+            .apply_edit(&main, "fn main() {\n    print(\"n={a::twice(3)}\")\n}\n")
+            .expect("a pub fn added by an earlier edit must resolve");
+    }
+
+    /// Visibility is read from the namespace tree too, so taking `pub` off a
+    /// definition must stop a consumer in another module reaching it.
+    #[test]
+    fn a_v1_visibility_narrowed_by_an_edit_is_enforced() {
+        let (_dir, _main, a, mut project) = v1_live_project();
+        // `apply_edit_inner` skips the rollback, so the rejecting diagnostics
+        // are still on the session to read.
+        project
+            .apply_edit_inner(&a, "mod a;\n\nfn bump(n: int) -> int {\n    n + 1\n}\n")
+            .expect_err("main still calls a::bump, which is now private to `a`");
+        let messages: Vec<String> =
+            project.session.diagnostics().iter().map(|d| d.message.clone()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("`bump` is not accessible from this module")),
+            "{messages:?}"
+        );
+    }
+
+    /// A file's `mod` header is not an item, so an edit to it alone changes
+    /// no item print. It still moves every definition in the file: `a::bump`
+    /// stops existing when `a.rock` becomes `mod b;`.
+    #[test]
+    fn a_v1_module_header_edit_moves_its_definitions() {
+        let (_dir, _main, a, mut project) = v1_live_project();
+        project
+            .apply_edit_inner(&a, "mod b;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n")
+            .expect_err("main still calls a::bump, and `a` no longer exists");
+        let messages: Vec<String> =
+            project.session.diagnostics().iter().map(|d| d.message.clone()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("`a::bump` did not resolve")),
+            "{messages:?}"
+        );
     }
 }

@@ -182,8 +182,8 @@ fn run_to_tick_stops_at_target() {
 /// Scope is the engine's simulation-state predicate (P3.5): compare every
 /// global the engine hashes as sim state (from `sim_state_names`), across all
 /// packages. Render OUTPUT legitimately differs -- skipping render leaves the
-/// batch pools / shadow scratch / graphics-stats counters and game Materials'
-/// `cached_batch` unbuilt (`RENDER_BATCHES`, `SHADOW_*`, `stats_history_*`,
+/// batch pools / shadow scratch / last-frame graphics counters and game Materials'
+/// `cached_batch` unbuilt (`RENDER_BATCHES`, `SHADOW_*`, `LAST_FRAME_GFX`,
 /// `tileset_mat`, ...); those are excluded by the predicate, not compared here.
 /// Tick 25 is far enough that the render-only material batches have grown, so
 /// this would catch a predicate that failed to exclude them.
@@ -222,9 +222,9 @@ fn seek_reaches_same_state_as_stepping() {
     // packages, restricted to the names the engine hashes.
     let sim = sim_state_names("bitgun", 30);
     let mut compared = 0;
-    for (pkg, globals) in seek.as_object().expect("dump is an object") {
+    for (pkg, globals) in crate::stone_harness::dump_packages(&seek) {
         let step_pkg = &step[pkg];
-        for (name, sv) in globals.as_object().expect("package is an object") {
+        for (name, sv) in globals {
             if !sim.contains(name) {
                 continue;
             }
@@ -832,13 +832,11 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         "bitgun",
         40,
         &[
-            (20, "o"),
-            (21, "f8"),
-            (22, "f6"),
-            (23, "f10"),
-            (24, "lctrl,f8"),
-            (25, "lctrl,f6"),
-            (26, "lctrl,f10"),
+            (20, "f8"),
+            (21, "f6"),
+            (22, "lctrl,f8"),
+            (23, "lctrl,f6"),
+            (24, "lctrl,f11"),
         ],
     );
     let log = dir.path().join("keys.replay");
@@ -848,17 +846,15 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         "bitgun", 40, &["--replay", &log_s], &[("STONE_TOOL_KEY_PROBE", "1")],
     );
     let engine = &replayed["stone"]["ENGINE"];
-    // Every field these keys reach, not only the windows: F6 and F8 are each
-    // bound twice (SFX browser + visibility, pipeline inspector + profiler),
-    // and F10 has its graphics-stats window consumer.
+    // Every field these keys reach, not only the windows: F6 is bound twice
+    // (SFX browser + visibility), while F8 and F11 each own one tool.
     let recorded_consumers = [
-        ("show_graphics_stats_window", "o/F10"),
-        ("show_pipeline_inspector", "f8"),
+        ("show_pipeline_inspector", "f11"),
         ("show_sfx_browser", "f6"),
         ("debug_draw_visibility", "f6"),
         ("profiler_enabled", "f8"),
     ];
-    assert_eq!(recorded_consumers.len(), 5, "recorded consumer census must be nonzero");
+    assert_eq!(recorded_consumers.len(), 4, "recorded consumer census must be nonzero");
     for (field, key) in recorded_consumers {
         assert_eq!(
             engine[field].as_bool(), Some(false),
@@ -875,24 +871,13 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
     assert!(diag.get("TOOL_KEYS_PROBED").is_none(), "the false census must be gone: {diag}");
     assert!(diag.get("TOOL_KEYS_UNMAPPED").is_none(), "the false census must be gone: {diag}");
 
-    // The live arm, through the same ImGui IO the timeline shortcuts use.
-    let injected = run_frame_env(
-        "bitgun", 20, &[],
-        &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", "o")],
-    );
-    assert_eq!(
-        injected["stone"]["ENGINE"]["show_graphics_stats_window"].as_bool(), Some(true),
-        "a live 'o' must still open the graphics stats window: {}",
-        injected["stone"]["ENGINE"]
-    );
-
     let bare_function_consumers = [
         ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
-        ("f8", vec!["show_pipeline_inspector", "profiler_enabled"]),
-        ("f10", vec!["show_graphics_stats_window"]),
+        ("f8", vec!["profiler_enabled"]),
+        ("f11", vec!["show_pipeline_inspector"]),
     ];
     let bare_consumer_count: usize = bare_function_consumers.iter().map(|(_, fields)| fields.len()).sum();
-    assert_eq!(bare_consumer_count, 5, "bare F-key consumer census must be nonzero");
+    assert_eq!(bare_consumer_count, 4, "bare F-key consumer census must be nonzero");
     for (key, fields) in bare_function_consumers {
         let bare = run_frame_env(
             "bitgun", 20, &[],
@@ -909,11 +894,11 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
 
     let live_chords = [
         ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
-        ("f8", vec!["show_pipeline_inspector", "profiler_enabled"]),
-        ("f10", vec!["show_graphics_stats_window"]),
+        ("f8", vec!["profiler_enabled"]),
+        ("f11", vec!["show_pipeline_inspector"]),
     ];
     let live_consumer_count: usize = live_chords.iter().map(|(_, fields)| fields.len()).sum();
-    assert_eq!(live_consumer_count, 5, "Ctrl+F consumer census must be nonzero");
+    assert_eq!(live_consumer_count, 4, "Ctrl+F consumer census must be nonzero");
     for (key, fields) in live_chords {
         let chord = run_frame_env(
             "bitgun",
@@ -1079,18 +1064,20 @@ fn mag_screenshot_environment_reaches_header_and_mismatch_warning() {
 /// mis-split, and unset / empty / a literal `-` are three different runs that a
 /// `-` sentinel collapses into one.
 ///
-/// `MAG_SCENE` is the vehicle because it is a GAME-declared key
-/// (`GameConfig.replay_env_keys`), so the same run proves the game's
-/// contribution reaches the header at all.
+/// `STONE_QUIET` is the engine-declared codec vehicle. Each case records the
+/// exact wire line and replays it under the same value, covering both encode
+/// and decode. The adjacent environment-disagreement test owns the separate
+/// mismatch arm, while the MAG screenshot test proves a real game-declared key
+/// reaches the same header path.
 #[test]
 fn the_recorded_environment_survives_awkward_values() {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let cases: [(&str, Option<&str>, &str); 5] = [
-        ("unset", None, "env MAG_SCENE 0 "),
-        ("empty", Some(""), "env MAG_SCENE 1 "),
-        ("a literal dash", Some("-"), "env MAG_SCENE 1 2d"),
-        ("spaces", Some("two words"), "env MAG_SCENE 1 74776f20776f726473"),
-        ("an equals sign", Some("k=v"), "env MAG_SCENE 1 6b3d76"),
+        ("unset", None, "env STONE_QUIET 0 "),
+        ("empty", Some(""), "env STONE_QUIET 1 "),
+        ("a literal dash", Some("-"), "env STONE_QUIET 1 2d"),
+        ("spaces", Some("two words"), "env STONE_QUIET 1 74776f20776f726473"),
+        ("an equals sign", Some("k=v"), "env STONE_QUIET 1 6b3d76"),
     ];
     for (label, value, expected) in cases {
         let dir = tempfile::tempdir().expect("dir");
@@ -1098,14 +1085,14 @@ fn the_recorded_environment_survives_awkward_values() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut cmd = Command::new(rock_bin);
         cmd.args([
-            "frame", "mag", "-n", "3", "--record", &log.to_string_lossy(),
+            "frame", "bitgun", "-n", "3", "--record", &log.to_string_lossy(),
             "--output", &scratch.path().to_string_lossy(),
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root());
         match value {
-            Some(v) => { cmd.env("MAG_SCENE", v); }
-            None => { cmd.env_remove("MAG_SCENE"); }
+            Some(v) => { cmd.env("STONE_QUIET", v); }
+            None => { cmd.env_remove("STONE_QUIET"); }
         }
         let out = cmd.output().expect("spawn record");
         assert!(out.status.success(), "{label}: record failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -1113,36 +1100,29 @@ fn the_recorded_environment_survives_awkward_values() {
         let text = std::fs::read_to_string(&log).expect("read log");
         let line = text
             .lines()
-            .find(|l| l.starts_with("env MAG_SCENE "))
-            .unwrap_or_else(|| panic!("{label}: the game-declared key must reach the header:\n{text}"));
+            .find(|l| l.starts_with("env STONE_QUIET "))
+            .unwrap_or_else(|| panic!("{label}: the engine key must reach the header:\n{text}"));
         assert_eq!(line, expected, "{label}: value must round-trip exactly");
 
         // And the decode side agrees: replaying under the SAME value is silent.
-        let same = run_frame_stderr_env(
-            "mag", 3, &["--replay", &log.to_string_lossy()], value,
+        let same = run_frame_stderr_optional_env(
+            "bitgun", 3, &["--replay", &log.to_string_lossy()], "STONE_QUIET", value,
         );
         assert!(
-            !same.contains("MAG_SCENE"),
+            !same.contains("recorded environment differs: STONE_QUIET"),
             "{label}: an identical environment must not warn: stderr:\n{same}"
         );
-        // Changing it to a value the encoding could confuse with this one must warn.
-        let other = run_frame_stderr_env("mag", 3, &["--replay", &log.to_string_lossy()], Some("-"));
-        if value != Some("-") {
-            assert!(
-                other.contains("MAG_SCENE"),
-                "{label}: a differing environment must be named: stderr:\n{other}"
-            );
-        }
     }
 }
 
-/// `run_frame_stderr`, but MAG_SCENE is set to an exact value or removed --
+/// `run_frame_stderr`, but one key is set to an exact value or removed --
 /// `envs()` cannot express "unset", which is one of the cases under test.
-fn run_frame_stderr_env(
+fn run_frame_stderr_optional_env(
     game: &str,
     frames: u32,
     extra: &[&str],
-    mag_scene: Option<&str>,
+    key: &str,
+    value: Option<&str>,
 ) -> String {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let scratch = tempfile::tempdir().expect("scratch dir");
@@ -1154,9 +1134,9 @@ fn run_frame_stderr_env(
     cmd.args(&args)
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root());
-    match mag_scene {
-        Some(v) => { cmd.env("MAG_SCENE", v); }
-        None => { cmd.env_remove("MAG_SCENE"); }
+    match value {
+        Some(v) => { cmd.env(key, v); }
+        None => { cmd.env_remove(key); }
     }
     let out = cmd.output().expect("failed to spawn rock frame");
     assert!(

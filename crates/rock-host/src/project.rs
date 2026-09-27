@@ -24,6 +24,13 @@ fn is_rock_root(path: &Path) -> bool {
 ///
 /// Walks up from the given path. Returns None if no workspace root is found.
 pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = context_root_from_env() {
+        return Some(root);
+    }
+    if let Some(root) = release_root_from_exe() {
+        return Some(root);
+    }
+
     let initial_path = fs_err::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf());
 
@@ -44,6 +51,44 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Find the source workspace root for a project path without consulting the
+/// executable's installed toolchain layout.
+pub fn find_source_root(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = context_root_from_env() {
+        return Some(root);
+    }
+
+    let initial_path = fs_err::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf());
+    let mut current = if initial_path.is_file() {
+        initial_path.parent()?.to_path_buf()
+    } else {
+        initial_path
+    };
+
+    loop {
+        if current.join("Cargo.toml").exists() && current.join("prebuilt").is_dir() {
+            return Some(current);
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return None,
+        }
+    }
+}
+
+pub(crate) fn context_root_from_env() -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("ROCK_CONTEXT_ROOT")?);
+    if root.is_dir()
+        && root.join("sdk").is_dir()
+        && root.join(".context/context.json").is_file()
+    {
+        Some(root)
+    } else {
+        None
+    }
+}
+
 /// If the current executable is `<root>/bin/rock` inside a release layout,
 /// return that root. The binary knows where its own install directory is,
 /// which is more authoritative than walking up CWD — a user running a
@@ -60,23 +105,21 @@ fn release_root_from_exe() -> Option<PathBuf> {
     }
 }
 
-/// Ensure the process is running from the Rock workspace root.
+/// Ensure that the Rock root directory can be located and is valid.
 ///
-/// Resolution order:
-///   1. Executable-based release layout (authoritative for release installs).
-///   2. CWD is already a rock root.
-///   3. Walk up from CWD to find one.
+/// Does NOT change process current directory, allowing callers to execute
+/// from project subdirectories while finding toolchain resources.
 pub fn ensure_workspace_root() -> Result<()> {
-    if let Some(root) = release_root_from_exe() {
-        std::env::set_current_dir(&root)?;
+    if release_root_from_exe().is_some() {
         return Ok(());
     }
-    let cwd = std::env::current_dir()?;
-    if is_rock_root(&cwd) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if is_rock_root(&cwd) || find_workspace_root(&cwd).is_some() {
         return Ok(());
     }
-    if let Some(root) = find_workspace_root(&cwd) {
-        std::env::set_current_dir(&root)?;
+    let rock_dir = crate::rock_dir();
+    let root = Path::new(&rock_dir);
+    if is_rock_root(root) || root.join("Cargo.toml").exists() || root.join("lib").is_dir() {
         return Ok(());
     }
     Err(anyhow::anyhow!(
@@ -84,6 +127,7 @@ pub fn ensure_workspace_root() -> Result<()> {
          Run this command from within the Rock workspace, or set the ROCK_DIR environment variable."
     ))
 }
+
 
 /// Find project directory by looking for stick.toml or other project markers
 /// This walks up the directory tree from the given path until it finds a project root
@@ -144,7 +188,10 @@ pub fn get_project_id(project_root: &Path) -> Result<String> {
 /// commands like `rock run` must not shell out to cargo or copy from
 /// target/debug/ — there is no target dir.
 pub fn is_release_layout() -> bool {
-    let root = PathBuf::from(crate::rock_dir());
+    is_release_layout_in(Path::new(&crate::rock_dir()))
+}
+
+fn is_release_layout_in(root: &Path) -> bool {
     root.join("lib").is_dir() && root.join("bin").is_dir() && root.join("stone").is_dir()
         && !root.join("Cargo.toml").exists()
 }
@@ -184,32 +231,36 @@ pub fn luajit_path() -> PathBuf {
 
 /// Get the library search path value for the current platform.
 ///
-/// In release layout: `<rock_dir>/lib`
+/// In release layout: `<rock_dir>/lib` (Windows adds `<rock_dir>\bin`)
 /// In dev layout: `tmp` (macOS), `tmp:prebuilt/gamelibs-<platform>/lib` (Linux),
 ///                `tmp;prebuilt\gamelibs-<platform>\bin` (Windows)
 pub fn lib_path_value() -> String {
-    let root = PathBuf::from(crate::rock_dir());
+    lib_path_value_in(Path::new(&crate::rock_dir()))
+}
 
-    // Release layout: lib/ directory exists at root
-    let release_lib = root.join("lib");
-    if release_lib.exists() {
-        let lib_str = release_lib.to_string_lossy().into_owned();
+fn lib_path_value_in(root: &Path) -> String {
+    // Release layout stages nothing into tmp/, so a worktree's tmp/ can only
+    // hold stale dev-layout builds; searching it shadowed the SDK's libstone.
+    if is_release_layout_in(root) {
+        let lib_str = root.join("lib").to_string_lossy().into_owned();
         if cfg!(target_os = "windows") {
             // Windows also needs bin/ on PATH for DLLs next to executables
             let bin_str = root.join("bin").to_string_lossy().into_owned();
-            return format!("tmp;{};{}", lib_str, bin_str);
+            return format!("{};{}", lib_str, bin_str);
         } else {
-            return format!("tmp:{}", lib_str);
+            return lib_str;
         }
     }
 
-    // Dev layout: relative paths from CWD (which is the workspace root).
+    // Dev layout: prebuilt libraries and tmp/ rooted at rock_dir().
     // The prebuilt lib dir MUST be on the search path: stone's Rock global
     // initializer does ffi.load("libcimgui_complete.{dylib,so,dll}") before
     // stone_init has had a chance to dlopen anything via rpath.
     // Without prebuilt on the path, dyld/dl_open cannot find the lib and
     // the prelude silently falls back to a no-op imgui stub — symptom:
     // every imgui.Begin call succeeds but no window ever renders.
+    let dev_tmp = root.join("tmp");
+    let dev_tmp_str = dev_tmp.to_string_lossy();
     if cfg!(target_os = "macos") {
         // ARM first, x64 fallback (matches luajit_path resolution above).
         let arm_lib = root.join("prebuilt/gamelibs-macos-arm64/lib");
@@ -218,11 +269,11 @@ pub fn lib_path_value() -> String {
         } else {
             root.join("prebuilt/gamelibs-macos-x64/lib")
         };
-        format!("tmp:{}", chosen.to_string_lossy())
+        format!("tmp:{}:{}", dev_tmp_str, chosen.to_string_lossy())
     } else if cfg!(target_os = "windows") {
-        "tmp;prebuilt\\gamelibs-windows-x86_64\\bin".to_string()
+        format!("tmp;{};{}", dev_tmp_str, root.join("prebuilt\\gamelibs-windows-x86_64\\bin").display())
     } else {
-        "tmp:prebuilt/gamelibs-linux-x86_64/lib".to_string()
+        format!("tmp:{}:{}", dev_tmp_str, root.join("prebuilt/gamelibs-linux-x86_64/lib").display())
     }
 }
 
@@ -231,7 +282,7 @@ pub fn lib_path_value() -> String {
 /// Linux also gets the system Vulkan loader and driver directories when they
 /// exist; the bundled LuaJIT does not receive NixOS's nix-ld defaults itself.
 ///
-/// Rock's own dirs (`tmp`, prebuilt gamelibs) come FIRST so the bundled
+/// Rock's own dirs (SDK `lib/`, or `tmp` and prebuilt gamelibs) come FIRST so the bundled
 /// luajit/cimgui libs always win; the inherited value follows so a
 /// user-provided `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH`/`PATH` still
 /// resolves transitive system deps the prebuilt FHS libs need but the
@@ -278,7 +329,7 @@ pub fn lib_path_with_inherited() -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_vulkan_library_paths() -> Vec<PathBuf> {
+pub fn linux_vulkan_library_paths() -> Vec<PathBuf> {
     linux_vulkan_library_paths_from(
         Path::new("/nix/store"),
         Path::new("/run/opengl-driver/lib"),
@@ -352,6 +403,35 @@ pub fn lua_path_value() -> String {
 /// Filename of the assembled Lua output inside an output directory.
 pub const MAIN_LUA_FILENAME: &str = "main.lua";
 
+/// Filename of the precompiled LuaJIT bytecode image of `main.lua`, beside it
+/// in the same output directory. Optional everywhere: a consumer that cannot
+/// find it runs the source file instead.
+pub const MAIN_BYTECODE_FILENAME: &str = "main.ljbc";
+
+/// Build a `Command` that dumps `lua_file` to LuaJIT bytecode at
+/// `bytecode_file`.
+///
+/// `-g` keeps debug info, which is not optional: the dumped chunk carries the
+/// SOURCE file's chunkname and line table, so a runtime error raised from the
+/// bytecode image renders the same `main.lua:1234:` text a source run renders.
+/// LuaJIT's `-b` default is `-s` (strip), which would renumber every traceback
+/// a sim or a game can print.
+///
+/// `-b` consumes the rest of the argument list, so this cannot go through
+/// `build_luajit_command` (which puts the script first). `LUA_PATH` is the same
+/// value, and it is required rather than incidental: `-b` is implemented by
+/// `jit/bcsave.lua` under `<prefix>/share/luajit-2.1/`.
+pub fn build_luajit_bytecode_command(lua_file: &Path, bytecode_file: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(luajit_path());
+    cmd.arg("-b")
+        .arg("-g")
+        .arg(lua_file)
+        .arg(bytecode_file)
+        .env("LUA_PATH", lua_path_value())
+        .env(lib_path_var(), lib_path_with_inherited());
+    cmd
+}
+
 /// Default output directory for compiled games (and most things).
 pub const DEFAULT_OUTPUT_DIR: &str = "tmp";
 
@@ -395,9 +475,19 @@ pub fn stone_session_main_lua_path(game: &str, pid: u32) -> PathBuf {
 /// one process never collide on the temp path. The single atomic-write
 /// path shared by every generated-Lua writer (rock + skull backends).
 pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    write_atomic_impl(path.as_ref(), contents.as_ref(), false)
+}
+
+pub fn write_atomic_durable(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    write_atomic_impl(path.as_ref(), contents.as_ref(), true)
+}
+
+fn write_atomic_impl(path: &Path, contents: &[u8], durable: bool) -> std::io::Result<()> {
     use std::io::Write;
 
-    let path = path.as_ref();
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -408,11 +498,17 @@ pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::
     // (atomic) rename. NamedTempFile gives an OS-level unique name -- no
     // collisions between concurrent compiler / test instances -- and is
     // removed on any early return, so a failed write leaves no `.tmp`
-    // litter. No fsync: main.lua is a regenerated build artifact, and
-    // rename atomicity alone closes the concurrent-reader race.
+    // litter. Generated artifacts skip fsync; authored documents request it.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(contents.as_ref())?;
+    tmp.write_all(contents)?;
+    if durable {
+        tmp.as_file().sync_all()?;
+    }
     tmp.persist(path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    if durable {
+        fs_err::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -532,12 +628,20 @@ pub fn is_game_project(path: &Path) -> Result<bool> {
 /// check, so they need no entry here.
 pub const PROJECT_PARENTS: &[&str] = &["games"];
 
-/// Resolve a project argument (`rock sim`/`--list`) to a directory, relative to
-/// the current directory -- callers run `ensure_workspace_root` first, so cwd is
-/// the workspace root. An existing path wins as-is; otherwise the bare name is
-/// expanded against `PROJECT_PARENTS`. Zero or more-than-one matches reject with
-/// the candidates listed -- never guess.
+/// Resolve a project argument (`rock sim`/`--list`) to a directory. Checks
+/// relative to current directory first (allowing execution from game subdirectories);
+/// if not found in CWD, expands against `PROJECT_PARENTS` relative to `rock_dir()`.
+/// Zero or more-than-one matches reject with the candidates listed -- never guess.
 pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
+    if let Ok(dir) = resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg) {
+        return Ok(dir);
+    }
+    let rock_root = PathBuf::from(crate::rock_dir());
+    if rock_root != Path::new("") && rock_root != Path::new(".") {
+        if let Ok(dir) = resolve_project_dir_in(&rock_root, PROJECT_PARENTS, arg) {
+            return Ok(dir);
+        }
+    }
     resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg)
 }
 
@@ -582,6 +686,42 @@ mod tests {
     use super::*;
     use fs_err as fs;
     use tempfile::TempDir;
+
+    fn lib_path_entries(value: &str) -> Vec<&str> {
+        value.split(if cfg!(target_os = "windows") { ';' } else { ':' }).collect()
+    }
+
+    #[test]
+    fn release_lib_path_never_searches_a_worktree_tmp() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        for dir in ["lib", "bin", "stone", "tmp"] {
+            fs::create_dir(root.join(dir)).unwrap();
+        }
+        assert!(is_release_layout_in(root));
+
+        let value = lib_path_value_in(root);
+        let entries = lib_path_entries(&value);
+        assert_eq!(entries[0], root.join("lib").to_string_lossy(), "{value}");
+        assert!(
+            !entries.iter().any(|entry| Path::new(entry).ends_with("tmp")),
+            "{value}"
+        );
+    }
+
+    #[test]
+    fn dev_lib_path_searches_staged_tmp_first() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::create_dir(root.join("tmp")).unwrap();
+        assert!(!is_release_layout_in(root));
+
+        let value = lib_path_value_in(root);
+        let entries = lib_path_entries(&value);
+        assert_eq!(entries[0], "tmp", "{value}");
+        assert_eq!(entries[1], root.join("tmp").to_string_lossy(), "{value}");
+    }
 
     #[test]
     fn test_find_project_root_with_stick_toml() {
@@ -644,6 +784,18 @@ mod tests {
         // Should generate the same ID for the same path
         assert_eq!(id1, id2);
         assert_eq!(id1.len(), 8);
+    }
+
+    #[test]
+    fn durable_atomic_write_replaces_the_file_without_temp_artifacts() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("arrangement.json");
+        fs::write(&path, "old").unwrap();
+
+        write_atomic_durable(&path, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -800,5 +952,44 @@ mod tests {
             value.ends_with(":/inherited:/nix-ld"),
             "unexpected library path: {value}"
         );
+    }
+
+    #[test]
+    fn ensure_workspace_root_preserves_cwd() {
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().canonicalize().unwrap();
+        fs_err::write(project_dir.join("stick.toml"), "[package]\nname = \"game\"\n").unwrap();
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&project_dir).unwrap();
+        let res = ensure_workspace_root();
+        let new_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&orig_cwd).unwrap();
+
+        assert!(res.is_ok());
+        assert_eq!(new_cwd, project_dir, "ensure_workspace_root must not change caller CWD");
+    }
+
+    #[test]
+    fn context_root_env_admits_a_project_sibling_to_the_sdk() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::create_dir_all(root.join("sdk")).unwrap();
+        fs::create_dir_all(root.join("game")).unwrap();
+        fs::create_dir_all(root.join(".context")).unwrap();
+        fs::write(root.join(".context/context.json"), "{}\n").unwrap();
+
+        let previous = std::env::var_os("ROCK_CONTEXT_ROOT");
+        unsafe { std::env::set_var("ROCK_CONTEXT_ROOT", &root) };
+        let found = find_workspace_root(&root.join("game"));
+        let found_source = find_source_root(&root.join("game"));
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("ROCK_CONTEXT_ROOT", value),
+                None => std::env::remove_var("ROCK_CONTEXT_ROOT"),
+            }
+        }
+
+        assert_eq!(found, Some(root.clone()));
+        assert_eq!(found_source, Some(root));
     }
 }

@@ -56,13 +56,22 @@ pub fn spec_fn_name(
 /// A specialized body's symbol IS the type's canonical identity
 /// ([`MonoTy::canonical`](crate::monoty::MonoTy::canonical)) -- one encoder, so
 /// a symbol and an instance identity cannot disagree about which type they name.
+///
+/// It is written in the SYMBOL spelling: this text lands in an identifier, and
+/// a v1 nominal's canonical name is its DefKey, which is not one. The identity
+/// keeps the key; only the emitted spelling of a nominal changes, exactly as
+/// [`encode_into`] already does for the signature suffix.
 fn encode_mono_type(ty: &crate::monoty::MonoTy, out: &mut String) {
-    ty.write_canonical(out);
+    ty.write_canonical_as(out, crate::monoty::NominalSpelling::Symbol);
 }
 
 /// True if `f` keeps its bare surface name (never mangled).
+///
+/// A v1 definition's `name` is its DefKey, so the runner-entry-point tests
+/// (`main`, `test_*`) read the DECLARED name out of the key rather than the key
+/// itself -- `v1pkg::main` is still `main` to the runtime.
 pub fn is_exempt(f: &Function) -> bool {
-    let name = f.name.as_str();
+    let name = declared_name(f.name.as_str());
     f.is_extern
         || has_annotation(f, "nomangle")
         || has_annotation(f, "test")
@@ -70,8 +79,79 @@ pub fn is_exempt(f: &Function) -> bool {
         || name.starts_with("test_")
 }
 
+/// The declared (last) segment of a DefKey. A legacy key IS the declared name.
+/// Classifiers use this spelling; emitted identifiers use [`ident_of_key`]
+/// instead.
+pub fn declared_name(key: &str) -> &str {
+    match key.rfind("::") {
+        Some(cut) => &key[cut + 2..],
+        None => key,
+    }
+}
+
+/// The identifier form of a DefKey (plan 2.1). A legacy key is a bare name and
+/// passes through byte-identical, so legacy emission cannot move. A v1 key
+/// `<package>::<module path>::<name>` becomes `<name>_<digest>`: `::` is not in
+/// any identifier grammar, and the prefix is never flattened textually, so
+/// module `a::b` and a module literally named `a_b` cannot converge.
+///
+/// The separator is a single `_` because this module's scheme forbids `__`
+/// ANYWHERE -- it is reserved in the GLSL ES identifier grammar, which the
+/// shared mangler must also satisfy.
+/// [`collision_errors`] rejects a residual collision either way.
+pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
+    match key.rfind("::") {
+        None => std::borrow::Cow::Borrowed(key),
+        Some(cut) => std::borrow::Cow::Owned(format!(
+            "{}{SEP}{}",
+            &key[cut + 2..],
+            prefix_digest(&key[..cut])
+        )),
+    }
+}
+
+/// [`ident_of_key`] for a name that is used as an emitted symbol: the Lua global
+/// a definition occupies, the `_G` key the state bridge installs under it, and
+/// the identifiers minted from it. The compiler's own maps stay keyed on the
+/// LOGICAL name (the DefKey), so this belongs where a name is WRITTEN into the
+/// artifact, never where one is looked up.
+pub fn symbol_of_key(name: ustr::Ustr) -> ustr::Ustr {
+    match ident_of_key(name.as_str()) {
+        std::borrow::Cow::Borrowed(_) => name,
+        std::borrow::Cow::Owned(owned) => ustr::Ustr::from(&owned),
+    }
+}
+
+/// The emitted symbol of the nominal type keyed `key`: its C typedef, `__ty`
+/// tag, `<T>_ct` constructor and every registry key minted from it. A
+/// `@nomangle` struct keeps its declared name, because inline Lua spells it
+/// (cdefs, `ffi.new`, tag compares); every other type is [`symbol_of_key`].
+/// [`collision_errors`] rejects two types that would share a symbol.
+pub fn type_symbol(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
+    let exempt = ws
+        .struct_by_name
+        .get(&key)
+        .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].nomangle);
+    if exempt {
+        ustr::Ustr::from(declared_name(key.as_str()))
+    } else {
+        symbol_of_key(key)
+    }
+}
+
+/// The digest of a DefKey's `<package>::<module path>` prefix. Hashes the
+/// prefix BYTES with std's `DefaultHasher` (the `StaticCell.init_hash`
+/// precedent): stable across processes AND across compiler builds, unlike a
+/// `Ustr` hash, whose seed is per-build.
+pub fn prefix_digest(prefix: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    prefix.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
 fn has_annotation(f: &Function, name: &str) -> bool {
-    f.annotations.iter().any(|a| a.name.name.as_str() == name)
+    f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
 /// The emitted name for function `f`, identical for its definition and every
@@ -80,13 +160,16 @@ fn has_annotation(f: &Function, name: &str) -> bool {
 /// global).
 pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
     if is_exempt(f) {
-        return f.name.to_string();
+        // The exemption IS the surface name: `main`, a `test_*` runner entry,
+        // an `extern` foreign symbol, an author-owned `@nomangle`. A v1 key
+        // carries its module prefix, which none of those consumers know.
+        return declared_name(f.name.as_str()).to_string();
     }
     // Append directly into one buffer -- no per-fragment `String`/`Vec` (this is
     // on the per-call-site codegen path; the old collect+join allocated N+2
     // strings + a vec per reference).
     let mut out = String::with_capacity(f.name.len() + 16);
-    out.push_str(f.name.as_str());
+    out.push_str(&ident_of_key(f.name.as_str()));
     for pd in &f.param_decls {
         out.push_str(SEP);
         encode_into(ws, pd.ty, &mut out);
@@ -160,7 +243,9 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
                     append_args(out);
                 }
                 hir::TypeCtor::Nominal(name) => {
-                    out.push_str(name.as_str());
+                    // A v1 nominal's name is its DefKey; the signature suffix is
+                    // an identifier too, so it takes the same form.
+                    out.push_str(&ident_of_key(name.as_str()));
                     if !params.is_empty() {
                         out.push_str(SEP);
                         append_args(out);
@@ -294,7 +379,10 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     for m in ws.modules.iter() {
         for (_, f) in m.functions.iter() {
             if is_exempt(f) {
-                exempt_names.entry(f.name.to_string()).or_insert(f.name_span);
+                // The EMITTED name, which for a v1 key is its declared segment
+                // -- comparing the raw DefKey here would never match a mangled
+                // name and the exempt-collision check would go silent.
+                exempt_names.entry(mangle_fn(ws, f)).or_insert(f.name_span);
                 continue;
             }
             let name = mangle_fn(ws, f);
@@ -311,6 +399,63 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
                 None => {
                     seen.insert(name, (f, f.name_span));
                 }
+            }
+        }
+    }
+
+    // Two distinct `<package>::<module path>` prefixes whose digests coincide
+    // would hand their definitions the same emitted identifier. Plan 2.1: reject
+    // it, never silently rename. One pass over `ws.defs` covers callables, types
+    // and globals; sorted so the reported pair does not depend on map order.
+    let mut prefixes: Vec<(String, &str, Span)> = Vec::new();
+    for (key, meta) in &ws.defs {
+        if let Some(cut) = key.as_str().rfind("::") {
+            let prefix = &key.as_str()[..cut];
+            prefixes.push((prefix_digest(prefix), prefix, meta.span));
+        }
+    }
+    prefixes.sort_by(|a, b| a.1.cmp(b.1));
+    let mut by_digest: HashMap<&str, &str> = HashMap::new();
+    for (digest, prefix, span) in &prefixes {
+        match by_digest.get(digest.as_str()) {
+            Some(prev) if prev != prefix => {
+                let msg = format!(
+                    "module path digest `{digest}` is produced by both `{prev}` and `{prefix}`;                      their definitions would share emitted identifiers -- rename one of the modules"
+                );
+                out.push((digest.clone(), CompilerError::new_with_label(*span, msg)));
+            }
+            Some(_) => {}
+            None => {
+                by_digest.insert(digest.as_str(), prefix);
+            }
+        }
+    }
+
+    // Two nominal types with one emitted symbol would share a typedef, a
+    // constructor and a runtime tag. Only a `@nomangle` struct can reach
+    // another type's symbol: its declared name against a legacy type or
+    // another package's `@nomangle` struct of that name.
+    let mut type_keys: Vec<(ustr::Ustr, Span)> = Vec::new();
+    for m in ws.modules.iter() {
+        type_keys.extend(m.structs.iter().map(|(_, d)| (d.name, d.name_span)));
+        type_keys.extend(m.enums.iter().map(|(_, d)| (d.name, d.name_span)));
+        type_keys.extend(m.newtypes.iter().map(|(_, d)| (d.name, d.name_span)));
+    }
+    type_keys.sort_by(|a, b| a.0.cmp(&b.0));
+    type_keys.dedup_by(|a, b| a.0 == b.0);
+    let mut type_owner: HashMap<ustr::Ustr, ustr::Ustr> = HashMap::new();
+    for (key, span) in &type_keys {
+        let symbol = type_symbol(ws, *key);
+        match type_owner.get(&symbol) {
+            Some(prev) => {
+                let msg = format!(
+                    "types `{prev}` and `{key}` would both emit as `{symbol}`; \
+                     a `@nomangle` struct owns its declared name -- rename one of them"
+                );
+                out.push((symbol.to_string(), CompilerError::new_with_label(*span, msg)));
+            }
+            None => {
+                type_owner.insert(symbol, *key);
             }
         }
     }

@@ -340,7 +340,13 @@ fn check_project(
             },
         )?;
     let sources = if game_project {
-        sources.production_only()
+        sources
+            .production_only(std::path::Path::new(dir))
+            .map_err(|error| FileCheckError {
+                reason: "cannot classify production sources".to_string(),
+                rendered: error.to_string(),
+                expected_failure_tests: None,
+            })?
     } else {
         sources
     };
@@ -620,7 +626,8 @@ fn emit_main_program(path: &str) -> Result<skull_codegen_c::CProgram> {
             .functions
             .iter()
             .filter(|(_, function)| {
-                function.name.as_str() == "main" && function.param_decls.is_empty()
+                skull_mir::mangle::declared_name(function.name.as_str()) == "main"
+                    && function.param_decls.is_empty()
             });
         let Some((main, _)) = mains.next() else {
             anyhow::bail!("C backend requires a nullary `main` in the entry file");

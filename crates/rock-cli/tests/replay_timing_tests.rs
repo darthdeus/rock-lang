@@ -370,15 +370,7 @@ fn assert_load_rejected(out: &Output, label: &str) {
 }
 
 fn strip_observational_dump(v: &mut serde_json::Value) {
-    if let Some(root) = v.as_object_mut() {
-        root.remove("__stone_diag");
-    }
-    if let Some(stone) = v
-        .get_mut("stone")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        stone.remove("PROFILER");
-    }
+    crate::stone_harness::strip_nonreproducible(v);
 }
 
 #[test]
@@ -405,8 +397,8 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
 
     let text = std::fs::read_to_string(&log).expect("read replay");
     assert!(
-        text.starts_with("STONE_REPLAY 13\n"),
-        "phase timing logs must use v13\n{text}"
+        text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "phase timing logs must use v{}\n{text}", rock_replay_protocol::REPLAY_VERSION
     );
     assert_eq!(tick_count(&text), 8, "fixture must have eight observations");
     assert_eq!(
@@ -430,15 +422,11 @@ fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("image-load.replay");
     let log_s = log.to_string_lossy().into_owned();
-    let recorded = record_raw(
-        "bitgun",
-        6,
-        &log_s,
-        &[
-            ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "3"),
-            ("STONE_TEST_IMAGE_LOAD_PATH", "assets/Sprites/error.png"),
-        ],
-    );
+    let image_env = [
+        ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "3"),
+        ("STONE_TEST_IMAGE_LOAD_PATH", "assets/Sprites/error.png"),
+    ];
+    let recorded = record_raw("bitgun", 6, &log_s, &image_env);
     assert!(
         recorded.status.success(),
         "record failed: {}",
@@ -455,7 +443,7 @@ fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
     assert_eq!(rows[0][11], "1", "the row must carry one exact path");
     assert_eq!(decode_hex_string(rows[0][13]), "assets/Sprites/error.png");
 
-    let playback = replay_dump("bitgun", 6, &log_s, &[]);
+    let playback = replay_dump("bitgun", 6, &log_s, &image_env);
     assert_eq!(
         playback["__stone_diag"]["STONE_REPLAY_RECORDED_IMAGE_RESOURCE_COUNT"],
         1,
@@ -494,8 +482,9 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
     );
     let text = std::fs::read_to_string(&profiled).expect("read profiled replay");
     assert!(
-        text.starts_with("STONE_REPLAY 13\n"),
-        "slow-frame attribution requires the versioned v13 grammar\n{text}"
+        text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "slow-frame attribution requires the versioned v{} grammar\n{text}",
+        rock_replay_protocol::REPLAY_VERSION
     );
     let rows = slow_frame_lines(&text);
     assert_eq!(
@@ -603,8 +592,8 @@ fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
     let ticks = tick_count(&text);
     let timings = timing_lines(&text);
     assert!(
-        text.starts_with("STONE_REPLAY 13\n"),
-        "crash log must retain v13\n{text}"
+        text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "crash log must retain v{}\n{text}", rock_replay_protocol::REPLAY_VERSION
     );
     assert!(ticks > 0, "crash log must retain observations");
     assert_eq!(
@@ -626,16 +615,9 @@ fn legacy_v8_without_timing_remains_playable_and_reports_an_empty_track() {
     let log_s = log.to_string_lossy().into_owned();
     let recorded = record_raw("bitgun", 8, &log_s, &[]);
     assert!(recorded.status.success(), "record failed");
-    let legacy = std::fs::read_to_string(&log)
-        .expect("read replay")
-        .lines()
-        .filter(|line| !line.starts_with("p "))
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replacen("STONE_REPLAY 13", "STONE_REPLAY 8", 1)
-        + "\n";
-    std::fs::write(&log, legacy).expect("write legacy replay");
+    let text = std::fs::read_to_string(&log).expect("read replay");
+    std::fs::write(&log, crate::stone_harness::downgrade_replay(&text, 8))
+        .expect("write legacy replay");
 
     let state = replay_dump("bitgun", 8, &log_s, &[]);
     assert_eq!(
@@ -651,22 +633,9 @@ fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
     let log_s = log.to_string_lossy().into_owned();
     let recorded = record_raw("bitgun", 8, &log_s, &[]);
     assert!(recorded.status.success(), "record failed");
-    let legacy = std::fs::read_to_string(&log)
-        .expect("read replay")
-        .lines()
-        .map(|line| {
-            if let Some(rest) = line.strip_prefix("p ") {
-                let fields = rest.split_whitespace().collect::<Vec<_>>();
-                format!("p {} {} {}", fields[0], fields[1], fields[2])
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .replacen("STONE_REPLAY 13", "STONE_REPLAY 9", 1)
-        + "\n";
-    std::fs::write(&log, legacy).expect("write legacy replay");
+    let text = std::fs::read_to_string(&log).expect("read replay");
+    std::fs::write(&log, crate::stone_harness::downgrade_replay(&text, 9))
+        .expect("write legacy replay");
 
     let state = replay_dump("bitgun", 8, &log_s, &[]);
     assert_eq!(
@@ -686,10 +655,9 @@ fn legacy_v10_phase_timing_remains_playable_without_slow_profiles() {
     let log_s = log.to_string_lossy().into_owned();
     let recorded = record_raw("bitgun", 8, &log_s, &[]);
     assert!(recorded.status.success(), "record failed");
-    let legacy = std::fs::read_to_string(&log)
-        .expect("read replay")
-        .replacen("STONE_REPLAY 13", "STONE_REPLAY 10", 1);
-    std::fs::write(&log, legacy).expect("write v10 replay");
+    let text = std::fs::read_to_string(&log).expect("read replay");
+    std::fs::write(&log, crate::stone_harness::downgrade_replay(&text, 10))
+        .expect("write v10 replay");
 
     let state = replay_dump("bitgun", 8, &log_s, &[]);
     assert_eq!(
@@ -1030,6 +998,7 @@ fn resume_live_here_drops_abandoned_timing_and_appends_fresh_branch_samples() {
             ("STONE_FRAME_DELAY_MS", "2"),
             ("STONE_REPLAY_SLOW_PROFILE_MS", "1"),
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "20"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "10"),
             ("STONE_BRANCH_AT_FRAME", "40"),

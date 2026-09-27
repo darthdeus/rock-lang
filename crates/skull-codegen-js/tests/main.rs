@@ -132,3 +132,7 @@ mod value_gc_eq;
 mod value_structs;
 #[path = "vec_columns.rs"]
 mod vec_columns;
+#[path = "vec_flat_enum_strided.rs"]
+mod vec_flat_enum_strided;
+#[path = "optional_entity_vec.rs"]
+mod optional_entity_vec;

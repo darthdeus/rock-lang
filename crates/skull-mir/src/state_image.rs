@@ -221,7 +221,7 @@ impl StateImagePlan {
             &mut entries,
             ImageEntryKind::SemanticSession,
             "session::rng-state",
-            "uint64-rng-state",
+            "uint32-rng-state",
             "scalar",
             "fresh-session",
         );
@@ -376,6 +376,7 @@ mod tests {
                 owner: Some("test".into()),
                 initializer_identity: None,
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             },
             StateEntry {
                 kind: StateKind::Static,
@@ -385,6 +386,7 @@ mod tests {
                 owner: Some("test".into()),
                 initializer_identity: Some(7),
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             },
             StateEntry {
                 kind: StateKind::CoroutineFrame,
@@ -394,6 +396,7 @@ mod tests {
                 owner: Some("fn:test::frame".into()),
                 initializer_identity: None,
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             },
             StateEntry {
                 kind: StateKind::Storage,
@@ -403,6 +406,7 @@ mod tests {
                 owner: None,
                 initializer_identity: None,
                 metadata: Some(StateMetadata::default()),
+                storage_free: false,
             },
         ])
         .expect("fixture schema")
@@ -470,6 +474,12 @@ mod tests {
                 "runner::logger-state",
             ]
         );
+        let rng = plan
+            .entries()
+            .iter()
+            .find(|entry| entry.identity == "session::rng-state")
+            .expect("RNG structural entry");
+        assert_eq!(rng.layout, "uint32-rng-state");
     }
 
     #[test]
@@ -491,6 +501,7 @@ mod tests {
             owner: None,
             initializer_identity: None,
             metadata: None,
+            storage_free: false,
         }])
         .expect("unclassified root schema");
         assert!(StateImagePlan::from_schema(&schema).is_err());
@@ -506,6 +517,7 @@ mod tests {
             owner: Some("/workspace/stone/engine/compat/bindings.rock".into()),
             initializer_identity: None,
             metadata: Some(StateMetadata::default()),
+            storage_free: false,
         }])
         .expect("blend shadow schema");
         let plan = StateImagePlan::from_schema(&schema).expect("image plan");

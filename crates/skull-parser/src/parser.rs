@@ -9,6 +9,7 @@
 //! reports coverage honestly rather than silently parsing less.
 
 use crate::ast::*;
+use rock_core::source_code::{Dialect, MemoryClass};
 use rock_core::{CompilerError, Span};
 use rock_tokenizer::{interp, Token, TokenKind, Tokenizer};
 use ustr::Ustr;
@@ -44,6 +45,14 @@ pub struct Parser<'a> {
     /// expr-hole ids surface in the s-expr (`?{id}`), but type holes must still
     /// advance it so the numbering stays in lockstep with rock.
     hole_counter: u32,
+    /// Source-language dialect (modules plan M1). Legacy is today's grammar;
+    /// V1 enables `(expr : Type)` ascription, `::` paths, and the module-item
+    /// forms, and rejects infix `expr :: Type`.
+    pub dialect: Dialect,
+    /// Depth of paren groups whose head is currently parsing. While > 0 the
+    /// Pratt loop breaks at `:` so the paren arm owns the `(expr : Type)`
+    /// ascription form (spec 7) instead of `:` binding as a binop.
+    paren_head: u32,
     /// Source text a span can be read back from, innermost last. Interpolated
     /// strings are re-scanned from RAW source so each hole's sub-expression gets
     /// a real file span; a hole whose text carried `\`-escapes is cooked into
@@ -147,6 +156,15 @@ impl Frame<'_> {
         }
     }
 
+    /// The file offset of frame-local offset `local`; the inverse of
+    /// [`Frame::to_local`].
+    fn to_file(&self, local: usize) -> usize {
+        match self {
+            Frame::File { base, .. } => base + local,
+            Frame::Hole { map, .. } => map[local],
+        }
+    }
+
     /// The (line, column) of frame-local offset 0.
     fn origin(&self) -> Option<(usize, usize)> {
         match self {
@@ -164,8 +182,14 @@ impl<'a> Parser<'a> {
     /// a caller that passes the wrong text gets spanned errors, not silent
     /// drift.
     pub fn new(tokens: Vec<Token>, source: &'a str, base: usize) -> Self {
+        Self::new_with_dialect(tokens, source, base, Dialect::Legacy)
+    }
+
+    /// [`Parser::new`] with the file's source dialect selected.
+    pub fn new_with_dialect(tokens: Vec<Token>, source: &'a str, base: usize, dialect: Dialect) -> Self {
         let eof_span = tokens.last().map(|t| t.span).unwrap_or_else(Span::unknown);
-        let ast = Ast::with_capacity(tokens.len());
+        let mut ast = Ast::with_capacity(tokens.len());
+        ast.dialect = dialect;
         Self {
             frames: vec![Frame::File { text: source, base }],
             tokens,
@@ -179,6 +203,8 @@ impl<'a> Parser<'a> {
             arrow_lambda_blocked: false,
             last_was_operator: false,
             hole_counter: 0,
+            dialect,
+            paren_head: 0,
         }
     }
 
@@ -198,6 +224,16 @@ impl<'a> Parser<'a> {
         out
     }
 
+    /// Run `f` inside a paren group head: the Pratt loop breaks at `:` there
+    /// (see the `paren_head` field). The restore runs on every path out of
+    /// `f`, so statement-level recovery never sees a stale depth.
+    fn with_paren_head<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.paren_head += 1;
+        let out = f(self);
+        self.paren_head -= 1;
+        out
+    }
+
     /// Parse the whole token stream as a module, consuming the parser and
     /// returning the populated arena AST.
     ///
@@ -211,11 +247,107 @@ impl<'a> Parser<'a> {
     /// still dropped whole. Valid input never enters either recovery path, so
     /// the A/B parse oracle stays byte-faithful.
     pub fn parse_module(mut self) -> PResult<Ast> {
+        let mut seen_item = false;
         loop {
             self.skip_comments_as_items();
             if self.at_end() {
                 break;
             }
+            // The `@memory(<class>)` file header: every dialect, first
+            // non-comment item. It names the memory class of this file's
+            // globals, overriding the package's `[language] memory`
+            // (docs/state-ownership-plan.md R2). Parsed here rather than as an
+            // item annotation because it decorates the FILE, not a declaration;
+            // an unknown class rejects instead of falling back to `game`.
+            if self.kind() == TokenKind::At
+                && matches!(self.peek_kind(), TokenKind::Ident(n) if n.as_str() == "memory")
+            {
+                let start = self.span();
+                self.advance(); // `@`
+                self.advance(); // `memory`
+                self.expect(TokenKind::OpenParen)?;
+                let name = self.expect_ident()?;
+                self.expect(TokenKind::CloseParen)?;
+                let span = self.span_from(start);
+                let Some(class) = MemoryClass::parse(name.name.as_str()) else {
+                    return Err(CompilerError::new_with_label(
+                        span,
+                        format!(
+                            "unknown memory class `{}`; known classes: {}",
+                            name.name,
+                            MemoryClass::NAMES.join(", ")
+                        ),
+                    ));
+                };
+                if seen_item {
+                    return Err(CompilerError::new_with_label(
+                        span,
+                        "`@memory(<class>)` is a file header and must be the file's first item; it governs every global in the file"
+                            .to_string(),
+                    ));
+                }
+                if self.ast.memory_header.is_some() {
+                    return Err(CompilerError::new_with_label(
+                        span,
+                        "a file has one `@memory(<class>)` header".to_string(),
+                    ));
+                }
+                self.ast.memory_header = Some(MemoryHeader { class, span });
+                continue;
+            }
+            // The `mod a::b;` file header: v1-only, first non-comment item,
+            // `;`-terminated. A later one is a misplaced header, not a
+            // Rust-style load request (spec 6.1). A visibility prefix
+            // (`pub mod combat;`) is part of the header; on a false lead the
+            // position rewinds and parse_item handles the item.
+            if self.dialect == Dialect::V1 && !seen_item {
+                let save = self.pos;
+                let start = self.span();
+                let mods = self.parse_vis_mods()?;
+                if self.at_mod_decl() {
+                    self.advance(); // `mod`
+                    let mut path = Vec::new();
+                    loop {
+                        let seg = self.expect_ident()?;
+                        if seg.name.as_str() == "self"
+                            && path.is_empty()
+                            && self.kind() == TokenKind::Semicolon
+                        {
+                            break;
+                        }
+                        path.push(seg);
+                        if self.kind() != TokenKind::DoubleColon {
+                            break;
+                        }
+                        self.advance();
+                    }
+                    let span = self.span_from(start);
+                    if self.kind() == TokenKind::OpenCurly {
+                        // `pub mod x { .. }` — an inline block, not a header.
+                        self.pos = save;
+                    } else if self.kind() != TokenKind::Semicolon {
+                        return Err(self.err(
+                            "expected `;` after the file header path (or `{` for an inline block)",
+                        ));
+                    } else if self.ast.module_header.is_some() {
+                        return Err(CompilerError::new_with_label(
+                            span,
+                            "a file has one `mod path;` header; a second one would move the rest of the file to another module".to_string(),
+                        ));
+                    } else {
+                        self.advance(); // `;`
+                        self.ast.module_header = Some(ModuleHeader { path, vis: mods.vis, span });
+                        continue;
+                    }
+                }
+                self.pos = save;
+            }
+            if self.dialect == Dialect::V1 && seen_item && self.at_mod_decl() {
+                return Err(self.err(
+                    "`mod path;` is a file header and must be the file's first item; inline module blocks use `{ .. }`",
+                ));
+            }
+            seen_item = true;
             let item_start = self.pos;
             match self.parse_item() {
                 Ok(item) => self.ast.items.push(item),
@@ -463,7 +595,7 @@ impl<'a> Parser<'a> {
     fn skip_comments_as_items(&mut self) {
         while let TokenKind::Comment(text) = self.kind() {
             let span = self.span();
-            self.ast.items.push(Item { annotations: Vec::new(), is_global_write: false,
+            self.ast.items.push(Item { annotations: Vec::new(), vis: None, is_global_write: false,
                 span,
                 kind: ItemKind::Comment(text),
             });
@@ -486,11 +618,304 @@ impl<'a> Parser<'a> {
 
     // ---- items ------------------------------------------------------------
 
+    /// Parse leading visibility modifiers (v1): any sequence of `pub`,
+    /// `pub(super)`, `pub(package)`, `pub(in a::b)`, `private`, `private(set)`
+    /// in either order. All words are contextual: `private: bool` is still a
+    /// field named `private` because `parse_vis_mods` only commits when the
+    /// modifier is followed by something item-like.
+    fn parse_vis_mods(&mut self) -> PResult<VisMods> {
+        let mut mods = VisMods::default();
+        // Peek two tokens ahead: `pub(package)` / `private(set)` put a `(` between.
+        let peek2 = |p: &Self| {
+            p.tokens
+                .get(p.pos + 2)
+                .map(|t| t.kind.clone())
+                .unwrap_or(TokenKind::EOF)
+        };
+        // The token kinds that can follow a committed visibility modifier: the
+        // item keywords, the contextual item words (Ident), an item's leading
+        // annotation, a root-anchored use path, an inline mod block, or a
+        // qualifier paren. `macro` is absent on purpose: macros expand before
+        // the namespace tree exists, so a visibility on one would be inert.
+        let starts_item_like = |k: &TokenKind| matches!(
+            k,
+            TokenKind::Ident(_)
+                | TokenKind::At
+                | TokenKind::Deco
+                | TokenKind::Fn
+                | TokenKind::Struct
+                | TokenKind::Enum
+                | TokenKind::Newtype
+                | TokenKind::Global
+                | TokenKind::Const
+                | TokenKind::Operator
+                | TokenKind::Extern
+                | TokenKind::DoubleColon
+                | TokenKind::OpenCurly
+        );
+        loop {
+            let is_pub = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "pub");
+            let is_private = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "private");
+            // `in` is a keyword token (for loops), not an Ident.
+            let pub_follows = starts_item_like(&self.peek_kind())
+                || (self.peek_kind() == TokenKind::OpenParen
+                    && match peek2(self) {
+                        TokenKind::In => true,
+                        TokenKind::Ident(n) => n.as_str() == "package" || n.as_str() == "super",
+                        _ => false,
+                    });
+            let private_follows = starts_item_like(&self.peek_kind())
+                || (self.peek_kind() == TokenKind::OpenParen
+                    && matches!(peek2(self), TokenKind::Ident(ref n) if n.as_str() == "set"));
+            if is_pub && pub_follows {
+                self.advance();
+                if self.kind() == TokenKind::OpenParen && self.peek_kind() == TokenKind::In {
+                    self.advance(); // `(`
+                    self.advance(); // `in`
+                    let mut segments = vec![self.expect_ident()?];
+                    while self.kind() == TokenKind::DoubleColon {
+                        self.advance();
+                        segments.push(self.expect_ident()?);
+                    }
+                    self.expect(TokenKind::CloseParen)?;
+                    mods.vis = Some(Visibility::PubIn(segments));
+                } else if self.kind() == TokenKind::OpenParen {
+                    self.advance();
+                    let q = self.expect_ident()?;
+                    match q.name.as_str() {
+                        "package" => {
+                            self.expect(TokenKind::CloseParen)?;
+                            mods.vis = Some(Visibility::PubPackage);
+                        }
+                        "super" => {
+                            self.expect(TokenKind::CloseParen)?;
+                            mods.vis = Some(Visibility::PubSuper);
+                        }
+                        other => {
+                            return Err(self.err(format!(
+                                "unknown visibility qualifier `pub({other})`; known: pub, pub(super), pub(package), pub(in path)"
+                            )));
+                        }
+                    }
+                } else {
+                    mods.vis = Some(Visibility::Pub);
+                }
+                continue;
+            }
+            if is_private && private_follows {
+                self.advance();
+                if self.kind() == TokenKind::OpenParen
+                    && matches!(self.peek_kind(), TokenKind::Ident(n) if n.as_str() == "set")
+                {
+                    self.advance(); // `(`
+                    self.advance(); // `set`
+                    self.expect(TokenKind::CloseParen)?;
+                    mods.set_private = true;
+                } else {
+                    mods.vis = Some(Visibility::Private);
+                }
+                continue;
+            }
+            break;
+        }
+        Ok(mods)
+    }
+
+    /// `use` declaration after any `pub`/`private` prefix:
+    /// `use <path><suffix>;` where suffix is nothing (bind the tail),
+    /// `as alias`, `*`, `operator(op)` (optionally `as alias`), or
+    /// `{ sub-trees }`.
+    /// `use ... as _` rejects (spec 8.1: no activation semantics).
+    fn parse_use_decl(&mut self, start: Span, vis: Option<Visibility>) -> PResult<UseDecl> {
+        debug_assert!(matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "use"));
+        self.advance(); // `use`
+        let tree = self.parse_use_tree(true)?;
+        // `;` optional: a newline ends the declaration too (block-level form
+        // is newline-terminated; top level spells both).
+        self.eat(TokenKind::Semicolon);
+        let span = self.span_from(start);
+        Ok(UseDecl { span, vis, tree })
+    }
+
+    /// One use tree: `a::b::c`, `a::*`, `a::operator(+)`, `a::b as c`,
+    /// `a::b::{ .. }`, or (inside braces) `self` / `*` alone. `allow_root`
+    /// permits the leading `::` of a root-anchored path (top level only).
+    fn parse_use_tree(&mut self, allow_root: bool) -> PResult<UseTree> {
+        self.skip_comments();
+        let from_root = allow_root && self.kind() == TokenKind::DoubleColon;
+        if from_root {
+            self.advance();
+        }
+        let mut segments = Vec::new();
+        loop {
+            // A `{` immediately after `::` (`use a::{ .. }`), a bare `*`
+            // member, or the `operator` selector has no leading segment here.
+            if self.kind() == TokenKind::OpenCurly
+                || self.kind() == TokenKind::Mul
+                || self.suffix_is_operator_selector()
+            {
+                break;
+            }
+            segments.push(self.expect_ident()?);
+            if self.kind() != TokenKind::DoubleColon {
+                break;
+            }
+            self.advance(); // `::`
+        }
+        let kind = if self.kind() == TokenKind::OpenCurly {
+            self.advance();
+            let mut trees = Vec::new();
+            loop {
+                self.skip_comments();
+                if self.kind() == TokenKind::CloseCurly || self.at_end() {
+                    break;
+                }
+                trees.push(self.parse_use_tree(false)?);
+                self.skip_comments();
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::CloseCurly)?;
+            UseSuffix::Nested(trees)
+        } else if self.kind() == TokenKind::Mul {
+            self.advance();
+            UseSuffix::Glob
+        } else if self.suffix_is_operator_selector() {
+            // `geo::operator(+);` — the leading segments name the module and
+            // the trailing `operator(<glyph>)` is the selector. The glyph is
+            // an operator token (`+`, `*` is glob here so no clash, `-`, ..):
+            // take its spelling from the source.
+            self.advance(); // `operator`
+            self.expect(TokenKind::OpenParen)?;
+            let glyph_span = self.span();
+            let glyph = self.kind();
+            self.advance();
+            self.expect(TokenKind::CloseParen)?;
+            let op_fn = glyph.overloadable_binop_fn().or_else(|| match glyph {
+                TokenKind::Bang => Some("__not"),
+                _ => None,
+            }).ok_or_else(|| {
+                self.err(format!("operator({:?}) is not an importable operator family", glyph))
+            })?;
+            let op = Ident {
+                span: glyph_span,
+                name: Ustr::from(op_fn),
+            };
+            let alias = if self.kind() == TokenKind::As { Some(self.parse_use_alias()?) } else { None };
+            UseSuffix::Operator { op, alias }
+        } else if self.kind() == TokenKind::As {
+            UseSuffix::BindAs(self.parse_use_alias()?)
+        } else {
+            UseSuffix::Bind
+        };
+        Ok(UseTree::Path { from_root, segments, kind })
+    }
+
+    /// `as <ident>` ending a use tree. `use ... as _` rejects (spec 8.1).
+    fn parse_use_alias(&mut self) -> PResult<Ident> {
+        self.expect(TokenKind::As)?;
+        if matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "_") {
+            return Err(self.err(
+                "`use ... as _` has no activation semantics in modules-v1 and is not supported",
+            ));
+        }
+        self.expect_ident()
+    }
+
+    /// At `operator` + `(` in a use suffix position. `operator` is a keyword
+    /// token; it never appears as a path segment spelling.
+    fn suffix_is_operator_selector(&self) -> bool {
+        self.kind() == TokenKind::Operator && self.peek_kind() == TokenKind::OpenParen
+    }
+
+    /// `pub mod name { .. }` — an inline module block (v1).
+    fn parse_mod_block(
+        &mut self,
+        start: Span,
+        vis: Option<Visibility>,
+        name: Ident,
+    ) -> PResult<Item> {
+        debug_assert!(self.kind() == TokenKind::OpenCurly);
+        self.advance(); // `{`
+        self.brace_depth += 1;
+        let mut items = Vec::new();
+        loop {
+            self.skip_comments_as_items();
+            if self.kind() == TokenKind::CloseCurly || self.at_end() {
+                break;
+            }
+            items.push(self.parse_item()?);
+        }
+        self.brace_depth -= 1;
+        let close = self.expect(TokenKind::CloseCurly)?;
+        let span = self.merge_spans(start, close);
+        Ok(Item {
+            annotations: Vec::new(),
+            vis: vis.clone(),
+            is_global_write: false,
+            span,
+            kind: ItemKind::Module(ModBlock { span, name, vis, items }),
+        })
+    }
+
+    /// True at an `mod` (header or block) item start: contextual `mod`
+    /// followed by an identifier.
+    fn at_mod_decl(&self) -> bool {
+        matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "mod")
+            && matches!(self.peek_kind(), TokenKind::Ident(_))
+    }
+
+    /// True at a `use` item start: contextual `use` followed by an ident or
+    /// a root-anchored `::`.
+    fn at_use_decl(&self) -> bool {
+        matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "use")
+            && (matches!(self.peek_kind(), TokenKind::Ident(_))
+                || self.peek_kind() == TokenKind::DoubleColon)
+    }
+
     fn parse_item(&mut self) -> PResult<Item> {
         // Leading `@name[(args)]` annotations are captured and attached to the
         // parsed item (rendered in the s-expr, matching rock). rock's item span
         // covers the annotations too, so anchor the start at the first `@`.
         let item_start = self.span();
+        // v1 visibility modifiers lead the item (`pub fn`, `private(set)` is
+        // field-only and rejected below). Contextual: parse_vis_mods commits
+        // only when a modifier is followed by an item-like token.
+        let mods = if self.dialect == Dialect::V1 {
+            self.parse_vis_mods()?
+        } else {
+            VisMods::default()
+        };
+        if mods.set_private {
+            return Err(self.err(
+                "`private(set)` applies to stored struct fields, not to items",
+            ));
+        }
+        // `use ...;` — item-level import (v1 scoping; parses additively in
+        // legacy, where it was previously an unsupported item start).
+        if self.at_use_decl() {
+            let decl = self.parse_use_decl(item_start, mods.vis.clone())?;
+            return Ok(Item {
+                annotations: Vec::new(),
+                vis: mods.vis,
+                is_global_write: false,
+                span: decl.span,
+                kind: ItemKind::Use(decl),
+            });
+        }
+        // `mod name { .. }` — inline module block (v1 only). A `;`-terminated
+        // `mod` here is a misplaced header (headers lead the file only).
+        if self.dialect == Dialect::V1 && self.at_mod_decl() {
+            self.advance(); // `mod`
+            let name = self.expect_ident()?;
+            if self.kind() == TokenKind::Semicolon {
+                return Err(self.err(
+                    "`mod name;` is a file header and must be the file's first item; inline module blocks use `{ .. }`",
+                ));
+            }
+            return self.parse_mod_block(item_start, mods.vis, name);
+        }
         let mut annotations = self.parse_item_annotations()?;
         // rock consumes `@guarded` / `@global_write` into flags (Global.is_guarded
         // etc.) and drops them from the annotation list — mirror that so they
@@ -501,6 +926,7 @@ impl<'a> Parser<'a> {
         self.last_was_operator = false;
         let mut item = self.parse_item_inner()?;
         item.is_global_write = is_global_write;
+        item.vis = mods.vis;
         if is_guarded {
             if let ItemKind::Global(g) = &mut item.kind {
                 g.is_guarded = true;
@@ -625,7 +1051,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(), is_global_write: false,
+            annotations: Vec::new(), vis: None, is_global_write: false,
             span,
             kind: ItemKind::MacroInvocation { name, args, sigil },
         })
@@ -895,9 +1321,9 @@ impl<'a> Parser<'a> {
         self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)
     }
 
-    /// `operator [(<backend>)] <sym>(params) -> ret { body }` folds to a
-    /// function named `__op_<sym>` (rock's `OperatorSymbol::function_name`),
-    /// so the body s-expr lines up with rock's.
+    /// `operator [(<backend>)] <sym>(params) -> ret { body }` folds to the
+    /// operator family name used by lowering. The `-` and `!` glyphs select
+    /// their prefix families when the declaration has one parameter.
     fn parse_operator(
         &mut self,
         is_coroutine: bool,
@@ -919,7 +1345,8 @@ impl<'a> Parser<'a> {
         }
         self.skip_comments();
         let sym_span = self.span();
-        let op_name = match self.kind() {
+        let symbol = self.kind();
+        let op_name = match symbol {
             TokenKind::Plus => "__op_add",
             TokenKind::Minus => "__op_sub",
             TokenKind::Mul => "__op_mul",
@@ -949,7 +1376,25 @@ impl<'a> Parser<'a> {
         };
         self.advance(); // the symbol token (or `]` for index)
         let name = Ident { span: sym_span, name: Ustr::from(op_name) };
-        self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)
+        let mut item = self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)?;
+        if let ItemKind::Function(function) = &mut item.kind {
+            if function.params.len() == 1 {
+                match symbol {
+                    TokenKind::Minus => function.name.name = Ustr::from("__unm"),
+                    TokenKind::Bang => function.name.name = Ustr::from("__not"),
+                    TokenKind::BitNot => {}
+                    _ => {
+                        return Err(CompilerError::new_with_label(
+                            sym_span,
+                            format!(
+                                "operator `{symbol}` takes two parameters; only `-` and `!` have a prefix (unary) form"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(item)
     }
 
     /// Generic params + `(params)` + optional `-> ret` + body, shared by
@@ -976,6 +1421,65 @@ impl<'a> Parser<'a> {
         // follow an operator symbol), macros, or extern decls (edge-case table).
         let mut receiver_surface: Option<(Ident, usize)> = None;
         let mut receiver_ty: Option<Idx<TypeExprData>> = None;
+
+        // v1 qualified receiver: `fn lib::Actor<..>.method<..>(..)`. Extend
+        // the leading ident into a path, then reuse the single-ident D-form
+        // flow with the method name/generics and a Path receiver type.
+        if self.dialect == Dialect::V1
+            && self.kind() == TokenKind::DoubleColon
+            && matches!(self.peek_kind(), TokenKind::Ident(_))
+        {
+            if is_macro {
+                return Err(self.err("the method form `Type.name` is for functions, not macros"));
+            }
+            if extern_body.is_some() {
+                return Err(self.err(
+                    "extern functions are foreign symbols and cannot declare a receiver path",
+                ));
+            }
+            let path = self.parse_path_tail(name)?;
+            let last = path.segments.last().expect("path has segments").clone();
+            // Optional generics on the receiver tail: `lib::Actor<T>.heal`.
+            let receiver_generics = if self.kind() == TokenKind::LessThan {
+                self.parse_generics()
+            } else {
+                Vec::new()
+            };
+            if self.kind() != TokenKind::Dot {
+                return Err(self.err(
+                    "a qualified receiver path must end in `.method` (`lib::Actor.heal`)",
+                ));
+            }
+            self.advance(); // `.`
+            let method_name = self.expect_ident()?;
+            let method_generics = self.parse_generics();
+            for pg in &receiver_generics {
+                if method_generics.iter().any(|mg| mg.name.name == pg.name.name) {
+                    return Err(self.err(format!(
+                        "generic `{}` is declared in both the receiver path and the method generics",
+                        pg.name.name
+                    )));
+                }
+            }
+            receiver_ty = Some(self.ast.ty(path.span(), TypeExprKind::Path(path), false));
+            receiver_surface = Some((last, 0));
+            let mut merged = receiver_generics;
+            merged.extend(method_generics);
+            // Reuse the single-ident D-form continuation with the method as
+            // the function name and the merged generics.
+            return self.continue_fn_def(
+                method_name,
+                start,
+                is_macro,
+                false,
+                extern_body,
+                inline_backend,
+                merged,
+                receiver_surface,
+                receiver_ty,
+            );
+        }
+
         let (name, generics) = if self.kind() == TokenKind::Dot {
             if is_macro {
                 return Err(self.err("the method form `Type.name` is for functions, not macros"));
@@ -1011,6 +1515,36 @@ impl<'a> Parser<'a> {
             (name, generics)
         };
 
+        self.continue_fn_def(
+            name,
+            start,
+            is_macro,
+            is_coroutine,
+            extern_body,
+            inline_backend,
+            generics,
+            receiver_surface,
+            receiver_ty,
+        )
+    }
+
+    /// The shared tail of every fn-header parse: params, return type, body,
+    /// and item construction. `finish_fn_def` calls it after resolving the
+    /// receiver/name/generics; the v1 qualified-receiver path calls it
+    /// directly with its own resolution.
+    #[allow(clippy::too_many_arguments)]
+    fn continue_fn_def(
+        &mut self,
+        name: Ident,
+        start: Span,
+        is_macro: bool,
+        is_coroutine: bool,
+        extern_body: Option<FunctionBody>,
+        backend: FnBackend,
+        generics: Vec<Generic>,
+        receiver_surface: Option<(Ident, usize)>,
+        receiver_ty: Option<Idx<TypeExprData>>,
+    ) -> PResult<Item> {
         let params = self.parse_params(receiver_ty)?;
         self.skip_comments(); // `f() /* c */ -> T`
         let return_ty = if self.eat(TokenKind::Arrow) {
@@ -1051,7 +1585,7 @@ impl<'a> Parser<'a> {
                         ))
                     }
                 };
-                FunctionBody::Inline(inline_backend, src)
+                FunctionBody::Inline(backend, src)
             } else {
                 // Only `extern fn` declares a body-less foreign symbol. Every other
                 // form reaching here is missing its body, and defaulting to
@@ -1081,7 +1615,7 @@ impl<'a> Parser<'a> {
             );
             self.ast.macro_param_refs.extend(refs);
         }
-        Ok(Item { annotations: Vec::new(), is_global_write: false,
+        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false,
             span,
             kind: ItemKind::Function(FunctionDef {
                 span,
@@ -1137,10 +1671,20 @@ impl<'a> Parser<'a> {
     /// Does the current token start an item declaration valid inside a macro
     /// body? (`@anno` / `fn` / `co` / `extern` / `struct` / `enum` / `newtype` /
     /// `inline(lua) fn`.) Mirrors rock's `token_starts_macro_body_item`.
+    ///
+    /// `use`/`mod` are included so they parse as ITEMS and `macro_expand`
+    /// rejects them by name (plan M1: a macro must not change the module
+    /// graph). Left out, they fell through to `parse_statement` and a
+    /// `use a::b;` in a macro body compiled to nothing at all. Both are
+    /// contextual words, so the lookahead is what separates the declaration
+    /// from `mod(a, b)` or an assignment to a binding spelled `mod`.
     fn token_starts_macro_body_item(&self) -> bool {
         match self.kind() {
             TokenKind::At | TokenKind::Fn | TokenKind::Extern
             | TokenKind::Struct | TokenKind::Enum | TokenKind::Newtype => true,
+            TokenKind::Ident(name) if matches!(name.as_str(), "use" | "mod") => {
+                matches!(self.peek_kind(), TokenKind::Ident(_))
+            }
             TokenKind::Ident(name) if name.as_str() == "co" => {
                 matches!(self.peek_kind(), TokenKind::Fn)
             }
@@ -1284,7 +1828,7 @@ impl<'a> Parser<'a> {
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(), is_global_write: false,
+            annotations: Vec::new(), vis: None, is_global_write: false,
             span,
             kind: ItemKind::Struct(StructDef {
                 span,
@@ -1308,6 +1852,11 @@ impl<'a> Parser<'a> {
             if self.kind() == TokenKind::CloseCurly || self.at_end() {
                 break;
             }
+            // v1 visibility modifiers on fields: `pub`, `private`,
+            // `private(set)`, `pub(package) private(set)`, ... (spec 10).
+            // `vis`/`set_private` are contextual words, never reserved.
+            let mods = self.parse_vis_mods()?;
+            let (vis, set_private) = (mods.vis, mods.set_private);
             let annotations = self.parse_item_annotations()?;
             // `embed` is contextual: it is the modifier only when a field name
             // follows it, so `embed: int` stays a field named `embed`.
@@ -1325,7 +1874,7 @@ impl<'a> Parser<'a> {
                 None
             };
             let span = self.span_from(name.span);
-            fields.push(Field { span, name, ty, default, annotations, is_embed });
+            fields.push(Field { span, name, ty, vis, set_private, default, annotations, is_embed });
             self.skip_comments();
             // Item separator: comma or newline (both allowed).
             self.eat(TokenKind::Comma);
@@ -1386,7 +1935,7 @@ impl<'a> Parser<'a> {
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
+        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
     }
 
     /// `newtype Name<gen>(WrappedType)`.
@@ -1406,7 +1955,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
+        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
     }
 
     /// `deco init Name[(params)] { body }` — the `init` category keyword is
@@ -1427,7 +1976,7 @@ impl<'a> Parser<'a> {
         };
         let body = self.parse_block()?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
+        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
     }
 
     /// `global|const Name [: T] [= value]`.
@@ -1448,7 +1997,7 @@ impl<'a> Parser<'a> {
         let span = self.span_from(start);
         // `is_guarded` is set by `parse_item` from a leading `@guarded` (the
         // annotation is consumed there before it reaches the item).
-        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const, is_guarded: false }) })
+        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const, is_guarded: false }) })
     }
 
     /// `#if cond` / `#elseif cond` / `#else` / `#end` (cond is a bare ident).
@@ -1469,7 +2018,7 @@ impl<'a> Parser<'a> {
             _ => CompilerDirective::End,
         };
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::CompilerDirective(directive) })
+        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::CompilerDirective(directive) })
     }
 
     fn directive_condition(&mut self) -> Ustr {
@@ -1482,6 +2031,53 @@ impl<'a> Parser<'a> {
     }
 
     // ---- types ------------------------------------------------------------
+
+    /// Consume `::seg(::seg)*` after an already-parsed first segment (v1).
+    fn parse_path_tail(&mut self, first: Ident) -> PResult<Path> {
+        let mut segments = vec![first];
+        while self.kind() == TokenKind::DoubleColon {
+            self.advance();
+            segments.push(self.expect_ident()?);
+        }
+        Ok(Path { from_root: false, segments })
+    }
+
+    /// `a::b::T<A, B>` vs `a::b::T` after the segments are consumed.
+    fn finish_type_path(&mut self, path: Path) -> PResult<TypeExprKind> {
+        if self.kind() == TokenKind::LessThan {
+            self.advance();
+            let args = self.parse_type_arg_list()?;
+            return Ok(TypeExprKind::AppPath { ctor: path, args });
+        }
+        Ok(TypeExprKind::Path(path))
+    }
+
+    /// `<T, U>` generic type arguments after an explicit `<` (v1 path ctor).
+    fn parse_type_arg_list(&mut self) -> PResult<Vec<Idx<TypeExprData>>> {
+        let mut args = Vec::new();
+        while !matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift)
+            && !self.at_end()
+        {
+            args.push(self.parse_type()?);
+            self.skip_comments();
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect_generic_close()?;
+        Ok(args)
+    }
+
+    /// Consume `::seg(::seg)*` from a leading `::` (root-anchored, v1).
+    fn parse_root_path(&mut self) -> PResult<Path> {
+        self.advance(); // leading `::`
+        let mut segments = vec![self.expect_ident()?];
+        while self.kind() == TokenKind::DoubleColon {
+            self.advance();
+            segments.push(self.expect_ident()?);
+        }
+        Ok(Path { from_root: true, segments })
+    }
 
     fn parse_type(&mut self) -> PResult<Idx<TypeExprData>> {
         // Leading comments (`-> /* c */ int`, `(/* c */ A, B)`, generic args).
@@ -1496,6 +2092,11 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_type()?;
                 self.expect(TokenKind::CloseSquare)?;
                 TypeExprKind::Array(inner)
+            }
+            // `::root::T` (v1) — unambiguously root-anchored.
+            TokenKind::DoubleColon if self.dialect == Dialect::V1 => {
+                let path = self.parse_root_path()?;
+                self.finish_type_path(path)?
             }
             TokenKind::OpenParen => {
                 // `()` Unit, `(T)` parenthesized T, `(A, B)` tuple, or
@@ -1564,8 +2165,13 @@ impl<'a> Parser<'a> {
                     "ref" => TypeExprKind::Ref(self.parse_type()?),
                     _ => {
                         let ctor = Ident { span: ident_span, name };
+                        // `a::b::T` / `a::b::T<A, B>` (v1 paths).
+                        if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+                            let path = self.parse_path_tail(ctor)?;
+                            self.finish_type_path(path)?
+                        }
                         // Generic application `Foo<A, B>`.
-                        if self.kind() == TokenKind::LessThan {
+                        else if self.kind() == TokenKind::LessThan {
                             self.advance();
                             let mut args = Vec::new();
                             while !matches!(
@@ -1729,6 +2335,13 @@ impl<'a> Parser<'a> {
                     StatementKind::LifecycleHook { keyword_span: Some(start), name, body },
                 ));
             }
+        }
+
+        // `use ...;` inside a block (v1; spec 8.2). Parses additively in
+        // legacy, where it was previously an unsupported statement.
+        if self.at_use_decl() {
+            let decl = self.parse_use_decl(start, None)?;
+            return Ok(self.ast.stmt(decl.span, StatementKind::Use(decl)));
         }
 
         // Contextual `static <name> ...` local. Only fires when `static` heads a
@@ -1947,11 +2560,26 @@ impl<'a> Parser<'a> {
             self.skip_comments_in_expr();
             let op = self.kind();
 
+            // Inside a paren group's head the `:` belongs to the
+            // `(expr : Type)` ascription form owned by the paren arm, so stop
+            // here instead of consuming it as a binop.
+            if op == TokenKind::Colon && self.paren_head > 0 {
+                break;
+            }
+
             // Type ascription `expr :: Type` is intercepted before the
             // precedence checks (as rock does), so it binds tighter than any
             // operator: `j :: float / k :: float` is `(j::float) / (k::float)`.
             // Qualified idents (`Color::Red`) were already consumed in primary.
             if op == TokenKind::DoubleColon {
+                if self.dialect == Dialect::V1 {
+                    // In v1 `::` is exclusively the path separator; an infix
+                    // `::` after a non-path expression can only be an
+                    // ascription, so name the replacement form (spec 7).
+                    return Err(self.err(
+                        "infix `expr :: Type` ascription is not available in modules-v1; write `(expr : Type)`",
+                    ));
+                }
                 self.advance();
                 let ty = self.parse_type()?;
                 let span = self.node_span(left, self.prev_span());
@@ -2199,10 +2827,10 @@ impl<'a> Parser<'a> {
     /// rock's newline rule: a postfix/infix operator on a fresh line does
     /// not continue the expression, except inside `(`/`[` (where it does,
     /// unless we are also inside a `{ }` code block). The rule applies ONLY to
-    /// operators that could also *start* a new expression (see `op_starts_expr`)
-    /// -- rock only runs its newline-break check for those operand-start
-    /// tokens, so an unambiguous binary op (`+`, `*`, `&&`) on a fresh line
-    /// continues the expression regardless of indentation.
+    /// operators whose postfix use yields to a fresh expression (see
+    /// `op_starts_expr`). Binary operators (`+`, `-`, `*`, `&&`) on a fresh
+    /// line continue the expression regardless of indentation. A `-` in a
+    /// prefix context is still parsed by `parse_prefix` as unary negation.
     fn newline_breaks(&self) -> bool {
         self.prev_trailing_newlines() > 0 && (self.delimiter_depth == 0 || self.brace_depth > 0)
     }
@@ -2468,6 +3096,14 @@ impl<'a> Parser<'a> {
             return self.finish_lambda(params, start);
         }
 
+        // `::root::path` (v1) — a root-anchored path in value position.
+        if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+            let start = self.span();
+            let path = self.parse_root_path()?;
+            let span = self.span_from(start);
+            return Ok(self.ast.expr(span, ExprKind::Path { path, generic_args: Vec::new() }));
+        }
+
         // Leading `.ident` is a sibling-field reference (`current: int = .max`).
         // Only valid in a struct field default; the type-checker enforces context.
         if self.kind() == TokenKind::Dot && matches!(self.peek_kind(), TokenKind::Ident(_)) {
@@ -2610,11 +3246,32 @@ impl<'a> Parser<'a> {
                 if !self.arrow_lambda_blocked && self.kind() == TokenKind::FatArrow {
                     return self.finish_lambda(vec![LambdaParam { span: base.span, name: base, ty: None }], start);
                 }
+                // v1: `::` after an ident is ALWAYS a path — the resolver
+                // decides whether the head names a module, type, or enum
+                // (no case heuristic, spec 4.3).
+                if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+                    let path = self.parse_path_tail(base)?;
+                    // `p::Type { .. }` / `p::E::V { .. }` record literal.
+                    if self.struct_literal_follows() {
+                        let (bases, fields) = self.parse_struct_fields()?;
+                        if !bases.is_empty() {
+                            return Err(self
+                                .err("functional-update `..base` is not supported on qualified record literals"));
+                        }
+                        let span = self.span_from(start);
+                        return Ok(self.ast.expr(span, ExprKind::PathStructLiteral { path, bases, fields }));
+                    }
+                    // `p::f(x)` and `p::f<T>(x)` keep their generics/call in
+                    // the postfix machinery; a bare path (or `p::Type<T>` as a
+                    // value) lands here.
+                    let span = self.span_from(start);
+                    return Ok(self.ast.expr(span, ExprKind::Path { path, generic_args: Vec::new() }));
+                }
                 // `Base::Member` is a qualified ident ONLY when the member
                 // starts uppercase (enum-variant convention). A lowercase
                 // member (`value :: int`) is type ascription, handled by the
                 // infix `::` branch — so fall through to a plain ident here.
-                if self.kind() == TokenKind::DoubleColon && self.peek_is_uppercase_ident() {
+                else if self.kind() == TokenKind::DoubleColon && self.peek_is_uppercase_ident() {
                     self.advance(); // `::`
                     let member = self.expect_ident()?;
                     if self.struct_literal_follows() {
@@ -2652,7 +3309,27 @@ impl<'a> Parser<'a> {
                     // Span the whole `()`, not just the open paren.
                     return Ok(self.ast.expr(self.span_from(start), ExprKind::Unit));
                 }
-                let first = self.with_allow_literals(true, |p| p.parse_expr(0))?;
+                // `(expr : Type)` — the modules-v1 contextual-ascription form,
+                // accepted additively in legacy (there it previously reached
+                // inference as a `:` binop and was rejected there). While the
+                // paren group's head and elements parse, the Pratt loop BREAKS
+                // at `:` so this arm owns the colon: one expression, one
+                // colon, one complete type, then `)`. `(a : T, ..)` is NOT a
+                // typed-tuple form and rejects (spec 7).
+                let first = self.with_paren_head(|p| p.with_allow_literals(true, |p| p.parse_expr(0)))?;
+                if self.kind() == TokenKind::Colon {
+                    self.advance();
+                    let ty = self.parse_type()?;
+                    if self.kind() == TokenKind::Comma {
+                        return Err(self.err(
+                            "an ascription takes one expression: `(expr : Type)`; to ascribe a tuple write `((a, b) : (A, B))`",
+                        ));
+                    }
+                    self.delimiter_depth -= 1;
+                    let end = self.expect(TokenKind::CloseParen)?;
+                    let span = self.merge_spans(start, end);
+                    return Ok(self.ast.expr(span, ExprKind::ParenAscription(first, ty)));
+                }
                 // `(a, b, ...)` is a tuple; `(a)` is a parenthesized expr.
                 if self.kind() == TokenKind::Comma {
                     let mut items = vec![first];
@@ -2660,7 +3337,14 @@ impl<'a> Parser<'a> {
                         if self.kind() == TokenKind::CloseParen {
                             break;
                         }
-                        items.push(self.with_allow_literals(true, |p| p.parse_expr(0))?);
+                        items.push(self.with_paren_head(|p| p.with_allow_literals(true, |p| p.parse_expr(0)))?);
+                        // A colon after an element is the un-added bare
+                        // ascription grammar, not a new typed-tuple form.
+                        if self.kind() == TokenKind::Colon {
+                            return Err(self.err(
+                                "bare `expr : Type` is not grammar; parenthesize the ascription: `(expr : Type)`",
+                            ));
+                        }
                     }
                     self.delimiter_depth -= 1;
                     let end = self.expect(TokenKind::CloseParen)?;
@@ -2804,7 +3488,10 @@ impl<'a> Parser<'a> {
                         let cook = |at: (usize, usize), from: Pos| {
                             let mut p = from;
                             p.advance(frame.text(), at.0);
-                            let (text, map) = scan.hole_source(frame.text(), at);
+                            // `hole_source` maps into this frame's text, which
+                            // is a slice of the file or an enclosing hole.
+                            let (text, local) = scan.hole_source(frame.text(), at);
+                            let map = local.into_iter().map(|o| frame.to_file(o)).collect();
                             HoleFrame { text, map, line: p.line, column: p.column }
                         };
                         pending.push(Pending::Hole(holes.len()));
@@ -3246,6 +3933,27 @@ impl<'a> Parser<'a> {
                 let ident_span = self.span();
                 self.advance();
                 let ident = Ident { span: ident_span, name };
+                // v1: a pattern path `p::E::V` resolves like any path.
+                if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+                    let path = self.parse_path_tail(ident)?;
+                    if self.kind() == TokenKind::OpenParen {
+                        self.advance();
+                        let mut args = Vec::new();
+                        while self.kind() != TokenKind::CloseParen && !self.at_end() {
+                            args.push(self.parse_pattern()?);
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(TokenKind::CloseParen)?;
+                        return Ok(Pattern::PathVariant { path, args: Some(args) });
+                    }
+                    if self.kind() == TokenKind::OpenCurly {
+                        let (fields, rest) = self.parse_pattern_record_fields()?;
+                        return Ok(Pattern::PathRecord { path, fields, rest });
+                    }
+                    return Ok(Pattern::PathVariant { path, args: None });
+                }
                 // Qualified `Enum::Variant`.
                 let (enum_name, variant) = if self.kind() == TokenKind::DoubleColon
                     && matches!(self.peek_kind(), TokenKind::Ident(_))
@@ -3514,12 +4222,11 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Operators that can ALSO begin a new expression, so a newline before them
-/// signals a fresh statement rather than a continuation. rock applies its
-/// newline-break rule only to this operand-start set (`exprs.rs` operand list:
-/// `Minus`, `Bang`, `++`, `--`, `(`, `[`, `{`); unary `Minus`/`++`/`--` reach
-/// skull's loop as infix/postfix candidates). Unambiguous binary operators
-/// (`+`, `*`, `&&`, comparisons) are not here, so they continue across lines.
+/// Postfix operators whose use yields to a fresh expression after a newline.
+/// `Minus` is deliberately absent: once the Pratt loop has a left operand it
+/// is binary subtraction, consistent with `Plus`; in a prefix context it is
+/// still unary negation. `++` and `--` remain here because their prefix and
+/// postfix forms are genuinely indistinguishable from token context alone.
 /// Consume a brace-balanced `{...}` body (cursor positioned just after the
 /// opening `{`), returning the inner text. Mirror of rock's
 /// `take_balanced_brace_body`. Errors on an unmatched `{`.
@@ -3552,8 +4259,7 @@ fn take_balanced_brace_body(
 fn op_starts_expr(op: TokenKind) -> bool {
     matches!(
         op,
-        TokenKind::Minus
-            | TokenKind::PlusPlus
+        TokenKind::PlusPlus
             | TokenKind::MinusMinus
             | TokenKind::OpenParen
             | TokenKind::OpenSquare

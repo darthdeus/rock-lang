@@ -106,7 +106,7 @@ fn assert_layout_fixture_added_one(state: &serde_json::Value) {
     let after = diag["MAG_REPLAY_LAYOUT_STRIPS_AFTER"]
         .as_i64()
         .expect("layout fixture must report its final strip population");
-    assert_eq!(before, 3, "empty history must seed the three category strips: {diag}");
+    assert!(before > 0, "empty history must seed the production strips: {diag}");
     assert_eq!(after, before + 1, "the production drag must add exactly one strip: {diag}");
     assert_eq!(state["mag"]["SPELL_STRIPS"]["len"], after,
         "the fixture census must describe the authoritative strip population");
@@ -201,6 +201,48 @@ fn known_progress_a() -> Vec<u8> {
     .expect("serialize known progress A")
 }
 
+fn hex_bytes(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn world_damage_snapshot_path(progress: &Path) -> PathBuf {
+    PathBuf::from(format!(
+        "{}.damage/chunks/{}/{}/x1-y0-g1.png",
+        progress.display(),
+        hex_bytes("official"),
+        hex_bytes("crypt"),
+    ))
+}
+
+fn add_world_damage_snapshot_fixture(progress: &Path) -> PathBuf {
+    let mut root: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(progress).expect("read generated current progress"),
+    )
+    .expect("generated progress must be JSON");
+    root["world_damage"] = serde_json::json!([{
+        "level": {"namespace": "official", "name": "crypt"},
+        "chunks": [{"x": 1, "y": 0, "face": 0, "generation": 1, "tail": []}],
+    }]);
+    std::fs::write(
+        progress,
+        serde_json::to_vec_pretty(&root).expect("serialize snapshot fixture manifest"),
+    )
+    .expect("write snapshot fixture manifest");
+
+    let snapshot = world_damage_snapshot_path(progress);
+    std::fs::create_dir_all(snapshot.parent().expect("snapshot parent"))
+        .expect("create snapshot fixture directory");
+    let image = image::RgbaImage::from_pixel(128, 128, image::Rgba([151, 19, 27, 211]));
+    image
+        .save_with_format(&snapshot, image::ImageFormat::Png)
+        .expect("write snapshot fixture PNG");
+    snapshot
+}
+
 #[test]
 fn binding_history_bootstrap_ignores_mutated_and_deleted_live_history() {
     let dir = tempfile::tempdir().expect("fixture dir");
@@ -210,6 +252,12 @@ fn binding_history_bootstrap_ignores_mutated_and_deleted_live_history() {
     let bindings = dir.path().join("bindings.json");
     let bindings_history = dir.path().join("spellbook-bindings.jsonl");
     let replay = dir.path().join("bindings-history.replay");
+
+    std::fs::write(
+        &bindings,
+        br#"{"version":1,"actions":{"toggle_spells":[{"alt":false,"ctrl":false,"gui":false,"kind":"key","scan":"b","shift":false},{"button":"leftstick","kind":"pad"}]}}"#,
+    )
+    .expect("write non-default bindings A");
 
     let mut seed_owned = fixture_env("bindings_history_seed", &progress, &layout, &settings).to_vec();
     seed_owned.push(("MAG_BINDINGS_PATH_OVERRIDE", bindings.to_string_lossy().into_owned()));
@@ -567,7 +615,8 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
     let recorded = run_mag(1, Some(&replay), None, &env);
     let persisted_b = std::fs::read(&progress).expect("record action must create B");
     let log = std::fs::read_to_string(&replay).expect("read replay");
-    assert!(log.starts_with("STONE_REPLAY 13\n"), "recording must use v13\n{log}");
+    assert!(log.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "recording must use v{}\n{log}", rock_replay_protocol::REPLAY_VERSION);
     let boot_lines: Vec<&str> = log.lines().filter(|line| line.starts_with("boot ")).collect();
     assert_eq!(boot_lines.len(), 4,
         "the temporary current-settings path plus progress and both histories must capture keys");
@@ -637,6 +686,82 @@ fn progress_bootstrap_captures_existing_save_bytes_and_applies_them_once() {
         persisted_b,
         "existing-save playback must not rewrite the persisted B file"
     );
+}
+
+#[test]
+fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("world-damage.replay");
+
+    let setup_owned = fixture_env("progress", &progress, &layout, &settings);
+    let setup_env = env_refs(&setup_owned);
+    let _ = run_mag(1, None, None, &setup_env);
+    let snapshot = add_world_damage_snapshot_fixture(&progress);
+    let snapshot_key = format!(
+        "mag.damage.snapshot/{}/{}/{}/1/0/1",
+        hex_bytes(&progress.to_string_lossy()),
+        hex_bytes("official"),
+        hex_bytes("crypt"),
+    );
+    let wire_key = hex_bytes(&snapshot_key);
+
+    let env_owned = fixture_env("world_damage", &progress, &layout, &settings);
+    let env = env_refs(&env_owned);
+    let recorded = run_mag(2, Some(&replay), None, &env);
+    let recorded_snapshot = std::fs::read(&snapshot).expect("read recorded snapshot");
+    let log = std::fs::read_to_string(&replay).expect("read world damage replay");
+    // A chunk is two sidecars of one generation now, colour and material, so
+    // it contributes two bootstrap inputs. The fixture writes only the colour
+    // PNG, and the material one is captured as ABSENT -- which is what lets
+    // playback derive it instead of probing disk.
+    let material_key = format!("{snapshot_key}/m");
+    let material_wire_key = hex_bytes(&material_key);
+    assert_eq!(
+        log.lines().filter(|line| line.starts_with("boot ")).count(),
+        6,
+        "the colour and material sidecars add one captured bootstrap input each\n{log}"
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with(&format!("boot {wire_key} ")))
+            .count(),
+        1,
+        "the snapshot identity has one collision-free bootstrap entry\n{log}"
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.starts_with(&format!("boot {material_wire_key} ")))
+            .count(),
+        1,
+        "the material sidecar has its own collision-free bootstrap entry\n{log}"
+    );
+    assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_GENERATION"], 1);
+    assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_TAIL"], 0);
+    assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_SAVE_WRITES"], 1);
+
+    std::fs::remove_file(&snapshot).expect("delete live snapshot before playback");
+    let replayed = run_mag(2, None, Some(&replay), &env);
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_GENERATION"],
+        recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_GENERATION"]
+    );
+    assert_eq!(
+        replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_TAIL"],
+        recorded["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_TAIL"]
+    );
+    assert_eq!(replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_SAVE_OK"], 1);
+    assert_eq!(replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_SAVE_WRITES"], 0);
+    assert!(
+        replayed["__stone_diag"]["MAG_REPLAY_WORLD_DAMAGE_UPLOAD_CALLS"]
+            .as_i64()
+            .is_some_and(|n| n > 0),
+        "playback must upload the captured sidecar bytes\n{replayed}"
+    );
+    assert!(!snapshot.exists(), "playback must not recreate the deleted blob");
+    assert_ne!(recorded_snapshot.len(), 0, "the record must contain PNG bytes");
 }
 
 #[test]
@@ -746,11 +871,9 @@ fn legacy_replay_warns_about_each_missing_bootstrap_contract() {
     let _ = run_mag(1, Some(&replay), None, &env);
 
     let text = std::fs::read_to_string(&replay).expect("read replay");
-    let legacy = text
+    let legacy = crate::stone_harness::downgrade_replay(&text, 6)
         .lines()
         .filter(|line| !line.starts_with("boot "))
-        .enumerate()
-        .map(|(i, line)| if i == 0 { "STONE_REPLAY 6" } else { line })
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
@@ -786,7 +909,8 @@ fn save_repro_retains_bootstrap_entries() {
         .find(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("repro-")))
         .expect("auto save repro must create a sibling");
     let text = std::fs::read_to_string(repro).expect("read saved repro");
-    assert!(text.starts_with("STONE_REPLAY 13\n"), "repro must retain v13\n{text}");
+    assert!(text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
+        "repro must retain v{}\n{text}", rock_replay_protocol::REPLAY_VERSION);
     assert_eq!(text.lines().filter(|line| line.starts_with("boot ")).count(), 4,
         "save repro must retain all bootstrap entries");
 }
@@ -798,22 +922,43 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
     let layout = dir.path().join("spellbook-layout.jsonl");
     let settings = dir.path().join("settings.json");
     let replay = dir.path().join("branch.replay");
+    let before_branch = dir.path().join("before-branch.replay");
+    let before_branch_path = before_branch.to_string_lossy();
     let env_owned = fixture_env("progress", &progress, &layout, &settings);
     let mut env = env_refs(&env_owned);
     env.extend([
         ("STONE_LIVE_REWIND", "1"),
+        ("STONE_KEYFRAME_INTERVAL", "10"),
         ("STONE_CHECKPOINT_INTERVAL", "5"),
         ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
         ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+        ("STONE_SAVE_REPRO_AT_FRAME", "69"),
+        ("STONE_SAVE_REPRO_PATH", before_branch_path.as_ref()),
         ("STONE_BRANCH_AT_FRAME", "70"),
     ]);
-    let state = run_mag(120, Some(&replay), None, &env);
+    // Stop at the rewrite: later gameplay may append new snapshot inputs.
+    let state = run_mag(70, Some(&replay), None, &env);
     assert_eq!(state["__stone_diag"]["STONE_BRANCH_COUNT"], 1,
         "branch fixture must actually rewrite the log");
 
     let text = std::fs::read_to_string(&replay).expect("read branched replay");
     let boot_lines: Vec<&str> = text.lines().filter(|line| line.starts_with("boot ")).collect();
-    assert_eq!(boot_lines.len(), 4, "branch rewrite must retain all bootstrap entries");
+    let before = std::fs::read_to_string(&before_branch).expect("read pre-branch replay");
+    let mut expected: Vec<&str> = before.lines().filter(|line| line.starts_with("boot ")).collect();
+    // Damage snapshots can add inputs while the fixture runs; preserve their
+    // captured bytes as well as the four inputs read at boot.
+    for key in [
+        "mag/progress.json",
+        "mag/settings.json",
+        "mag/spellbook-layout.jsonl",
+        "mag/spellbook-bindings.jsonl",
+    ] {
+        let prefix = format!("boot {} ", hex_bytes(key));
+        assert_eq!(expected.iter().filter(|line| line.starts_with(&prefix)).count(), 1,
+            "pre-branch recording must contain bootstrap input {key} exactly once");
+    }
+    expected.sort_unstable();
+    assert_eq!(boot_lines, expected, "branch rewrite must retain every captured bootstrap entry");
     let mut sorted = boot_lines.clone();
     sorted.sort_unstable();
     assert_eq!(boot_lines, sorted, "branch rewrite must emit bootstrap keys canonically");

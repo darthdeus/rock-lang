@@ -1,4 +1,16 @@
-use crate::common::{emit_mir, mangled_name, run_luajit};
+use crate::common::{emit_mir, mangled_name, run_luajit, ws_with_stdlib};
+use skull::mir_emit::{emit_full_with_shapes, ShapeOverrides};
+use skull_codegen_lua::CalleeBindingMode;
+use ustr::Ustr;
+
+/// The fixture emitted under an explicit callee-binding shape and Session-cell
+/// switch, so one process can pin both spellings of a mutable-global access.
+fn emit_shaped(src: &str, binding: CalleeBindingMode, state_cell: Option<bool>) -> String {
+    let ws = ws_with_stdlib(src);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let shapes = ShapeOverrides { callee_binding: Some(binding), state_cell, ..ShapeOverrides::default() };
+    emit_full_with_shapes(&ws, mid, shapes).expect("emit").0.lua
+}
 
 const FIXTURE: &str = r#"
 global COUNTER: int = 0
@@ -29,10 +41,9 @@ fn compiler_generated_mutable_global_accesses_require_the_active_session() {
 #[test]
 fn lua_global_session_slots_are_dense_numeric_realizations() {
     let emitted = emit_mir(FIXTURE);
+    let global_walk = emit_shaped(FIXTURE, CalleeBindingMode::Global, None);
     assert!(
-        emitted
-            .lua
-            .contains("__rock_active_session.__rock_state[5]"),
+        global_walk.contains("__rock_active_session.__rock_state[5]"),
         "the fixture global must use its compact numeric Lua Session slot"
     );
     assert!(
@@ -79,23 +90,17 @@ fn lua_global_session_slot_order_is_declaration_independent() {
 
 #[test]
 fn generated_state_accesses_follow_mid_call_session_swaps() {
-    let emitted = emit_mir(FIXTURE);
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Global, None);
     assert!(
-        !emitted
-            .lua
-            .contains("local __rock_active_state = __rock_active_session.__rock_state"),
+        !lua.contains("local __rock_active_state = __rock_active_session.__rock_state"),
         "state-using functions must not cache a Session table across activation"
     );
     assert!(
-        emitted
-            .lua
-            .contains("__rock_active_session.__rock_state[5]"),
+        lua.contains("__rock_active_session.__rock_state[5]"),
         "mutable global reads and writes must follow the active Session"
     );
     assert!(
-        emitted
-            .lua
-            .contains("__rock_active_session.__rock_initialized[5] = true"),
+        lua.contains("__rock_active_session.__rock_initialized[5] = true"),
         "mutable global writes must mark the active Session initialized"
     );
 }
@@ -126,6 +131,40 @@ fn two_lua_sessions_initialize_and_isolate_mutable_globals() {
         emitted.lua
     );
     assert_eq!(run_luajit(&program, "two_sessions_global"), "1\n1\n2");
+}
+
+#[test]
+fn rng_state_suffix_restore_and_session_isolation() {
+    let emitted = emit_mir("fn main() {}\n");
+    let program = format!(
+        r#"{lua}
+local a = __rock_active_session
+__rock_rng_seed(17)
+local first = __rock_rng_next()
+local checkpoint = __rock_rng_state_get()
+local second = __rock_rng_next()
+local third = __rock_rng_next()
+__rock_rng_state_set(checkpoint)
+local replay_second = __rock_rng_next()
+local replay_third = __rock_rng_next()
+local b = __rock_session_new(__rock_state_schema_id)
+__rock_session_activate(b)
+__rock_rng_seed(99)
+local b_first = __rock_rng_next()
+local b_checkpoint = __rock_rng_state_get()
+local b_second = __rock_rng_next()
+__rock_session_activate(a)
+local a_fourth = __rock_rng_next()
+__rock_session_activate(b)
+__rock_rng_state_set(b_checkpoint)
+local replay_b_second = __rock_rng_next()
+print(first ~= second and second ~= third
+  and second == replay_second and third == replay_third
+  and a_fourth ~= b_first and b_second == replay_b_second)
+"#,
+        lua = emitted.lua,
+    );
+    assert_eq!(run_luajit(&program, "rng_suffix_and_sessions"), "true");
 }
 
 #[test]
@@ -255,4 +294,181 @@ print(b_value .. ":" .. tostring(__rock_state_get(key)))
         lua = emitted.lua,
     );
     assert_eq!(run_luajit(&program, "lifecycle_session"), "1:2");
+}
+
+// --- Session cells under the bound shape (docs/backends.md) -----------------
+//
+// Under `CalleeBindingMode::Upvalue` a mutable-global access reads the active
+// Session's tables through two chunk-level locals, `__rock_state_cell` and
+// `__rock_initialized_cell`, instead of walking
+// `_G.__rock_active_session.__rock_state` (three guarded hash lookups that
+// LuaJIT re-executes after every store to the state table). Every writer of the
+// active Session publishes to the cells through `__rock_session_publish`, so
+// the mid-call-swap rule above still holds.
+
+#[test]
+fn bound_emission_reads_state_through_the_session_cells() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    assert!(
+        lua.contains("local __rock_state_cell, __rock_initialized_cell"),
+        "the prelude must declare the cells as chunk-level locals:\n{}",
+        &lua[..lua.len().min(4000)]
+    );
+    assert!(lua.contains("__rock_state_cell[5]"), "reads and writes go through the state cell");
+    assert!(
+        lua.contains("__rock_initialized_cell[5] = true"),
+        "writes mark the initialized cell"
+    );
+    assert!(
+        !lua.contains("__rock_active_session.__rock_state[5]"),
+        "no access may keep the `_G` walk under the bound shape"
+    );
+    assert!(
+        !lua.contains("local __rock_active_state = __rock_active_session.__rock_state"),
+        "state-using functions must not cache a Session table across activation"
+    );
+}
+
+#[test]
+fn global_emission_keeps_the_session_walk() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Global, None);
+    assert!(lua.contains("__rock_active_session.__rock_state[5]"));
+    assert!(
+        !lua.contains("__rock_state_cell["),
+        "an overlay-capable build must never read a chunk-level cell"
+    );
+}
+
+#[test]
+fn state_cell_switch_off_keeps_the_session_walk_under_bound_emission() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, Some(false));
+    assert!(lua.contains("__rock_active_session.__rock_state[5]"));
+    assert!(!lua.contains("__rock_state_cell["));
+}
+
+/// Every path that swaps the active Session -- `__rock_session_activate`, the
+/// direct publisher the state-image code uses, and a transaction abort -- must
+/// reach the cells, or a bound function would read the previous Session.
+#[test]
+fn session_cells_follow_every_session_writer() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    let bump = mangled_name(&lua, "bump");
+    let program = format!(
+        "{lua}
+local a = __rock_active_session
+local schema = __rock_state_schema_id
+print({bump}())
+local b = __rock_session_new(schema)
+__rock_session_activate(b)
+__rock_state_initialize()
+print({bump}())
+__rock_session_publish(a)
+print({bump}())
+__rock_state_transaction_begin()
+__rock_session_activate(b)
+__rock_state_transaction_abort()
+print({bump}())
+"
+    );
+    assert_eq!(run_luajit(&program, "session_cells_writers"), "1\n1\n2\n3");
+}
+
+/// The rule `generated_state_accesses_follow_mid_call_session_swaps` pins, on
+/// the cell shape at runtime: a callee swaps the Session in the middle of the
+/// caller, and the caller's NEXT read sees the new Session.
+#[test]
+fn session_cells_follow_a_mid_call_swap() {
+    let source = r#"
+global COUNTER: int = 0
+
+@nomangle inline(lua) fn swap_to_b() = """
+    __rock_session_publish(_G.__rock_test_session_b)
+"""
+
+fn probe() -> int {
+    let before = COUNTER
+    swap_to_b()
+    return before * 100 + COUNTER
+}
+"#;
+    let lua = emit_shaped(source, CalleeBindingMode::Upvalue, None);
+    let probe = mangled_name(&lua, "probe");
+    let program = format!(
+        "{lua}
+local a = __rock_active_session
+local schema = __rock_state_schema_id
+local b = __rock_session_new(schema)
+__rock_session_activate(b)
+__rock_state_initialize()
+__rock_active_session.__rock_state[5] = 41
+_G.__rock_test_session_b = b
+__rock_session_activate(a)
+__rock_active_session.__rock_state[5] = 7
+print({probe}())
+"
+    );
+    assert_eq!(run_luajit(&program, "session_cells_mid_call"), "741");
+}
+
+// --- Session tables sized from the schema (docs/backends.md, "Session cells") --
+//
+// LuaJIT specialises a constant-key read to the table's CURRENT array/hash
+// split (`ULE asize` / `ABC` guard). `__rock_state` used to start as `{}` and
+// grow lazily, and every rehash (one per hash-part overflow as statics fill in)
+// recomputed the array part from the populated keys, so a trace recorded before
+// a move carried a permanently failing guard: a doomed side exit with the
+// caller's floats live, 468 aborts a run at one site, plus the interpreted
+// remainder of every execution after. The emitter now publishes the schema's
+// rehash fixpoint and the prelude sizes every Session's tables to it.
+
+#[test]
+fn the_emitter_publishes_a_state_capacity_and_reserves_it_before_initializing() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    // COUNTER is slot 5 (`lua_global_session_slots_are_dense_numeric_realizations`):
+    // the array fixpoint is the next power of two above the highest slot, plus
+    // one for index 0; the hash part has a 16-node floor.
+    let line = lua
+        .lines()
+        .find(|l| l.starts_with("_G.__ROCK_STATE_CAPACITY = {"))
+        .expect("capacity line");
+    let nums: Vec<usize> = line
+        .trim_start_matches("_G.__ROCK_STATE_CAPACITY = {")
+        .trim_end_matches('}')
+        .split(", ")
+        .map(|n| n.parse().expect("capacity number"))
+        .collect();
+    assert_eq!(nums[0], 9, "array fixpoint of slot 5 is 8 + 1: {line}");
+    // The hash size counts the stdlib's own statics too, so pin its shape, not
+    // its value: a power of two no smaller than the 16-node floor.
+    assert!(nums[1] >= 16 && nums[1].is_power_of_two(), "hash capacity shape: {line}");
+    let cap = lua.find("_G.__ROCK_STATE_CAPACITY = ").expect("capacity line");
+    let reserve = lua.find("\n__rock_state_reserve_active()\n").expect("reserve call");
+    let init = lua.find("\n__rock_state_initialize()\n").expect("initialize call");
+    assert!(cap < reserve && reserve < init, "capacity, then reserve, then initialize");
+    assert!(
+        lua.contains("__rock_table_new(narr, nhash)"),
+        "sessions must be built with table.new, not `{{}}`"
+    );
+}
+
+#[test]
+fn every_session_carries_the_reserved_capacity_and_keeps_its_values() {
+    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    let bump = mangled_name(&lua, "bump");
+    let program = format!(
+        "{lua}
+local a = __rock_active_session
+local schema = __rock_state_schema_id
+print({bump}())
+local b = __rock_session_new(schema)
+__rock_session_activate(b)
+__rock_state_initialize()
+print({bump}())
+__rock_session_activate(a)
+print({bump}())
+print(a.__rock_state_capacity[1], b.__rock_state_capacity[1],
+  a.__rock_state_capacity[2] == b.__rock_state_capacity[2] and a.__rock_state_capacity[2] >= 16)
+"
+    );
+    assert_eq!(run_luajit(&program, "session_capacity"), "1\n1\n2\n9\t9\ttrue");
 }

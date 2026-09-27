@@ -7,8 +7,8 @@ impl Builder<'_> {
     /// `match scrut { pat => body, ... }` as a value. Each arm is a test block
     /// (branch to its body on match, else to the next arm) and a body block that
     /// binds, checks the guard, then stores its value into a result **cell** and
-    /// jumps to the join. Single-level patterns only: a sub-pattern that needs
-    /// its own test (nested enum) gaps rather than silently skipping the test.
+    /// jumps to the join. A sub-pattern that needs its own test (a nested enum)
+    /// emits it before any child read, so a parent tag gates every child slot.
     pub(crate) fn lower_match(
         &mut self,
         scrut: Idx<Expr>,
@@ -128,7 +128,12 @@ impl Builder<'_> {
                     return Ok(());
                 }
                 let val = self.scrut_value(scrut);
-                let cell = self.f.new_cell_typed(Some(name), self.binding_ty(b));
+                let cell = self.new_binding_cell(
+                    b,
+                    name,
+                    self.binding_ty(b),
+                    Ustr::from(""),
+                );
                 self.emit_cur(Inst::Store { cell, value: val });
                 self.binds.insert(raw(b), cell);
                 Ok(())
@@ -158,6 +163,16 @@ impl Builder<'_> {
                     EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned())
                 });
                 for (i, sp) in sub.into_iter().enumerate() {
+                    // POSITION -> SLOT. They differ once any position ahead of
+                    // this one is widened: `V2(Vec2)` at position 0 spans two
+                    // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
+                    // Indexing by position read the widened value's second leaf
+                    // and handed `nil` to the count.
+                    let slot = flat_shape.as_ref().map_or(i, |s| s.slot_offset(i));
+                    // Thread the sub-pattern's enum (from this variant's payload
+                    // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
+                    // repr -- else an unqualified `J` defaults to the `.__variant`
+                    // table path and faults on a cdata inner enum.
                     let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
                     // A payload position widened to a `nobox` value's leaves binds
                     // THE LEAVES -- rebuilding a box here to bind one cell is the
@@ -171,60 +186,19 @@ impl Builder<'_> {
                             self.bind_leaves(b, &leaves, vs)?;
                             continue;
                         }
-                        if let Some(sub_enum) = sub_enum
-                            && let Some(nested_shape) = EnumPlan::for_name(self.ws, sub_enum)
-                                .and_then(|plan| plan.flat().cloned())
-                        {
-                            let leaves = self.scrut_payload_leaves(
-                                scrut,
-                                i,
-                                &vs,
-                                flat_shape
-                                    .as_ref()
-                                    .ok_or_else(|| gap("flat enum payload lost its compiler-owned shape"))?,
-                            );
-                            let (tag, rest) = leaves
-                                .split_first()
-                                .ok_or_else(|| gap("flat enum payload has no nested tag leaf"))?;
-                            let width = nested_shape.tuple_width();
-                            let record_fields = nested_shape.record_fields();
-                            if rest.len() != width + record_fields.len() {
-                                return Err(gap(
-                                    "nested flat enum payload differs from its compiler-owned shape",
-                                ));
-                            }
-                            let nested_scrut = Scrut::Cells {
-                                tag: *tag,
-                                positional: rest[..width].to_vec(),
-                                named: record_fields
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(index, field)| (*field, rest[width + index]))
-                                    .collect(),
-                                shape: nested_shape,
-                            };
-                            self.match_pattern(
-                                &nested_scrut,
-                                sp,
-                                fail,
-                                variants,
-                                false,
-                                Some(sub_enum),
-                            )?;
+                        // A position widened for a NESTED FLAT ENUM holds that
+                        // enum's own cells, not a value: the inner pattern has to
+                        // test the tag SLOT and read the payload SLOTS. Reading the
+                        // position as one value hands it the inner tag string, and
+                        // `.__variant` on a string matches no arm.
+                        if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
+                            self.match_pattern(&inner, sp, fail, variants, false, sub_enum)?;
                             continue;
                         }
                     }
-                    // POSITION -> SLOT. They differ once any position ahead of
-                    // this one is widened: `V2(Vec2)` at position 0 spans two
-                    // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
-                    // Indexing by position read the widened value's second leaf
-                    // and handed `nil` to the count.
-                    let slot = flat_shape.clone().map_or(i, |s| s.slot_offset(i));
+
                     let payload = self.scrut_payload(scrut, slot, cdata);
-                    // Thread the sub-pattern's enum (from this variant's payload
-                    // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
-                    // repr -- else an unqualified `J` defaults to the `.__variant`
-                    // table path and faults on a cdata inner enum.
+
                     self.match_pattern(&Scrut::Val(payload), sp, fail, variants, false, sub_enum)?;
                 }
                 Ok(())
@@ -520,6 +494,53 @@ impl Builder<'_> {
             .collect()
     }
 
+    /// A widened payload position holding a nested FLAT enum, read as that enum's
+    /// own cells from the parent's slots starting at `slot`. `None` when the
+    /// position is widened for a value struct instead.
+    ///
+    /// The inner enum's OWN plan sizes the read, because that is the plan the
+    /// ctor's leaf bundle writes with (`lower_flat_value` -> `repr_to_leaves_bundle`
+    /// over the inner `Group`): `[__tag, _0.., <rec>..]`. `vs` is what the PARENT
+    /// reserved for the position, so a parent that reserved less than the inner
+    /// plan needs would read a neighbouring position's slot; that is a plan
+    /// disagreement, not something to paper over.
+    fn nested_flat_enum_scrut(
+        &mut self,
+        scrut: &Scrut,
+        slot: usize,
+        vs: &ValueShape,
+    ) -> Result<Option<Scrut>, CompilerError> {
+        let Some(plan) = EnumPlan::for_name(self.ws, vs.name) else {
+            return Ok(None);
+        };
+        let Some(shape) = plan.flat().cloned() else {
+            return Ok(None);
+        };
+        if vs.leaf_count() < shape.leaf_count() {
+            return Err(gap(format!(
+                "nested flat enum `{}` reads {} slots but position reserved {}",
+                shape.name,
+                shape.leaf_count(),
+                vs.leaf_count()
+            )));
+        }
+        let width = shape.tuple_width();
+        let leaves: Vec<Idx<Inst>> =
+            (0..shape.leaf_count()).map(|k| self.scrut_slot(scrut, slot + k)).collect();
+        let named = shape
+            .record_fields
+            .iter()
+            .enumerate()
+            .map(|(k, rf)| (*rf, leaves[1 + width + k]))
+            .collect();
+        Ok(Some(Scrut::Cells {
+            tag: leaves[0],
+            positional: leaves[1..1 + width].to_vec(),
+            named,
+            shape,
+        }))
+    }
+
     /// One raw positional SLOT of the scrutinee (not a position -- a slot).
     fn scrut_slot(&mut self, scrut: &Scrut, slot: usize) -> Idx<Inst> {
         match scrut {
@@ -644,13 +665,10 @@ impl Builder<'_> {
         value: Idx<Expr>,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self
-            .f
-            .new_cell_typed(None, self.current_expr_unit_storage_ty_id());
-        Ok(self
-            .lower_if_let_inner(pattern, value, then_branch, else_branch, Some(result))?
-            .expect("value-position if let returns a result"))
+        result_shape: Option<RetSlot>,
+    ) -> Result<ValueRepr, CompilerError> {
+        self.lower_if_let_inner(pattern, value, then_branch, else_branch, result_shape, false)?
+            .ok_or_else(|| gap("value-position if let produced no result"))
     }
 
     pub(crate) fn lower_if_let_stmt(
@@ -660,7 +678,7 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<(), CompilerError> {
-        self.lower_if_let_inner(pattern, value, then_branch, else_branch, None)
+        self.lower_if_let_inner(pattern, value, then_branch, else_branch, None, true)
             .map(drop)
     }
 
@@ -670,86 +688,235 @@ impl Builder<'_> {
         value: Idx<Expr>,
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
-        result: Option<Idx<Cell>>,
-    ) -> Result<Option<Idx<Inst>>, CompilerError> {
-        if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
-            if self.expr_is_nullable(value) && self.nobox_binding_shape(b)?.is_some() {
-                return self.lower_if_let_nobox(b, value, then_branch, else_branch, result);
-            }
+        result_shape: Option<RetSlot>,
+        statement: bool,
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        enum IfLetScrutinee {
+            Generic,
+            Nobox {
+                binding: Idx<BindingInfo>,
+                values: Vec<Idx<Inst>>,
+                shape: ValueShape,
+                then_bb: Idx<Block>,
+            },
+            Tuple {
+                pattern: Idx<Pattern>,
+                slots: Vec<Idx<Inst>>,
+                shape: TupleRetShape,
+                then_bb: Idx<Block>,
+            },
         }
-        // Any name-only pattern, `Bind` included: the presence is a WIRE slot, so
-        // it has to be the branch condition. Falling through to the general path
-        // instead tests the PACKED tuple against nil -- and a `MakeTuple` is never
-        // nil, so the test const-folds to always-present and the else arm is
-        // deleted, which is the same shape the `??` consumer hit.
-        if self.pattern_is_names_only(pattern) {
-            if let Some(shape) = self.nullable_tuple_wire_shape(value)? {
-                return self.lower_if_let_nullable_tuple(
+
+        let use_repr = result_shape.is_some();
+        let shape = result_shape.unwrap_or(RetSlot::Opaque);
+        let result_count = if statement {
+            0
+        } else if use_repr {
+            shape.slot_count()
+        } else {
+            1
+        };
+        let result_ty = if statement || use_repr {
+            None
+        } else {
+            self.current_expr_unit_storage_ty_id()
+        };
+        let nobox_binding = match self.body.pattern_arena[pattern] {
+            Pattern::Bind(binding) if self.expr_is_nullable(value) => {
+                self.nobox_binding_shape(binding)?.map(|shape| (binding, shape))
+            }
+            _ => None,
+        };
+        let tuple_shape = if nobox_binding.is_none() && self.pattern_is_names_only(pattern) {
+            self.nullable_tuple_wire_shape(value)?
+        } else {
+            None
+        };
+
+        let (scrutinee, results, else_bb, join) = if let Some((binding, binding_shape)) = nobox_binding
+        {
+            let mut scrut_shape = binding_shape.clone();
+            scrut_shape.nullable = true;
+            let bundle = self.lower_expr_repr(value)?;
+            let leaves = self
+                .repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
+            let (present, values) = leaves
+                .split_first()
+                .expect("a nullable shape carries its presence leaf first");
+            let results: Vec<Idx<Cell>> = (0..result_count)
+                .map(|_| {
+                    if use_repr {
+                        self.f.new_cell(None)
+                    } else {
+                        self.f.new_cell_typed(None, result_ty)
+                    }
+                })
+                .collect();
+            let then_bb = self.f.new_block();
+            let else_bb = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch { cond: *present, then_bb, else_bb },
+            );
+            (
+                IfLetScrutinee::Nobox {
+                    binding,
+                    values: values.to_vec(),
+                    shape: binding_shape,
+                    then_bb,
+                },
+                results,
+                else_bb,
+                join,
+            )
+        } else if let Some(tuple_shape) = tuple_shape {
+            let results: Vec<Idx<Cell>> = (0..result_count)
+                .map(|_| {
+                    if use_repr {
+                        self.f.new_cell(None)
+                    } else {
+                        self.f.new_cell_typed(None, result_ty)
+                    }
+                })
+                .collect();
+            let repr = self.lower_expr_repr(value)?.into_value();
+            let ValueRepr::Tuple {
+                parts,
+                present: Some(present),
+            } = repr
+            else {
+                return Err(gap(
+                    "a nullable tuple scrutinee arrived without its presence slot",
+                ));
+            };
+            let bound_shape = TupleRetShape {
+                slots: tuple_shape.slots,
+                nullable: false,
+            };
+            let slots = self.tuple_repr_to_slots(
+                ValueRepr::Tuple { parts, present: None },
+                &bound_shape,
+            )?;
+            let then_bb = self.f.new_block();
+            let else_bb = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch { cond: present, then_bb, else_bb },
+            );
+            (
+                IfLetScrutinee::Tuple {
                     pattern,
-                    value,
-                    &shape,
-                    then_branch,
-                    else_branch,
-                    result,
+                    slots,
+                    shape: bound_shape,
+                    then_bb,
+                },
+                results,
+                else_bb,
+                join,
+            )
+        } else {
+            let results: Vec<Idx<Cell>> = (0..result_count)
+                .map(|_| {
+                    if use_repr {
+                        self.f.new_cell(None)
+                    } else {
+                        self.f.new_cell_typed(None, result_ty)
+                    }
+                })
+                .collect();
+            let scrut = self.lower_scrut(value)?;
+            let else_bb = self.f.new_block();
+            let join = self.f.new_block();
+            if self.expr_is_nullable(value) {
+                let val_v = self.scrut_value(&scrut);
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
+                let cont = self.f.new_block();
+                self.f.set_term(
+                    self.cur,
+                    Term::Branch { cond: is_nil, then_bb: else_bb, else_bb: cont },
                 );
+                self.cur = cont;
             }
+            let variants = self.scrut_variants(value);
+            let scrut_enum = self.scrut_enum_name(value);
+            self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
+            (IfLetScrutinee::Generic, results, else_bb, join)
+        };
+
+        match scrutinee {
+            IfLetScrutinee::Nobox {
+                binding,
+                values,
+                shape,
+                then_bb,
+            } => {
+                self.cur = then_bb;
+                self.bind_leaves(binding, &values, shape)?;
+            }
+            IfLetScrutinee::Tuple {
+                pattern,
+                slots,
+                shape,
+                then_bb,
+            } => {
+                self.cur = then_bb;
+                let mut idx = 0;
+                self.bind_names_slot(pattern, &RetSlot::Nested(shape), &slots, &mut idx)?;
+            }
+            IfLetScrutinee::Generic => {}
         }
-        let scrut = self.lower_scrut(value)?;
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        // A nullable scrutinee (`if let v = some_opt`) fails the bind on nil ->
-        // else branch (the runtime value of a `T?` is the unwrapped value or nil).
-        // A flattened-enum-field scrutinee is never nullable (its type is a bare
-        // enum), so `scrut_value` here is always a plain `Val`.
-        if self.expr_is_nullable(value) {
-            let val_v = self.scrut_value(&scrut);
-            let nil = self.emit_cur(Inst::Const(Lit::Nil));
-            let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
-            let cont = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: else_bb, else_bb: cont });
-            self.cur = cont;
+
+        if statement {
+            self.lower_stmt_expr(then_branch)?;
+            if self.is_open() {
+                self.f.set_term(self.cur, Term::Goto(join));
+            }
+            self.cur = else_bb;
+            if let Some(else_branch) = else_branch {
+                self.lower_stmt_expr(else_branch)?;
+            }
+            if self.is_open() {
+                self.f.set_term(self.cur, Term::Goto(join));
+            }
+            self.cur = join;
+            Ok(None)
+        } else if use_repr {
+            let tv = self.lower_expr_repr(then_branch)?;
+            self.store_bundle_and_join(&results, &shape, &tv, join)?;
+
+            self.cur = else_bb;
+            let ev = match else_branch {
+                Some(eb) => self.lower_expr_repr(eb)?,
+                None => ValueBundle::new(
+                    tv.representation(),
+                    ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+                ),
+            };
+            self.store_bundle_and_join(&results, &shape, &ev, join)?;
+
+            self.cur = join;
+            let slots: Vec<Idx<Inst>> =
+                results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+            let mut idx = 0;
+            Ok(Some(self.slot_repr(&shape, &slots, &mut idx)))
+        } else {
+            let result = results[0];
+            let tv = self.lower_expr(then_branch)?;
+            self.store_and_join(result, tv, join);
+
+            self.cur = else_bb;
+            let ev = match else_branch {
+                Some(eb) => self.lower_expr(eb)?,
+                None => self.emit_cur(Inst::Const(Lit::Nil)),
+            };
+            self.store_and_join(result, ev, join);
+
+            self.cur = join;
+            Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Load(result)))))
         }
-        // Match: failures jump to else_bb; on success `self.cur` holds the bindings.
-        let variants = self.scrut_variants(value);
-        let scrut_enum = self.scrut_enum_name(value);
-        self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
-        self.finish_if_let(then_branch, else_branch, else_bb, join, result)
-    }
-
-    /// `if let q = p` binding a nullable `nobox` value: the scrutinee's presence
-    /// leaf IS the branch condition and `q` binds the remaining leaves as cells,
-    /// so nothing is packed to be tested and immediately unpacked again. Only a
-    /// plain `Bind` takes this path -- a destructuring pattern still matches
-    /// against the boxed scrutinee.
-    fn lower_if_let_nobox(
-        &mut self,
-        b: Idx<BindingInfo>,
-        value: Idx<Expr>,
-        then_branch: Idx<Expr>,
-        else_branch: Option<Idx<Expr>>,
-        result: Option<Idx<Cell>>,
-    ) -> Result<Option<Idx<Inst>>, CompilerError> {
-        let shape = self
-            .nobox_binding_shape(b)?
-            .ok_or_else(|| gap("nullable nobox binding has no scalar shape"))?;
-        let mut scrut_shape = shape.clone();
-        scrut_shape.nullable = true;
-
-        let bundle = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_slot_values_bundle(&bundle, &RetSlot::Leaves(scrut_shape))?;
-        let (present, values) = leaves
-            .split_first()
-            .expect("a nullable shape carries its presence leaf first");
-        let (present, values) = (*present, values.to_vec());
-
-        let then_bb = self.f.new_block();
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
-
-        self.cur = then_bb;
-        self.bind_leaves(b, &values, shape)?;
-        self.finish_if_let(then_branch, else_branch, else_bb, join, result)
     }
 
     /// The DECLARED nullable-tuple shape of a call, without lowering it.
@@ -773,16 +940,12 @@ impl Builder<'_> {
             return Ok(None);
         }
         let arg_idxs: Vec<_> = args.into_iter().collect();
+        if self.fn_field_of_call(e).is_some() {
+            return Ok(None);
+        }
         let any_named = arg_idxs
             .iter()
             .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
-        if !any_named
-            && arg_idxs
-                .first()
-                .is_some_and(|&recv| self.struct_field_is_fn(recv, name))
-        {
-            return Ok(None);
-        }
         if !any_named && self.is_fn_global(name) {
             return Ok(None);
         }
@@ -883,87 +1046,6 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `if let t = <call returning (..)?>` where an element splats: the presence
-    /// SLOT is the branch condition and the pattern binds the remaining slots as
-    /// cells, so nothing is packed to be tested and immediately unpacked again.
-    /// The tuple twin of [`Self::lower_if_let_nobox`].
-    pub(crate) fn lower_if_let_nullable_tuple(
-        &mut self,
-        pattern: Idx<Pattern>,
-        value: Idx<Expr>,
-        shape: &TupleRetShape,
-        then_branch: Idx<Expr>,
-        else_branch: Option<Idx<Expr>>,
-        result: Option<Idx<Cell>>,
-    ) -> Result<Option<Idx<Inst>>, CompilerError> {
-        let repr = self.lower_expr_repr(value)?.into_value();
-        let ValueRepr::Tuple {
-            parts,
-            present: Some(present),
-        } = repr
-        else {
-            return Err(gap("a nullable tuple scrutinee arrived without its presence slot"));
-        };
-        // Presence is consumed by the branch, so what `t` holds is the plain tuple.
-        let bound_shape = TupleRetShape { slots: shape.slots.clone(), nullable: false };
-
-        let then_bb = self.f.new_block();
-        let else_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
-
-        self.cur = then_bb;
-        let slots = self.tuple_repr_to_slots(
-            ValueRepr::Tuple { parts, present: None },
-            &bound_shape,
-        )?;
-        // ONE dispatcher for every pattern shape: a single name takes the whole
-        // tuple's slot cells, a destructure takes each element's, and anything
-        // that does not line up packs -- which is where a whole-tuple use of a
-        // `nobox` element meets the guarantee's rejection.
-        let mut idx = 0;
-        self.bind_names_slot(pattern, &RetSlot::Nested(bound_shape), &slots, &mut idx)?;
-        self.finish_if_let(then_branch, else_branch, else_bb, join, result)
-    }
-
-    fn finish_if_let(
-        &mut self,
-        then_branch: Idx<Expr>,
-        else_branch: Option<Idx<Expr>>,
-        else_bb: Idx<Block>,
-        join: Idx<Block>,
-        result: Option<Idx<Cell>>,
-    ) -> Result<Option<Idx<Inst>>, CompilerError> {
-        if let Some(result) = result {
-            let then_value = self.lower_expr(then_branch)?;
-            self.store_and_join(result, then_value, join);
-
-            self.cur = else_bb;
-            let else_value = match else_branch {
-                Some(else_branch) => self.lower_expr(else_branch)?,
-                None => self.emit_cur(Inst::Const(Lit::Nil)),
-            };
-            self.store_and_join(result, else_value, join);
-
-            self.cur = join;
-            return Ok(Some(self.emit_cur(Inst::Load(result))));
-        }
-
-        self.lower_stmt_expr(then_branch)?;
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
-        self.cur = else_bb;
-        if let Some(else_branch) = else_branch {
-            self.lower_stmt_expr(else_branch)?;
-        }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
-        self.cur = join;
-        Ok(None)
-    }
-
     /// `while let pat = value { body }`: re-evaluate `value` each iteration in
     /// the header, match it, run the body on success, exit on failure.
     pub(crate) fn lower_while_let(
@@ -1016,7 +1098,12 @@ impl Builder<'_> {
         high: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let i_cell = self.f.new_cell(Some(self.body.binding_arena[var_b].name));
+        let i_cell = self.new_binding_cell(
+            var_b,
+            self.body.binding_arena[var_b].name,
+            self.binding_ty(var_b),
+            Ustr::from(""),
+        );
         self.binds.insert(raw(var_b), i_cell);
         self.f.mark_loop_binding(i_cell);
         let lo_v = self.lower_expr(low)?;
