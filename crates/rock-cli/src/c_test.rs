@@ -3,6 +3,7 @@ use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{FLOAT_REL_TOL, compare_value, parse_skull_markers, reason_histogram};
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
+use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,55 @@ pub struct CSuiteSummary {
     pub tests_skipped: usize,
     pub unit_failures: usize,
     pub skip_reasons: Vec<(String, usize)>,
+    pub required_failures: Vec<String>,
+}
+
+#[derive(Debug)]
+enum RequiredTestOutcome {
+    Passed,
+    Failed(String),
+    Skipped(String),
+}
+
+struct RequiredTestGate {
+    required: HashSet<String>,
+    seen: HashSet<String>,
+    failures: Vec<String>,
+}
+
+impl RequiredTestGate {
+    fn new(required: &[String]) -> Self {
+        Self {
+            required: required.iter().cloned().collect(),
+            seen: HashSet::new(),
+            failures: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, name: &str, outcome: RequiredTestOutcome) {
+        if !self.required.contains(name) {
+            return;
+        }
+        self.seen.insert(name.to_string());
+        match outcome {
+            RequiredTestOutcome::Passed => {}
+            RequiredTestOutcome::Failed(detail) => self
+                .failures
+                .push(format!("required test `{name}` failed: {detail}")),
+            RequiredTestOutcome::Skipped(reason) => self
+                .failures
+                .push(format!("required test `{name}` was skipped: {reason}")),
+        }
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        for name in self.required.difference(&self.seen) {
+            self.failures
+                .push(format!("required test `{name}` was not discovered"));
+        }
+        self.failures.sort();
+        self.failures
+    }
 }
 
 struct CheckedFile {
@@ -88,14 +138,14 @@ fn c_foreign_provider(library: &str) -> Option<CForeignProvider> {
     }
 }
 
-pub fn c_test(paths: &[String]) -> Result<()> {
+pub fn c_test(paths: &[String], required_tests: &[String]) -> Result<()> {
     let probe = Command::new("clang").arg("--version").output();
     if !matches!(probe, Ok(ref output) if output.status.success()) {
         anyhow::bail!("C backend requires `clang` on PATH");
     }
 
     let start = Instant::now();
-    let summary = c_test_run(paths, true)?;
+    let summary = c_test_run_with_required_tests(paths, true, required_tests)?;
     println!(
         "\nc backend: {}/{} @tests passed ({} failed, {} skipped) across {} files ({:.2}s)",
         summary.tests_passed.to_string().green(),
@@ -121,15 +171,33 @@ pub fn c_test(paths: &[String]) -> Result<()> {
             println!("  {:>5}  {}", count.to_string().yellow(), reason);
         }
     }
+    if !summary.required_failures.is_empty() {
+        println!("\n{}", "=== required test failures (c) ===".bold());
+        for failure in &summary.required_failures {
+            println!("  {} {}", "FAIL".red(), failure);
+        }
+    }
 
     let ablation_fatals = crate::ablation_report::report("rock test --backend c");
-    if summary.tests_failed > 0 || summary.unit_failures > 0 || ablation_fatals {
+    if summary.tests_failed > 0
+        || summary.unit_failures > 0
+        || !summary.required_failures.is_empty()
+        || ablation_fatals
+    {
         std::process::exit(1);
     }
     Ok(())
 }
 
 pub fn c_test_run(paths: &[String], print: bool) -> Result<CSuiteSummary> {
+    c_test_run_with_required_tests(paths, print, &[])
+}
+
+fn c_test_run_with_required_tests(
+    paths: &[String],
+    print: bool,
+    required_tests: &[String],
+) -> Result<CSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
     let mut summary = CSuiteSummary {
         files: 0,
@@ -138,15 +206,17 @@ pub fn c_test_run(paths: &[String], print: bool) -> Result<CSuiteSummary> {
         tests_skipped: 0,
         unit_failures: 0,
         skip_reasons: Vec::new(),
+        required_failures: Vec::new(),
     };
     let mut all_skip_reasons = Vec::new();
+    let mut required_gate = RequiredTestGate::new(required_tests);
 
     for file in &files {
         record_unit(
             &mut summary,
             &mut all_skip_reasons,
             short_path(file),
-            build_file(file),
+            build_file(file, &mut required_gate),
             print,
         );
     }
@@ -155,11 +225,12 @@ pub fn c_test_run(paths: &[String], print: bool) -> Result<CSuiteSummary> {
             &mut summary,
             &mut all_skip_reasons,
             short_path(dir),
-            build_package(dir),
+            build_package(dir, &mut required_gate),
             print,
         );
     }
     summary.skip_reasons = reason_histogram(all_skip_reasons.iter().map(String::as_str));
+    summary.required_failures = required_gate.finish();
     Ok(summary)
 }
 
@@ -223,7 +294,7 @@ fn record_unit(
     }
 }
 
-fn build_file(file: &str) -> CUnitOutcome {
+fn build_file(file: &str, required_gate: &mut RequiredTestGate) -> CUnitOutcome {
     let checked = match check_file(file) {
         Ok(checked) => checked,
         Err(error) => {
@@ -256,7 +327,7 @@ fn build_file(file: &str) -> CUnitOutcome {
             };
         }
     };
-    run_tests(file, &checked.ws, &tests)
+    run_tests(file, &checked.ws, &tests, required_gate)
 }
 
 fn check_file(file: &str) -> std::result::Result<CheckedFile, FileCheckError> {
@@ -298,7 +369,7 @@ fn check_file(file: &str) -> std::result::Result<CheckedFile, FileCheckError> {
     })
 }
 
-fn build_package(dir: &str) -> CUnitOutcome {
+fn build_package(dir: &str, required_gate: &mut RequiredTestGate) -> CUnitOutcome {
     let checked = match check_project(dir, false) {
         Ok(checked) => checked,
         Err(error) => {
@@ -317,7 +388,7 @@ fn build_package(dir: &str) -> CUnitOutcome {
             };
         }
     };
-    run_tests(dir, &checked.ws, &tests)
+    run_tests(dir, &checked.ws, &tests, required_gate)
 }
 
 fn check_project(
@@ -381,6 +452,7 @@ fn run_tests(
     path: &str,
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
+    required_gate: &mut RequiredTestGate,
 ) -> CUnitOutcome {
     let mut passed = 0;
     let mut fails = Vec::new();
@@ -390,6 +462,10 @@ fn run_tests(
             let emitted = match skull_codegen_c::emit_test(ws, *func) {
                 Ok(emitted) => emitted,
                 Err(error) => {
+                    required_gate.record(
+                        &test.name,
+                        RequiredTestOutcome::Skipped(error.message.clone()),
+                    );
                     skips.push((test.name.clone(), error.message));
                     continue;
                 }
@@ -400,33 +476,66 @@ fn run_tests(
                         let got = stdout.trim_end();
                         if got == expected {
                             passed += 1;
+                            required_gate
+                                .record(&test.name, RequiredTestOutcome::Passed);
                         } else {
-                            fails.push(format!(
-                                "{}: output mismatch: expected <{:?}> got <{:?}>",
-                                test.name, expected, got
-                            ));
+                            let detail = format!(
+                                "output mismatch: expected <{:?}> got <{:?}>",
+                                expected, got
+                            );
+                            required_gate.record(
+                                &test.name,
+                                RequiredTestOutcome::Failed(detail.clone()),
+                            );
+                            fails.push(format!("{}: {detail}", test.name));
                         }
                     } else {
                         passed += 1;
+                        required_gate.record(&test.name, RequiredTestOutcome::Passed);
                     }
                 }
-                Err(detail) => fails.push(format!("{}: {detail}", test.name)),
+                Err(detail) => {
+                    required_gate.record(
+                        &test.name,
+                        RequiredTestOutcome::Failed(detail.clone()),
+                    );
+                    fails.push(format!("{}: {detail}", test.name));
+                }
             }
             continue;
         };
         let emitted = match skull_codegen_c::emit_value_test(ws, *func, &test.name) {
             Ok(emitted) => emitted,
             Err(error) => {
+                required_gate.record(
+                    &test.name,
+                    RequiredTestOutcome::Skipped(error.message.clone()),
+                );
                 skips.push((test.name.clone(), error.message));
                 continue;
             }
         };
         match compile_and_run(&test.name, &emitted.source) {
             Ok(value) => match compare_value(expect, &value, FLOAT_REL_TOL) {
-                Ok(()) => passed += 1,
-                Err(detail) => fails.push(format!("{}: {detail}", test.name)),
+                Ok(()) => {
+                    passed += 1;
+                    required_gate.record(&test.name, RequiredTestOutcome::Passed);
+                }
+                Err(detail) => {
+                    required_gate.record(
+                        &test.name,
+                        RequiredTestOutcome::Failed(detail.clone()),
+                    );
+                    fails.push(format!("{}: {detail}", test.name));
+                }
             },
-            Err(detail) => fails.push(format!("{}: {detail}", test.name)),
+            Err(detail) => {
+                required_gate.record(
+                    &test.name,
+                    RequiredTestOutcome::Failed(detail.clone()),
+                );
+                fails.push(format!("{}: {detail}", test.name));
+            }
         }
     }
     CUnitOutcome::Ran {
@@ -887,6 +996,52 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn required_test_gate_rejects_missing_names() {
+        let required = vec!["mag_world::missing_test".to_string()];
+        let failures = super::RequiredTestGate::new(&required).finish();
+        assert_eq!(
+            failures,
+            ["required test `mag_world::missing_test` was not discovered"]
+        );
+    }
+
+    #[test]
+    fn required_test_gate_fails_required_skips_but_ignores_unrequired_skips() {
+        let required = vec!["mag_world::required_test".to_string()];
+        let mut gate = super::RequiredTestGate::new(&required);
+        gate.record(
+            "mag_world::required_test",
+            super::RequiredTestOutcome::Skipped("unsupported emitter case".to_string()),
+        );
+        gate.record(
+            "mag_world::optional_test",
+            super::RequiredTestOutcome::Skipped("unsupported emitter case".to_string()),
+        );
+        assert_eq!(
+            gate.finish(),
+            ["required test `mag_world::required_test` was skipped: unsupported emitter case"]
+        );
+    }
+
+    #[test]
+    fn required_test_gate_keeps_failures_and_accepts_passes() {
+        let required = vec![
+            "mag_world::failed_test".to_string(),
+            "mag_world::passed_test".to_string(),
+        ];
+        let mut gate = super::RequiredTestGate::new(&required);
+        gate.record(
+            "mag_world::failed_test",
+            super::RequiredTestOutcome::Failed("assertion mismatch".to_string()),
+        );
+        gate.record("mag_world::passed_test", super::RequiredTestOutcome::Passed);
+        assert_eq!(
+            gate.finish(),
+            ["required test `mag_world::failed_test` failed: assertion mismatch"]
+        );
+    }
+
+    #[test]
     fn c_link_plan_rejects_an_unregistered_foreign_provider() {
         let emitted = skull_codegen_c::CProgram {
             source: "#include <unknown.h>\n".to_string(),
@@ -921,6 +1076,7 @@ mod tests {
         assert_eq!(summary.tests_failed, 0);
         assert_eq!(summary.tests_skipped, 0);
         assert_eq!(summary.unit_failures, 0);
+        assert!(summary.required_failures.is_empty());
     }
 
     #[test]
@@ -935,6 +1091,7 @@ mod tests {
         assert_eq!(summary.tests_failed, 0);
         assert_eq!(summary.tests_skipped, 0);
         assert_eq!(summary.unit_failures, 0);
+        assert!(summary.required_failures.is_empty());
     }
 
     #[test]

@@ -24,6 +24,7 @@ impl CommandContext {
 
     /// Run the command directly without server
     pub fn run(&self) -> Result<()> {
+        self.require_required_test_support()?;
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
@@ -583,7 +584,7 @@ impl CommandContext {
             }
             CliCommand::Test => {
                 let files = self.get_test_files()?;
-                crate::c_test::c_test(&files)
+                crate::c_test::c_test(&files, &self.args.required_tests)
             }
             CliCommand::Run => {
                 let file = self.get_required_file("run")?;
@@ -1042,5 +1043,56 @@ impl CommandContext {
         }
         self.require_backend_support()?;
         self.run_command_skull()
+    }
+
+    fn require_required_test_support(&self) -> Result<()> {
+        if !self.args.required_tests.is_empty()
+            && (self.args.command != CliCommand::Test || self.args.backend != Backend::C)
+        {
+            anyhow::bail!("`--require-test` is supported only by `rock test --backend c`");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod required_test_dispatch_tests {
+    use super::CommandContext;
+
+    fn context(argv: &[&str]) -> CommandContext {
+        let matches = crate::Args::command()
+            .try_get_matches_from(argv)
+            .expect("parse CLI arguments");
+        CommandContext::new(crate::Args::from_matches(matches))
+    }
+
+    #[test]
+    fn required_test_flag_rejects_a_non_c_backend_before_dispatch() {
+        let error = context(&["rock", "test", "mag-world", "--require-test", "test_name"])
+            .run()
+            .expect_err("the default Skull backend cannot honor --require-test");
+        assert!(
+            error.to_string().contains("only by `rock test --backend c`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn required_test_flag_rejects_a_non_test_command_before_dispatch() {
+        let error = context(&[
+            "rock",
+            "run",
+            "unused.rock",
+            "--backend",
+            "c",
+            "--require-test",
+            "test_name",
+        ])
+        .run()
+        .expect_err("the C run command cannot honor --require-test");
+        assert!(
+            error.to_string().contains("only by `rock test --backend c`"),
+            "{error}"
+        );
     }
 }

@@ -609,6 +609,8 @@ fn resolve_backend(explicit: Option<Backend>, _command: CliCommand) -> Backend {
 pub struct Args {
     pub command: CliCommand,
     pub files: Vec<String>,
+    /// Named tests that must be discovered and pass under `rock test --backend c`.
+    pub required_tests: Vec<String>,
     pub output: Option<String>,
     /// For `rock sim`: opt into a complete sim-wide gross Lua allocation
     /// census and write its machine-readable artifact to this path.
@@ -819,6 +821,13 @@ impl Args {
                     .value_parser(clap::value_parser!(CliCommand)),
             )
             .arg(Arg::new("files").num_args(0..))
+            .arg(
+                Arg::new("require-test")
+                    .long("require-test")
+                    .value_name("NAME")
+                    .action(ArgAction::Append)
+                    .help("For `rock test --backend c`: require this named @test to be discovered and pass (repeatable)."),
+            )
             .arg(Arg::new("output").long("output").alias("out"))
             .arg(Arg::new("allocation-census").long("allocation-census")
                 .value_name("PATH")
@@ -998,6 +1007,7 @@ impl Args {
         Args {
             command,
             files: many_str("files"),
+            required_tests: many_str("require-test"),
             output: m.get_one::<String>("output").cloned(),
             allocation_census: m.get_one::<String>("allocation-census").cloned(),
             allocation_sites: m.get_one::<String>("allocation-sites").cloned(),
@@ -1137,7 +1147,7 @@ impl Args {
 
 #[cfg(test)]
 mod arg_tests {
-    use super::{Args, Backend};
+    use super::{Args, Backend, CliCommand};
 
     #[test]
     fn sibling_daemon_bin_is_the_daemon_next_to_rock_or_nothing() {
@@ -1213,10 +1223,26 @@ mod arg_tests {
     fn c_backend_parses_for_test() {
         let args = Args::from_matches(
             Args::command()
-                .try_get_matches_from(["rock", "test", "tests/c_backend_smoke.rock", "--backend", "c"])
+                .try_get_matches_from([
+                    "rock",
+                    "test",
+                    "mag-world",
+                    "--backend",
+                    "c",
+                    "--require-test",
+                    "mag_world::first_test",
+                    "--require-test",
+                    "mag_world::second_test",
+                ])
                 .expect("parse"),
         );
         assert_eq!(args.backend, Backend::C);
+        assert_eq!(args.command, CliCommand::Test);
+        assert_eq!(args.files, ["mag-world"]);
+        assert_eq!(
+            args.required_tests,
+            ["mag_world::first_test", "mag_world::second_test"]
+        );
     }
 
     #[test]
