@@ -1346,3 +1346,34 @@ fn v1_shader_identifiers_and_intrinsics_validate_on_both_wgsl_pipelines() {
     assert!(fullscreen.source.contains(" + vec2<f32>("));
     assert_naga_valid(&fullscreen.source);
 }
+
+const FRAG_DEPTH_SHADER: &str = r#"
+value DepthAttrs { pos: Vec2 }
+value DepthVary { position: Vec4, depth: float }
+value DepthOut { FragColor: Vec4, FragDepth: float }
+
+@shader(vertex)
+fn depth_vert(@attr a: DepthAttrs) -> DepthVary {
+    return DepthVary { position: Vec4 { x: a.pos.x, y: a.pos.y, z: 0.0, w: 1.0 }, depth: a.pos.x }
+}
+
+@shader(fragment)
+fn depth_frag(vary: DepthVary) -> DepthOut {
+    return DepthOut { FragColor: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 }, FragDepth: vary.depth }
+}
+"#;
+
+/// WGSL is a paused lane: a fragment depth output is a spanned rejection, never
+/// a silently dropped field.
+#[test]
+fn frag_depth_output_is_rejected_by_wgsl() {
+    let error = match try_explicit_artifact_source(FRAG_DEPTH_SHADER, "depth_vert", "depth_frag") {
+        Ok(artifact) => panic!("WGSL must reject FragDepth, emitted:\n{}", artifact.source),
+        Err(error) => error,
+    };
+    assert!(
+        error.message.contains("WGSL") && error.message.contains("FragDepth"),
+        "unexpected rejection: {}",
+        error.message
+    );
+}
