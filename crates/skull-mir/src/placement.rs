@@ -184,8 +184,10 @@ fn known_outlives(value: Place, destination: Place) -> Option<bool> {
     match (value, destination) {
         (Place::Pending, _) | (_, Place::Pending) => None,
         (Place::Static, _) => Some(true),
-        (left, right) if left == right => Some(true),
+        // Equal unresolved categories do not identify the same owner.
         (Place::Unknown, _) | (_, Place::Unknown) => None,
+        (Place::RuntimeAny, Place::RuntimeAny) => None,
+        (left, right) if left == right => Some(true),
         (Place::Param(_) | Place::Destination, _) | (_, Place::Param(_) | Place::Destination) => {
             None
         }
@@ -197,7 +199,6 @@ fn known_outlives(value: Place, destination: Place) -> Option<bool> {
         (Place::RuntimeAny, Place::Frame) => Some(true),
         (Place::Runtime(left), Place::Runtime(right)) => Some(left == right),
         (Place::Runtime(_), Place::RuntimeAny) | (Place::RuntimeAny, Place::Runtime(_)) => None,
-        (Place::RuntimeAny, Place::RuntimeAny) => None,
         (Place::Frame, Place::Frame) => Some(true),
         _ => Some(false),
     }
@@ -2307,6 +2308,22 @@ mod tests {
             None
         );
         assert_eq!(export_place(Place::RuntimeAny), Place::Frame);
+    }
+
+    #[test]
+    fn unresolved_places_do_not_prove_same_owner_by_category() {
+        assert_eq!(known_outlives(Place::Static, Place::Unknown), Some(true));
+        assert_eq!(known_outlives(Place::RuntimeAny, Place::Frame), Some(true));
+        for place in [Place::Unknown, Place::RuntimeAny] {
+            assert_eq!(known_outlives(place, place), None);
+            let mut analysis = PlacementAnalysis::default();
+            add_constraint(&mut analysis, place, place, Span::default());
+            assert_eq!(analysis.violations.len(), 1);
+            assert_eq!(
+                analysis.violations[0].kind,
+                PlacementViolationKind::UnknownProvenance
+            );
+        }
     }
 
     #[test]
