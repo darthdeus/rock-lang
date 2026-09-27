@@ -892,10 +892,14 @@ fn callee_inst_at(
 struct MainOut {
     /// Field name -> GLSL type (the assignment target's type).
     fields: HashMap<Ustr, GlslTy>,
-    /// Vertex only: a `position` field becomes `gl_Position` (suppressed as a
-    /// named output). Fragment MRT has no such remap -- every field is an out.
-    position_is_gl: bool,
+    /// The one field that is a GL builtin rather than a named output:
+    /// vertex `position` -> `gl_Position`, fragment `FragDepth` ->
+    /// `gl_FragDepth`. `(field, builtin, type)`.
+    builtin: Option<(&'static str, &'static str, GlslTy)>,
 }
+
+/// The fragment output field that is written to `gl_FragDepth`.
+const FRAG_DEPTH_FIELD: &str = "FragDepth";
 
 #[derive(Clone, Copy)]
 struct LoopInfo {
@@ -1906,7 +1910,8 @@ impl FnEmit<'_> {
     fn emit_return(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
         // `void main()` mode: `return <Struct { field, ... }>` destructures into a
         // named global assignment per field -- vertex varyings (a `position` field
-        // -> gl_Position) or MRT fragment outputs.
+        // -> gl_Position) or MRT fragment outputs (a `FragDepth` field ->
+        // gl_FragDepth).
         if let Some(mo) = self.main_out.clone() {
             let [v] = vs else {
                 return Err(err(self.span(), "shader entry: a void-main entry must return its output struct"));
@@ -1924,8 +1929,9 @@ impl FnEmit<'_> {
                 }
             };
             for (name, val) in fields {
-                let (target, want) = if mo.position_is_gl && name.as_str() == "position" {
-                    ("gl_Position".to_string(), GlslTy::Vec4)
+                let builtin = mo.builtin.filter(|(field, _, _)| name.as_str() == *field);
+                let (target, want) = if let Some((_, gl, ty)) = builtin {
+                    (gl.to_string(), ty)
                 } else {
                     // bone typechecks the returned struct against the varyings/MRT
                     // struct, so every field is in the map. Reject rather than
@@ -4059,6 +4065,9 @@ struct FragShape {
     /// `Single` for the implicit `FragColor` (`I32` for an R32I-only target).
     /// This IS the interface's answer, not a GLSL-typed copy of it.
     output: FragmentOutput,
+    /// The output struct carries a `FragDepth: float` field (gl_FragDepth),
+    /// which is excluded from `output`.
+    frag_depth: bool,
 }
 
 fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
@@ -4536,6 +4545,9 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
     // (MRT -- one `layout(location=N) out <ty> <field>` per field, in order;
     // int fields feed R32I attachments).
+    // A `FragDepth: float` field is gl_FragDepth, not an MRT output: it takes
+    // no location, so the colour fields keep theirs.
+    let mut frag_depth = false;
     let output = match f.return_ty.map(|rt| (rt, glsl_ty(ws, &SpecSubst::default(), rt, span, "return"))) {
         Some((_, Ok(GlslTy::Vec4))) => FragmentOutput::Single(WireKind::F32x4),
         Some((_, Ok(GlslTy::Int))) => FragmentOutput::Single(WireKind::I32),
@@ -4546,6 +4558,16 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
             let mut outs = Vec::new();
             for fd in &sd.fields {
                 let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("MRT output `{}`", fd.name))?;
+                if fd.name.as_str() == FRAG_DEPTH_FIELD {
+                    if fty != GlslTy::Float {
+                        return Err(err(span, format!(
+                            "shader fragment: `{FRAG_DEPTH_FIELD}` must be float (window-space depth in [0,1], written to gl_FragDepth), found {}",
+                            fty.name()
+                        )));
+                    }
+                    frag_depth = true;
+                    continue;
+                }
                 if fty != GlslTy::Vec4 && fty != GlslTy::Int {
                     return Err(err(span, format!(
                         "shader fragment: MRT output `{}` ({}) must be Vec4 or int (each output is a `layout(location=N) out <ty>`)",
@@ -4555,7 +4577,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
                 outs.push((fd.name, wire_kind_of(fty)));
             }
             if outs.is_empty() {
-                return Err(err(span, "shader fragment: the MRT output struct must have at least one field"));
+                return Err(err(span, "shader fragment: the MRT output struct must have at least one colour (Vec4/int) field besides `FragDepth`"));
             }
             FragmentOutput::Mrt(outs)
         }
@@ -4572,6 +4594,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         samplers,
         arrays,
         output,
+        frag_depth,
     })
 }
 
@@ -4622,7 +4645,7 @@ fn emit_vertex_stage(
         arrays: v.arrays.iter().map(|a| a.param).collect(),
         main_out: Some(MainOut {
             fields: iface.varyings.iter().map(|v| (v.name, wire_glsl(v.kind))).collect(),
-            position_is_gl: true,
+            builtin: Some(("position", "gl_Position", GlslTy::Vec4)),
         }),
     };
     let (mf, helpers, dependencies) =
@@ -4703,7 +4726,7 @@ fn emit_fragment_stage(
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
     let main_out = interface_mrt_outputs(iface).as_ref().map(|outs| MainOut {
         fields: outs.iter().copied().collect(),
-        position_is_gl: false,
+        builtin: iface.frag_depth.then_some((FRAG_DEPTH_FIELD, "gl_FragDepth", GlslTy::Float)),
     });
     let shape = EntryShape {
         global_params: std::iter::once(fs.varyings_param)
@@ -5061,6 +5084,7 @@ fn plan_shader_pipeline_inner(
         vertex_inputs: vshape.inputs.clone(),
         varyings: varyings.varyings.clone(),
         fragment_output: fshape.output.clone(),
+        frag_depth: fshape.frag_depth,
         bare_samplers: bare_sampler_list(
             &vshape.samplers,
             &vshape.texture_params,

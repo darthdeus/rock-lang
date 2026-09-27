@@ -530,6 +530,11 @@ pub struct ShaderInterfacePlan {
     pub compute: Option<ComputeInterfacePlan>,
     /// How the fragment stage's colour output is shaped.
     pub fragment_output: FragmentOutput,
+    /// The fragment entry's output struct carries a `FragDepth: float` field
+    /// (window-space depth in [0,1]). It is not a colour output, so it is
+    /// absent from `fragment_output` and from the semantic wire: the engine
+    /// binds nothing for it, and its colour-attachment count must not see it.
+    pub frag_depth: bool,
 }
 
 /// The fragment stage's output shape.

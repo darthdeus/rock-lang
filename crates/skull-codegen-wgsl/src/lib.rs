@@ -1173,10 +1173,24 @@ fn uniform_role_key(role: UniformRole) -> u8 {
     }
 }
 
+/// WGSL does not project a fragment depth output yet (`@builtin(frag_depth)`).
+/// Reject it rather than emit a program that silently drops the depth write.
+fn reject_frag_depth(iface: &ShaderInterfacePlan, span: Span) -> Result<(), CompilerError> {
+    if iface.frag_depth {
+        return Err(unsupported_err(
+            span,
+            "fragment depth output",
+            "WGSL projection does not support a `FragDepth` fragment output (gl_FragDepth) yet",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_fullscreen_interface(
     iface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
+    reject_frag_depth(iface, span)?;
     if iface.compute.is_some() || iface.stages.contains(&ShaderStage::Compute) {
         return Err(err(
             span,
@@ -1295,6 +1309,7 @@ fn validate_explicit_interface(
     iface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
+    reject_frag_depth(iface, span)?;
     if iface.compute.is_some() || iface.stages.contains(&ShaderStage::Compute) {
         return Err(err(
             span,
