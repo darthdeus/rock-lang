@@ -24,7 +24,7 @@ struct ArenaStore<T> {
     next_generation: int = 0,
 }
 
-struct ArenaGenerationSnapshot {
+value ArenaGenerationSnapshot {
     generations: [int],
     free_indices: [int],
     next_generation: int,
