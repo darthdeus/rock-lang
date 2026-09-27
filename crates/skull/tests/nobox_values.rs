@@ -1780,3 +1780,100 @@ fn a_loop_element_binds_a_nobox_value_by_leaves() {
         "3 -1"
     );
 }
+
+// A GC-tier `value` (its array field keeps it off the cdata and leaf-table
+// tiers) holding `nobox` fields: the `ScenarioMap` shape.
+const NOBOX_IN_GC_VALUE_DECLS: &str = r#"
+nobox value Id { value: int }
+nobox value Grid { x: int, y: int }
+value Map { space: Id, size: Grid, tiles: [int] }
+struct World { map: Map, n: int }
+enum Slot { Empty, Has(Map) }
+fn total(m: Map) -> int { return m.space.value + m.size.x + m.size.y + m.tiles.len() }
+"#;
+
+fn nobox_in_gc_value_src(site: &str, main: &str) -> String {
+    format!("{NOBOX_IN_GC_VALUE_DECLS}{site}\nfn main() {{ {main} }}\n")
+}
+
+// Positions that carry the outer value as leaves: a flat-enum payload and a
+// scalar-ABI argument. Neither builds the `Map_vt` box, so neither boxes a
+// nobox field.
+const NOBOX_IN_GC_VALUE_LEAF_SITES: [(&str, &str, &str, &str); 2] = [
+    (
+        "enum payload",
+        "fn site(s: int) -> Slot { return Slot::Has(Map { space: Id { value: s }, size: Grid { x: 1, y: 1 }, tiles: [] }) }",
+        "match site(7) { Slot::Has(m) => print(m.space.value + m.size.x), Slot::Empty => print(-1) }",
+        "8",
+    ),
+    (
+        "call argument",
+        "fn site(s: int) -> int { return total(Map { space: Id { value: s }, size: Grid { x: 1, y: 1 }, tiles: [9] }) }",
+        "print(site(7))",
+        "10",
+    ),
+];
+
+#[test]
+fn a_gc_tier_value_threaded_as_leaves_keeps_its_nobox_fields_unboxed() {
+    for (what, site, main, expected) in NOBOX_IN_GC_VALUE_LEAF_SITES {
+        let lua = match try_emit_module(&nobox_in_gc_value_src(site, main)) {
+            Ok(lua) => lua,
+            Err(e) => panic!("the {what} site must emit: {e:?}"),
+        };
+        let body = function_body(&lua, "site");
+        assert!(
+            !body.contains("Id_ct(") && !body.contains("Grid_ct(") && !body.contains("Map_vt("),
+            "the {what} site boxed:\n{body}"
+        );
+        assert_eq!(
+            run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_leaves"),
+            expected,
+            "the {what} site"
+        );
+    }
+}
+
+// Positions that store the outer value in a table slot, so its `Map_vt` box
+// is real.
+const NOBOX_IN_GC_VALUE_BOXED_SITES: [(&str, &str); 2] = [
+    (
+        "struct literal field",
+        "fn site(s: int) -> World { return World { map: Map { space: Id { value: s }, size: Grid { x: 2, y: 3 }, tiles: [4] }, n: 1 } }",
+    ),
+    (
+        "Vec element",
+        "fn site(s: int) -> [Map] { return [Map { space: Id { value: s }, size: Grid { x: 1, y: 1 }, tiles: [] }] }",
+    ),
+];
+
+// PINNED BUG (sentinel, docs/test-sentinels.md). Correct behavior: the
+// `Map_vt` box stores its `nobox` fields as leaves, the way a plain struct and
+// a leaf-table value already do, so both sites emit and neither builds an
+// `Id_ct`/`Grid_ct` box. Today the GC tier's `_vt` table is keyed by DECLARED
+// field (`StructFieldPlan::Direct` for a nobox child of a `GcTable` parent;
+// `pack_group_fields` packs each part whole), so the child is boxed and the
+// nobox verifier rejects it. The C backend accepts the same program. The fix
+// changes the `_vt` physical layout; see "Not covered by this fix" in
+// docs/nobox-nested-ctor-plan.md.
+// This passes today because the bug exists. When a site stops rejecting, flip
+// this to the leaf-site test's assertions (emits, runs, no `Id_ct(`/`Grid_ct(`),
+// and flip `an_implicit_box_under_a_gc_tier_parent_is_rejected_with_a_span`
+// in nobox_materialize_gc_tier.rs with it.
+#[test]
+fn a_stored_gc_tier_value_boxes_its_nobox_fields_sentinel() {
+    for (what, site) in NOBOX_IN_GC_VALUE_BOXED_SITES {
+        let err = match try_emit_module(&nobox_in_gc_value_src(site, "let _ = site(7)")) {
+            Ok(_) => panic!(
+                "PINNED BEHAVIOR (BUG): the {what} site now emits. The GC-tier nobox gap \
+                 is fixed there -- flip this sentinel."
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.message.contains("survived lowering as an implicit materialization"),
+            "the {what} site was rejected for an unrelated reason: {err:?}"
+        );
+        assert!(err.location.line > 0, "the {what} rejection lost its span: {err:?}");
+    }
+}
