@@ -154,7 +154,7 @@ fn direct_refs(
         for &iid in &block.insts {
             match &mf.insts[iid] {
                 Inst::Global(n) => globals.push(*n),
-                Inst::Call { func, .. } => {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                     let f = &ws.module(func.module).functions[func.func];
                     calls.push(Ustr::from(&mangle_fn(ws, f)));
                 }

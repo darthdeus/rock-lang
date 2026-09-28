@@ -2440,6 +2440,16 @@ mod tests {
                    fn read_b() -> int { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
     }
 
+    /// The same edge when the helper returns a value through the scalar ABI:
+    /// the init calls it as a multi-return (`Inst::CallMulti`), which must count
+    /// as a call edge too, or `A` runs before `B` and indexes nil.
+    #[test]
+    fn exec_global_init_dep_through_value_returning_call() {
+        exec_eq("global A: int = read_b().x\nvalue P { x: int, s: string }\n\
+                   global B: P = P { x: 42, s: \"b\" }\n\
+                   fn read_b() -> P { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
+    }
+
 
     /// Execution oracle for interpolated strings:
     /// `tostring("n=") .. tostring(7) .. tostring("!")` -> "n=7!".
