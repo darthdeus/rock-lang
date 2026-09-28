@@ -1,0 +1,36 @@
+// A game whose sims may take the active world as their entry argument. The
+// fixture world is a Scene created at @init unless `FIXTURE_NO_WORLD=1`, which
+// stands in for a menu boot with no run.
+struct FixtureWorld {
+    marker: int,
+}
+
+global FIXTURE_WORLD_ID: int = -1
+
+@init
+fn fixture_world_boot() {
+    if (os_getenv("FIXTURE_NO_WORLD") ?? "") == "1" { return }
+    let scene = scene_create((b) => FixtureWorld { marker: 42 })
+    FIXTURE_WORLD_ID = if let live = scene { live._scene_id } else { -1 }
+}
+
+@sim_entry
+co fn fixture_sim_entry(body: fn(Scene<FixtureWorld>) -> Coroutine<Wait>) -> Coroutine<Wait> {
+    let scene: Scene<FixtureWorld> = Scene { _scene_id: FIXTURE_WORLD_ID }
+    if !scene.is_live() {
+        error("SimNoActiveWorld: this sim takes the world but no fixture world is active")
+    }
+    await body(scene)
+}
+
+fn main() {
+    stone_run_game(GameConfig {
+        title: "sim-world-entry",
+        width: 640,
+        height: 360,
+        vsync: 0,
+        clear_color: color(0.0, 0.0, 0.0, 1.0),
+        esc_quits: true,
+        cap_height_fonts: true,
+    })
+}

@@ -3120,7 +3120,7 @@ struct ShaderRegistrations {
 struct RootCache {
     project_root: Option<String>,
     interface_roots: Vec<FuncRef>,
-    sim_root: Option<FuncRef>,
+    sim_roots: Vec<FuncRef>,
     shader_roots: Vec<FuncRef>,
     roots: Vec<FuncRef>,
 }
@@ -4584,6 +4584,35 @@ fn register_sim_candidates(ws: &Workspace) -> Vec<FuncRef> {
         .collect()
 }
 
+/// The game's `@sim_entry` providers. A provider is how a game hands a sim its
+/// entry argument while the engine's registry stays game-agnostic: a sim that
+/// takes one parameter is registered as `provider(sim)`, and the provider
+/// (a `co fn(body: fn(P) -> Coroutine<Wait>) -> Coroutine<Wait>`) resolves the
+/// argument when the runner starts the sim and awaits the body with it.
+fn sim_entry_providers(ws: &Workspace) -> Vec<FuncRef> {
+    ws.modules
+        .iter()
+        .filter(|m| m.id != ModuleId::builtin())
+        .flat_map(|m| {
+            m.functions
+                .iter()
+                .filter(|(_, f)| f.annotations.iter().any(|a| a.is_builtin("sim_entry")))
+                .map(|(fid, _)| FuncRef { module: m.id, func: fid })
+        })
+        .collect()
+}
+
+/// Functions the generated sim registration text names: `register_sim` and the
+/// `@sim_entry` providers. Empty when the build has no sims.
+fn sim_glue_roots(ws: &Workspace) -> Vec<FuncRef> {
+    if collect_sim_fns(ws).is_empty() {
+        return Vec::new();
+    }
+    let mut roots: Vec<FuncRef> = register_sim_fn(ws).into_iter().collect();
+    roots.extend(sim_entry_providers(ws));
+    roots
+}
+
 /// Every function this build roots from, by the emitter's own predicate.
 ///
 /// It lives in the DRIVER, not in `skull_graph`: which declarations a build
@@ -4650,10 +4679,7 @@ fn all_roots_with_census(
 ) -> Vec<FuncRef> {
     let mut roots = emission_roots_with_census(ws, project_root, census.as_deref_mut());
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
-    let mut glue: Vec<FuncRef> = Vec::new();
-    if !collect_sim_fns(ws).is_empty() {
-        glue.extend(register_sim_fn(ws));
-    }
+    let mut glue: Vec<FuncRef> = sim_glue_roots(ws);
     glue.extend(shader_roots.iter().copied());
     // Deterministic: `dependencies` is a hash set, so its iteration order is not.
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
@@ -4669,15 +4695,12 @@ fn all_roots_with_census(
 /// workspace for its declarations or sim functions.
 fn cached_roots(
     interface_roots: &[FuncRef],
-    sim_root: Option<FuncRef>,
+    sim_roots: &[FuncRef],
     shader_roots: &[FuncRef],
 ) -> Vec<FuncRef> {
     let mut roots = interface_roots.to_vec();
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
-    let mut glue = Vec::new();
-    if let Some(register_sim) = sim_root {
-        glue.push(register_sim);
-    }
+    let mut glue = sim_roots.to_vec();
     glue.extend(shader_roots.iter().copied());
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
@@ -4734,9 +4757,90 @@ fn sim_registration_lines(
         })?;
         let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(fref));
         let key = identity.logical_key(ws, scx.interner());
-        let _ = writeln!(out, "{}({:?}, __rock_code_slot_ref({:?}))", register_name, wire, key);
+        let body = format!("__rock_code_slot_ref({:?})", key);
+        let entry = match f.param_decls.len() {
+            0 => body,
+            1 => {
+                let provider = sim_entry_provider_for(ws, f, &wire)?;
+                // The provider is called when the runner STARTS the sim, so the
+                // argument is resolved against the world live at that moment.
+                format!("function() return {}({}) end", provider, body)
+            }
+            n => {
+                return Err(CompilerError::new_with_label(
+                    f.span,
+                    format!(
+                        "`@sim` `{wire}` takes {n} parameters; a sim takes none or one entry \
+                         argument supplied by the game's `@sim_entry` provider"
+                    ),
+                ))
+            }
+        };
+        let _ = writeln!(out, "{}({:?}, {})", register_name, wire, entry);
     }
     Ok(out)
+}
+
+/// The mangled name of the `@sim_entry` provider that supplies `sim`'s single
+/// parameter. The provider must be unique and its `body` parameter must take
+/// exactly the sim's parameter type, so a sim cannot be started with an
+/// argument of the wrong type.
+fn sim_entry_provider_for(
+    ws: &Workspace,
+    sim: &bone_semantic::hir::Function,
+    wire: &str,
+) -> Result<String, CompilerError> {
+    use skull_mir::monoty::{convert_decl, MonoSubst, MonoTy};
+    let providers = sim_entry_providers(ws);
+    let provider_ref = match providers.as_slice() {
+        [only] => *only,
+        [] => {
+            return Err(CompilerError::new_with_label(
+                sim.span,
+                format!(
+                    "`@sim` `{wire}` takes an entry argument but no `@sim_entry` provider is \
+                     defined; the game declares one \
+                     `@sim_entry co fn(body: fn(T) -> Coroutine<Wait>) -> Coroutine<Wait>`"
+                ),
+            ))
+        }
+        many => {
+            let names: Vec<&str> = many
+                .iter()
+                .map(|f| ws.module(f.module).functions[f.func].name.as_str())
+                .collect();
+            return Err(CompilerError::new_no_location(format!(
+                "`@sim_entry` is ambiguous: {} are all providers",
+                names.join(", ")
+            )));
+        }
+    };
+    let provider = &ws.module(provider_ref.module).functions[provider_ref.func];
+    let subst = MonoSubst::default();
+    let sim_param = convert_decl(ws, sim.param_decls[0].ty, &subst).ok();
+    let provider_param = match provider.param_decls.as_slice() {
+        [only] => convert_decl(ws, only.ty, &subst).ok(),
+        _ => None,
+    };
+    let accepted = match &provider_param {
+        Some(MonoTy::Function { params, .. }) if params.len() == 1 => Some(&params[0]),
+        _ => None,
+    };
+    match (accepted, &sim_param) {
+        (Some(accepted), Some(sim_param)) if accepted == sim_param => {}
+        _ => {
+            return Err(CompilerError::new_with_label(
+                sim.span,
+                format!(
+                    "`@sim` `{wire}` takes `{}`, but the `@sim_entry` provider `{}` supplies `{}`",
+                    sim_param.as_ref().map_or("<unresolved>".to_string(), MonoTy::render),
+                    provider.name,
+                    accepted.map_or("<not a one-argument body>".to_string(), MonoTy::render),
+                ),
+            ))
+        }
+    }
+    Ok(mangle_fn(ws, provider))
 }
 
 /// A Lua long-bracket string literal (`[==[ ... ]==]`) holding `s`, at the
@@ -6709,8 +6813,8 @@ fn emit_full_in_with_mutation(
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
     let interface_roots = emission_roots(ws, project_root);
-    let sim_root = (!collect_sim_fns(ws).is_empty()).then(|| register_sim_fn(ws)).flatten();
-    let emission_roots = cached_roots(&interface_roots, sim_root, &shader_roots);
+    let sim_roots = sim_glue_roots(ws);
+    let emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
     #[cfg(test)]
     assert_eq!(
         emission_roots,
@@ -7129,7 +7233,7 @@ fn emit_full_in_with_mutation(
         roots: RootCache {
             project_root: project_root.map(str::to_string),
             interface_roots,
-            sim_root,
+            sim_roots,
             shader_roots,
             roots: emission_roots.clone(),
         },
@@ -7860,7 +7964,7 @@ fn update_chunk_cache(
             .filter(|root| !current_shader_roots.contains(root))
         {
             if cache.roots.interface_roots.contains(root)
-                || cache.roots.sim_root == Some(*root)
+                || cache.roots.sim_roots.contains(root)
             {
                 continue;
             }

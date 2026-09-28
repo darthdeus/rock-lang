@@ -33,12 +33,27 @@ struct Census {
     failed: Vec<(String, String)>,
 }
 
+/// `ROCK_IDENTITY_CENSUS_BY_FILE=<kind label>` (e.g. `across-yield`) also
+/// prints that kind's per-file counts, which is how a migration shard checks
+/// that each file it rewrote dropped.
 pub fn do_identity_storage_census(root: &str) -> Result<()> {
-    print!("{}", identity_storage_census(root)?);
+    let census = collect(root)?;
+    print!("{}", render(&census));
+    if let Ok(label) = std::env::var("ROCK_IDENTITY_CENSUS_BY_FILE") {
+        let kind = IdentityStorageKind::ALL
+            .iter()
+            .find(|kind| kind.label() == label)
+            .ok_or_else(|| anyhow::anyhow!("ROCK_IDENTITY_CENSUS_BY_FILE: unknown kind `{label}`"))?;
+        print!("{}", render_by_file(&census, *kind));
+    }
     Ok(())
 }
 
 pub fn identity_storage_census(root: &str) -> Result<String> {
+    Ok(render(&collect(root)?))
+}
+
+fn collect(root: &str) -> Result<Census> {
     let root = Path::new(root)
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("identity-storage-census: cannot resolve `{root}`: {e}"))?;
@@ -63,7 +78,24 @@ pub fn identity_storage_census(root: &str) -> Result<String> {
         let spec = crate::unified_compile::SourceSpec::Files(vec![file]);
         census_input(&root, &label, &spec, &mut census);
     }
-    Ok(render(&census))
+    Ok(census)
+}
+
+fn render_by_file(census: &Census, kind: IdentityStorageKind) -> String {
+    let mut per_file: BTreeMap<&str, usize> = BTreeMap::new();
+    for ((_, site_kind), sites) in &census.sites {
+        if *site_kind != kind {
+            continue;
+        }
+        for (file, _, _) in sites {
+            *per_file.entry(file.as_str()).or_default() += 1;
+        }
+    }
+    let mut out = format!("\n{} by file:\n", kind.label());
+    for (file, count) in per_file {
+        out.push_str(&format!("{count}\t{file}\n"));
+    }
+    out
 }
 
 fn census_input(root: &Path, label: &str, spec: &crate::unified_compile::SourceSpec, census: &mut Census) {

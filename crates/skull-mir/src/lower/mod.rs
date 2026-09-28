@@ -586,6 +586,16 @@ impl ScalarCtx {
                     per_body.insert((module.id, *owner), set);
                 }
             }
+            // Generated `@sim` registration passes each sim as a fn value, which
+            // no body scan sees. Its reference is permanent (adding or removing
+            // `@sim` is an interface edit), so it holds one count that no body
+            // edit can release.
+            for (_, f) in module.functions.iter() {
+                if f.annotations.iter().any(|a| a.is_builtin("sim")) {
+                    *ref_counts.entry(f.name).or_insert(0) += 1;
+                    taken_by_ref.insert(f.name);
+                }
+            }
         }
         // Default target is Lua: skull-codegen-lua is the primary consumer and its
         // full + incremental paths build a `ScalarCtx::new`. The JS driver and the

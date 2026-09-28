@@ -87,7 +87,7 @@ fn validate_one(
         | "build_var_expand" | "embed_expand"
         | "uniform_values" | "scene_type_key"
         | "materialize" | "gpu_only"
-        | "scalar_abi" | "inline" | "sim"
+        | "scalar_abi" | "inline" | "sim" | "sim_entry"
         | "sim_render" | "shadow_root" => {
             at(anno, pos, AnnoPos::FnItem)?;
             no_args(anno)
