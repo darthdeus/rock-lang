@@ -2234,6 +2234,13 @@ impl Emitter<'_> {
             // `.len`, a leaf VIEW field and Vec `._data`/`.len` are all the same
             // shape; a read THROUGH a buffer element is decomposed by lowering.
             Inst::Field { base, field } => js_member(&self.render_val(*base)?, field)?,
+            // Presence is a bool on the scalar ABI, so JS truthiness agrees with
+            // luajit's `present and value or nil`.
+            Inst::MakeNullableValue { present, value } => format!(
+                "({} ? {} : null)",
+                self.render_val(*present)?,
+                self.render_val(*value)?
+            ),
             // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
             // value (Lua path). `__rock_sprintf` is the single-value C printf port
             // (d/i/u/x/X/o/f/F/e/E/g/G/s/c, flags, width, precision; half-even
@@ -5372,15 +5379,18 @@ fn emit_vt_eq(
         return Ok(String::new());
     };
     let arena = registry.arena();
-    let mut vt_names: BTreeSet<ustr::Ustr> = BTreeSet::new();
+    let mut vt_names: BTreeMap<ustr::Ustr, skull_mir::lower::ValueStorage> = BTreeMap::new();
     for (&name, &representation) in registry.value_plans() {
         let plan = arena.try_get(representation).ok_or_else(|| {
             err(format!(
                 "JS subset: value equality registry `{name}` carries a foreign representation plan"
             ))
         })?;
-        if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
-            vt_names.insert(name);
+        match plan.value_storage() {
+            Some(skull_mir::lower::ValueStorage::CData) | None => {}
+            Some(storage) => {
+                vt_names.insert(name, storage);
+            }
         }
     }
     build_vt_eq_defs(ws, &vt_names)
@@ -6536,25 +6546,42 @@ fn build_inspect_ty_defs(
 /// nested value structs; `===` (by reference, luajit's `rawequal`) for a Vec /
 /// Map / Arena / reference-struct / generic-`T` / string field. `===` on a JS
 /// string is by-value, matching luajit's interning.
-fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<String, CompilerError> {
+fn build_vt_eq_defs(
+    ws: &Workspace,
+    names: &BTreeMap<ustr::Ustr, skull_mir::lower::ValueStorage>,
+) -> Result<String, CompilerError> {
     let mut out = String::new();
-    for name in names {
+    for (name, storage) in names {
         let sid = ws.struct_by_name.get(name).ok_or_else(|| {
             err(format!("JS subset: value equality registry type `{name}` is not declared"))
         })?;
         let s = &ws.module(sid.module).structs[sid.def];
-        let cmps: Vec<String> = s
-            .fields
-            .iter()
-            .map(|f| {
-                let (a, b) = (format!("a.{}", f.name), format!("b.{}", f.name));
-                if skull_mir::lower::gc_eq_is_structural(ws, f.ty) {
-                    format!("__op_eq({a}, {b})")
-                } else {
-                    format!("{a} === {b}")
+        let compare = |key: &str, structural: bool| -> Result<String, CompilerError> {
+            let (a, b) = if key.contains('.') {
+                (format!("a[{}]", js_string_lit(key)?), format!("b[{}]", js_string_lit(key)?))
+            } else {
+                (format!("a.{key}"), format!("b.{key}"))
+            };
+            Ok(if structural { format!("__op_eq({a}, {b})") } else { format!("{a} === {b}") })
+        };
+        // A GC-table box keys an inline child's leaves by dotted path.
+        let cmps: Vec<String> = if *storage == skull_mir::lower::ValueStorage::GcTable {
+            let fields =
+                skull_mir::lower::gc_table_fields(ws, bone_semantic::hir::FnBackend::Js, *name)
+                    .map_err(|e| err(e.message))?;
+            let mut cmps = Vec::new();
+            for f in &fields {
+                for ((key, _), structural) in f.keys().into_iter().zip(f.keys_eq_structural(ws)) {
+                    cmps.push(compare(key.as_str(), structural)?);
                 }
-            })
-            .collect();
+            }
+            cmps
+        } else {
+            s.fields
+                .iter()
+                .map(|f| compare(f.name.as_str(), skull_mir::lower::gc_eq_is_structural(ws, f.ty)))
+                .collect::<Result<_, _>>()?
+        };
         let body = if cmps.is_empty() { "true".to_string() } else { cmps.join(" && ") };
         out.push_str(&format!(
             "__rock_vt_eq[{}] = function(a, b) {{ return {body}; }};\n",

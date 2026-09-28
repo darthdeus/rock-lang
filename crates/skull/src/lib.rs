@@ -1306,60 +1306,77 @@ fn value_struct_gc_defs(
             ));
             continue;
         }
+        // The box's keys: a declared field's name, or an inline child's dotted
+        // leaf paths (`skull_mir::lower::gc_table_fields`, shared with every
+        // MIR reader and writer of the box).
+        let fields = skull_mir::lower::gc_table_fields(ws, bone_semantic::hir::FnBackend::Lua, n)
+            .map_err(|e| CompilerError::new_no_location(e.message))?;
         // value __eq
         out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
         out.push_str("  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n");
-        if s.fields.is_empty() {
+        let cmps: Vec<String> = fields
+            .iter()
+            .flat_map(|f| f.keys().into_iter().zip(f.keys_eq_structural(ws)))
+            .map(|((key, _), structural)| {
+                let (a, b) = (lua_key_read("a", key.as_str()), lua_key_read("b", key.as_str()));
+                if structural { format!("{a} == {b}") } else { format!("rawequal({a}, {b})") }
+            })
+            .collect();
+        if cmps.is_empty() {
             out.push_str("  return true\n");
         } else {
-            let cmps: Vec<String> = s
-                .fields
-                .iter()
-                .map(|f| {
-                    if skull_mir::lower::gc_eq_is_structural(ws, f.ty) {
-                        format!("a.{n} == b.{n}", n = f.name)
-                    } else {
-                        format!("rawequal(a.{n}, b.{n})", n = f.name)
-                    }
-                })
-                .collect();
             out.push_str(&format!("  return {}\n", cmps.join(" and ")));
         }
         out.push_str("end\n");
         // __tostring: field-wise, mirroring the cdata tier's `Name { f: v, .. }`.
         out.push_str(&format!("{mt}.__tostring = function(v)\n"));
-        if s.fields.is_empty() {
+        if fields.is_empty() {
             out.push_str(&format!("  return \"{n} {{ }}\"\n"));
         } else {
-            let ts: Vec<String> = s
-                .fields
-                .iter()
-                .map(|f| format!("\"{}: \" .. tostring(v.{})", f.name, f.name))
-                .collect();
+            let ts: Vec<String> =
+                fields.iter().map(|f| format!("\"{}: \" .. {}", f.name, f.lua_tostring())).collect();
             out.push_str(&format!(
                 "  return \"{n} {{ \" .. {} .. \" }}\"\n",
                 ts.join(" .. \", \" .. ")
             ));
         }
         out.push_str("end\n");
-        // `<Name>_vt(...)` positional ctor in declared field order.
-        let params: Vec<String> = s.fields.iter().map(|f| f.name.as_str().to_string()).collect();
-        let assigns: Vec<String> =
-            s.fields.iter().map(|f| format!("{n} = {n}", n = f.name)).collect();
-        let mut body = assigns.join(", ");
-        if !body.is_empty() {
-            body.push_str(", ");
+        // `<Name>_vt(...)` positional ctor over the box keys. A declared field's
+        // parameter keeps its name; an inline leaf's is positional, since a
+        // dotted path has no injective identifier spelling.
+        let mut params = Vec::new();
+        let mut body = String::new();
+        for f in &fields {
+            for (key, presence) in f.keys() {
+                let param = if f.is_inline() {
+                    format!("__rock_l{}", params.len())
+                } else {
+                    key.as_str().to_string()
+                };
+                // An absent tag canonicalizes to `nil`, as the leaf-table ctor's.
+                let value = if presence { format!("{param} or nil") } else { param.clone() };
+                if f.is_inline() {
+                    body.push_str(&format!("[\"{key}\"] = {value}, "));
+                } else {
+                    body.push_str(&format!("{key} = {value}, "));
+                }
+                params.push(param);
+            }
         }
         out.push_str(&format!(
             "{sym}_vt = function({p})\n{r}\nend\n",
             p = params.join(", "),
             r = skull_codegen_lua::wrapper_return(&format!(
-                "setmetatable({{ {b}__ty = \"{sym}\" }}, {mt})",
-                b = body,
+                "setmetatable({{ {body}__ty = \"{sym}\" }}, {mt})",
             )),
         ));
     }
     Ok(out)
+}
+
+/// `t.key`, or `t["a.b"]` for a dotted leaf key.
+fn lua_key_read(table: &str, key: &str) -> String {
+    if key.contains('.') { format!("{table}[\"{key}\"]") } else { format!("{table}.{key}") }
 }
 
 /// Emit the `ffi.cdef` typedef + `<Enum>_ct` ctor for every cdata-eligible enum

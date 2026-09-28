@@ -75,14 +75,13 @@ fn main() {
 }
 "#;
 
-/// A nested `nobox` struct inside a GC-tier outer. The outer's `pos` key holds a
-/// value, so the inner cdata is built -- the same thing an unmarked outer does
-/// with an unmarked inner. The explicit request authorizes the boxes its own box
-/// is made of, and nothing beyond them.
+/// A nested `nobox` struct inside a GC-tier outer. The outer's box keys the
+/// inner's leaves by dotted path (`pos.x`), as an unmarked outer with the same
+/// `nobox` inner does, so the explicit box builds no inner box at all.
 const NESTED_NOBOX_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
 nobox value Outer { label: string, pos: NV2 }
-inline(lua) fn show(v: any) -> string = "return v.label .. ':' .. tostring(v.pos.x) .. ':' .. tostring(v.pos.y)"
+inline(lua) fn show(v: any) -> string = "return v.label .. ':' .. tostring(v['pos.x']) .. ':' .. tostring(v['pos.y'])"
 fn main() {
     let v = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } }
     print(show(materialize(v)))
@@ -130,10 +129,10 @@ fn main() {
 }
 "#;
 
-/// An implicit box one level down, inside a GC-tier parent the guarantee does
-/// not cover. The parent's `pos` key needs a value and flattening cannot reach
-/// it, so the box is real and must be reported -- with a span, at the ctor.
-const IMPLICIT_BOX_UNDER_A_GC_TIER_PARENT: &str = r#"
+/// A `nobox` field of a GC-tier parent stored in a global. The parent's box
+/// keys the field's leaves by dotted path, so no box of `NV2` exists to report.
+/// This pinned a rejection while the GC tier keyed every field whole.
+const NOBOX_FIELD_UNDER_A_GC_TIER_PARENT: &str = r#"
 nobox value NV2 { x: float, y: float }
 value Outer { label: string, pos: NV2 }
 global G: Outer
@@ -280,14 +279,11 @@ fn an_implicit_box_of_a_gc_tier_value_is_still_rejected() {
 }
 
 #[test]
-fn an_implicit_box_under_a_gc_tier_parent_is_rejected_with_a_span() {
-    let err = try_emit_module(IMPLICIT_BOX_UNDER_A_GC_TIER_PARENT)
-        .expect_err("an implicit nobox box inside a GC-tier parent must be rejected");
-    assert!(
-        err.message.contains("survived lowering as an implicit materialization"),
-        "the implicit box was rejected for an unrelated reason: {err:?}"
-    );
-    assert!(err.location.line > 0, "the rejection lost its span: {err:?}");
+fn a_nobox_field_under_a_gc_tier_parent_stores_as_leaves() {
+    let lua = emit_ok(NOBOX_FIELD_UNDER_A_GC_TIER_PARENT, "a nobox field of a stored GC-tier value");
+    let setup = function_body(&lua, "setup");
+    assert!(!setup.contains("NV2_ct("), "the stored parent boxed its nobox field:\n{setup}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_parent_leaves"), "1 L");
 }
 
 #[test]
@@ -317,18 +313,20 @@ fn main() {
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_closure_local"), "10");
 }
 
+// The live-body tests need a box that is still real: a tuple holding a `nobox`
+// value, interpolated whole, is the permanent sink (`nobox_values.rs`,
+// `NOBOX_TWO_SINKS_IN_ONE_BODY`). A GC-tier parent stored in a global was the
+// sink until its box keyed `nobox` fields as leaves.
 #[test]
 fn live_implicit_materialization_in_a_hoisted_closure_is_rejected() {
     let source = r#"
 nobox value NV2 { x: float, y: float }
-value Outer { label: string, pos: NV2 }
-global G: Outer
 fn with_check(check: fn() -> ()) { check() }
 fn main() {
     with_check(() => {
-        G = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } }
+        let t = (NV2 { x: 1.0, y: 2.0 }, 1.0)
+        print("{t}")
     })
-    print(G.label)
 }
 "#;
     let err = try_emit_module(source).expect_err("live closure boxes must still reject");
@@ -341,11 +339,10 @@ fn main() {
 fn live_implicit_materialization_in_a_coroutine_hook_is_rejected() {
     let source = r#"
 nobox value NV2 { x: float, y: float }
-value Outer { label: string, pos: NV2 }
-global G: Outer
 co fn worker() -> Coroutine<int> {
     on_killed(() => {
-        G = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } }
+        let t = (NV2 { x: 1.0, y: 2.0 }, 1.0)
+        print("{t}")
     })
     yield 1
 }
@@ -353,7 +350,6 @@ fn main() {
     let c = worker()
     let _ = c.resume()
     c.kill()
-    print(G.label)
 }
 "#;
     let err = try_emit_module(source).expect_err("live coroutine hook boxes must still reject");

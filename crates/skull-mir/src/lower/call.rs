@@ -1550,6 +1550,77 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
+    /// The physical layout of GC-table value `name` when some field is stored
+    /// inline (a `nobox` child keyed by dotted leaf paths); `None` for every
+    /// other box, which keys each declared field whole. First-class targets
+    /// nest children as declared fields, so they never take this layout.
+    pub(crate) fn gc_table_inline_layout(
+        &self,
+        name: Ustr,
+    ) -> Result<Option<Vec<GcTableField>>, CompilerError> {
+        if self.scx.values_first_class || !self.is_value_struct(name) {
+            return Ok(None);
+        }
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, name)
+            .map_err(|e| self.gap_here(e.message))?;
+        if storage != ValueStorage::GcTable {
+            return Ok(None);
+        }
+        let fields = crate::lower::gc_table_fields(self.ws, self.scx.target, name)
+            .map_err(|e| self.gap_here(e.message))?;
+        Ok(fields.iter().any(GcTableField::is_inline).then_some(fields))
+    }
+
+    /// A GC-table Group's `<Name>_vt` operands, keyed as `layout` stores them:
+    /// a whole field packs, an inline child contributes its leaves. A presence
+    /// tag canonicalizes to `true`/`nil`, the form a `= null` write stores; the
+    /// scalar ABI spells absence `false`, and `__eq` compares tags per key.
+    fn gc_table_box_fields(
+        &mut self,
+        name: Ustr,
+        layout: &[GcTableField],
+        parts: Vec<ValueRepr>,
+        kind: BoxKind,
+    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if parts.len() != layout.len() {
+            return Err(self.gap_here(format!(
+                "GC-table value `{name}` has {} parts for {} fields",
+                parts.len(),
+                layout.len()
+            )));
+        }
+        let mut out = Vec::new();
+        for (field, part) in layout.iter().zip(parts) {
+            let Some(sub) = &field.inline else {
+                out.push((field.name, self.pack_boxed(part, kind)?));
+                continue;
+            };
+            let leaves = self.repr_to_leaves_shape(&part, sub)?;
+            let keys = field.keys();
+            if keys.len() != leaves.len() {
+                return Err(self.gap_here(format!(
+                    "`{name}.{}` has {} keys but the value produced {} leaves",
+                    field.name,
+                    keys.len(),
+                    leaves.len()
+                )));
+            }
+            for ((key, presence), leaf) in keys.into_iter().zip(leaves) {
+                let value = if presence {
+                    let tag = self.emit_cur(Inst::Const(Lit::Bool(true)));
+                    self.emit_cur(Inst::MakeNullableValue { present: leaf, value: tag })
+                } else {
+                    leaf
+                };
+                out.push((key, value));
+            }
+        }
+        Ok(out)
+    }
+
     /// The `<name>_ct(..)` cdata for a Group's parts, with no presence test.
     ///
     /// The parts are in declared field order (the positional ctor ABI requires
@@ -1564,6 +1635,11 @@ impl Builder<'_> {
         kind: BoxKind,
     ) -> Result<Idx<Inst>, CompilerError> {
         let representation = self.nominal_value_representation(name)?;
+        if let Some(layout) = self.gc_table_inline_layout(name)? {
+            let fields = self.gc_table_box_fields(name, &layout, parts, kind)?;
+            let ctor = kind.value_ctor(name, representation, ValueCtorForm::Declared, fields);
+            return Ok(self.emit_cur(ctor));
+        }
         let names = struct_field_names(self.ws, name);
         let fields = parts
             .into_iter()
@@ -1998,8 +2074,17 @@ impl Builder<'_> {
                 .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))
                 .collect());
         }
+        // A GC-table box keys an inline child's leaves by dotted path: the
+        // exact inverse of `gc_table_box_fields`, presence tag included.
+        let inline = self.gc_table_inline_layout(shape.name)?;
         let mut out = Vec::new();
-        for (fname, fs) in &shape.fields {
+        for (i, (fname, fs)) in shape.fields.iter().enumerate() {
+            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
+                for (key, _) in field.keys() {
+                    out.push(self.emit_cur(Inst::Field { base: v, field: key }));
+                }
+                continue;
+            }
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             match fs {
                 FieldShape::Prim => out.push(fv),
@@ -2097,7 +2182,16 @@ impl Builder<'_> {
             }
             return Ok(());
         }
-        for (fname, fs) in &shape.fields {
+        let inline = self.gc_table_inline_layout(shape.name)?;
+        for (i, (fname, fs)) in shape.fields.iter().enumerate() {
+            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
+                for (key, _) in field.keys() {
+                    let mut full = prefix.clone();
+                    full.push(key);
+                    out.push(full);
+                }
+                continue;
+            }
             prefix.push(*fname);
             match fs {
                 FieldShape::Prim => out.push(prefix.clone()),

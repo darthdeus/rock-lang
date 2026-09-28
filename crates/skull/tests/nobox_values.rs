@@ -1924,3 +1924,77 @@ fn a_stored_gc_tier_value_with_a_nobox_field_matches_its_unmarked_twin() {
     assert_eq!(run_luajit(&format!("{plain}\nmain()\n"), "nobox_in_gc_value_plain"), expected);
     assert_eq!(run_luajit(&format!("{marked}\nmain()\n"), "nobox_in_gc_value_marked"), expected);
 }
+
+// Nullable, nested and generic-parent `nobox` fields of a stored GC-tier value:
+// whole-field and nested-leaf writes, an absent tag written back to `null`, an
+// enum payload, and `==` over the presence tag. The unmarked twin is no oracle
+// for `==` here: it compares a `V2?` field by reference.
+const NOBOX_IN_GC_VALUE_NULLABLE_NESTED: &str = r#"
+nobox value V2 { x: float, y: float }
+nobox value Rect { lo: V2, hi: V2 }
+value Row { label: string, pos: V2, at: V2?, r: Rect }
+value Gen<T> { t: T, pos: V2 }
+struct Holder { row: Row, g: Gen<string> }
+enum Slot { Empty, Has(Row) }
+global G: Row
+fn mk(l: string, x: float) -> Row {
+    return Row { label: l, pos: V2 { x: x, y: 2.0 }, at: null, r: Rect { lo: V2 { x: 1.0, y: 2.0 }, hi: V2 { x: 3.0, y: 4.0 } } }
+}
+fn mk_at(l: string, x: float) -> Row {
+    return Row { label: l, pos: V2 { x: x, y: 2.0 }, at: V2 { x: 1.5, y: 2.5 }, r: Rect { lo: V2 { x: 1.0, y: 2.0 }, hi: V2 { x: 3.0, y: 4.0 } } }
+}
+fn area(r: Rect) -> float { return (r.hi.x - r.lo.x) * (r.hi.y - r.lo.y) }
+fn ax(r: Row) -> float {
+    if let a = r.at { return a.x }
+    return -1.0
+}
+fn main() {
+    let h = Holder { row: mk("a", 1.0), g: Gen { t: "gt", pos: V2 { x: 6.0, y: 7.0 } } }
+    h.row.pos = V2 { x: 10.0, y: 11.0 }
+    h.row.at = V2 { x: 5.0, y: 6.0 }
+    h.row.r.hi.x = 13.0
+    print("{h.row}")
+    print("{area(h.row.r)} {ax(h.row)} {h.g.t} {h.g.pos.y}")
+    h.row.at = null
+    print("{ax(h.row)} {h.row == mk("a", 10.0)}")
+    let slots = [Slot::Has(mk("s", 4.0)), Slot::Empty, Slot::Has(mk_at("t", 5.0))]
+    for s in slots {
+        match s {
+            Slot::Has(r) => print("has {r.label} {r.pos.x} {r.r.lo.y} {ax(r)}"),
+            Slot::Empty => print("empty"),
+        }
+    }
+    G = mk("g", 8.0)
+    G.at = V2 { x: 1.5, y: 2.5 }
+    print("{G == mk_at("g", 8.0)} {G == mk("g", 8.0)}")
+    G.at = null
+    print("{G == mk("g", 8.0)}")
+}
+"#;
+
+#[test]
+fn a_stored_gc_tier_value_keeps_nullable_and_nested_nobox_fields_as_leaves() {
+    let lua = match try_emit_module(NOBOX_IN_GC_VALUE_NULLABLE_NESTED) {
+        Ok(lua) => lua,
+        Err(e) => panic!("nullable and nested nobox fields of a GC-tier value must emit: {e:?}"),
+    };
+    for name in ["mk", "mk_at", "main"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("V2_ct(") && !body.contains("Rect_ct("),
+            "`{name}` boxed a nobox field:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_nullable_nested"),
+        "Row { label: \"a\", pos: V2 { x: 10, y: 11 }, at: V2 { x: 5, y: 6 }, \
+         r: Rect { lo: V2 { x: 1, y: 2 }, hi: V2 { x: 13, y: 4 } } }\n\
+         24 5 gt 7\n\
+         -1 false\n\
+         has s 4 2 -1\n\
+         empty\n\
+         has t 5 2 1.5\n\
+         true false\n\
+         true"
+    );
+}

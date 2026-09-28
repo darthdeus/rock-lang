@@ -338,7 +338,7 @@ pub use abi::{
 };
 
 mod struct_plan;
-pub use struct_plan::{struct_field_plan, StructFieldPlan, StructRegistryPlan};
+pub use struct_plan::{gc_table_fields, struct_field_plan, GcTableField, StructFieldPlan, StructRegistryPlan};
 
 mod coroutine;
 pub use coroutine::CoroutinePlan;
