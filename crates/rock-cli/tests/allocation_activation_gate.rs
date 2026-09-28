@@ -221,3 +221,36 @@ fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
     }
     assert!(heatmap.join("manifest.txt").is_file());
 }
+
+#[test]
+#[ignore = "spawns an instrumented sim (-P full)"]
+fn sim_command_reports_a_child_that_never_loads() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let heatmap = scratch.path().join("heatmap");
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .current_dir(repo_root())
+        .args(["sim", "--allocation-sites"])
+        .arg(&heatmap)
+        .args(["crates/rock-cli/test-data/sim-load-failure", "load_failure_reaches_the_report"])
+        .env("ROCK_SIM_TIMEOUT_SECS", "120")
+        .output()
+        .expect("spawn allocation-site sim");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "a sim that never loads must fail the command:\n{combined}");
+    assert!(
+        combined.contains("'end' expected"),
+        "the child's LuaJIT load error must reach the report:\n{combined}",
+    );
+
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(heatmap.join("index.json")).expect("heat-map index"))
+            .expect("valid heat-map index");
+    let records = index["records"].as_array().expect("records");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], "FAIL", "record: {}", records[0]);
+    assert!(records[0].get("activation").is_none(), "no activation was written: {}", records[0]);
+}

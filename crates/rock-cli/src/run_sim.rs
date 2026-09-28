@@ -2687,6 +2687,23 @@ pub fn do_run_allocation_sites(
                 let status = verdict_word(&summary);
                 if status != "PASS" {
                     failed.push(display_name.clone());
+                    // The run was buffered; its child's stderr (a LuaJIT load
+                    // error included) exists only here.
+                    if !summary.diagnostics.is_empty() {
+                        eprint!("{}", summary.diagnostics);
+                    }
+                    summary.print(&display_name, false);
+                    if !activation_path.exists() {
+                        records.push(serde_json::json!({
+                            "sim_name": display_name,
+                            "status": status,
+                            "process_id": summary.process_id,
+                            "failure": "the sim wrote no allocation-site activation; its diagnostics are above",
+                            "completed_frames": 0,
+                            "active_sites": 0,
+                        }));
+                        continue;
+                    }
                 }
                 let activation = fs_err::read_to_string(&activation_path).with_context(|| {
                     format!("reading allocation-site activation for `{display_name}` from `{}`", activation_path.display())
