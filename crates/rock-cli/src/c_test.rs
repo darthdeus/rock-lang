@@ -1095,6 +1095,21 @@ mod tests {
     }
 
     #[test]
+    fn c_backend_nullable_identity_field_unwrap_mutates_the_owner() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/c_nullable_identity_field_place.rock")
+            .to_string_lossy()
+            .into_owned();
+        let summary = super::c_test_run(&[path], false).expect("run nullable identity field test");
+        assert_eq!(summary.files, 1);
+        assert_eq!(summary.tests_passed, 1);
+        assert_eq!(summary.tests_failed, 0);
+        assert_eq!(summary.tests_skipped, 0);
+        assert_eq!(summary.unit_failures, 0);
+        assert!(summary.required_failures.is_empty());
+    }
+
+    #[test]
     fn c_native_commands_use_the_authoritative_library_path() {
         let command = super::c_native_command(std::path::Path::new("unused-native-program"));
         let actual = command
