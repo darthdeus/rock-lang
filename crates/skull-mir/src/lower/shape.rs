@@ -742,6 +742,21 @@ pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> 
     planned_value_rec(ws, name, &mut Vec::new())
 }
 
+/// Whether every leaf of `name` is a non-float primitive, so two leaf readings
+/// compare exactly wherever they came from. A C-layout value stores `float` as
+/// single precision; its stored leaves differ from unrounded scalar operands.
+/// Opaque (generic or GC) and enum-payload leaves may hold such a float.
+pub(crate) fn value_leaves_compare_exactly(ws: &Workspace, name: Ustr) -> bool {
+    fn exact(plan: &PlannedValue) -> bool {
+        plan.fields.iter().all(|(_, field)| match field {
+            PlannedField::Primitive(cty) => *cty != "float",
+            PlannedField::Nested(child) | PlannedField::Nullable(child) => exact(child),
+            PlannedField::FlatEnum(_) | PlannedField::Opaque => false,
+        })
+    }
+    planned_value(ws, name).is_some_and(|plan| exact(&plan))
+}
+
 pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bool {
     fn contains(plan: &PlannedValue) -> bool {
         plan.fields.iter().any(|(_, field)| match field {

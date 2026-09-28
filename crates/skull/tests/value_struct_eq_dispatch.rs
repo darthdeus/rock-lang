@@ -223,3 +223,38 @@ fn scalar_value_leaf_equality_keeps_field_semantics() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["true\tfalse\tfalse", "false\ttrue"], "unexpected results:\n{out}");
 }
+
+// A C-layout `value` stores `float` leaves as single precision, so leaves read
+// back from storage are rounded while a scalarized operand's leaves are not.
+// Equality must still see a stored `Tint { r: 0.4 }` equal to a fresh one.
+const STORED_FLOAT_VALUE: &str = r#"
+value Tint { r: float, g: float, n: int }
+struct Holder { tint: Tint? = null }
+
+fn same(h: Holder, t: Tint) -> bool { return h.tint.unwrap() == t }
+fn differ(h: Holder, t: Tint) -> bool { return h.tint.unwrap() != t }
+
+@nomangle fn stored_float_eq(r: float, g: float) -> bool {
+    let h = Holder {}
+    h.tint = Tint { r: r, g: g, n: 3 }
+    return same(h, Tint { r: r, g: g, n: 3 })
+}
+
+@nomangle fn stored_float_ne(r: float, g: float) -> bool {
+    let h = Holder {}
+    h.tint = Tint { r: r, g: g, n: 3 }
+    return differ(h, Tint { r: r, g: g, n: 3 })
+}
+"#;
+
+#[test]
+fn stored_float_value_equality_matches_a_fresh_operand() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit not found; skipping execution check");
+        return;
+    }
+    let mut lua = emit_module(STORED_FLOAT_VALUE);
+    lua.push_str("\nprint(stored_float_eq(0.4, 0.1), stored_float_ne(0.4, 0.1), stored_float_eq(0.5, 0.25))\n");
+    let out = run_luajit(&lua, "value_struct_eq_stored_float");
+    assert_eq!(out.trim(), "true\tfalse\ttrue", "stored float value equality:\n{out}");
+}
