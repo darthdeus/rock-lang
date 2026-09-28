@@ -238,7 +238,7 @@ fn nullable_nobox_local_keeps_presence_in_leaf_cells() {
     );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable_local"),
-        "nil\nNV2 { x = 1, y = 2 }"
+        "nil\nNV2 { x: 1, y: 2 }"
     );
 }
 

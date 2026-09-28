@@ -99,8 +99,8 @@ fn v1_nominal_types_mint_identifiers_and_keep_the_key_for_identity() {
         "the type's own identity stays its DefKey"
     );
     assert!(
-        emitted.lua.contains("\"v1ty::a::Color::Blue\""),
-        "display text stays the readable path"
+        emitted.lua.contains("\"Color::Blue\""),
+        "display text is the declared name"
     );
 }
 

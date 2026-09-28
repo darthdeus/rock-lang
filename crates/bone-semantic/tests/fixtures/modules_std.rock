@@ -179,6 +179,7 @@
 // prelude: __rock_materialize_strided_element
 // prelude: __rock_native_buffer_prefix_eq
 // prelude: __rock_parse_float_at_setup
+// prelude: __rock_quote_string
 // prelude: __rock_range
 // prelude: __rock_repeat
 // prelude: __rock_scene_type_key
