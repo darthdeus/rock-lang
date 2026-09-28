@@ -2440,6 +2440,27 @@ mod tests {
                    fn read_b() -> int { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
     }
 
+    /// PINNED BUG (sentinel, docs/test-sentinels.md): a plain FFI-clean value
+    /// nested in a `nobox` value that a struct field holds. The struct stores
+    /// the child's leaves under fully dotted keys (`place.pos.x`), but a read
+    /// of `h.place.pos.x` loads the undotted `place.pos` key, gets nil and
+    /// fails at runtime. Found migrating mag-simulation's `ContinuousPlace`
+    /// (worked around by making `SpacePoint` nobox). When this fails, the
+    /// read and store agree: flip it into an execution test that prints 9.5.
+    #[test]
+    fn nobox_value_holding_a_plain_value_reads_an_unstored_key_sentinel() {
+        let lua = emit(
+            "nobox value Sid { value: int }\nvalue Pt { x: float, y: float }\n\
+             nobox value CPlace { space: Sid, pos: Pt }\nstruct Holder { place: CPlace }\n\
+             fn make(p: CPlace) -> Holder { return Holder { place: p } }\n\
+             fn pos_x(h: Holder) -> float { return h.place.pos.x }",
+        );
+        assert!(
+            lua.contains("[\"place.pos.x\"]") && lua.contains("[\"place.pos\"]"),
+            "PINNED BUG: expected a dotted-leaf store and an undotted read; got:\n{lua}"
+        );
+    }
+
     /// The same edge when the helper returns a value through the scalar ABI:
     /// the init calls it as a multi-return (`Inst::CallMulti`), which must count
     /// as a call edge too, or `A` runs before `B` and indexes nil.
