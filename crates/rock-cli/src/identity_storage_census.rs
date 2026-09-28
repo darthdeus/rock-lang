@@ -1,9 +1,11 @@
 //! `rock identity-storage-census [root]`: the exact per-package, per-kind
 //! count of identity structs stored in declaration positions (S0a) and in
 //! function bodies (S0b; docs/identity-storage-plan.md). Packages on
-//! `bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT` report no
-//! diagnostics while they migrate; this census is what keeps their debt
-//! visible. `crates/rock-cli/tests/identity_storage_census.rs` pins the table.
+//! `bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT`, and modules
+//! under a prefix on `IDENTITY_STORAGE_EXEMPT_MODULES`, report no diagnostics
+//! while they migrate; this census is what keeps their debt visible. A
+//! module prefix is its own row, and its sites are also listed one by one.
+//! `crates/rock-cli/tests/identity_storage_census.rs` pins the table.
 //!
 //! Scope: every package under `root` (each checked with its own dependency
 //! set), and each top-level `tests/*.rock` program as an unpackaged program.
@@ -17,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use bone_semantic::identity_storage::{
     identity_module_body_sites, identity_storage_exempt, identity_storage_package, identity_storage_sites,
-    IdentityStorageKind, IDENTITY_STORAGE_EXEMPT,
+    IdentityStorageExemption, IdentityStorageExemptions, IdentityStorageKind, IDENTITY_STORAGE_EXEMPTIONS,
 };
 use bone_semantic::inference::Workspace;
 
@@ -25,9 +27,10 @@ use crate::Result;
 
 #[derive(Default)]
 struct Census {
-    /// package -> exempt?
-    exempt: BTreeMap<String, bool>,
-    /// (package, kind) -> unique (file, line, identity)
+    /// row -> its exemption. A row is a package, or `package::prefix` for
+    /// the modules under a listed prefix.
+    rows: BTreeMap<String, Option<IdentityStorageExemption>>,
+    /// (row, kind) -> unique (file, line, identity)
     sites: BTreeMap<(String, IdentityStorageKind), BTreeSet<(String, usize, String)>>,
     /// Inputs that did not type-check for a reason other than identity storage.
     failed: Vec<(String, String)>,
@@ -37,8 +40,8 @@ struct Census {
 /// prints that kind's counts per file and identity, which is how a migration
 /// shard checks that each file it rewrote dropped.
 pub fn do_identity_storage_census(root: &str) -> Result<()> {
-    let census = collect(root)?;
-    print!("{}", render(&census));
+    let census = collect(root, &IDENTITY_STORAGE_EXEMPTIONS)?;
+    print!("{}", render(&census, &IDENTITY_STORAGE_EXEMPTIONS));
     if let Ok(label) = std::env::var("ROCK_IDENTITY_CENSUS_BY_FILE") {
         let kind = IdentityStorageKind::ALL
             .iter()
@@ -50,10 +53,10 @@ pub fn do_identity_storage_census(root: &str) -> Result<()> {
 }
 
 pub fn identity_storage_census(root: &str) -> Result<String> {
-    Ok(render(&collect(root)?))
+    Ok(render(&collect(root, &IDENTITY_STORAGE_EXEMPTIONS)?, &IDENTITY_STORAGE_EXEMPTIONS))
 }
 
-fn collect(root: &str) -> Result<Census> {
+fn collect(root: &str, exemptions: &IdentityStorageExemptions) -> Result<Census> {
     let root = Path::new(root)
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("identity-storage-census: cannot resolve `{root}`: {e}"))?;
@@ -61,7 +64,7 @@ fn collect(root: &str) -> Result<Census> {
     for dir in packages_under(&root) {
         let label = rel(&root, &dir);
         let spec = crate::common::path_to_source_spec(&dir.display().to_string());
-        census_input(&root, &label, &spec, &mut census);
+        census_input(&root, &label, &spec, exemptions, &mut census);
     }
     let mut programs: Vec<PathBuf> = fs_err::read_dir(root.join("tests"))
         .map(|entries| {
@@ -76,7 +79,7 @@ fn collect(root: &str) -> Result<Census> {
     for file in programs {
         let label = rel(&root, &file);
         let spec = crate::unified_compile::SourceSpec::Files(vec![file]);
-        census_input(&root, &label, &spec, &mut census);
+        census_input(&root, &label, &spec, exemptions, &mut census);
     }
     Ok(census)
 }
@@ -98,7 +101,13 @@ fn render_by_file(census: &Census, kind: IdentityStorageKind) -> String {
     out
 }
 
-fn census_input(root: &Path, label: &str, spec: &crate::unified_compile::SourceSpec, census: &mut Census) {
+fn census_input(
+    root: &Path,
+    label: &str,
+    spec: &crate::unified_compile::SourceSpec,
+    exemptions: &IdentityStorageExemptions,
+    census: &mut Census,
+) {
     let loaded = crate::unified_compile::discover_sources(spec)
         .map_err(|e| e.to_string())
         .and_then(|sources| {
@@ -116,7 +125,7 @@ fn census_input(root: &Path, label: &str, spec: &crate::unified_compile::SourceS
             return;
         }
     };
-    let identity_errors = record(root, &ws, census);
+    let identity_errors = record(root, &ws, exemptions, census);
     // Identity diagnostics in enforced packages show up in the table's
     // enforced rows; anything else means the counts may be incomplete.
     let other = errs.len().saturating_sub(identity_errors);
@@ -126,26 +135,28 @@ fn census_input(root: &Path, label: &str, spec: &crate::unified_compile::SourceS
 }
 
 /// Records every module's sites and returns how many of them the check
-/// reported as errors (sites in enforced packages).
-fn record(root: &Path, ws: &Workspace, census: &mut Census) -> usize {
+/// reported as errors: sites the production lists enforce, whatever lists the
+/// rows follow.
+fn record(root: &Path, ws: &Workspace, exemptions: &IdentityStorageExemptions, census: &mut Census) -> usize {
     let mut reported = 0;
     for module in ws.modules.iter() {
-        let package = identity_storage_package(module).to_string();
-        let exempt = identity_storage_exempt(ws, module);
+        let package = identity_storage_package(module);
+        let exemption = exemptions.exemption(ws, module);
         let mut sites = identity_storage_sites(ws, module);
         sites.extend(identity_module_body_sites(ws, module));
         if sites.is_empty() {
             continue;
         }
-        if !exempt {
+        if !identity_storage_exempt(ws, module) {
             reported += sites.len();
         }
-        census.exempt.insert(package.clone(), exempt);
+        let row = row_label(package, exemption);
+        census.rows.insert(row.clone(), exemption);
         let file = rel(root, Path::new(module.file.as_str()));
         for site in sites {
             census
                 .sites
-                .entry((package.clone(), site.kind))
+                .entry((row.clone(), site.kind))
                 .or_default()
                 .insert((file.clone(), site.span.line_range.0, site.identity.to_string()));
         }
@@ -153,29 +164,59 @@ fn record(root: &Path, ws: &Workspace, census: &mut Census) -> usize {
     reported
 }
 
-fn render(census: &Census) -> String {
+fn row_label(package: &str, exemption: Option<IdentityStorageExemption>) -> String {
+    match exemption {
+        Some(IdentityStorageExemption::Module(prefix)) => format!("{package}::{prefix}"),
+        _ => package.to_string(),
+    }
+}
+
+fn render(census: &Census, exemptions: &IdentityStorageExemptions) -> String {
     let mut out = String::new();
     let labels: Vec<&str> = IdentityStorageKind::ALL.iter().map(|kind| kind.label()).collect();
     out.push_str(&format!("| package | status | {} | total |\n", labels.join(" | ")));
     out.push_str(&format!("| --- | --- |{} ---: |\n", " ---: |".repeat(labels.len())));
-    // A listed package with no sites left is shown so its entry gets removed.
-    let mut rows = census.exempt.clone();
-    for package in IDENTITY_STORAGE_EXEMPT {
-        rows.entry(package.to_string()).or_insert(true);
+    // A listed entry with no sites left is shown so it gets removed.
+    let mut rows = census.rows.clone();
+    for package in exemptions.packages {
+        rows.entry(package.to_string()).or_insert(Some(IdentityStorageExemption::Package));
     }
-    for (package, exempt) in &rows {
+    for (package, prefix) in exemptions.modules {
+        let exemption = Some(IdentityStorageExemption::Module(prefix));
+        rows.entry(row_label(package, exemption)).or_insert(exemption);
+    }
+    for (row, exemption) in &rows {
         let counts: Vec<usize> = IdentityStorageKind::ALL
             .iter()
-            .map(|kind| census.sites.get(&(package.clone(), *kind)).map_or(0, BTreeSet::len))
+            .map(|kind| census.sites.get(&(row.clone(), *kind)).map_or(0, BTreeSet::len))
             .collect();
         let total: usize = counts.iter().sum();
-        let status = match (*exempt, total) {
-            (true, 0) => "exempt, zero: remove from the list",
-            (true, _) => "exempt",
-            (false, _) => "ENFORCED",
+        let status = match (exemption, total) {
+            (Some(IdentityStorageExemption::Package), 0) => "exempt, zero: remove from the list",
+            (Some(IdentityStorageExemption::Package), _) => "exempt",
+            (Some(IdentityStorageExemption::Module(_)), 0) => "exempt module, zero: remove from the list",
+            (Some(IdentityStorageExemption::Module(_)), _) => "exempt module",
+            (None, _) => "ENFORCED",
         };
         let cells = counts.iter().map(usize::to_string).collect::<Vec<_>>().join(" | ");
-        out.push_str(&format!("| {package} | {status} | {cells} | {total} |\n"));
+        out.push_str(&format!("| {row} | {status} | {cells} | {total} |\n"));
+    }
+    let mut module_sites = BTreeSet::new();
+    for ((row, kind), sites) in &census.sites {
+        if matches!(rows.get(row), Some(Some(IdentityStorageExemption::Module(_)))) {
+            // Spans count lines from zero; `file:line` counts from one.
+            module_sites.extend(
+                sites
+                    .iter()
+                    .map(|(file, line, identity)| (row, file, line + 1, kind.label(), identity)),
+            );
+        }
+    }
+    if !module_sites.is_empty() {
+        out.push_str("\nExempt module sites:\n");
+        for (row, file, line, kind, identity) in module_sites {
+            out.push_str(&format!("- {row}: {file}:{line} {kind} {identity}\n"));
+        }
     }
     if !census.failed.is_empty() {
         out.push_str("\nNOT fully analyzed:\n");
@@ -215,4 +256,38 @@ fn packages_under(root: &Path) -> Vec<PathBuf> {
 
 fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bone_semantic::identity_storage::IdentityStorageExemptions;
+
+    // One enforced package with a listed module prefix: the enforced part and
+    // the prefix are separate rows, and the prefix's sites are listed one by
+    // one so a site that moves inside it changes the table.
+    #[test]
+    fn a_partly_exempt_package_has_a_row_per_status() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/identity-storage-scope");
+        let exemptions = IdentityStorageExemptions {
+            packages: &[bone_semantic::identity_storage::STDLIB_PACKAGE],
+            modules: &[("scope_fixture", "nav"), ("scope_fixture", "empty")],
+        };
+        let census = collect(root.to_str().expect("UTF-8 fixture path"), &exemptions).expect("census");
+        assert_eq!(
+            render(&census, &exemptions),
+            "\
+| package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| scope_fixture | ENFORCED | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
+| scope_fixture::empty | exempt module, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| scope_fixture::nav | exempt module | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
+| std | exempt | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
+
+Exempt module sites:
+- scope_fixture::nav: scope-fixture/nav.rock:4 container scope_fixture::nav::NavMob
+- scope_fixture::nav: scope-fixture/nav/graph.rock:4 container scope_fixture::nav::graph::GraphMob
+"
+        );
+    }
 }

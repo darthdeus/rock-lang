@@ -1,0 +1,12 @@
+[package]
+name = "scope-fixture"
+version = "0.1.0"
+type = "lib"
+
+[language]
+modules = "v1"
+globals = "none"
+
+[build]
+channels = ["dev"]
+default_channel = "dev"

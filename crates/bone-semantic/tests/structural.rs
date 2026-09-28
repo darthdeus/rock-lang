@@ -2646,6 +2646,82 @@ fn identity_storage_exemptions_follow_the_package() {
     assert!(exempt.is_empty(), "an exempt package gets no diagnostics: {exempt:?}");
 }
 
+// A module exemption covers a qualified module path prefix of one package,
+// read from each file's `mod` header: the module it names and every module
+// below it, never a sibling that shares its spelling or a file with no path.
+#[test]
+fn identity_storage_module_exemption_follows_the_module_path() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use bone_semantic::identity_storage::{
+        identity_storage_exempt, IdentityStorageExemption, IdentityStorageExemptions,
+    };
+    use bone_semantic::semantic_passes::semantic_pass_with_aliases;
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let files = [
+        ("nav.rock", "pub mod nav;", "NavMob"),
+        ("nav/graph.rock", "pub mod nav::graph;", "GraphMob"),
+        ("navigation.rock", "pub mod navigation;", "NavigationMob"),
+        ("world.rock", "pub mod world;", "WorldMob"),
+        ("lib.rock", "", "RootMob"),
+    ];
+    let mut modules: Vec<_> = files
+        .iter()
+        .map(|(file, header, mob)| {
+            let src = format!("{header}\npub struct {mob} {{ hp: int }}\npub struct {mob}Room {{ mobs: [{mob}] }}\n");
+            let mut module = parse_module_with_dialect(&src, ustr(file), Dialect::V1).expect("parse v1");
+            module.package = Some(rock_core::source_code::PackageTag {
+                id: 1,
+                self_name: "game".to_string(),
+            });
+            module
+        })
+        .collect();
+    let mut legacy = parse_module_with_dialect(
+        "struct LegacyMob { hp: int }\nstruct LegacyMobRoom { mobs: [LegacyMob] }\n",
+        ustr("legacy.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy");
+    legacy.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+    modules.push(legacy);
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: ustr("game"),
+            aliases: vec![],
+        }],
+    };
+    let ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
+    let errors = module_error_messages(&ws);
+    for (_, _, mob) in files {
+        assert!(
+            errors.iter().any(|e| e.contains("cannot store identity struct") && e.contains(&format!("{mob}`;"))),
+            "every module holds the same violation while `game` is enforced: {errors:?}"
+        );
+    }
+
+    let exemptions = IdentityStorageExemptions {
+        packages: &[],
+        modules: &[("game", "nav"), ("other", "world")],
+    };
+    let exemption_of = |file: &str| {
+        let module = ws.modules.iter().find(|m| m.file == ustr(file)).expect("fixture module");
+        assert!(!identity_storage_exempt(&ws, module), "`game` has no listed exemption");
+        exemptions.exemption(&ws, module)
+    };
+    assert_eq!(exemption_of("nav.rock"), Some(IdentityStorageExemption::Module("nav")));
+    assert_eq!(exemption_of("nav/graph.rock"), Some(IdentityStorageExemption::Module("nav")));
+    assert_eq!(exemption_of("navigation.rock"), None, "a prefix matches whole segments");
+    assert_eq!(exemption_of("world.rock"), None, "an entry covers its own package only");
+    assert_eq!(exemption_of("lib.rock"), None, "the package root is not under `nav`");
+    assert!(ws.fragment_scopes.get(&ustr("legacy.rock")).is_none());
+    assert_eq!(exemption_of("legacy.rock"), None, "a module with no v1 path matches no prefix");
+}
+
 #[test]
 fn chess_sfx_identity_storage_is_enforced() {
     let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";

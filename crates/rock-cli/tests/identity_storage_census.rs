@@ -1,9 +1,10 @@
 //! The identity-storage census (docs/identity-storage-plan.md S0a-S0c) pinned
-//! exactly. Exempt packages report no diagnostics, so this table is where
-//! their debt stays visible: a migration that removes sites updates the row,
-//! and a package whose row reaches zero leaves
-//! `bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT` in the same
-//! commit.
+//! exactly. Exempt packages and module prefixes report no diagnostics, so this
+//! table is where their debt stays visible: a migration that removes sites
+//! updates the row, and an entry whose row reaches zero leaves
+//! `bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT` (or
+//! `IDENTITY_STORAGE_EXEMPT_MODULES`) in the same commit. A module prefix's
+//! sites are pinned one by one.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

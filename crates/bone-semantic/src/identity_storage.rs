@@ -1,11 +1,11 @@
 //! The identity-storage checks (docs/identity-storage-plan.md): declarations
 //! (S0a), function bodies (S0b), and their transitional package exemptions.
 //!
-//! Enforcement is on by default. A package on [`IDENTITY_STORAGE_EXEMPT`]
-//! gets no diagnostics; `rock identity-storage-census` counts its sites and
-//! the census test pins those counts per kind, so a migration that removes
-//! sites updates the pinned table and drops the package here when it reaches
-//! zero.
+//! Enforcement is on by default. A package on [`IDENTITY_STORAGE_EXEMPT`],
+//! or a module under a prefix on [`IDENTITY_STORAGE_EXEMPT_MODULES`], gets no
+//! diagnostics; `rock identity-storage-census` counts its sites and the
+//! census test pins those counts per kind, so a migration that removes sites
+//! updates the pinned table and drops the entry here when it reaches zero.
 
 use bone_core::escape::lambda_is_nonescaping;
 use bone_core::identity_storage::{
@@ -91,6 +91,58 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
     "wgpu_renderer",
 ];
 
+/// Module path prefixes, by stamped package name and `::`-joined module path,
+/// exempt inside an otherwise enforced package. A prefix covers the module it
+/// names and every module below it: `("p", "nav")` covers `p::nav` and
+/// `p::nav::graph`, not `p::navigation`.
+pub const IDENTITY_STORAGE_EXEMPT_MODULES: &[(&str, &str)] = &[];
+
+/// Why a module's sites are counted by the census instead of reported.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IdentityStorageExemption {
+    /// Its package is listed whole.
+    Package,
+    /// It is under this listed module path prefix.
+    Module(&'static str),
+}
+
+/// The exemption lists. Production reads [`IDENTITY_STORAGE_EXEMPTIONS`];
+/// tests pass their own.
+pub struct IdentityStorageExemptions {
+    pub packages: &'static [&'static str],
+    pub modules: &'static [(&'static str, &'static str)],
+}
+
+pub const IDENTITY_STORAGE_EXEMPTIONS: IdentityStorageExemptions = IdentityStorageExemptions {
+    packages: IDENTITY_STORAGE_EXEMPT,
+    modules: IDENTITY_STORAGE_EXEMPT_MODULES,
+};
+
+impl IdentityStorageExemptions {
+    /// The one exemption predicate. A module's path is the `mod` header of
+    /// its file (`Workspace.fragment_scopes`); a file without one matches no
+    /// module prefix.
+    pub fn exemption(&self, ws: &Workspace, module: &Module) -> Option<IdentityStorageExemption> {
+        let package = identity_storage_package(module);
+        if package == UNPACKAGED_PROGRAMS && ws.identity_storage_enforce_unpackaged {
+            return None;
+        }
+        if self.packages.contains(&package) {
+            return Some(IdentityStorageExemption::Package);
+        }
+        let path = &ws.fragment_scopes.get(&module.file)?.module_path;
+        self.modules
+            .iter()
+            .find(|(p, prefix)| *p == package && module_path_under(path, prefix))
+            .map(|(_, prefix)| IdentityStorageExemption::Module(prefix))
+    }
+}
+
+fn module_path_under(path: &[Ustr], prefix: &str) -> bool {
+    let prefix: Vec<&str> = prefix.split("::").collect();
+    path.len() >= prefix.len() && path.iter().zip(&prefix).all(|(segment, want)| segment.as_str() == *want)
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IdentityStorageKind {
     /// A struct or value field holding an identity directly or nullable.
@@ -165,11 +217,7 @@ pub fn identity_storage_package(module: &Module) -> &str {
 
 /// Whether `module`'s sites are counted by the census instead of reported.
 pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
-    let package = identity_storage_package(module);
-    if package == UNPACKAGED_PROGRAMS && ws.identity_storage_enforce_unpackaged {
-        return false;
-    }
-    IDENTITY_STORAGE_EXEMPT.contains(&package)
+    IDENTITY_STORAGE_EXEMPTIONS.exemption(ws, module).is_some()
 }
 
 /// Every declaration position in `module` that stores an identity struct.
