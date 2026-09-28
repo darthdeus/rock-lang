@@ -1326,8 +1326,9 @@ pub struct NoboxGlobalAccessorShape {
     /// shape unbuildable.
     pub presence_path: Option<Ustr>,
     /// Why no accessor can be built, if so. `_lct` is positional over physical
-    /// leaves, while `_vt` is positional over declared fields; nested GC-table
-    /// fields therefore cannot be rebuilt from the flattened global storage.
+    /// leaves, while `_vt` is positional over its box keys (`gc_table_fields`),
+    /// which split only `nobox` fields into leaves; a GC table with a nested
+    /// boxed child therefore cannot be rebuilt from the flattened storage.
     pub unbuildable: Option<String>,
 }
 
@@ -1373,14 +1374,20 @@ pub fn nobox_global_accessor_shape(
         ValueStorage::CData if has_nested => "_lct",
         ValueStorage::CData => "_ct",
     };
+    // `_vt` is positional over its box keys: a declared field whole, a `nobox`
+    // field by its dotted leaves. It is the accessor's ctor exactly when those
+    // keys are the storage's leaf paths.
     let unbuildable = if storage == ValueStorage::GcTable {
-        paths.iter().find(|p| p.contains('.')).map(|nested| {
+        let keys: Vec<Ustr> = super::gc_table_fields(ws, scx.target, shape.name)?
+            .iter()
+            .flat_map(|f| f.keys().into_iter().map(|(key, _)| key))
+            .collect();
+        (keys != paths).then(|| {
             format!(
-                "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
-                 storage is {} leaves including a nested one (`{nested}`), so the accessor \
-                 would pass a leaf where the ctor wants a nested value",
+                "`{}{ctor_suffix}` is positional over its box keys {keys:?}, but this \
+                 type's storage is the leaves {paths:?}, so the accessor would pass a leaf \
+                 where the ctor wants a nested value",
                 shape.name,
-                paths.len(),
             )
         })
     } else {
