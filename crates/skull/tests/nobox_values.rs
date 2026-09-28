@@ -1835,45 +1835,92 @@ fn a_gc_tier_value_threaded_as_leaves_keeps_its_nobox_fields_unboxed() {
 }
 
 // Positions that store the outer value in a table slot, so its `Map_vt` box
-// is real.
-const NOBOX_IN_GC_VALUE_BOXED_SITES: [(&str, &str); 2] = [
+// is real. The box keys each `nobox` field's leaves by dotted path
+// (`size.x`), the layout a plain struct and a leaf-table value already use, so
+// storing it builds no `Id_ct`/`Grid_ct`.
+const NOBOX_IN_GC_VALUE_BOXED_SITES: [(&str, &str, &str, &str); 3] = [
     (
         "struct literal field",
         "fn site(s: int) -> World { return World { map: Map { space: Id { value: s }, size: Grid { x: 2, y: 3 }, tiles: [4] }, n: 1 } }",
+        "let w = site(7)\n w.map.size.x = 11\n print(\"{w.map.space.value} {w.map.size.x} {w.map.size.y} {total(w.map)}\")",
+        "7 11 3 22",
     ),
     (
         "Vec element",
         "fn site(s: int) -> [Map] { return [Map { space: Id { value: s }, size: Grid { x: 1, y: 1 }, tiles: [] }] }",
+        "let v = site(5)\n v[0].size.y = 12\n v.push(v[0])\n print(\"{v[1].space.value} {v[1].size.y} {v.len()} {v[0] == v[1]}\")",
+        "5 12 2 true",
+    ),
+    (
+        "global",
+        "global G: Map\nfn site(s: int) { G = Map { space: Id { value: s }, size: Grid { x: 4, y: 5 }, tiles: [1, 2] } }",
+        "site(9)\n G.size.y = 6\n print(\"{G.space.value} {G.size.x} {G.size.y} {total(G)}\")",
+        "9 4 6 21",
     ),
 ];
 
-// PINNED BUG (sentinel, docs/test-sentinels.md). Correct behavior: the
-// `Map_vt` box stores its `nobox` fields as leaves, the way a plain struct and
-// a leaf-table value already do, so both sites emit and neither builds an
-// `Id_ct`/`Grid_ct` box. Today the GC tier's `_vt` table is keyed by DECLARED
-// field (`StructFieldPlan::Direct` for a nobox child of a `GcTable` parent;
-// `pack_group_fields` packs each part whole), so the child is boxed and the
-// nobox verifier rejects it. The C backend accepts the same program. The fix
-// changes the `_vt` physical layout; see "Not covered by this fix" in
-// docs/nobox-nested-ctor-plan.md.
-// This passes today because the bug exists. When a site stops rejecting, flip
-// this to the leaf-site test's assertions (emits, runs, no `Id_ct(`/`Grid_ct(`),
-// and flip `an_implicit_box_under_a_gc_tier_parent_is_rejected_with_a_span`
-// in nobox_materialize_gc_tier.rs with it.
 #[test]
-fn a_stored_gc_tier_value_boxes_its_nobox_fields_sentinel() {
-    for (what, site) in NOBOX_IN_GC_VALUE_BOXED_SITES {
-        let err = match try_emit_module(&nobox_in_gc_value_src(site, "let _ = site(7)")) {
-            Ok(_) => panic!(
-                "PINNED BEHAVIOR (BUG): the {what} site now emits. The GC-tier nobox gap \
-                 is fixed there -- flip this sentinel."
-            ),
-            Err(e) => e,
+fn a_stored_gc_tier_value_keeps_its_nobox_fields_as_leaves() {
+    for (what, site, main, expected) in NOBOX_IN_GC_VALUE_BOXED_SITES {
+        let lua = match try_emit_module(&nobox_in_gc_value_src(site, main)) {
+            Ok(lua) => lua,
+            Err(e) => panic!("the {what} site must emit: {e:?}"),
         };
+        let body = function_body(&lua, "site");
         assert!(
-            err.message.contains("survived lowering as an implicit materialization"),
-            "the {what} site was rejected for an unrelated reason: {err:?}"
+            !body.contains("Id_ct(") && !body.contains("Grid_ct("),
+            "the {what} site boxed a nobox field:\n{body}"
         );
-        assert!(err.location.line > 0, "the {what} rejection lost its span: {err:?}");
+        assert_eq!(
+            run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_stored"),
+            expected,
+            "the {what} site"
+        );
     }
+}
+
+// The observable surface of a stored GC-tier value with a `nobox` field --
+// field write through a row, `==`, structural `tostring`, a Vec of them -- is
+// the unmarked twin's, which boxes `V2` as an ordinary value. Both must print
+// the same text; the marked one must not build a `V2` box to do it.
+const NOBOX_IN_GC_VALUE_SURFACE: &str = r#"
+nobox value V2 { x: float, y: float }
+value Row { label: string, pos: V2 }
+struct Holder { row: Row }
+global G: Row
+fn mk(l: string, x: float) -> Row { return Row { label: l, pos: V2 { x: x, y: 2.0 } } }
+fn main() {
+    let h = Holder { row: mk("a", 1.0) }
+    print("{h.row}")
+    h.row.pos.x = 5.0
+    print("{h.row.pos.x} {h.row == mk("a", 5.0)} {h.row == mk("a", 6.0)}")
+    let rows = [mk("b", 3.0), mk("c", 4.0)]
+    rows.push(mk("d", 7.0))
+    rows[1].pos.y = 8.0
+    let total = 0.0
+    for r in rows { total += r.pos.x + r.pos.y }
+    print("{total} {rows[1]} {rows.len()}")
+    G = mk("g", 8.0)
+    G.pos.y = 9.0
+    print("{G} {G.pos.y} {to_string(rows[2])}")
+}
+"#;
+
+#[test]
+fn a_stored_gc_tier_value_with_a_nobox_field_matches_its_unmarked_twin() {
+    let marked = match try_emit_module(NOBOX_IN_GC_VALUE_SURFACE) {
+        Ok(lua) => lua,
+        Err(e) => panic!("a stored GC-tier value with a nobox field must emit: {e:?}"),
+    };
+    let plain = emit_module(&NOBOX_IN_GC_VALUE_SURFACE.replacen("nobox value V2", "value V2", 1));
+    for name in ["mk", "main"] {
+        let body = function_body(&marked, name);
+        assert!(!body.contains("V2_ct("), "`{name}` boxed the nobox field:\n{body}");
+    }
+    let expected = "Row { label: \"a\", pos: V2 { x: 1, y: 2 } }\n\
+                    5 true false\n\
+                    26 Row { label: \"c\", pos: V2 { x: 4, y: 8 } } 3\n\
+                    Row { label: \"g\", pos: V2 { x: 8, y: 9 } } 9 Row { label: \"d\", pos: V2 { x: 7, y: 2 } }";
+    assert_eq!(run_luajit(&format!("{plain}\nmain()\n"), "nobox_in_gc_value_plain"), expected);
+    assert_eq!(run_luajit(&format!("{marked}\nmain()\n"), "nobox_in_gc_value_marked"), expected);
 }
