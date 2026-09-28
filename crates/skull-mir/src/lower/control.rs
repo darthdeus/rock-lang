@@ -26,6 +26,25 @@ impl Builder<'_> {
         Ok(self.emit_cur(inst))
     }
 
+    fn lower_leafwise_value_eq(
+        &mut self,
+        op: BinOp,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+        shape: &ValueShape,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let lhs_repr = self.lower_expr_repr(lhs)?;
+        let lhs_leaves = self.repr_to_leaves_bundle_for_shape(&lhs_repr, shape)?;
+        let rhs_repr = self.lower_expr_repr(rhs)?;
+        let rhs_leaves = self.repr_to_leaves_bundle_for_shape(&rhs_repr, shape)?;
+        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
+        Ok(if matches!(op, BinOp::Eq) {
+            equal
+        } else {
+            self.emit_cur(Inst::Not(equal))
+        })
+    }
+
     pub(crate) fn lower_binop(
         &mut self,
         op: BinOp,
@@ -177,10 +196,28 @@ impl Builder<'_> {
                             )));
                         }
                         shape.nullable |= rhs_shape.nullable;
-                        let lhs_repr = self.lower_expr_repr(lhs)?;
-                        let lhs_leaves = self.repr_to_leaves_bundle_for_shape(&lhs_repr, &shape)?;
-                        let rhs_repr = self.lower_expr_repr(rhs)?;
-                        let rhs_leaves = self.repr_to_leaves_bundle_for_shape(&rhs_repr, &shape)?;
+                        return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
+                    }
+                }
+                // A `value` that is not `nobox` (every generic one, e.g. `Entity<T>`)
+                // still arrives as leaf cells wherever its ABI splats it. Packing
+                // both operands to reach the per-type `__eq` allocated two tables
+                // per comparison; comparing the leaves is the same answer, since
+                // that metamethod is the field-wise `==` over the same leaves.
+                // Lua only: native C compares its own handle and struct layouts.
+                let same_value = self.scx.target() == bone_semantic::hir::FnBackend::Lua
+                    && !self.scx.values_first_class
+                    && matches!(
+                        (self.dispatch().value_struct_name(lhs), self.dispatch().value_struct_name(rhs)),
+                        (Some(ln), Some(rn)) if ln == rn
+                    );
+                if same_value {
+                    let lhs_repr = self.lower_expr_repr(lhs)?.into_value();
+                    let rhs_repr = self.lower_expr_repr(rhs)?.into_value();
+                    let (mut lhs_leaves, mut rhs_leaves) = (Vec::new(), Vec::new());
+                    if matches!(lhs_repr, ValueRepr::Group { .. })
+                        && matching_scalar_leaves(&lhs_repr, &rhs_repr, &mut lhs_leaves, &mut rhs_leaves)
+                    {
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal
@@ -188,6 +225,13 @@ impl Builder<'_> {
                             self.emit_cur(Inst::Not(equal))
                         });
                     }
+                    let lv = self.pack(lhs_repr)?;
+                    let rv = self.pack(rhs_repr)?;
+                    return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                        Inst::Eq(lv, rv)
+                    } else {
+                        Inst::NotEq(lv, rv)
+                    }));
                 }
                 if let (Some(lhs_shape), Some(rhs_shape)) = (
                     self.flat_enum_value_shape_of(lhs)?,
@@ -550,5 +594,30 @@ impl Builder<'_> {
         self.store_and_join(result, lv, join);
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
+    }
+}
+
+/// Pair the leaves of two unpacked operands of one value type, or answer false
+/// when either side is packed or carries a presence leaf.
+fn matching_scalar_leaves(
+    lhs: &ValueRepr,
+    rhs: &ValueRepr,
+    lhs_out: &mut Vec<Idx<Inst>>,
+    rhs_out: &mut Vec<Idx<Inst>>,
+) -> bool {
+    match (lhs, rhs) {
+        (
+            ValueRepr::Group { name: ln, parts: lp, present: None },
+            ValueRepr::Group { name: rn, parts: rp, present: None },
+        ) if ln == rn && lp.len() == rp.len() => lp
+            .iter()
+            .zip(rp)
+            .all(|(l, r)| matching_scalar_leaves(l, r, lhs_out, rhs_out)),
+        (ValueRepr::Scalar(l), ValueRepr::Scalar(r)) => {
+            lhs_out.push(*l);
+            rhs_out.push(*r);
+            true
+        }
+        _ => false,
     }
 }
