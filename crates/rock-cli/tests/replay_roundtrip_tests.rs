@@ -802,10 +802,17 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
         ("STONE_PHYSICAL_KEY_PRESS_AT_2", "105"),
         ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "106"),
         ("STONE_PHYSICAL_KEY_2", "return"), ("STONE_PHYSICAL_SCANCODE_2", "return"),
+        ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "110"),
+        ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "111"),
+        ("STONE_PHYSICAL_MOUSE_X_2", "640"),
+        ("STONE_PHYSICAL_MOUSE_Y_2", "247"),
     ]);
     assert_eq!(recorded["mag"]["MAG_RUN_STARTS"], 1,
-        "fixture must enter gameplay: screen={} prep_ticks={} admission_ticks={} play_effects={}",
-        recorded["mag"]["SCREEN"], recorded["mag"]["MAG_RUN_PREPARE_ADVANCE_TICKS"],
+        "fixture must enter gameplay: screen={} save_slots_open={} focus_scope={} first_focus_rect={} prep_ticks={} admission_ticks={} play_effects={}",
+        recorded["mag"]["SCREEN"], recorded["mag"]["SAVE_SLOTS_OPEN"],
+        recorded["stone"]["UI_FOCUS"]["scope"],
+        recorded["stone"]["UI_FOCUS"]["cur"]["data"][0]["rect"],
+        recorded["mag"]["MAG_RUN_PREPARE_ADVANCE_TICKS"],
         recorded["mag"]["MAG_RUN_ADMISSION_TICKS"], recorded["__stone_diag"]["MAG_PLAY_EFFECT_COUNT"]);
     let wire = std::fs::read_to_string(&log).unwrap();
     assert!(wire.lines().any(|line| line.starts_with("j ") && line.contains(" flow ")),

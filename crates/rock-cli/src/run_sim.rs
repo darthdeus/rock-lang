@@ -235,23 +235,42 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
 /// Map each part of each requested spec to its registered wire name. A v1
 /// package registers sims under canonical DefKeys (`game::module::name`); a
 /// trailing `::`-segment path such as the declared name selects the one sim it
-/// ends (spec sections 15 and 16). An exact wire name always wins. A name no
-/// sim has passes through unchanged so each route keeps its own unknown-name
-/// report.
+/// ends (spec sections 15 and 16). An exact wire name always wins.
+///
+/// Every name must be a registered sim, checked here before anything boots: a
+/// helper coroutine named in a batch would otherwise kill its whole worker
+/// with `unknown sim`, and a name holding whitespace (one argv element of
+/// newline-joined names) splits the worker's entry-plan line. Every problem is
+/// reported at once, one `unknown sim: <name>` line per name, so a batch is
+/// fixed in one pass.
 fn resolve_sim_specs(wire_names: &[String], specs: &[String]) -> Result<Vec<String>> {
-    specs
-        .iter()
-        .map(|spec| {
-            let parts = parse_sim_chain(spec)
-                .into_iter()
-                .map(|part| resolve_sim_name(wire_names, part))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(parts.join(","))
-        })
-        .collect()
+    let mut problems = Vec::new();
+    let mut resolved = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let mut parts = Vec::new();
+        for part in parse_sim_chain(spec) {
+            match resolve_sim_name(wire_names, part) {
+                Ok(wire) => parts.push(wire),
+                Err(problem) => problems.push(problem),
+            }
+        }
+        resolved.push(parts.join(","));
+    }
+    if problems.is_empty() {
+        return Ok(resolved);
+    }
+    Err(anyhow!(
+        "{} requested sim name{} not runnable (list sims with `rock sim --list <project>`):\n  {}",
+        problems.len(),
+        if problems.len() == 1 { " is" } else { "s are" },
+        problems.join("\n  ")
+    ))
 }
 
-fn resolve_sim_name(wire_names: &[String], name: &str) -> Result<String> {
+fn resolve_sim_name(wire_names: &[String], name: &str) -> std::result::Result<String, String> {
+    if name.contains(char::is_whitespace) {
+        return Err(format!("sim name {name:?} contains whitespace; pass each sim name as its own argument"));
+    }
     if wire_names.iter().any(|wire| wire == name) {
         return Ok(name.to_string());
     }
@@ -262,12 +281,9 @@ fn resolve_sim_name(wire_names: &[String], name: &str) -> Result<String> {
         .map(String::as_str)
         .collect();
     match candidates.as_slice() {
-        [] => Ok(name.to_string()),
+        [] => Err(format!("unknown sim: {name}")),
         [only] => Ok((*only).to_string()),
-        many => Err(anyhow!(
-            "sim name `{name}` is ambiguous; name one of: {}",
-            many.join(", ")
-        )),
+        many => Err(format!("sim name `{name}` is ambiguous; name one of: {}", many.join(", "))),
     }
 }
 
@@ -460,22 +476,27 @@ fn record_sim_lifecycle(event: &str, sim_name: &str) {
 }
 
 /// Compile `project` into `output_path` and walk the `@sim` registry
-/// once, returning the registry-ordered wire names alongside each sim's
-/// `@sim_env` pairs. Single source of suite discovery for the list,
-/// single-run, and run-all paths so they can't drift in which sims they
-/// see. Does not validate the project dir or build engine libs — callers
-/// own that (listing needs neither).
+/// once, returning registry-ordered wire names, source paths and each sim's
+/// `@sim_env` pairs. Single source of suite discovery for the list, single-run,
+/// and run-all paths so they can't drift in which sims they see. Does not
+/// validate the project dir or build engine libs -- callers own that (listing
+/// needs neither).
 fn compile_sims(
     backend: crate::Backend,
     project_path: PathBuf,
     output_path: PathBuf,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
+) -> Result<(
+    Vec<String>,
+    HashMap<String, Vec<(String, String)>>,
+    HashMap<String, String>,
+    crate::skull_backend::SkullStone,
+)> {
     compile_sims_with_allocation(backend, project_path, output_path, None)
 }
 
 const SIM_COMPILE_RECEIPT_DIR_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_DIR";
 const SIM_COMPILE_RECEIPT_PREPARE_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_PREPARE";
-const SIM_COMPILE_RECEIPT_VERSION: u64 = 1;
+const SIM_COMPILE_RECEIPT_VERSION: u64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SimReceiptInput {
@@ -487,6 +508,7 @@ struct SimReceiptInput {
 struct PreparedSims {
     wire_names: Vec<String>,
     env_by_wire: HashMap<String, Vec<(String, String)>>,
+    source_files: HashMap<String, String>,
     stone: Option<crate::skull_backend::SkullStone>,
 }
 
@@ -661,29 +683,35 @@ fn parse_receipt_inputs(value: &serde_json::Value) -> Result<Vec<SimReceiptInput
 fn registry_json(
     wire_names: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
-) -> serde_json::Value {
-    serde_json::Value::Array(
-        wire_names
-            .iter()
-            .map(|name| {
-                let env = env_by_wire.get(name).map_or(&[][..], Vec::as_slice);
-                serde_json::json!({
-                    "wire_name": name,
-                    "env": env.iter().map(|(key, value)| serde_json::json!([key, value])).collect::<Vec<_>>(),
-                })
-            })
-            .collect(),
-    )
+    source_files: &HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let rows = wire_names
+        .iter()
+        .map(|name| {
+            let source_file = source_files
+                .get(name)
+                .filter(|source_file| !source_file.is_empty())
+                .ok_or_else(|| anyhow!("compiled @sim `{name}` has no recorded source file"))?;
+            let env = env_by_wire.get(name).map_or(&[][..], Vec::as_slice);
+            Ok(serde_json::json!({
+                "wire_name": name,
+                "env": env.iter().map(|(key, value)| serde_json::json!([key, value])).collect::<Vec<_>>(),
+                "source_file": source_file,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(serde_json::Value::Array(rows))
 }
 
 fn parse_registry(
     value: &serde_json::Value,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, HashMap<String, String>)> {
     let rows = value
         .as_array()
         .ok_or_else(|| anyhow!("sim compile receipt `registry` is not an array"))?;
     let mut names = Vec::with_capacity(rows.len());
     let mut env_by_wire = HashMap::new();
+    let mut source_files = HashMap::new();
     for row in rows {
         let name = row
             .get("wire_name")
@@ -708,9 +736,15 @@ fn parse_registry(
             env.push((key.to_owned(), value.to_owned()));
         }
         names.push(name.clone());
-        env_by_wire.insert(name, env);
+        env_by_wire.insert(name.clone(), env);
+        let source_file = row
+            .get("source_file")
+            .and_then(serde_json::Value::as_str)
+            .filter(|source_file| !source_file.is_empty())
+            .ok_or_else(|| anyhow!("sim compile receipt source file for `{name}` is missing or invalid"))?;
+        source_files.insert(name, source_file.to_owned());
     }
-    Ok((names, env_by_wire))
+    Ok((names, env_by_wire, source_files))
 }
 
 fn publish_sim_receipt(
@@ -720,6 +754,7 @@ fn publish_sim_receipt(
     output: &Path,
     wire_names: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    source_files: &HashMap<String, String>,
     stone: &crate::skull_backend::SkullStone,
 ) -> Result<()> {
     std::fs::create_dir_all(root)
@@ -739,7 +774,7 @@ fn publish_sim_receipt(
         "context": sim_receipt_context(project)?,
         "main_sha256": sha256_bytes(&main_bytes),
         "inputs": receipt_inputs_json(&inputs),
-        "registry": registry_json(wire_names, env_by_wire),
+        "registry": registry_json(wire_names, env_by_wire, source_files)?,
     });
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .context("serialize sim compile receipt")?;
@@ -761,7 +796,7 @@ fn load_sim_receipt(
     receipt_dir: &Path,
     project: &Path,
     output: &Path,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, HashMap<String, String>)> {
     let manifest_path = receipt_dir.join("receipt.json");
     let manifest_bytes = std::fs::read(&manifest_path)
         .with_context(|| format!("read sim compile receipt {}", manifest_path.display()))?;
@@ -842,9 +877,9 @@ fn prepare_sims(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
     else {
-        let (wire_names, env_by_wire, stone) =
+        let (wire_names, env_by_wire, source_files, stone) =
             compile_sims(backend, project_path, output_path)?;
-        return Ok(PreparedSims { wire_names, env_by_wire, stone: Some(stone) });
+        return Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: Some(stone) });
     };
     let project_path = project_path.canonicalize().with_context(|| {
         format!("canonicalize sim receipt project {}", project_path.display())
@@ -858,14 +893,14 @@ fn prepare_sims(
             Some(&output_path),
             || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
         )?;
-        let (wire_names, env_by_wire) = timed_sim_compile_phase(
+        let (wire_names, env_by_wire, source_files) = timed_sim_compile_phase(
             "compile_sims",
             "receipt_materialize",
             &project_path,
             Some(&output_path),
             || load_sim_receipt(&receipt_dir, &project_path, &output_path),
         )?;
-        return Ok(PreparedSims { wire_names, env_by_wire, stone: None });
+        return Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: None });
     }
     if std::env::var_os(SIM_COMPILE_RECEIPT_PREPARE_ENV).as_deref()
         != Some(std::ffi::OsStr::new("1"))
@@ -876,7 +911,7 @@ fn prepare_sims(
             root.display()
         ));
     }
-    let (wire_names, env_by_wire, stone) =
+    let (wire_names, env_by_wire, source_files, stone) =
         compile_sims(backend, project_path.clone(), output_path.clone())?;
     timed_sim_compile_phase(
         "compile_sims",
@@ -891,11 +926,12 @@ fn prepare_sims(
                 &output_path,
                 &wire_names,
                 &env_by_wire,
+                &source_files,
                 &stone,
             )
         },
     )?;
-    Ok(PreparedSims { wire_names, env_by_wire, stone: Some(stone) })
+    Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: Some(stone) })
 }
 
 fn compile_sims_with_allocation(
@@ -903,11 +939,17 @@ fn compile_sims_with_allocation(
     project_path: PathBuf,
     output_path: PathBuf,
     allocation_manifest: Option<&Path>,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
+) -> Result<(
+    Vec<String>,
+    HashMap<String, Vec<(String, String)>>,
+    HashMap<String, String>,
+    crate::skull_backend::SkullStone,
+)> {
     // Only skull serves sims now (bone has no codegen, rock is gone): build the
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
-    // same build. The returned SkullStone serves mid-sim `reload_edit` ops.
+    // same build. Source paths are captured from the same HIR declarations, and
+    // the returned SkullStone serves mid-sim `reload_edit` ops.
     timed_sim_compile_phase(
         "compile_sims",
         "sound_bank",
@@ -969,7 +1011,7 @@ fn reload_lane_session(
             stone
         }
         // A receipt contains emitted code, but no editable compiler Session.
-        None => compile_sims(backend, project_path.to_path_buf(), dir.path().to_path_buf())?.2,
+        None => compile_sims(backend, project_path.to_path_buf(), dir.path().to_path_buf())?.3,
     };
     if !quiet {
         println!("[sim] hot-reload lane: isolated chunk with the shared callee shape");
@@ -1081,12 +1123,13 @@ fn do_run_sim_opts_recorded(
     if prepared.stone.is_none()
         && entry_is_reload_lane(sim_name, &prepared.env_by_wire)
     {
-        let (wire_names, env_by_wire, stone) = recorder.phase("compile_reload_session", || {
+        let (wire_names, env_by_wire, source_files, stone) = recorder.phase("compile_reload_session", || {
             compile_sims(backend, project_path.clone(), output_path)
         })?;
         prepared = PreparedSims {
             wire_names,
             env_by_wire,
+            source_files,
             stone: Some(stone),
         };
     }
@@ -1101,6 +1144,7 @@ fn do_run_sim_opts_recorded(
         requested_mode,
         "single",
         update_snapshots,
+        &prepared.source_files,
     );
     sim_spawn_barrier();
 
@@ -1447,6 +1491,7 @@ fn do_run_named_sims_recorded(
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
+    let source_files = prepared.source_files;
     let names = &resolve_sim_specs(&wire_names, names)?;
     emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
@@ -1478,6 +1523,7 @@ fn do_run_named_sims_recorded(
         requested_mode,
         sim_exec_mode_name(mode),
         update_snapshots,
+        &source_files,
     );
     let mut reload_lane = reload_lane_session(
         backend,
@@ -1915,6 +1961,7 @@ fn do_run_all_sims_recorded(
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
+    let source_files = prepared.source_files;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
     if wire_names.is_empty() {
@@ -1937,6 +1984,7 @@ fn do_run_all_sims_recorded(
         requested_mode,
         sim_exec_mode_name(mode),
         update_snapshots,
+        &source_files,
     );
     let selected = wire_names.len();
     let mut routine_names = Vec::new();
@@ -2294,7 +2342,7 @@ pub fn do_run_allocation_census(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, stone) =
+    let (wire_names, env_by_wire, _source_files, stone) =
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
@@ -2312,9 +2360,6 @@ pub fn do_run_allocation_census(
             return Err(anyhow!(
                 "allocation census accepts one sim per entry; comma-chain `{name}` would hide a per-sim row"
             ));
-        }
-        if !wire_names.iter().any(|known| known == name) {
-            return Err(anyhow!("no sim named `{name}` in project `{project}`"));
         }
     }
 
@@ -2566,7 +2611,7 @@ pub fn do_run_allocation_sites(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, stone) = compile_sims_with_allocation(
+    let (wire_names, env_by_wire, _source_files, stone) = compile_sims_with_allocation(
         backend,
         project_path,
         PathBuf::from(&output),
@@ -2590,9 +2635,6 @@ pub fn do_run_allocation_sites(
     for name in &selected {
         if parse_sim_chain(name).len() != 1 {
             return Err(anyhow!("allocation-site diagnostics accept one sim per entry; comma-chain `{name}` would merge frame populations"));
-        }
-        if !wire_names.iter().any(|known| known == name) {
-            return Err(anyhow!("no sim named `{name}` in project `{project}`"));
         }
         if entry_is_reload_lane(name, &env_by_wire) {
             return Err(anyhow!("allocation-site diagnostics do not support reload sim `{name}` because its emitted site IDs can change after the initial manifest"));
@@ -3811,6 +3853,25 @@ fn per_entry_env_pairs(part: &WorkerPart) -> Vec<(String, String)> {
         .collect()
 }
 
+/// One entry-plan line, without its newline: `<name>\t<out>\t<budget>` and a
+/// flat key, value tail (see `sim_load_entries` in stone/engine/sim.rock).
+fn entry_plan_line(p: &WorkerPart) -> Result<String> {
+    let mut fields = vec![p.name.clone(), p.out_dir.to_string_lossy().into_owned(), p.frame_budget.to_string()];
+    for (k, v) in per_entry_env_pairs(p).into_iter().chain(runner_owned_plan_pairs(&p.env)) {
+        fields.push(k);
+        fields.push(v);
+    }
+    // The worker splits on these unescaped, so one inside a field would shift
+    // or split the line and kill every entry in the worker.
+    if let Some(bad) = fields.iter().find(|f| f.contains(['\t', '\n', '\r'])) {
+        return Err(anyhow!(
+            "entry plan field {bad:?} of sim `{}` contains a tab or line break the worker cannot parse",
+            p.name
+        ));
+    }
+    Ok(fields.join("\t"))
+}
+
 /// How `rock sim` maps entries to processes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SimExecMode {
@@ -4541,20 +4602,7 @@ fn run_worker(
         .tempfile_in(output)
         .context("creating the worker entry plan")?;
     for p in parts {
-        write!(
-            plan_file,
-            "{}\t{}\t{}",
-            p.name,
-            p.out_dir.to_string_lossy(),
-            p.frame_budget
-        )?;
-        for (k, v) in per_entry_env_pairs(p) {
-            write!(plan_file, "\t{k}\t{v}")?;
-        }
-        for (k, v) in runner_owned_plan_pairs(&p.env) {
-            write!(plan_file, "\t{k}\t{v}")?;
-        }
-        writeln!(plan_file)?;
+        writeln!(plan_file, "{}", entry_plan_line(p)?)?;
     }
     plan_file.flush()?;
 
@@ -6922,6 +6970,20 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sim_receipt_registry_requires_source_files() {
+        let wire_names = vec!["probe".to_string()];
+        let env_by_wire = HashMap::new();
+        let missing = registry_json(&wire_names, &env_by_wire, &HashMap::new()).unwrap_err();
+        assert!(missing.to_string().contains("compiled @sim `probe` has no recorded source file"));
+
+        let malformed = serde_json::json!([{"wire_name":"probe", "env":[]}]);
+        assert!(parse_registry(&malformed)
+            .unwrap_err()
+            .to_string()
+            .contains("source file for `probe` is missing or invalid"));
+    }
+
     fn corpus() -> Vec<String> {
         ["a_first", "b_second", "c_third"].iter().map(|s| s.to_string()).collect()
     }
@@ -8393,13 +8455,62 @@ mod tests {
         assert_eq!(resolve(&["legacy_sim", "game::hover"]).unwrap(), ["legacy_sim", "game::hover"]);
         assert_eq!(resolve(&["ui::hover"]).unwrap(), ["game::ui::hover"]);
         assert_eq!(resolve(&["boots, ui::hover"]).unwrap(), ["game::boots,game::ui::hover"]);
-        assert_eq!(resolve(&["missing"]).unwrap(), ["missing"]);
-        assert_eq!(resolve(&["oots"]).unwrap(), ["oots"], "only whole segments match");
+        let error = resolve(&["oots"]).unwrap_err().to_string();
+        assert!(error.contains("unknown sim: oots"), "only whole segments match: {error}");
         let error = resolve(&["hover"]).unwrap_err().to_string();
         assert!(
             error.contains("`hover` is ambiguous") && error.contains("game::ui::hover") && error.contains("game::hover"),
             "{error}"
         );
+    }
+
+    // A name the registry lacks used to pass through to the worker's entry
+    // plan, where a name holding a line break (one argv element of
+    // newline-joined names) split the plan line and killed the whole worker
+    // with `malformed entry plan line: <a valid sim>`.
+    #[test]
+    fn requested_sim_names_that_are_not_sims_are_all_refused_before_boot() {
+        let wires: Vec<String> = ["game::boots", "game::hover"].into_iter().map(String::from).collect();
+        let specs: Vec<String> =
+            ["boots", "helper_probe", "boots\nhover", "hover,missing_part", "other_helper"]
+                .into_iter()
+                .map(String::from)
+                .collect();
+        let error = resolve_sim_specs(&wires, &specs).unwrap_err().to_string();
+        for expected in [
+            "unknown sim: helper_probe",
+            "unknown sim: missing_part",
+            "unknown sim: other_helper",
+            "\"boots\\nhover\" contains whitespace",
+        ] {
+            assert!(error.contains(expected), "missing `{expected}` in:\n{error}");
+        }
+        assert!(!error.contains("unknown sim: boots"), "a valid sim must not be named unknown:\n{error}");
+    }
+
+    #[test]
+    fn an_entry_plan_field_that_would_split_the_line_is_refused() {
+        let part = |name: &str, env: Vec<(String, String)>| WorkerPart {
+            name: name.to_string(),
+            out_dir: PathBuf::from("/tmp/out"),
+            frame_budget: 60,
+            env,
+            occurrence_id: 0,
+            part_index: 0,
+        };
+        let line = entry_plan_line(&part("game::boots", Vec::new())).unwrap();
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(&fields[..3], ["game::boots", "/tmp/out", "60"], "{line:?}");
+        assert!(!line.contains('\n'), "{line:?}");
+        for bad in ["a\nb", "a\tb", "a\rb"] {
+            let error = entry_plan_line(&part(bad, Vec::new())).unwrap_err().to_string();
+            assert!(error.contains("entry plan"), "{error}");
+        }
+        let env = vec![
+            (PER_ENTRY_ENV_DECL.to_string(), "KEY".to_string()),
+            ("KEY".to_string(), "line\nbreak".to_string()),
+        ];
+        assert!(entry_plan_line(&part("game::boots", env)).is_err(), "a value must not split the line");
     }
 
     #[test]

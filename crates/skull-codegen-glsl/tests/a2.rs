@@ -482,6 +482,61 @@ fn reject_mrt_output_name_collision() {
     reject_pipeline(src, "vt", "fr", "collide");
 }
 
+// --- fragment depth output: a `FragDepth: float` field is gl_FragDepth -------
+// Window-space depth in [0,1]. It is not a colour attachment: it takes no
+// `layout(location=N) out` and the colour fields keep the locations they would
+// have without it.
+
+const FRAG_DEPTH_SRC: &str = r#"
+    value QV   { aPos: Vec2, aDepth: float }
+    value Vary { position: Vec4, TexCoord: Vec2, Depth: float }
+    value DepthOut { FragColor: Vec4, FragDepth: float, FragId: Vec4 }
+    @shader(vertex)
+    fn vt(@attr a: QV) -> Vary {
+        return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos, Depth: a.aDepth }
+    }
+    @shader(fragment)
+    fn fr(vary: Vary, uTexture: Sampler2D) -> DepthOut {
+        let c = texture(uTexture, vary.TexCoord)
+        return DepthOut { FragColor: c, FragDepth: vary.Depth * 0.5, FragId: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 } }
+    }
+"#;
+
+#[test]
+fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
+    for p in [GlslProfile::Core330, GlslProfile::Es300] {
+        let glsl = emit_pipeline_profile(FRAG_DEPTH_SRC, "vt", "fr", p).expect("emit");
+        assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
+        assert!(glsl.contains("layout(location = 1) out vec4 FragId;"), "got:\n{glsl}");
+        assert!(!glsl.contains("layout(location = 2)"), "FragDepth must not take a location:\n{glsl}");
+        assert!(!glsl.contains("out float FragDepth"), "FragDepth is not an out:\n{glsl}");
+        assert!(glsl.contains("gl_FragDepth = (Depth * 0.5);"), "got:\n{glsl}");
+        assert_eq!(glsl.matches("FragDepth = ").count(), 1, "only gl_FragDepth is assigned:\n{glsl}");
+    }
+}
+
+#[test]
+fn reject_frag_depth_that_is_not_float() {
+    let src = FRAG_DEPTH_SRC
+        .replace("FragDepth: float", "FragDepth: Vec4")
+        .replace("FragDepth: vary.Depth * 0.5", "FragDepth: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }");
+    reject_pipeline(&src, "vt", "fr", "`FragDepth` must be float");
+}
+
+#[test]
+fn reject_frag_depth_without_a_colour_output() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        value DepthOnly { FragDepth: float }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> DepthOnly { return DepthOnly { FragDepth: 0.5 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "colour");
+}
+
 // --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
 
 // --- A2c: the instanced tier -- @instance attrs continue the locations -------

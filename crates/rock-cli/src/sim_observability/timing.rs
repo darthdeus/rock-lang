@@ -194,6 +194,7 @@ pub(super) struct Timings {
     latest: HashMap<(String, String), u64>,
     host: Value,
     config: Value,
+    source_files: HashMap<String, String>,
     source_clean: bool,
     quiet: Value,
     workers: HashMap<u64, Value>,
@@ -256,9 +257,14 @@ impl Timings {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
             Err(e) => log::warn!(target: "SIM", "cannot inspect timing history: {e}"),
         }
-        Self { policy, history, latest, host, config: Value::Null, source_clean: false, quiet: Value::Null,
+        Self { policy, history, latest, host, config: Value::Null, source_files: HashMap::new(),
+            source_clean: false, quiet: Value::Null,
             workers: HashMap::new(), runtime: HashMap::new(), active: HashMap::new(),
             phases: HashMap::new(), results: HashMap::new(), rows: Vec::new() }
+    }
+
+    pub(super) fn set_source_files(&mut self, source_files: &HashMap<String, String>) {
+        self.source_files.clone_from(source_files);
     }
 
     fn identity(&self, key: EntryKey) -> Option<TimingIdentity> {
@@ -294,10 +300,12 @@ impl Timings {
     ) -> Vec<TimingWarning> {
         let Some((start, name, identity)) = self.active.remove(&key) else { return Vec::new(); };
         let ms = now.saturating_sub(start);
+        let source_file = self.source_files.get(&name).map_or(Value::Null, |path| json!(path));
         let baseline = identity.as_ref().map(|id| self.history.samples(&name, id)).unwrap_or(&[]);
         let warnings = evaluate_entry(&name, ms, &self.policy, baseline);
         self.rows.push(json!({ "name": name, "occurrence_id": key.1, "part": key.2,
-            "duration_ms": ms, "completed": completed, "frame_count": frame_count.unwrap_or(Value::Null),
+            "source_file": source_file, "duration_ms": ms, "completed": completed,
+            "frame_count": frame_count.unwrap_or(Value::Null),
             "frame_timing": frame_timing.unwrap_or(Value::Null),
             "boundary_timing": boundary_timing.unwrap_or(Value::Null),
             "identity": identity.map(|id| id.key()) }));
@@ -538,6 +546,26 @@ mod tests {
         timings.observe("entry_result", &json!({ "worker_attempt": 1, "occurrence_id": 1,
             "verdict": if passed { "PASS" } else { "FAIL" }, "timed_out": false }), duration);
         warnings
+    }
+
+    #[test]
+    fn completed_timing_rows_retain_the_compiled_sim_source_file() {
+        let root = tempfile::tempdir().unwrap();
+        let mut timing = recorder(root.path());
+        timing.observe("run_start", &json!({ "source": { "dirty": false } }), 0);
+        timing.set_source_files(&HashMap::from([(
+            "sim".to_string(),
+            "tests/sims/example.rock".to_string(),
+        )]));
+        timing.observe("run_config", &json!({ "project_path": "mag" }), 0);
+        timing.observe("worker_spawn", &json!({ "worker_attempt": 1, "kind": "shared",
+            "entries": [{ "occurrence_id": 1, "name": "sim" }], "boot_signature": [] }), 0);
+        timing.observe("entry_start", &json!({ "worker_attempt": 1, "occurrence_id": 1,
+            "part": 0, "name": "sim" }), 0);
+        timing.observe("entry_end", &json!({ "worker_attempt": 1, "occurrence_id": 1,
+            "part": 0, "frame_count": 7 }), 1000);
+
+        assert_eq!(timing.rows[0]["source_file"], "tests/sims/example.rock");
     }
 
     /// Runs 0-2 are each excluded for a different reason - a dirty tree, an

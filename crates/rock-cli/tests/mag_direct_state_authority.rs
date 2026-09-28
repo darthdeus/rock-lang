@@ -522,9 +522,10 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         0,
         "panel definitions must not reload Session state per catalog entry"
     );
+    let attach_player = rock_function_body(&world, "fn WorldState.attach_player(");
     assert!(
-        world.contains("entity.get().unwrap().entity = entity"),
-        "WorldState construction must publish the Player's self identity"
+        attach_player.contains("entity.get().unwrap().entity = entity"),
+        "attaching a Player must publish its self identity"
     );
 
     let player = fs::read_to_string(repo.join("mag/player.rock"))

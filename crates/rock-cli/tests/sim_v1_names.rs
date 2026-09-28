@@ -59,6 +59,29 @@ fn an_ambiguous_v1_sim_short_name_names_its_candidates() {
     assert!(!combined.contains("[sim] "), "no sim may start on an ambiguous name:\n{combined}");
 }
 
+/// A batch naming helpers that are not sims, plus one argv element holding
+/// newline-joined names (`"$(cat names.txt)"`), used to reach the worker's
+/// entry plan and die as `malformed entry plan line: <a valid sim>`.
+#[test]
+fn names_that_are_not_sims_are_all_refused_before_any_sim_boots() {
+    let (out, combined) = rock_sim(&[
+        "unique_short_name",
+        "helper_probe",
+        "other_snapshot_baseline\nsim_v1_names::other::shared_short_name",
+        "other_helper",
+    ]);
+    assert!(!out.status.success(), "a batch with non-sim names must fail:\n{combined}");
+    for expected in [
+        "unknown sim: helper_probe",
+        "unknown sim: other_helper",
+        "\"other_snapshot_baseline\\nsim_v1_names::other::shared_short_name\" contains whitespace",
+    ] {
+        assert!(combined.contains(expected), "missing `{expected}`:\n{combined}");
+    }
+    assert!(!combined.contains("malformed entry plan"), "{combined}");
+    assert!(!combined.contains("[sim] "), "no sim may start on a refused batch:\n{combined}");
+}
+
 #[test]
 fn a_qualified_v1_sim_name_selects_one_of_two_same_short_names() {
     let (out, combined) = rock_sim(&["sim_v1_names::other::shared_short_name", "unique_short_name"]);

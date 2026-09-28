@@ -586,7 +586,7 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
         "all four logical bootstrap inputs must be present exactly once\n{text}"
     );
     for key in [
-        "6d61672f70726f67726573732e6a736f6e",
+        "6d61672f70726f67726573732e6a736f6e2f31",
         "6d61672f73657474696e67732e6a736f6e",
         "6d61672f7370656c6c626f6f6b2d6c61796f75742e6a736f6e6c",
         "6d61672f7370656c6c626f6f6b2d62696e64696e67732e6a736f6e6c",
@@ -701,7 +701,7 @@ fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
     let _ = run_mag(1, None, None, &setup_env);
     let snapshot = add_world_damage_snapshot_fixture(&progress);
     let snapshot_key = format!(
-        "mag.damage.snapshot/{}/{}/{}/1/0/1",
+        "mag.damage.snapshot/{}/{}/{}/1/0/1/load/1",
         hex_bytes(&progress.to_string_lossy()),
         hex_bytes("official"),
         hex_bytes("crypt"),
@@ -786,7 +786,7 @@ fn progress_bootstrap_can_be_captured_when_play_starts_after_menu_ticks() {
     );
     let text = std::fs::read_to_string(&replay).expect("read replay");
     let first_tick = text.lines().position(|line| line.starts_with("t ")).expect("tick");
-    let progress_key = "6d61672f70726f67726573732e6a736f6e";
+    let progress_key = "6d61672f70726f67726573732e6a736f6e2f31";
     let progress_boot = text
         .lines()
         .position(|line| line.starts_with(&format!("boot {progress_key} ")))
@@ -816,7 +816,7 @@ fn new_replay_fails_closed_when_a_declared_bootstrap_is_missing() {
     let _ = run_mag(1, Some(&replay), None, &env);
 
     let text = std::fs::read_to_string(&replay).expect("read replay");
-    let progress_key = "6d61672f70726f67726573732e6a736f6e";
+    let progress_key = "6d61672f70726f67726573732e6a736f6e2f31";
     let without_bootstrap = text
         .lines()
         .filter(|line| !line.starts_with(&format!("boot {progress_key} ")))
@@ -948,7 +948,7 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
     // Damage snapshots can add inputs while the fixture runs; preserve their
     // captured bytes as well as the four inputs read at boot.
     for key in [
-        "mag/progress.json",
+        "mag/progress.json/1",
         "mag/settings.json",
         "mag/spellbook-layout.jsonl",
         "mag/spellbook-bindings.jsonl",
@@ -1008,4 +1008,27 @@ fn spell_layout_bootstrap_captures_empty_file_and_keeps_b_read_only() {
         persisted_b,
         "spell-layout playback must not rewrite the persisted B file"
     );
+}
+
+#[test]
+fn progress_bootstrap_records_each_reload_and_deletion() {
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let progress = empty_progress_path(&dir);
+    let layout = dir.path().join("spellbook-layout.jsonl");
+    let settings = dir.path().join("settings.json");
+    let replay = dir.path().join("progress-reload.replay");
+    std::fs::write(&progress, known_progress_a()).unwrap();
+    let env_owned = fixture_env("progress_reload", &progress, &layout, &settings);
+    let env = env_refs(&env_owned);
+    let recorded = run_mag(1, Some(&replay), None, &env);
+    assert_eq!(recorded["__stone_diag"]["MAG_REPLAY_RELOAD_REMOVED"], 1);
+    let sentinel = b"live save must not be read or rewritten by playback";
+    std::fs::write(&progress, sentinel).unwrap();
+    let replayed = run_mag(1, None, Some(&replay), &env);
+    for state in [&recorded, &replayed] {
+        assert_eq!(state["__stone_diag"]["MAG_REPLAY_RELOAD_LOADED"], 1);
+        assert_eq!(state["__stone_diag"]["MAG_REPLAY_RELOAD_GOLD"], 765);
+        assert_eq!(state["__stone_diag"]["MAG_REPLAY_RELOAD_DELETED_LOADED"], 0);
+    }
+    assert_eq!(std::fs::read(&progress).unwrap(), sentinel);
 }

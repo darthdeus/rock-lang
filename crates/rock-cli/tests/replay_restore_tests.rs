@@ -862,33 +862,23 @@ fn assert_mag_menu_seek_state_matches(
     sim: &std::collections::HashSet<String>,
     label: &str,
 ) {
-    let rat_path = "/mag/CAST_GLYPHS_WORLD/adventurers/ratcatcher_entity";
-    let farmer_path = "/mag/CAST_GLYPHS_WORLD/adventurers/farming/data/0/identity";
     for state in [got, want] {
-        let rat = state.pointer(rat_path).expect("Ratcatcher reference in state dump");
-        let farmer = state.pointer(farmer_path).expect("farming reference in state dump");
-        for (entity_field, inhabitant_field) in [
-            ("_slot", "live_mob.slot"),
-            ("_generation", "live_mob.generation"),
-            ("_arena_id", "live_mob.arena_id"),
-            ("_scene_id", "live_mob.scene_id"),
-        ] {
-            assert_eq!(rat[entity_field], farmer[inhabitant_field],
-                "the route must refer to the live Ratcatcher");
-        }
         let diag = &state["__stone_diag"];
         assert_eq!(diag["MAG_REPLAY_RATCATCHER_NAME"], "Pip", "Ratcatcher must resolve live");
-        assert_eq!(diag["MAG_REPLAY_RATCATCHER_SLOT"], rat["_slot"]);
-        assert_eq!(diag["MAG_REPLAY_RATCATCHER_GEN"], rat["_generation"]);
-        assert_eq!(diag["MAG_PLAY_EFFECT_SCENE"], rat["_scene_id"]);
-        for field in ["_arena_id", "_scene_id"] {
-            assert!(rat[field].as_i64().is_some_and(|id| id > 0), "{field} must be live: {rat}");
+        assert_eq!(diag["MAG_REPLAY_RATCATCHER_FARM_BOUND"], 1,
+            "the farming route must bind the live Ratcatcher: {diag}");
+        assert_eq!(diag["MAG_REPLAY_WORLD_MOBS_SCENE"], diag["MAG_REPLAY_RATCATCHER_SCENE"]);
+        for key in ["MAG_REPLAY_RATCATCHER_ARENA", "MAG_REPLAY_RATCATCHER_SCENE"] {
+            assert!(diag[key].as_i64().is_some_and(|id| id > 0), "{key} must be live: {diag}");
         }
+        assert!(diag["MAG_PLAY_EFFECT_SCENE"].as_i64().is_some_and(|id| id > 0),
+            "Play must activate a live world scene: {diag}");
     }
     for key in [
         "MAG_REPLAY_RATCATCHER_NAME", "MAG_REPLAY_RATCATCHER_GRID_X",
         "MAG_REPLAY_RATCATCHER_GRID_Y", "MAG_REPLAY_RATCATCHER_SLOT",
-        "MAG_REPLAY_RATCATCHER_GEN", "MAG_REPLAY_WORLD_DIGEST",
+        "MAG_REPLAY_RATCATCHER_GEN", "MAG_REPLAY_RATCATCHER_FARM_BOUND",
+        "MAG_REPLAY_WORLD_DIGEST",
     ] {
         assert_eq!(got["__stone_diag"][key], want["__stone_diag"][key],
             "live Ratcatcher/world {key} must match {label}");
@@ -896,19 +886,7 @@ fn assert_mag_menu_seek_state_matches(
     assert!(got["__stone_diag"]["MAG_REPLAY_WORLD_DIGEST"].as_i64().is_some_and(|n| n != 0),
         "the world digest must cover a populated world");
 
-    // WorldImage retains live registry identity ceilings, so resimulation may
-    // remint these two references while preserving their one live referent.
-    let mut got = got.clone();
-    let mut want = want.clone();
-    for state in [&mut got, &mut want] {
-        let rat = state.pointer_mut(rat_path).expect("Ratcatcher reference to normalize");
-        rat["_arena_id"] = serde_json::Value::Null;
-        rat["_scene_id"] = serde_json::Value::Null;
-        let farmer = state.pointer_mut(farmer_path).expect("farming reference to normalize");
-        farmer["live_mob.arena_id"] = serde_json::Value::Null;
-        farmer["live_mob.scene_id"] = serde_json::Value::Null;
-    }
-    assert_mag_seek_state_matches(&got, &want, sim, label);
+    assert_mag_seek_state_matches(got, want, sim, label);
 }
 
 fn assert_mag_seek_populations_match(
@@ -2062,16 +2040,16 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
             ("STONE_PHYSICAL_MOUSE_Y", "590"),
             ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "49"),
             ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "50"),
-            ("STONE_PHYSICAL_MOUSE_X_2", "960"),
-            ("STONE_PHYSICAL_MOUSE_Y_2", "370"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT_3", "55"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_3", "56"),
-            ("STONE_PHYSICAL_MOUSE_X_3", "1100"),
-            ("STONE_PHYSICAL_MOUSE_Y_3", "700"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT_4", "60"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_4", "61"),
-            ("STONE_PHYSICAL_MOUSE_X_4", "960"),
-            ("STONE_PHYSICAL_MOUSE_Y_4", "370"),
+            ("STONE_PHYSICAL_MOUSE_X_2", "1100"),
+            ("STONE_PHYSICAL_MOUSE_Y_2", "700"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT", "53"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT", "54"),
+            ("STONE_PHYSICAL_KEY", "down"),
+            ("STONE_PHYSICAL_SCANCODE", "down"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT_2", "57"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "58"),
+            ("STONE_PHYSICAL_KEY_2", "return"),
+            ("STONE_PHYSICAL_SCANCODE_2", "return"),
         ],
     );
     assert_eq!(
@@ -2255,8 +2233,8 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
 #[test]
 fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
     let game = "mag";
-    let frames = 120;
-    let target: u32 = 110;
+    let frames = 160;
+    let target: u32 = 150;
     let census_tick = (target - 1).to_string();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("menu-state-equivalence.replay");
@@ -2287,8 +2265,9 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
             ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "46"),
             ("STONE_PHYSICAL_MOUSE_X", "960"),
             ("STONE_PHYSICAL_MOUSE_Y", "591"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "49"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "50"),
+            ("STONE_PHYSICAL_MOUSE_MOVE_AT_2", "70"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "85"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "86"),
             ("STONE_PHYSICAL_MOUSE_X_2", "960"),
             ("STONE_PHYSICAL_MOUSE_Y_2", "370"),
         ],
@@ -2320,7 +2299,20 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
         ],
     );
     assert_eq!(current_tick(&reference), i64::from(target));
-    assert_eq!(reference["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"].as_i64(), Some(2));
+    assert_eq!(
+        reference["__stone_diag"]["MAG_PLAY_EFFECT_SCREEN"].as_i64(), Some(2),
+        "replay screen={} starts={} slots={} chosen={} active_world={} pending={} requested={} failed={} fade_target={} diag={}",
+        reference["mag"]["SCREEN"],
+        reference["mag"]["MAG_RUN_STARTS"],
+        reference["mag"]["SAVE_SLOTS_OPEN"],
+        reference["mag"]["SAVE_SLOT_CHOSEN"],
+        reference["mag"]["MAG_ACTIVE_WORLD_ID"],
+        reference["mag"]["MAG_RUN_ADMISSION_PENDING"],
+        reference["mag"]["MAG_RUN_PLAY_REQUESTED"],
+        reference["mag"]["MAG_RUN_PREPARE_FAILED"],
+        reference["mag"]["SCREEN_FADE_TARGET"],
+        reference["__stone_diag"]
+    );
     assert_mag_seek_populations_are_nonzero(&reference);
     let sim = mag_seek_equivalence_state_names(game, 3);
 
@@ -2362,7 +2354,10 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
             ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
         ],
     );
-    assert_eq!(cadence_sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(10));
+    assert_eq!(
+        cadence_sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(),
+        Some(i64::from(target % 100)),
+    );
     assert_mag_menu_seek_state_matches(&cadence_sought, &reference, &sim, "Mag cadence state equivalence");
 }
 
@@ -3435,12 +3430,13 @@ fn literal_temporary_path_mag_product_smoke() {
 
     let run = run_record_dump_observed(
         "mag",
-        540,
+        740,
         &replay_s,
         &[
             ("STONE_TEST_FIXED_DT", "0.1"),
             ("MAG_BOOT_MENU", "1"),
             ("MAG_LITERAL_PRODUCT_SMOKE", "1"),
+            ("STONE_TEST_FIXED_DT", "0.1"),
             ("MAG_PROGRESS_PATH_OVERRIDE", &first_progress_s),
             ("MAG_LITERAL_PRODUCT_SMOKE_SECOND_PATH", &second_progress_s),
             ("MAG_SETTINGS_PATH_OVERRIDE", &settings_s),
@@ -3451,40 +3447,29 @@ fn literal_temporary_path_mag_product_smoke() {
             ("MAG_LITERAL_PRODUCT_SMOKE_HISTORY_V1_PATH", &editor_history_v1_s),
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_KEYFRAME_INTERVAL", "10"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT", "45"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "46"),
-            ("STONE_PHYSICAL_MOUSE_X", "960"),
-            ("STONE_PHYSICAL_MOUSE_Y", "591"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "49"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "50"),
-            ("STONE_PHYSICAL_MOUSE_X_2", "960"),
-            ("STONE_PHYSICAL_MOUSE_Y_2", "370"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT_3", "55"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_3", "56"),
-            ("STONE_PHYSICAL_MOUSE_X_3", "1100"),
-            ("STONE_PHYSICAL_MOUSE_Y_3", "700"),
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT_4", "60"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_4", "61"),
-            ("STONE_PHYSICAL_MOUSE_X_4", "960"),
-            ("STONE_PHYSICAL_MOUSE_Y_4", "370"),
-            ("STONE_PHYSICAL_KEY_PRESS_AT", "100"),
-            ("STONE_PHYSICAL_KEY_RELEASE_AT", "101"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT", "180"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT", "181"),
             ("STONE_PHYSICAL_KEY", "down"),
             ("STONE_PHYSICAL_SCANCODE", "down"),
-            ("STONE_PHYSICAL_KEY_PRESS_AT_2", "105"),
-            ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "106"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT_2", "185"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "186"),
             ("STONE_PHYSICAL_KEY_2", "return"),
             ("STONE_PHYSICAL_SCANCODE_2", "return"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME", "260"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "150"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "430"),
-            ("STONE_TIMELINE_SEEK_TO_TICK_2", "180"),
-            ("STONE_BRANCH_DRAW_AT_FRAME", "480"),
+            ("STONE_PHYSICAL_MOUSE_MOVE_AT_2", "200"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "220"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "221"),
+            ("STONE_PHYSICAL_MOUSE_X_2", "960"),
+            ("STONE_PHYSICAL_MOUSE_Y_2", "370"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "320"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "270"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "620"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "300"),
+            ("STONE_BRANCH_DRAW_AT_FRAME", "680"),
         ],
     );
     assert!(run.status_success, "literal product run failed:\n{}", run.stderr);
     assert!(
-        run.stderr.contains("completed/requested=540/540 frame_errors=0"),
+        run.stderr.contains("completed/requested=740/740 frame_errors=0"),
         "the literal bounded run must report zero frame errors:\n{}",
         run.stderr
     );
@@ -3495,8 +3480,8 @@ fn literal_temporary_path_mag_product_smoke() {
         run.state["mag"]["SCREEN"], run.state["mag"]["SAVE_SLOTS_OPEN"],
         run.state["mag"]["CONSENT_OPEN"], diag["MAG_PLAY_EFFECT_SCREEN"]);
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "{diag}");
-    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(150), "the second scrub must start at the backward target: {diag}");
-    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(180), "the second scrub must move forward: {diag}");
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(270), "the second scrub must start at the backward target: {diag}");
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(300), "the second scrub must move forward: {diag}");
     assert_eq!(diag["STONE_BRANCH_DRAW_ACTIVE"].as_i64(), Some(1), "Resume Live Here must run from the timeline draw path: {diag}");
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "Resume Live Here must commit: {diag}");
     assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_SURVIVED"].as_i64(), Some(1), "{diag}");
@@ -4459,12 +4444,10 @@ fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
 /// A keyframe taken while image publication is HELD carries the requests that
 /// were still outstanding, and restoring it puts them back.
 ///
-/// A decode finishes inside the tick that asked for it, and MAG's admission
-/// waits for `stone_image_uploads_pending() == 0` before it proceeds, so no
-/// cadence keyframe in an ordinary run captures an outstanding queue.
-/// The fixture submits a real image request while `STONE_IMAGE_HOLD_AT_FRAME`
-/// holds `select` off, through the same
-/// `stone_image_publication_hold` production uses across a session activation.
+/// A test-only image request under `STONE_IMAGE_HOLD_AT_FRAME` creates the
+/// outstanding queue through the same loader and publication hold used by a
+/// game session. Ordinary headless frames finish their decode before a
+/// cadence keyframe can capture it.
 ///
 /// The control arm is the denominator: without the hold the same snapshot and
 /// restore sees an EMPTY queue, so a green here is the hold's doing and not a
@@ -4472,16 +4455,13 @@ fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
 #[test]
 fn a_restore_reinstalls_the_image_requests_that_were_still_outstanding() {
     let dir = tempfile::tempdir().unwrap();
-    let progress = dir.path().join("progress.json").to_string_lossy().into_owned();
-    let settings = dir.path().join("settings.json").to_string_lossy().into_owned();
-    let image = workspace_root().join("games/match3/tests/sims/smoke.snap/boot.png");
-    let image_path = image.to_string_lossy().into_owned();
+    let image = dir.path().join("queue.png");
+    std::fs::copy(workspace_root().join("mag/assets/cursors/color/01.png"), &image)
+        .expect("copy an owned image to a unique request path");
+    let image_s = image.to_string_lossy().into_owned();
     let common: Vec<(&str, &str)> = vec![
-        ("MAG_BOOT_PLAYING", "1"),
-        ("MAG_PROGRESS_PATH_OVERRIDE", &progress),
-        ("MAG_SETTINGS_PATH_OVERRIDE", &settings),
-        ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "2"),
-        ("STONE_TEST_IMAGE_LOAD_PATH", &image_path),
+        ("STONE_IMAGE_REQUEST_AT_FRAME", "2"),
+        ("STONE_IMAGE_REQUEST_PATH", &image_s),
         ("STONE_SNAPSHOT_AT_TICK", "3"),
         ("STONE_RESTORE_AT_TICK", "6"),
     ];
@@ -4489,7 +4469,7 @@ fn a_restore_reinstalls_the_image_requests_that_were_still_outstanding() {
     let mut held = common.clone();
     held.push(("STONE_IMAGE_HOLD_AT_FRAME", "1"));
     held.push(("STONE_IMAGE_RELEASE_AT_FRAME", "30"));
-    let held = run_plain_dump("mag", 40, &held);
+    let held = run_plain_dump("testbed", 40, &held);
     assert_eq!(held["__stone_diag"]["STONE_LAST_RESTORE_TICK"], 3,
         "the held arm must restore the keyframe it took");
     let pending = held["__stone_diag"]["STONE_RESTORE_IMAGE_PENDING"]
@@ -4498,7 +4478,7 @@ fn a_restore_reinstalls_the_image_requests_that_were_still_outstanding() {
         "restoring a keyframe taken under a publication hold must reinstall its \
          outstanding requests, got {pending}");
 
-    let plain = run_plain_dump("mag", 40, &common);
+    let plain = run_plain_dump("testbed", 40, &common);
     assert_eq!(plain["__stone_diag"]["STONE_LAST_RESTORE_TICK"], 3,
         "the control arm must restore the same keyframe");
     assert_eq!(plain["__stone_diag"]["STONE_RESTORE_IMAGE_PENDING"], 0,

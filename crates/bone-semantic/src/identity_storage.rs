@@ -73,6 +73,7 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
     "mag_ai",
     "mag_content",
     "mag_encounter_worker",
+    "mag_simulation",
     "mag_world",
     "match3",
     "match3_core",

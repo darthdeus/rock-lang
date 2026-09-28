@@ -613,11 +613,14 @@ fn assert_bank_writer_leaves_the_tracked_bank(name: &str, bank: &str) {
 
     let mut live = HashSet::new();
     let mut overlapped = false;
+    let writer_wire = format!("mag::{name}");
     for line in run.trace.lines() {
         let (event, entry) = line.split_once('\t').expect("lifecycle event");
         match event {
             "start" => {
-                overlapped |= live.iter().any(|other| (*other == name) != (entry == name));
+                overlapped |= live.iter().any(|other| {
+                    (*other == writer_wire.as_str()) != (entry == writer_wire.as_str())
+                });
                 live.insert(entry);
             }
             "end" => {
