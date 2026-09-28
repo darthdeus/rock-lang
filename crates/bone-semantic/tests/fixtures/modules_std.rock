@@ -396,6 +396,7 @@
 // prelude: json_indent
 // prelude: json_int
 // prelude: json_is_null
+// prelude: json_key_listed
 // prelude: json_max_depth
 // prelude: json_null
 // prelude: json_object
