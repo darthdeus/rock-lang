@@ -3,7 +3,7 @@
 // maps to the GLSL builtin; reaching it on the CPU is a hard error, never a
 // silent stub.
 
-struct Sampler2D {
+value Sampler2D {
     __handle: int,
 }
 
@@ -21,7 +21,7 @@ struct Sampler2D {
 // Phantom like Sampler2D. texture_id() reads the id channel as int
 // (`texture(s, uv).r`); GLSL ES gives isampler2D no default precision, so the
 // emitter declares it `highp` at the use site.
-struct ISampler2D {
+value ISampler2D {
     __handle: int,
 }
 
@@ -226,12 +226,12 @@ struct SemanticUniformBlock {
     leaves: [CanonicalUniformLeaf],
 }
 
-struct SemanticUniformArrayMember {
+value SemanticUniformArrayMember {
     name: string,
     values: [CanonicalUniformLeaf],
 }
 
-struct SemanticUniformArrayBlock {
+value SemanticUniformArrayBlock {
     name: string,
     members: [SemanticUniformArrayMember],
 }

@@ -20,7 +20,7 @@ const PINNED: &str = "\
 | package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | anvil | exempt | 0 | 4 | 0 | 0 | 11 | 0 | 0 | 0 | 0 | 15 |
-| bitgun | exempt | 23 | 8 | 0 | 0 | 75 | 1 | 1 | 95 | 2 | 205 |
+| bitgun | exempt | 20 | 8 | 0 | 0 | 72 | 1 | 1 | 95 | 2 | 199 |
 | bopt | exempt | 3 | 12 | 1 | 0 | 198 | 0 | 0 | 0 | 0 | 214 |
 | chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 0 | 99 |
 | chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 8 |
@@ -36,8 +36,8 @@ const PINNED: &str = "\
 | sample-game | exempt | 1 | 14 | 0 | 0 | 285 | 0 | 0 | 14 | 0 | 314 |
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
-| logo | exempt | 3 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 12 |
-| mag | exempt | 514 | 228 | 9 | 0 | 1691 | 26 | 116 | 10485 | 63 | 13132 |
+| logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
+| mag | exempt | 411 | 228 | 9 | 0 | 1689 | 26 | 116 | 10485 | 63 | 13027 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 5 | 11 | 6 | 0 | 18 | 0 | 0 | 0 | 1 | 41 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -47,18 +47,18 @@ const PINNED: &str = "\
 | match3_core | exempt | 1 | 2 | 0 | 0 | 4 | 0 | 0 | 0 | 0 | 7 |
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 30 |
-| std | exempt | 11 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 17 | 29 |
-| stone | exempt | 157 | 118 | 10 | 0 | 334 | 5 | 0 | 0 | 13 | 637 |
-| stone_core | exempt | 1 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
+| std | exempt | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 17 | 26 |
+| stone | exempt | 134 | 116 | 10 | 0 | 319 | 5 | 0 | 0 | 13 | 597 |
+| stone_core | exempt | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 5 | 9 |
-| testbed | exempt | 13 | 5 | 0 | 0 | 143 | 2 | 2 | 77 | 74 | 316 |
+| testbed | exempt | 11 | 5 | 0 | 0 | 140 | 2 | 2 | 77 | 74 | 311 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 6 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
 | unpackaged programs | exempt | 105 | 13 | 5 | 0 | 110 | 56 | 4 | 0 | 53 | 346 |
 | vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 4 |
 | void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 | 4 |
-| wgpu_renderer | exempt | 1 | 0 | 0 | 0 | 144 | 0 | 0 | 37 | 7 | 189 |
+| wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 144 | 0 | 0 | 37 | 7 | 188 |
 
 NOT fully analyzed:
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors

@@ -81,7 +81,7 @@ struct PtrI16 { }
 struct PtrU32 { }
 
 // Compiler-owned destination capability for explicit deep copies.
-struct Storage { }
+value Storage { }
 
 // ============================================================================
 // NativeBuffer<T> — typed contiguous ffi buffers
@@ -3358,23 +3358,28 @@ fn RingBuffer<T>.clear(rb) {
     rb.head = 0
 }
 
+// Holds the shared `data` descriptor and the oldest slot rather than the
+// buffer, which is a mutable identity and cannot be stored in a field.
 struct RingIter<T> {
-    rb: RingBuffer<T>,
+    data: [T],
+    oldest: int,
+    cap: int,
+    n: int,
     i: int,
 }
 
 @inline
 fn RingBuffer<T>.iter(rb) -> RingIter<T> {
-    return RingIter { rb: rb, i: 0 }
+    let n = rb.data.len
+    return RingIter { data: rb.data, oldest: (rb.head + rb.cap - n) % rb.cap, cap: rb.cap, n: n, i: 0 }
 }
 
 @inline
 fn RingIter<T>.next(it) -> (bool, T) {
-    let n = it.rb.data.len
-    if it.i >= n { return (false, phantom()) }
-    let idx = (it.rb.head + it.rb.cap - n + it.i) % it.rb.cap
+    if it.i >= it.n { return (false, phantom()) }
+    let idx = (it.oldest + it.i) % it.cap
     it.i = it.i + 1
-    return (true, it.rb.data[idx])
+    return (true, it.data[idx])
 }
 
 // Vec operations
