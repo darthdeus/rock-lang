@@ -404,6 +404,14 @@ end
 function __rock_alloc_hit_effect(id)
   __rock_alloc_hit(id, false)
 end
+-- A value site reads `(__rock_alloc_site[id] and value)`: the lookup takes the
+-- register `value` lands in, where a wrapping call would reserve three more
+-- and push a function at LJ_MAX_SLOTS over it. The table stays empty so every
+-- read reaches __index.
+__rock_alloc_site = setmetatable({}, { __index = function(_, id)
+  __rock_alloc_hit(id, false)
+  return true
+end })
 function __rock_allocation_activation_begin()
   _G.__rock_alloc_hits = {}
   _G.__rock_alloc_frame_hits = {}
@@ -4401,9 +4409,9 @@ impl Emitter<'_> {
     fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         let instrument = self.record_value_allocation_site(id, inst, out.len());
         if let Some(ref site) = instrument {
-            out.push_str("__rock_alloc_hit(\"");
+            out.push_str("(__rock_alloc_site[\"");
             write!(out, "{:016x}", site.id).unwrap();
-            out.push_str("\", ");
+            out.push_str("\"] and ");
         }
         self.write_value_inner(out, id, inst);
         if instrument.is_some() {

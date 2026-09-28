@@ -311,7 +311,7 @@ fn render(a: int) -> string {
 
     assert!(
         emit.lua
-            .contains(&format!("__rock_alloc_hit(\"{:016x}\", ", concat.site.id)),
+            .contains(&format!("(__rock_alloc_site[\"{:016x}\"] and ", concat.site.id)),
         "the runtime hit must use the manifest's exact artifact-local ID",
     );
     let function_line = emit
@@ -469,7 +469,7 @@ fn make_worker() -> Coroutine<Event> {
     assert!(sites.len() >= 3, "step, defer, and hook sites must be visible: {sites:#?}");
     for site in sites {
         assert!(
-            emit.lua.contains(&format!("__rock_alloc_hit(\"{:016x}\", ", site.id)),
+            emit.lua.contains(&format!("(__rock_alloc_site[\"{:016x}\"] and ", site.id)),
             "coroutine site {:016x} must share its ID with runtime activation",
             site.id,
         );
@@ -501,5 +501,95 @@ fn make_worker() -> Coroutine<Event> {
             .iter()
             .any(|finding| finding.site.detail.as_deref().is_some_and(|detail| detail.contains("worker"))),
         "constructing a coroutine must remain an explicit opaque boundary rather than falsely tracing a future resume",
+    );
+}
+
+fn wide_value_fixture(fields: usize, pads: usize) -> String {
+    let pad_params = (0..pads).map(|i| format!(", p{i}: int")).collect::<String>();
+    let pad_sum = (0..pads).map(|i| format!(" + p{i}")).collect::<String>();
+    let decl = (0..fields).map(|i| format!("f{i}: int")).collect::<Vec<_>>().join(", ");
+    let init = (0..fields).map(|i| format!("f{i}: seed + {i}")).collect::<Vec<_>>().join(", ");
+    format!(
+        r#"
+nobox value Wide {{ {decl} }}
+
+fn make_wide(seed: int) -> Wide {{
+    return Wide {{ {init} }}
+}}
+
+fn step(w: Wide, tag: [int]) -> Wide {{
+    return make_wide(w.f0 + tag.len())
+}}
+
+fn run(seed: int{pad_params}) -> int {{
+    let a = make_wide(seed)
+    let b = step(a, [seed])
+    let c = step(b, [seed, 1])
+    return a.f1 + b.f2 + c.f3{pad_sum}
+}}
+"#
+    )
+}
+
+/// The largest `stackslots` over every prototype in `lua`, or LuaJIT's load
+/// error. The chunk is compiled, never run.
+fn max_stack_slots(lua: &str, tag: &str) -> Result<u32, String> {
+    use std::process::Command;
+    let path = std::env::temp_dir().join(format!("skull_slots_{}_{tag}.lua", std::process::id()));
+    std::fs::write(&path, lua).expect("write chunk");
+    let probe = r#"
+local f, err = loadfile(arg[1])
+if not f then io.write("LOAD ", err) os.exit(0) end
+local util = require("jit.util")
+local best = 0
+local function walk(fn)
+  local slots = util.funcinfo(fn).stackslots
+  if slots > best then best = slots end
+  local i = -1
+  while true do
+    local k = util.funck(fn, i)
+    if k == nil then break end
+    if type(k) == "proto" then walk(k) end
+    i = i - 1
+  end
+end
+walk(f)
+io.write("SLOTS ", best)
+"#;
+    let probe_path = std::env::temp_dir().join(format!("skull_slots_{}_{tag}_probe.lua", std::process::id()));
+    std::fs::write(&probe_path, probe).expect("write probe");
+    let out = Command::new("luajit").arg(&probe_path).arg(&path).output().expect("spawn luajit");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&probe_path);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "probe failed: {stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+    if let Some(slots) = stdout.strip_prefix("SLOTS ") {
+        Ok(slots.parse().expect("slot count"))
+    } else {
+        Err(stdout)
+    }
+}
+
+#[test]
+fn allocation_activation_adds_no_register_slots_to_a_wide_frame() {
+    // 60 nobox lanes live twice across a call that passes them plus a vec
+    // literal, padded with live parameters until the ordinary frame is the
+    // widest LuaJIT loads.
+    let _inline = InlineOffGuard::on();
+    let source = wide_value_fixture(60, 123);
+    let ordinary = emit_mir(&source);
+    let instrumented = {
+        let _activation = AllocationActivationGuard::on();
+        emit_mir(&source)
+    };
+    assert_eq!(
+        max_stack_slots(&ordinary.lua, "ordinary"),
+        Ok(249),
+        "the fixture must sit exactly at LJ_MAX_SLOTS - 1 to guard the activated build",
+    );
+    assert_eq!(
+        max_stack_slots(&instrumented.lua, "activated"),
+        Ok(249),
+        "allocation-site counters must not widen any emitted frame",
     );
 }
