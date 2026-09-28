@@ -9,8 +9,8 @@ use super::*;
 use crate::monoty::{convert_decl, MonoSubst};
 use bone_semantic::hir::VariantPayload;
 
-/// How an absent nullable payload prints.
-const NULL_TEXT: &str = "nil";
+/// How an absent nullable payload prints: Rock's spelling, not the backend's.
+const NULL_TEXT: &str = "null";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FmtNode {
@@ -266,12 +266,12 @@ impl Builder<'_> {
             FmtNode::Nullable(inner) => match repr {
                 ValueRepr::Group { name, parts, present: Some(present) } => {
                     let group = ValueRepr::Group { name, parts, present: None };
-                    self.render_present_or_null(present, true, |s| s.render_fmt(inner, path, group))
+                    self.render_present_or_null(present, true, NULL_TEXT, |s| s.render_fmt(inner, path, group))
                 }
                 ValueRepr::Scalar(v) => {
                     let nil = self.emit_cur(Inst::Const(Lit::Nil));
                     let is_nil = self.emit_cur(Inst::Eq(v, nil));
-                    self.render_present_or_null(is_nil, false, |s| {
+                    self.render_present_or_null(is_nil, false, NULL_TEXT, |s| {
                         s.render_fmt(inner, path, ValueRepr::Scalar(v))
                     })
                 }
@@ -330,11 +330,12 @@ impl Builder<'_> {
         self.emit_cur(Inst::StringConcat(out, c))
     }
 
-    /// `cond` selects the rendered value (`when_present` true) or the null text.
-    fn render_present_or_null(
+    /// `cond` selects the rendered value (`cond_is_present` true) or `null_text`.
+    pub(crate) fn render_present_or_null(
         &mut self,
         cond: Idx<Inst>,
         cond_is_present: bool,
+        null_text: &str,
         render: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell(None);
@@ -345,7 +346,7 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Branch { cond, then_bb, else_bb });
 
         self.cur = null_bb;
-        let null = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(NULL_TEXT))));
+        let null = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(null_text))));
         self.store_and_join(result, null, join);
 
         self.cur = value_bb;

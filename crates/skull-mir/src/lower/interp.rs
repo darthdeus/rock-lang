@@ -106,11 +106,7 @@ impl Builder<'_> {
             return self.render_fmt(&tree, Vec::new(), repr);
         };
         // A nullable scalarized hole: the same null text as any other hole.
-        let wrapped = super::format::FmtNode::Nullable(Box::new(tree));
-        let ValueRepr::Group { name, parts, .. } = repr else {
-            return Err(self.gap_here("nullable structural hole lost its group"));
-        };
-        self.render_fmt(&wrapped, Vec::new(), ValueRepr::Group { name, parts, present: Some(present) })
+        self.render_present_or_null(present, true, "nil", |s| s.render_fmt(&tree, Vec::new(), repr))
     }
 
     pub(crate) fn unprintable_error(&self, reason: &str) -> CompilerError {
