@@ -34,8 +34,8 @@ struct Census {
 }
 
 /// `ROCK_IDENTITY_CENSUS_BY_FILE=<kind label>` (e.g. `across-yield`) also
-/// prints that kind's per-file counts, which is how a migration shard checks
-/// that each file it rewrote dropped.
+/// prints that kind's counts per file and identity, which is how a migration
+/// shard checks that each file it rewrote dropped.
 pub fn do_identity_storage_census(root: &str) -> Result<()> {
     let census = collect(root)?;
     print!("{}", render(&census));
@@ -82,18 +82,18 @@ fn collect(root: &str) -> Result<Census> {
 }
 
 fn render_by_file(census: &Census, kind: IdentityStorageKind) -> String {
-    let mut per_file: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut per_file: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     for ((_, site_kind), sites) in &census.sites {
         if *site_kind != kind {
             continue;
         }
-        for (file, _, _) in sites {
-            *per_file.entry(file.as_str()).or_default() += 1;
+        for (file, _, identity) in sites {
+            *per_file.entry((file.as_str(), identity.as_str())).or_default() += 1;
         }
     }
-    let mut out = format!("\n{} by file:\n", kind.label());
-    for (file, count) in per_file {
-        out.push_str(&format!("{count}\t{file}\n"));
+    let mut out = format!("\n{} by file and identity:\n", kind.label());
+    for ((file, identity), count) in per_file {
+        out.push_str(&format!("{count}\t{file}\t{identity}\n"));
     }
     out
 }
