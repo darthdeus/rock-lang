@@ -1652,6 +1652,15 @@ impl Builder<'_> {
                 let fname = *names
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
+                // A nullable nobox field is observable as null through its
+                // parent, so its presence must reach the field; `pack_boxed`
+                // alone would build a statically present child.
+                if let ValueRepr::Group { name, parts, present: Some(present) } = p {
+                    let value =
+                        self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
+                    let field = self.emit_cur(Inst::MakeNullableValue { present, value });
+                    return Ok((fname, field));
+                }
                 Ok((fname, self.pack_boxed(p, kind)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
