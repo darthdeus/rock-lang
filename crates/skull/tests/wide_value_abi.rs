@@ -238,33 +238,32 @@ fn a_value_one_leaf_over_the_cut_takes_the_aggregate_wire() {
 }
 
 /// `K` compares the PAYLOAD leaf count, not `ValueShape::leaf_count()`, which
-/// also counts the nullable presence flag. A nullable ORDINARY `value` never
-/// reached the Lua scalar wire in the first place (`sig_shape_of_nullable_
-/// nominal` produces a leaf shape only for a `nobox` struct or a flat enum), so
-/// `V?` is one slot at every width -- including two leaves, far under the cut.
-/// The witness that the CUT is not the reason is exactly that: width does not
-/// move it.
+/// also counts the nullable presence flag, so a nullable ORDINARY `value`
+/// takes the same wire as its payload: a presence lane plus its leaves at or
+/// under the cut, one boxed slot over it.
 #[test]
-fn a_nullable_ordinary_value_is_one_slot_at_every_width() {
-    for payload in [2, WIDE_VALUE_PAYLOAD_LEAF_CUT, WIDE_VALUE_PAYLOAD_LEAF_CUT + 1] {
+fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
+    for (payload, lanes) in [(2, 3), (WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, 1)] {
         let lua = try_emit_module(&cut_fixture(payload, true)).expect("emits");
         assert_eq!(
             emitted_params(&lua, "thru").len(),
-            1,
+            lanes,
             "`V?` at {payload} payload leaves:\n{}",
             function_body(&lua, "thru")
         );
     }
-    assert_eq!(
-        run_luajit(
-            &format!(
-                "{}\nmain()\n",
-                try_emit_module(&cut_fixture(WIDE_VALUE_PAYLOAD_LEAF_CUT + 1, true)).expect("emits")
+    for payload in [2, WIDE_VALUE_PAYLOAD_LEAF_CUT, WIDE_VALUE_PAYLOAD_LEAF_CUT + 1] {
+        assert_eq!(
+            run_luajit(
+                &format!(
+                    "{}\nmain()\n",
+                    try_emit_module(&cut_fixture(payload, true)).expect("emits")
+                ),
+                "wide_value_abi_nullable"
             ),
-            "wide_value_abi_nullable"
-        ),
-        "1",
-    );
+            "1",
+        );
+    }
 }
 
 /// A `nobox` value is never boxed, at any width.

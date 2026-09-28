@@ -1319,13 +1319,18 @@ pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape
         .or_else(|| EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape())))
 }
 
-/// [`sig_shape_of_nominal`] for a NULLABLE nominal.
+/// [`sig_shape_of_nominal`] for a NULLABLE nominal: a presence leaf, then the
+/// payload leaves.
+///
+/// An ORDINARY value takes this wire only in the cdata tier. A GC-tier `T?`
+/// (`Entity<T>?`, a string-carrying value) is mostly read out of storage that
+/// already holds the table, so spreading it at the callee and re-boxing it at
+/// the caller's escape measured +30% MAG allocation; it keeps the boxed slot.
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
-    if ws
-        .struct_by_name
-        .get(&n)
-        .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
-    {
+    let scalar = is_nobox_nominal(ws, n)
+        || (ws.struct_by_name.contains_key(&n)
+            && planned_value(ws, n).is_some_and(|plan| plan.storage == ValueStorage::CData));
+    if scalar {
         let mut shape = value_shape(ws, n).or_else(|| value_shape_gc(ws, n))?;
         shape.nullable = true;
         return Some(shape);

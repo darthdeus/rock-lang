@@ -9,6 +9,8 @@ mod allocation_report;
 
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
+#[path = "arena_borrow_flat_element_reject.rs"]
+mod arena_borrow_flat_element_reject;
 #[path = "arena_column_oracle.rs"]
 mod arena_column_oracle;
 #[path = "backend_variant_mangling.rs"]
@@ -19,6 +21,8 @@ mod bounded_lambda_inline;
 mod bounded_standalone_emission;
 #[path = "capture_free_hoist.rs"]
 mod capture_free_hoist;
+#[path = "clone_into_immutable.rs"]
+mod clone_into_immutable;
 #[path = "closure_snapshot.rs"]
 mod closure_snapshot;
 #[path = "code_identity_artifact.rs"]
@@ -45,6 +49,8 @@ mod const_hot_reload;
 mod coroutine_hook_hoist;
 #[path = "dead_lambda_scope.rs"]
 mod dead_lambda_scope;
+#[path = "descriptor_value_repr.rs"]
+mod descriptor_value_repr;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
 #[path = "v1_enum_join_scalarize.rs"]
@@ -73,6 +79,8 @@ mod extern_return_representation;
 mod nomangle_type_symbol;
 #[path = "extern_value_return_ownership.rs"]
 mod extern_value_return_ownership;
+#[path = "flat_enum_match_passthrough.rs"]
+mod flat_enum_match_passthrough;
 #[path = "flat_vec_value_shape.rs"]
 mod flat_vec_value_shape;
 #[path = "fn_record_mt.rs"]
@@ -131,6 +139,10 @@ mod graph_update;
 #[path = "graph_snapshot.rs"]
 mod graph_snapshot;
 
+#[path = "identity_storage_instances.rs"]
+mod identity_storage_instances;
+#[path = "relocation.rs"]
+mod relocation;
 #[path = "instance_graph.rs"]
 mod instance_graph;
 #[path = "instance_owned_emission.rs"]
@@ -197,10 +209,14 @@ mod nobox_wide_strided;
 mod nobox_materialize_gc_tier;
 #[path = "wide_value_abi.rs"]
 mod wide_value_abi;
+#[path = "optional_value_wire.rs"]
+mod optional_value_wire;
 #[path = "wide_value_slot_budget.rs"]
 mod wide_value_slot_budget;
 #[path = "nobox_fn_value_nullable_return_sentinel.rs"]
 mod nobox_fn_value_nullable_return_sentinel;
+#[path = "nobox_fn_value_nobox_return.rs"]
+mod nobox_fn_value_nobox_return;
 #[path = "nobox_generic_return_boundary_sentinel.rs"]
 mod nobox_generic_return_boundary_sentinel;
 #[path = "nobox_global_accessor_shape.rs"]
@@ -217,6 +233,8 @@ mod nobox_tuple_option_presence_sentinel;
 mod nobox_values;
 #[path = "nullable_generic_binding_sroa.rs"]
 mod nullable_generic_binding_sroa;
+#[path = "nullable_value_join_sroa.rs"]
+mod nullable_value_join_sroa;
 #[path = "nullable_value_in_tuple_sentinel.rs"]
 mod nullable_value_in_tuple_sentinel;
 #[path = "plain_struct_scalarize.rs"]
