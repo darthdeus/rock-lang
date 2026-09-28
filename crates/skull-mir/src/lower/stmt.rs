@@ -342,7 +342,7 @@ impl Builder<'_> {
                         let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                         let v = match opaque_repr {
                             Some(r) => self.pack(r.into_value())?,
-                            None if self.binding_is_ref(name) => self.lower_place_base(value)?,
+                            None if self.binding_is_ref(name) => self.lower_ref_borrow(value)?,
                             None => self.lower_expr_with_expected(value, expected.as_deref())?,
                         };
                         let v = self.coerced_to_binding(v, value, name);

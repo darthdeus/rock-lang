@@ -903,7 +903,7 @@ impl Builder<'_> {
                             .concrete_callee_param_ty(e, &dc.callee_inst, i)?
                             .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
                         if self.is_ref_call_arg(e, a) {
-                            self.lower_place_base(a)
+                            self.lower_ref_borrow(a)
                         } else {
                             let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
                             Ok(self.coerced_mono(v, a, t.as_ref()))
@@ -1253,7 +1253,7 @@ impl Builder<'_> {
                 continue;
             }
             let r = if self.is_ref_call_arg(e, a) {
-                let place = self.lower_place_base(a)?;
+                let place = self.lower_ref_borrow(a)?;
                 self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
             } else {
                 self.lower_expr_repr(a)?

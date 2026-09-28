@@ -756,6 +756,27 @@ impl Builder<'_> {
         }
     }
 
+    /// A `ref` borrow (local initializer, argument or returned place): the place
+    /// itself, as [`Self::lower_place_base`] lowers it, with its root cell marked
+    /// [`Cell::borrowed`]. Marked whatever the borrowed type is: a borrowed
+    /// struct can still reach a `value` field that is written through the alias.
+    pub(crate) fn lower_ref_borrow(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let place = self.lower_place_base(e)?;
+        let mut cur = place;
+        loop {
+            match &self.f.insts[cur] {
+                Inst::Field { base, .. } => cur = *base,
+                Inst::Load(cell) => {
+                    let cell = *cell;
+                    self.f.mark_borrowed(cell);
+                    break;
+                }
+                _ => break,
+            }
+        }
+        Ok(place)
+    }
+
     /// `target = value` -> a `Store`/`StoreField`/`StoreIndex`/`StoreGlobal`
     /// (the effect; no value). The expression form wraps this with a unit value.
     /// The BASE of an assignment target, lowered as a PLACE: the slot itself,

@@ -2839,7 +2839,7 @@ impl Builder<'_> {
                 )
             })
         {
-            return Ok(vec![self.lower_place_base(e)?]);
+            return Ok(vec![self.lower_ref_borrow(e)?]);
         }
         if let Some(shape) = self.result_shape() {
             let is_phantom = match &self.body.expr_arena[e] {
@@ -3068,7 +3068,7 @@ impl Builder<'_> {
         arg: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         if self.is_ref_call_arg(call, arg) {
-            self.lower_place_base(arg)
+            self.lower_ref_borrow(arg)
         } else {
             self.lower_expr(arg)
         }
@@ -3081,7 +3081,7 @@ impl Builder<'_> {
         arg: Idx<Expr>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if self.is_ref_call_arg(call, arg) {
-            return Ok(vec![self.lower_place_base(arg)?]);
+            return Ok(vec![self.lower_ref_borrow(arg)?]);
         }
         self.arg_values_for_slot(slot, arg)
     }

@@ -1024,6 +1024,12 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     for c in &func.params {
         disq[raw(*c) as usize] = true; // params are the Lua signature; never split
     }
+    // Written through a `ref` alias this pass cannot see (`Cell::borrowed`).
+    for (c, cell) in func.cells.iter() {
+        if cell.borrowed {
+            disq[raw(c) as usize] = true;
+        }
+    }
     if let Some(ra) = func.resume_arg {
         disq[raw(ra) as usize] = true;
     }
@@ -1695,7 +1701,8 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
     // `escaping` cell flag, `subst` value->value chain, and per-block `cur`
     // cell->value. `cur` is reset between blocks via a touched-list so the clear
     // stays O(stores-in-block), not O(cells).
-    let mut escaping = vec![false; func.cells.len()];
+    // A `ref`-borrowed cell is written through an alias this pass cannot see.
+    let mut escaping: Vec<bool> = func.cells.iter().map(|(_, cell)| cell.borrowed).collect();
     for (bid, b) in func.blocks.iter() {
         if main.contains(&bid) {
             continue;

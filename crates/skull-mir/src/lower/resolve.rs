@@ -788,7 +788,7 @@ impl Builder<'_> {
             };
             let is_ref = self.is_ref_call_arg(e, a);
             let v = if is_ref {
-                self.lower_place_base(a)?
+                self.lower_ref_borrow(a)?
             } else {
                 let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
                 self.coerced_mono(v, a, t.as_ref())

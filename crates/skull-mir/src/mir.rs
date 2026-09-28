@@ -897,6 +897,13 @@ pub struct Cell {
     /// A source parameter has a compiler-generated default-fill store. Closure
     /// ownership treats that store as initialization, not mutation.
     pub default_param: bool,
+    /// Set ONLY at lowering, on the root cell of a place that a `ref` borrows.
+    /// A write through that alias can reach a `value` object in this cell, and
+    /// the transforms cannot see it, so the object must stay the one this cell
+    /// holds: SROA does not split the cell (nor rematerialize it at a use), and
+    /// copy-prop does not forward its loads (the `Field`-of-ctor fold assumes
+    /// value immutability).
+    pub borrowed: bool,
     /// Build-owned concrete type for a scalarized value leaf when its HIR
     /// `TyId` cannot name the physical leaf. Native backends consume this
     /// alongside the shared mono interner; source-level backends ignore it.
@@ -1348,6 +1355,7 @@ impl MirFunc {
             ty: None,
             nonnull_value_struct: false,
             default_param: false,
+            borrowed: false,
             native_ty: None,
             native_flat_slot: None,
         });
@@ -1371,6 +1379,7 @@ impl MirFunc {
             ty,
             nonnull_value_struct: false,
             default_param: false,
+            borrowed: false,
             native_ty: None,
             native_flat_slot: None,
         });
@@ -1424,6 +1433,11 @@ impl MirFunc {
     /// SROA escape-rematerialization; see [`Cell::nonnull_value_struct`]).
     pub fn mark_nonnull_value_struct(&mut self, cell: Idx<Cell>) {
         self.cells[cell].nonnull_value_struct = true;
+    }
+
+    /// Tag the root cell of a `ref`-borrowed place (see [`Cell::borrowed`]).
+    pub fn mark_borrowed(&mut self, cell: Idx<Cell>) {
+        self.cells[cell].borrowed = true;
     }
 
     /// Allocate a fresh (empty, `Unreachable`-terminated) block.
