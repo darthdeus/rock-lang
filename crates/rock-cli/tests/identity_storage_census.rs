@@ -37,12 +37,12 @@ const PINNED: &str = "\
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 383 | 220 | 8 | 0 | 1457 | 69 | 206 | 5669 | 57 | 8069 |
+| mag | exempt | 382 | 218 | 8 | 0 | 1404 | 69 | 206 | 5665 | 57 | 8009 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 8 | 7 | 3 | 0 | 21 | 0 | 0 | 0 | 1 | 40 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
-| mag_simulation | exempt | 4 | 7 | 0 | 0 | 23 | 0 | 0 | 0 | 0 | 34 |
-| mag_world | exempt | 14 | 2 | 0 | 0 | 13 | 0 | 0 | 0 | 0 | 29 |
+| mag_simulation | exempt | 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
+| mag_world | exempt | 14 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 17 |
 | match3 | exempt | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 15 | 7 | 23 |
 | match3_core | exempt | 1 | 2 | 0 | 0 | 4 | 0 | 0 | 0 | 0 | 7 |
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
