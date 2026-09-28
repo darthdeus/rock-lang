@@ -467,26 +467,14 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
 // over an empty column rather than an error, matching `len() == 0`.
 //
 // Each iterator snapshots only the columns it yields from: `values()` never
-// touches generations, `keys()` never touches data. The row column is held
-// through the erased store: an iterator is not an Arena row store.
-
-// The store an iterator holds erased, typed again for one row read. The row
-// column stays behind the store, so its layout is the store's own.
-@inline
-fn __arena_val_rows<T>(it: ArenaValIter<T>) -> [T] {
-    let store: ArenaStore<T> = cast(it.store)
-    return store.data
-}
-
-@inline
-fn __arena_pair_rows<T>(it: ArenaPairIter<T>) -> [T] {
-    let store: ArenaStore<T> = cast(it.store)
-    return store.data
-}
+// touches generations, `keys()` never touches data. The `data` snapshot is
+// the store's own row column, so it is an `@identity_storage` edge like
+// `ArenaStore.data` (docs/identity-storage-plan.md S0d).
 
 struct ArenaValIter<T> {
     occupied: [bool],
-    store: any,
+    @identity_storage
+    data: [T],
     n: int,
     i: int,
 }
@@ -494,7 +482,7 @@ struct ArenaValIter<T> {
 @inline
 fn values<T>(a: Arena<T>) -> ArenaValIter<T> {
     let store = __arena_store_or_dead(a)
-    return ArenaValIter { occupied: store.occupied, store: __arena_store_erased(store), n: store.occupied.len, i: 0 }
+    return ArenaValIter { occupied: store.occupied, data: store.data, n: store.occupied.len, i: 0 }
 }
 
 @inline
@@ -506,14 +494,15 @@ fn next<T>(it: ArenaValIter<T>) -> (bool, T) {
         if i >= it.n { it.i = i; return (false, phantom()) }
     }
     it.i = i + 1
-    return (true, __arena_val_rows(it)[i])
+    return (true, it.data[i])
 }
 
 struct ArenaPairIter<T> {
     arena: Arena<T>,
     occupied: [bool],
     generations: [int],
-    store: any,
+    @identity_storage
+    data: [T],
     n: int,
     i: int,
 }
@@ -525,7 +514,7 @@ fn pairs<T>(a: Arena<T>) -> ArenaPairIter<T> {
         arena: a,
         occupied: store.occupied,
         generations: store.generations,
-        store: __arena_store_erased(store),
+        data: store.data,
         n: store.occupied.len,
         i: 0,
     }
@@ -546,7 +535,7 @@ fn next<T>(it: ArenaPairIter<T>) -> (bool, (Entity<T>, T)) {
         _slot: i,
         _generation: it.generations[i],
     }
-    return (true, (e, __arena_pair_rows(it)[i]))
+    return (true, (e, it.data[i]))
 }
 
 struct ArenaKeyIter<T> {

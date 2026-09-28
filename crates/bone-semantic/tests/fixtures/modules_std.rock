@@ -90,7 +90,6 @@
 // prelude: __arena_drain_retired
 // prelude: __arena_new_owned
 // prelude: __arena_owns
-// prelude: __arena_pair_rows
 // prelude: __arena_reinitialize
 // prelude: __arena_store
 // prelude: __arena_store_any
@@ -98,7 +97,6 @@
 // prelude: __arena_store_mut
 // prelude: __arena_store_or_dead
 // prelude: __arena_store_or_empty
-// prelude: __arena_val_rows
 // prelude: __debug_traceback
 // prelude: __entity_arena
 // prelude: __ffi_new_float_1
