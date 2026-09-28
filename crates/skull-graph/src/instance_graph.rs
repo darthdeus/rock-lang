@@ -268,6 +268,10 @@ pub enum RejectionKind {
     /// instantiate at. Distinct from a declared generic read inside a shared
     /// body, which is [`Unresolved`] data.
     UnconstrainedTypeVar,
+    /// An identity struct in an ordinary storage position that only the
+    /// instance's substitution shows (docs/identity-storage-plan.md S0c).
+    /// Fatal for the package whose call site instantiated it.
+    IdentityInOrdinaryStorage,
 }
 
 impl RejectionKind {
@@ -277,6 +281,7 @@ impl RejectionKind {
             Self::GenericFnValue => "generic-fn-value",
             Self::UnconstrainedTypeVar => "unconstrained-type-var",
             Self::ConcreteTypeUnavailable => "concrete-type-unavailable",
+            Self::IdentityInOrdinaryStorage => "identity-in-ordinary-storage",
         }
     }
 }
@@ -2223,6 +2228,21 @@ impl InstanceGraph {
                     &mut w, ws, inf, Some(body), Some(inst), &subst, &SiteDomain::Own, None,
                 );
                 add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
+                for site in crate::identity_storage::substitution_only_sites(
+                    ws,
+                    ws.module(inst.func.module),
+                    f,
+                    body,
+                    inf,
+                    &subst,
+                ) {
+                    w.push_rejection(Rejection {
+                        kind: RejectionKind::IdentityInOrdinaryStorage,
+                        at: inst.clone(),
+                        span: site.span,
+                        message: format!("in this instantiation of `{}`, {}", f.name, site.message),
+                    });
+                }
                 let defaults_start = w.timer();
                 walk_struct_default_edges(
                     &mut w,

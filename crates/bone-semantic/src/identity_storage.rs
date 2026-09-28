@@ -11,7 +11,11 @@ use bone_core::escape::lambda_is_nonescaping;
 use bone_core::identity_storage::{
     identity_body_storage_violation, identity_local_storage_violation, identity_root_storage_violation,
     identity_storage_field_violation, identity_storage_violation, is_identity_storage_field, IdentityStorageVia,
-    IdentityStorageViolation, IDENTITY_STORAGE_ANNOTATION,
+    IDENTITY_STORAGE_ANNOTATION,
+};
+pub use bone_core::identity_storage::{
+    identity_violation_in, IdentityNode, IdentityPosition, IdentityStorageViolation,
+    IdentityTypes,
 };
 use bone_core::modules::is_stdlib_module_file;
 use bone_core::suspension::{uses_after_suspension, SuspensionPolicy};
@@ -244,10 +248,46 @@ fn storage_message(what: &str, identity: Ustr) -> String {
     )
 }
 
+/// How the body check reads a slot's type: as inferred, or under an
+/// instance's substitution (the instance graph's substitution-only check).
+pub trait BodySlotTypes {
+    /// A local, parameter or temporary of type `ty`: an identity at the top is
+    /// a borrow.
+    fn local(&self, ty: TyId) -> Option<IdentityStorageViolation>;
+    /// A value the closure or coroutine frame keeps: the identity itself is
+    /// storage.
+    fn stored(&self, ty: TyId) -> Option<IdentityStorageViolation>;
+}
+
+struct InferredSlotTypes<'a> {
+    ws: &'a Workspace,
+    bi: &'a BodyInference,
+}
+
+impl BodySlotTypes for InferredSlotTypes<'_> {
+    fn local(&self, ty: TyId) -> Option<IdentityStorageViolation> {
+        identity_local_storage_violation(self.ws, self.bi, ty)
+    }
+    fn stored(&self, ty: TyId) -> Option<IdentityStorageViolation> {
+        identity_body_storage_violation(self.ws, Some(self.bi), ty)
+    }
+}
+
 /// Every position in one function body that stores an identity struct: the
 /// S0b body check. `bi` is the body's inference; types it left unresolved are
 /// not reported.
 pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi: &BodyInference) -> Vec<IdentityStorageSite> {
+    identity_body_sites_with(ws, function, body, bi, &InferredSlotTypes { ws, bi })
+}
+
+/// [`identity_body_sites`] reading slot types through `types`.
+pub fn identity_body_sites_with(
+    ws: &Workspace,
+    function: &Function,
+    body: &Body,
+    bi: &BodyInference,
+    types: &impl BodySlotTypes,
+) -> Vec<IdentityStorageSite> {
     let mut sites = Vec::new();
     let fn_params: FxHashSet<Idx<BindingInfo>> = body.param_bindings.into_iter().collect();
     let binding_ty = |binding: Idx<BindingInfo>| bi.binding_types.get(binding).copied();
@@ -258,7 +298,7 @@ pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi:
         }
         let Some(ty) = binding_ty(binding) else { continue };
         let what = if info.kind == BindingKind::Param { "parameter" } else { "local" };
-        if let Some(violation) = identity_local_storage_violation(ws, bi, ty) {
+        if let Some(violation) = types.local(ty) {
             sites.push(IdentityStorageSite {
                 kind: IdentityStorageKind::LocalStorage,
                 identity: violation.identity,
@@ -267,7 +307,7 @@ pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi:
             });
         } else if function.is_coroutine
             && fn_params.contains(&binding)
-            && let Some(violation) = identity_body_storage_violation(ws, Some(bi), ty)
+            && let Some(violation) = types.stored(ty)
         {
             let identity = violation.identity;
             sites.push(IdentityStorageSite {
@@ -290,7 +330,7 @@ pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi:
             _ => continue,
         };
         let Some(ty) = bi.expr_types.get(id).copied() else { continue };
-        if let Some(violation) = identity_local_storage_violation(ws, bi, ty) {
+        if let Some(violation) = types.local(ty) {
             sites.push(IdentityStorageSite {
                 kind: IdentityStorageKind::LocalStorage,
                 identity: violation.identity,
@@ -315,8 +355,7 @@ pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi:
             {
                 continue;
             }
-            let Some(violation) = binding_ty(binding).and_then(|ty| identity_body_storage_violation(ws, Some(bi), ty))
-            else {
+            let Some(violation) = binding_ty(binding).and_then(|ty| types.stored(ty)) else {
                 continue;
             };
             if !*escapes.get_or_insert_with(|| !lambda_is_nonescaping(ws, body, bi, lambda)) {
@@ -336,7 +375,7 @@ pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi:
     }
 
     if function.is_coroutine {
-        let policy = IdentityBorrowPolicy { ws, body, bi };
+        let policy = IdentityBorrowPolicy { body, bi, types };
         for at in uses_after_suspension(body, &policy) {
             let binding = match body.expr_arena[at] {
                 Expr::Var(binding) => Some(binding),
@@ -347,8 +386,7 @@ pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi:
                 _ => None,
             };
             let Some(binding) = binding else { continue };
-            let Some(violation) = binding_ty(binding).and_then(|ty| identity_body_storage_violation(ws, Some(bi), ty))
-            else {
+            let Some(violation) = binding_ty(binding).and_then(|ty| types.stored(ty)) else {
                 continue;
             };
             let identity = violation.identity;
@@ -373,13 +411,13 @@ pub fn identity_body_sites(ws: &Workspace, function: &Function, body: &Body, bi:
 /// A local borrow of an identity is frame data for the suspension walk.
 /// Parameters are left to the `co fn` parameter rule, and locals whose type
 /// stores an identity to the local-storage rule.
-struct IdentityBorrowPolicy<'a> {
-    ws: &'a Workspace,
+struct IdentityBorrowPolicy<'a, T> {
     body: &'a Body,
     bi: &'a BodyInference,
+    types: &'a T,
 }
 
-impl SuspensionPolicy for IdentityBorrowPolicy<'_> {
+impl<T: BodySlotTypes> SuspensionPolicy for IdentityBorrowPolicy<'_, T> {
     fn binding_holds_frame_data(&self, binding: Idx<BindingInfo>, _value: Option<Idx<Expr>>) -> bool {
         if matches!(self.body.binding_arena[binding].kind, BindingKind::Param | BindingKind::Fn) {
             return false;
@@ -387,8 +425,7 @@ impl SuspensionPolicy for IdentityBorrowPolicy<'_> {
         let Some(ty) = self.bi.binding_types.get(binding).copied() else {
             return false;
         };
-        identity_local_storage_violation(self.ws, self.bi, ty).is_none()
-            && identity_body_storage_violation(self.ws, Some(self.bi), ty).is_some()
+        self.types.local(ty).is_none() && self.types.stored(ty).is_some()
     }
 }
 
@@ -414,13 +451,17 @@ pub fn identity_module_body_sites(ws: &Workspace, module: &Module) -> Vec<Identi
     sites
 }
 
-/// `@identity_storage` is the Arena store's privilege, with the trust
-/// boundary of `@frame_ref_source`: only the stdlib arena file may use it, and
-/// only on a Vec field.
-fn capability_errors(module: &Module) -> Vec<CompilerError> {
+/// The stdlib arena file: the one module that implements the privileged row
+/// store, with the trust boundary of `@frame_ref_source`.
+pub fn is_identity_store_module(module: &Module) -> bool {
     let file = module.file.as_str();
-    let is_arena_stdlib =
-        is_stdlib_module_file(file) && (file.ends_with("/arena.rock") || file.ends_with(":arena.rock>"));
+    is_stdlib_module_file(file) && (file.ends_with("/arena.rock") || file.ends_with(":arena.rock>"))
+}
+
+/// `@identity_storage` is the Arena store's privilege: only
+/// [`is_identity_store_module`] may use it, and only on a Vec field.
+fn capability_errors(module: &Module) -> Vec<CompilerError> {
+    let is_arena_stdlib = is_identity_store_module(module);
     let mut errs = Vec::new();
     for (_, def) in module.structs.iter() {
         for field in &def.fields {

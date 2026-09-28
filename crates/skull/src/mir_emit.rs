@@ -4846,8 +4846,23 @@ fn graph_rejection_error(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
 ) -> Option<CompilerError> {
+    let mut callers: Option<FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>> = None;
     for rejection in graph.rejections() {
         let caller = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
+        if rejection.kind == crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage {
+            // A language rejection, not a totality gap: fatal in ablation runs too.
+            let callers = callers.get_or_insert_with(|| {
+                let mut map: FxHashMap<_, Vec<_>> = FxHashMap::default();
+                for edge in graph.edges() {
+                    map.entry(&edge.to).or_default().push(edge);
+                }
+                map
+            });
+            if let Some(err) = identity_instance_rejection_error(ws, graph, callers, rejection) {
+                return Some(err);
+            }
+            continue;
+        }
         if skull_mir::ablation::enabled() {
             let category = match rejection.kind {
                 crate::instance_graph::RejectionKind::ChangingInstanceRecursion => {
@@ -4859,6 +4874,9 @@ fn graph_rejection_error(
                 }
                 crate::instance_graph::RejectionKind::ConcreteTypeUnavailable => {
                     skull_mir::ablation::FatalCategory::CompilerInvariant
+                }
+                crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage => {
+                    unreachable!("identity rejections are handled before ablation")
                 }
             };
             skull_mir::ablation::note_examined();
@@ -4889,6 +4907,62 @@ fn graph_rejection_error(
         ));
     }
     None
+}
+
+/// An instance's identity-storage rejection belongs to the package whose call
+/// site instantiated it (docs/identity-storage-plan.md S0c). The walk goes back
+/// from the instance through its callers; a caller in an exempt package whose
+/// own type arguments carry an identity only forwarded it, so its callers are
+/// asked in turn. Any other caller introduced the identity, and the rejection is
+/// fatal when that caller's package is not exempt. A caller in the stdlib
+/// arena module is the privileged row store handling its own rows, so it
+/// introduces nothing (S0d gives that store its compiler-private
+/// representation).
+fn identity_instance_rejection_error(
+    ws: &Workspace,
+    graph: &crate::instance_graph::InstanceGraph,
+    callers: &FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>,
+    rejection: &crate::instance_graph::Rejection,
+) -> Option<CompilerError> {
+    let exempt = |instance: &crate::instance_graph::Instance| {
+        bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
+    };
+    let store = |instance: &crate::instance_graph::Instance| {
+        bone_semantic::identity_storage::is_identity_store_module(ws.module(instance.func.module))
+    };
+    let mut seen = FxHashSet::default();
+    let mut work = vec![&rejection.at];
+    let mut reached_by_edge = false;
+    while let Some(instance) = work.pop() {
+        if !seen.insert(instance) {
+            continue;
+        }
+        for edge in callers.get(instance).into_iter().flatten() {
+            reached_by_edge = true;
+            if store(&edge.from) {
+                continue;
+            }
+            let forwarded = exempt(&edge.from)
+                && edge.from.args.iter().any(|arg| {
+                    skull_graph::identity_storage::stores_identity(ws, &graph.interner().get(*arg))
+                });
+            if forwarded {
+                work.push(&edge.from);
+            } else if !exempt(&edge.from) {
+                let callee = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
+                return Some(
+                    CompilerError::new_with_label(rejection.span, rejection.message.clone()).with_label(
+                        edge.span,
+                        format!("`{}` is instantiated from here with an identity struct", callee.name),
+                    ),
+                );
+            }
+        }
+    }
+    // An instance no edge reaches is rooted by an always-emitted body; the
+    // instance's own package answers for it.
+    (!reached_by_edge && !exempt(&rejection.at))
+        .then(|| CompilerError::new_with_label(rejection.span, rejection.message.clone()))
 }
 
 /// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
