@@ -79,9 +79,30 @@ fn f() -> int {
   //^ int
 }
 
-//- identity_nullable_global @fail=cannot store identity struct `Mob`
+// A direct `T?` at the top of a global is an optional one-row Session root:
+// the nullable is occupancy, not nested storage.
+//- identity_nullable_root_global
 struct Mob { hp: int }
 global BOSS: Mob? = nil
+fn f() -> int {
+    5
+  //^ int
+}
+
+// The root privilege is the global's top position alone: a nullable root's
+// type arguments and a nullable inside another constructor still store.
+//- identity_nullable_root_global_argument @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+struct Bag<T> { items: [T] }
+global BAG: Bag<Mob>? = nil
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_nullable_global_in_tuple @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+global PAIR: (Mob?, int) = (nil, 0)
 fn f() -> int {
     5
   //^ int
