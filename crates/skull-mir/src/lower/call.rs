@@ -306,6 +306,13 @@ impl Builder<'_> {
                 }
             }
         }
+        // `tostring` of an enum, value record or handle is the structural
+        // rendering, never the backend's own rendering of its representation.
+        if let Some((arg, _)) = self.dispatch().tostring_route(e) {
+            return self
+                .with_site_expr(arg, |s| s.stringify_structural(arg))
+                .map(ValueRepr::Scalar);
+        }
         // `cast<T>(v)` is identity at runtime (`return value`), so a `nobox`
         // RESULT threads the argument's repr instead of packing it for the boxed
         // `any` param and field-reading the leaves back off that box. This is

@@ -410,7 +410,7 @@ impl Builder<'_> {
 
     /// Preserve a tuple element's flat-enum representation until the pattern
     /// proves it needs a whole value.
-    fn scrut_from_repr(&mut self, repr: ValueRepr) -> Result<Scrut, CompilerError> {
+    pub(crate) fn scrut_from_repr(&mut self, repr: ValueRepr) -> Result<Scrut, CompilerError> {
         match repr {
             ValueRepr::Group { name, parts, .. }
                 if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
@@ -504,7 +504,7 @@ impl Builder<'_> {
     /// reserved for the position, so a parent that reserved less than the inner
     /// plan needs would read a neighbouring position's slot; that is a plan
     /// disagreement, not something to paper over.
-    fn nested_flat_enum_scrut(
+    pub(crate) fn nested_flat_enum_scrut(
         &mut self,
         scrut: &Scrut,
         slot: usize,

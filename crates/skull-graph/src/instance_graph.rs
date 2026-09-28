@@ -5641,6 +5641,17 @@ fn dispatched_sites(
                     }
                 }
             }
+            E::Call { .. } => {
+                for dispatch in &dispatches {
+                    let Some((arg, route)) = dispatch.tostring_route(e) else { continue };
+                    for (path, name) in route.obligations() {
+                        out.push((
+                            Site { domain: domain.clone(), expr: arg, op: SiteOp::Dispatched { name, path } },
+                            name,
+                        ));
+                    }
+                }
+            }
             E::BinOp { op: op @ (BinOp::Eq | BinOp::NotEq), lhs, rhs } => {
                 if let Some(name) = dcx.eq_route(*lhs, *rhs).synthesized_callee(*op) {
                     out.push((

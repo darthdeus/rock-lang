@@ -2449,6 +2449,20 @@ const EPSILON: float = 0.0000001
     return inspect(obj, true, precision)
 """
 
+// A string inside a structural rendering (enum payload, value-record field):
+// quoted and escaped as a Rock literal so the text stays on one line.
+@nomangle inline(lua) fn __rock_quote_string(s: string) -> string = """
+    local escaped = string.gsub(s, "[%c\"\\]", function(c)
+        if c == "\\" then return "\\\\" end
+        if c == "\"" then return "\\\"" end
+        if c == "\n" then return "\\n" end
+        if c == "\t" then return "\\t" end
+        if c == "\r" then return "\\r" end
+        return string.format("\\u{%X}", string.byte(c))
+    end)
+    return "\"" .. escaped .. "\""
+"""
+
 // Smart float formatting for `"{x}"` interpolation: scientific for
 // very small/large magnitudes; up to 4 decimals otherwise, trailing
 // zeros and trailing decimal point trimmed. Module-level (not an
