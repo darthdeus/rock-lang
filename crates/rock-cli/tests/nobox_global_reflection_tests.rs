@@ -241,11 +241,12 @@ fn on_update() {
         .split(',')
         .filter(|k| k.contains("SPOT"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        keys,
-        vec!["SPOT"],
+    // A legacy (non-module) global's StateSchema identity is
+    // `global:<file>::<name>`; the file is this run's temp `main.rock`.
+    assert!(
+        matches!(keys.as_slice(), [k] if k.starts_with("global:") && k.ends_with("/main.rock::SPOT")),
         "the keyframe must record the logical StateSchema identity, not physical leaves -- these \
-         keys are persisted into replay checkpoints and saves"
+         keys are persisted into replay checkpoints and saves. Got {keys:?}"
     );
 }
 
