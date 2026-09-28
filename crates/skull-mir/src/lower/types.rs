@@ -567,6 +567,25 @@ impl Builder<'_> {
         self.dispatch().expr_ty(e)
     }
 
+    /// The type a field access on `base` projects out of: [`Self::expr_ty`]
+    /// with a `ref T` seen through to `T`. A ref IS its referent's storage, so
+    /// the referent's field plan (inline leaves, flat slots) is the one its
+    /// fields are read and written by.
+    pub(crate) fn field_base_ty(&self, base: Idx<Expr>) -> Option<TypeExpr> {
+        let dispatch = self.dispatch();
+        let mut ty = *self.inf?.expr_types.get(base)?;
+        loop {
+            match dispatch.ty_node(ty)? {
+                TypeExpr::Infer(var, _) => ty = self.inf?.substitutions.get(var)?,
+                TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
+                TypeExpr::App { ctor: TypeCtor::Ref, params } => {
+                    return dispatch.resolve_ty(ty.with_idx(params.into_iter().next()?));
+                }
+                other => return Some(other),
+            }
+        }
+    }
+
     pub(crate) fn current_expr_storage_ty_id(&self) -> Option<TyId> {
         let ty = self.cur_expr.and_then(|e| self.inf?.expr_types.get(e).copied())?;
         let resolved = self.resolve_tyid(ty)?;

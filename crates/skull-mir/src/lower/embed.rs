@@ -56,7 +56,7 @@ impl Builder<'_> {
             if self.swizzle_of(b2, f2).is_some() {
                 break;
             }
-            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(b2) else {
+            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(b2) else {
                 break;
             };
             if self
@@ -510,7 +510,7 @@ impl Builder<'_> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<bool, CompilerError> {
-        match self.expr_ty(base) {
+        match self.field_base_ty(base) {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) => {
                 Ok(self
                     .struct_field_plan(sname, field, false)?

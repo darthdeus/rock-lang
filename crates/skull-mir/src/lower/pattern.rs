@@ -389,7 +389,7 @@ impl Builder<'_> {
     /// else lowers to an ordinary value.
     pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
         if let Expr::FieldAccess { base, field } = self.body.expr_arena[e].clone() {
-            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base) {
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) {
                 if let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape() {
                     let parent = self.lower_expr(base)?;
                     return Ok(Scrut::Flat { parent, prefix: field, shape });

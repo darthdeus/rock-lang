@@ -288,7 +288,7 @@ impl Builder<'_> {
                 }
                 // A flattened enum field read as a WHOLE value re-materializes the
                 // box from the parent's slots (the single escape boundary).
-                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base)
+                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base)
                     && let Some(shape) = self
                         .struct_field_plan(sname, field, false)?
                         .flat_shape()
@@ -304,7 +304,7 @@ impl Builder<'_> {
                 // its leaves. Projection-only keeps every such read transient
                 // (never bound, returned, captured or stored), so this is the
                 // consuming boundary, not a reintroduced box.
-                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base)
+                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base)
                     && let Some((cname, _)) = self
                         .struct_field_plan(sname, field, false)?
                         .embed()

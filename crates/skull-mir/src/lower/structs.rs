@@ -359,7 +359,7 @@ impl Builder<'_> {
         recv: Idx<Expr>,
         field: Ustr,
     ) -> Result<Option<FunctionRepPlan>, CompilerError> {
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(recv) else {
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(recv) else {
             return Ok(None);
         };
         let Some(sid) = self.ws.struct_by_name.get(&sname) else {

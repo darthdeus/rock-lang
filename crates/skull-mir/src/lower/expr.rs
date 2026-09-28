@@ -789,7 +789,7 @@ impl Builder<'_> {
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let nobox_global_place = self.nobox_global_place(e)?;
         let flat_field = match self.body.expr_arena[e].clone() {
-            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.expr_ty(base) {
+            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.field_base_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
                     Some(self.struct_field_plan(sname, field, false)?),
                 _ => None,
@@ -862,7 +862,7 @@ impl Builder<'_> {
         absent_join: Idx<Block>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let flat_field = match self.body.expr_arena[e].clone() {
-            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.expr_ty(base) {
+            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.field_base_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
                     Some(self.struct_field_plan(sname, field, false)?),
                 _ => None,
@@ -970,7 +970,7 @@ impl Builder<'_> {
                 // A whole embedded field (`p.f = Foo { .. }`): the child has no
                 // slot of its own, so write its leaves. Composition happens
                 // BEFORE this, so `p.f` here is the child, not a physical key.
-                let embed_plan = match self.expr_ty(base) {
+                let embed_plan = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                         if self.swizzle_of(base, field).is_none() =>
                         Some(self.struct_field_plan(sname, field, false)?),
@@ -985,7 +985,7 @@ impl Builder<'_> {
                 // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
-                let spliced_embed = match self.expr_ty(base) {
+                let spliced_embed = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                         if key != field && self.swizzle_of(base, field).is_none() =>
                         self.struct_field_plan(sname, field, true)?.embed(),
@@ -1000,7 +1000,7 @@ impl Builder<'_> {
                 }
                 // A flattened enum field: write the discriminant + payload slots
                 // directly on the parent table (no nested box).
-                let flat_plan = match self.expr_ty(base) {
+                let flat_plan = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                         if self.swizzle_of(base, field).is_none() =>
                         Some(self.struct_field_plan(sname, field, false)?),
@@ -1010,6 +1010,39 @@ impl Builder<'_> {
                     let cells = self.lower_flat_value(&shape, value)?;
                     self.store_flat_cells(b, key, cells);
                     return Ok(());
+                }
+                // A whole `nobox` child that is not inline lives nested in its
+                // cdata parent: write its leaves through the stored child, the
+                // inverse of `cdata_leaves`, rather than box a copy to store.
+                if !self.scx.values_first_class
+                    && let Some(cname) = self.value_struct_of(target)
+                    && self.is_nobox_struct(cname)
+                {
+                    let shape = self.nominal_rep_shape_required(cname, false)?;
+                    if self.shape_is_plain_keys(&shape) {
+                        let r = self.lower_expr_repr(value)?;
+                        let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
+                        let paths = self.boxed_leaf_paths(&shape)?;
+                        if paths.len() != leaves.len() {
+                            return Err(self.gap_here(format!(
+                                "`{cname}` has {} leaf paths but the value produced {} leaves",
+                                paths.len(),
+                                leaves.len()
+                            )));
+                        }
+                        let child = self.emit_cur(Inst::Field { base: b, field: key });
+                        for (path, leaf) in paths.into_iter().zip(leaves) {
+                            let (last, walk) = path
+                                .split_last()
+                                .ok_or_else(|| self.gap_here(format!("`{cname}` has an empty leaf path")))?;
+                            let mut at = child;
+                            for seg in walk {
+                                at = self.emit_cur(Inst::Field { base: at, field: *seg });
+                            }
+                            self.emit_cur(Inst::StoreField { base: at, field: *last, value: leaf });
+                        }
+                        return Ok(());
+                    }
                 }
                 let expected = self.concrete_expr_ty(target);
                 let v = self.lower_expr_with_expected(value, expected.as_deref())?;
@@ -1520,7 +1553,7 @@ impl Builder<'_> {
         let embed_plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
             None
         } else {
-            match self.expr_ty(base) {
+            match self.field_base_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                     if self.swizzle_of(base, field).is_none() =>
                     Some(self.struct_field_plan(sname, field, false)?),
@@ -1614,7 +1647,7 @@ impl Builder<'_> {
         let plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
             None
         } else {
-            match self.expr_ty(base) {
+            match self.field_base_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                     if self.swizzle_of(base, field).is_none() =>
                     Some(self.struct_field_plan(sname, field, false)?),
