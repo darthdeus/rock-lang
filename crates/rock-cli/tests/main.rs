@@ -147,3 +147,5 @@ mod content_boundary;
 mod state_memory_class;
 #[path = "state_globals_none.rs"]
 mod state_globals_none;
+#[path = "identity_storage_census.rs"]
+mod identity_storage_census;

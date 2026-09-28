@@ -158,7 +158,7 @@ value Handle<T> { slot: int, generation: int }
 value HandleBox<T> { handle: Handle<T> }
 struct Room { boss: Handle<Mob>, mobs: [Handle<Mob>], boxed: HandleBox<Mob>, by_id: Map<int, Handle<Mob>> }
 enum Event { Spawned(Handle<Mob>) }
-global BOSS: Handle<Mob>? = nil
+global HANDLES: [Handle<Mob>] = []
 fn f() -> int {
     5
   //^ int
@@ -187,7 +187,7 @@ fn f() -> int {
 //- identity_params_and_function_types
 struct Mob { hp: int }
 value Callbacks { on_hit: (Mob) -> int, pick: () -> Mob }
-fn hp(mob: Mob) -> int {
-    mob.hp
-  //^ int
+fn spawn(mob: Mob) -> Mob {
+    mob
+  //^ Mob
 }

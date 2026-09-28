@@ -22,7 +22,7 @@ fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, Comp
 /// `.is_err()`. One place to touch when the front-end entry signature changes.
 fn check(src: &str) -> Result<bone_semantic::inference::Workspace, CompilerError> {
     let mut module = [parse_rock(src)?];
-    semantic_pass(&mut module)
+    bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut module)
 }
 
 #[test]
@@ -1609,7 +1609,7 @@ fn local_place_cannot_be_returned_as_a_frame_reference() {
 
 #[test]
 fn returned_frame_reference_must_propagate_a_valid_origin() {
-    let propagated = "struct Stats { hp: int }\nstruct Player { stats: Stats }\nfn stats(player: ref Player) -> ref Stats { return player.stats }";
+    let propagated = "value Stats { hp: int }\nstruct Player { stats: Stats }\nfn stats(player: ref Player) -> ref Stats { return player.stats }";
     assert!(
         !bone_rejects(propagated),
         "a returned field ref may inherit an input ref's lifetime"
@@ -2533,4 +2533,87 @@ fn argument_matching_errors_name_the_parameter() {
         let msgs = all_err_msgs(src);
         assert!(msgs.iter().any(|m| m == want), "expected `{want}` for\n{src}\ngot: {msgs:?}");
     }
+}
+
+fn identity_storage_errors(std_file: &str, std_src: &str, package: Option<&str>, user_src: &str) -> Vec<String> {
+    let std_module = parse_rock_with_file(std_src, std_file).expect("parse stdlib module");
+    let mut user_module = parse_rock_with_file(user_src, "main.rock").expect("parse user module");
+    user_module.package = package.map(|name| rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: name.to_string(),
+    });
+    let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
+    ws.modules
+        .iter()
+        .flat_map(|m| m.interface_errors.iter().map(|e| e.to_string()))
+        .collect()
+}
+
+const MINI_ARENA_STORE: &str = "struct ArenaStore<T> {\n    generations: [int],\n    @identity_storage\n    data: [T],\n}\nstruct PlainStore<T> { data: [T] }";
+
+#[test]
+fn identity_storage_edge_admits_only_direct_rows() {
+    let arena = "<stdlib>/arena.rock";
+    let admitted = identity_storage_errors(
+        arena,
+        MINI_ARENA_STORE,
+        Some("game"),
+        "struct Mob { hp: int }\nglobal MOBS: ArenaStore<Mob> = ArenaStore { generations: [], data: [] }",
+    );
+    assert!(admitted.is_empty(), "the annotated edge stores Arena rows: {admitted:?}");
+
+    for (label, user) in [
+        (
+            "not a recursive waiver",
+            "struct Mob { hp: int }\nglobal MOBS: ArenaStore<[Mob]> = ArenaStore { generations: [], data: [] }",
+        ),
+        (
+            "ordinary Vec field",
+            "struct Mob { hp: int }\nglobal MOBS: PlainStore<Mob> = PlainStore { data: [] }",
+        ),
+    ] {
+        let errors = identity_storage_errors(arena, MINI_ARENA_STORE, Some("game"), user);
+        assert!(
+            errors.iter().any(|e| e.contains("cannot store identity struct `Mob`")),
+            "{label} must reject: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn identity_storage_capability_is_the_arena_files_alone() {
+    let forged = identity_storage_errors("<stdlib>/scene.rock", MINI_ARENA_STORE, Some("game"), "fn main() {}");
+    assert!(
+        forged.iter().any(|e| e.contains("`@identity_storage` is reserved")),
+        "another stdlib file cannot claim the Arena row store: {forged:?}"
+    );
+    let not_vec = identity_storage_errors(
+        "<stdlib>/arena.rock",
+        "struct ArenaStore<T> {\n    @identity_storage\n    row: T,\n}",
+        Some("game"),
+        "fn main() {}",
+    );
+    assert!(
+        not_vec.iter().any(|e| e.contains("marks the Vec field")),
+        "the capability names the row Vec: {not_vec:?}"
+    );
+}
+
+#[test]
+fn identity_storage_exemptions_follow_the_package() {
+    use bone_semantic::identity_storage::{IDENTITY_STORAGE_EXEMPT, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS};
+    let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }";
+    let enforced = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("game"), user);
+    assert!(
+        enforced.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        "a package off the exemption list is enforced: {enforced:?}"
+    );
+    let unpackaged = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", None, user);
+    assert!(unpackaged.is_empty(), "unpackaged programs are exempt outside bone fixtures: {unpackaged:?}");
+    let package = IDENTITY_STORAGE_EXEMPT
+        .iter()
+        .find(|p| **p != STDLIB_PACKAGE && **p != UNPACKAGED_PROGRAMS)
+        .expect("a package is exempt while S0a's census is nonzero");
+    let exempt = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some(package), user);
+    assert!(exempt.is_empty(), "an exempt package gets no diagnostics: {exempt:?}");
 }

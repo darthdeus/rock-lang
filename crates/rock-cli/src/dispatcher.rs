@@ -892,6 +892,10 @@ impl CommandContext {
             let root = self.get_path_or_current()?;
             return crate::monoty_census::do_monoty_census(Some(&root));
         }
+        if self.args.command == CliCommand::IdentityStorageCensus {
+            let root = self.get_path_or_current()?;
+            return crate::identity_storage_census::do_identity_storage_census(&root);
+        }
         // mono-manifest builds the Stage-0d shadow instance graph; a diagnostic
         // that touches no emission, dispatched early like its 0c sibling.
         #[cfg(feature = "backend-js")]

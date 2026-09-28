@@ -104,6 +104,11 @@ pub struct Workspace {
     /// that reach exists. Empty in LSP/typecheck-only contexts, where no
     /// expansion runs.
     pub comptime_inputs: ComptimeInputs,
+
+    /// Enforce identity storage in files outside any package instead of
+    /// counting them as unmigrated unpackaged programs. The bone fixture
+    /// harness sets it: its programs are the rule's fixtures.
+    pub identity_storage_enforce_unpackaged: bool,
 }
 
 /// See [`Workspace::comptime_inputs`].
@@ -196,6 +201,7 @@ impl Workspace {
             defs: Default::default(),
             legacy_projections: Default::default(),
             legacy_imports: Default::default(),
+            identity_storage_enforce_unpackaged: false,
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());

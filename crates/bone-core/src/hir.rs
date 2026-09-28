@@ -380,6 +380,9 @@ pub struct Module {
     pub lower_var_high_water: u32,
 
     pub file: Ustr,
+    /// The owning package's manifest name, stamped by the host graph. `None`
+    /// for stdlib files and for programs outside any package.
+    pub package: Option<Ustr>,
 
     pub functions: Arena<Function>,
     pub functions_by_name: FxHashMap<Ustr, FnList>,
@@ -440,6 +443,7 @@ impl Default for Module {
             lower_var_high_water: 0,
 
             file: Ustr::from(""),
+            package: None,
 
             functions: Default::default(),
             functions_by_name: Default::default(),

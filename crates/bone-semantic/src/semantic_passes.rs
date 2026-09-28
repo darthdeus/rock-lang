@@ -143,6 +143,7 @@ pub fn lower_modules(
         .iter()
         .map(|rock_mod| Module {
             file: rock_mod.file,
+            package: rock_mod.package.as_ref().map(|tag| ustr(&tag.self_name)),
             ..Default::default()
         })
         .collect_vec();
@@ -439,6 +440,7 @@ pub fn lower_modules(
 
     check_embed_site_legality(ws, &ids);
     check_frame_ref_storage(ws, &ids);
+    crate::identity_storage::check_identity_storage(ws, &ids);
 
     Ok(ids)
 }
@@ -1060,8 +1062,34 @@ pub fn semantic_pass_without_closure_gate(
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
+    semantic_pass_into(Workspace::default(), rock_modules, aliases)
+}
+
+/// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
+/// fixture harness.
+pub fn semantic_pass_enforcing_identity_storage(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerError> {
+    semantic_pass_enforcing_identity_storage_with_aliases(rock_modules, &bone_core::modules::NsAliases::default())
+}
+
+pub fn semantic_pass_enforcing_identity_storage_with_aliases(
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
+    let ws = Workspace {
+        identity_storage_enforce_unpackaged: true,
+        ..Workspace::default()
+    };
+    let ws = semantic_pass_into(ws, rock_modules, aliases)?;
+    pass_validate_api_closure(&ws)?;
+    Ok(ws)
+}
+
+fn semantic_pass_into(
+    mut ws: Workspace,
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
-    let mut ws = Workspace::default();
 
     build_namespaces(&mut ws, rock_modules, aliases)?;
     expand_and_desugar(&mut ws, rock_modules)?;

@@ -7,7 +7,7 @@
 
 // shorthand: `{ x, y }` binds locals x and y.
 //- struct_record_shorthand
-struct Point { x: int, y: int }
+value Point { x: int, y: int }
 fn f(p: Point) -> int {
     let r = match p {
         Point { x, y } => x,
@@ -18,7 +18,7 @@ fn f(p: Point) -> int {
 
 // explicit binding: `{ x: a }` binds field x to local a.
 //- struct_record_explicit
-struct Point { x: int, y: int }
+value Point { x: int, y: int }
 fn f(p: Point) -> int {
     let r = match p {
         Point { x: a, y: b } => a,
@@ -29,7 +29,7 @@ fn f(p: Point) -> int {
 
 // rest: `{ x, .. }` ignores remaining fields.
 //- struct_record_rest
-struct Point { x: int, y: int }
+value Point { x: int, y: int }
 fn f(p: Point) -> int {
     let r = match p {
         Point { x, .. } => x,
@@ -40,7 +40,7 @@ fn f(p: Point) -> int {
 
 // nested record: the sub-pattern is itself a record.
 //- struct_record_nested
-struct Point { x: int, y: int }
+value Point { x: int, y: int }
 struct Wrapper { inner: Point, tag: int }
 fn f(w: Wrapper) -> int {
     let r = match w {

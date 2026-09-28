@@ -23,7 +23,7 @@ fn f(p: Flags?) -> int {
 
 // chaining: each `?.` step stays a single nullable layer (no `T??`)
 //- safe_nav_chain
-struct Inner { n: int }
+value Inner { n: int }
 struct Outer { inner: Inner }
 fn f(o: Outer?) -> int {
     let v = o?.inner?.n

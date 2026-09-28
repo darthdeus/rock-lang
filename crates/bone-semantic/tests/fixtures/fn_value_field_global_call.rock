@@ -23,7 +23,7 @@ fn f() -> int {
 }
 
 //- fn_typed_field_nested
-struct Inner { processor: fn(int) -> int }
+value Inner { processor: fn(int) -> int }
 struct Outer { inner: Inner }
 fn f() -> int {
     let o = Outer { inner: Inner { processor: (x) => x } }

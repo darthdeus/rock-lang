@@ -285,7 +285,7 @@ fn validate_one(
             }
             Ok(())
         }
-        "flat" => {
+        "flat" | "identity_storage" => {
             at(anno, pos, AnnoPos::StructField)?;
             no_args(anno)
         }

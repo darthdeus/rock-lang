@@ -24,7 +24,7 @@
 // --- the feature: refine a global inside `!= null` -------------------------
 
 //- global_refine_basic
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn f() -> Player? {
     if P != null {
@@ -38,7 +38,7 @@ fn f() -> Player? {
 // the user-facing win: a field access on the refined global type-checks (and is
 // the field's type, not an error).
 //- global_refine_field_access
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn f() -> string {
     if P != null {
@@ -53,7 +53,7 @@ fn f() -> string {
 // global FIELD path: `if G.inner != null` refines `G.inner` (and the `G`
 // prefix), so `G.inner.v` type-checks -- same path-keyed mechanism as locals.
 //- global_refine_field_path
-struct Inner { v: int }
+value Inner { v: int }
 struct Outer { inner: Inner? }
 global G: Outer = Outer { inner: null }
 fn f() -> int {
@@ -68,7 +68,7 @@ fn f() -> int {
 // `== null` guard with an early return refines G for the rest of the function
 // (the else path is unreachable, so the narrow escapes the if).
 //- global_refine_guard_early_return
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn f() -> string {
     if P == null {
@@ -82,7 +82,7 @@ fn f() -> string {
 // a `@pure` call cannot write globals, so the refinement survives it. (This
 // pins the PURITY-AWARE choice: a "any call invalidates" rule would fail here.)
 //- global_refine_survives_pure_call
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 @pure fn noop() -> int { 0 }
 fn f() -> int {
@@ -98,7 +98,7 @@ fn f() -> int {
 // the body. The effect check is purity-aware: a non-pure call here would drop it
 // (see global_refine_dropped_after_impure_in_cond).
 //- global_refine_survives_pure_in_cond
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 @pure fn ok() -> bool { return true }
 fn f() -> int {
@@ -112,7 +112,7 @@ fn f() -> int {
 // the access precedes the impure call's effect, so it is refined; the later
 // impure() does not retroactively un-refine the earlier access.
 //- global_refine_use_before_impure_call
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn impure() -> int { 0 }
 fn f() -> int {
@@ -128,7 +128,7 @@ fn f() -> int {
 
 // a non-`@pure` call may have nulled P, so P is `Player?` again after it.
 //- global_refine_dropped_after_impure_call
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn impure() -> int { 0 }
 fn f() -> int {
@@ -143,7 +143,7 @@ fn f() -> int {
 // a global FIELD-path refinement is also dropped by an intervening impure call,
 // so `G.inner` is `Inner?` again after it.
 //- global_refine_field_path_dropped_after_impure_call
-struct Inner { v: int }
+value Inner { v: int }
 struct Outer { inner: Inner? }
 global G: Outer = Outer { inner: null }
 fn impure() -> int { 0 }
@@ -159,7 +159,7 @@ fn f() -> int {
 
 // a direct write to P invalidates the refinement.
 //- global_refine_dropped_after_write
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn f() -> int {
     if P != null {
@@ -175,7 +175,7 @@ fn f() -> int {
 // NOT hold inside a lambda body (`P` is `Player?` there, not `Player`). Locals
 // are captured, so they keep their refinement; only globals are cleared.
 //- global_not_refined_inside_lambda_body
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn f() -> int {
     if P != null {
@@ -191,7 +191,7 @@ fn f() -> int {
 
 // a `yield` hands control to the resumer, who may mutate P, so it invalidates.
 //- global_refine_dropped_after_yield
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 co fn f() -> Coroutine<int> {
     if P != null {
@@ -206,7 +206,7 @@ co fn f() -> Coroutine<int> {
 // are immune -- a call can't mutate a caller local -- so this guard is
 // global-specific.)
 //- global_refine_dropped_after_impure_in_cond
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn impure() -> bool { return true }
 fn f() -> int {
@@ -219,7 +219,7 @@ fn f() -> int {
 
 // the overlay is block-scoped: after the branch closes, P is `Player?` again.
 //- global_refine_restored_after_branch
-struct Player { name: string }
+value Player { name: string }
 global P: Player? = null
 fn f() -> int {
     if P != null {

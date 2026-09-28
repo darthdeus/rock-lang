@@ -66,6 +66,7 @@ pub mod child_lifetime;
 mod allocation_join;
 #[cfg(feature = "backend-js")]
 mod mono_manifest;
+mod identity_storage_census;
 mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
@@ -225,6 +226,11 @@ pub enum CliCommand {
     /// distinct logical types, and failures bucketed by reason. Changes no
     /// emission. See `monoty_census::do_monoty_census`.
     MonoTyCensus,
+    /// `rock identity-storage-census [root]` -- the exact per-package,
+    /// per-kind count of identity structs in declaration storage
+    /// (`docs/identity-storage-plan.md` S0a). See
+    /// `identity_storage_census::do_identity_storage_census`.
+    IdentityStorageCensus,
     /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
     /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
     /// the closed world (instances keyed by `MonoTy`), and
@@ -371,6 +377,7 @@ impl clap::ValueEnum for CliCommand {
             Self::SkullIncrementalProfile,
             Self::IterIncremental,
             Self::MonoTyCensus,
+            Self::IdentityStorageCensus,
             Self::MonoManifest,
             Self::AllocationJoin,
             Self::IterLsp,
@@ -434,6 +441,7 @@ impl CliCommand {
             Self::SkullIncrementalProfile => "skull-incremental-profile",
             Self::IterIncremental => "iter-incremental",
             Self::MonoTyCensus => "mono-ty-census",
+            Self::IdentityStorageCensus => "identity-storage-census",
             Self::MonoManifest => "mono-manifest",
             Self::AllocationJoin => "allocation-join",
             Self::IterLsp => "iter-lsp",

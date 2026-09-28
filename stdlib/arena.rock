@@ -18,6 +18,7 @@ struct ArenaStore<T> {
     _owner_scene_id: int,
     generations: [int],
     occupied: [bool],
+    @identity_storage
     data: [T],
     free_indices: [int],
     occupied_count: int = 0,

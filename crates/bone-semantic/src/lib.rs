@@ -1,4 +1,5 @@
 pub mod defs;
+pub mod identity_storage;
 pub use bone_core::hir;
 // The macros are `#[macro_export]`'d in bone-core; re-export at bone's root so
 // `bone_semantic::comp_error!` / `bone_semantic::or_fail!` / `bone_semantic::unify_fail!` keep resolving.

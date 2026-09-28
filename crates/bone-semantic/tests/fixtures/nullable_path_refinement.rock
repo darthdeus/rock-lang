@@ -5,7 +5,7 @@
 
 // field-path narrowing: inside `if m.inner != null`, `m.inner` is non-null.
 //- refine_field_path
-struct Inner { v: int }
+value Inner { v: int }
 struct Mid { inner: Inner? }
 fn f(m: Mid) -> int {
     if m.inner != null {
@@ -19,7 +19,7 @@ fn f(m: Mid) -> int {
 
 // `&&` chain: `m != null && m.inner != null` narrows both.
 //- refine_and_chain
-struct Inner { v: int }
+value Inner { v: int }
 struct Mid { inner: Inner? }
 fn f(m: Mid?) -> int {
     if m != null && m.inner != null {

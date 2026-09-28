@@ -135,7 +135,7 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
         });
         modules.push(module);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
         .map_err(|e| format!("stdlib + v1 semantic pass failed: {e}"))?;
     for file in &user_files {
         let module = ws
