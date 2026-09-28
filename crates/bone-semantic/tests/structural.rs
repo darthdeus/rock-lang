@@ -1764,31 +1764,37 @@ fn ref_finished_before_a_coroutine_suspension_is_allowed() {
     assert!(!bone_rejects(src), "last use before yield does not put the ref in the coroutine frame");
 }
 
+// IDENTITY BORROW ACROSS SUSPENSION (docs/identity-storage-plan.md): an
+// identity parameter is an implicit borrow that coroutine construction would
+// retain before the first resume, so a `co fn` cannot take one at all.
 #[test]
-fn implicit_identity_parameter_is_checked_by_the_backend_at_suspension() {
-    let src = "struct Player { hp: int }\nco fn bad(player: Player) -> Coroutine<int> { yield 1  player.hp = 1 }";
+fn implicit_identity_parameter_is_rejected_on_a_coroutine() {
+    for src in [
+        "struct Player { hp: int }\nco fn bad(player: Player) -> Coroutine<int> { yield 1  player.hp = 1 }",
+        "struct Player { hp: int }\nco fn bad(player: Player) -> Coroutine<int> { player.hp = 1  yield 1 }",
+    ] {
+        let err = rejection_messages(src);
+        assert!(
+            err.contains("coroutine parameter `player` cannot hold identity struct `Player`"),
+            "a co fn identity parameter must reject, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn identity_local_cannot_live_across_a_coroutine_suspension() {
+    let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn bad() -> Coroutine<int> { let player = make_player()  yield 1  player.hp = 2 }";
+    let err = rejection_messages(src);
     assert!(
-        !bone_rejects(src),
-        "the selected backend checks whether the identity parameter is borrowed"
+        err.contains("identity borrow `player` is used after a coroutine suspension"),
+        "a coroutine frame cannot retain an identity across yield, got: {err}"
     );
 }
 
 #[test]
-fn locally_owned_identity_can_live_across_a_coroutine_suspension() {
-    let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  yield 1  player.hp = 2 }";
-    assert!(
-        !bone_rejects(src),
-        "an owned identity in a coroutine frame remains valid across yield"
-    );
-}
-
-#[test]
-fn implicit_identity_borrow_finished_before_suspension_is_allowed() {
-    let src = "struct Player { hp: int }\nco fn fine(player: Player) -> Coroutine<int> { player.hp = 1  yield 1 }";
-    assert!(
-        !bone_rejects(src),
-        "last use before yield does not retain the identity borrow"
-    );
+fn identity_local_finished_before_suspension_is_allowed() {
+    let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }";
+    assert!(!bone_rejects(src), "last use before yield does not retain the identity borrow");
 }
 
 #[test]
@@ -2543,10 +2549,28 @@ fn identity_storage_errors(std_file: &str, std_src: &str, package: Option<&str>,
         self_name: name.to_string(),
     });
     let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
+    module_error_messages(&ws)
+}
+
+/// Every declaration and body diagnostic in `ws`.
+fn module_error_messages(ws: &bone_semantic::inference::Workspace) -> Vec<String> {
     ws.modules
         .iter()
-        .flat_map(|m| m.interface_errors.iter().map(|e| e.to_string()))
+        .flat_map(|m| {
+            m.interface_errors
+                .iter()
+                .chain(ws.inference(m.id).into_iter().flat_map(|inf| inf.errors.values().flatten()))
+                .map(|e| e.to_string())
+        })
         .collect()
+}
+
+/// The diagnostics bone reports for one standalone, identity-enforced source.
+fn rejection_messages(src: &str) -> String {
+    match check(src) {
+        Ok(ws) => module_error_messages(&ws).join("\n"),
+        Err(err) => err.to_string(),
+    }
 }
 
 const MINI_ARENA_STORE: &str = "struct ArenaStore<T> {\n    generations: [int],\n    @identity_storage\n    data: [T],\n}\nstruct PlainStore<T> { data: [T] }";
@@ -2602,11 +2626,15 @@ fn identity_storage_capability_is_the_arena_files_alone() {
 #[test]
 fn identity_storage_exemptions_follow_the_package() {
     use bone_semantic::identity_storage::{IDENTITY_STORAGE_EXEMPT, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS};
-    let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }";
+    let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
     let enforced = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("game"), user);
     assert!(
         enforced.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
         "a package off the exemption list is enforced: {enforced:?}"
+    );
+    assert!(
+        enforced.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
+        "the body check follows the same exemption list: {enforced:?}"
     );
     let unpackaged = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", None, user);
     assert!(unpackaged.is_empty(), "unpackaged programs are exempt outside bone fixtures: {unpackaged:?}");

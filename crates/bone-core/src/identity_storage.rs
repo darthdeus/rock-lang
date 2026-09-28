@@ -11,7 +11,7 @@
 
 use crate::hir::{StructFieldDef, TyId, TypeCtor, TypeExpr, VariantPayload};
 use crate::prelude::*;
-use crate::workspace::Workspace;
+use crate::workspace::{BodyInference, Workspace};
 
 pub const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
 
@@ -47,14 +47,36 @@ pub fn is_identity_storage_field(field: &StructFieldDef) -> bool {
 /// The first identity stored by a value of `ty` held in an ordinary storage
 /// position.
 pub fn identity_storage_violation(ws: &Workspace, ty: TyId) -> Option<IdentityStorageViolation> {
-    visit(ws, ty, Top::Stored, IdentityStorageVia::Direct, &mut ParamClasses::default())
+    identity_body_storage_violation(ws, None, ty)
+}
+
+/// [`identity_storage_violation`] for a type that may be local to a body
+/// (`bi` owns its `TyId::Local` arena and substitutions): a closure capture or
+/// a `co fn` parameter, which the closure or coroutine frame stores.
+pub fn identity_body_storage_violation(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    ty: TyId,
+) -> Option<IdentityStorageViolation> {
+    visit(Types { ws, bi }, ty, Top::Stored, IdentityStorageVia::Direct, &mut ParamClasses::default())
 }
 
 /// [`identity_storage_violation`] for a root position (a global's type): the
-/// top itself may be an identity, but what it stores through its type
-/// arguments may not.
+/// top itself may be an identity, or a nullable identity (an optional one-row
+/// Session root), but what it stores through its type arguments may not.
 pub fn identity_root_storage_violation(ws: &Workspace, ty: TyId) -> Option<IdentityStorageViolation> {
-    visit(ws, ty, Top::Admitted, IdentityStorageVia::Direct, &mut ParamClasses::default())
+    visit(Types { ws, bi: None }, ty, Top::Root, IdentityStorageVia::Direct, &mut ParamClasses::default())
+}
+
+/// [`identity_storage_violation`] for a body's local, parameter or temporary:
+/// an identity at the top, under a nullable, or as a tuple element is a
+/// borrow; one stored by a Vec, Map or constructor type argument is storage.
+pub fn identity_local_storage_violation(
+    ws: &Workspace,
+    bi: &BodyInference,
+    ty: TyId,
+) -> Option<IdentityStorageViolation> {
+    visit(Types { ws, bi: Some(bi) }, ty, Top::Borrow, IdentityStorageVia::Direct, &mut ParamClasses::default())
 }
 
 /// [`identity_storage_violation`] for an `@identity_storage` field: the Vec's
@@ -66,16 +88,56 @@ pub fn identity_storage_field_violation(ws: &Workspace, ty: TyId) -> Option<Iden
             ctor: TypeCtor::Array,
             mut params,
         }) => params.find_map(|p| {
-            visit(ws, ty.with_idx(p), Top::Admitted, IdentityStorageVia::Container, &mut classes)
+            visit(
+                Types { ws, bi: None },
+                ty.with_idx(p),
+                Top::Admitted,
+                IdentityStorageVia::Container,
+                &mut classes,
+            )
         }),
-        _ => visit(ws, ty, Top::Stored, IdentityStorageVia::Direct, &mut classes),
+        _ => visit(Types { ws, bi: None }, ty, Top::Stored, IdentityStorageVia::Direct, &mut classes),
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Top {
     Stored,
+    /// An Arena row: the identity itself.
     Admitted,
+    /// A Session root: the identity, or a nullable one.
+    Root,
+    /// A body's borrow: the identity, under nullables and tuples.
+    Borrow,
+}
+
+/// Where a `TyId` is read: declaration arenas, plus one body's arena and
+/// substitutions for `TyId::Local`.
+#[derive(Copy, Clone)]
+struct Types<'a> {
+    ws: &'a Workspace,
+    bi: Option<&'a BodyInference>,
+}
+
+impl Types<'_> {
+    /// The type behind `ty`, following inference variables, with the id whose
+    /// arena its child indices point into.
+    fn resolve(self, ty: TyId) -> Option<(TyId, TypeExpr)> {
+        let mut cur = ty;
+        loop {
+            let expr = match cur {
+                TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
+                TyId::Local(idx) => self.bi?.ty_arena[idx],
+            };
+            match expr {
+                TypeExpr::Infer(var, _) => match self.bi.and_then(|bi| bi.substitutions.get(var)) {
+                    Some(next) => cur = next,
+                    None => return Some((cur, expr)),
+                },
+                _ => return Some((cur, expr)),
+            }
+        }
+    }
 }
 
 /// What a nominal constructor does with one of its type parameters. Ordered
@@ -94,9 +156,9 @@ struct ParamClasses {
     in_progress: FxHashSet<(Ustr, usize)>,
 }
 
+/// A declaration type. Constructor parameter classes are read from
+/// declarations only.
 fn static_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
-    // Declaration types live in module arenas. Body-local types are the body
-    // check's concern (S0b), which reads them through the body's own arena.
     match ty {
         TyId::Static(mid, idx) => Some(ws.module(mid).ty_arena[idx]),
         TyId::Local(_) => None,
@@ -104,19 +166,29 @@ fn static_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 }
 
 fn visit(
-    ws: &Workspace,
+    types: Types,
     ty: TyId,
     top: Top,
     via: IdentityStorageVia,
     classes: &mut ParamClasses,
 ) -> Option<IdentityStorageViolation> {
-    match static_expr(ws, ty)? {
+    let ws = types.ws;
+    let (ty, expr) = types.resolve(ty)?;
+    match expr {
         TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
         TypeExpr::Function { .. } => None,
-        TypeExpr::Nullable(inner) => visit(ws, ty.with_idx(inner), Top::Stored, via, classes),
-        TypeExpr::Tuple { mut elements } => elements.find_map(|e| {
-            visit(ws, ty.with_idx(e), Top::Stored, IdentityStorageVia::Container, classes)
-        }),
+        TypeExpr::Nullable(inner) => {
+            let inner_top = if matches!(top, Top::Root | Top::Borrow) { top } else { Top::Stored };
+            visit(types, ty.with_idx(inner), inner_top, via, classes)
+        }
+        TypeExpr::Tuple { mut elements } => {
+            let (element_top, element_via) = if top == Top::Borrow {
+                (Top::Borrow, via)
+            } else {
+                (Top::Stored, IdentityStorageVia::Container)
+            };
+            elements.find_map(|e| visit(types, ty.with_idx(e), element_top, element_via, classes))
+        }
         TypeExpr::App {
             ctor: TypeCtor::Ref, ..
         } => None,
@@ -124,7 +196,7 @@ fn visit(
             ctor: TypeCtor::Array | TypeCtor::Map,
             mut params,
         } => params.find_map(|p| {
-            visit(ws, ty.with_idx(p), Top::Stored, IdentityStorageVia::Container, classes)
+            visit(types, ty.with_idx(p), Top::Stored, IdentityStorageVia::Container, classes)
         }),
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
@@ -139,7 +211,7 @@ fn visit(
                     ParamClass::Row => Top::Admitted,
                     ParamClass::Stored => Top::Stored,
                 };
-                visit(ws, ty.with_idx(p), arg_top, IdentityStorageVia::Container, classes)
+                visit(types, ty.with_idx(p), arg_top, IdentityStorageVia::Container, classes)
             })
         }
     }

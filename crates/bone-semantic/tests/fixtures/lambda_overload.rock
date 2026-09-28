@@ -5,7 +5,7 @@
 //! the expected param type into the lambda.
 
 //- lambda_to_overloaded_fn
-struct Box { v: int }
+value Box { v: int }
 fn pick(xs: [int], f: fn(int) -> int) -> int { 0 }
 fn pick(xs: [Box], f: fn(Box) -> int) -> int { 0 }
 fn g() -> int {

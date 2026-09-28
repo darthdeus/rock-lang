@@ -2110,6 +2110,7 @@ pub fn check_module_incremental(
     mut prev: InferenceResult,
 ) -> Result<InferenceResult, CompilerError> {
     let mut result = InferenceResult::default();
+    let enforce_identity_storage = !crate::identity_storage::identity_storage_exempt(ws, module);
 
     for (f_id, f) in module.functions.iter() {
         let owner = BodyOwner::Function(f_id);
@@ -2127,7 +2128,19 @@ pub fn check_module_incremental(
         // incremental Session can report exactly how many bodies re-inferred.
         ws.reinferred_body_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        fold_inference(&mut result, owner, check_function(ws, module, mid, f_id, f));
+        let checked = check_function(ws, module, mid, f_id, f).map(|checked| {
+            checked.map(|(owner, inference, mut errs)| {
+                if enforce_identity_storage {
+                    errs.extend(
+                        crate::identity_storage::identity_body_sites(ws, f, body, &inference)
+                            .into_iter()
+                            .map(|site| CompilerError::new_with_label(site.span, site.message)),
+                    );
+                }
+                (owner, inference, errs)
+            })
+        });
+        fold_inference(&mut result, owner, checked);
     }
 
     for (d_id, d) in module.decorators.iter() {

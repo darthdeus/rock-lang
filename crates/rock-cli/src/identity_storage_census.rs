@@ -1,6 +1,6 @@
 //! `rock identity-storage-census [root]`: the exact per-package, per-kind
-//! count of identity structs stored in declaration positions
-//! (docs/identity-storage-plan.md S0a). Packages on
+//! count of identity structs stored in declaration positions (S0a) and in
+//! function bodies (S0b; docs/identity-storage-plan.md). Packages on
 //! `bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT` report no
 //! diagnostics while they migrate; this census is what keeps their debt
 //! visible. `crates/rock-cli/tests/identity_storage_census.rs` pins the table.
@@ -16,20 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use bone_semantic::identity_storage::{
-    identity_storage_exempt, identity_storage_package, identity_storage_sites, IdentityStorageKind,
-    IDENTITY_STORAGE_EXEMPT,
+    identity_module_body_sites, identity_storage_exempt, identity_storage_package, identity_storage_sites,
+    IdentityStorageKind, IDENTITY_STORAGE_EXEMPT,
 };
 use bone_semantic::inference::Workspace;
 
 use crate::Result;
-
-const KINDS: [IdentityStorageKind; 5] = [
-    IdentityStorageKind::Field,
-    IdentityStorageKind::Container,
-    IdentityStorageKind::Payload,
-    IdentityStorageKind::Newtype,
-    IdentityStorageKind::Global,
-];
 
 #[derive(Default)]
 struct Census {
@@ -108,7 +100,8 @@ fn record(root: &Path, ws: &Workspace, census: &mut Census) -> usize {
     for module in ws.modules.iter() {
         let package = identity_storage_package(module).to_string();
         let exempt = identity_storage_exempt(ws, module);
-        let sites = identity_storage_sites(ws, module);
+        let mut sites = identity_storage_sites(ws, module);
+        sites.extend(identity_module_body_sites(ws, module));
         if sites.is_empty() {
             continue;
         }
@@ -130,15 +123,16 @@ fn record(root: &Path, ws: &Workspace, census: &mut Census) -> usize {
 
 fn render(census: &Census) -> String {
     let mut out = String::new();
-    out.push_str("| package | status | field | container | payload | newtype | global | total |\n");
-    out.push_str("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+    let labels: Vec<&str> = IdentityStorageKind::ALL.iter().map(|kind| kind.label()).collect();
+    out.push_str(&format!("| package | status | {} | total |\n", labels.join(" | ")));
+    out.push_str(&format!("| --- | --- |{} ---: |\n", " ---: |".repeat(labels.len())));
     // A listed package with no sites left is shown so its entry gets removed.
     let mut rows = census.exempt.clone();
     for package in IDENTITY_STORAGE_EXEMPT {
         rows.entry(package.to_string()).or_insert(true);
     }
     for (package, exempt) in &rows {
-        let counts: Vec<usize> = KINDS
+        let counts: Vec<usize> = IdentityStorageKind::ALL
             .iter()
             .map(|kind| census.sites.get(&(package.clone(), *kind)).map_or(0, BTreeSet::len))
             .collect();

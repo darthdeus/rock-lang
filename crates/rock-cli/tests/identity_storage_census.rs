@@ -1,4 +1,4 @@
-//! The identity-storage census (docs/identity-storage-plan.md S0a) pinned
+//! The identity-storage census (docs/identity-storage-plan.md S0a, S0b) pinned
 //! exactly. Exempt packages report no diagnostics, so this table is where
 //! their debt stays visible: a migration that removes sites updates the row,
 //! and a package whose row reaches zero leaves
@@ -17,41 +17,47 @@ fn repo_root() -> PathBuf {
 }
 
 const PINNED: &str = "\
-| package | status | field | container | payload | newtype | global | total |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| anvil | exempt | 0 | 4 | 0 | 0 | 0 | 4 |
-| bitgun | exempt | 23 | 8 | 0 | 0 | 4 | 35 |
-| bopt | exempt | 3 | 12 | 1 | 0 | 0 | 16 |
-| chess | exempt | 1 | 22 | 0 | 0 | 1 | 24 |
-| chess_game | exempt | 14 | 3 | 0 | 0 | 0 | 17 |
-| chesslings | exempt | 2 | 6 | 0 | 0 | 0 | 8 |
-| sample_game_c | exempt | 2 | 4 | 0 | 0 | 2 | 8 |
-| sample_game_c_v0 | exempt | 1 | 2 | 0 | 0 | 1 | 4 |
-| sample_game_b | exempt | 1 | 11 | 0 | 0 | 0 | 12 |
-| decorator_systems | exempt | 0 | 1 | 0 | 0 | 0 | 1 |
-| fm_core | exempt | 0 | 4 | 0 | 0 | 2 | 6 |
-| sample-game | exempt | 1 | 14 | 0 | 0 | 2 | 17 |
-| idle_core | exempt | 4 | 18 | 0 | 0 | 1 | 23 |
-| logo | exempt | 3 | 1 | 0 | 0 | 2 | 6 |
-| mag | exempt | 514 | 228 | 9 | 0 | 46 | 797 |
-| mag_content | exempt | 5 | 11 | 6 | 0 | 0 | 22 |
-| mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 0 | 4 |
-| mag_simulation | exempt | 20 | 9 | 4 | 0 | 0 | 33 |
-| mag_world | exempt | 11 | 0 | 0 | 0 | 0 | 11 |
-| match3 | exempt | 0 | 1 | 0 | 0 | 1 | 2 |
-| match3_core | exempt | 1 | 2 | 0 | 0 | 0 | 3 |
-| spark | exempt | 2 | 4 | 0 | 0 | 0 | 6 |
-| std | exempt | 11 | 1 | 0 | 0 | 0 | 12 |
-| stone | exempt | 157 | 118 | 10 | 0 | 24 | 309 |
-| stone_core | exempt | 1 | 0 | 1 | 0 | 0 | 2 |
-| survivors | exempt | 0 | 3 | 0 | 0 | 0 | 3 |
-| testbed | exempt | 13 | 5 | 0 | 0 | 26 | 44 |
-| typography | exempt | 0 | 0 | 0 | 0 | 1 | 1 |
-| ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 3 |
-| unpackaged programs | exempt | 105 | 13 | 5 | 0 | 0 | 123 |
-| vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 4 |
-| void | exempt | 0 | 1 | 0 | 0 | 1 | 2 |
-| wgpu_renderer | exempt | 1 | 0 | 0 | 0 | 24 | 25 |
+| package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | total |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| anvil | exempt | 0 | 4 | 0 | 0 | 11 | 0 | 0 | 0 | 15 |
+| bitgun | exempt | 23 | 8 | 0 | 0 | 75 | 1 | 1 | 95 | 203 |
+| bopt | exempt | 3 | 12 | 1 | 0 | 198 | 0 | 0 | 0 | 214 |
+| chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 99 |
+| chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 8 |
+| chess_game | exempt | 14 | 3 | 0 | 0 | 143 | 1 | 0 | 0 | 161 |
+| chess_sfx | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
+| chesslings | exempt | 2 | 6 | 0 | 0 | 51 | 0 | 0 | 0 | 59 |
+| sample_game_c | exempt | 2 | 4 | 0 | 0 | 18 | 0 | 0 | 17 | 41 |
+| sample_game_c_v0 | exempt | 1 | 2 | 0 | 0 | 8 | 0 | 0 | 0 | 11 |
+| sample_game_b | exempt | 1 | 11 | 0 | 0 | 150 | 0 | 0 | 49 | 211 |
+| decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 |
+| fm | exempt | 0 | 0 | 0 | 0 | 13 | 0 | 0 | 0 | 13 |
+| fm_core | exempt | 0 | 4 | 0 | 0 | 21 | 0 | 0 | 0 | 25 |
+| sample-game | exempt | 1 | 14 | 0 | 0 | 285 | 0 | 0 | 14 | 314 |
+| idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 79 |
+| idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 94 |
+| logo | exempt | 3 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 12 |
+| mag | exempt | 514 | 228 | 9 | 0 | 1691 | 26 | 116 | 10485 | 13069 |
+| mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 1 |
+| mag_content | exempt | 5 | 11 | 6 | 0 | 18 | 0 | 0 | 0 | 40 |
+| mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 6 |
+| mag_simulation | exempt | 20 | 9 | 4 | 0 | 127 | 0 | 1 | 0 | 161 |
+| mag_world | exempt | 11 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 13 |
+| match3 | exempt | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 15 | 16 |
+| match3_core | exempt | 1 | 2 | 0 | 0 | 4 | 0 | 0 | 0 | 7 |
+| pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
+| spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 30 |
+| std | exempt | 11 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 12 |
+| stone | exempt | 157 | 118 | 10 | 0 | 334 | 5 | 0 | 0 | 624 |
+| stone_core | exempt | 1 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 2 |
+| survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 4 |
+| testbed | exempt | 13 | 5 | 0 | 0 | 143 | 2 | 2 | 77 | 242 |
+| typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 2 |
+| ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 3 | 6 |
+| unpackaged programs | exempt | 105 | 13 | 5 | 0 | 110 | 56 | 4 | 0 | 293 |
+| vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 4 |
+| void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 |
+| wgpu_renderer | exempt | 1 | 0 | 0 | 0 | 144 | 0 | 0 | 37 | 182 |
 
 NOT fully analyzed:
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors

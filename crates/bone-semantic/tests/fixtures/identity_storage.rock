@@ -83,7 +83,7 @@ fn f() -> int {
 // the nullable is occupancy, not nested storage.
 //- identity_nullable_root_global
 struct Mob { hp: int }
-global BOSS: Mob? = nil
+global BOSS: Mob? = null
 fn f() -> int {
     5
   //^ int
@@ -94,7 +94,7 @@ fn f() -> int {
 //- identity_nullable_root_global_argument @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
 struct Bag<T> { items: [T] }
-global BAG: Bag<Mob>? = nil
+global BAG: Bag<Mob>? = null
 fn f() -> int {
     5
   //^ int
@@ -102,7 +102,7 @@ fn f() -> int {
 
 //- identity_nullable_global_in_tuple @fail=cannot store identity struct `Mob`
 struct Mob { hp: int }
-global PAIR: (Mob?, int) = (nil, 0)
+global PAIR: (Mob?, int) = (null, 0)
 fn f() -> int {
     5
   //^ int
