@@ -14,8 +14,8 @@ const NULL_TEXT: &str = "null";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FmtNode {
-    /// A scalar, a string or a payload-free enum.
-    Leaf(StringifyRoute),
+    /// A scalar, a string or a payload-free enum, with its logical type.
+    Leaf { route: StringifyRoute, ty: MonoTy },
     Nullable(Box<FmtNode>),
     Enum { name: Ustr, variants: Vec<FmtVariant> },
     /// `Name { field: <..>, .. }`.
@@ -44,7 +44,7 @@ impl FmtNode {
     /// lowering passes to `dispatched_call` for it.
     pub fn obligations(&self, path: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, &'static str)>) {
         match self {
-            Self::Leaf(route) => out.extend(route.synthesized_callee().map(|n| (path.clone(), n))),
+            Self::Leaf { route, .. } => out.extend(route.synthesized_callee().map(|n| (path.clone(), n))),
             Self::Nullable(inner) => inner.obligations(path, out),
             Self::Enum { variants, .. } => {
                 for (vi, v) in variants.iter().enumerate() {
@@ -162,9 +162,11 @@ pub fn format_tree(ws: &Workspace, ty: &MonoTy) -> Result<FmtNode, String> {
 
 fn format_tree_in(ws: &Workspace, ty: &MonoTy, visiting: &mut Vec<Ustr>) -> Result<FmtNode, String> {
     Ok(match ty {
-        MonoTy::Int | MonoTy::Uint | MonoTy::Bool => FmtNode::Leaf(StringifyRoute::ToString),
-        MonoTy::Float => FmtNode::Leaf(StringifyRoute::FormatFloat),
-        MonoTy::String => FmtNode::Leaf(StringifyRoute::EscapedString),
+        MonoTy::Int | MonoTy::Uint | MonoTy::Bool => {
+            FmtNode::Leaf { route: StringifyRoute::ToString, ty: ty.clone() }
+        }
+        MonoTy::Float => FmtNode::Leaf { route: StringifyRoute::FormatFloat, ty: ty.clone() },
+        MonoTy::String => FmtNode::Leaf { route: StringifyRoute::EscapedString, ty: ty.clone() },
         MonoTy::Nullable(inner) => FmtNode::Nullable(Box::new(format_tree_in(ws, inner, visiting)?)),
         MonoTy::App { ctor: MonoCtor::Nominal(name), params } => {
             let name = *name;
@@ -212,7 +214,8 @@ fn nominal_tree(
     }
     if let Some(eid) = ws.enums_by_name.get(&name) {
         if payload_free_enum_variants(ws, name).is_some() {
-            return Ok(FmtNode::Leaf(StringifyRoute::EnumNames(name)));
+            let ty = MonoTy::App { ctor: MonoCtor::Nominal(name), params: params.to_vec() };
+            return Ok(FmtNode::Leaf { route: StringifyRoute::EnumNames(name), ty });
         }
         let def = &ws.module(eid.module).enums[eid.def];
         let subst = nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
@@ -259,8 +262,9 @@ impl Builder<'_> {
         repr: ValueRepr,
     ) -> Result<Idx<Inst>, CompilerError> {
         match node {
-            FmtNode::Leaf(route) => {
+            FmtNode::Leaf { route, ty } => {
                 let v = self.pack(repr)?;
+                let v = self.native_leaf(v, ty);
                 self.render_stringify(route, path, v)
             }
             FmtNode::Nullable(inner) => match repr {
@@ -301,6 +305,7 @@ impl Builder<'_> {
                 let mut pieces = Vec::with_capacity(fields.len());
                 for ((l, _), part) in fields.iter().zip(parts) {
                     let v = self.pack(part)?;
+                    let v = self.native_leaf(v, &MonoTy::Int);
                     let rendered = self.emit_cur(Inst::ToString(v));
                     pieces.push((format!("{l}="), rendered));
                 }
@@ -313,6 +318,18 @@ impl Builder<'_> {
                 Ok(self.join_pieces(&format!("{}(", display_name(*name)), vec![(String::new(), rendered)], ")"))
             }
         }
+    }
+
+    /// A payload read off flat-enum union storage names no single member; on a
+    /// native backend, a local of the leaf's type selects it.
+    fn native_leaf(&mut self, v: Idx<Inst>, ty: &MonoTy) -> Idx<Inst> {
+        if !self.scx.native_flat_enums || matches!(self.f.insts[v], Inst::Const(_)) {
+            return v;
+        }
+        let ty = self.scx.interner().intern(ty.clone());
+        let cell = self.f.new_cell_native_typed(None, None, Some(ty));
+        self.emit_cur(Inst::Store { cell, value: v });
+        self.emit_cur(Inst::Load(cell))
     }
 
     /// `open` + `label_i .. piece_i` joined by ", " + `close`, one flat concat run.
@@ -413,9 +430,22 @@ impl Builder<'_> {
             .ok_or_else(|| gap(format!("formatted enum `{name}` has no plan")))?;
         let cdata = plan.cdata().is_some();
         let flat_shape = plan.flat().cloned();
+        // A value constructed in place has a constant tag. Only its arm is
+        // reachable; the others would read slots holding nil or another
+        // variant's payload.
+        let known = match scrut {
+            Scrut::Cells { tag, .. } => match self.f.insts[*tag] {
+                Inst::Const(Lit::Str(variant)) => Some(variant),
+                _ => None,
+            },
+            _ => None,
+        };
         let result = self.f.new_cell(None);
         let join = self.f.new_block();
         for (vi, variant) in variants.iter().enumerate() {
+            if known.is_some_and(|k| k != variant.name) {
+                continue;
+            }
             let fail = self.f.new_block();
             self.test_tag(scrut, variant.name, Some(name), fail);
             let head = format!("{}::{}", display_name(name), variant.name);
@@ -431,7 +461,12 @@ impl Builder<'_> {
                                 let shape = flat_shape
                                     .as_ref()
                                     .ok_or_else(|| gap("flat enum payload lost its compiler-owned shape"))?;
-                                if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
+                                if let Some(mut inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
+                                    // The nested tag shares its slot with other
+                                    // variants' payloads, like any leaf.
+                                    if let Scrut::Cells { tag, .. } = &mut inner {
+                                        *tag = self.native_leaf(*tag, &MonoTy::String);
+                                    }
                                     self.render_enum(child, vs.name, child_path, &inner)?
                                 } else {
                                     let leaves = self.scrut_payload_leaves(scrut, i, &vs, shape);
