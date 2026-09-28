@@ -326,9 +326,39 @@ impl Builder<'_> {
                 }
                 // An embed LEAF read composes to one dotted key on the parent
                 // that holds it; no intermediate projection exists.
-                let (pbase, key) = self.physical_field(base, field)?;
+                let (pbase, mut key) = self.physical_field(base, field)?;
                 if key != field {
-                    let parent = self.lower_expr(pbase)?;
+                    // A value parent can still be UNBOXED (a param, a local):
+                    // project the path off its Group rather than pack a box
+                    // just to read a dotted key back out of it.
+                    let mut repr = self.lower_expr_repr_inner(pbase)?;
+                    // A boxed GC-table parent keys an inline child's enum and
+                    // struct fields by their leaves too, so a whole-field read
+                    // is split back into the Group rather than read off one key.
+                    if let ValueRepr::Scalar(v) = repr {
+                        repr = match self.value_struct_name_of(pbase) {
+                            Some(sname) if self.gc_table_inline_layout(sname)?.is_some() => {
+                                self.boxed_value_copy_repr(v, sname)?
+                            }
+                            _ => ValueRepr::Scalar(v),
+                        };
+                    }
+                    let segs: Vec<Ustr> = key.as_str().split('.').map(Ustr::from).collect();
+                    let mut at = 0;
+                    while at < segs.len() {
+                        let ValueRepr::Group { name, parts, .. } = &repr else { break };
+                        let Some(i) = self.field_index(*name, segs[at]) else { break };
+                        repr = parts[i].clone();
+                        at += 1;
+                    }
+                    if at == segs.len() {
+                        return Ok(repr);
+                    }
+                    if at > 0 {
+                        let rest: Vec<&str> = segs[at..].iter().map(|s| s.as_str()).collect();
+                        key = Ustr::from(&rest.join("."));
+                    }
+                    let parent = self.pack(repr)?;
                     if let Some(name) = self.value_struct_of(e)
                         && self.is_nobox_struct(name)
                     {
@@ -676,23 +706,7 @@ impl Builder<'_> {
                 for fname in decl {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
-                        None => match (&base_repr, base_boxed) {
-                            (Some(ValueRepr::Group { name: bn, parts, .. }), _) => {
-                                let i = self
-                                    .field_index(*bn, fname)
-                                    .expect("functional-update base covers every field");
-                                fs.push(parts[i].clone());
-                            }
-                            (Some(_), Some(bi)) => {
-                                fs.push(ValueRepr::Scalar(
-                                    self.emit_cur(Inst::Field { base: bi, field: fname }),
-                                ));
-                            }
-                            _ => {
-                                let v = self.lower_struct_default(name, fname)?;
-                                fs.push(ValueRepr::Scalar(v));
-                            }
-                        },
+                        None => fs.push(self.spread_base_field_repr(&base_repr, base_boxed, name, fname)?),
                     }
                 }
                 fs

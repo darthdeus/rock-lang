@@ -1998,3 +1998,100 @@ fn a_stored_gc_tier_value_keeps_nullable_and_nested_nobox_fields_as_leaves() {
          true"
     );
 }
+
+// A leaf read through a `nobox` field of an UNBOXED GC-tier value (a scalar-ABI
+// param) projects the leaf off the value's Group. The `_vt` box keys that leaf
+// as `lock.place.x`, but building the box just to read the key back is an
+// allocation the leaf-threaded value never needed (MAG's
+// `hostile_target_evaluate` reads `input.lock.target` this way per mob).
+const NOBOX_IN_GC_VALUE_PARAM_LEAF_READ: &str = r#"
+nobox value P { x: int, y: int }
+nobox value Id { a: int, b: int }
+enum Who { Player, Mob(Id) }
+nobox value Cand { target: Who, place: P, ok: bool }
+nobox value Decision { target: Who, place: P }
+enum Eval { Found(Decision, bool), Nothing(bool) }
+value Snap { label: string, lock: Cand, rest: [int] }
+fn pick(s: Snap) -> Eval {
+    if s.lock.ok { return Eval::Found(Decision { target: s.lock.target, place: s.lock.place }, false) }
+    return Eval::Nothing(true)
+}
+fn main() {
+    let e = pick(Snap { label: "s", lock: Cand { target: Who::Mob(Id { a: 5, b: 6 }), place: P { x: 3, y: 4 }, ok: true }, rest: [] })
+    match e {
+        Eval::Found(d, _) => match d.target {
+            Who::Mob(id) => print(id.b + d.place.x + d.place.y),
+            Who::Player => print(0),
+        },
+        Eval::Nothing(_) => print(-1),
+    }
+}
+"#;
+
+#[test]
+fn a_leaf_read_through_a_nobox_field_of_a_gc_tier_param_does_not_box() {
+    let lua = emit_module(NOBOX_IN_GC_VALUE_PARAM_LEAF_READ);
+    let body = function_body(&lua, "pick");
+    assert!(!body.contains("Snap_vt("), "`pick` boxed its param to read a leaf:\n{body}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_param_leaf"), "13");
+}
+
+// Functional update of a GC-tier value whose base is a local: the fields the
+// literal does not name come off the base by the box's layout, so a `nobox`
+// field is read by its leaves (MAG's `CarriedItemView { ..view, id }`).
+const NOBOX_IN_GC_VALUE_FUNCTIONAL_UPDATE: &str = r#"
+nobox value C { r: float, g: float }
+enum Kind { Plain, Tagged(string) }
+value View { id: int, kind: Kind, name: string, color: C }
+fn mk(k: Kind) -> View { return View { id: 1, kind: k, name: "n", color: C { r: 0.5, g: 0.25 } } }
+fn use_it(v: View) -> float { return v.color.r + v.color.g + v.id }
+fn main() {
+    let view = mk(Kind::Tagged("t"))
+    print(use_it(View { ..view, id: 3 }))
+}
+"#;
+
+#[test]
+fn a_functional_update_of_a_gc_tier_value_reads_nobox_fields_by_leaf() {
+    let lua = emit_module(NOBOX_IN_GC_VALUE_FUNCTIONAL_UPDATE);
+    let body = function_body(&lua, "main");
+    assert!(!body.contains("View_vt("), "the update boxed its base:\n{body}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_update"), "3.75");
+}
+
+// The same read off a BOXED GC-tier local (reassigned in a loop, so it lives in
+// one cell): the enum inside the `nobox` field is keyed by its leaves
+// (`lock.target.__tag`, ...), so reading the whole enum off `lock.target`
+// found nil. MAG's `scenario_world_hostile_target` has this shape.
+const NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ: &str = r#"
+nobox value P { x: int, y: int }
+nobox value Id { a: int, b: int }
+enum Who { Player, Mob(Id) }
+nobox value Cand { target: Who, place: P, ok: bool }
+value Snap { label: string, lock: Cand, rest: [int] }
+fn vis(c: Cand, v: bool) -> Cand { return Cand { target: c.target, place: c.place, ok: v } }
+fn look(s0: Snap) -> int {
+    let s = s0
+    for _ in 0..4 {
+        let id = match s.lock.target {
+            Who::Player => return -1,
+            Who::Mob(id) => id,
+        }
+        if s.lock.ok { return id.b + s.lock.place.y }
+        let lock = vis(s.lock, true)
+        s = Snap { ..s, lock }
+    }
+    return -2
+}
+fn main() {
+    print(look(Snap { label: "s", lock: Cand { target: Who::Mob(Id { a: 5, b: 6 }), place: P { x: 3, y: 4 }, ok: false }, rest: [] }))
+}
+"#;
+
+#[test]
+fn an_enum_in_a_nobox_field_of_a_boxed_gc_tier_local_reads_by_leaf() {
+    let lua = emit_module(NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_boxed_local"), "10");
+    let body = function_body(&lua, "look");
+    assert!(!body.contains("Snap_vt("), "`look` boxed its local to read a field:\n{body}");
+}
