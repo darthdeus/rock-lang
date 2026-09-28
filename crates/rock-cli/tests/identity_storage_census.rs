@@ -21,7 +21,7 @@ const PINNED: &str = "\
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | anvil | exempt | 0 | 4 | 0 | 0 | 11 | 0 | 0 | 0 | 0 | 15 |
 | bitgun | exempt | 20 | 8 | 0 | 0 | 72 | 1 | 1 | 95 | 2 | 199 |
-| bopt | exempt | 3 | 12 | 1 | 0 | 198 | 0 | 0 | 0 | 0 | 214 |
+| bopt | exempt | 3 | 12 | 1 | 0 | 197 | 0 | 0 | 0 | 0 | 213 |
 | chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 0 | 99 |
 | chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 8 |
 | chess_game | exempt | 14 | 3 | 0 | 0 | 143 | 1 | 0 | 0 | 0 | 161 |
@@ -37,7 +37,7 @@ const PINNED: &str = "\
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 411 | 228 | 9 | 0 | 1689 | 25 | 116 | 10419 | 63 | 12960 |
+| mag | exempt | 404 | 226 | 9 | 0 | 1685 | 25 | 116 | 10419 | 63 | 12947 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 5 | 11 | 6 | 0 | 18 | 0 | 0 | 0 | 1 | 41 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -48,7 +48,7 @@ const PINNED: &str = "\
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 30 |
 | std | exempt | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
-| stone | exempt | 134 | 116 | 10 | 0 | 319 | 5 | 0 | 0 | 13 | 597 |
+| stone | exempt | 131 | 104 | 10 | 0 | 318 | 5 | 0 | 0 | 13 | 581 |
 | stone_core | exempt | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 5 | 9 |
 | testbed | exempt | 11 | 5 | 0 | 0 | 140 | 2 | 2 | 76 | 74 | 310 |
@@ -58,7 +58,7 @@ const PINNED: &str = "\
 | unpackaged programs | exempt | 105 | 13 | 5 | 0 | 110 | 56 | 4 | 0 | 53 | 346 |
 | vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 4 |
 | void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 | 4 |
-| wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 144 | 0 | 0 | 37 | 7 | 188 |
+| wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 144 | 0 | 0 | 26 | 7 | 177 |
 
 NOT fully analyzed:
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
