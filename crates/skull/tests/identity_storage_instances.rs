@@ -98,3 +98,21 @@ fn substitution_only_identity_storage_is_fatal_for_an_enforced_package() {
 fn substitution_only_identity_storage_is_counted_not_fatal_for_an_exempt_package() {
     try_emit_module(STASH).expect("unpackaged programs are exempt");
 }
+
+/// A generic `T -> any` coercion erases the identity `erase<Unit>` binds.
+#[test]
+fn substituted_identity_erased_to_any_is_rejected() {
+    let r = identity_rejections(
+        r#"
+struct Unit { hp: int }
+fn keep(x: any) -> int { return 0 }
+fn erase<T>(x: T) -> int { return keep(x) }
+fn main() {
+    let u = Unit { hp: 1 }
+    print("{erase(u)}")
+}
+"#,
+    );
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(r[0].contains("erase") && r[0].contains("cannot erase identity struct `Unit`"), "{r:?}");
+}
