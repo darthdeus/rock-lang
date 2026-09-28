@@ -33,11 +33,11 @@ const PINNED: &str = "\
 | sample-game | exempt | 1 | 14 | 0 | 0 | 2 | 17 |
 | idle_core | exempt | 4 | 18 | 0 | 0 | 1 | 23 |
 | logo | exempt | 3 | 1 | 0 | 0 | 2 | 6 |
-| mag | exempt | 514 | 229 | 9 | 0 | 46 | 798 |
+| mag | exempt | 514 | 228 | 9 | 0 | 46 | 797 |
 | mag_content | exempt | 5 | 11 | 6 | 0 | 0 | 22 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 0 | 4 |
-| mag_simulation | exempt | 20 | 13 | 4 | 0 | 0 | 37 |
-| mag_world | exempt | 18 | 0 | 0 | 0 | 0 | 18 |
+| mag_simulation | exempt | 20 | 9 | 4 | 0 | 0 | 33 |
+| mag_world | exempt | 16 | 0 | 0 | 0 | 0 | 16 |
 | match3 | exempt | 0 | 1 | 0 | 0 | 1 | 2 |
 | match3_core | exempt | 1 | 2 | 0 | 0 | 0 | 3 |
 | spark | exempt | 2 | 4 | 0 | 0 | 0 | 6 |
