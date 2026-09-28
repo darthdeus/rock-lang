@@ -34,6 +34,7 @@ pub const STDLIB_PACKAGE: &str = "std";
 /// belong to [`UNPACKAGED_PROGRAMS`] until S8 rewrites them; the census does
 /// not count them.
 pub const RUST_EMBEDDED_PACKAGES: &[&str] = &[
+    "enum_json_v1",
     "legacyapp",
     "memclass_handle",
     "memclass_handle_marked",
