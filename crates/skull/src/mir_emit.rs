@@ -4914,10 +4914,7 @@ fn graph_rejection_error(
 /// from the instance through its callers; a caller in an exempt package whose
 /// own type arguments carry an identity only forwarded it, so its callers are
 /// asked in turn. Any other caller introduced the identity, and the rejection is
-/// fatal when that caller's package is not exempt. A caller in the stdlib
-/// arena module is the privileged row store handling its own rows, so it
-/// introduces nothing (S0d gives that store its compiler-private
-/// representation).
+/// fatal when that caller's package is not exempt.
 fn identity_instance_rejection_error(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -4926,9 +4923,6 @@ fn identity_instance_rejection_error(
 ) -> Option<CompilerError> {
     let exempt = |instance: &crate::instance_graph::Instance| {
         bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
-    };
-    let store = |instance: &crate::instance_graph::Instance| {
-        bone_semantic::identity_storage::is_identity_store_module(ws.module(instance.func.module))
     };
     let mut seen = FxHashSet::default();
     let mut work = vec![&rejection.at];
@@ -4939,9 +4933,6 @@ fn identity_instance_rejection_error(
         }
         for edge in callers.get(instance).into_iter().flatten() {
             reached_by_edge = true;
-            if store(&edge.from) {
-                continue;
-            }
             let forwarded = exempt(&edge.from)
                 && edge.from.args.iter().any(|arg| {
                     skull_graph::identity_storage::stores_identity(ws, &graph.interner().get(*arg))

@@ -90,12 +90,15 @@
 // prelude: __arena_drain_retired
 // prelude: __arena_new_owned
 // prelude: __arena_owns
+// prelude: __arena_pair_rows
 // prelude: __arena_reinitialize
 // prelude: __arena_store
 // prelude: __arena_store_any
+// prelude: __arena_store_erased
 // prelude: __arena_store_mut
 // prelude: __arena_store_or_dead
 // prelude: __arena_store_or_empty
+// prelude: __arena_val_rows
 // prelude: __debug_traceback
 // prelude: __entity_arena
 // prelude: __ffi_new_float_1
@@ -200,6 +203,7 @@
 // prelude: __scene_reserve
 // prelude: __scene_retire
 // prelude: __scene_root_any
+// prelude: __scene_root_erased
 // prelude: __scene_state
 // prelude: __scene_type_bucket_index
 // prelude: __scene_type_bucket_insert

@@ -69,3 +69,15 @@ fn f(e: Entity<Mob>, p: Point) -> int {
     keep(p)
   //^ int
 }
+
+// The erasure capability belongs to the stdlib Arena and Scene registries.
+//- identity_erasure_capability_is_reserved @fail=`@identity_erasure` is reserved
+struct Mob { hp: int }
+@identity_erasure
+fn erase(mob: Mob) -> any {
+    return mob
+}
+fn f() -> int {
+    5
+  //^ int
+}

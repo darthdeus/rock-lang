@@ -1370,7 +1370,7 @@ fn Vec<T>.remove_at(vec, index: int) -> T? {
     }
     let value: T? = cast(__vec_data_get(vec, index))
     for i in index..(vec.len - 1) {
-        __vec_data_set(vec, i, __vec_data_get(vec, i + 1))
+        __vec_data_set(vec, i, cast(__vec_data_get(vec, i + 1)))
     }
     __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
@@ -1383,7 +1383,7 @@ fn Vec<T>.swap_remove(vec, index: int) -> T? {
     }
     let value: T? = cast(__vec_data_get(vec, index))
     if index + 1 < vec.len {
-        __vec_data_set(vec, index, __vec_data_get(vec, vec.len - 1))
+        __vec_data_set(vec, index, cast(__vec_data_get(vec, vec.len - 1)))
     }
     __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
@@ -1887,14 +1887,16 @@ inline(lua) fn table_new() -> any = """return {}"""
 // no call frame.
 // The RECEIVER is typed so 2.4 can protect these: spelled `any` they claimed no
 // representation, and a missing column route fell through to the boxed body and
-// died at runtime on `_data` instead of rejecting. The VALUE stays `any` -- it
-// is stored opaquely. `docs/boundary-contracts.md` 2.3b.
+// died at runtime on `_data` instead of rejecting. The stored VALUE is spelled
+// `T` with `@repr(opaque)`, as `vec_push`'s item is: it makes no layout claim,
+// and an `any` would erase an Arena row (docs/identity-storage-plan.md S0d).
+// `docs/boundary-contracts.md` 2.3b.
 // Not `@nomangle`: nothing calls these by their bare name. `@nomangle` is what
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
 @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, value: any) = "vec._data[index + 1] = value"
+@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
 @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that

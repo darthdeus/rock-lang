@@ -2230,7 +2230,6 @@ impl InstanceGraph {
                 add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
                 for site in crate::identity_storage::substitution_only_sites(
                     ws,
-                    ws.module(inst.func.module),
                     f,
                     body,
                     inf,

@@ -14,6 +14,10 @@ use crate::prelude::*;
 use crate::workspace::{BodyInference, Workspace};
 
 pub const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
+/// The Arena and Scene registries' erasure capability: a stdlib function whose
+/// body may erase an identity to `any` (docs/identity-storage-plan.md,
+/// IDENTITY ANY ERASURE).
+pub const IDENTITY_ERASURE_ANNOTATION: &str = "identity_erasure";
 
 /// How an identity reached the storage position that rejects it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -142,6 +146,9 @@ pub enum IdentityPosition {
     /// A body's local, parameter or temporary: see
     /// [`identity_local_storage_violation`].
     Borrow,
+    /// The Vec written to an `@identity_storage` field: its direct elements
+    /// are rows, and everything below them is ordinary storage.
+    Row,
 }
 
 /// The predicate over any [`IdentityTypes`] representation.
@@ -154,8 +161,47 @@ pub fn identity_violation_in<V: IdentityTypes>(
     let top = match position {
         IdentityPosition::Stored => Top::Stored,
         IdentityPosition::Borrow => Top::Borrow,
+        IdentityPosition::Row => {
+            let mut classes = ParamClasses::default();
+            return match types.node(ty)? {
+                IdentityNode::Collection(mut params) => params.find_map(|p| {
+                    visit(ws, types, p, Top::Admitted, IdentityStorageVia::Container, &mut classes)
+                }),
+                _ => visit(ws, types, ty, Top::Stored, IdentityStorageVia::Direct, &mut classes),
+            };
+        }
     };
     visit(ws, types, ty, top, IdentityStorageVia::Direct, &mut ParamClasses::default())
+}
+
+/// [`identity_violation_in`] over one body's inferred types.
+pub fn identity_body_violation(
+    ws: &Workspace,
+    bi: &BodyInference,
+    ty: TyId,
+    position: IdentityPosition,
+) -> Option<IdentityStorageViolation> {
+    identity_violation_in(ws, Types { ws, bi: Some(bi) }, ty, position)
+}
+
+/// Whether `field` of a value of `owner` (a body type) is an
+/// `@identity_storage` edge.
+pub fn is_identity_storage_edge(ws: &Workspace, bi: &BodyInference, owner: TyId, field: Ustr) -> bool {
+    let Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })) = (Types { ws, bi: Some(bi) }).resolve(owner)
+    else {
+        return false;
+    };
+    is_identity_storage_struct_field(ws, name, field)
+}
+
+/// Whether `field` of the struct `name` is an `@identity_storage` edge.
+pub fn is_identity_storage_struct_field(ws: &Workspace, name: Ustr, field: Ustr) -> bool {
+    ws.struct_by_name.get(&name).is_some_and(|sid| {
+        ws.module(sid.module).structs[sid.def]
+            .fields
+            .iter()
+            .any(|f| f.name == field && is_identity_storage_field(f))
+    })
 }
 
 /// Where a `TyId` is read: declaration arenas, plus one body's arena and

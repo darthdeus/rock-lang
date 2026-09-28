@@ -9,8 +9,9 @@
 
 use bone_core::escape::lambda_is_nonescaping;
 use bone_core::identity_storage::{
-    identity_body_storage_violation, identity_local_storage_violation, identity_root_storage_violation,
-    identity_storage_field_violation, identity_storage_violation, is_identity_storage_field, IdentityStorageVia,
+    identity_body_storage_violation, identity_body_violation, identity_local_storage_violation,
+    identity_root_storage_violation, identity_storage_field_violation, identity_storage_violation,
+    is_identity_storage_edge, is_identity_storage_field, IdentityStorageVia, IDENTITY_ERASURE_ANNOTATION,
     IDENTITY_STORAGE_ANNOTATION,
 };
 pub use bone_core::identity_storage::{
@@ -263,6 +264,9 @@ pub trait BodySlotTypes {
     /// A value the closure or coroutine frame keeps: the identity itself is
     /// storage.
     fn stored(&self, ty: TyId) -> Option<IdentityStorageViolation>;
+    /// A Vec literal written to an `@identity_storage` field: its direct
+    /// elements are rows.
+    fn row(&self, ty: TyId) -> Option<IdentityStorageViolation>;
 }
 
 struct InferredSlotTypes<'a> {
@@ -277,6 +281,40 @@ impl BodySlotTypes for InferredSlotTypes<'_> {
     fn stored(&self, ty: TyId) -> Option<IdentityStorageViolation> {
         identity_body_storage_violation(self.ws, Some(self.bi), ty)
     }
+    fn row(&self, ty: TyId) -> Option<IdentityStorageViolation> {
+        identity_body_violation(self.ws, self.bi, ty, IdentityPosition::Row)
+    }
+}
+
+/// The Vec literals written directly to an `@identity_storage` field, by a
+/// constructor or an assignment: the one edge whose elements may be rows.
+fn row_edge_literals(ws: &Workspace, body: &Body, bi: &BodyInference) -> FxHashSet<Idx<Expr>> {
+    let mut rows = FxHashSet::default();
+    let mut edge = |owner: Idx<Expr>, field: Ustr, value: Idx<Expr>| {
+        if matches!(body.expr_arena[value], Expr::Array(_))
+            && let Some(ty) = bi.expr_types.get(owner).copied()
+            && is_identity_storage_edge(ws, bi, ty, field)
+        {
+            rows.insert(value);
+        }
+    };
+    for (id, expr) in body.expr_arena.iter() {
+        match expr {
+            Expr::StructLiteral { fields, .. } => {
+                for field in fields.clone() {
+                    let field = &body.struct_lit_field_arena[field];
+                    edge(id, field.name, field.value);
+                }
+            }
+            Expr::Assign { target, value } => {
+                if let Expr::FieldAccess { base, field } = body.expr_arena[*target] {
+                    edge(base, field, *value);
+                }
+            }
+            _ => {}
+        }
+    }
+    rows
 }
 
 /// Every position in one function body that stores an identity struct: the
@@ -328,6 +366,7 @@ pub fn identity_body_sites_with(
         }
     }
 
+    let rows = row_edge_literals(ws, body, bi);
     for (id, expr) in body.expr_arena.iter() {
         let what = match expr {
             Expr::Array(_) => "this Vec literal",
@@ -336,7 +375,8 @@ pub fn identity_body_sites_with(
             _ => continue,
         };
         let Some(ty) = bi.expr_types.get(id).copied() else { continue };
-        if let Some(violation) = types.local(ty) {
+        let violation = if rows.contains(&id) { types.row(ty) } else { types.local(ty) };
+        if let Some(violation) = violation {
             sites.push(IdentityStorageSite {
                 kind: IdentityStorageKind::LocalStorage,
                 identity: violation.identity,
@@ -346,7 +386,11 @@ pub fn identity_body_sites_with(
         }
     }
 
-    for &(span, ty) in &bi.any_erasures {
+    let erasure_capability = function
+        .annotations
+        .iter()
+        .any(|annotation| annotation.is_builtin(IDENTITY_ERASURE_ANNOTATION));
+    for &(span, ty) in bi.any_erasures.iter().filter(|_| !erasure_capability) {
         if let Some(violation) = types.stored(ty) {
             let identity = violation.identity;
             sites.push(IdentityStorageSite {
@@ -471,18 +515,44 @@ pub fn identity_module_body_sites(ws: &Workspace, module: &Module) -> Vec<Identi
     sites
 }
 
+fn is_stdlib_file_named(module: &Module, stem: &str) -> bool {
+    let file = module.file.as_str();
+    is_stdlib_module_file(file)
+        && (file.ends_with(&format!("/{stem}.rock")) || file.ends_with(&format!(":{stem}.rock>")))
+}
+
 /// The stdlib arena file: the one module that implements the privileged row
 /// store, with the trust boundary of `@frame_ref_source`.
-pub fn is_identity_store_module(module: &Module) -> bool {
-    let file = module.file.as_str();
-    is_stdlib_module_file(file) && (file.ends_with("/arena.rock") || file.ends_with(":arena.rock>"))
+fn is_identity_store_module(module: &Module) -> bool {
+    is_stdlib_file_named(module, "arena")
+}
+
+/// The stdlib files that implement the Arena and Scene registries, which hold
+/// identities behind `@identity_erasure`.
+fn is_identity_registry_module(module: &Module) -> bool {
+    is_identity_store_module(module) || is_stdlib_file_named(module, "scene")
 }
 
 /// `@identity_storage` is the Arena store's privilege: only
 /// [`is_identity_store_module`] may use it, and only on a Vec field.
+/// `@identity_erasure` is the Arena and Scene registries' privilege.
 fn capability_errors(module: &Module) -> Vec<CompilerError> {
     let is_arena_stdlib = is_identity_store_module(module);
     let mut errs = Vec::new();
+    if !is_identity_registry_module(module) {
+        for (_, function) in module.functions.iter() {
+            if let Some(annotation) = function
+                .annotations
+                .iter()
+                .find(|annotation| annotation.is_builtin(IDENTITY_ERASURE_ANNOTATION))
+            {
+                errs.push(CompilerError::new_with_label(
+                    annotation.span,
+                    "`@identity_erasure` is reserved for the standard Arena and Scene registries".to_string(),
+                ));
+            }
+        }
+    }
     for (_, def) in module.structs.iter() {
         for field in &def.fields {
             let Some(annotation) = field
