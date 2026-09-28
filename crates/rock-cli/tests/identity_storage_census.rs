@@ -37,7 +37,7 @@ const PINNED: &str = "\
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 411 | 228 | 9 | 0 | 1689 | 26 | 116 | 10466 | 63 | 13008 |
+| mag | exempt | 411 | 228 | 9 | 0 | 1689 | 25 | 116 | 10419 | 63 | 12960 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 5 | 11 | 6 | 0 | 18 | 0 | 0 | 0 | 1 | 41 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
