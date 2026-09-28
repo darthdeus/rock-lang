@@ -950,13 +950,14 @@ impl Builder<'_> {
             Expr::FieldAccess { base, field } => {
                 // `xs[i].x = v` / `xs[i].at.x = v` on a column-stored or strided
                 // Vec: there is no element slot to take a place base of, so the
-                // write lands directly in the leaf named by the dotted path.
-                let (root, path) = self.flat_leaf_path(base, field)?.unwrap_or((base, field));
+                // write lands directly in the leaf columns under the dotted path.
+                let (root, path, nested) =
+                    self.flat_field_path(base, field)?.unwrap_or((base, field, None));
                 if let Some((vec, idx, elem)) = self.column_index_place(root)? {
-                    return self.column_leaf_store(vec, idx, elem, path, value);
+                    return self.column_leaf_store(vec, idx, elem, path, nested.as_ref(), value);
                 }
                 if let Some((vec, idx, elem)) = self.strided_index_place(root)? {
-                    return self.strided_leaf_store(vec, idx, elem, path, value);
+                    return self.strided_leaf_store(vec, idx, elem, path, nested.as_ref(), value);
                 }
                 // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
                 // leaf-addressed NativeBuffer: there is no element slot to take a
