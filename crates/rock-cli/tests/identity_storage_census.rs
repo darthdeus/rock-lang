@@ -20,24 +20,24 @@ const PINNED: &str = "\
 | package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | anvil | exempt | 0 | 4 | 0 | 0 | 11 | 0 | 0 | 0 | 0 | 15 |
-| bitgun | exempt | 20 | 8 | 0 | 0 | 72 | 1 | 1 | 95 | 2 | 199 |
-| bopt | exempt | 3 | 12 | 1 | 0 | 197 | 0 | 0 | 0 | 0 | 213 |
+| bitgun | exempt | 20 | 8 | 0 | 0 | 68 | 1 | 1 | 71 | 2 | 171 |
+| bopt | exempt | 3 | 12 | 1 | 0 | 196 | 0 | 0 | 0 | 0 | 212 |
 | chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 0 | 99 |
 | chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 8 |
 | chess_game | exempt | 14 | 3 | 0 | 0 | 143 | 1 | 0 | 0 | 0 | 161 |
-| chess_sfx | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
+| chess_sfx | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | chesslings | exempt | 2 | 6 | 0 | 0 | 51 | 0 | 0 | 0 | 0 | 59 |
-| sample_game_c | exempt | 2 | 4 | 0 | 0 | 18 | 0 | 0 | 17 | 0 | 41 |
+| sample_game_c | exempt | 2 | 4 | 0 | 0 | 18 | 0 | 0 | 11 | 0 | 35 |
 | sample_game_c_v0 | exempt | 1 | 2 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 11 |
 | sample_game_b | exempt | 1 | 11 | 0 | 0 | 150 | 0 | 0 | 49 | 0 | 211 |
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | fm | exempt | 0 | 0 | 0 | 0 | 13 | 0 | 0 | 0 | 0 | 13 |
 | fm_core | exempt | 0 | 4 | 0 | 0 | 21 | 0 | 0 | 0 | 0 | 25 |
-| sample-game | exempt | 1 | 14 | 0 | 0 | 285 | 0 | 0 | 14 | 0 | 314 |
+| sample-game | exempt | 1 | 14 | 0 | 0 | 284 | 0 | 0 | 14 | 0 | 313 |
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 387 | 219 | 8 | 0 | 1623 | 25 | 115 | 10335 | 63 | 12775 |
+| mag | exempt | 369 | 215 | 8 | 0 | 1560 | 25 | 115 | 10168 | 63 | 12523 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 2 | 2 | 2 | 0 | 9 | 0 | 0 | 0 | 1 | 16 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -48,17 +48,17 @@ const PINNED: &str = "\
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 30 |
 | std | exempt | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
-| stone | exempt | 131 | 100 | 10 | 0 | 310 | 5 | 0 | 0 | 13 | 569 |
+| stone | exempt | 90 | 59 | 7 | 0 | 226 | 5 | 0 | 0 | 11 | 398 |
 | stone_core | exempt | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 5 | 9 |
-| testbed | exempt | 11 | 5 | 0 | 0 | 140 | 2 | 2 | 76 | 74 | 310 |
+| testbed | exempt | 11 | 5 | 0 | 0 | 135 | 2 | 2 | 73 | 74 | 302 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
-| ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 3 | 0 | 6 |
+| ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
 | unpackaged programs | exempt | 105 | 13 | 5 | 0 | 110 | 56 | 4 | 0 | 53 | 346 |
 | vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 4 |
 | void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 | 4 |
-| wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 144 | 0 | 0 | 26 | 7 | 177 |
+| wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |
 
 NOT fully analyzed:
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
