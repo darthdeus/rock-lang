@@ -1590,9 +1590,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                     .variants
                     .iter()
                     .enumerate()
-                    .map(|(ord, v)| {
-                        format!("[{ord}] = \"{e}::{v}\"", e = skull_mir::lower::display_name(e.name), v = v.name)
-                    })
+                    .map(|(ord, v)| format!("[{ord}] = \"{e}::{v}\"", e = e.name, v = v.name))
                     .collect();
                 // The table is a Lua GLOBAL, so its name carries the enum's
                 // symbol; the values it holds are display text.

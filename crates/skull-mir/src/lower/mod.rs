@@ -360,7 +360,7 @@ mod embed;
 mod expr;
 mod flat;
 mod format;
-pub use format::{display_name, format_tree, FmtNode, FmtPayload, FmtVariant};
+pub use format::{format_tree, FmtNode, FmtPayload, FmtVariant};
 mod interp;
 mod kinds;
 mod loops;

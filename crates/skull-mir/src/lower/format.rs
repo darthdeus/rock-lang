@@ -103,13 +103,6 @@ fn handle_fields(name: Ustr) -> Option<&'static [(&'static str, &'static str)]> 
     }
 }
 
-/// A nominal's name as its source spells it. A v1 package type's name is its
-/// DefKey path (`pkg::module::Name`); the text uses the declared name.
-pub fn display_name(name: Ustr) -> &'static str {
-    let s: &'static str = name.as_str();
-    s.rsplit("::").next().unwrap_or(s)
-}
-
 /// The source spelling of a type, for a handle's type argument.
 fn type_label(ty: &MonoTy) -> String {
     match ty {
@@ -129,11 +122,11 @@ fn type_label(ty: &MonoTy) -> String {
             format!("[{}]", type_label(&params[0]))
         }
         MonoTy::App { ctor: MonoCtor::Nominal(n), params } if params.is_empty() => {
-            display_name(*n).to_string()
+            n.to_string()
         }
         MonoTy::App { ctor: MonoCtor::Nominal(n), params } => format!(
             "{}<{}>",
-            display_name(*n),
+            n,
             params.iter().map(type_label).collect::<Vec<_>>().join(", ")
         ),
         other => other.render(),
@@ -294,7 +287,6 @@ impl Builder<'_> {
                     let rendered = self.render_fmt(child, child_path, part)?;
                     pieces.push((format!("{field}: "), rendered));
                 }
-                let name = display_name(*name);
                 if pieces.is_empty() {
                     return Ok(self.emit_cur(Inst::Const(Lit::Str(Ustr::from(format!("{name} {{}}").as_str())))));
                 }
@@ -315,7 +307,7 @@ impl Builder<'_> {
                 let mut child_path = path;
                 child_path.push(0);
                 let rendered = self.render_fmt(inner, child_path, repr)?;
-                Ok(self.join_pieces(&format!("{}(", display_name(*name)), vec![(String::new(), rendered)], ")"))
+                Ok(self.join_pieces(&format!("{name}("), vec![(String::new(), rendered)], ")"))
             }
         }
     }
@@ -448,7 +440,7 @@ impl Builder<'_> {
             }
             let fail = self.f.new_block();
             self.test_tag(scrut, variant.name, Some(name), fail);
-            let head = format!("{}::{}", display_name(name), variant.name);
+            let head = format!("{name}::{}", variant.name);
             let rendered = match &variant.payload {
                 FmtPayload::Unit => self.emit_cur(Inst::Const(Lit::Str(Ustr::from(head.as_str())))),
                 FmtPayload::Tuple(nodes) => {
