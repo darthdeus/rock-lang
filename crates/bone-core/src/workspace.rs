@@ -622,7 +622,20 @@ pub struct BodyInference {
 
     pub trail: Vec<(VarId, Option<TyId>)>,
 
+    /// Every coercion `coerce` accepted into an `any` target: the span and the
+    /// source type. A trial's rollback drops the ones it recorded. The
+    /// identity-storage body check reads them (docs/identity-storage-plan.md
+    /// IDENTITY ANY ERASURE).
+    pub any_erasures: Vec<(Span, TyId)>,
+
     pub deps: FxHashSet<Ustr>,
+}
+
+/// What [`BodyInference::rollback_to`] restores.
+#[derive(Copy, Clone, Debug)]
+pub struct BodyCheckpoint {
+    trail: usize,
+    any_erasures: usize,
 }
 
 impl BodyInference {
@@ -653,15 +666,25 @@ impl BodyInference {
         self.trail.push((v, prev));
     }
 
-    pub fn checkpoint(&self) -> usize {
-        self.trail.len()
+    pub fn checkpoint(&self) -> BodyCheckpoint {
+        BodyCheckpoint {
+            trail: self.trail.len(),
+            any_erasures: self.any_erasures.len(),
+        }
     }
 
-    pub fn rollback_to(&mut self, cp: usize) {
-        while self.trail.len() > cp {
+    pub fn rollback_to(&mut self, cp: BodyCheckpoint) {
+        while self.trail.len() > cp.trail {
             let (v, prev) = self.trail.pop().unwrap();
             self.substitutions.restore(v, prev);
         }
+        self.any_erasures.truncate(cp.any_erasures);
+    }
+
+    /// The erasures recorded since `cp`, for a caller whose rollback undoes a
+    /// classification's bindings but keeps its erasure.
+    pub fn any_erasures_since(&self, cp: BodyCheckpoint) -> Vec<(Span, TyId)> {
+        self.any_erasures[cp.any_erasures..].to_vec()
     }
 }
 

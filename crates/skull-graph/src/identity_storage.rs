@@ -11,6 +11,7 @@ use bone_semantic::identity_storage::{
     IdentityNode, IdentityPosition, IdentityStorageKind, IdentityStorageSite, IdentityStorageViolation, IdentityTypes,
 };
 use bone_semantic::inference::{BodyInference, Workspace};
+use bone_semantic::prelude::is_stdlib_module_file;
 use bone_semantic::prelude::TyId;
 use rustc_hash::FxHashSet;
 use skull_mir::monoty::{MonoCtor, MonoSubst, MonoTy};
@@ -71,8 +72,10 @@ impl BodySlotTypes for SubstitutedSlotTypes<'_> {
 
 /// The identity-storage sites of one instance's body that its substitution
 /// adds to what bone reports for the declared body. The stdlib arena module is
-/// the privileged row store, whose `[T]` rows are its capability (S0d gives
-/// them a compiler-private representation).
+/// the privileged row store, whose `[T]` rows are its capability, and stdlib
+/// bodies erase `T` to `any` to reach the Vec, Map and registry primitives;
+/// S0d gives both a compiler-private representation, so neither is reported
+/// here yet.
 pub fn substitution_only_sites(
     ws: &Workspace,
     module: &Module,
@@ -89,6 +92,7 @@ pub fn substitution_only_sites(
     if substituted.is_empty() {
         return substituted;
     }
+    let stdlib = is_stdlib_module_file(module.file.as_str());
     let key = |site: &IdentityStorageSite| (site.kind, site.span.file, site.span.offset_range);
     let mut skip: FxHashSet<_> = identity_body_sites(ws, function, body, bi).iter().map(key).collect();
     // A parameter holds what its caller already stored, and that storage is
@@ -97,5 +101,8 @@ pub fn substitution_only_sites(
         let span = body.binding_spans[binding];
         (IdentityStorageKind::LocalStorage, span.file, span.offset_range)
     }));
-    substituted.into_iter().filter(|site| !skip.contains(&key(site))).collect()
+    substituted
+        .into_iter()
+        .filter(|site| !skip.contains(&key(site)) && !(stdlib && site.kind == IdentityStorageKind::AnyErasure))
+        .collect()
 }

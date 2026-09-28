@@ -65,6 +65,7 @@ value Entity<T> { idx: int }
 value Point { x: int }
 fn keep(x: any) -> int { return 0 }
 fn f(e: Entity<Mob>, p: Point) -> int {
-    keep(e) + keep(p)
+    keep(e)
+    keep(p)
   //^ int
 }

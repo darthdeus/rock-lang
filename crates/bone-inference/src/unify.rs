@@ -767,6 +767,7 @@ fn coerce_impl(
     }
 
     if matches!(to_ty, TypeExpr::Builtin(BuiltinTy::Any)) {
+        gamma.out.any_erasures.push((span, from_r));
         return Ok(());
     }
 

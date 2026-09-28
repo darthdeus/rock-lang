@@ -2645,3 +2645,27 @@ fn identity_storage_exemptions_follow_the_package() {
     let exempt = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some(package), user);
     assert!(exempt.is_empty(), "an exempt package gets no diagnostics: {exempt:?}");
 }
+
+// Identity-to-`any` erasure is recorded where `coerce` accepts the `any`
+// target, and a coercion inside a trial that is rolled back leaves no record:
+// overload scoring and `as` classification try coercions they then undo.
+#[test]
+fn any_erasure_record_follows_trial_rollback() {
+    use bone_semantic::inference::{coerce, Gamma};
+
+    let ws = check("struct Mob { hp: int }\nfn main() { }").expect("semantic pass");
+    let mid = ws.modules.iter().find(|m| m.file == ustr("<parse_rock>")).unwrap().id;
+    let body = bone_core::hir::Body::default();
+    let mut gamma = Gamma::new(&ws, &body, mid);
+    let mob = gamma.nominal_app(ustr("Mob"), &[], Span::unknown());
+    let any = ws.builtins.any();
+
+    let snap = gamma.out.checkpoint();
+    assert!(gamma.trial(|g| coerce(g, mob, any, Span::unknown()).is_ok()));
+    assert_eq!(gamma.out.any_erasures.len(), 1, "the accepted erasure is recorded");
+    gamma.out.rollback_to(snap);
+    assert!(gamma.out.any_erasures.is_empty(), "a rolled-back trial keeps no erasure");
+
+    coerce(&mut gamma, mob, any, Span::unknown()).expect("identity coerces to any at inference");
+    assert_eq!(gamma.out.any_erasures.len(), 1, "a committed coercion keeps its erasure");
+}

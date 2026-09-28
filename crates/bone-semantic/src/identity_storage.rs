@@ -84,6 +84,7 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
     "testbed",
     "typography",
     "ui_lab",
+    "ui_shader_probe",
     "vfxlab",
     "void",
     "wgpu_renderer",
@@ -109,10 +110,12 @@ pub enum IdentityStorageKind {
     CoParam,
     /// An identity borrow read after a coroutine suspension.
     AcrossYield,
+    /// An identity coerced to `any`.
+    AnyErasure,
 }
 
 impl IdentityStorageKind {
-    pub const ALL: [IdentityStorageKind; 8] = [
+    pub const ALL: [IdentityStorageKind; 9] = [
         IdentityStorageKind::Field,
         IdentityStorageKind::Container,
         IdentityStorageKind::Payload,
@@ -121,6 +124,7 @@ impl IdentityStorageKind {
         IdentityStorageKind::Capture,
         IdentityStorageKind::CoParam,
         IdentityStorageKind::AcrossYield,
+        IdentityStorageKind::AnyErasure,
     ];
 
     pub fn label(self) -> &'static str {
@@ -133,6 +137,7 @@ impl IdentityStorageKind {
             IdentityStorageKind::Capture => "capture",
             IdentityStorageKind::CoParam => "co-param",
             IdentityStorageKind::AcrossYield => "across-yield",
+            IdentityStorageKind::AnyErasure => "any-erasure",
         }
     }
 }
@@ -336,6 +341,20 @@ pub fn identity_body_sites_with(
                 identity: violation.identity,
                 span: body.expr_spans[id],
                 message: storage_message(what, violation.identity),
+            });
+        }
+    }
+
+    for &(span, ty) in &bi.any_erasures {
+        if let Some(violation) = types.stored(ty) {
+            let identity = violation.identity;
+            sites.push(IdentityStorageSite {
+                kind: IdentityStorageKind::AnyErasure,
+                identity,
+                span,
+                message: format!(
+                    "cannot erase identity struct `{identity}` to `any`; erase an `Entity<{identity}>` or make `{identity}` a `value`"
+                ),
             });
         }
     }

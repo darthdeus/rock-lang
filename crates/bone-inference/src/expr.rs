@@ -2354,8 +2354,11 @@ pub(crate) fn check_cast(
     // the answer is a classification and not inference evidence.
     let snap = gamma.out.checkpoint();
     let compatible = gamma.trial(|g| coerce(g, from_r, to_r, span).is_ok());
+    let erased = gamma.out.any_erasures_since(snap);
     gamma.out.rollback_to(snap);
     if compatible {
+        // The cast's value is the erased one.
+        gamma.out.any_erasures.extend(erased);
         return Ok(());
     }
 
