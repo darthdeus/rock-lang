@@ -2483,7 +2483,7 @@ fn collect_const_hoists(
             );
             continue;
         };
-        let _ = write!(defs, "{gname} = {name}{suffix}(");
+        let _ = write!(defs, "{gname} = {}{suffix}(", skull_mir::mangle::type_symbol(ws, *name));
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
                 defs.push_str(", ");
