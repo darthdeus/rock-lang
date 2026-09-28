@@ -141,24 +141,27 @@ fn encode_object(m: Map<string, JsonValue>, parts: [string]) {
 // children are all scalars stays compact on a single line (so a tile/spawner
 // object renders as `{"type":"wall","x":0,"y":0}`, not four lines). Keeps
 // diffs line-oriented and deterministic (object keys stay sorted).
-fn json_encode_pretty(v: JsonValue) -> string {
+// An array under an object key named in `compact_items_of` keeps each item on
+// one compact line even when the item nests containers.
+fn json_encode_pretty(v: JsonValue, compact_items_of: [string] = []) -> string {
     let parts: [string] = []
-    encode_pretty_into(v, parts, 0)
+    encode_pretty_into(v, parts, 0, compact_items_of)
     return join(parts, "")
 }
 
-fn encode_pretty_into(v: JsonValue, parts: [string], level: int) {
+fn encode_pretty_into(v: JsonValue, parts: [string], level: int, compact_items_of: [string],
+                      compact_items: bool = false) {
     match v {
         Array(items) => {
             if json_has_nested_container(v) {
-                encode_pretty_array(items, parts, level)
+                encode_pretty_array(items, parts, level, compact_items_of, compact_items)
             } else {
                 encode_array(items, parts)
             }
         },
         Object(m) => {
             if json_has_nested_container(v) {
-                encode_pretty_object(m, parts, level)
+                encode_pretty_object(m, parts, level, compact_items_of)
             } else {
                 encode_object(m, parts)
             }
@@ -193,7 +196,8 @@ fn json_has_nested_container(v: JsonValue) -> bool {
     }
 }
 
-fn encode_pretty_array(items: [JsonValue], parts: [string], level: int) {
+fn encode_pretty_array(items: [JsonValue], parts: [string], level: int,
+                       compact_items_of: [string], compact_items: bool) {
     parts.push("[\n")
     let inner = json_indent(level + 1)
     let first = true
@@ -201,14 +205,19 @@ fn encode_pretty_array(items: [JsonValue], parts: [string], level: int) {
         if !first { parts.push(",\n") }
         first = false
         parts.push(inner)
-        encode_pretty_into(item, parts, level + 1)
+        if compact_items {
+            encode_into(item, parts)
+        } else {
+            encode_pretty_into(item, parts, level + 1, compact_items_of)
+        }
     }
     parts.push("\n")
     parts.push(json_indent(level))
     parts.push("]")
 }
 
-fn encode_pretty_object(m: Map<string, JsonValue>, parts: [string], level: int) {
+fn encode_pretty_object(m: Map<string, JsonValue>, parts: [string], level: int,
+                        compact_items_of: [string]) {
     let ks = keys(m)
     sort(ks, k => k)
     parts.push("{{\n")
@@ -220,11 +229,18 @@ fn encode_pretty_object(m: Map<string, JsonValue>, parts: [string], level: int) 
         parts.push(inner)
         parts.push(encode_string(k))
         parts.push(": ")
-        encode_pretty_into(m[k], parts, level + 1)
+        encode_pretty_into(m[k], parts, level + 1, compact_items_of, json_key_listed(compact_items_of, k))
     }
     parts.push("\n")
     parts.push(json_indent(level))
     parts.push("}}")
+}
+
+fn json_key_listed(keys: [string], key: string) -> bool {
+    for k in keys {
+        if k == key { return true }
+    }
+    return false
 }
 
 fn json_indent(level: int) -> string {
