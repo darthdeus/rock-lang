@@ -25,7 +25,6 @@ const PINNED: &str = "\
 | chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 0 | 99 |
 | chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 8 |
 | chess_game | exempt | 14 | 3 | 0 | 0 | 143 | 1 | 0 | 0 | 0 | 161 |
-| chess_sfx | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | chesslings | exempt | 2 | 6 | 0 | 0 | 51 | 0 | 0 | 0 | 0 | 59 |
 | sample_game_c | exempt | 2 | 4 | 0 | 0 | 18 | 0 | 0 | 11 | 0 | 35 |
 | sample_game_c_v0 | exempt | 1 | 2 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 11 |

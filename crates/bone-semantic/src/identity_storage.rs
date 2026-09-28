@@ -58,7 +58,6 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
     "chess",
     "chess_core",
     "chess_game",
-    "chess_sfx",
     "chesslings",
     "sample_game_c",
     "sample_game_c_v0",

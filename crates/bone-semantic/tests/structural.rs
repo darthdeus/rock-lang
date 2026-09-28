@@ -2646,6 +2646,24 @@ fn identity_storage_exemptions_follow_the_package() {
     assert!(exempt.is_empty(), "an exempt package gets no diagnostics: {exempt:?}");
 }
 
+#[test]
+fn chess_sfx_identity_storage_is_enforced() {
+    let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
+    let errors = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("chess_sfx"), user);
+    assert!(
+        errors.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        "chess_sfx fields must reject ordinary identity storage: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
+        "chess_sfx bodies must reject ordinary identity storage: {errors:?}"
+    );
+    assert!(
+        !bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT.contains(&"chess_sfx"),
+        "chess_sfx has no remaining identity-storage sites"
+    );
+}
+
 // Identity-to-`any` erasure is recorded where `coerce` accepts the `any`
 // target, and a coercion inside a trial that is rolled back leaves no record:
 // overload scoring and `as` classification try coercions they then undo.
