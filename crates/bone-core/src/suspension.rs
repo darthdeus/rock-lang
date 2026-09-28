@@ -30,6 +30,8 @@ pub fn uses_after_suspension(
         body,
         policy,
         reported: FxHashSet::default(),
+        loops: Vec::new(),
+        unwound: Flow::default(),
     };
     walk.expr(root, &mut flow);
     let mut found: Vec<_> = walk.reported.into_iter().collect();
@@ -70,6 +72,22 @@ struct Walk<'a, P> {
     body: &'a Body,
     policy: &'a P,
     reported: FxHashSet<Idx<Expr>>,
+    /// Flows leaving each enclosing loop by `break` and by `continue`.
+    loops: Vec<LoopExits>,
+    /// Flows that left a block early; its defers still run on them.
+    unwound: Flow,
+}
+
+#[derive(Default)]
+struct LoopExits {
+    breaks: Flow,
+    continues: Flow,
+}
+
+enum Exit {
+    Break,
+    Continue,
+    Return,
 }
 
 impl<P: SuspensionPolicy> Walk<'_, P> {
@@ -84,17 +102,52 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
         out.merge(branch);
     }
 
-    fn loop_body(&mut self, body: Idx<Expr>, flow: &mut Flow) {
-        let before = flow.size();
-        let mut pass = flow.clone();
-        self.expr(body, &mut pass);
-        flow.merge(pass);
-        if flow.size() == before {
-            return;
+    /// Walks a loop until the flow at its head stops growing. `cond` runs
+    /// before every iteration and may leave the loop; `vars` are bound fresh
+    /// for every iteration.
+    fn loop_body(
+        &mut self,
+        cond: Option<Idx<Expr>>,
+        vars: &[(Idx<BindingInfo>, Option<Idx<Expr>>)],
+        body: Idx<Expr>,
+        flow: &mut Flow,
+    ) {
+        let mut head = flow.clone();
+        let mut exit = Flow::default();
+        loop {
+            let mut pass = head.clone();
+            if let Some(cond) = cond {
+                self.expr(cond, &mut pass);
+            }
+            exit.merge(pass.clone());
+            for &(binding, value) in vars {
+                self.bind(binding, value, &mut pass);
+            }
+            self.loops.push(LoopExits::default());
+            self.expr(body, &mut pass);
+            let exits = self.loops.pop().expect("pushed above");
+            pass.merge(exits.continues);
+            exit.merge(exits.breaks);
+            let before = head.size();
+            head.merge(pass);
+            if head.size() == before {
+                break;
+            }
         }
-        let mut second = flow.clone();
-        self.expr(body, &mut second);
-        flow.merge(second);
+        *flow = exit;
+    }
+
+    /// Ends the current path: nothing after a `break`, `continue` or
+    /// `return` runs on it.
+    fn exit(&mut self, exit: Exit, flow: &mut Flow) {
+        let taken = std::mem::take(flow);
+        self.unwound.merge(taken.clone());
+        let Some(exits) = self.loops.last_mut() else { return };
+        match exit {
+            Exit::Break => exits.breaks.merge(taken),
+            Exit::Continue => exits.continues.merge(taken),
+            Exit::Return => {}
+        }
     }
 
     fn stmt(&mut self, stmt: Idx<Statement>, flow: &mut Flow) {
@@ -122,29 +175,26 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 if let Some(value) = value {
                     self.expr(*value, flow);
                 }
+                self.exit(Exit::Return, flow);
             }
             Statement::Expr(expr) => self.expr(*expr, flow),
             Statement::Defer(_) => {}
             Statement::For { vars, iter, body } => {
                 self.expr(*iter, flow);
-                for binding in vars.leaves() {
-                    self.bind(binding, None, flow);
-                }
-                self.loop_body(*body, flow);
+                let vars: Vec<_> = vars.leaves().into_iter().map(|binding| (binding, None)).collect();
+                self.loop_body(None, &vars, *body, flow);
             }
-            Statement::While { cond, body } => {
-                self.expr(*cond, flow);
-                self.loop_body(*body, flow);
-                self.expr(*cond, flow);
-            }
+            Statement::While { cond, body } => self.loop_body(Some(*cond), &[], *body, flow),
             Statement::WhileLet { pattern, value, body } => {
-                self.expr(*value, flow);
-                if let Pattern::Bind(binding) = self.body.pattern_arena[*pattern] {
-                    self.bind(binding, Some(*value), flow);
-                }
-                self.loop_body(*body, flow);
+                let vars: &[_] = match self.body.pattern_arena[*pattern] {
+                    Pattern::Bind(binding) => &[(binding, Some(*value))],
+                    _ => &[],
+                };
+                self.loop_body(Some(*value), vars, *body, flow);
             }
-            Statement::Comment(_) | Statement::Break | Statement::Continue => {}
+            Statement::Break => self.exit(Exit::Break, flow),
+            Statement::Continue => self.exit(Exit::Continue, flow),
+            Statement::Comment(_) => {}
         }
     }
 
@@ -167,6 +217,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             }
             Expr::Lambda { .. } => {}
             Expr::Block { statements, tail } => {
+                let outer = std::mem::take(&mut self.unwound);
                 for stmt in statements {
                     self.stmt(stmt, flow);
                 }
@@ -174,6 +225,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                     self.expr(tail, flow);
                 }
                 self.run_defers(statements, flow);
+                self.unwound.merge(outer);
             }
             Expr::If { cond, then_branch, else_branch } => {
                 self.expr(cond, flow);
@@ -318,7 +370,10 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 if let Some(value) = value {
                     self.expr(value, flow);
                 }
+                self.exit(Exit::Return, flow);
             }
+            Expr::Break => self.exit(Exit::Break, flow),
+            Expr::Continue => self.exit(Exit::Continue, flow),
             Expr::Unit
             | Expr::Null
             | Expr::Hole(_)
@@ -327,16 +382,15 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             | Expr::Bool(_)
             | Expr::String(_)
             | Expr::Global(_)
-            | Expr::SiblingRef(_)
-            | Expr::Break
-            | Expr::Continue => {}
+            | Expr::SiblingRef(_) => {}
         }
     }
 
-    fn run_defers(&mut self, statements: IdxRange<Statement>, flow: &mut Flow) {
+    fn run_defers(&mut self, statements: IdxRange<Statement>, flow: &Flow) {
         for stmt in statements {
             if let Statement::Defer(expr) = self.body.statement_arena[stmt] {
                 let mut deferred = flow.clone();
+                deferred.merge(self.unwound.clone());
                 self.expr(expr, &mut deferred);
             }
         }
