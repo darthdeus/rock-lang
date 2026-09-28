@@ -202,6 +202,18 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
+/// [`try_emit_module`] with identity storage enforced on the unpackaged
+/// `<test>` module, as bone fixtures do: the program's package is not exempt.
+pub fn try_emit_module_enforcing_identity_storage(src: &str) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
+        .expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// Like [`try_emit_module`] but with LuaJIT's frame-limit rejection OFF, so the
 /// emitted Lua of a body the check rejects is still produced. The
 /// boundary-agreement test needs it: without the Lua there is nothing to ask
