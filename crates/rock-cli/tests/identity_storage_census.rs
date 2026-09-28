@@ -37,7 +37,7 @@ const PINNED: &str = "\
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 404 | 226 | 9 | 0 | 1685 | 25 | 116 | 10419 | 63 | 12947 |
+| mag | exempt | 404 | 226 | 9 | 0 | 1684 | 25 | 116 | 10419 | 63 | 12946 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 5 | 11 | 6 | 0 | 18 | 0 | 0 | 0 | 1 | 41 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -48,7 +48,7 @@ const PINNED: &str = "\
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 30 |
 | std | exempt | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
-| stone | exempt | 131 | 104 | 10 | 0 | 318 | 5 | 0 | 0 | 13 | 581 |
+| stone | exempt | 131 | 100 | 10 | 0 | 310 | 5 | 0 | 0 | 13 | 569 |
 | stone_core | exempt | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 5 | 9 |
 | testbed | exempt | 11 | 5 | 0 | 0 | 140 | 2 | 2 | 76 | 74 | 310 |
