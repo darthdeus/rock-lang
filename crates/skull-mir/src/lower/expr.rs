@@ -807,13 +807,14 @@ impl Builder<'_> {
         match self.body.expr_arena[e].clone() {
             // Element stores and leaf places of flat storage are decomposed
             // before this; what reaches here is a borrow of the whole element or
-            // a struct inside it (a `ref` argument or `let`), which needs a table
-            // the element does not have.
+            // a struct inside it (a `ref` argument or `let`). A known Lua gap, not
+            // policy: C runs these. Fix options: docs/unfuck-backlog.md.
             Expr::Index { base, .. } if self.flat_stored_container(base)? => {
                 Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
-                    "this container element is stored as flat columns or rows, so it has no \
-                     table a `ref` can alias; copy it out, modify it and store it back"
+                    "the Lua backend does not yet support a `ref` borrow of a container element \
+                     stored as flat columns or rows (it has no table to alias); copy it out, \
+                     modify it and store it back"
                         .to_string(),
                 ))
             }
