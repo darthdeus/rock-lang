@@ -411,7 +411,7 @@ fn profile_body(
             | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
             | Inst::UintShl(..) | Inst::UintShr(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::MakeValueStruct { .. }
             | Inst::MaterializeValueStruct { .. }
@@ -1420,7 +1420,7 @@ impl FnEmit<'_> {
             Inst::Neg(x) | Inst::BitNot(x) | Inst::UintBitNot(x) => self.ty_of(*x)?,
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
-            Inst::UintToFloat(_) => GlslTy::Float,
+            Inst::UintToFloat(_) | Inst::FloatToF32(_) => GlslTy::Float,
             Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => GlslTy::Uint,
             Inst::UintToInt(_) | Inst::UintBitcastInt(_) => GlslTy::Int,
             Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..) => GlslTy::Int,
@@ -1595,6 +1595,8 @@ impl FnEmit<'_> {
                 _ => format!("float({})", self.render_val(*x)?),
             },
             Inst::UintToFloat(x) => format!("float({})", self.render_val(*x)?),
+            // Shader floats are already single precision.
+            Inst::FloatToF32(x) => self.render_val(*x)?,
             Inst::IntToUint(x) | Inst::FloatToUint(x) => format!("uint({})", self.render_val(*x)?),
             Inst::UintToInt(x) => format!("int({})", self.render_val(*x)?),
             Inst::UintBitcastInt(x) => format!("uintBitsToInt({})", self.render_val(*x)?),

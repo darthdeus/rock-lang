@@ -433,6 +433,23 @@ impl Builder<'_> {
         sd.fields.iter().find(|f| f.name == field).map(|f| f.ty)
     }
 
+    /// Round `value` when it is written into an `f32` field of struct `name`.
+    /// Every write path calls this, so the field's number never depends on
+    /// whether it lands in cdata, a table or scalarized leaves.
+    pub(crate) fn round_f32_field(&mut self, name: Ustr, field: Ustr, value: Idx<Inst>) -> Idx<Inst> {
+        let narrow = self.ws.struct_by_name.get(&name).is_some_and(|sid| {
+            self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
+                f.name == field
+                    && matches!(
+                        f.storage_ty,
+                        TyId::Static(m, i)
+                            if matches!(self.ws.module(m).ty_arena[i], TypeExpr::Builtin(BuiltinTy::F32))
+                    )
+            })
+        });
+        if narrow { self.emit_cur(Inst::FloatToF32(value)) } else { value }
+    }
+
     /// Coerce a value-struct field's repr int->float at CONSTRUCTION (before any
     /// scalar-ABI splat, per the plan): only a `Scalar` leaf can be an int; a
     /// `Group` / nested-value repr is already composite.
@@ -469,7 +486,7 @@ impl Builder<'_> {
                         None => s,
                     },
                 };
-                Ok(ValueRepr::Scalar(s))
+                Ok(ValueRepr::Scalar(self.round_f32_field(struct_name, field, s)))
             }
             other => Ok(other),
         }

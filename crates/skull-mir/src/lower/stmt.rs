@@ -198,6 +198,7 @@ impl Builder<'_> {
             cur_op: crate::site::SiteOp::DirectCall,
             site_owner: self.site_owner.clone(),
             group_binds: HashMap::new(),
+            f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT

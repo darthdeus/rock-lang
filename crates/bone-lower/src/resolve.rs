@@ -1208,7 +1208,7 @@ fn unresolved_value_path(ws: &Workspace, frag: &FragmentScope, segments: &[Ustr]
 }
 
 /// Type names the parser reads as builtins rather than as paths.
-const BUILTIN_TYPE_NAMES: &[&str] = &["any", "bool", "float", "int", "string", "uint"];
+const BUILTIN_TYPE_NAMES: &[&str] = &["any", "bool", "f32", "f64", "float", "int", "string", "uint"];
 
 fn joined(segments: &[Ustr]) -> String {
     segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")

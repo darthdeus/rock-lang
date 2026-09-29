@@ -574,6 +574,14 @@ assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refres
 -- as a table key, and because a typedef'd anonymous struct only gets its
 -- `struct <n>` spelling from LuaJIT. Registering through the same `ffi.typeof`
 -- the lookup uses is what makes the two agree.
+-- The write into an `f32` field: round through one reused float cell, so the
+-- field holds the same number in a table, a scalarized local or cdata.
+local __rock_f32_cell = ffi.new("float[1]")
+local function __rock_f32(x)
+  __rock_f32_cell[0] = x
+  return __rock_f32_cell[0]
+end
+_G.__rock_f32 = __rock_f32
 _G.__ROCK_NB_STORAGE = {}
 local function __rock_nb_storage(ctype, elem_size, views)
   local ok, ct = pcall(ffi.typeof, ctype .. "[?]")
@@ -1104,7 +1112,7 @@ fn value_struct_defs(
             for f in &s.fields {
                 // An FFI-clean struct has every field C-mappable by construction
                 // (that is what the `CData` storage plan means).
-                let ct = c_field_type(ws, f.ty).expect(
+                let ct = c_field_type(ws, f.storage_ty).expect(
                     "FFI-clean value-struct field must be C-mappable (CData storage invariant)",
                 );
                 let dep = ustr::Ustr::from(ct.as_str());

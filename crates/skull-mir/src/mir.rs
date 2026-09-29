@@ -357,6 +357,9 @@ pub enum Inst {
     /// wrap `float(...)`). See `docs/shaders.md`.
     IntToFloat(Idx<Inst>),
     UintToFloat(Idx<Inst>),
+    /// Round a float to the nearest `f32` and back: the write into an `f32`
+    /// field, so its value is the same in every storage.
+    FloatToF32(Idx<Inst>),
     IntToUint(Idx<Inst>),
     UintToInt(Idx<Inst>),
     FloatToUint(Idx<Inst>),
@@ -767,6 +770,7 @@ impl Inst {
             | Inst::FloatToInt(value)
             | Inst::IntToFloat(value)
             | Inst::UintToFloat(value)
+            | Inst::FloatToF32(value)
             | Inst::IntToUint(value)
             | Inst::UintToInt(value)
             | Inst::FloatToUint(value)

@@ -2443,6 +2443,8 @@ impl<'a> Printer<'a> {
             TypeExprKind::Int => Doc::text("int"),
             TypeExprKind::Uint => Doc::text("uint"),
             TypeExprKind::Float => Doc::text("float"),
+            TypeExprKind::F64 => Doc::text("f64"),
+            TypeExprKind::F32 => Doc::text("f32"),
             TypeExprKind::Bool => Doc::text("bool"),
             TypeExprKind::Ref(target) => {
                 let reference = Doc::concat([Doc::text("ref "), self.type_expr(*target)]);

@@ -963,6 +963,7 @@ impl BodyHasher {
             Inst::FloatToInt(value) => self.unary(36, *value),
             Inst::IntToFloat(value) => self.unary(37, *value),
             Inst::UintToFloat(value) => self.unary(38, *value),
+            Inst::FloatToF32(value) => self.unary(93, *value),
             Inst::IntToUint(value) => self.unary(39, *value),
             Inst::UintToInt(value) => self.unary(40, *value),
             Inst::FloatToUint(value) => self.unary(41, *value),

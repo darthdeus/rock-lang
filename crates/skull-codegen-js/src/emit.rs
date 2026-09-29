@@ -1893,6 +1893,7 @@ impl Emitter<'_> {
             // Identity on JS (all doubles), like codegen-lua on luajit.
             Inst::IntToFloat(x) => self.render_val(*x)?,
             Inst::UintToFloat(x) => self.render_val(*x)?,
+            Inst::FloatToF32(x) => format!("Math.fround({})", self.render_val(*x)?),
             Inst::IntToUint(x) | Inst::FloatToUint(x) => {
                 let value = self.render_val(*x)?;
                 format!(
@@ -2216,6 +2217,7 @@ impl Emitter<'_> {
             Inst::FfiViewCast { cty, ptr } => {
                 let p = self.render_val(*ptr)?;
                 let array = match cty.as_str() {
+                    "double" => "Float64Array",
                     "float" => "Float32Array",
                     "int" => "Int32Array",
                     "uint32_t" => "Uint32Array",
@@ -7452,6 +7454,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         | Inst::FloatToInt(x)
         | Inst::IntToFloat(x)
         | Inst::UintToFloat(x)
+        | Inst::FloatToF32(x)
         | Inst::IntToUint(x)
         | Inst::UintToInt(x)
         | Inst::FloatToUint(x)
@@ -7554,7 +7557,7 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
             | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)

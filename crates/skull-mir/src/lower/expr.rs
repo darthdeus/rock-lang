@@ -28,6 +28,10 @@ impl Builder<'_> {
                 }) => self.lower_array_literal_with_expected(e, elems, expected),
             _ => self.lower_expr_inner(e),
         };
+        let v = match v {
+            Ok(v) if self.f32_round_exprs.contains(&e) => Ok(self.emit_cur(Inst::FloatToF32(v))),
+            other => other,
+        };
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         let v = v?;
@@ -945,6 +949,9 @@ impl Builder<'_> {
         target: Idx<Expr>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        if self.assign_target_is_f32(target) {
+            self.f32_round_exprs.insert(value);
+        }
         let nobox_global_place = self.nobox_global_place(target)?;
         match self.body.expr_arena[target].clone() {
             // A threaded (group_binds) var -- a scalarized flat-enum local or value
@@ -1182,6 +1189,26 @@ impl Builder<'_> {
     /// target uses native arith; a non-scalar target (struct/value with an
     /// operator overload) routes `op_fn(target, value)` through the resolved
     /// overload (bone records it on the CompoundAssign expr).
+    /// Whether `target` is a field declared `f32`, so a write rounds.
+    pub(crate) fn assign_target_is_f32(&self, target: Idx<Expr>) -> bool {
+        let Expr::FieldAccess { base, field } = self.body.expr_arena[target] else {
+            return false;
+        };
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) else {
+            return false;
+        };
+        self.ws.struct_by_name.get(&sname).is_some_and(|sid| {
+            self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
+                f.name == field
+                    && matches!(
+                        f.storage_ty,
+                        TyId::Static(m, i)
+                            if matches!(self.ws.module(m).ty_arena[i], TypeExpr::Builtin(BuiltinTy::F32))
+                    )
+            })
+        })
+    }
+
     pub(crate) fn lower_compound_assign_effect(
         &mut self,
         e: Idx<Expr>,
@@ -1189,6 +1216,7 @@ impl Builder<'_> {
         op_fn: Ustr,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        let f32_target = self.assign_target_is_f32(target);
         let nobox_global_place = self.nobox_global_place(target)?;
         let scalar = self.arith_ty(target).zip(self.arith_ty(value));
         // Non-scalar: resolve the operator overload once (overload target on the
@@ -1206,7 +1234,7 @@ impl Builder<'_> {
                 let name = self.static_cells[&raw(b)];
                 let cur = self.emit_cur(Inst::Global(name));
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::Var(b) => {
@@ -1216,7 +1244,7 @@ impl Builder<'_> {
                     .ok_or_else(|| gap("compound-assign to an unbound variable"))?;
                 let cur = self.emit_cur(Inst::Load(cell));
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::Store { cell, value: new_v });
             }
             // A `nobox` global is stored as leaves, so neither the whole-group
@@ -1232,14 +1260,14 @@ impl Builder<'_> {
             Expr::Global(name) => {
                 let cur = self.emit_cur(Inst::Global(name));
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
                 if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
                     let cur = self.nb_leaf_load(buf, checked, &place);
                     let rv = self.lower_expr(value)?;
-                    let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                    let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                     self.nb_leaf_store(buf, checked, &place, new_v);
                     return Ok(());
                 }
@@ -1247,7 +1275,7 @@ impl Builder<'_> {
                 let b = self.lower_place_base(pbase)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field: key });
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreField { base: b, field: key, value: new_v });
             }
             Expr::Index { base, index } => {
@@ -1255,7 +1283,7 @@ impl Builder<'_> {
                 let i = self.lower_expr(index)?;
                 let cur = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreIndex { base: b, index: i, value: new_v, kind });
             }
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
@@ -1270,7 +1298,7 @@ impl Builder<'_> {
                 self.cur = store_bb;
                 let cur = self.emit_cur(Inst::Field { base: recv, field });
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreField { base: recv, field, value: new_v });
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
@@ -1282,6 +1310,20 @@ impl Builder<'_> {
 
     /// `cur <op> rv`: native arith for a scalar target, else the resolved
     /// operator-overload call `op_fn(cur, rv)`.
+    /// [`Self::compound_combine`], rounding the result for an `f32` target.
+    fn compound_combine_f32(
+        &mut self,
+        f32_target: bool,
+        scalar: Option<(ArithTy, ArithTy)>,
+        op_fn: Ustr,
+        overload: Option<FuncRef>,
+        cur: Idx<Inst>,
+        rv: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+        Ok(if f32_target { self.emit_cur(Inst::FloatToF32(v)) } else { v })
+    }
+
     pub(crate) fn compound_combine(
         &mut self,
         scalar: Option<(ArithTy, ArithTy)>,

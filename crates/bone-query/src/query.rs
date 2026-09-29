@@ -2660,6 +2660,8 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
         K::Int => "int".to_string(),
         K::Uint => "uint".to_string(),
         K::Float => "float".to_string(),
+        K::F64 => "f64".to_string(),
+        K::F32 => "f32".to_string(),
         K::Bool => "bool".to_string(),
         K::Ref(target) => format!("ref {}", render_type_expr(ast, *target)),
         K::Ident(id) => id.name.to_string(),
@@ -4937,7 +4939,7 @@ pub fn completion(
 /// builtins (`Coroutine`, `Map`) and the scalar primitives have no workspace
 /// name-index entry.
 const BUILTIN_TYPE_NAMES: &[&str] =
-    &["Coroutine", "Map", "int", "uint", "float", "string", "bool", "any"];
+    &["Coroutine", "Map", "int", "uint", "float", "f32", "f64", "string", "bool", "any"];
 
 /// Whether the body enclosing `offset` is a `co fn`. Drives `yield`/`await`
 /// keyword completion (and -- in the facade -- coroutine-fn ranking after a

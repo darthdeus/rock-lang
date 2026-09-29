@@ -39,8 +39,8 @@ pub(crate) fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mu
     visiting.push(name);
     let mut total = 0usize;
     for f in &sd.fields {
-        let n = match static_ty(ws, f.ty)? {
-            TypeExpr::Builtin(BuiltinTy::Float) => 1,
+        let n = match static_ty(ws, f.storage_ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float | BuiltinTy::F32) => 1,
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
                 match all_float_leaf_count_rec(ws, n, visiting) {
                     Some(k) => k,
@@ -82,8 +82,8 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
     let mut out = Vec::with_capacity(sd.fields.len());
     let mut offset = 0usize;
     for f in &sd.fields {
-        match static_ty(ws, f.ty)? {
-            TypeExpr::Builtin(BuiltinTy::Float) => {
+        match static_ty(ws, f.storage_ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float | BuiltinTy::F32) => {
                 out.push(ValueSlotField { name: f.name, offset, nested: None });
                 offset += 1;
             }
@@ -265,6 +265,7 @@ pub(crate) fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &
 /// leaf type here reaches all of them; a hand-written list in any of them is the
 /// bug this replaces.
 pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
+    ("double", "__vd", "double*"),
     ("float", "__vf", "float*"),
     ("int", "__vi", "int*"),
     ("uint32_t", "__vu", "uint32_t*"),
@@ -407,6 +408,7 @@ pub struct LeafSlot {
 /// types [`value_field_c_type`] admits as leaves.
 pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     match cty {
+        "double" => Some((8, 8)),
         "int" | "uint32_t" | "float" => Some((4, 4)),
         "bool" => Some((1, 1)),
         _ => None,
@@ -665,10 +667,11 @@ fn planned_value_rec(
     let mut cdata = sd.generics.is_empty();
     let mut scalarizable = true;
     for field in &sd.fields {
-        let planned = match static_ty(ws, field.ty) {
+        let planned = match static_ty(ws, field.storage_ty) {
             Some(TypeExpr::Builtin(BuiltinTy::Int)) => PlannedField::Primitive("int"),
             Some(TypeExpr::Builtin(BuiltinTy::Uint)) => PlannedField::Primitive("uint32_t"),
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => PlannedField::Primitive("float"),
+            Some(TypeExpr::Builtin(BuiltinTy::Float)) => PlannedField::Primitive("double"),
+            Some(TypeExpr::Builtin(BuiltinTy::F32)) => PlannedField::Primitive("float"),
             Some(TypeExpr::Builtin(BuiltinTy::Bool)) => PlannedField::Primitive("bool"),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. })
                 if payload_free_enum_variants(ws, child).is_some() =>
@@ -2061,7 +2064,7 @@ pub(crate) fn scalar_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
     match static_ty(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some("int"),
         TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t"),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some("float"),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some("double"),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool"),
         _ => None,
     }
@@ -2126,7 +2129,8 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
     match static_ty(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some("int".into()),
         TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t".into()),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some("float".into()),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some("double".into()),
+        TypeExpr::Builtin(BuiltinTy::F32) => Some("float".into()),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
         // A nested value struct is C-mappable iff it is itself FFI-clean; a
         // GC-carrying nested value struct makes this field (and its parent)
@@ -2472,6 +2476,7 @@ fn equality_payload_is_leafwise(
             | BuiltinTy::Int
             | BuiltinTy::Uint
             | BuiltinTy::Float
+            | BuiltinTy::F32
             | BuiltinTy::Bool
             | BuiltinTy::String
             | BuiltinTy::Never,

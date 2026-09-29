@@ -421,6 +421,7 @@ fn profile_body(
             | Inst::FloatToInt(_)
             | Inst::IntToFloat(_)
             | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
             | Inst::IntToUint(_)
             | Inst::UintToInt(_)
             | Inst::FloatToUint(_)

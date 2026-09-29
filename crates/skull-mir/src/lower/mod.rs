@@ -1625,6 +1625,7 @@ fn lower_body(
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: Some(subject.clone()),
         group_binds: HashMap::new(),
+        f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
@@ -1747,6 +1748,7 @@ fn lower_global_inner(
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: None,
         group_binds: HashMap::new(),
+        f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -2080,6 +2082,7 @@ fn lower_decorator_inner(
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: None,
         group_binds: HashMap::new(),
+        f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -2202,6 +2205,10 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// Right-hand sides of assignments into an `f32` field. Every assignment
+    /// path lowers its value through one of the expression entries, which
+    /// round these, so no store path needs its own rounding.
+    f32_round_exprs: HashSet<Idx<Expr>>,
     /// The tuple twin of [`Self::group_binds`]: a NAME bound to a splatting
     /// tuple holds its slot cells, so `if let t = <nullable tuple call>` can
     /// rebuild the unboxed repr on each read of `t` instead of packing it.
@@ -3135,6 +3142,7 @@ fn map_key_rejection_reason(
             BuiltinTy::Int
             | BuiltinTy::Uint
             | BuiltinTy::Float
+            | BuiltinTy::F32
             | BuiltinTy::Bool
             | BuiltinTy::String
             // Not key shapes, but nothing here can decide against them either.

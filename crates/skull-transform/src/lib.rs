@@ -2616,7 +2616,7 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
         | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { p(a); p(b); }
         Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
-        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::FloatToF32(x) | Inst::IntToUint(x)
         | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x)
         | Inst::VecStrideNilToFalse(x)
@@ -2690,7 +2690,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
         | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { f(a); f(b); }
         Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
-        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::FloatToF32(x) | Inst::IntToUint(x)
         | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x)
         | Inst::VecStrideNilToFalse(x)

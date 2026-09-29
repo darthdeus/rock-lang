@@ -78,6 +78,7 @@ impl Builder<'_> {
                         v
                     }
                 };
+                let v = self.round_f32_field(name, lf.name, v);
                 lit_box.push((lf.name, v));
             }
         }
@@ -559,7 +560,7 @@ impl Builder<'_> {
                     // This variant has no such field -> pad with the slot's zero.
                     let zero = match *c {
                         "int" => Lit::Int(0),
-                        "float" => Lit::Float(0.0),
+                        "float" | "double" => Lit::Float(0.0),
                         "bool" => Lit::Bool(false),
                         "uint32_t" => Lit::Uint(0),
                         other => {
@@ -1138,7 +1139,7 @@ impl Builder<'_> {
                     payload
                 } else {
                     let zero = match *c {
-                        "float" => Lit::Float(0.0),
+                        "float" | "double" => Lit::Float(0.0),
                         "bool" => Lit::Bool(false),
                         _ => Lit::Int(0),
                     };

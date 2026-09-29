@@ -3042,7 +3042,7 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
             | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
@@ -4492,6 +4492,11 @@ impl Emitter<'_> {
             // rendering it would evaluate a producer twice.
             Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::UintToInt(x) => {
                 self.write_opnd(out, *x)
+            }
+            Inst::FloatToF32(x) => {
+                out.push_str("__rock_f32(");
+                self.write_opnd(out, *x);
+                out.push(')');
             }
             Inst::IntToUint(x) | Inst::FloatToUint(x) => {
                 self.write_checked_u32(out, *x, "uint conversion out of range")

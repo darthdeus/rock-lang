@@ -3967,6 +3967,7 @@ impl<'a> FunctionEmitter<'a> {
                 | Inst::FloatToInt(_)
                 | Inst::IntToFloat(_)
                 | Inst::UintToFloat(_)
+                | Inst::FloatToF32(_)
                 | Inst::IntToUint(_)
                 | Inst::UintToInt(_)
                 | Inst::FloatToUint(_)
@@ -4192,7 +4193,7 @@ impl<'a> FunctionEmitter<'a> {
             | Inst::Not(_) => Ok(ValueKind::Bool),
             Inst::FloatToInt(_) => Ok(ValueKind::I32),
             Inst::IntToFloat(_) => Ok(ValueKind::F32),
-            Inst::UintToFloat(_) => Ok(ValueKind::F32),
+            Inst::UintToFloat(_) | Inst::FloatToF32(_) => Ok(ValueKind::F32),
             Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => {
                 Ok(ValueKind::U32)
             }
@@ -4741,6 +4742,8 @@ impl<'a> FunctionEmitter<'a> {
                 self.reject_compute_numeric_conversion("uint as float", *value)?;
                 Ok(format!("f32({})", self.render_val(*value)?))
             }
+            // Shader floats are already single precision.
+            Inst::FloatToF32(value) => self.render_val(*value),
             Inst::IntToUint(value) => {
                 self.reject_compute_numeric_conversion("int as uint", *value)?;
                 Ok(format!("u32({})", self.render_val(*value)?))
