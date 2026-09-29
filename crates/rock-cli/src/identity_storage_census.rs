@@ -282,7 +282,7 @@ mod tests {
 | scope_fixture | ENFORCED | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
 | scope_fixture::empty | exempt module, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | scope_fixture::nav | exempt module | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 |
-| std | exempt | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
+| std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
 Exempt module sites:
 - scope_fixture::nav: scope-fixture/nav.rock:4 container scope_fixture::nav::NavMob

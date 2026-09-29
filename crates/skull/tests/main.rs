@@ -47,6 +47,8 @@ mod const_hot_reload;
 mod coroutine_hook_hoist;
 #[path = "dead_lambda_scope.rs"]
 mod dead_lambda_scope;
+#[path = "descriptor_value_repr.rs"]
+mod descriptor_value_repr;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
 #[path = "v1_enum_join_scalarize.rs"]

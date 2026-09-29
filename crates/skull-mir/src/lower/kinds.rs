@@ -110,7 +110,7 @@ impl Builder<'_> {
         let Some(&sid) = self.ws.struct_by_name.get(&name) else {
             return Ok(None);
         };
-        if !self.ws.modules[sid.module.index()].structs[sid.def].is_value {
+        if !has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]) {
             return Ok(None);
         }
         let arena = self.scx.rep_arena();

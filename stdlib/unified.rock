@@ -62,9 +62,9 @@ inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 // ============================================================================
 //
 // `Ptr<T>` and the sized variants (PtrU8/PtrI8/PtrU16/PtrI16/PtrU32) are
-// empty phantom structs. At runtime they carry raw LuaJIT cdata (no
-// wrapper table — the inline(lua) constructors return the cdata directly
-// and Rock's static typing is nominal). At compile time they give
+// empty phantom values whose representation the backend supplies: raw
+// LuaJIT cdata on Lua (no wrapper table; the inline(lua) constructors return
+// the cdata directly), a native pointer on C. Copying one shares the referent. At compile time they give
 // extern(ffi) signatures the power to say "this argument must be a
 // float* (not an int*, not a uint8_t*)" without runtime cost.
 //
@@ -73,12 +73,12 @@ inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 // keeps working — the runtime value is still cdata, the Rock type just
 // became more specific.
 
-struct Ptr<T> { }
-struct PtrU8  { }
-struct PtrI8  { }
-struct PtrU16 { }
-struct PtrI16 { }
-struct PtrU32 { }
+value Ptr<T> { }
+value PtrU8  { }
+value PtrI8  { }
+value PtrU16 { }
+value PtrI16 { }
+value PtrU32 { }
 
 // Compiler-owned destination capability for explicit deep copies.
 value Storage { }
@@ -98,8 +98,11 @@ value Storage { }
 //
 // Bounds: reads/writes past `len` yield LuaJIT garbage; indexing is 0-based.
 // T ∈ {int, uint, float}; extend with more primitives as needed.
+//
+// A `value` descriptor: copying one copies the whole descriptor (on Lua, the
+// one table with its hidden leaf views) and shares the storage.
 
-struct NativeBuffer<T> {
+value NativeBuffer<T> {
     ptr: Ptr<T>,
     len: int,
 }
@@ -471,11 +474,11 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 // can declare the exact variant they accept — passing `PtrI16` where
 // `PtrU8` is expected is a compile error.
 
-struct NativeBufferU8  { ptr: PtrU8,  len: int }
-struct NativeBufferI8  { ptr: PtrI8,  len: int }
-struct NativeBufferU16 { ptr: PtrU16, len: int }
-struct NativeBufferI16 { ptr: PtrI16, len: int }
-struct NativeBufferU32 { ptr: PtrU32, len: int }
+value NativeBufferU8  { ptr: PtrU8,  len: int }
+value NativeBufferI8  { ptr: PtrI8,  len: int }
+value NativeBufferU16 { ptr: PtrU16, len: int }
+value NativeBufferI16 { ptr: PtrI16, len: int }
+value NativeBufferU32 { ptr: PtrU32, len: int }
 
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'local r = ffi.new("uint8_t[?]", n); return r'
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'local r = ffi.new("int8_t[?]", n); return r'
@@ -547,6 +550,21 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     for field, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
         if buf[field] ~= nil then buf[field] = ffi.cast(cast_ty, buf.ptr) end
     end
+"""
+
+// Copy-on-write for a Rock-level field write on a descriptor (`buf.len = n`):
+// copies share the descriptor table, so the write lands on a fresh one that
+// keeps the leaf views, reseated when `ptr` changes. The compiler emits the call.
+@nomangle inline(lua) fn __descriptor_with(d: any, field: string, v: any) -> any = """
+    local out = {}
+    for k, x in pairs(d) do out[k] = x end
+    out[field] = v
+    if field == "ptr" then
+        for view, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
+            if out[view] ~= nil then out[view] = ffi.cast(cast_ty, v) end
+        end
+    end
+    return setmetatable(out, getmetatable(d))
 """
 
 // Bounds-check WITHOUT taking a slot reference: returns the index unchanged.

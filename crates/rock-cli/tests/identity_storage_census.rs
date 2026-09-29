@@ -21,7 +21,7 @@ const PINNED: &str = "\
 | package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | anvil | exempt | 0 | 4 | 0 | 0 | 11 | 0 | 0 | 0 | 0 | 15 |
-| bitgun | exempt | 20 | 8 | 0 | 0 | 68 | 1 | 1 | 71 | 2 | 171 |
+| bitgun | exempt | 17 | 8 | 0 | 0 | 68 | 1 | 1 | 70 | 1 | 166 |
 | bopt | exempt | 3 | 12 | 1 | 0 | 196 | 0 | 0 | 0 | 0 | 212 |
 | chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 0 | 99 |
 | chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 8 |
@@ -37,25 +37,25 @@ const PINNED: &str = "\
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 382 | 218 | 8 | 0 | 1404 | 69 | 206 | 5669 | 57 | 8013 |
+| mag | exempt | 312 | 218 | 8 | 0 | 1402 | 69 | 206 | 5654 | 56 | 7925 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 8 | 7 | 3 | 0 | 21 | 0 | 0 | 0 | 1 | 40 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | mag_world | exempt | 14 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 17 |
-| match3 | exempt | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 15 | 7 | 23 |
+| match3 | exempt | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 15 | 6 | 22 |
 | match3_core | exempt | 1 | 2 | 0 | 0 | 4 | 0 | 0 | 0 | 0 | 7 |
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 30 |
-| std | exempt | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
-| stone | exempt | 90 | 59 | 7 | 0 | 226 | 5 | 0 | 0 | 11 | 398 |
+| std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| stone | exempt | 42 | 59 | 6 | 0 | 226 | 5 | 0 | 0 | 11 | 349 |
 | stone_core | exempt | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 5 | 9 |
-| testbed | exempt | 11 | 5 | 0 | 0 | 135 | 2 | 2 | 73 | 74 | 302 |
+| testbed | exempt | 5 | 3 | 0 | 0 | 134 | 2 | 2 | 73 | 68 | 287 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| unpackaged programs | exempt | 108 | 13 | 5 | 0 | 131 | 56 | 4 | 0 | 53 | 370 |
+| unpackaged programs | exempt | 104 | 13 | 5 | 0 | 131 | 49 | 1 | 0 | 50 | 353 |
 | vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 4 |
 | void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 | 4 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |

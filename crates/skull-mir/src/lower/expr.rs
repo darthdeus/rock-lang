@@ -898,6 +898,48 @@ impl Builder<'_> {
         }
     }
 
+    /// `place.f = v` on a stdlib descriptor. Copies share its one Lua table, so
+    /// the write builds a fresh descriptor and stores it back into `place`.
+    fn descriptor_field_store(
+        &mut self,
+        place: Idx<Expr>,
+        field: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        enum Owner {
+            Field(Idx<Inst>, Ustr),
+            Global(Ustr),
+        }
+        let owner = match self.body.expr_arena[place].clone() {
+            Expr::FieldAccess { base, field: slot } => {
+                let (pbase, key) = self.physical_field(base, slot)?;
+                Owner::Field(self.lower_place_base(pbase)?, key)
+            }
+            Expr::Global(name) => Owner::Global(name),
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                Owner::Global(self.static_cells[&raw(b)])
+            }
+            _ => {
+                return Err(self.gap_here(
+                    "a descriptor field write must name the field or global holding the \
+                     descriptor; replace it wholesale instead",
+                ));
+            }
+        };
+        let old = match owner {
+            Owner::Field(b, key) => self.emit_cur(Inst::Field { base: b, field: key }),
+            Owner::Global(name) => self.emit_cur(Inst::Global(name)),
+        };
+        let key = self.emit_cur(Inst::Const(Lit::Str(field)));
+        let v = self.lower_expr(value)?;
+        let fresh = self.call_spine("__descriptor_with", vec![old, key, v])?;
+        match owner {
+            Owner::Field(b, key) => self.emit_cur(Inst::StoreField { base: b, field: key, value: fresh }),
+            Owner::Global(name) => self.emit_cur(Inst::StoreGlobal { name, value: fresh }),
+        };
+        Ok(())
+    }
+
     pub(crate) fn lower_assign_effect(
         &mut self,
         target: Idx<Expr>,
@@ -946,6 +988,16 @@ impl Builder<'_> {
             Expr::FieldAccess { .. } if nobox_global_place.is_some() => {
                 let (leaves, shape) = nobox_global_place.clone().expect("guard matched");
                 self.nobox_global_store(&leaves, shape, value)?;
+            }
+            Expr::FieldAccess { base, field }
+                if !self.scx.values_first_class
+                    && matches!(
+                        self.field_base_ty(base),
+                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
+                            if bone_semantic::prelude::is_descriptor_key(name)
+                    ) =>
+            {
+                self.descriptor_field_store(base, field, value)?;
             }
             Expr::FieldAccess { base, field } => {
                 // `xs[i].x = v` / `xs[i].at.x = v` on a column-stored or strided

@@ -216,7 +216,7 @@ impl Builder<'_> {
         self.ws
             .struct_by_name
             .get(&name)
-            .map(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
+            .map(|sid| has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]))
             .unwrap_or(false)
     }
 

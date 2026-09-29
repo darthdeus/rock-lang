@@ -106,7 +106,7 @@ impl StructRegistryPlan {
                 .get(&name)
                 .ok_or_else(|| plan_error(format!("struct registry type `{name}` is not declared")))?;
             let s = &ws.modules[sid.module.index()].structs[sid.def];
-            if s.is_value && !value_plans.contains_key(&name) {
+            if crate::lower::has_value_plan(s) && !value_plans.contains_key(&name) {
                 value_plans.insert(name, arena.plan_nominal_value(ws, target, name)?);
             }
             for field in &s.fields {
@@ -237,7 +237,7 @@ pub fn struct_field_plan(
         )));
     }
 
-    let parent_is_value = sd.is_value;
+    let parent_is_value = crate::lower::has_value_plan(sd);
     let parent_storage = if parent_is_value && !spliced {
         Some(declared_value_storage(ws, target, sname).ok_or_else(|| {
             plan_error(format!("struct `{sname}` has no resolved value storage plan"))

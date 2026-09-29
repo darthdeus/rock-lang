@@ -87,7 +87,7 @@ pub fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
     }
     ws.struct_by_name
         .get(&name)
-        .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value)
+        .is_some_and(|sid| super::has_value_plan(&ws.module(sid.module).structs[sid.def]))
 }
 
 fn handle_fields(name: Ustr) -> Option<&'static [(&'static str, &'static str)]> {

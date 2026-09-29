@@ -515,7 +515,7 @@ impl<'a> DispatchCtx<'a> {
         self.ws
             .struct_by_name
             .get(&name)
-            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
+            .is_some_and(|sid| crate::lower::has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]))
     }
 
     /// The declared `value` struct name of `e`'s (nullable-peeled) static

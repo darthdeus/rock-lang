@@ -974,7 +974,7 @@ fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<Stri
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
-        .and_then(|sid| ws.modules.get(sid.module.index()).map(|m| m.structs[sid.def].is_value))
+        .and_then(|sid| ws.modules.get(sid.module.index()).map(|m| skull_mir::lower::has_value_plan(&m.structs[sid.def])))
         .unwrap_or(false)
 }
 
@@ -987,7 +987,7 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
         .values()
         .filter_map(|sid| {
             let s = &ws.modules.get(sid.module.index())?.structs[sid.def];
-            s.is_value.then(|| s.clone())
+            skull_mir::lower::has_value_plan(s).then(|| s.clone())
         })
         .collect();
     v.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
@@ -1976,7 +1976,7 @@ fn type_table_defs(
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
             // immutable Lua tables (`value_table`).
-            let kind = if !s.is_value {
+            let kind = if !skull_mir::lower::has_value_plan(s) {
                 "struct"
             } else if gc.contains(&s.name) {
                 "value_table"

@@ -18,6 +18,14 @@ use ustr::Ustr;
 use crate::concrete::ConcreteSignature;
 use crate::monoty::{MonoCtor, MonoTy};
 
+/// Whether `sd` is a `value` lowered through the value plans. A stdlib
+/// descriptor (`Ptr`, `NativeBuffer`) is a `value` whose representation the
+/// backend supplies: on Lua, the one host slot holding the cdata or the buffer
+/// table with its leaf views, which a copy shares and never rebuilds.
+pub fn has_value_plan(sd: &bone_semantic::hir::StructDef) -> bool {
+    sd.is_value && !bone_semantic::prelude::is_descriptor_key(sd.name)
+}
+
 pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<usize> {
     all_float_leaf_count_rec(ws, name, &mut Vec::new())
 }
@@ -25,7 +33,7 @@ pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<u
 pub(crate) fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value || visiting.contains(&name) {
+    if !has_value_plan(sd) || visiting.contains(&name) {
         return None;
     }
     visiting.push(name);
@@ -113,7 +121,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
                     return false;
                 };
                 let decl = &ws.modules[sid.module.index()].structs[sid.def];
-                if !decl.is_value || visiting.contains(&child) {
+                if !has_value_plan(decl) || visiting.contains(&child) {
                     return false;
                 }
                 visiting.push(child);
@@ -649,7 +657,7 @@ fn planned_value_rec(
     }
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value || visiting.contains(&name) {
+    if !has_value_plan(sd) || visiting.contains(&name) {
         return None;
     }
     visiting.push(name);
@@ -804,7 +812,7 @@ fn lua_nominal_is_immutable(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>
     }
     let Some(sid) = ws.struct_by_name.get(&name) else { return false };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value || !sd.is_nobox || !sd.generics.is_empty() || visiting.contains(&name) {
+    if !has_value_plan(sd) || !sd.is_nobox || !sd.generics.is_empty() || visiting.contains(&name) {
         return false;
     }
     visiting.push(name);
@@ -1264,7 +1272,7 @@ pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
 pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value {
+    if !has_value_plan(sd) {
         return None;
     }
     Some(sd.fields.iter().map(|f| (f.name, f.ty)).collect())

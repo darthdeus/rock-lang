@@ -98,6 +98,7 @@
 // prelude: __arena_store_or_dead
 // prelude: __arena_store_or_empty
 // prelude: __debug_traceback
+// prelude: __descriptor_with
 // prelude: __entity_arena
 // prelude: __ffi_new_float_1
 // prelude: __ffi_new_int_1

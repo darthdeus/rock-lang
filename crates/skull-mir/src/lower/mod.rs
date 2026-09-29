@@ -3200,7 +3200,7 @@ fn map_key_rejection_reason(
 fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
-        .map(|sid| ws.modules[sid.module.index()].structs[sid.def].is_value)
+        .map(|sid| has_value_plan(&ws.modules[sid.module.index()].structs[sid.def]))
         .unwrap_or(false)
 }
 
