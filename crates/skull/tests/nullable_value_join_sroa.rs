@@ -21,6 +21,22 @@ fn poll_in(h: Holder) {
     }
 }
 
+fn reads_st(h: Holder, xs: [int]) -> bool {
+    let t = h.t ?? return false
+    for x in xs {
+        if t.st.a == x { return true }
+    }
+    return false
+}
+
+fn first_match(h: Holder, xs: [int]) -> Tk? {
+    let t = h.t ?? return null
+    for x in xs {
+        if t.st.a == x { return t }
+    }
+    return t
+}
+
 fn held(h: Holder) -> bool { return h.t != null }
 
 fn first_a(h: Holder) -> int {
@@ -33,11 +49,11 @@ fn first_a(h: Holder) -> int {
 fn main() {
     let h = Holder { t: Tk { co: "x", st: Ent { a: 1, b: 2 } } }
     for _ in 0..3 { poll_in(h) }
-    __out("{h.polls} {held(h)} {first_a(h)}")
+    __out("{h.polls} {held(h)} {first_a(h)} {reads_st(h, [0, 1])} {reads_st(h, [2])}")
     h.t = Tk { co: "y", st: Ent { a: 0, b: 5 } }
     poll_in(h)
     poll_in(h)
-    __out("{h.polls} {!held(h)} {first_a(h)}")
+    __out("{h.polls} {!held(h)} {first_a(h)} {reads_st(h, [0])}")
 }
 "#;
 
@@ -49,7 +65,7 @@ fn if_let_join_of_nullable_value_field_builds_no_box() {
         assert!(!body.contains(ctor), "poll_in rebuilds `{ctor}` for its `if let` join:\n{body}");
     }
     let out = run_luajit(&format!("{lua}\nmain()\n"), "nullable_value_join");
-    assert_eq!(out, "3 true 3 4 true -1");
+    assert_eq!(out, "3 true 3 true false 4 true -1 false");
 }
 
 #[test]
@@ -59,4 +75,23 @@ fn unwrap_of_nullable_value_field_builds_no_box() {
     for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
         assert!(!body.contains(ctor), "first_a rebuilds `{ctor}` to unwrap a field:\n{body}");
     }
+}
+
+#[test]
+fn coalesce_return_binding_of_nullable_value_field_builds_no_box() {
+    let lua = emit_module(JOIN);
+    let body = function_body(&lua, "reads_st");
+    for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
+        assert!(!body.contains(ctor), "reads_st rebuilds `{ctor}` for its `??` binding:\n{body}");
+    }
+}
+
+
+// A `??` binding that escapes at two returns keeps the one copy it had: a
+// split family would rebuild the value at each escaping use.
+#[test]
+fn escaping_coalesce_binding_keeps_one_copy() {
+    let lua = emit_module(JOIN);
+    let body = function_body(&lua, "first_match");
+    assert_eq!(body.matches("Tk_vt(").count(), 1, "first_match copies `Tk` more than once:\n{body}");
 }

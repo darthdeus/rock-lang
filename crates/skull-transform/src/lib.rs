@@ -894,8 +894,8 @@ enum StructId {
 enum FieldSrc {
     Operand(Idx<Inst>),
     ConstStr(ustr::Ustr),
-    /// Leaf-wise copy from another family's field cell (a value-struct alias
-    /// member, see `copy_alias`) -- materializes a `Load` at the store site.
+    /// Leaf-wise copy from another family member's field cell (a value-struct
+    /// alias member, see `copy_alias`) -- materializes a `Load` at the store site.
     CellLoad(Idx<Cell>),
     /// A nullable value cell's presence leaf on a ctor store.
     ConstTrue,
@@ -1288,6 +1288,8 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     // inlined `unwrap()` produce) is tested against nil before its fields are
     // read. The split cell answers that test from a presence leaf.
     let mut value_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
+    // Roots of families that split only because a copy of a copy is accepted.
+    let mut chained_roots: HashSet<usize> = HashSet::default();
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             value_operands(&func.insts[i], &mut |op| {
@@ -1334,14 +1336,20 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         }
                         // The alias store itself: `Store(y, Load(x))` where y and x
                         // unify to the same root (deleted by the rewrite), or where
-                        // y copies x's leaves (expanded to leaf-wise stores).
+                        // y copies x's leaves (expanded to leaf-wise stores). A copy
+                        // of a copy (`let t = h.t ?? return` feeding a loop body's
+                        // binding) reads its immediate source's leaves.
                         Inst::Store { cell, value } => {
                             let yk = raw(*cell) as usize;
-                            *value == op
+                            let accepted = *value == op
                                 && alias[yk].is_some()
                                 && !disq[yk]
                                 && (rep[yk] == rep[raw(c) as usize]
-                                    || copy_alias[yk] == Some(c))
+                                    || (copy_alias[yk].is_some() && alias[yk] == Some(c)));
+                            if accepted && copy_alias[yk].is_some_and(|r| r != c) {
+                                chained_roots.insert(raw(copy_alias[yk].unwrap()) as usize);
+                            }
+                            accepted
                         }
                         _ => false,
                     };
@@ -1366,6 +1374,16 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 }
             }
         });
+    }
+
+    // A chained family that also escapes would rebuild its value at every
+    // escaping use, which can cost more than the one copy it replaces.
+    for (_, c) in &escape_loads {
+        let k = raw(*c) as usize;
+        let root = copy_alias[k].map_or(rep[k], |r| raw(r) as usize);
+        if chained_roots.contains(&root) {
+            disq[root] = true;
+        }
     }
 
     // Disqualification is family-wide: an escaping alias member keeps the
@@ -1618,16 +1636,17 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         fs.into_iter().map(|f| (f, FieldSrc::Operand(*value))).collect(),
                     )));
                 }
-                // A value-struct alias member copies the root's leaves.
-                if let (Inst::Load(_), Some(root)) =
+                // A value-struct alias member copies its source's leaves.
+                if let (Inst::Load(src), Some(_)) =
                     (&func.insts[*value], copy_alias[raw(*cell) as usize])
                 {
+                    let src = to_rep(*src);
                     let mut fs = candidate_fields(*cell)?;
                     fs.sort_unstable();
                     return Ok(Some((
                         i,
                         *cell,
-                        fs.into_iter().map(|f| (f, FieldSrc::CellLoad(root))).collect(),
+                        fs.into_iter().map(|f| (f, FieldSrc::CellLoad(src))).collect(),
                     )));
                 }
                 Ok(ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize]).map(
