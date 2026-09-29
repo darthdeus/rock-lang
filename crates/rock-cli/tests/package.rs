@@ -71,9 +71,11 @@ fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
 
 fn content_revision(catalog: &Path) -> String {
     let script = repo_root().join("tools/release/content_revision.py");
+    let project = catalog.parent().unwrap().parent().unwrap();
     let out = Command::new("python3")
         .arg(script)
         .arg(catalog)
+        .arg(project.join("prop_kits.json"))
         .output()
         .expect("run content revision helper");
     assert!(
@@ -190,6 +192,13 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         .expect("packaged level catalog JSON");
     let levels = catalog_value["levels"].as_array().expect("catalog level entries");
     assert!(!levels.is_empty(), "package stages a nonempty official catalog");
+    let packaged_prop_kits = packaged_root.join("prop_kits.json");
+    assert!(packaged_prop_kits.is_file(), "packaged prop kits are missing");
+    assert_eq!(
+        std::fs::read(&packaged_prop_kits).unwrap(),
+        std::fs::read(repo_root().join("mag/prop_kits.json")).unwrap(),
+        "packaged prop kits must match the content revision source"
+    );
     let mut identities = Vec::new();
     for entry in levels {
         let namespace = entry["namespace"].as_str().expect("catalog entry namespace");
@@ -230,6 +239,7 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let fixture_catalog = fixture_root.join("levels/index.json");
     std::fs::create_dir_all(fixture_catalog.parent().unwrap()).unwrap();
     std::fs::copy(&catalog, &fixture_catalog).unwrap();
+    std::fs::copy(&packaged_prop_kits, fixture_root.join("prop_kits.json")).unwrap();
     let mut depth_path = None;
     for entry in levels {
         let relative = entry["path"].as_str().unwrap();
@@ -252,6 +262,17 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         "CONTENT_REV must change when Crypt Depths changes"
     );
     std::fs::write(&depth_path, depth_bytes).unwrap();
+    let prop_kits_path = fixture_root.join("prop_kits.json");
+    let prop_kits_bytes = std::fs::read(&prop_kits_path).unwrap();
+    let mut changed_prop_kits = prop_kits_bytes.clone();
+    changed_prop_kits.extend_from_slice(b"\n");
+    std::fs::write(&prop_kits_path, changed_prop_kits).unwrap();
+    assert_ne!(
+        content_revision(&fixture_catalog),
+        revision_before_mutations,
+        "CONTENT_REV must change when prop kits change"
+    );
+    std::fs::write(&prop_kits_path, prop_kits_bytes).unwrap();
     let catalog_bytes = std::fs::read(&fixture_catalog).unwrap();
     let mut changed_catalog = catalog_bytes.clone();
     changed_catalog.extend_from_slice(b"\n");

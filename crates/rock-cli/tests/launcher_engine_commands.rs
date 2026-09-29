@@ -58,7 +58,7 @@ mod unix {
         assert!(status.success(), "rock.sh replay fixture failed: {status}");
         assert_eq!(
             fs::read_to_string(log).expect("launcher log"),
-            "cargo:build --bin rock\nrock:replay mag mag/replays/last.replay\n"
+            "cargo:build --bin rock\ncargo:build -p rock-agent-daemon --bin rock-agent-daemon\nrock:replay mag mag/replays/last.replay\n"
         );
     }
 }
