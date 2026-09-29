@@ -694,6 +694,30 @@ fn return_mismatch_does_not_mask_genuine_body_error() {
     );
 }
 
+// A bare `{name}` that meant a local but named a global fn passed the checker
+// and failed in lowering with no location.
+#[test]
+fn interpolation_hole_rejects_a_function_value_at_the_hole() {
+    let src = "fn name(a: int) -> string {\n    return \"\"\n}\nfn f() -> string {\n    return \"x {name}\"\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded hole error");
+    assert!(err.message.contains("cannot interpolate"), "got: {:?}", err.message);
+    let span = err.labels.first().expect("labeled error").span;
+    assert_eq!(text(src, &span), "name");
+}
+
+#[test]
+fn interpolation_hole_rejects_a_unit_value_at_the_hole() {
+    let src = "fn u() {\n}\nfn f() -> string {\n    return \"x {u()}\"\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded hole error");
+    assert!(err.message.contains("cannot interpolate"), "got: {:?}", err.message);
+    let span = err.labels.first().expect("labeled error").span;
+    assert_eq!(text(src, &span), "u()");
+}
+
 // Companion to body_type_error_does_not_abort_other_bodies for the
 // non-function BodyOwners: check_module has a separate `?` loop per owner
 // kind (decorators, globals, struct defaults), and the early global-init
