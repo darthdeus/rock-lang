@@ -602,16 +602,18 @@ fn leaf_operand(
 /// dotted path (`("pos.x", ..)`). The nested ctors then have no users and DCE
 /// removes them.
 ///
-/// Flattening happens at the OUTERMOST materialization: rewriting bottom-up
-/// would satisfy the guarantee too, but allocate an intermediate cdata per
-/// construction. A ctor that is itself a field operand of another ctor is
-/// therefore skipped -- the outer one absorbs it.
+/// Flattening happens at the OUTERMOST cdata materialization: rewriting
+/// bottom-up would satisfy the guarantee too, but allocate an intermediate cdata
+/// per construction. A ctor that is itself a field operand of another cdata
+/// ctor is therefore skipped -- the outer one absorbs it.
 ///
 /// Only the CDATA tier is rewritten, because only a cdata parent has physical
 /// fields to splice the child's leaves into. The other two tiers need nothing
 /// from this pass: a leaf-table box is already built from leaves by `pack`, and
 /// a GC-table box keeps its declared keys, so a `nobox` child inside one is a
-/// real box that the verifier rejects at its own span.
+/// real box that the verifier rejects at its own span. A plain cdata child of
+/// a GC-table box (`RoomC { span: Span2 { lo: Cell { .. } } }`) is flattened
+/// here like any outermost cdata ctor.
 ///
 /// The dotted form exists only between here (end of `cleanup`) and emit. Field
 /// names are documented as MIR-pass metadata rather than the wire shape, and
@@ -624,13 +626,27 @@ pub fn flatten_nobox_nested_ctors(
 ) -> Result<bool, CompilerError> {
     let all: Vec<Idx<Inst>> =
         func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
-    // A ctor used as a field operand of another ctor is not the outermost one.
+    // A ctor used as a field operand of another CDATA ctor is not the
+    // outermost one. A table parent absorbs nothing, so a cdata child of a
+    // GC-table or leaf-table ctor is itself the outermost cdata materialization.
     let mut inner: HashSet<Idx<Inst>> = HashSet::default();
     for &i in &all {
-        if let Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } =
-            &func.insts[i]
+        if let Inst::MakeValueStruct { fields, representation, .. }
+        | Inst::MaterializeValueStruct { fields, representation, .. } = &func.insts[i]
         {
-            inner.extend(fields.iter().map(|(_, op)| *op));
+            let table_parent = matches!(
+                func.rep_arena
+                    .as_ref()
+                    .and_then(|arena| arena.try_get(*representation))
+                    .and_then(|plan| plan.value_storage()),
+                Some(
+                    skull_mir::lower::ValueStorage::GcTable
+                        | skull_mir::lower::ValueStorage::LeafTable
+                )
+            );
+            if !table_parent {
+                inner.extend(fields.iter().map(|(_, op)| *op));
+            }
         }
     }
     let targets: Vec<Idx<Inst>> = all

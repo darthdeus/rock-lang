@@ -55,7 +55,7 @@ const PINNED: &str = "\
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| unpackaged programs | exempt | 106 | 13 | 5 | 0 | 124 | 56 | 4 | 0 | 53 | 361 |
+| unpackaged programs | exempt | 106 | 13 | 5 | 0 | 131 | 56 | 4 | 0 | 53 | 368 |
 | vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 4 |
 | void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 | 4 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |
