@@ -79,7 +79,6 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
     "pixel_spirit",
     "spark",
     "stone",
-    "stone_core",
     "survivors",
     "testbed",
     "typography",

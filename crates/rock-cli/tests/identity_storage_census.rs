@@ -21,7 +21,7 @@ const PINNED: &str = "\
 | package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | anvil | exempt | 0 | 4 | 0 | 0 | 11 | 0 | 0 | 0 | 0 | 15 |
-| bitgun | exempt | 17 | 8 | 0 | 0 | 68 | 1 | 1 | 70 | 1 | 166 |
+| bitgun | exempt | 14 | 8 | 0 | 0 | 68 | 1 | 1 | 70 | 1 | 163 |
 | bopt | exempt | 3 | 12 | 1 | 0 | 196 | 0 | 0 | 0 | 0 | 212 |
 | chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 0 | 99 |
 | chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 8 |
@@ -37,9 +37,9 @@ const PINNED: &str = "\
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 312 | 218 | 8 | 0 | 1402 | 69 | 206 | 5654 | 56 | 7925 |
+| mag | exempt | 310 | 218 | 8 | 0 | 1391 | 69 | 206 | 5654 | 56 | 7912 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
-| mag_content | exempt | 8 | 7 | 3 | 0 | 21 | 0 | 0 | 0 | 1 | 40 |
+| mag_content | exempt | 3 | 1 | 3 | 0 | 6 | 0 | 0 | 0 | 1 | 14 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | mag_world | exempt | 14 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 17 |
@@ -49,7 +49,6 @@ const PINNED: &str = "\
 | spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 30 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | stone | exempt | 42 | 59 | 6 | 0 | 226 | 5 | 0 | 0 | 11 | 349 |
-| stone_core | exempt | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 |
 | survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 5 | 9 |
 | testbed | exempt | 5 | 3 | 0 | 0 | 134 | 2 | 2 | 73 | 68 | 287 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
