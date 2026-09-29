@@ -127,6 +127,22 @@ impl Builder<'_> {
                     self.test_tag(scrut, name, scrut_enum, fail);
                     return Ok(());
                 }
+                // A threaded flat enum binds as its cells; boxing it here cost a
+                // table that the arm's join or first payload read unpacked again.
+                // Native backends bind their own tagged enum value.
+                if let Scrut::Cells { tag, positional, named, shape } = scrut {
+                    let whole = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
+                    if !self.scx.native_flat_enums
+                        && whole.is_some_and(|ty| ty.nominal() == Some(shape.name))
+                    {
+                        let mut leaves = Vec::with_capacity(shape.leaf_count());
+                        leaves.push(*tag);
+                        leaves.extend(positional.iter().copied());
+                        leaves.extend(named.iter().map(|(_, value)| *value));
+                        self.bind_leaves(b, &leaves, shape.value_shape())?;
+                        return Ok(());
+                    }
+                }
                 let val = self.scrut_value(scrut);
                 let cell = self.new_binding_cell(
                     b,

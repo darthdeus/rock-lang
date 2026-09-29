@@ -75,6 +75,8 @@ mod extern_return_representation;
 mod nomangle_type_symbol;
 #[path = "extern_value_return_ownership.rs"]
 mod extern_value_return_ownership;
+#[path = "flat_enum_match_passthrough.rs"]
+mod flat_enum_match_passthrough;
 #[path = "flat_vec_value_shape.rs"]
 mod flat_vec_value_shape;
 #[path = "fn_record_mt.rs"]

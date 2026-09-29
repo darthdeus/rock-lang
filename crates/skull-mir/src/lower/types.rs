@@ -692,6 +692,18 @@ impl Builder<'_> {
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
             return Ok(Some(RetSlot::Nested(shape)));
         }
+        // A non-null flat enum joins in its leaves, so an arm that yields a
+        // threaded value (a ctor, a leaf-bound `other`) is never boxed to cross
+        // the join. A nullable one keeps the packed cell: its nil is the value.
+        // Native backends join their own tagged enum value.
+        if let Some(shape) = self.flat_enum_value_shape_of(e)? {
+            let non_null = self
+                .concrete_expr_ty(e)
+                .is_some_and(|ty| !matches!(*ty, MonoTy::Nullable(_)));
+            if !self.scx.native_flat_enums && non_null {
+                return Ok(Some(RetSlot::Leaves(shape)));
+            }
+        }
         let shape = match self.nobox_value_shape_of(e)? {
             Some(shape) => shape,
             None => {
