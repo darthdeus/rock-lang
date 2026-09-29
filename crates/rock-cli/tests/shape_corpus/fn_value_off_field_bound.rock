@@ -1,6 +1,5 @@
-// The control for `fn_value_off_field.rock`: the same storage, the same fn
-// value, the same `nobox` argument -- bound to a local before the call. This is
-// what makes the CALL SHAPE the discriminant rather than the field storage.
+// The control for `fn_value_off_field.rock`: the same storage, fn value, and
+// `nobox` argument, bound to a local before the call.
 //
 // Corpus case: `fn_value_off_field_bound`. Expected bucket: CORRECT.
 

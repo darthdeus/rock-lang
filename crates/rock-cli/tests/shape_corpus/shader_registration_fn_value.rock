@@ -1,30 +1,17 @@
 // SHAPE: `rock_shader(<entry>)` inside a FN BODY x nobox representation.
 //
-// The rejection this pins is SPURIOUS. `rock_shader` is a compile-time expansion:
-// its argument lowers to the entry's NAME as a string literal (`do return
-// ("shape_reg_frag") end`, read off the emitted Lua), and what reaches the engine
-// is `__rock_shader_register("shape_reg_frag", [[<glsl>]])`. The fn is never taken
-// as a value at runtime, so the ABI-disagreement hazard
-// `reject_nobox_fn_taken_by_value` exists to prevent cannot arise here.
-//
-// It fires anyway once `Vec2` is marked, because a fullscreen entry's signature
-// always mentions `Vec2` (the TexCoord varying) and the check matches any
-// `Expr::Global(name)` naming a function, without excluding a compile-time
-// expansion's argument position.
-//
-// The discriminant is the SPELLING, not the marking: the global-initializer form
-// in `shader_registration_global_init.rock` emits clean under the same marking, and
-// that is the form every one of the ~20 real in-tree sites uses
-// (`stone/engine/rendering/draw.rock`). So this costs no in-tree annotation today.
-// What it is evidence for is that one expression rejects in a fn body and emits at
-// global scope.
+// `rock_shader` is a compile-time expansion: its argument lowers to the entry's
+// name as a string literal. The fn is never taken as a value at runtime, so a
+// marked `Vec2` parameter does not owe the function-value ABI rejection here.
+// The global-initializer control in `shader_registration_global_init.rock`
+// guards the other placement.
 //
 // The verdict lands at EMIT, so the surface is `rock compile` -- `rock_shader` is a
 // stone-engine global and a bare `rock test` would die at `__rock_shader_register
 // (a nil value)` before the shape could be judged.
 //
 // Corpus cases: `shader_registration_fn_body_unmarked` (control),
-// `shader_registration_fn_body_vec2_marked` (the spurious rejection).
+// `shader_registration_fn_body_vec2_marked` (fixed, emits cleanly).
 
 @shader(fragment)
 fn shape_reg_frag(tc: Vec2) -> Vec4 {
