@@ -20,22 +20,17 @@ fn repo_root() -> PathBuf {
 const PINNED: &str = "\
 | package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| anvil | exempt | 0 | 4 | 0 | 0 | 11 | 0 | 0 | 0 | 0 | 15 |
+| anvil | exempt | 0 | 4 | 0 | 0 | 10 | 0 | 0 | 0 | 0 | 14 |
 | bitgun | exempt | 14 | 8 | 0 | 0 | 68 | 1 | 1 | 70 | 1 | 163 |
-| bopt | exempt | 3 | 12 | 1 | 0 | 196 | 0 | 0 | 0 | 0 | 212 |
-| chess | exempt | 1 | 22 | 0 | 0 | 54 | 0 | 3 | 19 | 0 | 99 |
-| chess_core | exempt | 0 | 0 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 8 |
-| chess_game | exempt | 14 | 3 | 0 | 0 | 143 | 1 | 0 | 0 | 0 | 161 |
-| chesslings | exempt | 2 | 6 | 0 | 0 | 51 | 0 | 0 | 0 | 0 | 59 |
-| sample_game_c | exempt | 2 | 4 | 0 | 0 | 18 | 0 | 0 | 11 | 0 | 35 |
+| bopt | exempt | 2 | 2 | 0 | 0 | 102 | 0 | 0 | 0 | 0 | 106 |
+| chess | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 19 | 0 | 21 |
+| chess_game | exempt | 4 | 1 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 7 |
+| chesslings | exempt | 2 | 3 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
+| sample_game_c | exempt | 2 | 2 | 0 | 0 | 8 | 0 | 0 | 5 | 0 | 17 |
 | sample_game_c_v0 | exempt | 1 | 2 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 11 |
-| sample_game_b | exempt | 1 | 11 | 0 | 0 | 150 | 0 | 0 | 49 | 0 | 211 |
+| sample_game_b | exempt | 0 | 3 | 0 | 0 | 25 | 0 | 0 | 0 | 0 | 28 |
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
-| fm | exempt | 0 | 0 | 0 | 0 | 13 | 0 | 0 | 0 | 0 | 13 |
-| fm_core | exempt | 0 | 4 | 0 | 0 | 21 | 0 | 0 | 0 | 0 | 25 |
-| sample-game | exempt | 1 | 14 | 0 | 0 | 284 | 0 | 0 | 14 | 0 | 313 |
-| idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
-| idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
+| idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
 | mag | exempt | 310 | 218 | 8 | 0 | 1391 | 69 | 206 | 5553 | 56 | 7811 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
@@ -43,20 +38,17 @@ const PINNED: &str = "\
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | mag_world | exempt | 14 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 17 |
-| match3 | exempt | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 15 | 6 | 22 |
-| match3_core | exempt | 1 | 2 | 0 | 0 | 4 | 0 | 0 | 0 | 0 | 7 |
+| match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 15 | 6 | 21 |
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
-| spark | exempt | 2 | 4 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 30 |
+| spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | stone | exempt | 42 | 59 | 6 | 0 | 226 | 5 | 0 | 0 | 11 | 349 |
-| survivors | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 5 | 9 |
+| survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
 | testbed | exempt | 5 | 3 | 0 | 0 | 134 | 2 | 2 | 73 | 68 | 287 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
-| ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
 | unpackaged programs | exempt | 104 | 13 | 5 | 0 | 131 | 49 | 1 | 0 | 50 | 353 |
-| vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 4 |
-| void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 | 4 |
+| void | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |
 
 Exempt module sites:
