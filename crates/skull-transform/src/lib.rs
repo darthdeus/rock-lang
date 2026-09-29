@@ -323,6 +323,30 @@ pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
     Ok(())
 }
 
+/// A store through a NativeBuffer's `float` leaf view converts to f32 itself,
+/// so an `f32` write's explicit rounding feeding it is redundant: an inlined
+/// constructor's per-leaf rounding meets the buffer store here.
+fn drop_f32_rounding_into_float_views(func: &mut MirFunc) -> bool {
+    let float_view = skull_mir::lower::leaf_view_field("float");
+    let mut changed = false;
+    let insts: Vec<Idx<Inst>> = func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
+    for i in insts {
+        let Inst::StoreIndex { base, value, kind: ContainerKind::NativeBufferLeaf, .. } = func.insts[i] else {
+            continue;
+        };
+        if !matches!(func.insts[base], Inst::Field { field, .. } if field == float_view) {
+            continue;
+        }
+        if let Inst::FloatToF32(unrounded) = func.insts[value] {
+            if let Inst::StoreIndex { value, .. } = &mut func.insts[i] {
+                *value = unrounded;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 fn has_scalarizable_store(func: &MirFunc) -> bool {
     func.blocks.iter().any(|(_, b)| {
         b.insts.iter().any(|&i| {
@@ -819,6 +843,11 @@ pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), Comp
     }
     dce(func);
     promote_direct_cells(func);
+    // After promotion, so a rounding that reached the store through a cell
+    // (an inlined constructor with a defaulted argument) is seen directly.
+    if drop_f32_rounding_into_float_views(func) {
+        dce(func);
+    }
     Ok(())
 }
 

@@ -659,14 +659,6 @@ impl Builder<'_> {
         value: Idx<Inst>,
     ) {
         let addr = place.address();
-        // A `float` leaf view rounds the store itself, so an `f32` write's
-        // explicit rounding is redundant here, the vertex hot path.
-        let value = match self.f.insts[value] {
-            Inst::FloatToF32(unrounded) if addr.view_field == crate::lower::leaf_view_field("float") => {
-                unrounded
-            }
-            _ => value,
-        };
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
         self.emit_cur(Inst::StoreIndex {
