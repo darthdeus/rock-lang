@@ -239,6 +239,10 @@ impl Builder<'_> {
                 }
             }
 
+            Expr::BinOp { op: BinOp::NullCoalesce, .. } if self.expr_is_flat_enum(e) => {
+                let r = self.lower_expr_repr(e)?.into_value();
+                self.pack(r)
+            }
             Expr::BinOp { op, lhs, rhs } => self.lower_binop(op, lhs, rhs),
 
             Expr::If {
