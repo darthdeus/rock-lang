@@ -805,6 +805,18 @@ impl Builder<'_> {
             _ => None,
         };
         match self.body.expr_arena[e].clone() {
+            // Element stores and leaf places of flat storage are decomposed
+            // before this; what reaches here is a borrow of the whole element or
+            // a struct inside it (a `ref` argument or `let`), which needs a table
+            // the element does not have.
+            Expr::Index { base, .. } if self.flat_stored_container(base)? => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "this container element is stored as flat columns or rows, so it has no \
+                     table a `ref` can alias; copy it out, modify it and store it back"
+                        .to_string(),
+                ))
+            }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;

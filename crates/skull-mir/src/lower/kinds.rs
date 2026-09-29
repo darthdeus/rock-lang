@@ -123,6 +123,15 @@ impl Builder<'_> {
         Ok(arena.value_shape(rep).map(|shape| shape.name))
     }
 
+    /// Whether `e` is a Vec, Map or Arena whose elements have no per-element
+    /// table (column or strided storage).
+    pub(crate) fn flat_stored_container(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
+        Ok(self.vec_column_elem_of(e)?.is_some()
+            || self.vec_strided_elem_of(e)?.is_some()
+            || self.map_column_value_of(e)?.is_some()
+            || self.arena_column_elem_of(e)?.is_some())
+    }
+
     /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
     /// [`Self::vec_column_elem_of`] one container out: an arena's `data` field is
     /// an ordinary `[E]`, so it columnizes on exactly the same rule, and the
