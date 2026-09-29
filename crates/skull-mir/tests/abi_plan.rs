@@ -983,7 +983,7 @@ fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
 
 #[test]
 fn nominal_c_layout_is_owned_by_the_rep_plan() {
-    let ws = ws_of("value Mixed { on: bool, count: int, scale: float }");
+    let ws = ws_of("value Mixed { on: bool, count: int, scale: f32 }");
     let arena = RepArena::default();
     let (leaves, size, align) = arena
         .nominal_leaf_layout(
@@ -1003,8 +1003,8 @@ fn nominal_c_layout_is_owned_by_the_rep_plan() {
 #[test]
 fn nominal_c_layout_aligns_nested_fields_before_recurse() {
     let ws = ws_of(
-        "value V2 { x: float, y: float }\n\
-         value V4 { x: float, y: float, z: float, w: float }\n\
+        "value V2 { x: f32, y: f32 }\n\
+         value V4 { x: f32, y: f32, z: f32, w: f32 }\n\
          value SpriteFragU {\
              lights: bool, unlit: bool, count: int, ambient: V4,\
              glow: bool, normal: bool, params: V2\

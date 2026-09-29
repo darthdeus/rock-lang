@@ -69,8 +69,11 @@
 // prelude: UniformArray
 // prelude: Vec
 // prelude: Vec2
+// prelude: Vec2f
 // prelude: Vec3
+// prelude: Vec3f
 // prelude: Vec4
+// prelude: Vec4f
 // prelude: VecIter
 // prelude: WorkgroupArray
 // prelude: WriteFieldRef
@@ -603,6 +606,8 @@
 // prelude: texture_id
 // prelude: texture_size
 // prelude: to_array
+// prelude: to_f32
+// prelude: to_f64
 // prelude: to_float
 // prelude: to_int
 // prelude: to_string

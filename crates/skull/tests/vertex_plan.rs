@@ -24,14 +24,14 @@ use ustr::Ustr;
 // recognizes vectors by nominal NAME -- so the fixture declares its own, the
 // same way `value_leaf_layout.rs` declares its shapes.
 const SHAPES: &str = r#"
-value Vec2 { x: float, y: float }
-value Vec3 { x: float, y: float, z: float }
-value Vec4 { x: float, y: float, z: float, w: float }
-value Grass { pos: Vec2, rot: float, scale: float, height: float }
-value GrassReordered { rot: float, pos: Vec2, scale: float, height: float }
-value GrassPlusOne { pos: Vec2, rot: float, scale: float, height: float, tint: float }
+value Vec2 { x: f32, y: f32 }
+value Vec3 { x: f32, y: f32, z: f32 }
+value Vec4 { x: f32, y: f32, z: f32, w: f32 }
+value Grass { pos: Vec2, rot: f32, scale: f32, height: f32 }
+value GrassReordered { rot: f32, pos: Vec2, scale: f32, height: f32 }
+value GrassPlusOne { pos: Vec2, rot: f32, scale: f32, height: f32, tint: f32 }
 value WithInt { pos: Vec2, id: int }
-value Wide { a: Vec4, b: Vec3, c: float }
+value Wide { a: Vec4, b: Vec3, c: f32 }
 fn main() { }
 "#;
 
