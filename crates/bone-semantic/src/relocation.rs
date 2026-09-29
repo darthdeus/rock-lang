@@ -44,7 +44,7 @@ type FnKey = (ModuleId, Idx<Function>);
 
 /// What a call may do to collection structure. Each entry keeps the first
 /// site that established it, for the diagnostic.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 struct Effect {
     /// Runs a closure or foreign code whose effect is not known.
     unknown: Option<Span>,
@@ -65,6 +65,14 @@ impl Effect {
 
     fn add_element(&mut self, key: String, at: Span) {
         self.elements.entry(key).or_insert(at);
+    }
+
+    /// Equal apart from witnesses. Witnesses can shift while a cycle
+    /// settles; only the keys decide convergence.
+    fn same_shape(&self, other: &Effect) -> bool {
+        self.unknown.is_some() == other.unknown.is_some()
+            && self.params.keys().eq(other.params.keys())
+            && self.elements.keys().eq(other.elements.keys())
     }
 
     fn union(&mut self, other: &Effect) {
@@ -706,7 +714,7 @@ impl<'a> Program<'a> {
             }
             effect.locals.clear();
             self.relevance.trim(&mut effect);
-            if self.summaries.get(&key) == Some(&effect) {
+            if self.summaries.get(&key).is_some_and(|old| old.same_shape(&effect)) {
                 continue;
             }
             self.summaries.insert(key, effect);
