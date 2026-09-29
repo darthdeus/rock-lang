@@ -44,6 +44,9 @@ impl Builder<'_> {
     /// link under the storage rule stopped at the first FFI-clean link and read a
     /// `"m.v"` key nothing writes; matching every link under the spliced rule
     /// would compose a dotted key on that cdata local.
+    ///
+    /// A plain value child of a leaf-table value links like an inline child:
+    /// that parent keys all its nested leaves by dotted path.
     pub(crate) fn physical_field(
         &self,
         base: Idx<Expr>,
@@ -63,6 +66,7 @@ impl Builder<'_> {
                 .struct_field_plan(sname, f2, true)?
                 .inline_child()
                 .is_none()
+                && self.leaf_table_value_child(sname, f2)?.is_none()
             {
                 break;
             }
@@ -75,6 +79,7 @@ impl Builder<'_> {
                 .struct_field_plan(s, f, false)?
                 .inline_child()
                 .is_none()
+            && self.leaf_table_value_child(s, f)?.is_none()
         {
             return Ok((base, field));
         }
@@ -87,6 +92,82 @@ impl Builder<'_> {
         parts.reverse();
         let key: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
         Ok((cur, Ustr::from(&key.join("."))))
+    }
+
+    /// The leaf-table value `base` projects a field out of, seen through `ref`.
+    pub(crate) fn leaf_table_base(&self, base: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(None);
+        }
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) else {
+            return Ok(None);
+        };
+        if !self.is_value_struct(sname) {
+            return Ok(None);
+        }
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, sname)
+            .map_err(|e| self.gap_here(e.message))?;
+        Ok((storage == ValueStorage::LeafTable).then_some(sname))
+    }
+
+    /// The plain (not `nobox`) value child `field` of leaf-table value `sname`.
+    /// Its field plan is `Direct`, yet the parent keys every nested leaf by
+    /// dotted path, so the child has no key of its own: `pos` of a leaf-table
+    /// parent lives at `pos.x`/`pos.y`, exactly like an inline child.
+    pub(crate) fn leaf_table_value_child(
+        &self,
+        sname: Ustr,
+        field: Ustr,
+    ) -> Result<Option<Ustr>, CompilerError> {
+        if self.scx.values_first_class || !self.is_value_struct(sname) {
+            return Ok(None);
+        }
+        let Some(child) = self.struct_field_plan(sname, field, false)?.direct_child() else {
+            return Ok(None);
+        };
+        if !self.is_value_struct(child) {
+            return Ok(None);
+        }
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, sname)
+            .map_err(|e| self.gap_here(e.message))?;
+        Ok((storage == ValueStorage::LeafTable).then_some(child))
+    }
+
+    /// Write a whole [`Self::leaf_table_value_child`] `parent.{key} = value`:
+    /// the child's leaves go to the parent's dotted keys under `key`, in the
+    /// order the parent's `<Name>_lct` ctor keys them.
+    pub(crate) fn store_leaf_table_child(
+        &mut self,
+        parent: Idx<Inst>,
+        sname: Ustr,
+        field: Ustr,
+        key: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let shape = self.nominal_rep_shape_required(sname, false)?;
+        let Some((_, FieldShape::Nested(sub))) = shape.fields.iter().find(|(f, _)| *f == field) else {
+            return Err(self.gap_here(format!("leaf-table value `{sname}` has no nested field `{field}`")));
+        };
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves_bundle_for_shape(&repr, sub)?;
+        let keys = super::shape::leaf_names(sub, key.as_str(), ".");
+        if keys.len() != leaves.len() {
+            return Err(self.gap_here(format!(
+                "`{sname}.{field}` has {} leaf keys but the value produced {} leaves",
+                keys.len(),
+                leaves.len()
+            )));
+        }
+        for (k, v) in keys.into_iter().zip(leaves) {
+            self.emit_cur(Inst::StoreField { base: parent, field: Ustr::from(&k), value: v });
+        }
+        Ok(())
     }
 
     /// Re-materialize an embedded field `parent.{prefix}` from its physical

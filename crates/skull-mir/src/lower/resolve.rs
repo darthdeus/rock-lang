@@ -376,20 +376,10 @@ impl Builder<'_> {
                 // Split it back into leaves and project the rebuilt Group; the
                 // leaves nothing reads die in DCE.
                 if let ValueRepr::Scalar(v) = br {
-                    if let Some(sname) = self.value_struct_name_of(base) {
-                        let storage = self
-                            .scx
-                            .rep_arena()
-                            .nominal_value_storage_required(self.ws, self.scx.target, sname)
-                            .map_err(|e| self.gap_here(e.message))?;
-                        if storage == ValueStorage::LeafTable {
-                            br = self.boxed_value_copy_repr(v, sname)?;
-                        } else {
-                            br = ValueRepr::Scalar(v);
-                        }
-                    } else {
-                        br = ValueRepr::Scalar(v);
-                    }
+                    br = match self.leaf_table_base(base)? {
+                        Some(sname) => self.boxed_value_copy_repr(v, sname)?,
+                        None => ValueRepr::Scalar(v),
+                    };
                 }
                 if let ValueRepr::Group { name, parts, .. } = &br {
                     if let Some(i) = self.field_index(*name, field) {

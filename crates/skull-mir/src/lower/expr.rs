@@ -985,6 +985,11 @@ impl Builder<'_> {
                 // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
+                if let Some(sname) = self.leaf_table_base(base)?
+                    && self.leaf_table_value_child(sname, field)?.is_some()
+                {
+                    return self.store_leaf_table_child(b, sname, field, key, value);
+                }
                 let spliced_embed = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                         if key != field && self.swizzle_of(base, field).is_none() =>
