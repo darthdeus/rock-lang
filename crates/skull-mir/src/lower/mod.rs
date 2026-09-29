@@ -1911,6 +1911,9 @@ fn validate_concrete_type_tables(
         }
         visit(ws, inf, tables, label, *ty, &mut seen)?;
     }
+    for ty in inf.fn_field_call_types.values() {
+        visit(ws, inf, tables, label, *ty, &mut seen)?;
+    }
     for ty in declared_types {
         visit(ws, inf, tables, label, ty, &mut seen)?;
     }

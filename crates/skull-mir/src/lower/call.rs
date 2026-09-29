@@ -555,11 +555,22 @@ impl Builder<'_> {
             .iter()
             .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
         if let Some(field) = self.fn_field_of_call(e) {
-            let arg_vals: Vec<Idx<Inst>> =
-                arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-            let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field });
-            let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec())?;
-            return Ok(ValueRepr::Scalar(v));
+            let Some((&receiver_arg, call_args)) = arg_idxs.split_first() else {
+                return Err(self.gap_here("fn-field call has no receiver"));
+            };
+            let receiver = self.lower_expr(receiver_arg)?;
+            let fieldv = self.emit_cur(Inst::Field { base: receiver, field });
+            let field_ty = self
+                .inf
+                .and_then(|inf| inf.fn_field_call_types.get(&e))
+                .copied()
+                .ok_or_else(|| {
+                    self.gap_here("fn-field call is missing its resolved function type")
+                })?;
+            let abi = self.fn_value_rep_plan(field_ty)?.ok_or_else(|| {
+                self.gap_here("fn-field call has no concrete function ABI plan")
+            })?;
+            return self.indirect_call_by_plan(abi, fieldv, call_args);
         }
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at

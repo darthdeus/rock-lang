@@ -1412,6 +1412,9 @@ fn concrete_ty_types(
     for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
         collect_type_nodes(ws, inf, *ty, &mut nodes);
     }
+    for ty in inf.fn_field_call_types.values() {
+        collect_type_nodes(ws, inf, *ty, &mut nodes);
+    }
     for ty in declared_types {
         collect_type_nodes(ws, inf, ty, &mut nodes);
     }
@@ -1934,9 +1937,12 @@ fn prepare_instance(
             .iter()
             .map(|(_, ty)| *ty)
             .chain(inf.binding_types.iter().map(|(_, ty)| *ty))
+            .chain(inf.fn_field_call_types.values().copied())
             .collect();
         (
-            inf.expr_types.iter().count() + inf.binding_types.iter().count(),
+            inf.expr_types.iter().count()
+                + inf.binding_types.iter().count()
+                + inf.fn_field_call_types.len(),
             tyids.len(),
         )
     } else {

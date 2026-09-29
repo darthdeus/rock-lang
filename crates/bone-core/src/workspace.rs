@@ -581,6 +581,10 @@ pub struct BodyInference {
     /// receiver's fn-typed field `f` instead of a function, keyed by the call
     /// expr. skull lowers exactly these as indirect calls through the field.
     pub fn_field_calls: FxHashMap<Idx<Expr>, Ustr>,
+    /// The resolved function type of each call above. Skull uses this same
+    /// type-derived ABI plan as other function-value calls; the return type
+    /// alone cannot describe flattened arguments or opaque boundaries.
+    pub fn_field_call_types: FxHashMap<Idx<Expr>, TyId>,
     /// Calls of bounded fns: the conformance-resolution tree built at the call
     /// site, keyed by the call expr. Tells skull how to substitute the
     /// placeholder bound-calls inside that callee when it is inlined here.

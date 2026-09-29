@@ -1185,12 +1185,18 @@ impl Builder<'_> {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
             let fieldv = self.emit_cur(Inst::Field { base: recv, field });
-            let mut argv = Vec::new();
-            for a in args {
-                argv.push(self.lower_expr(a)?);
-            }
-            let shape = self.peeled_tuple_shape(e)?;
-            ValueRepr::Scalar(self.emit_call_value_n(shape, fieldv, argv)?)
+            let call_args: Vec<Idx<Expr>> = args.into_iter().collect();
+            let field_ty = self
+                .inf
+                .and_then(|inf| inf.fn_field_call_types.get(&e))
+                .copied()
+                .ok_or_else(|| {
+                    self.gap_here("fn-field call is missing its resolved function type")
+                })?;
+            let abi = self.fn_value_rep_plan(field_ty)?.ok_or_else(|| {
+                self.gap_here("fn-field call has no concrete function ABI plan")
+            })?;
+            self.indirect_call_by_plan(abi, fieldv, &call_args)?
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             // The whole call -- both ABIs, the delivery key, the bound tree, the

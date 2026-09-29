@@ -201,6 +201,8 @@ mod wide_value_abi;
 mod wide_value_slot_budget;
 #[path = "nobox_fn_value_nullable_return_sentinel.rs"]
 mod nobox_fn_value_nullable_return_sentinel;
+#[path = "nobox_fn_value_nobox_return.rs"]
+mod nobox_fn_value_nobox_return;
 #[path = "nobox_generic_return_boundary_sentinel.rs"]
 mod nobox_generic_return_boundary_sentinel;
 #[path = "nobox_global_accessor_shape.rs"]
