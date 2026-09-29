@@ -74,6 +74,7 @@ fn content_revision(catalog: &Path) -> String {
     let out = Command::new("python3")
         .arg(script)
         .arg(catalog)
+        .arg("prop_kits.json")
         .output()
         .expect("run content revision helper");
     assert!(
@@ -211,6 +212,13 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         "package catalog includes official:crypt-depths");
     assert!(packaged_root.join("magic_trials.json").is_file(),
         "packaged Magic Trials catalog is missing");
+    let packaged_kits = packaged_root.join("prop_kits.json");
+    assert!(packaged_kits.is_file(), "packaged prop kit catalog is missing");
+    assert_eq!(
+        std::fs::read(&packaged_kits).unwrap(),
+        std::fs::read(repo_root().join("mag/prop_kits.json")).unwrap(),
+        "packaged prop kit catalog bytes must match the source"
+    );
     let packaged_revision = manifest["build_vars"]["CONTENT_REV"]["value"]
         .as_str()
         .expect("CONTENT_REV value");
@@ -230,6 +238,8 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let fixture_catalog = fixture_root.join("levels/index.json");
     std::fs::create_dir_all(fixture_catalog.parent().unwrap()).unwrap();
     std::fs::copy(&catalog, &fixture_catalog).unwrap();
+    let fixture_kits = fixture_root.join("prop_kits.json");
+    std::fs::copy(&packaged_kits, &fixture_kits).unwrap();
     let mut depth_path = None;
     for entry in levels {
         let relative = entry["path"].as_str().unwrap();
@@ -260,6 +270,16 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         content_revision(&fixture_catalog),
         revision_before_mutations,
         "CONTENT_REV must change when index.json changes"
+    );
+    std::fs::write(&fixture_catalog, catalog_bytes).unwrap();
+    let kits_bytes = std::fs::read(&fixture_kits).unwrap();
+    let mut changed_kits = kits_bytes.clone();
+    changed_kits.extend_from_slice(b"\n");
+    std::fs::write(&fixture_kits, changed_kits).unwrap();
+    assert_ne!(
+        content_revision(&fixture_catalog),
+        revision_before_mutations,
+        "CONTENT_REV must change when prop_kits.json changes"
     );
 
     let level = packaged_root.join("levels/crypt.json");
