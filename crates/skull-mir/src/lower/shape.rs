@@ -784,6 +784,48 @@ pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<V
     Some(out)
 }
 
+/// Whether a Lua value of `ty` holds no mutable heap storage: every leaf is a
+/// scalar, a string or a payload-free enum, through nullables and non-generic
+/// nobox value structs. Such a value is already its own copy.
+pub(crate) fn lua_value_is_immutable(ws: &Workspace, ty: &MonoTy) -> bool {
+    match ty {
+        MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String => true,
+        MonoTy::Nullable(inner) => lua_value_is_immutable(ws, inner),
+        MonoTy::App { ctor: MonoCtor::Nominal(name), params } if params.is_empty() => {
+            lua_nominal_is_immutable(ws, *name, &mut Vec::new())
+        }
+        _ => false,
+    }
+}
+
+fn lua_nominal_is_immutable(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> bool {
+    if payload_free_enum_variants(ws, name).is_some() {
+        return true;
+    }
+    let Some(sid) = ws.struct_by_name.get(&name) else { return false };
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !sd.is_value || !sd.is_nobox || !sd.generics.is_empty() || visiting.contains(&name) {
+        return false;
+    }
+    visiting.push(name);
+    let immutable = sd.fields.iter().all(|field| lua_decl_is_immutable(ws, field.ty, visiting));
+    visiting.pop();
+    immutable
+}
+
+fn lua_decl_is_immutable(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> bool {
+    match static_ty(ws, ty) {
+        Some(TypeExpr::Builtin(
+            BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String,
+        )) => true,
+        Some(TypeExpr::Nullable(inner)) => lua_decl_is_immutable(ws, ty.with_idx(inner), visiting),
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), params }) if params.is_empty() => {
+            lua_nominal_is_immutable(ws, child, visiting)
+        }
+        _ => false,
+    }
+}
+
 /// `Some(ordinal)` iff `name` is a payload-free enum and `variant` is one of its
 /// variants — the variant's declaration-order index, which IS its runtime `int`
 /// value. `None` for a mixed/payload enum (those keep the table representation).

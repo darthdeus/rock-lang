@@ -19,6 +19,8 @@ mod bounded_lambda_inline;
 mod bounded_standalone_emission;
 #[path = "capture_free_hoist.rs"]
 mod capture_free_hoist;
+#[path = "clone_into_immutable.rs"]
+mod clone_into_immutable;
 #[path = "closure_snapshot.rs"]
 mod closure_snapshot;
 #[path = "code_identity_artifact.rs"]

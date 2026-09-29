@@ -334,6 +334,31 @@ impl Builder<'_> {
                 }
             }
         }
+        // On Lua a value with no mutable heap storage is already the owner's
+        // copy, so `clone_into` is its argument; the inline body allocated a
+        // `seen` table per call even for a string. C keeps the call: its
+        // strings are bytes the destination owner must own.
+        if let Callee::Unresolved { name, .. } = callee {
+            if name.as_str() == "clone_into"
+                && self.scx.target() == bone_semantic::hir::FnBackend::Lua
+            {
+                if let [value, storage] = arg_idxs[..] {
+                    let positional = arg_idxs.iter().all(|a| {
+                        !self.body.arg_names.contains_key(a) && !self.body.spread_args.contains(a)
+                    });
+                    if positional
+                        && self.resolves_to_inline_builtin(e, name)
+                        && self
+                            .concrete_expr_ty(value)
+                            .is_some_and(|ty| super::shape::lua_value_is_immutable(self.ws, &ty))
+                    {
+                        let copy = self.lower_expr_repr(value)?;
+                        self.lower_expr(storage)?;
+                        return Ok(copy.into_value());
+                    }
+                }
+            }
+        }
         // Scalar arithmetic: rock desugars `+ - * / %` to `__op_*` calls; turn
         // them back into native typed ops when both operands are scalars.
         // (Non-scalar `__op_*` falls through to a real overload Call below.)
