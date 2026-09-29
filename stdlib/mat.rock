@@ -1,5 +1,5 @@
-// Mat4: 4x4 matrix, stored as 4 Vec4 columns (column-major float[16] in memory,
-// byte-identical to what GL wants -- no transpose on upload). Element (row i,
+// Mat4: 4x4 matrix, stored as 4 Vec4 columns (column-major double[16] in memory;
+// the GL upload packs it to float[16], no transpose). Element (row i,
 // col j) is c{j}[i]. Design + layout decision: docs/mat-design.md.
 
 value Mat4 {
