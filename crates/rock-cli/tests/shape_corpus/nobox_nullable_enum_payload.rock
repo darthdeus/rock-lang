@@ -6,17 +6,26 @@
 //
 // Same root cause as the struct-field context (no `Nullable` arm), different
 // constructor -- so a fix to `value_shape_rec` alone leaves this standing.
+//
+// The enum must ESCAPE, as in its control: SROA splits a local nullable
+// payload into leaves, so a local probe never reaches the enum box.
 
 nobox value P { x: int, y: int }
 enum E { Has(P?), Nope }
 
+global G: E = E::Nope
+
 fn seed(n: int) -> int { return n }
+
+fn show(e: E) -> string {
+    match e {
+        E::Has(p) => return "{p?.x} {p?.y}",
+        E::Nope => return "nope",
+    }
+}
 
 @test(output = "1 2")
 fn probe_nullable_nobox_enum_payload() {
-    let e = E::Has(P { x: seed(1), y: 2 })
-    match e {
-        E::Has(p) => print("{p?.x} {p?.y}"),
-        E::Nope => print("nope"),
-    }
+    G = E::Has(P { x: seed(1), y: 2 })
+    print(show(G))
 }

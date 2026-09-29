@@ -868,6 +868,8 @@ enum FieldSrc {
     /// Leaf-wise copy from another family's field cell (a value-struct alias
     /// member, see `copy_alias`) -- materializes a `Load` at the store site.
     CellLoad(Idx<Cell>),
+    /// A nullable value cell's presence leaf on a ctor store.
+    ConstTrue,
 }
 
 /// If `inst` is a scalarizable aggregate ctor, its identity + logical field list.
@@ -1253,6 +1255,10 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
         }
     }
     let mut enum_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
+    // A nullable value cell (a `V?` read joined with `nil`, as `if let` and an
+    // inlined `unwrap()` produce) is tested against nil before its fields are
+    // read. The split cell answers that test from a presence leaf.
+    let mut value_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             value_operands(&func.insts[i], &mut |op| {
@@ -1268,6 +1274,17 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         // An enum positional payload read: `v[index+1]`, named `_<index>`.
                         Inst::TupleIndex { base, index } => {
                             *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
+                        }
+                        Inst::Eq(a, b) | Inst::NotEq(a, b)
+                            if matches!(cand[rep[raw(c) as usize]], Some(StructId::Value(_))) =>
+                        {
+                            let other = if *a == op { *b } else { *a };
+                            let is_nil = (*a == op) != (*b == op)
+                                && matches!(func.insts[other], Inst::Const(Lit::Nil));
+                            if is_nil {
+                                value_nil_tests.push((i, op, c));
+                            }
+                            is_nil
                         }
                         Inst::Eq(a, b)
                             if matches!(cand[rep[raw(c) as usize]], Some(StructId::Enum(_))) =>
@@ -1351,6 +1368,29 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
         }
     }
 
+    // A family whose nullable value is nil-tested carries a presence leaf,
+    // written by every store: a constant on a ctor, nil on a nil store. Copy
+    // members read the root's leaves, so the whole family gets it.
+    let present_field = ustr::Ustr::from("__present");
+    let mut presence_roots: HashSet<usize> = HashSet::default();
+    for (_, _, c) in &value_nil_tests {
+        let k = raw(*c) as usize;
+        let root = copy_alias[k].map_or(rep[k], |r| raw(r) as usize);
+        presence_roots.insert(root);
+    }
+    for k in 0..nc {
+        let root = copy_alias[k].map_or(rep[k], |r| raw(r) as usize);
+        if presence_roots.contains(&root) {
+            if let Some(fields) = cand_fields[k].as_mut() {
+                fields.insert(present_field);
+            }
+        }
+    }
+    let needs_presence = |c: Idx<Cell>| {
+        let k = raw(c) as usize;
+        k < nc && presence_roots.contains(&copy_alias[k].map_or(rep[k], |r| raw(r) as usize))
+    };
+
     // `k < nc` guards the field cells `get_field_cell` allocates during the
     // rewrite (a `StoreField`->`Store` rewrite emits a `Store` to a fresh field
     // cell that the later `store_expansions` scan sees): they are never candidates
@@ -1407,6 +1447,24 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 }
             }
             _ => unreachable!("recorded enum nil test changed instruction kind"),
+        }
+        nil_test_loads.insert(test, present);
+    }
+    for (test, old, c) in value_nil_tests {
+        if !is_cand(c) {
+            continue;
+        }
+        let present_cell = get_field_cell(func, to_rep(c), present_field);
+        let present = func.alloc_inst(Inst::Load(present_cell));
+        match &mut func.insts[test] {
+            Inst::Eq(a, b) | Inst::NotEq(a, b) => {
+                if *a == old {
+                    *a = present;
+                } else if *b == old {
+                    *b = present;
+                }
+            }
+            _ => unreachable!("recorded value nil test changed instruction kind"),
         }
         nil_test_loads.insert(test, present);
     }
@@ -1543,8 +1601,14 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         fs.into_iter().map(|f| (f, FieldSrc::CellLoad(root))).collect(),
                     )));
                 }
-                Ok(ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
-                    .map(|(_, fields)| (i, *cell, fields)))
+                Ok(ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize]).map(
+                    |(_, mut fields)| {
+                        if needs_presence(*cell) {
+                            fields.push((present_field, FieldSrc::ConstTrue));
+                        }
+                        (i, *cell, fields)
+                    },
+                ))
             }
             _ => Ok(None),
             }
@@ -1609,6 +1673,11 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 // or it floats free of any block and regalloc/codegen never emit it.
                 FieldSrc::ConstStr(s) => {
                     let cv = func.alloc_inst(Inst::Const(Lit::Str(s)));
+                    news.push(cv);
+                    cv
+                }
+                FieldSrc::ConstTrue => {
+                    let cv = func.alloc_inst(Inst::Const(Lit::Bool(true)));
                     news.push(cv);
                     cv
                 }

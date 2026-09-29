@@ -225,6 +225,8 @@ mod nobox_tuple_option_presence_sentinel;
 mod nobox_values;
 #[path = "nullable_generic_binding_sroa.rs"]
 mod nullable_generic_binding_sroa;
+#[path = "nullable_value_join_sroa.rs"]
+mod nullable_value_join_sroa;
 #[path = "nullable_value_in_tuple_sentinel.rs"]
 mod nullable_value_in_tuple_sentinel;
 #[path = "plain_struct_scalarize.rs"]
