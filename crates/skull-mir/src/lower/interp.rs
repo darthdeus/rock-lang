@@ -114,6 +114,11 @@ impl Builder<'_> {
             "cannot format this value: {reason}; the structural formatter prints scalars, \
              strings, handles, enums and value records composed of those"
         );
+        self.error_at_hole(msg)
+    }
+
+    /// `cur_expr` is the hole while it lowers (`with_site_expr`).
+    fn error_at_hole(&self, msg: String) -> CompilerError {
         match self.cur_expr {
             Some(e) => CompilerError::new_with_label(self.body.expr_spans[e], msg),
             None => CompilerError::new_no_location(msg),
@@ -225,9 +230,9 @@ impl Builder<'_> {
                 self.render_fmt(&tree, path, ValueRepr::Scalar(v))
             }
             StringifyRoute::Unprintable(reason) => Err(self.unprintable_error(reason)),
-            StringifyRoute::Unsupported => {
-                Err(gap("interpolation hole of unknown/unsupported type"))
-            }
+            StringifyRoute::Unsupported => Err(self.error_at_hole(
+                "skull-mir: lowering gap: interpolation hole of unknown/unsupported type".to_string(),
+            )),
         }
     }
 
