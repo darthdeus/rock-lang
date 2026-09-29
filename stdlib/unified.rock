@@ -1280,7 +1280,7 @@ inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
 // so it makes no layout claim and carries the contract that says so. It stays
 // spelled `T`: that is the inference edge giving `vec_new()` its element type,
 // and `any`/`any?` would sever it. See `docs/boundary-contracts.md` 2.4.
-@inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
+@relocates @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
 """
@@ -1894,7 +1894,7 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
 // representation, so a missing column route fell through to the boxed body.
 // Both callers are Map methods (`remove`, `clear`).
-@inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
+@relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -1915,7 +1915,7 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Rock name rather than the emitted symbol.
 @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
 @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
-@inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
+@relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
@@ -1938,7 +1938,7 @@ inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
 
 inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
 
-inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+@relocates inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
     table.insert(vec._data, lua_index, value)
 """
 
@@ -1948,7 +1948,7 @@ inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     return { _data = copy, len = vec.len, __ty = "Vec" }
 """
 
-inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+@relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
@@ -2437,7 +2437,7 @@ const EPSILON: float = 0.0000001
     return tostring(a) < tostring(b)
 """
 
-@nomangle inline(lua) fn __sort_map_keys<K>(keys: [K]) = """
+@relocates @nomangle inline(lua) fn __sort_map_keys<K>(keys: [K]) = """
     table.sort(keys._data, __rock_inspect_key_lt)
 """
 

@@ -972,6 +972,16 @@ impl Session {
     }
 
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
+        let result = self.update_file_bodies(path, text)?;
+        if result.tier != UpdateTier::NoChange {
+            // Whole-program: an edited callee can change an unchanged caller's
+            // verdict.
+            bone_semantic::relocation::check_relocation(&mut self.ws);
+        }
+        Ok(result)
+    }
+
+    fn update_file_bodies(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
         // Reset the work counters so callers can read EXACTLY how many bodies
         // this update re-inferred (check_module_incremental bumps it) and
         // re-lowered (the lowering passes bump it).

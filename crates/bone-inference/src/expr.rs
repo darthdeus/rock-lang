@@ -1665,7 +1665,8 @@ pub fn infer_expr(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> Result<TyId, C
     infer_expr_used(c, gamma, e, Use::Value)
 }
 
-fn type_is_vec(gamma: &mut Gamma, mut ty: TyId, span: Span) -> bool {
+/// A Vec or Map: growth, removal or a rehash can move its elements.
+fn type_is_relocatable_collection(gamma: &mut Gamma, mut ty: TyId, span: Span) -> bool {
     loop {
         ty = resolve(gamma, ty, span);
         match *gamma.get(ty) {
@@ -1680,7 +1681,7 @@ fn type_is_vec(gamma: &mut Gamma, mut ty: TyId, span: Span) -> bool {
                 ty = ty.with_idx(inner);
             }
             TypeExpr::App {
-                ctor: TypeCtor::Array,
+                ctor: TypeCtor::Array | TypeCtor::Map,
                 ..
             } => return true,
             _ => return false,
@@ -1772,7 +1773,7 @@ fn frame_ref_provenance(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> RefProve
                 .get(base)
                 .copied()
                 .or_else(|| infer_expr(c, gamma, base).ok());
-            if base_ty.is_some_and(|ty| type_is_vec(gamma, ty, span)) {
+            if base_ty.is_some_and(|ty| type_is_relocatable_collection(gamma, ty, span)) {
                 RefProvenance::Relocatable
             } else {
                 frame_ref_provenance(c, gamma, base)
@@ -1818,7 +1819,7 @@ fn reject_unstable_frame_ref(span: Span, provenance: RefProvenance) -> Result<()
     match provenance {
         RefProvenance::Relocatable => comp_error!(
             span,
-            "cannot retain a reference into relocatable Vec storage; pass the element directly to a `ref T` parameter"
+            "cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref T` parameter"
         ),
         RefProvenance::Unknown => comp_error!(
             span,

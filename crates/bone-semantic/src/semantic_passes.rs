@@ -761,6 +761,7 @@ pub fn lower_and_infer(
     let ids = lower_modules(ws, rock_modules)?;
 
     infer_modules(ws, &ids)?;
+    crate::relocation::check_relocation(ws);
 
     Ok(ids)
 }

@@ -1636,7 +1636,7 @@ fn main() {
 "#;
     let errors = main_body_error_messages(src);
     assert!(
-        errors.iter().any(|message| message.contains("relocatable Vec storage")),
+        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
         "a retained Vec-element ref would dangle when growth relocates the buffer: {errors:?}"
     );
 }
@@ -1656,7 +1656,7 @@ fn main() {
 "#;
     let errors = main_body_error_messages(src);
     assert!(
-        errors.iter().any(|message| message.contains("relocatable Vec storage")),
+        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
         "a ref-returning helper must preserve its Vec-element argument's ephemeral origin: {errors:?}"
     );
 }
@@ -1669,7 +1669,7 @@ fn main(positions: [Position]) -> ref Position { return positions[0] }
 "#;
     let errors = main_body_error_messages(src);
     assert!(
-        errors.iter().any(|message| message.contains("relocatable Vec storage")),
+        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
         "borrowing the Vec header does not pin its relocatable element buffer: {errors:?}"
     );
 }

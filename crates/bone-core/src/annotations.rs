@@ -82,7 +82,7 @@ fn validate_one(
             no_args(anno)
         }
         "pure" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
-        | "frame_ref_source" | "identity_erasure"
+        | "frame_ref_source" | "identity_erasure" | "relocates"
         | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand"
         | "uniform_values" | "scene_type_key"

@@ -139,6 +139,8 @@ mod graph_snapshot;
 
 #[path = "identity_storage_instances.rs"]
 mod identity_storage_instances;
+#[path = "relocation.rs"]
+mod relocation;
 #[path = "instance_graph.rs"]
 mod instance_graph;
 #[path = "instance_owned_emission.rs"]
