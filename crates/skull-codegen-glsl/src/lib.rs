@@ -126,9 +126,9 @@ fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 /// The tier-0 GLSL type of a nominal, or `None`.
 fn nominal_glsl_ty(n: &str) -> Option<GlslTy> {
     match n {
-        "Vec2" => Some(GlslTy::Vec2),
-        "Vec3" => Some(GlslTy::Vec3),
-        "Vec4" => Some(GlslTy::Vec4),
+        "Vec2" | "Vec2f" => Some(GlslTy::Vec2),
+        "Vec3" | "Vec3f" => Some(GlslTy::Vec3),
+        "Vec4" | "Vec4f" => Some(GlslTy::Vec4),
         "Bvec3" => Some(GlslTy::Bvec3),
         "Mat4" => Some(GlslTy::Mat4),
         "Sampler2D" => Some(GlslTy::Sampler2D),
@@ -598,7 +598,7 @@ pub fn renders_inline_instance(
             Some(GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 | GlslTy::Mat4)
         ) || matches!(
             ws.render(None, param.ty).as_str(),
-            "Vec2" | "Vec3" | "Vec4" | "Mat4"
+            "Vec2" | "Vec3" | "Vec4" | "Vec2f" | "Vec3f" | "Vec4f" | "Mat4"
         )
     })
 }
@@ -1441,9 +1441,9 @@ impl FnEmit<'_> {
             }
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => {
                 match name.as_str() {
-                "Vec2" => GlslTy::Vec2,
-                "Vec3" => GlslTy::Vec3,
-                "Vec4" => GlslTy::Vec4,
+                "Vec2" | "Vec2f" => GlslTy::Vec2,
+                "Vec3" | "Vec3f" => GlslTy::Vec3,
+                "Vec4" | "Vec4f" => GlslTy::Vec4,
                 "Bvec3" => GlslTy::Bvec3,
                 "Mat4" => GlslTy::Mat4,
                 _ => GlslTy::Float,
@@ -1627,9 +1627,9 @@ impl FnEmit<'_> {
                 // Bvec3 components render at a bool context; the vecN ctors take
                 // float components (int operands materialize an IntToFloat).
                 let (ctor, comp_ty) = match name.as_str() {
-                    "Vec2" => ("vec2", GlslTy::Float),
-                    "Vec3" => ("vec3", GlslTy::Float),
-                    "Vec4" => ("vec4", GlslTy::Float),
+                    "Vec2" | "Vec2f" => ("vec2", GlslTy::Float),
+                    "Vec3" | "Vec3f" => ("vec3", GlslTy::Float),
+                    "Vec4" | "Vec4f" => ("vec4", GlslTy::Float),
                     "Bvec3" => ("bvec3", GlslTy::Bool),
                     other => return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0"))),
                 };

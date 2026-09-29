@@ -22,6 +22,33 @@ nobox value Vec4 {
     w: float,
 }
 
+// 32-bit twins for layouts that need 4-byte floats (vertex and GPU structs).
+// Math stays on Vec2/Vec3/Vec4; convert at the layout boundary.
+nobox value Vec2f {
+    x: f32,
+    y: f32,
+}
+
+nobox value Vec3f {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+nobox value Vec4f {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+}
+
+@pure fn Vec2.to_f32(v) -> Vec2f { return Vec2f { x: v.x, y: v.y } }
+@pure fn Vec3.to_f32(v) -> Vec3f { return Vec3f { x: v.x, y: v.y, z: v.z } }
+@pure fn Vec4.to_f32(v) -> Vec4f { return Vec4f { x: v.x, y: v.y, z: v.z, w: v.w } }
+@pure fn Vec2f.to_f64(v) -> Vec2 { return Vec2 { x: v.x, y: v.y } }
+@pure fn Vec3f.to_f64(v) -> Vec3 { return Vec3 { x: v.x, y: v.y, z: v.z } }
+@pure fn Vec4f.to_f64(v) -> Vec4 { return Vec4 { x: v.x, y: v.y, z: v.z, w: v.w } }
+
 @pure operator +(a: Vec2, b: Vec2) -> Vec2 {
     return Vec2 { x: a.x + b.x, y: a.y + b.y }
 }

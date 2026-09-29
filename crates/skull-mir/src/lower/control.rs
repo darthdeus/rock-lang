@@ -210,7 +210,6 @@ impl Builder<'_> {
                     && matches!(
                         (self.dispatch().value_struct_name(lhs), self.dispatch().value_struct_name(rhs)),
                         (Some(ln), Some(rn)) if ln == rn
-                            && crate::lower::value_leaves_compare_exactly(self.ws, ln)
                     );
                 if same_value {
                     let lhs_repr = self.lower_expr_repr(lhs)?.into_value();

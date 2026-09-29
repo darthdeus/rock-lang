@@ -2922,9 +2922,9 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
             ctor: TypeCtor::Nominal(name),
             ..
         } => match declared_name(name.as_str()) {
-            "Vec2" => Some(ValueKind::Vec2),
-            "Vec3" => Some(ValueKind::Vec3),
-            "Vec4" => Some(ValueKind::Vec4),
+            "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+            "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+            "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
             "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
@@ -2955,9 +2955,9 @@ fn value_kind_for_instance_type(
             ctor: skull_mir::monoty::MonoCtor::Nominal(name),
             ..
         } => match declared_name(name.as_str()) {
-            "Vec2" => Some(ValueKind::Vec2),
-            "Vec3" => Some(ValueKind::Vec3),
-            "Vec4" => Some(ValueKind::Vec4),
+            "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+            "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+            "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
             "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
@@ -5594,9 +5594,9 @@ fn struct_field_kind_by_name(ws: &Workspace, name: Ustr, field: Ustr) -> Option<
 
 fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
     match declared_name(name.as_str()) {
-        "Vec2" => Some(ValueKind::Vec2),
-        "Vec3" => Some(ValueKind::Vec3),
-        "Vec4" => Some(ValueKind::Vec4),
+        "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+        "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+        "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
         "Bvec3" => Some(ValueKind::BVec3),
         "Mat4" => Some(ValueKind::Mat4),
         _ => Some(ValueKind::Struct(name)),
