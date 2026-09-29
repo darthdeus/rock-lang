@@ -733,9 +733,19 @@ impl CommandContext {
             return Ok(());
         }
         if self.args.command == CliCommand::Fix {
-            let usage = "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]";
+            let usage = "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]\n       rock fix --across-yield <file>... [--check|--apply]";
+            if self.args.across_yield {
+                if self.args.files.is_empty() {
+                    anyhow::bail!("{usage}");
+                }
+                let code = crate::across_yield_fix::run(&self.args.files, self.args.apply)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
             if !self.args.imports {
-                anyhow::bail!("rock fix: name the fix to run (`--imports` is the only one)\n{usage}");
+                anyhow::bail!("rock fix: name the fix to run (`--imports` or `--across-yield`)\n{usage}");
             }
             let format = match self.args.perf_format.as_str() {
                 "pretty" => crate::modules_audit::Format::Pretty,

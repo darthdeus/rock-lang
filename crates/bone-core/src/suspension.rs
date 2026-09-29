@@ -11,6 +11,18 @@ pub fn uses_after_suspension(
     body: &Body,
     policy: &impl SuspensionPolicy,
 ) -> Vec<Idx<Expr>> {
+    suspension_crossings(body, policy).into_iter().map(|crossing| crossing.at).collect()
+}
+
+/// A use of frame data after a suspension, with the last suspension before
+/// it on each path that reaches it (`rock fix --across-yield` rebinds after
+/// each of them).
+pub struct Crossing {
+    pub at: Idx<Expr>,
+    pub suspensions: Vec<Idx<Expr>>,
+}
+
+pub fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Crossing> {
     let Some(root) = body.root else { return Vec::new() };
     if !body
         .expr_arena
@@ -29,34 +41,54 @@ pub fn uses_after_suspension(
     let mut walk = Walk {
         body,
         policy,
-        reported: FxHashSet::default(),
+        reported: FxHashMap::default(),
         loops: Vec::new(),
         unwound: Flow::default(),
     };
     walk.expr(root, &mut flow);
-    let mut found: Vec<_> = walk.reported.into_iter().collect();
-    found.sort_by_key(|e| body.expr_spans[*e].offset_range);
+    let mut found: Vec<_> = walk
+        .reported
+        .into_iter()
+        .map(|(at, suspensions)| {
+            let mut suspensions: Vec<_> = suspensions.into_iter().collect();
+            suspensions.sort_by_key(|e| body.expr_spans[*e].offset_range);
+            Crossing { at, suspensions }
+        })
+        .collect();
+    found.sort_by_key(|c| body.expr_spans[c.at].offset_range);
     found
 }
 
 #[derive(Clone, Default)]
 struct Flow {
     live: FxHashSet<Idx<BindingInfo>>,
-    crossed: FxHashSet<Idx<BindingInfo>>,
+    /// Each crossed binding with the last suspension it was held across on
+    /// each path merged here.
+    crossed: FxHashMap<Idx<BindingInfo>, FxHashSet<Idx<Expr>>>,
 }
 
 impl Flow {
-    fn suspend(&mut self) {
-        self.crossed.extend(self.live.drain());
+    /// A suspension becomes the last one on this path for every binding it
+    /// holds, live or already crossed.
+    fn suspend(&mut self, at: Idx<Expr>) {
+        for suspensions in self.crossed.values_mut() {
+            suspensions.clear();
+            suspensions.insert(at);
+        }
+        for binding in self.live.drain() {
+            self.crossed.insert(binding, FxHashSet::from_iter([at]));
+        }
     }
 
     fn merge(&mut self, other: Flow) {
         self.live.extend(other.live);
-        self.crossed.extend(other.crossed);
+        for (binding, suspensions) in other.crossed {
+            self.crossed.entry(binding).or_default().extend(suspensions);
+        }
     }
 
     fn size(&self) -> usize {
-        self.live.len() + self.crossed.len()
+        self.live.len() + self.crossed.values().map(|s| s.len()).sum::<usize>()
     }
 
     fn rebind(&mut self, binding: Idx<BindingInfo>, live: bool) {
@@ -71,7 +103,7 @@ impl Flow {
 struct Walk<'a, P> {
     body: &'a Body,
     policy: &'a P,
-    reported: FxHashSet<Idx<Expr>>,
+    reported: FxHashMap<Idx<Expr>, FxHashSet<Idx<Expr>>>,
     /// Flows leaving each enclosing loop by `break` and by `continue`.
     loops: Vec<LoopExits>,
     /// Flows that left a block early; its defers still run on them.
@@ -91,6 +123,12 @@ enum Exit {
 }
 
 impl<P: SuspensionPolicy> Walk<'_, P> {
+    fn report(&mut self, at: Idx<Expr>, binding: Idx<BindingInfo>, flow: &Flow) {
+        if let Some(suspensions) = flow.crossed.get(&binding) {
+            self.reported.entry(at).or_default().extend(suspensions.iter().copied());
+        }
+    }
+
     fn bind(&self, binding: Idx<BindingInfo>, value: Option<Idx<Expr>>, flow: &mut Flow) {
         flow.rebind(binding, self.policy.binding_holds_frame_data(binding, value));
     }
@@ -200,20 +238,16 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
 
     fn expr(&mut self, expr: Idx<Expr>, flow: &mut Flow) {
         match self.body.expr_arena[expr] {
-            Expr::Var(binding) => {
-                if flow.crossed.contains(&binding) {
-                    self.reported.insert(expr);
-                }
-            }
+            Expr::Var(binding) => self.report(expr, binding, flow),
             Expr::Yield(value) => {
                 if let Some(value) = value {
                     self.expr(value, flow);
                 }
-                flow.suspend();
+                flow.suspend(expr);
             }
             Expr::YieldDelegate(value) => {
                 self.expr(value, flow);
-                flow.suspend();
+                flow.suspend(expr);
             }
             Expr::Lambda { .. } => {}
             Expr::Block { statements, tail } => {
@@ -286,9 +320,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                     self.expr(value, flow);
                 }
                 if let Callee::Local(binding) = callee {
-                    if flow.crossed.contains(&binding) {
-                        self.reported.insert(expr);
-                    }
+                    self.report(expr, binding, flow);
                 }
                 for arg in args {
                     self.expr(arg, flow);

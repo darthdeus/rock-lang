@@ -88,6 +88,7 @@ pub mod unified_compile;
 mod modules_analysis;
 mod modules_audit;
 mod modules_fix;
+mod across_yield_fix;
 mod modules_migrate;
 mod watch;
 
@@ -351,7 +352,8 @@ pub enum CliCommand {
     Modules,
     /// `rock fix --imports <package|file> [--check|--apply]` -- add the
     /// imports a modules-v1 fragment's unresolved names need (spec 15.3).
-    /// See `modules_fix::run`.
+    /// See `modules_fix::run`. `rock fix --across-yield <files>` -- see
+    /// `across_yield_fix::run`.
     Fix,
 }
 
@@ -794,8 +796,11 @@ pub struct Args {
     /// `rock modules migrate --consumer <dir>` (repeatable): the consumer set
     /// whose references decide the package's exports (spec 15.2).
     pub consumer: Vec<String>,
-    /// `rock fix --imports`: the fix to run (the only one so far).
+    /// `rock fix --imports`: add missing `use` items.
     pub imports: bool,
+    /// `rock fix --across-yield`: rewrite sim identity borrows held across a
+    /// suspension (`across_yield_fix::run`).
+    pub across_yield: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
     /// (`libs/chess-core`) needs the repo root passed explicitly.
@@ -988,6 +993,8 @@ impl Args {
                 .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
             .arg(Arg::new("imports").long("imports").action(ArgAction::SetTrue)
                 .help("For `rock fix`: add the `use` items a modules-v1 fragment's unresolved names need, when one accessible candidate exists (plans by default; --apply writes)."))
+            .arg(Arg::new("across-yield").long("across-yield").action(ArgAction::SetTrue)
+                .help("For `rock fix`: rewrite MAG sims' identity borrows held across a suspension to re-resolve from the handle they came from (plans by default; --apply writes)."))
             .arg(Arg::new("consumers").long("consumers")
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
@@ -1094,6 +1101,7 @@ impl Args {
             apply: m.get_flag("apply"),
             consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
             imports: m.get_flag("imports"),
+            across_yield: m.get_flag("across-yield"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is

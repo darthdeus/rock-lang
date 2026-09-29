@@ -20,6 +20,8 @@ mod modules_audit;
 mod modules_emit;
 #[path = "modules_migrate.rs"]
 mod modules_migrate;
+#[path = "across_yield_fix.rs"]
+mod across_yield_fix;
 #[path = "modules_fix.rs"]
 mod modules_fix;
 #[path = "formatting_modules.rs"]

@@ -34,11 +34,17 @@ struct Census {
     sites: BTreeMap<(String, IdentityStorageKind), BTreeSet<(String, usize, String)>>,
     /// Inputs that did not type-check for a reason other than identity storage.
     failed: Vec<(String, String)>,
+    /// (file, line, kind, identity, binding) of every site, for
+    /// `ROCK_IDENTITY_CENSUS_SITES`.
+    site_rows: BTreeSet<(String, usize, IdentityStorageKind, String, String)>,
 }
 
 /// `ROCK_IDENTITY_CENSUS_BY_FILE=<kind label>` (e.g. `across-yield`) also
 /// prints that kind's counts per file and identity, which is how a migration
 /// shard checks that each file it rewrote dropped.
+/// `ROCK_IDENTITY_CENSUS_SITES=<kind label>|all` prints each site as
+/// `file<TAB>line<TAB>kind<TAB>identity<TAB>binding` (1-based line; the
+/// binding is the local, parameter, global or field the diagnostic names).
 pub fn do_identity_storage_census(root: &str) -> Result<()> {
     let census = collect(root, &IDENTITY_STORAGE_EXEMPTIONS)?;
     print!("{}", render(&census, &IDENTITY_STORAGE_EXEMPTIONS));
@@ -48,6 +54,18 @@ pub fn do_identity_storage_census(root: &str) -> Result<()> {
             .find(|kind| kind.label() == label)
             .ok_or_else(|| anyhow::anyhow!("ROCK_IDENTITY_CENSUS_BY_FILE: unknown kind `{label}`"))?;
         print!("{}", render_by_file(&census, *kind));
+    }
+    if let Ok(label) = std::env::var("ROCK_IDENTITY_CENSUS_SITES") {
+        let kind = match label.as_str() {
+            "all" => None,
+            _ => Some(
+                *IdentityStorageKind::ALL
+                    .iter()
+                    .find(|kind| kind.label() == label)
+                    .ok_or_else(|| anyhow::anyhow!("ROCK_IDENTITY_CENSUS_SITES: unknown kind `{label}`"))?,
+            ),
+        };
+        print!("{}", render_sites(&census, kind));
     }
     Ok(())
 }
@@ -99,6 +117,27 @@ fn render_by_file(census: &Census, kind: IdentityStorageKind) -> String {
         out.push_str(&format!("{count}\t{file}\t{identity}\n"));
     }
     out
+}
+
+fn render_sites(census: &Census, kind: Option<IdentityStorageKind>) -> String {
+    let mut out = String::from("\nsites (file, line, kind, identity, binding):\n");
+    for (file, line, site_kind, identity, binding) in &census.site_rows {
+        if kind.is_none_or(|k| k == *site_kind) {
+            out.push_str(&format!("{file}\t{line}\t{}\t{identity}\t{binding}\n", site_kind.label()));
+        }
+    }
+    out
+}
+
+/// The first backticked name in a site message other than its identity.
+fn site_binding(message: &str, identity: &str) -> String {
+    message
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|name| *name != identity && !name.starts_with("Entity<"))
+        .unwrap_or("-")
+        .to_string()
 }
 
 fn census_input(
@@ -154,6 +193,13 @@ fn record(root: &Path, ws: &Workspace, exemptions: &IdentityStorageExemptions, c
         census.rows.insert(row.clone(), exemption);
         let file = rel(root, Path::new(module.file.as_str()));
         for site in sites {
+            census.site_rows.insert((
+                file.clone(),
+                site.span.line_range.0 + 1,
+                site.kind,
+                site.identity.to_string(),
+                site_binding(&site.message, &site.identity),
+            ));
             census
                 .sites
                 .entry((row.clone(), site.kind))
