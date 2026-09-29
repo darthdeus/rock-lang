@@ -73,7 +73,6 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
     "mag_ai",
     "mag_content",
     "mag_encounter_worker",
-    "mag_simulation",
     "mag_world",
     "match3",
     "match3_core",
@@ -95,7 +94,7 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
 /// exempt inside an otherwise enforced package. A prefix covers the module it
 /// names and every module below it: `("p", "nav")` covers `p::nav` and
 /// `p::nav::graph`, not `p::navigation`.
-pub const IDENTITY_STORAGE_EXEMPT_MODULES: &[(&str, &str)] = &[];
+pub const IDENTITY_STORAGE_EXEMPT_MODULES: &[(&str, &str)] = &[("mag_simulation", "nav")];
 
 /// Why a module's sites are counted by the census instead of reported.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

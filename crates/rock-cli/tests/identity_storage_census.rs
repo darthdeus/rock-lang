@@ -37,11 +37,11 @@ const PINNED: &str = "\
 | idle_core | exempt | 4 | 18 | 0 | 0 | 57 | 0 | 0 | 0 | 0 | 79 |
 | idle_reference | exempt | 0 | 0 | 0 | 0 | 94 | 0 | 0 | 0 | 0 | 94 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 382 | 218 | 8 | 0 | 1404 | 69 | 206 | 5665 | 57 | 8009 |
+| mag | exempt | 382 | 218 | 8 | 0 | 1404 | 69 | 206 | 5669 | 57 | 8013 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 8 | 7 | 3 | 0 | 21 | 0 | 0 | 0 | 1 | 40 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
-| mag_simulation | exempt | 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
+| mag_simulation::nav | exempt module | 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | mag_world | exempt | 14 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 17 |
 | match3 | exempt | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 15 | 7 | 23 |
 | match3_core | exempt | 1 | 2 | 0 | 0 | 4 | 0 | 0 | 0 | 0 | 7 |
@@ -55,10 +55,15 @@ const PINNED: &str = "\
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_lab | exempt | 0 | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| unpackaged programs | exempt | 106 | 13 | 5 | 0 | 131 | 56 | 4 | 0 | 53 | 368 |
+| unpackaged programs | exempt | 108 | 13 | 5 | 0 | 131 | 56 | 4 | 0 | 53 | 370 |
 | vfxlab | exempt | 0 | 3 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 4 |
 | void | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 2 | 4 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |
+
+Exempt module sites:
+- mag_simulation::nav: mag-simulation/nav/graph.rock:279 field mag_simulation::nav::query::NavQuery
+- mag_simulation::nav: mag-simulation/nav/query.rock:130 container mag_simulation::nav::query::NavPlan
+- mag_simulation::nav: mag-simulation/nav/walker.rock:21 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
