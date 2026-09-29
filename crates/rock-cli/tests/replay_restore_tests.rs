@@ -3997,9 +3997,8 @@ fn replay_reports_its_own_costs() {
         diag["STONE_REPLAY_SAVE_MS"].as_f64().unwrap()
     );
 
-    // Keyframe BYTES are only honest where real memory was imaged. Bopt holds
-    // game buffers in sim state; a minimal game with no buffer declarations is
-    // the zero control that proves we do not invent storage.
+    // Keyframe BYTES are only honest where real memory was imaged. Compare a
+    // no-buffer game with a small live NativeBuffer fixture.
 
     let minimal_game = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -4029,26 +4028,40 @@ fn replay_reports_its_own_costs() {
         "a game with no buffer declarations must report a real zero: {minimal_diag}"
     );
 
-    let bopt_log = dir.path().join("bopt.replay").to_string_lossy().into_owned();
-    let bopt_rec = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args([
-            "frame", "bopt", "-n", "25", "--record", &bopt_log,
-            "--output", &scratch.path().to_string_lossy(),
-        ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
-        .expect("spawn bopt record");
-    assert!(bopt_rec.status.success(), "bopt record failed: {}", String::from_utf8_lossy(&bopt_rec.stderr));
-    let bopt = run_replay_dump("bopt", 30, &bopt_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
-    let bytes = bopt["__stone_diag"]["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("storage bytes");
+    let buffer_game = tempfile::tempdir().unwrap();
+    std::fs::write(
+        buffer_game.path().join("stick.toml"),
+        format!(
+            "[package]\nname = \"replay_storage_buffer\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+             [dependencies]\nstone = {{ path = \"{}\" }}\n\n\
+             [build.vars]\nGIT_SHA = \"test\"\n",
+            workspace_root().join("stone").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        buffer_game.path().join("main.rock"),
+        "global REPLAY_BUFFER: NativeBuffer<int> = native_buffer_int(16)\n\n\
+         fn main() {\n    REPLAY_BUFFER[0] = 42\n    stone_run_game(GameConfig { title: \"replay storage buffer\", width: 64, height: 64 })\n}\n",
+    )
+    .unwrap();
+    let buffer_game_s = buffer_game.path().to_string_lossy().into_owned();
+    let buffer_log = dir.path().join("buffer-storage.replay").to_string_lossy().into_owned();
+    run_record_dump(&buffer_game_s, 25, &buffer_log, &[]);
+    let buffered = run_replay_dump(
+        &buffer_game_s,
+        30,
+        &buffer_log,
+        &[("STONE_KEYFRAME_INTERVAL", "10")],
+    );
+    let bytes = buffered["__stone_diag"]["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("storage bytes");
     assert!(
         bytes > engine_floor,
-        "bopt buffer storage must exceed the zero control {engine_floor}: {}",
-        bopt["__stone_diag"]
+        "buffer fixture storage must exceed the zero control {engine_floor}: {}",
+        buffered["__stone_diag"]
     );
     println!(
-        "[replay-costs] keyframe buffer storage: zero control {engine_floor}B, bopt {bytes}B"
+        "[replay-costs] keyframe buffer storage: zero control {engine_floor}B, fixture {bytes}B"
     );
 }
 
