@@ -35,7 +35,7 @@ use skull_parser::CompilerError;
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
 use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
-use crate::monoty::{MonoTy, MonoTyId};
+use crate::monoty::{MonoCtor, MonoTy, MonoTyId};
 
 type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, Rc<MonoTy>>>;
 
@@ -338,7 +338,7 @@ pub use abi::{
 };
 
 mod struct_plan;
-pub use struct_plan::{struct_field_plan, StructFieldPlan, StructRegistryPlan};
+pub use struct_plan::{gc_table_fields, struct_field_plan, GcTableField, StructFieldPlan, StructRegistryPlan};
 
 mod coroutine;
 pub use coroutine::CoroutinePlan;
@@ -359,6 +359,8 @@ pub use dispatch::{
 mod embed;
 mod expr;
 mod flat;
+mod format;
+pub use format::{format_tree, FmtNode, FmtPayload, FmtVariant};
 mod interp;
 mod kinds;
 mod loops;
@@ -499,6 +501,11 @@ pub struct ScalarCtx {
     /// policy behind [`BackendFnAbiPlan`], which definitions and direct calls
     /// both read.
     values_first_class: bool,
+    native_flat_enums: bool,
+    /// Keep value-struct Vec elements as first-class rows. Native backends use
+    /// their concrete aggregate layout directly instead of Lua's scalar-column
+    /// storage representation.
+    row_value_containers: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
     /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
@@ -538,6 +545,8 @@ impl Clone for ScalarCtx {
             per_body: self.per_body.clone(),
             ref_counts: self.ref_counts.clone(),
             values_first_class: self.values_first_class,
+            native_flat_enums: self.native_flat_enums,
+            row_value_containers: self.row_value_containers,
             target: self.target,
             interner: std::sync::Arc::clone(&self.interner),
             rep_arena: std::sync::Arc::clone(&self.rep_arena),
@@ -577,6 +586,16 @@ impl ScalarCtx {
                     per_body.insert((module.id, *owner), set);
                 }
             }
+            // Generated `@sim` registration passes each sim as a fn value, which
+            // no body scan sees. Its reference is permanent (adding or removing
+            // `@sim` is an interface edit), so it holds one count that no body
+            // edit can release.
+            for (_, f) in module.functions.iter() {
+                if f.annotations.iter().any(|a| a.is_builtin("sim")) {
+                    *ref_counts.entry(f.name).or_insert(0) += 1;
+                    taken_by_ref.insert(f.name);
+                }
+            }
         }
         // Default target is Lua: skull-codegen-lua is the primary consumer and its
         // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
@@ -586,6 +605,8 @@ impl ScalarCtx {
             per_body,
             ref_counts,
             values_first_class: false,
+            native_flat_enums: false,
+            row_value_containers: false,
             target: bone_semantic::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
             rep_arena: std::sync::Arc::new(abi::RepArena::default()),
@@ -682,6 +703,9 @@ impl ScalarCtx {
     pub fn adopt_warmed_abi(&mut self, warmed: Self) {
         assert!(
             self.values_first_class == warmed.values_first_class
+                && self.native_flat_enums == warmed.native_flat_enums
+                && self.native_flat_enums == warmed.native_flat_enums
+                && self.row_value_containers == warmed.row_value_containers
                 && self.target == warmed.target
                 && std::sync::Arc::ptr_eq(&self.interner, &warmed.interner),
             "ABI warm context does not match the emission context"
@@ -709,6 +733,11 @@ impl ScalarCtx {
         self
     }
 
+    pub fn with_row_value_containers(mut self) -> Self {
+        self.row_value_containers = true;
+        self
+    }
+
     /// Like [`new`](Self::new) but with the scalarized value ABI disabled: value
     /// structs stay first-class single values everywhere (the GLSL backend's
     /// requirement -- a `vecN` is not scalar leaves). See [`values_first_class`].
@@ -719,6 +748,20 @@ impl ScalarCtx {
         scx.values_first_class = true;
         scx.target = bone_semantic::hir::FnBackend::Any;
         scx
+    }
+
+    /// Share this context's representation arena while selecting the
+    /// first-class value ABI for a caller that emits into the same target.
+    /// Global initializers use this for calls, while retaining their separate
+    /// scalar storage policy.
+    pub fn with_values_first_class(mut self) -> Self {
+        self.values_first_class = true;
+        self
+    }
+
+    pub fn with_native_flat_enums(mut self) -> Self {
+        self.native_flat_enums = true;
+        self
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into
@@ -775,6 +818,7 @@ struct NestedFn {
     /// (`slotted_call_args`) exactly as a top-level callee's would be.
     param_names: Vec<Ustr>,
     representation: FunctionRepPlan,
+    logical_type: MonoTy,
 }
 
 impl NestedFn {
@@ -1548,6 +1592,7 @@ fn lower_body(
     let mut b = Builder {
         ws,
         scx,
+        call_scx: scx,
         concrete_plan,
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1580,6 +1625,7 @@ fn lower_body(
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: Some(subject.clone()),
         group_binds: HashMap::new(),
+        f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
@@ -1606,10 +1652,49 @@ fn lower_body(
     Ok(finish_lower_attribution(b.f, stats))
 }
 
+/// Call a catalog factory through its owner ABI and pack its complete result.
+pub fn lower_definition_factory(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    concrete_plans: &ConcretePlans,
+    factory: &crate::instance::Instance,
+) -> Result<MirFunc, CompilerError> {
+    let concrete_plan = concrete_plans.get(factory)
+        .ok_or_else(|| gap("definition factory has no concrete body plan"))?;
+    let module = ws.module(factory.func.module);
+    let body = module.bodies.get(&BodyOwner::Function(factory.func.func))
+        .ok_or_else(|| gap("definition factory has no body"))?;
+    let abi = owner_abi_plan(ws, scx, concrete_plans, factory)?;
+    let mut f = MirFunc::new(Ustr::from("__rock_definition_materialize"));
+    f.rep_arena = Some(scx.rep_arena());
+    let parameter = f.new_cell(Some(Ustr::from("factory")));
+    f.params.push(parameter);
+    let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, None, f);
+    let callee = b.emit_cur(Inst::Load(parameter));
+    let result = b.indirect_call_by_plan(abi.representation().clone(), callee, &[])?;
+    let result = b.pack(result)?;
+    b.f.set_term(b.cur, Term::Return(vec![result]));
+    Ok(b.f)
+}
+
 /// Lower an always-emitted global from its graph-owned concrete plan.
 pub fn lower_global_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
+    name: Ustr,
+) -> Result<Option<MirFunc>, CompilerError> {
+    lower_global_with_call_context(ws, scx, scx, plan, concrete_plans, name)
+}
+
+/// Lower a global with a storage context and a possibly different call ABI
+/// context. Native C globals keep their scalarized storage while calls into
+/// ordinary C bodies use those bodies' first-class value ABI.
+pub fn lower_global_with_call_context(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    call_scx: &ScalarCtx,
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
     name: Ustr,
@@ -1623,12 +1708,13 @@ pub fn lower_global_with_plans(
     }
     let gid = Idx::from_raw(RawIdx::from_u32(*index));
     validate_always_plan(ws, scx, *module, BodyOwner::Global(gid), plan, concrete_plans)?;
-    lower_global_inner(ws, scx, *module, gid, name, plan, concrete_plans)
+    lower_global_inner(ws, scx, call_scx, *module, gid, name, plan, concrete_plans)
 }
 
 fn lower_global_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
+    call_scx: &ScalarCtx,
     mid: ModuleId,
     gid: Idx<bone_semantic::hir::GlobalDef>,
     name: Ustr,
@@ -1655,45 +1741,7 @@ fn lower_global_inner(
         },
     ));
     f.rep_arena = Some(scx.rep_arena());
-    let cur = f.entry();
-    let mut b = Builder {
-        ws,
-        scx,
-        concrete_plan,
-        concrete_plans,
-        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
-        lower_attribution: RefCell::new(LowerAttribution::default()),
-        lower_timing_enabled: lower_attribution_timing_enabled(),
-        generic_bounds: &[],
-        body,
-        inf,
-        f,
-        cur,
-        binds: HashMap::new(),
-        loop_targets: Vec::new(),
-        used_break_targets: HashSet::default(),
-        defers: Vec::new(),
-        in_defer_body: false,
-        resume_arg: None,
-        // Global-init bodies never run `inline_functions` -- box value args.
-        param_reps: Vec::new(),
-        param_plan: None,
-        ret_rep: None,
-        fn_name_span: None,
-        cur_span: None,
-        cur_expr: None,
-        cur_domain: crate::site::SiteDomain::Own,
-        cur_op: crate::site::SiteOp::DirectCall,
-        site_owner: None,
-        group_binds: HashMap::new(),
-        tuple_binds: HashMap::new(),
-        static_cells: HashMap::new(),
-        static_owner: name,
-        static_counters: HashMap::new(),
-        nested_fn_globals: HashMap::new(),
-        nested_fn_counters: HashMap::new(),
-        presence_only: None,
-    };
+    let mut b = Builder::generated(ws, scx, call_scx, concrete_plan, concrete_plans, body, inf, f);
     let global_plan = GlobalPlan::for_concrete_result(
         ws,
         scx,
@@ -1911,6 +1959,9 @@ fn validate_concrete_type_tables(
         }
         visit(ws, inf, tables, label, *ty, &mut seen)?;
     }
+    for ty in inf.fn_field_call_types.values() {
+        visit(ws, inf, tables, label, *ty, &mut seen)?;
+    }
     for ty in declared_types {
         visit(ws, inf, tables, label, ty, &mut seen)?;
     }
@@ -1977,7 +2028,6 @@ fn lower_decorator_inner(
         },
     ));
     f.rep_arena = Some(scx.rep_arena());
-    let cur = f.entry();
     let representation = scx
         .rep_arena()
         .boxed_function(scx.target(), concrete_plan.signature.params.len());
@@ -1987,45 +2037,9 @@ fn lower_decorator_inner(
         .signature
         .result
         .map(|_| representation.result().expect("boxed decorator result plan"));
-    let mut b = Builder {
-        ws,
-        scx,
-        concrete_plan,
-        concrete_plans,
-        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
-        lower_attribution: RefCell::new(LowerAttribution::default()),
-        lower_timing_enabled: lower_attribution_timing_enabled(),
-        generic_bounds: &[],
-        body,
-        inf,
-        f,
-        cur,
-        binds: HashMap::new(),
-        loop_targets: Vec::new(),
-        used_break_targets: HashSet::default(),
-        defers: Vec::new(),
-        in_defer_body: false,
-        resume_arg: None,
-        // Decorator bodies never run `inline_functions` -- box value args, but
-        // their declared parameters still need the owned ABI slots.
-        param_reps,
-        param_plan: None,
-        ret_rep,
-        fn_name_span: None,
-        cur_span: None,
-        cur_expr: None,
-        cur_domain: crate::site::SiteDomain::Own,
-        cur_op: crate::site::SiteOp::DirectCall,
-        site_owner: None,
-        group_binds: HashMap::new(),
-        tuple_binds: HashMap::new(),
-        static_cells: HashMap::new(),
-        static_owner: name,
-        static_counters: HashMap::new(),
-        nested_fn_globals: HashMap::new(),
-        nested_fn_counters: HashMap::new(),
-        presence_only: None,
-    };
+    let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, inf, f);
+    b.param_reps = param_reps;
+    b.ret_rep = ret_rep;
     // `target` is param 0, then the decorator's declared params.
     let tcell = b.new_binding_cell(
         target,
@@ -2045,6 +2059,7 @@ fn lower_decorator_inner(
 struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
+    call_scx: &'a ScalarCtx,
     concrete_plan: &'a ConcreteBodyPlan,
     concrete_plans: &'a ConcretePlans,
     concrete_type_cache: ConcreteTypeCache,
@@ -2139,6 +2154,10 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// Right-hand sides of assignments into an `f32` field. Every assignment
+    /// path lowers its value through one of the expression entries, which
+    /// round these, so no store path needs its own rounding.
+    f32_round_exprs: HashSet<Idx<Expr>>,
     /// The tuple twin of [`Self::group_binds`]: a NAME bound to a splatting
     /// tuple holds its slot cells, so `if let t = <nullable tuple call>` can
     /// rebuild the unboxed repr on each read of `t` instead of packing it.
@@ -2173,6 +2192,62 @@ struct Builder<'a> {
     presence_only: Option<Idx<Expr>>,
 }
 
+impl<'a> Builder<'a> {
+    fn generated(
+        ws: &'a Workspace,
+        scx: &'a ScalarCtx,
+        call_scx: &'a ScalarCtx,
+        concrete_plan: &'a ConcreteBodyPlan,
+        concrete_plans: &'a ConcretePlans,
+        body: &'a Body,
+        inf: Option<&'a BodyInference>,
+        f: MirFunc,
+    ) -> Self {
+        let cur = f.entry();
+        let static_owner = f.name;
+        Self {
+            ws,
+            scx,
+            call_scx,
+            concrete_plan,
+            concrete_plans,
+            concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
+            lower_attribution: RefCell::new(LowerAttribution::default()),
+            lower_timing_enabled: lower_attribution_timing_enabled(),
+            generic_bounds: &[],
+            body,
+            inf,
+            f,
+            cur,
+            binds: HashMap::new(),
+            loop_targets: Vec::new(),
+            used_break_targets: HashSet::default(),
+            defers: Vec::new(),
+            in_defer_body: false,
+            resume_arg: None,
+            // Generated/init bodies never run `inline_functions` -- box value args.
+            param_reps: Vec::new(),
+            param_plan: None,
+            ret_rep: None,
+            fn_name_span: None,
+            cur_span: None,
+            cur_expr: None,
+            cur_domain: crate::site::SiteDomain::Own,
+            cur_op: crate::site::SiteOp::DirectCall,
+            site_owner: None,
+            group_binds: HashMap::new(),
+            f32_round_exprs: HashSet::new(),
+            tuple_binds: HashMap::new(),
+            static_cells: HashMap::new(),
+            static_owner,
+            static_counters: HashMap::new(),
+            nested_fn_globals: HashMap::new(),
+            nested_fn_counters: HashMap::new(),
+            presence_only: None,
+        }
+    }
+}
+
 impl Builder<'_> {
     fn new_binding_cell(
         &mut self,
@@ -2193,11 +2268,23 @@ impl Builder<'_> {
     }
 
     fn param_slot(&self, index: usize) -> Result<RetSlot, CompilerError> {
-        self.param_plan
-            .as_ref()
-            .and_then(|plan| plan.representation().params().get(index))
+        if let Some(plan) = self.param_plan.as_ref() {
+            if !plan.representation().uses_scalar_abi() {
+                return Ok(RetSlot::Opaque);
+            }
+            return plan
+                .representation()
+                .params()
+                .get(index)
+                .copied()
+                .map(|id| self.rep_slot(id))
+                .ok_or_else(|| {
+                    self.gap_here(format!("parameter {index} has no representation plan"))
+                });
+        }
+        self.param_reps
+            .get(index)
             .copied()
-            .or_else(|| self.param_reps.get(index).copied())
             .map(|id| self.rep_slot(id))
             .ok_or_else(|| self.gap_here(format!("parameter {index} has no representation plan")))
     }
@@ -2235,6 +2322,29 @@ impl Builder<'_> {
         let id = self.f.emit(self.cur, inst);
         if let Some(span) = self.cur_span {
             self.f.inst_spans.insert(id, span);
+        }
+        let enum_name = match self.f.insts[id] {
+            Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } => Some(ty),
+            _ => None,
+        };
+        if let (Some(enum_name), Some(expr)) = (enum_name, self.cur_expr) {
+            if let Some(logical_ty) = self
+                .concrete_plan
+                .domain_types(&self.cur_domain)
+                .and_then(|types| types.expr_type(expr))
+            {
+                let logical = self.scx.interner().get(logical_ty);
+                let matches_owner = matches!(
+                    logical.peel_nullable().0,
+                    MonoTy::App {
+                        ctor: MonoCtor::Nominal(name),
+                        ..
+                    } if *name == enum_name
+                );
+                if matches_owner {
+                    self.f.inst_logical_types.entry(id).or_insert(logical_ty);
+                }
+            }
         }
         // THE choke point for call-site identity: every call FORM entering the
         // arena is stamped here, so a missing stamp is a property of this ONE
@@ -2412,7 +2522,7 @@ impl Builder<'_> {
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
             let slot = self.param_slot(i)?;
-            self.bind_param_slot(*pb, name, &slot);
+            self.bind_param_slot(*pb, name, &slot)?;
         }
         Ok(())
     }
@@ -2432,26 +2542,47 @@ impl Builder<'_> {
         pb: Idx<BindingInfo>,
         name: Ustr,
         slot: &RetSlot,
-    ) {
+    ) -> Result<(), CompilerError> {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
             let cell = self.new_binding_cell(pb, name, cty, Ustr::from(""));
             self.f.params.push(cell);
             self.binds.insert(raw(pb), cell);
-            return;
+            return Ok(());
         }
-        let cells: Vec<Idx<Cell>> = (0..slot.slot_count())
-            .map(|li| {
-                let c = self.new_binding_cell(
+        let cells = match slot {
+            RetSlot::Leaves(shape) => {
+                let owner = self
+                    .binding_ty(pb)
+                    .and_then(|ty| self.concrete_ty_id(ty));
+                self.new_flat_enum_cells(pb, name, shape, owner.as_deref())?.unwrap_or_else(|| {
+                    (0..slot.slot_count())
+                        .map(|li| self.new_binding_cell(
+                            pb,
+                            Ustr::from(format!("{name}__{li}").as_str()),
+                            None,
+                            Ustr::from(li.to_string().as_str()),
+                        ))
+                        .collect()
+                })
+            }
+            RetSlot::Nested(_) | RetSlot::Opaque => (0..slot.slot_count())
+                .map(|li| self.new_binding_cell(
                     pb,
                     Ustr::from(format!("{name}__{li}").as_str()),
                     None,
                     Ustr::from(li.to_string().as_str()),
-                );
-                self.f.params.push(c);
-                c
-            })
-            .collect();
+                ))
+                .collect(),
+        };
+        if cells.len() != slot.slot_count() {
+            return Err(self.gap_here(format!(
+                "parameter {name} has {} cells for {} ABI slots",
+                cells.len(),
+                slot.slot_count()
+            )));
+        }
+        self.f.params.extend(cells.iter().copied());
         match slot {
             RetSlot::Leaves(shape) => {
                 self.group_binds.insert(raw(pb), (cells, shape.clone()));
@@ -2459,8 +2590,9 @@ impl Builder<'_> {
             RetSlot::Nested(inner) => {
                 self.tuple_binds.insert(raw(pb), (cells, inner.clone()));
             }
-            RetSlot::Opaque => unreachable!("guarded by `splats`"),
+            RetSlot::Opaque => unreachable!("guarded by slot.splats"),
         }
+        Ok(())
     }
 
     /// The callee's parameter defaults that are plain scalar literals, by param
@@ -2554,15 +2686,20 @@ impl Builder<'_> {
             // A scalarized value param's omitted arg arrives as N nils — guard on
             // the FIRST leaf cell and fill all leaves from the default's leaves.
             if let Some((cells, shape)) = self.group_binds.get(&raw(pb)).cloned() {
+                for &cell in &cells {
+                    self.f.mark_default_param(cell);
+                }
                 let cur = self.emit_cur(Inst::Load(cells[0]));
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(cur, nil));
+                self.f.param_default_guards.insert(is_nil, i);
                 let then_bb = self.f.new_block();
                 let join = self.f.new_block();
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
                 self.cur = then_bb;
                 let r = self.lower_expr_repr(*def)?;
                 let leaves = self.repr_to_storage_leaves(&r, &shape, "struct default")?;
+                self.f.param_default_values.insert(i, leaves.clone());
                 for (c, v) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store { cell: *c, value: v });
                 }
@@ -2576,15 +2713,18 @@ impl Builder<'_> {
             if matches!(self.body.expr_arena[*def], Expr::Null) {
                 continue;
             }
+            self.f.mark_default_param(cell);
             let cur = self.emit_cur(Inst::Load(cell));
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let is_nil = self.emit_cur(Inst::Eq(cur, nil));
+            self.f.param_default_guards.insert(is_nil, i);
             let then_bb = self.f.new_block();
             let join = self.f.new_block();
             self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
             self.cur = then_bb;
             let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
             let dv = self.lower_expr_with_expected(*def, expected.as_deref())?;
+            self.f.param_default_values.insert(i, vec![dv]);
             self.emit_cur(Inst::Store { cell, value: dv });
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
@@ -2613,7 +2753,18 @@ impl Builder<'_> {
             if self.f.is_coroutine {
                 self.reject_nonunit_coroutine_falloff()?;
             }
-            let leaves = self.return_leaves(tail)?;
+            let leaves = if self.f.is_coroutine {
+                if let Some(tail) = tail {
+                    self.lower_stmt_expr(tail)?;
+                }
+                if !self.is_open() {
+                    self.defers.pop();
+                    return Ok(());
+                }
+                Vec::new()
+            } else {
+                self.return_leaves(tail)?
+            };
             self.run_top_frame()?; // splice this scope's defers before the return
             self.defers.pop();
             self.f.set_term(self.cur, Term::Return(leaves));
@@ -2688,6 +2839,21 @@ impl Builder<'_> {
                 self.lower_stmt_expr(e)?;
             }
             return Ok(vec![]);
+        }
+        if self
+            .concrete_plan
+            .signature
+            .result
+            .is_some_and(|result| {
+                matches!(
+                    self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering)
+                        .peel_nullable()
+                        .0,
+                    MonoTy::App { ctor: MonoCtor::Ref, .. }
+                )
+            })
+        {
+            return Ok(vec![self.lower_ref_borrow(e)?]);
         }
         if let Some(shape) = self.result_shape() {
             let is_phantom = match &self.body.expr_arena[e] {
@@ -2897,11 +3063,41 @@ impl Builder<'_> {
         slot: &RetSlot,
         a: Idx<Expr>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        if !slot.splats() {
-            return Ok(vec![self.lower_expr(a)?]);
-        }
         let r = self.lower_expr_repr(a)?;
+        if !slot.splats() {
+            return Ok(vec![self.pack_bundle(&r)?]);
+        }
         self.repr_to_slot_values_bundle(&r, slot)
+    }
+
+    fn is_ref_call_arg(&self, call: Idx<Expr>, arg: Idx<Expr>) -> bool {
+        self.inf
+            .and_then(|inf| inf.ref_call_args.get(&call))
+            .is_some_and(|args| args.contains(&arg))
+    }
+
+    pub(crate) fn lower_call_arg(
+        &mut self,
+        call: Idx<Expr>,
+        arg: Idx<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        if self.is_ref_call_arg(call, arg) {
+            self.lower_ref_borrow(arg)
+        } else {
+            self.lower_expr(arg)
+        }
+    }
+
+    pub(crate) fn arg_values_for_call_slot(
+        &mut self,
+        call: Idx<Expr>,
+        slot: &RetSlot,
+        arg: Idx<Expr>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        if self.is_ref_call_arg(call, arg) {
+            return Ok(vec![self.lower_ref_borrow(arg)?]);
+        }
+        self.arg_values_for_slot(slot, arg)
     }
 
 }
@@ -2953,6 +3149,7 @@ fn map_key_rejection_reason(
             BuiltinTy::Int
             | BuiltinTy::Uint
             | BuiltinTy::Float
+            | BuiltinTy::F32
             | BuiltinTy::Bool
             | BuiltinTy::String
             // Not key shapes, but nothing here can decide against them either.
@@ -3018,7 +3215,7 @@ fn map_key_rejection_reason(
 fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
-        .map(|sid| ws.modules[sid.module.index()].structs[sid.def].is_value)
+        .map(|sid| has_value_plan(&ws.modules[sid.module.index()].structs[sid.def]))
         .unwrap_or(false)
 }
 

@@ -260,6 +260,7 @@ function __rock_code_slot_pending_ref(key) {
 var __rock_code_slot_pending_slots = Object.create(null);
 var __rock_lifecycle_plan_pending = null;
 var __rock_definition_plan_pending = null;
+var __rock_definition_materializers_pending = null;
 var __rock_definition_plan_materializing = false;
 function __rock_code_slot_begin() {
   if (typeof __rock_state_transaction_begin !== "undefined") __rock_state_transaction_begin();
@@ -268,6 +269,7 @@ function __rock_code_slot_begin() {
   __rock_definition_plan_materializing = false;
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
+  __rock_definition_materializers_pending = null;
 }
 function __rock_code_slot_abort() {
   if (typeof __rock_state_transaction_abort !== "undefined") __rock_state_transaction_abort();
@@ -276,15 +278,17 @@ function __rock_code_slot_abort() {
   __rock_definition_plan_materializing = false;
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
+  __rock_definition_materializers_pending = null;
   if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
 }
 function __rock_lifecycle_plan_stage(plan) {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
   __rock_lifecycle_plan_pending = plan;
 }
-function __rock_definition_plan_stage(plan) {
+function __rock_definition_plan_stage(plan, materializers) {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
   __rock_definition_plan_pending = plan;
+  __rock_definition_materializers_pending = materializers;
 }
 function __rock_definition_catalog(catalog) {
   var plan = __G.__ROCK_DEFINITION_PLAN;
@@ -349,7 +353,16 @@ function __rock_definition_plan_materialize(plan) {
     if (!catalog || !catalog._data || catalog.len === undefined) return;
     for (var i = 0; i < catalog.len; i++) {
       var entry = catalog._data[i];
-      if (entry && entry.factory !== undefined) entry.definition = __rock_call(entry.factory);
+      if (entry && entry.factory !== undefined) {
+        if (typeof entry.factory === "function") {
+          // Explicit foreign factories already return one boxed result.
+          entry.definition = entry.factory();
+        } else {
+          var materialize = __rock_definition_materializers_pending && __rock_definition_materializers_pending[entry.factory.key];
+          if (typeof materialize !== "function") throw new Error("DefinitionPlan factory has no ABI-aware materializer");
+          entry.definition = materialize(entry.factory);
+        }
+      }
     }
   });
   __rock_definition_plan_materializing = false;
@@ -395,6 +408,7 @@ function __rock_code_slot_publish() {
   __rock_code_slot_pending_slots = Object.create(null);
   __rock_lifecycle_plan_pending = null;
   __rock_definition_plan_pending = null;
+  __rock_definition_materializers_pending = null;
   if (typeof __rock_state_transaction_commit !== "undefined") __rock_state_transaction_commit();
   if (wireDue !== null) __G.__ROCK_WIRE_DUE = wireDue;
 }

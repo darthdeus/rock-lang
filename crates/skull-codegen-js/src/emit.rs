@@ -3478,7 +3478,7 @@ fn assemble_program_core(
     {
         out.push_str("__rock_code_slot_begin();\n");
     }
-    let definition_stage = definition_plan_stage_js(ws, scx.interner(), &definition_plan)?;
+    let definition_stage = definition_plan_stage_js(ws, scx, &st.concrete, &definition_plan)?;
     out.push_str(&definition_stage);
     stable.push_str(&definition_stage);
     out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
@@ -5181,7 +5181,8 @@ fn code_slot_publish_js(
 
 fn definition_plan_stage_js(
     ws: &Workspace,
-    interner: &skull_mir::monoty::MonoInterner,
+    scx: &skull_mir::lower::ScalarCtx,
+    concrete: &skull_mir::concrete::ConcretePlans,
     plan: &skull_mir::definition::DefinitionPlan,
 ) -> Result<String, CompilerError> {
     if plan.catalogs.is_empty() {
@@ -5189,7 +5190,14 @@ fn definition_plan_stage_js(
     }
     let mut out = String::new();
     let mut entries_by_catalog: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    let mut materializers = BTreeMap::new();
     for entry in &plan.entries {
+        let skull_mir::code_identity::CodeIdentity::Named(factory) = &entry.identity else {
+            return Err(err("definition factory has no named identity"));
+        };
+        let mut mf = skull_mir::lower::lower_definition_factory(ws, scx, concrete, factory)?;
+        skull_transform::cleanup_with_nobox(ws, &mut mf)?;
+        materializers.insert(entry.identity.clone(), emit_fn(ws, &mf, "")?);
         entries_by_catalog.entry(entry.catalog).or_default().push(entry);
     }
     for catalog_plan in &plan.catalogs {
@@ -5222,7 +5230,7 @@ fn definition_plan_stage_js(
         )
         .unwrap();
         for entry in entries {
-            let key = entry.identity.logical_key(ws, interner);
+            let key = entry.identity.logical_key(ws, scx.interner());
             writeln!(
                 out,
                 "{{catalog: {}, key: {}, name: {}, ordinal: {}, factory: __rock_code_slot_pending_ref({})}},",
@@ -5235,6 +5243,10 @@ fn definition_plan_stage_js(
             .unwrap();
         }
         out.push_str("]},\n");
+    }
+    out.push_str("}, {\n");
+    for (identity, body) in materializers {
+        writeln!(out, "{}: {},", js_string_lit(&identity.logical_key(ws, scx.interner()))?, body).unwrap();
     }
     out.push_str("});\n");
     Ok(out)
