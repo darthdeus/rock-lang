@@ -56,10 +56,104 @@ pub struct FileWatcherConfig {
     /// embed_string inputs (docs/comptime-plan.md): the set is only known
     /// after a compile, and grows/shrinks as the game's embeds change.
     pub extra_files: Option<SharedWatchSet>,
+    /// Ignore macOS create history for unchanged files present when a watch starts.
+    pub ignore_existing_creates: bool,
 }
 
 /// Canonicalized paths consulted by the debounce filter on every event.
 pub type SharedWatchSet = std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>;
+
+#[derive(PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl FileStamp {
+    fn read(path: &Path) -> Option<Self> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                log::warn!(target: "WATCH", "cannot inspect {}: {error}", path.display());
+                return None;
+            }
+        };
+        let modified = match metadata.modified() {
+            Ok(modified) => modified,
+            Err(error) => {
+                log::warn!(target: "WATCH", "cannot read modification time for {}: {error}", path.display());
+                return None;
+            }
+        };
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            len: metadata.len(),
+            modified,
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct InitialFiles {
+    stamps: HashMap<PathBuf, FileStamp>,
+}
+
+impl InitialFiles {
+    fn capture(roots: &[PathBuf], extensions: &[String], extra_files: &HashSet<PathBuf>, ignored_roots: &[PathBuf]) -> Self {
+        let mut stamps = HashMap::new();
+        for root in roots {
+            if ignored_roots.iter().any(|ignored| root.starts_with(ignored)) {
+                continue;
+            }
+            if !root.exists() {
+                continue;
+            }
+            if root.is_file() {
+                if let Some(stamp) = FileStamp::read(root) {
+                    stamps.insert(root.clone(), stamp);
+                }
+                continue;
+            }
+            for entry in walkdir::WalkDir::new(root).into_iter().filter_entry(|entry| {
+                !is_tmp_scratch_file(entry.path(), std::slice::from_ref(root))
+                    && !ignored_roots.iter().any(|ignored| entry.path().starts_with(ignored))
+            }) {
+                match entry {
+                    Ok(entry) if entry.file_type().is_file() => {
+                        let path = entry.path();
+                        let selected = path.extension().and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| extensions.iter().any(|candidate| candidate == ext));
+                        if (selected || extra_files.contains(path)) && let Some(stamp) = FileStamp::read(path) {
+                            stamps.insert(path.to_path_buf(), stamp);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!(target: "WATCH", "initial watch snapshot: {error}"),
+                }
+            }
+        }
+        for path in extra_files {
+            if ignored_roots.iter().any(|ignored| path.starts_with(ignored)) {
+                continue;
+            }
+            if let Some(stamp) = FileStamp::read(path) {
+                stamps.insert(path.clone(), stamp);
+            }
+        }
+        Self { stamps }
+    }
+
+    fn is_unchanged_create(&self, kind: &notify::EventKind, path: &Path) -> bool {
+        matches!(kind, notify::EventKind::Create(_))
+            && self.stamps.get(path).is_some_and(|initial| FileStamp::read(path).as_ref() == Some(initial))
+    }
+}
 
 impl Default for FileWatcherConfig {
     fn default() -> Self {
@@ -72,6 +166,7 @@ impl Default for FileWatcherConfig {
             watch_all_files: false,
             ignored_roots: Vec::new(),
             extra_files: None,
+            ignore_existing_creates: false,
         }
     }
 }
@@ -164,6 +259,11 @@ impl FileWatcher {
         self
     }
 
+    pub fn with_initial_create_filter(mut self, enabled: bool) -> Self {
+        self.config.ignore_existing_creates = enabled;
+        self
+    }
+
     /// Start watching the specified paths
     pub fn watch(
         self,
@@ -202,6 +302,13 @@ impl FileWatcher {
             .iter()
             .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
             .collect();
+        let initial_files = config.ignore_existing_creates.then(|| {
+            let mut extra_files = restart_files.clone();
+            if let Some(extra) = &config.extra_files {
+                extra_files.extend(extra.lock().iter().cloned());
+            }
+            InitialFiles::capture(&scratch_roots, &config.watch_extensions, &extra_files, &ignored_roots)
+        });
 
         // Track last data modification time for each file
         // to debounce metadata events against data events
@@ -224,6 +331,7 @@ impl FileWatcher {
                                 .iter()
                                 .filter(|path| {
                                     !ignored_roots.iter().any(|root| path.starts_with(root))
+                                        && !initial_files.as_ref().is_some_and(|initial| initial.is_unchanged_create(&event.kind, path))
                                         && (scratch_roots.iter().any(|root| path.starts_with(root))
                                             || restart_files.contains(path.as_path())
                                             || config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path.as_path())))
@@ -402,5 +510,34 @@ mod tests {
             panic!("poison probe");
         }));
         assert!(set.lock().contains(&PathBuf::from("held")));
+    }
+
+    #[test]
+    fn unchanged_preexisting_create_is_filtered_but_later_edits_are_not() {
+        use notify::event::CreateKind;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.rock");
+        std::fs::write(&path, "a").unwrap();
+        let ignored = dir.path().join("ignored");
+        std::fs::create_dir(&ignored).unwrap();
+        let ignored_source = ignored.join("omitted.rock");
+        std::fs::write(&ignored_source, "ignored").unwrap();
+        let initial = InitialFiles::capture(&[dir.path().to_path_buf()], &["rock".to_string()], &HashSet::new(), &[ignored]);
+        assert!(!initial.stamps.contains_key(&ignored_source));
+        let created = notify::EventKind::Create(CreateKind::File);
+        assert!(initial.is_unchanged_create(&created, &path));
+        let replacement = dir.path().join("saving");
+        std::fs::write(&replacement, "a").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(!initial.is_unchanged_create(&created, &path));
+        std::fs::write(&path, "longer body").unwrap();
+        assert!(!initial.is_unchanged_create(&created, &path));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!initial.is_unchanged_create(&created, &path));
+        std::fs::write(&path, "recreated body").unwrap();
+        assert!(!initial.is_unchanged_create(&created, &path));
+        let new_path = dir.path().join("later.rock");
+        std::fs::write(&new_path, "new source").unwrap();
+        assert!(!initial.is_unchanged_create(&created, &new_path));
     }
 }

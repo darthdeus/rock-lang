@@ -264,6 +264,7 @@ impl StoneWatcher {
         // Arm new roots and input parents before dropping the previous watches.
         let handle = FileWatcher::default_for_rock_sources()
             .with_restart_trigger(true)
+            .with_initial_create_filter(true)
             .with_restart_files(self.restart_files.clone())
             .with_extensions(vec!["rock".to_string(), "rs".to_string(), "c".to_string(), "h".to_string(), "toml".to_string()])
             .with_shared_extra_files(self.extra_files.clone())
