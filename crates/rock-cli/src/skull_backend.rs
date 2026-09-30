@@ -916,49 +916,45 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
     run_emitted_tests(&lua, &tests)
 }
 
-/// The preamble a package's `@test`s run under.
-///
-/// A GAME package gets the game preamble -- the same `__ROCK_GAME_SOURCE_DIR`,
-/// asset overlays, stone root and renderer the game itself boots with -- and its
-/// engine cdylib staged, so a `@test` resolves an `asset_path` to the file the
-/// game would open and can load the engine library when it asks for a headless
-/// capability. Without the source dir, `asset_path("assets/x")` answered
-/// `"/assets/x"` here, and `stone_load_font` silently fell back to its embedded
-/// face: a measurement that is plausible, nonzero and wrong.
-///
-/// Anything else keeps the stone root alone. A lib or a test-only package has no
-/// game directory to point at and no engine to stage.
+/// Package tests keep their configured asset roots and load Stone's CPU host
+/// when their dependency graph includes Stone. Lifecycle hooks and the frame
+/// runner are not invoked: no SDL, window, GL context or audio device is started.
 fn prepend_package_preamble(lua: String, dir: &str) -> std::result::Result<String, SkullFailure> {
     let path = std::path::Path::new(dir);
-    if rock_host::project::is_game_project(path).unwrap_or(false) {
-        // Core libstone only, not `build_engine_libs`: the test process loads
-        // the engine library for CPU-side capabilities and never asks for a
-        // game's optional cdylibs (video, wgpu, agent), so building them here
-        // would be time spent on libraries nothing in this process opens.
-        // A no-op in release layout, where the prebuilt libs are already in
-        // place.
+    let stone_dir = configured_stone_dir(path).map_err(|error| SkullFailure {
+        reason: "Stone root resolution failed".to_string(),
+        rendered: error.to_string(),
+    })?;
+    let is_game = rock_host::project::is_game_project(path).map_err(|error| SkullFailure {
+        reason: "test host resolution failed".to_string(),
+        rendered: error.to_string(),
+    })?;
+    if is_game || stone_dir.is_some() {
+        // Core libstone only: the CPU host does not use optional game cdylibs.
         rock_host::engine_build::build_libstone().map_err(|error| SkullFailure {
             reason: "engine library staging failed".to_string(),
             rendered: format!(
                 "`rock test {dir}` could not stage libstone for the test process: {error:#}"
             ),
         })?;
-        let preamble =
-            skull_game_preamble(dir).map_err(|error| {
-                SkullFailure {
-                    reason: "game preamble resolution failed".to_string(),
-                    rendered: error.to_string(),
-                }
-            })?;
-        return Ok(format!("{preamble}{lua}"));
     }
-    match configured_stone_dir(path) {
-        Ok(Some(stone_dir)) => Ok(prepend_stone_root(lua, &stone_dir)),
-        Ok(None) => Ok(lua),
-        Err(error) => Err(SkullFailure {
-            reason: "Stone root resolution failed".to_string(),
+    let lua = if is_game {
+        let preamble = skull_game_preamble(dir).map_err(|error| SkullFailure {
+            reason: "game preamble resolution failed".to_string(),
             rendered: error.to_string(),
-        }),
+        })?;
+        format!("{preamble}{lua}")
+    } else if let Some(stone_dir) = &stone_dir {
+        prepend_stone_root(lua, stone_dir)
+    } else {
+        lua
+    };
+    if stone_dir.is_some() {
+        // setup_stone is a published Stone binding, shared with the sim runner.
+        // Definitions must load first; the host is ready before any @test runs.
+        Ok(format!("{lua}\nsetup_stone()\n"))
+    } else {
+        Ok(lua)
     }
 }
 
@@ -1902,11 +1898,12 @@ fn build_state_nobox_accessors(
             let writes = leaves
                 .iter()
                 .zip(&paths)
-                // Flattened leaf tables store dotted paths as literal keys;
-                // declared cdata fields remain ordinary nested field reads.
+                // Table boxes (leaf-table, and a GC table's `nobox` fields) store
+                // dotted paths as literal keys; cdata fields remain ordinary
+                // nested field reads.
                 .zip(&value_keys)
                 .map(|((_, p), key)| {
-                    let value = if storage == skull_mir::lower::ValueStorage::LeafTable {
+                    let value = if storage != skull_mir::lower::ValueStorage::CData {
                         format!("v[{:?}]", p.as_str())
                     } else {
                         format!("v.{}", p.as_str())
