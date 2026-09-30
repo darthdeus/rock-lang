@@ -438,3 +438,23 @@ fn all_world_semantics_flags_skip_the_entire_file() {
         assert!(run.stdout.contains(&format!("skipped ({tag})")), "{}", shown(&run));
     }
 }
+
+#[test]
+fn helpers_forward_each_identity_parameter_with_its_own_handle() {
+    let (out, run) = applied("mixed_helper", "co fn mixed(p: Player, s: WorldState, m: Mob) -> Coroutine<int> {\n    await frame(1)\n    p.hp = m.hp + s.player.get().unwrap().hp\n}\n@sim\nco fn caller() -> Coroutine<int> {\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    let s = MAG_ACTIVE_WORLD.unwrap().get().unwrap()\n    let target = spawn_mob(5)\n    let m = target.get().unwrap()\n    await mixed(p, s, m)\n}\n");
+    assert!(out.contains("mixed(world: Scene<WorldState>, world_2: Scene<WorldState>, e: Entity<Mob>)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("await mixed(world, world, target)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("s = world_2.get().unwrap()"), "{}\n{out}", shown(&run));
+    assert!(out.contains("m = e.get().unwrap()"), "{}\n{out}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}
+
+#[test]
+fn world_named_identity_parameter_keeps_its_borrow_name() {
+    let (out, run) = applied("world_helper", "co fn helper(world: WorldState) -> Coroutine<int> {\n    await frame(1)\n    world.player.get().unwrap().hp = 2\n}\n@sim\nco fn caller() -> Coroutine<int> {\n    let s = MAG_ACTIVE_WORLD.unwrap().get().unwrap()\n    await helper(s)\n}\n");
+    assert!(out.contains("helper(world_2: Scene<WorldState>)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("let world = world_2.get().unwrap()"), "{}\n{out}", shown(&run));
+    assert!(out.contains("world = world_2.get().unwrap()\n"), "{}\n{out}", shown(&run));
+    assert!(out.contains("await helper(world)"), "{}\n{out}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}

@@ -62,8 +62,9 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
     })?;
     for f in plan.files.iter_mut().filter(|f| f.skipped.is_none()) {
         let module = module_of(&entry.ws, f.id).expect("checked above");
-        let (edits, refused) = helper_edits(&entry.ws, module, f.id, &f.entry);
+        let (edits, refused, count) = helper_edits(&entry.ws, module, f.id, &f.entry);
         f.refused.extend(refused);
+        f.helper_bindings = count;
         f.helpers = apply_edits(&f.entry, &edits).map_err(|e| anyhow::anyhow!(e))?;
     }
     // New local borrows in helpers need their rebindings before the final
@@ -73,6 +74,7 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
         Err(_) => plan.settle(&base, "helpers", |f| &f.helpers, |f| {
             let changed = f.helpers != f.entry;
             f.helpers = f.entry.clone();
+            f.helper_bindings = 0;
             changed
         })?,
     };
@@ -88,6 +90,7 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
         f.rebound = f.original.clone();
         f.left.clear();
         f.bindings = [0; 2];
+        f.helper_bindings = 0;
         changed
     })?;
 
@@ -108,7 +111,7 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
         }
         changed += usize::from(f.rebound != f.original);
         let _ = writeln!(out, "{}: across-yield {} -> {}, capture {} -> {}, co-param {} -> {}", f.rel, b[0], a[0], b[1], a[1], b[2], a[2]);
-        let _ = writeln!(out, "  edited bindings: helper {}, rebind {}, capture {}", b[2].saturating_sub(a[2]), f.bindings[0], f.bindings[1]);
+        let _ = writeln!(out, "  edited bindings: helper {}, rebind {}, capture {}", f.helper_bindings, f.bindings[0], f.bindings[1]);
         for line in f.refused.iter().chain(&f.left) {
             let _ = writeln!(out, "  {line}");
         }
@@ -149,6 +152,7 @@ struct FixFile {
     refused: Vec<String>,
     left: Vec<String>,
     bindings: [usize; 2],
+    helper_bindings: usize,
 }
 
 struct Plan {
@@ -196,6 +200,7 @@ impl Plan {
                 refused: Vec::new(),
                 left: Vec::new(),
                 bindings: [0; 2],
+                helper_bindings: 0,
             });
         }
         Ok(Plan { root, sources, files: out })
@@ -219,10 +224,10 @@ impl Plan {
             let errors = match &checked {
                 Ok(c) => {
                     let mut errors = new_errors(&base.errors, &c.errors);
-                    if stage == "entry" {
+                    if stage == "entry" && !errors.is_empty() {
                         // Renaming an existing borrow changes its diagnostic's
                         // binding name. Rebindings must resolve it before write.
-                        let pending: BTreeSet<_> = c.ws.modules.iter().flat_map(|m| identity_module_body_sites(&c.ws, m))
+                        let pending: BTreeSet<_> = self.files.iter().filter(|f| f.entry != f.original).filter_map(|f| module_of(&c.ws, f.id)).flat_map(|m| identity_module_body_sites(&c.ws, m))
                             .filter(|s| matches!(s.kind, IdentityStorageKind::AcrossYield | IdentityStorageKind::Capture))
                             .map(|s| (s.span.file, s.span.line_range.0, s.message)).collect();
                         errors.retain(|e| !pending.contains(&(e.location.file, e.location.line, e.message.clone())));
@@ -456,7 +461,7 @@ struct HelperParam {
 
 /// All callers must migrate with the declaration. Refuse this file's helper
 /// group if one caller cannot carry the same scene, including helper chains.
-fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<Edit>, Vec<String>) {
+fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<Edit>, Vec<String>, usize) {
     let mut params = BTreeMap::new();
     let mut refused = Vec::new();
     for (fid, f, body) in functions_in(module, id).filter(|(_, f, _)| f.is_coroutine && !is_sim(f)) {
@@ -475,11 +480,7 @@ fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             Some("receiver-style co helper")
         } else if Regex::new(r"Coroutine<[^,>]+,\s*(Player|WorldState|Mob)\b").expect("static regex").is_match(header) {
             Some("co helper returns an identity")
-        } else if identities.len() != 1 {
-            Some("co helper has multiple identity parameters")
-        } else if identities[0].1 != "Mob" && body.binding_arena.iter().any(|(_, b)| b.name.as_str() == "world") {
-            Some("co helper already binds `world`")
-        } else if f.param_decls[identities[0].0].has_default {
+        } else if identities.iter().any(|(index, _)| f.param_decls[*index].has_default) {
             Some("identity parameter has a default")
         } else {
             None
@@ -488,48 +489,53 @@ fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             refused.push(format!("refused helper `{}`: {why}", f.name));
             continue;
         }
-        let (index, identity) = identities.into_iter().next().expect("one identity");
-        let binding = body.binding_arena.iter().find(|(_, b)| b.kind == BindingKind::Param && b.name == f.param_decls[index].name)
-            .map(|(b, _)| b).expect("parameter binding");
-        let handle = if identity == "Mob" {
-            free_name(body, "e")
-        } else { "world".to_string() };
-        params.insert(fid, HelperParam { index, binding, identity, handle });
+        let mut used = body.binding_arena.iter().map(|(_, b)| b.name.to_string()).collect();
+        let mut group = Vec::new();
+        for (index, identity) in identities {
+            let binding = body.binding_arena.iter().find(|(_, b)| b.kind == BindingKind::Param && b.name == f.param_decls[index].name)
+                .map(|(b, _)| b).expect("parameter binding");
+            let handle = fresh_name(&mut used, if identity == "Mob" { "e" } else { "world" });
+            group.push(HelperParam { index, binding, identity, handle });
+        }
+        params.insert(fid, group);
     }
     if params.is_empty() {
-        return (Vec::new(), refused);
+        return (Vec::new(), refused, 0);
     }
     let mut edits = Vec::new();
-    for (&fid, param) in &params {
-        let f = &module.functions[fid];
-        let body = &module.bodies[&BodyOwner::Function(fid)];
-        match helper_parameter_edits(ws, module, id, text, fid, param, &params) {
-            Ok(e) => edits.extend(e),
-            Err(why) => refused.push(format!("refused helper `{}`: {why}", f.name)),
+    for (&fid, group) in &params {
+        for param in group {
+            let f = &module.functions[fid];
+            let body = &module.bodies[&BodyOwner::Function(fid)];
+            match helper_parameter_edits(ws, module, id, text, fid, param, &params) {
+                Ok(e) => edits.extend(e),
+                Err(why) => refused.push(format!("refused helper `{}`: {why}", f.name)),
+            }
+            let root = body.root.expect("function body");
+            let start = body.expr_spans[root].offset_range.0;
+            let header = &text[f.span.offset_range.0..start];
+            let name = f.param_decls[param.index].name;
+            let declaration = Regex::new(&format!(r"\b{name}\s*:\s*(?:\w+::)*{}\b", param.identity)).expect("identifier regex");
+            let Some(found) = declaration.find(header) else {
+                refused.push(format!("refused helper `{}`: unsupported parameter declaration", f.name));
+                continue;
+            };
+            let declaration = if param.identity == "Mob" { format!("{}: Entity<Mob>", param.handle) }
+                else { format!("{}: Scene<WorldState>", param.handle) };
+            edits.push(Edit::new((f.span.offset_range.0 + found.start(), f.span.offset_range.0 + found.end()), declaration));
+            let line_start = text[..f.name_span.offset_range.0].rfind('\n').map_or(0, |i| i + 1);
+            let indent: String = text[line_start..f.name_span.offset_range.0].chars().take_while(|c| c.is_whitespace()).collect();
+            let resolution = format!("{}.{}", param.handle, if param.identity == "Player" { "player()" } else { "get().unwrap()" });
+            edits.push(Edit::new((start + 1, start + 1), format!("\n{indent}    let {name} = {resolution}")));
         }
-        let root = body.root.expect("function body");
-        let start = body.expr_spans[root].offset_range.0;
-        let header = &text[f.span.offset_range.0..start];
-        let name = f.param_decls[param.index].name;
-        let declaration = Regex::new(&format!(r"\b{name}\s*:\s*(?:\w+::)*{}\b", param.identity)).expect("identifier regex");
-        let Some(found) = declaration.find(header) else {
-            refused.push(format!("refused helper `{}`: unsupported parameter declaration", f.name));
-            continue;
-        };
-        let declaration = if param.identity == "Mob" { format!("{}: Entity<Mob>", param.handle) }
-            else { format!("{}: Scene<WorldState>", param.handle) };
-        edits.push(Edit::new((f.span.offset_range.0 + found.start(), f.span.offset_range.0 + found.end()), declaration));
-        let line_start = text[..f.name_span.offset_range.0].rfind('\n').map_or(0, |i| i + 1);
-        let indent: String = text[line_start..f.name_span.offset_range.0].chars().take_while(|c| c.is_whitespace()).collect();
-        let resolution = format!("{}.{}", param.handle, if param.identity == "Player" { "player()" } else { "get().unwrap()" });
-        edits.push(Edit::new((start + 1, start + 1), format!("\n{indent}    let {name} = {resolution}")));
     }
-    if refused.is_empty() { (edits, refused) } else { (Vec::new(), refused) }
+    let count = params.values().map(Vec::len).sum();
+    if refused.is_empty() { (edits, refused, count) } else { (Vec::new(), refused, 0) }
 }
 
 fn helper_parameter_edits(
     ws: &Workspace, module: &Module, id: Ustr, text: &str, fid: Idx<Function>, param: &HelperParam,
-    params: &BTreeMap<Idx<Function>, HelperParam>,
+    params: &BTreeMap<Idx<Function>, Vec<HelperParam>>,
 ) -> std::result::Result<Vec<Edit>, String> {
     let f = &module.functions[fid];
     let mut edits = Vec::new();
@@ -557,12 +563,12 @@ fn helper_parameter_edits(
                     Some(name) => *name == f.param_decls[param.index].name,
                     None => { let index = positional; positional += 1; index == param.index },
                 }).ok_or("caller does not supply the identity parameter")?;
-                let caller_param = (m.id == module.id).then(|| params.get(caller)).flatten();
+                let caller_params = if m.id == module.id { params.get(caller).map(Vec::as_slice).unwrap_or(&[]) } else { &[] };
                 let caller_f = &m.functions[*caller];
                 let source = if param.identity == "Mob" {
-                    entity_argument(ws, m, *owner, body, arg, text, caller_param)?
+                    entity_argument(ws, m, *owner, body, arg, text, caller_params)?
                 } else {
-                    scene_argument(ws, caller_f, body, arg, text, caller_param, &param.identity)?
+                    scene_argument(ws, caller_f, body, arg, text, caller_params, &param.identity)?
                 };
                 let span = body.expr_spans[arg];
                 let mut range = span.offset_range;
@@ -580,11 +586,6 @@ fn helper_parameter_edits(
     Ok(edits)
 }
 
-fn free_name(body: &Body, base: &str) -> String {
-    let mut used = body.binding_arena.iter().map(|(_, b)| b.name.to_string()).collect();
-    fresh_name(&mut used, base)
-}
-
 fn fresh_name(used: &mut BTreeSet<String>, base: &str) -> String {
     let mut name = base.to_string();
     let mut suffix = 2;
@@ -598,12 +599,12 @@ fn fresh_name(used: &mut BTreeSet<String>, base: &str) -> String {
 
 fn entity_argument(
     ws: &Workspace, module: &Module, owner: BodyOwner, body: &Body, arg: Idx<Expr>, text: &str,
-    helper: Option<&HelperParam>,
+    helpers: &[HelperParam],
 ) -> std::result::Result<String, String> {
     let (resolution, span) = match body.expr_arena[arg] {
         Expr::Var(b) => {
-            if helper.is_some_and(|p| p.binding == b && p.identity == "Mob") && !assigned(body, b) {
-                return Ok(helper.expect("matched").handle.clone());
+            if let Some(param) = helpers.iter().find(|p| p.binding == b && p.identity == "Mob" && !assigned(body, b)) {
+                return Ok(param.handle.clone());
             }
             let init = let_value(body, b).ok_or("caller Mob is not bound by a plain `let`")?;
             (rebind_text(body, b, text)?, body.expr_spans[init])
@@ -633,31 +634,27 @@ fn entity_argument(
 
 fn scene_argument(
     ws: &Workspace, f: &Function, body: &Body, arg: Idx<Expr>, text: &str,
-    helper: Option<&HelperParam>, identity: &str,
+    helpers: &[HelperParam], identity: &str,
 ) -> std::result::Result<String, String> {
     if let Expr::Var(b) = body.expr_arena[arg] {
-        if helper.is_some_and(|p| p.binding == b && p.identity == identity) && !assigned(body, b) {
-            return Ok(helper.expect("matched").handle.clone());
+        if let Some(param) = helpers.iter().find(|p| p.binding == b && p.identity == identity && !assigned(body, b)) {
+            return Ok(param.handle.clone());
         }
     }
-    let has_scene = f.param_decls.iter().any(|p| {
-        let ty = ws.render(None, p.ty);
-        p.name.as_str() == "world" && ty.rsplit_once("Scene<").is_some_and(|(_, inner)| {
-            inner.strip_suffix('>').is_some_and(|name| name.rsplit("::").next() == Some("WorldState"))
-        })
-    });
-    if !has_scene && !helper.is_some_and(|p| p.identity != "Mob") {
-        return Err("caller has no scene parameter to forward".to_string());
-    }
-    let wanted = if identity == "Player" { "world.player()" } else { "world.get().unwrap()" };
     let resolution = match body.expr_arena[arg] {
         Expr::Var(b) => rebind_text(body, b, text)?,
         _ => slice(text, body.expr_spans[arg]).trim().to_string(),
     };
-    if resolution != wanted {
-        return Err("caller identity is not resolved from its scene".to_string());
+    for p in &f.param_decls {
+        let ty = ws.render(None, p.ty);
+        if ty.rsplit_once("Scene<").is_some_and(|(_, inner)| {
+            inner.strip_suffix('>').is_some_and(|name| name.rsplit("::").next() == Some("WorldState"))
+        }) {
+            let wanted = format!("{}.{}", p.name, if identity == "Player" { "player()" } else { "get().unwrap()" });
+            if resolution == wanted { return Ok(p.name.to_string()); }
+        }
     }
-    Ok("world".to_string())
+    Err("caller identity is not resolved from its scene parameter".to_string())
 }
 
 fn let_value(body: &Body, binding: Idx<BindingInfo>) -> Option<Idx<Expr>> {
