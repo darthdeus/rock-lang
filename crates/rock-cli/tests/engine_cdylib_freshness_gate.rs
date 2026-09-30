@@ -11,8 +11,8 @@
 //!
 //! The OPTIONAL lib is the subject, not `stone-rs`. Core is loaded by every game,
 //! so an unbuilt one fails loudly everywhere at once; an optional cdylib is
-//! declared by a single game (`[engine] needs`, `OPTIONAL_ENGINE_LIBS`) and is
-//! reached through the manifest, which is the path with somewhere to go wrong.
+//! selected through `[engine] needs` and `OPTIONAL_ENGINE_LIBS`, the path with
+//! somewhere to go wrong. This gate uses a minimal temporary game fixture.
 //!
 //! Proving the BUILD ran and not merely the stage takes deleting both ends: a
 //! stage-only survivor would copy a months-old `target/debug` artifact into
@@ -54,15 +54,29 @@ fn workspace_root() -> PathBuf {
 #[ignore = "deletes shared workspace artifacts and rebuilds a crate; run deliberately"]
 fn a_game_command_rebuilds_and_stages_the_optional_engine_cdylib_it_declares() {
     let root = workspace_root();
-    // bopt is the only game declaring one. If that changes, this test should
-    // follow the declaration rather than be deleted -- the guarantee is about
-    // the mechanism, not about bopt.
-    let manifest = fs_err::read_to_string(root.join("games/bopt/stick.toml")).expect("stick.toml");
-    assert!(
-        manifest.contains("wgpu"),
-        "this gate is driven through the game that declares `[engine] needs = [\"wgpu\"]`; \
-         bopt no longer does, so point it at whichever game does"
+    let fixture = tempfile::Builder::new()
+        .prefix("engine-cdylib-fixture-")
+        .tempdir()
+        .expect("temporary game fixture");
+    let manifest = format!(
+        "[package]\nname = \"engine_cdylib_fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+         [dependencies]\nstone = {{ path = \"{}\" }}\n\n\
+         [engine]\nneeds = [\"wgpu\"]\n\n\
+         [build.vars]\nGIT_SHA = \"test\"\n",
+        root.join("stone").display(),
     );
+    std::fs::write(fixture.path().join("stick.toml"), manifest)
+        .expect("write fixture manifest");
+    std::fs::write(
+        fixture.path().join("main.rock"),
+        concat!(
+            "fn main() {\n",
+            "    stone_run_game(GameConfig { title: \"engine cdylib fixture\", ",
+            "width: 64, height: 64 })\n",
+            "}\n"
+        ),
+    )
+    .expect("write fixture main");
 
     let name = cdylib_name("stone_wgpu");
     let staged = root.join("tmp").join(&name);
@@ -81,8 +95,9 @@ fn a_game_command_rebuilds_and_stages_the_optional_engine_cdylib_it_declares() {
     // `frame` rather than `sim`: it is the cheapest command that goes through
     // the same `build_engine_libs`, and one frame is enough -- what is being
     // measured happens before the game starts.
+    let project = fixture.path().to_string_lossy().into_owned();
     let out = Command::new(root.join("target/debug/rock"))
-        .args(["frame", "games/bopt", "-n", "1"])
+        .args(["frame", project.as_str(), "-n", "1"])
         .current_dir(&root)
         .output()
         .expect("spawn rock frame");

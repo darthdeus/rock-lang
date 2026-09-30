@@ -805,6 +805,19 @@ impl Builder<'_> {
             _ => None,
         };
         match self.body.expr_arena[e].clone() {
+            // Element stores and leaf places of flat storage are decomposed
+            // before this; what reaches here is a borrow of the whole element or
+            // a struct inside it (a `ref` argument or `let`). A known Lua gap, not
+            // policy: C runs these. Fix options: docs/unfuck-backlog.md.
+            Expr::Index { base, .. } if self.flat_stored_container(base)? => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "the Lua backend does not yet support a `ref` borrow of a container element \
+                     stored as flat columns or rows (it has no table to alias); copy it out, \
+                     modify it and store it back"
+                        .to_string(),
+                ))
+            }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;

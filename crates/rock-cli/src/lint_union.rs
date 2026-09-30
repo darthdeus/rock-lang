@@ -157,8 +157,10 @@ fn unreached_in(
     Ok(Some((keys, findings, sources)))
 }
 
-/// Every `bin` package under `root`. Skips VCS/build dirs, and does not descend
-/// into a package once found (a package's subdirectories are its own sources).
+/// Every `bin` package under `root`. Skips VCS/build dirs and archived games,
+/// and does not descend into a package once found (a package's subdirectories
+/// are its own sources). Passing an archived project itself as `root` is
+/// explicit and remains supported.
 pub fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -179,9 +181,47 @@ pub fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
             if name.starts_with('.') || matches!(name, "target" | "node_modules" | "tmp") {
                 continue;
             }
+            if p != root
+                && name == "archived"
+                && p.parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some("games")
+            {
+                continue;
+            }
             stack.push(p);
         }
     }
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bin_projects_under;
+    use std::fs;
+    use std::path::Path;
+
+    fn write_bin_project(path: &Path, name: &str) {
+        fs::create_dir_all(path).expect("create project directory");
+        fs::write(
+            path.join("stick.toml"),
+            format!("[package]\nname = \"{name}\"\ntype = \"bin\"\n"),
+        )
+        .expect("write package manifest");
+    }
+
+    #[test]
+    fn automatic_project_scan_skips_archives_but_explicit_path_includes_them() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        let active = root.join("games/live");
+        let archived = root.join("games/archived/bopt");
+        write_bin_project(&active, "live");
+        write_bin_project(&archived, "bopt");
+
+        assert_eq!(bin_projects_under(root), vec![active.clone()]);
+        assert_eq!(bin_projects_under(&archived), vec![archived]);
+    }
 }

@@ -351,7 +351,8 @@ pub fn infer_expr_used(
         Expr::InterpolatedString(parts) => {
             for p in *parts {
                 if let InterpPart::Value { expr, spec } = c.body.interp_part_arena[p] {
-                    infer_expr(c, gamma, expr)?;
+                    let hole_ty = infer_expr(c, gamma, expr)?;
+                    check_interpolated_value(gamma, hole_ty, c.body.expr_spans[expr])?;
 
                     if let Some(s) = spec {
                         if let Some(we) = s.width_expr {
@@ -2371,6 +2372,22 @@ pub(crate) fn check_cast(
              `as` converts only between numeric types, or where `{from_str}` \
              is already assignable to `{to_str}`"
         ),
+    ))
+}
+
+/// A function or unit value has no text; without this a hole naming a global fn
+/// (meant as a local) passes and fails only in lowering, with no location.
+fn check_interpolated_value(gamma: &mut Gamma, ty: TyId, span: Span) -> Result<(), CompilerError> {
+    let resolved = resolve(gamma, ty, span);
+    let what = match gamma.get(resolved) {
+        TypeExpr::Function { .. } => "a function",
+        TypeExpr::Builtin(BuiltinTy::Unit) => "a value of type `()`",
+        _ => return Ok(()),
+    };
+    let rendered = gamma.render(resolved);
+    Err(CompilerError::new_with_label(
+        span,
+        format!("cannot interpolate {what} (`{rendered}`) into a string"),
     ))
 }
 

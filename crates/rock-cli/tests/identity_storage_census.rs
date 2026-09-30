@@ -32,7 +32,7 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 288 | 217 | 8 | 0 | 1369 | 43 | 147 | 5251 | 85 | 7408 |
+| mag | exempt | 284 | 216 | 8 | 0 | 1365 | 29 | 128 | 2951 | 85 | 5066 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 1 | 2 | 0 | 6 | 0 | 0 | 0 | 0 | 9 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -42,9 +42,9 @@ const PINNED: &str = "\
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| stone | exempt | 42 | 59 | 6 | 0 | 226 | 5 | 0 | 0 | 11 | 349 |
+| stone | exempt | 40 | 58 | 6 | 0 | 226 | 5 | 0 | 0 | 11 | 346 |
 | survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
-| testbed | exempt | 5 | 3 | 0 | 0 | 134 | 2 | 2 | 73 | 68 | 287 |
+| testbed | exempt | 5 | 3 | 0 | 0 | 135 | 2 | 2 | 74 | 68 | 289 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
 | unpackaged programs | exempt | 104 | 13 | 5 | 0 | 131 | 49 | 1 | 0 | 50 | 353 |

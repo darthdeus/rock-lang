@@ -1107,3 +1107,21 @@ return
 }"
     );
 }
+
+#[test]
+fn unsupported_interpolation_hole_error_is_located_at_the_hole() {
+    let src = "fn f(a: any) -> string {\n    return \"x {a}\"\n}";
+    let mut modules = vec![skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse")];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "f")
+        .expect("function by name");
+    let err = lower_test_root(&ws, mid, fid).expect_err("an `any` hole has no rendering");
+    assert!(err.message.contains("interpolation hole"), "got: {:?}", err.message);
+    let span = err.labels.first().expect("the hole is labeled").span;
+    assert_eq!(&src[span.offset_range.0..span.offset_range.1], "a");
+}

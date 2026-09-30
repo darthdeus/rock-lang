@@ -601,7 +601,7 @@ fn is_stdlib_file_named(module: &Module, stem: &str) -> bool {
 
 /// The stdlib arena file: the one module that implements the privileged row
 /// store, with the trust boundary of `@frame_ref_source`.
-fn is_identity_store_module(module: &Module) -> bool {
+pub fn is_identity_store_module(module: &Module) -> bool {
     is_stdlib_file_named(module, "arena")
 }
 

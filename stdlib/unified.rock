@@ -817,8 +817,10 @@ deco init on_reload {
     if type(x) ~= "table" or type(y) ~= "table" then return false end
     if x.ptr == nil or y.ptr == nil then return x.ptr == y.ptr end
     if x.ptr == y.ptr then return true end
-    local esz = ffi.sizeof(x.ptr[0])
-    if esz ~= ffi.sizeof(y.ptr[0]) then return false end
+    -- Scalar indexing returns a Lua number, so measure the typed pointer step.
+    local esz = ffi.cast("uint8_t*", x.ptr + 1) - ffi.cast("uint8_t*", x.ptr)
+    local ysz = ffi.cast("uint8_t*", y.ptr + 1) - ffi.cast("uint8_t*", y.ptr)
+    if esz ~= ysz then return false end
     return ffi.string(x.ptr, n * esz) == ffi.string(y.ptr, n * esz)
 """
 

@@ -123,6 +123,54 @@ impl Builder<'_> {
         Ok(arena.value_shape(rep).map(|shape| shape.name))
     }
 
+    /// Whether `e` is a Vec, Map or Arena whose elements have no per-element
+    /// table (column or strided storage).
+    pub(crate) fn flat_stored_container(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
+        match self.concrete_ty(e)? {
+            Some(ty) => self.flat_stored_container_type(&ty),
+            None => Ok(false),
+        }
+    }
+
+    /// [`Self::flat_stored_container`] for a container type.
+    pub(crate) fn flat_stored_container_type(&self, ty: &MonoTy) -> Result<bool, CompilerError> {
+        for family in [ContainerFamily::Vec, ContainerFamily::Map, ContainerFamily::Arena] {
+            if ContainerPlan::matches_type(family, ty) {
+                let plan = self.container_plan_for_type(ty, family)?;
+                let arena = self.scx.rep_arena();
+                return Ok(plan.column_elem(&arena).is_some() || plan.strided_elem(&arena).is_some());
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether call `e` resolves to the stdlib arena `borrow` (`Arena<T>.borrow`
+    /// or `Entity<T>.borrow`) of an element that `Arena<T>` stores flat. Its body
+    /// would reject the same borrow, but spanned in the stdlib.
+    pub(crate) fn borrows_flat_arena_element(
+        &self,
+        e: Idx<Expr>,
+        name: Ustr,
+    ) -> Result<bool, CompilerError> {
+        if name.as_str() != "borrow" {
+            return Ok(false);
+        }
+        let Ok(fref) = self.resolve_funcref(e, name) else { return Ok(false) };
+        if !bone_semantic::identity_storage::is_identity_store_module(self.ws.module(fref.module)) {
+            return Ok(false);
+        }
+        let Some(ty) = self.concrete_ty(e)? else { return Ok(false) };
+        let MonoTy::App { ctor: crate::monoty::MonoCtor::Ref, params } = ty.peel_nullable().0 else {
+            return Ok(false);
+        };
+        let Some(element) = params.first() else { return Ok(false) };
+        let arena = MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(Ustr::from("Arena")),
+            params: vec![element.clone()],
+        };
+        self.flat_stored_container_type(&arena)
+    }
+
     /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
     /// [`Self::vec_column_elem_of`] one container out: an arena's `data` field is
     /// an ordinary `[E]`, so it columnizes on exactly the same rule, and the
