@@ -181,6 +181,9 @@ impl Builder<'_> {
         // is fallible, and a guard cannot propagate. Ordered after the `nobox`
         // coalesce below, which is the narrower case.
         if let Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs } = self.body.expr_arena[e] {
+            if self.expr_is_flat_enum(e) {
+                return self.nullcoalesce_repr(e, lhs, rhs);
+            }
             if self.nobox_value_name(e).is_none() && self.nullable_tuple_wire_shape(lhs)?.is_some() {
                 return self.nullcoalesce_tuple_repr(lhs, rhs);
             }
@@ -558,29 +561,36 @@ impl Builder<'_> {
         }
     }
 
-    /// `a ?? b` whose RESULT is a `nobox` value: both arms thread leaves and join
-    /// through cells, so the coalesce never packs a cdata just to choose between
-    /// them. The lhs leaves are read before the branch (their block dominates
-    /// both arms) and its presence leaf IS the condition -- no nil compare.
+    /// `a ?? b` whose result has value leaves: both arms thread leaves and join
+    /// through cells without packing either arm. Read the lhs before branching;
+    /// its presence bool or enum tag determines which arm supplies the slots.
     pub(crate) fn nullcoalesce_repr(
         &mut self,
         e: Idx<Expr>,
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
-        let name = self.nobox_value_name(e).expect("caller checked");
-        let shape = self
-            .nobox_value_shape_of(e)?
-            .ok_or_else(|| gap(format!("nobox value `{name}` has no scalar shape")))?;
+        let flat_shape = self.flat_enum_value_shape_of(e)?;
+        let is_flat_enum = flat_shape.is_some();
+        let shape = match flat_shape {
+            Some(shape) => shape,
+            None => self.nobox_value_shape_of(e)?
+                .ok_or_else(|| gap("coalesce result has no scalar shape"))?,
+        };
         let mut lhs_shape = shape.clone();
-        lhs_shape.nullable = true;
-
+        // Flat enums use a nil tag for absence, not a separate presence leaf.
+        lhs_shape.nullable = !is_flat_enum;
         let lhs_bundle = self.lower_expr_repr(lhs)?;
         let lhs_leaves = self.repr_to_slot_values_bundle(&lhs_bundle, &RetSlot::Leaves(lhs_shape))?;
-        let (present, lhs_values) = lhs_leaves
+        let (first, rest) = lhs_leaves
             .split_first()
-            .expect("a nullable shape carries its presence leaf first");
-        let (present, lhs_values) = (*present, lhs_values.to_vec());
+            .ok_or_else(|| gap("coalesce lhs has no presence or tag leaf"))?;
+        let (present, lhs_values) = if is_flat_enum {
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            (self.emit_cur(Inst::NotEq(*first, nil)), lhs_leaves)
+        } else {
+            (*first, rest.to_vec())
+        };
 
         let cells: Vec<Idx<Cell>> = (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
         let lhs_bb = self.f.new_block();
