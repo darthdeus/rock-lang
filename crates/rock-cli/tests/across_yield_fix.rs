@@ -373,3 +373,20 @@ fn mob_helper_does_not_move_death_tested_handles_into_the_helper() {
     assert!(out.contains(helper), "{}\n{out}", shown(&run));
     assert!(run.stdout.contains("for death"), "{}", shown(&run));
 }
+
+#[test]
+fn compact_loop_and_branch_rebind_inside_the_block() {
+    let (out, run) = applied("compact", "@sim\nco fn compact() -> Coroutine<int> {\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    while p.hp < 3 { await frame(1) }\n    if p.hp == 3 { await frame(2) }\n    p.hp = 4\n}\n");
+    assert!(out.contains("while p.hp < 3 { await frame(1)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
+    assert!(out.contains("if p.hp == 3 { await frame(2)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
+    assert!(run.stdout.contains("across-yield 3 -> 0"), "{}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}
+
+#[test]
+fn suspension_before_a_use_in_the_same_statement_is_refused() {
+    let (out, run) = applied("condition", "co fn ready() -> Coroutine<int, bool> {\n    yield 1\n    return true\n}\n@sim\nco fn condition() -> Coroutine<int> {\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    if await ready() {\n        p.hp = 2\n    }\n}\n");
+    assert!(run.stdout.contains("use within the same statement"), "{}\n{out}", shown(&run));
+    assert!(!out.contains("p = world.player()\n}"), "{}\n{out}", shown(&run));
+    assert_eq!(run.code, Some(3), "{}", shown(&run));
+}

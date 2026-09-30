@@ -76,14 +76,16 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
     };
     for f in plan.files.iter_mut().filter(|f| f.skipped.is_none()) {
         let module = module_of(&helpers.ws, f.id).expect("checked above");
-        let (edits, left) = rebind_edits(&helpers.ws, module, f.id, &f.helpers);
+        let (edits, left, counts) = rebind_edits(&helpers.ws, module, f.id, &f.helpers);
         f.left = left;
+        f.bindings = counts;
         f.rebound = apply_edits(&f.helpers, &edits).map_err(|e| anyhow::anyhow!(e))?;
     }
     let done = plan.settle(&base, "rebind", |f| &f.rebound, |f| {
         let changed = f.rebound != f.entry;
         f.rebound = f.entry.clone();
         f.left.clear();
+        f.bindings = [0; 2];
         changed
     })?;
 
@@ -104,6 +106,7 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
         }
         changed += usize::from(f.rebound != f.original);
         let _ = writeln!(out, "{}: across-yield {} -> {}, capture {} -> {}, co-param {} -> {}", f.rel, b[0], a[0], b[1], a[1], b[2], a[2]);
+        let _ = writeln!(out, "  edited bindings: helper {}, rebind {}, capture {}", b[2].saturating_sub(a[2]), f.bindings[0], f.bindings[1]);
         for line in f.refused.iter().chain(&f.left) {
             let _ = writeln!(out, "  {line}");
         }
@@ -143,6 +146,7 @@ struct FixFile {
     skipped: Option<&'static str>,
     refused: Vec<String>,
     left: Vec<String>,
+    bindings: [usize; 2],
 }
 
 struct Plan {
@@ -189,6 +193,7 @@ impl Plan {
                 original,
                 refused: Vec::new(),
                 left: Vec::new(),
+                bindings: [0; 2],
             });
         }
         Ok(Plan { root, sources, files: out })
@@ -642,7 +647,7 @@ fn let_value(body: &Body, binding: Idx<BindingInfo>) -> Option<Idx<Expr>> {
 
 /// Stage two (recipe steps 4 and 5): the edits, and the borrows left as
 /// written with the reason.
-fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<Edit>, Vec<String>) {
+fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<Edit>, Vec<String>, [usize; 2]) {
     let bodies: FxHashMap<Idx<Function>, &Body> = functions_in(module, id).map(|(fid, _, body)| (fid, body)).collect();
     let mut crossed: BTreeMap<(Idx<Function>, Idx<BindingInfo>), Vec<Idx<Expr>>> = BTreeMap::new();
     for c in identity_suspension_crossings(ws, module) {
@@ -650,7 +655,9 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             crossed.entry((c.function, c.binding)).or_default().extend(c.suspensions);
         }
     }
-    let mut inserts: BTreeMap<usize, Vec<(usize, String)>> = BTreeMap::new();
+    let mut inserts: BTreeMap<(usize, usize), (String, Vec<(usize, String)>)> = BTreeMap::new();
+    let mut rebound = std::collections::BTreeSet::new();
+    let mut captured = std::collections::BTreeSet::new();
     let mut edits = Vec::new();
     let mut left = Vec::new();
     for ((fid, binding), suspensions) in crossed {
@@ -658,7 +665,7 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
         let at = rebind_text(body, binding, text).and_then(|rebind| {
             let mut lines = Vec::new();
             for s in suspensions {
-                lines.push((after_statement(body, s, text)?, rebind.clone()));
+                lines.push((after_statement(body, binding, s, text)?, rebind.clone()));
             }
             Ok(lines)
         });
@@ -666,9 +673,10 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             Ok(lines) => {
                 let name = body.binding_arena[binding].name;
                 let decl = body.binding_spans[binding].offset_range.0;
-                for ((pos, indent), rebind) in lines {
-                    let line = format!("\n{indent}{name} = {rebind}");
-                    let at = inserts.entry(pos).or_default();
+                rebound.insert((fid, binding));
+                for (point, rebind) in lines {
+                    let line = format!("\n{}{name} = {rebind}", point.indent);
+                    let (_, at) = inserts.entry(point.range).or_insert_with(|| (point.suffix, Vec::new()));
                     if !at.iter().any(|(_, l)| *l == line) {
                         at.push((decl, line));
                     }
@@ -677,9 +685,11 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             Err(why) => left.push(left_note(body, binding, text, &why)),
         }
     }
-    for (pos, mut lines) in inserts {
+    for (range, (suffix, mut lines)) in inserts {
         lines.sort();
-        edits.push(Edit::new((pos, pos), lines.into_iter().map(|(_, l)| l).collect::<String>()));
+        let mut insert = lines.into_iter().map(|(_, l)| l).collect::<String>();
+        insert.push_str(&suffix);
+        edits.push(Edit::new(range, insert));
     }
 
     let mut closures: BTreeMap<(Idx<Function>, Idx<Expr>, Idx<BindingInfo>), ()> = BTreeMap::new();
@@ -702,6 +712,7 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
         let body = bodies[&fid];
         match rebind_text(body, binding, text) {
             Ok(rebind) => {
+                captured.insert((fid, binding));
                 let within = body.expr_spans[lambda];
                 for (e, expr) in body.expr_arena.iter() {
                     if matches!(expr, Expr::Var(b) if *b == binding) && contains(within, body.expr_spans[e]) {
@@ -717,7 +728,7 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             }
         }
     }
-    (edits, left)
+    (edits, left, [rebound.len(), captured.len()])
 }
 
 fn left_note(body: &Body, binding: Idx<BindingInfo>, text: &str, why: &str) -> String {
@@ -795,9 +806,15 @@ fn innermost(body: &Body, span: Span, pick: impl Fn(&Expr) -> bool) -> Option<Id
         .map(|(e, _)| e)
 }
 
-/// Where a rebinding after `suspension` goes: the end of the line that ends
-/// the statement holding it, with that statement's indentation.
-fn after_statement(body: &Body, suspension: Idx<Expr>, text: &str) -> std::result::Result<(usize, String), String> {
+struct RebindPoint {
+    range: (usize, usize),
+    indent: String,
+    suffix: String,
+}
+
+/// Insert after the holding statement, staying inside compact blocks. A use
+/// inside a larger expression needs an expression rewrite, not a later rebind.
+fn after_statement(body: &Body, binding: Idx<BindingInfo>, suspension: Idx<Expr>, text: &str) -> std::result::Result<RebindPoint, String> {
     let span = body.expr_spans[suspension];
     let block = innermost(body, span, |e| matches!(e, Expr::Block { .. })).ok_or("suspension outside a block")?;
     let Expr::Block { statements, tail } = &body.expr_arena[block] else { unreachable!() };
@@ -807,15 +824,30 @@ fn after_statement(body: &Body, suspension: Idx<Expr>, text: &str) -> std::resul
         .chain(tail.map(|t| body.expr_spans[t]))
         .find(|s| contains(*s, span))
         .ok_or("suspension outside a statement")?;
+    if body.expr_arena.iter().any(|(e, expr)| {
+        matches!(expr, Expr::Var(b) if *b == binding) && contains(holder, body.expr_spans[e])
+            && body.expr_spans[e].offset_range.0 >= span.offset_range.1
+    }) {
+        return Err(format!("line {} has a use within the same statement after its suspension", holder.line_range.0 + 1));
+    }
     let (start, end) = holder.offset_range;
     let line_end = text[end..].find('\n').map_or(text.len(), |i| end + i);
     let rest = text[end..line_end].trim();
-    if !(rest.is_empty() || rest.starts_with("//")) {
-        return Err(format!("line {} continues after its suspension", holder.line_range.1 + 1));
-    }
     let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
-    let indent: String = text[line_start..start].chars().take_while(|c| c.is_whitespace()).collect();
-    Ok((line_end, indent))
+    let leading: String = text[line_start..start].chars().take_while(|c| c.is_whitespace()).collect();
+    let compact = !text[line_start..start].trim().is_empty();
+    let indent = if compact { format!("{leading}    ") } else { leading.clone() };
+    if rest.is_empty() || rest.starts_with("//") {
+        return Ok(RebindPoint { range: (line_end, line_end), indent, suffix: String::new() });
+    }
+    let mut next = end;
+    if text[next..].starts_with(';') { next += 1; }
+    while next < line_end && text.as_bytes()[next].is_ascii_whitespace() { next += 1; }
+    if next >= body.expr_spans[block].offset_range.1 {
+        return Err(format!("line {} continues outside the suspension's block", holder.line_range.1 + 1));
+    }
+    let suffix = if text[next..].starts_with('}') { format!("\n{leading}") } else { format!("\n{indent}") };
+    Ok(RebindPoint { range: (end, next), indent, suffix })
 }
 
 /// Across-yield and capture sites in `id`, unique by line and identity as the
