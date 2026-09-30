@@ -269,7 +269,7 @@ function __rock_lifecycle_take_wire(key)
   due[key] = nil
   return true
 end
-function __rock_definition_plan_materialize(plan)
+function __rock_definition_plan_materialize(plan, materializers)
   _G.__rock_definition_plan_materializing = true
   for _, catalog in pairs(plan) do
     if type(catalog) == "table" and catalog._data and catalog.len then
@@ -280,7 +280,6 @@ function __rock_definition_plan_materialize(plan)
             -- Explicit foreign factories already return one boxed result.
             entry.definition = entry.factory()
           else
-            local materializers = _G.__rock_definition_materializers_pending
             local materialize = materializers and materializers[entry.factory.key]
             if materialize == nil then error("DefinitionPlan factory has no ABI-aware materializer", 0) end
             entry.definition = materialize(entry.factory)
@@ -295,7 +294,7 @@ end
 function __rock_code_slot_publish()
   local definition_plan = _G.__rock_definition_plan_pending
   if definition_plan ~= nil then
-    definition_plan = __rock_definition_plan_materialize(definition_plan)
+    definition_plan = __rock_definition_plan_materialize(definition_plan, _G.__rock_definition_materializers_pending)
   end
   local candidate_lifecycle_plan = _G.__rock_lifecycle_plan_pending
   local wire_due = nil

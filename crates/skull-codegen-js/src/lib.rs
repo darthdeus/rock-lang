@@ -346,7 +346,7 @@ function __rock_lifecycle_take_wire(key) {
   delete due[key];
   return true;
 }
-function __rock_definition_plan_materialize(plan) {
+function __rock_definition_plan_materialize(plan, materializers) {
   __rock_definition_plan_materializing = true;
   Object.keys(plan).forEach(function(catalogKey) {
     var catalog = plan[catalogKey];
@@ -358,7 +358,7 @@ function __rock_definition_plan_materialize(plan) {
           // Explicit foreign factories already return one boxed result.
           entry.definition = entry.factory();
         } else {
-          var materialize = __rock_definition_materializers_pending && __rock_definition_materializers_pending[entry.factory.key];
+          var materialize = materializers && materializers[entry.factory.key];
           if (typeof materialize !== "function") throw new Error("DefinitionPlan factory has no ABI-aware materializer");
           entry.definition = materialize(entry.factory);
         }
@@ -377,7 +377,7 @@ function __rock_code_slot_stage_one(key, body, abi) {
 function __rock_code_slot_publish() {
   if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
   var definition_plan = __rock_definition_plan_pending;
-  if (definition_plan !== null) definition_plan = __rock_definition_plan_materialize(definition_plan);
+  if (definition_plan !== null) definition_plan = __rock_definition_plan_materialize(definition_plan, __rock_definition_materializers_pending);
   var candidateLifecyclePlan = __rock_lifecycle_plan_pending;
   var wireDue = null;
   if (candidateLifecyclePlan !== null) {
