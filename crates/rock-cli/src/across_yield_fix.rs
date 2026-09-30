@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use atomic_refcell::AtomicRefCell;
-use bone_core::hir::{BindingKind, Body, BodyOwner, Expr, Function, Module, Statement};
+use bone_core::hir::{BindingKind, Body, BodyOwner, Expr, Function, Module, Statement, TyId, TypeCtor, TypeExpr};
 use bone_core::prelude::{FxHashMap, Idx, Span};
 use bone_semantic::hir::BindingInfo;
 use bone_semantic::identity_storage::{identity_module_body_sites, identity_suspension_crossings, IdentityStorageKind};
@@ -51,7 +51,7 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
         let Some(module) = module_of(&base.ws, f.id) else {
             anyhow::bail!("rock fix --across-yield: `{}` is not a module of {}", f.rel, plan.root.display());
         };
-        let (edits, refused) = entry_edits(module, f.id, &f.original);
+        let (edits, refused) = entry_edits(&base.ws, module, f.id, &f.original);
         f.refused = refused;
         f.entry = apply_edits(&f.original, &edits).map_err(|e| anyhow::anyhow!(e))?;
     }
@@ -352,11 +352,11 @@ fn contains(outer: Span, inner: Span) -> bool {
 }
 
 /// Stage one (recipe steps 1-3 and 6).
-fn entry_edits(module: &Module, id: Ustr, text: &str) -> (Vec<Edit>, Vec<String>) {
+fn entry_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<Edit>, Vec<String>) {
     let mut edits = Vec::new();
     let mut refused = Vec::new();
     for (_, f, body) in functions_in(module, id) {
-        match function_entry_edits(f, body, text) {
+        match function_entry_edits(ws, f, body, text) {
             Ok(e) => edits.extend(e),
             Err(why) => refused.push(format!("refused `{}`: {why}", f.name)),
         }
@@ -364,7 +364,10 @@ fn entry_edits(module: &Module, id: Ustr, text: &str) -> (Vec<Edit>, Vec<String>
     (edits, refused)
 }
 
-fn function_entry_edits(f: &Function, body: &Body, text: &str) -> std::result::Result<Vec<Edit>, String> {
+fn function_entry_edits(ws: &Workspace, f: &Function, body: &Body, text: &str) -> std::result::Result<Vec<Edit>, String> {
+    if f.is_coroutine && !is_sim(f) && returns_identity(ws, f) {
+        return Ok(Vec::new());
+    }
     let chain = Regex::new(r"\bMAG_ACTIVE_WORLD\b(\.unwrap\(\)(\.get\(\)\.unwrap\(\)(\.player\.get\(\)\.unwrap\(\))?)?)?")
         .expect("static regex");
     let resolvers = Regex::new(r"\b(mag_world_state|active_world_scene)\(\)(\.player\.get\(\)\.unwrap\(\))?").expect("static regex");
@@ -452,6 +455,16 @@ fn rename_world_local(body: &Body, text: &str) -> std::result::Result<Vec<Edit>,
     Ok(edits)
 }
 
+fn returns_identity(ws: &Workspace, f: &Function) -> bool {
+    let Some(ty @ TyId::Static(mid, index)) = f.return_ty else { return false };
+    let TypeExpr::App { ctor: TypeCtor::Nominal(name), params } = ws.module(mid).ty_arena[index] else { return false };
+    if !bone_core::modules::is_intrinsic_key(name, "Coroutine") { return false; }
+    params.into_iter().nth(1).is_some_and(|ret| {
+        let ret = ws.render(None, ty.with_idx(ret));
+        matches!(ret.rsplit("::").next(), Some("Player" | "WorldState" | "Mob"))
+    })
+}
+
 struct HelperParam {
     index: usize,
     binding: Idx<BindingInfo>,
@@ -470,6 +483,10 @@ fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             let identity = ty.rsplit("::").next().unwrap_or(&ty);
             matches!(identity, "Player" | "WorldState" | "Mob").then(|| (index, identity.to_string()))
         }).collect();
+        if returns_identity(ws, f) {
+            refused.push(format!("refused helper `{}`: co helper returns an identity", f.name));
+            continue;
+        }
         if identities.is_empty() {
             continue;
         }
@@ -478,8 +495,6 @@ fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
         let header = &text[header_start..body.expr_spans[root].offset_range.0];
         let why = if Regex::new(r"co fn \w+\.").expect("static regex").is_match(header) {
             Some("receiver-style co helper")
-        } else if Regex::new(r"Coroutine<[^,>]+,\s*(Player|WorldState|Mob)\b").expect("static regex").is_match(header) {
-            Some("co helper returns an identity")
         } else if identities.iter().any(|(index, _)| f.param_decls[*index].has_default) {
             Some("identity parameter has a default")
         } else {

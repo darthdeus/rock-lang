@@ -458,3 +458,14 @@ fn world_named_identity_parameter_keeps_its_borrow_name() {
     assert!(out.contains("await helper(world)"), "{}\n{out}", shown(&run));
     assert_eq!(run.code, Some(0), "{}", shown(&run));
 }
+
+#[test]
+fn identity_returning_helpers_are_refused_even_without_identity_parameters() {
+    for (tag, ty) in [("bare", "Player"), ("qualified", "game::Player")] {
+        let helper = format!("co fn setup() -> Coroutine<int, {ty}> {{\n    await frame(1)\n    return MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n}}\n");
+        let (out, run) = applied(&format!("return_identity_{tag}"), &helper);
+        assert_eq!(out, helper, "{}", shown(&run));
+        assert!(run.stdout.contains("co helper returns an identity"), "{}", shown(&run));
+        assert_eq!(run.code, Some(3), "{}", shown(&run));
+    }
+}
