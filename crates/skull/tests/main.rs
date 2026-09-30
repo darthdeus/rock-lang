@@ -9,8 +9,8 @@ mod allocation_report;
 
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
-#[path = "arena_borrow_lost_write_sentinel.rs"]
-mod arena_borrow_lost_write_sentinel;
+#[path = "arena_borrow_flat_element_reject.rs"]
+mod arena_borrow_flat_element_reject;
 #[path = "arena_column_oracle.rs"]
 mod arena_column_oracle;
 #[path = "backend_variant_mangling.rs"]

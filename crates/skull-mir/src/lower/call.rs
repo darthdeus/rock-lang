@@ -306,6 +306,17 @@ impl Builder<'_> {
                 }
             }
         }
+        if let Callee::Unresolved { name, .. } = callee {
+            if self.borrows_flat_arena_element(e, name)? {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "the Lua backend does not yet support `borrow` on an arena whose `value` \
+                     elements are stored as flat columns or rows (they have no table to alias); \
+                     declare the element a `struct` to borrow it"
+                        .to_string(),
+                ));
+            }
+        }
         // `tostring` of an enum, value record or handle is the structural
         // rendering, never the backend's own rendering of its representation.
         if let Some((arg, _)) = self.dispatch().tostring_route(e) {

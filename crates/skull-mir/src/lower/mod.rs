@@ -2841,7 +2841,9 @@ impl Builder<'_> {
             .result
             .is_some_and(|result| {
                 matches!(
-                    &*self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering),
+                    self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering)
+                        .peel_nullable()
+                        .0,
                     MonoTy::App { ctor: MonoCtor::Ref, .. }
                 )
             })
