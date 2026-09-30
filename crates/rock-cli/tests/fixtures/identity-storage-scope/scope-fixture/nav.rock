@@ -1,0 +1,4 @@
+pub mod nav;
+
+pub struct NavMob { hp: int }
+pub struct NavRoom { mobs: [NavMob] }

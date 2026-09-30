@@ -1703,6 +1703,7 @@ pub(crate) fn commit_selected_call(
         SmallVec::new()
     };
 
+    let mut ref_call_args = Vec::new();
     for (fill, pty_decl) in pairs {
         if has_bounds {
             check_iterator_bounds(
@@ -1710,6 +1711,11 @@ pub(crate) fn commit_selected_call(
             )?;
         }
         let pty = substitute(gamma, pty_decl, &subs, span)?;
+        if frame_ref_target(gamma, pty).is_some()
+            && let SlotFill::Direct(arg) = fill
+        {
+            ref_call_args.push(arg);
+        }
         match fill {
             SlotFill::Direct(arg) => {
                 // Implicit iterable->iterator coercion at a bounded param:
@@ -1749,6 +1755,10 @@ pub(crate) fn commit_selected_call(
                 coerce(gamma, fty, pty, c.body.expr_spans[op])?
             }
         }
+    }
+
+    if !ref_call_args.is_empty() {
+        gamma.out.ref_call_args.insert(call_expr, ref_call_args);
     }
 
     if has_bounds {

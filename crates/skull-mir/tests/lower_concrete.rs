@@ -218,6 +218,15 @@ return v0
 }
 
 #[test]
+fn explicit_int_to_float_is_a_typed_mir_conversion() {
+    let dump = mir("fn widen(value: int) -> float { value as float }", "widen");
+    assert!(
+        dump.contains("int_to_float"),
+        "an explicit scalar cast must survive lowering as a typed conversion:\n{dump}"
+    );
+}
+
+#[test]
 fn omitted_result_discards_tail_value_after_its_effects() {
     let dump = mir_std(
         "value V2 { x: int, y: int }\n\
@@ -398,6 +407,60 @@ goto bb3
 v5 = load c1
 return v5
 }"
+    );
+}
+
+#[test]
+fn diverging_if_join_does_not_declare_never_storage() {
+    let ast = skull_parser::parse_module(
+        "fn f(x: int) -> int { if x > 0 { return 1 } else { return 2 } }",
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "f")
+        .expect("function");
+    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+    assert!(
+        mir.cells.iter().skip(1).all(|(_, cell)| cell.ty.is_none()),
+        "a diverging join cannot materialize a never-typed local: {mir}"
+    );
+}
+
+#[test]
+fn nullable_aggregate_if_join_does_not_declare_payload_storage() {
+    let ast = skull_parser::parse_module(
+        "value Pair { x: int, y: int }\n\
+         fn f(present: bool) -> Pair? {\n\
+             return if present { Pair { x: 1, y: 2 } } else { null }\n\
+         }",
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "f")
+        .expect("function");
+    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+    let typed_temporaries: Vec<_> = mir
+        .cells
+        .iter()
+        .filter(|(_, cell)| cell.name.is_none() && cell.ty.is_some())
+        .collect();
+    assert!(
+        typed_temporaries.is_empty(),
+        "nullable payload storage cannot represent its absent arm: {mir}"
     );
 }
 
@@ -851,6 +914,36 @@ goto bb1
 }
 
 #[test]
+fn match_payload_bindings_retain_their_semantic_types() {
+    let ast = skull_parser::parse_module(
+        "enum Mixed { Flag(bool), Number(int) }\n\
+         fn f(value: Mixed) -> int { match value { Mixed::Flag(flag) => if flag { 1 } else { 0 }, Mixed::Number(number) => number } }",
+        ustr::Ustr::from("<test>"),
+    )
+    .expect("parse");
+    let mut modules = vec![ast];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "f")
+        .expect("function");
+    let mir = lower_test_root(&ws, mid, fid).expect("lower");
+
+    for name in ["flag", "number"] {
+        let cell = mir
+            .cells
+            .iter()
+            .find(|(_, cell)| cell.name.is_some_and(|cell_name| cell_name.as_str() == name))
+            .map(|(_, cell)| cell)
+            .unwrap_or_else(|| panic!("missing match binding `{name}`: {mir}"));
+        assert!(cell.ty.is_some(), "match binding `{name}` lost its semantic type: {mir}");
+    }
+}
+
+#[test]
 fn match_nested_enum_gates_child_read_behind_parent_tag() {
     // `Some(Circle(r))`: the inner Circle tag test must be GATED behind the
     // outer Some tag (parent tag before any child read) — a cont block after
@@ -1013,4 +1106,22 @@ goto bb3
 return
 }"
     );
+}
+
+#[test]
+fn unsupported_interpolation_hole_error_is_located_at_the_hole() {
+    let src = "fn f(a: any) -> string {\n    return \"x {a}\"\n}";
+    let mut modules = vec![skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse")];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "f")
+        .expect("function by name");
+    let err = lower_test_root(&ws, mid, fid).expect_err("an `any` hole has no rendering");
+    assert!(err.message.contains("interpolation hole"), "got: {:?}", err.message);
+    let span = err.labels.first().expect("the hole is labeled").span;
+    assert_eq!(&src[span.offset_range.0..span.offset_range.1], "a");
 }

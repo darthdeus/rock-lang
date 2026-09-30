@@ -28,9 +28,47 @@ impl Builder<'_> {
                 }) => self.lower_array_literal_with_expected(e, elems, expected),
             _ => self.lower_expr_inner(e),
         };
+        let v = match v {
+            Ok(v) if self.f32_round_exprs.contains(&e) => Ok(self.emit_cur(Inst::FloatToF32(v))),
+            other => other,
+        };
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         let v = v?;
+        // A transparent newtype constructor returns its argument's MIR value.
+        // Keep the argument constructor's logical type on that shared value.
+        let is_newtype_constructor = matches!(
+            &self.body.expr_arena[e],
+            Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } if args.len() == 1 && self.ws.newtypes_by_name.contains_key(name)
+        );
+        if !is_newtype_constructor && matches!(
+            self.f.insts[v],
+            Inst::MakeValueStruct { .. }
+                | Inst::MaterializeValueStruct { .. }
+                | Inst::MakeTuple(..)
+        ) {
+            if let Some(ty) = self
+                .concrete_plan
+                .domain_types(&self.cur_domain)
+                .and_then(|types| types.expr_type(e))
+            {
+                match self.f.inst_logical_types.get(&v) {
+                    Some(existing) if *existing != ty => {
+                        return Err(self.gap_here(
+                            "one MIR value was assigned conflicting concrete logical types",
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.f.inst_logical_types.insert(v, ty);
+                    }
+                }
+            }
+        }
         // Implicit iterable->iterator coercion at a bounded call arg: bone
         // recorded the resolved `iter` fn; wrap the arg value in that call
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
@@ -184,9 +222,12 @@ impl Builder<'_> {
             // A global holding a value struct routes through the repr layer so a
             // whole-value read copies the box (a global is a mutable place).
             Expr::Global(name) => {
-                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e)?.is_some() {
+                if self.value_struct_of(e).is_some()
+                    || self.nullable_place_value_of(e)?.is_some()
+                    || self.nobox_global_place(e)?.is_some()
+                {
                     let r = self.lower_expr_repr(e)?.into_value();
-                    return Ok(self.pack(r)?);
+                    return Ok(self.pack_maybe_absent(r)?);
                 }
                 Ok(self.emit_cur(Inst::Global(name)))
             }
@@ -239,6 +280,10 @@ impl Builder<'_> {
                 }
             }
 
+            Expr::BinOp { op: BinOp::NullCoalesce, .. } if self.expr_is_flat_enum(e) => {
+                let r = self.lower_expr_repr(e)?.into_value();
+                self.pack(r)
+            }
             Expr::BinOp { op, lhs, rhs } => self.lower_binop(op, lhs, rhs),
 
             Expr::If {
@@ -295,7 +340,12 @@ impl Builder<'_> {
                             let vals = self.repr_to_slot_values_bundle(&bundle, &slot)?;
                             vs.extend(vals);
                         }
-                        _ => vs.push(self.pack_maybe_absent(bundle.into_value())?),
+                        _ => {
+                            let outer_expr = self.cur_expr.replace(el);
+                            let packed = self.pack_maybe_absent(bundle.into_value());
+                            self.cur_expr = outer_expr;
+                            vs.push(packed?);
+                        }
                     }
                 }
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
@@ -311,10 +361,11 @@ impl Builder<'_> {
                 // an unsubstituted generic (a nullable binding has no
                 // synthesizable node), so the type predicates below see nothing
                 // while the storage still has no element slot to name.
-                if self.value_struct_of(e).is_some()
-                    || self.nullable_place_value_of(e)?.is_some()
-                    || self.vec_column_elem_of(base)?.is_some()
+                if self.vec_column_elem_of(base)?.is_some()
                     || self.vec_strided_elem_of(base)?.is_some()
+                    || (!self.scx.values_first_class
+                        && (self.value_struct_of(e).is_some()
+                            || self.nullable_place_value_of(e)?.is_some()))
                 {
                     let r = self.lower_expr_repr(e)?.into_value();
                     return Ok(self.pack(r)?);
@@ -466,7 +517,7 @@ impl Builder<'_> {
                     let slot = param_slots.get(i).cloned().ok_or_else(|| {
                         self.gap_here(format!("lambda ABI has no collected parameter slot {i}"))
                     })?;
-                    self.bind_param_slot(pb, pname, &slot);
+                    self.bind_param_slot(pb, pname, &slot)?;
                 }
                 let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
                 let entry = self.f.new_block();
@@ -499,6 +550,27 @@ impl Builder<'_> {
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
                 self.ret_rep = lam_plan.result();
+                if self.ret_rep.is_none() {
+                    self.lower_stmt_expr(body)?;
+                    if self.is_open() {
+                        self.f.set_term(self.cur, Term::Return(Vec::new()));
+                    }
+                    self.defers = saved_defers;
+                    self.in_defer_body = saved_in_defer;
+                    self.ret_rep = saved_ret_rep;
+                    self.cur = saved;
+                    let id = self.emit_cur(Inst::Lambda {
+                        params: param_cells,
+                        entry,
+                    });
+                    self.f
+                        .lambda_abi_fingerprints
+                        .insert(id, lam_plan.logical_fingerprint(&self.scx.rep_arena()));
+                    self.f
+                        .lambda_abi_representations
+                        .insert(id, lam_plan.clone());
+                    return Ok(id);
+                }
                 if let Some(_shape) = self.result_shape() {
                     let r = self.lower_expr_repr(body)?;
                     if self.is_open() {
@@ -514,6 +586,9 @@ impl Builder<'_> {
                         id,
                         lam_plan.logical_fingerprint(&self.scx.rep_arena()),
                     );
+                    self.f
+                        .lambda_abi_representations
+                        .insert(id, lam_plan.clone());
                     return Ok(id);
                 }
                 match self.result_tuple() {
@@ -546,11 +621,12 @@ impl Builder<'_> {
                     id,
                     lam_plan.logical_fingerprint(&self.scx.rep_arena()),
                 );
+                self.f
+                    .lambda_abi_representations
+                    .insert(id, lam_plan.clone());
                 Ok(id)
             }
 
-            // `as` is identity at runtime EXCEPT `float as int`, which floors
-            // (Lua numbers are all doubles) — mirrors rock-codegen.
             Expr::As { value, target, kind } => {
                 let v = self.lower_expr(value)?;
                 let to_int = self
@@ -590,6 +666,8 @@ impl Builder<'_> {
                     Ok(self.emit_cur(Inst::FloatToUint(v)))
                 } else if to_float && from_uint {
                     Ok(self.emit_cur(Inst::UintToFloat(v)))
+                } else if to_float && from_int {
+                    Ok(self.emit_cur(Inst::IntToFloat(v)))
                 } else {
                     Ok(v)
                 }
@@ -612,7 +690,9 @@ impl Builder<'_> {
                 let bv = self.lower_expr(base)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(bv, nil));
-                let result = self.f.new_cell(None);
+                let result = self
+                    .f
+                    .new_cell_typed(None, self.current_expr_storage_ty_id());
                 let nil_bb = self.f.new_block();
                 let val_bb = self.f.new_block();
                 let join = self.f.new_block();
@@ -684,6 +764,27 @@ impl Builder<'_> {
         }
     }
 
+    /// A `ref` borrow (local initializer, argument or returned place): the place
+    /// itself, as [`Self::lower_place_base`] lowers it, with its root cell marked
+    /// [`Cell::borrowed`]. Marked whatever the borrowed type is: a borrowed
+    /// struct can still reach a `value` field that is written through the alias.
+    pub(crate) fn lower_ref_borrow(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let place = self.lower_place_base(e)?;
+        let mut cur = place;
+        loop {
+            match &self.f.insts[cur] {
+                Inst::Field { base, .. } => cur = *base,
+                Inst::Load(cell) => {
+                    let cell = *cell;
+                    self.f.mark_borrowed(cell);
+                    break;
+                }
+                _ => break,
+            }
+        }
+        Ok(place)
+    }
+
     /// `target = value` -> a `Store`/`StoreField`/`StoreIndex`/`StoreGlobal`
     /// (the effect; no value). The expression form wraps this with a unit value.
     /// The BASE of an assignment target, lowered as a PLACE: the slot itself,
@@ -696,7 +797,7 @@ impl Builder<'_> {
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let nobox_global_place = self.nobox_global_place(e)?;
         let flat_field = match self.body.expr_arena[e].clone() {
-            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.expr_ty(base) {
+            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.field_base_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
                     Some(self.struct_field_plan(sname, field, false)?),
                 _ => None,
@@ -704,6 +805,19 @@ impl Builder<'_> {
             _ => None,
         };
         match self.body.expr_arena[e].clone() {
+            // Element stores and leaf places of flat storage are decomposed
+            // before this; what reaches here is a borrow of the whole element or
+            // a struct inside it (a `ref` argument or `let`). A known Lua gap, not
+            // policy: C runs these. Fix options: docs/unfuck-backlog.md.
+            Expr::Index { base, .. } if self.flat_stored_container(base)? => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "the Lua backend does not yet support a `ref` borrow of a container element \
+                     stored as flat columns or rows (it has no table to alias); copy it out, \
+                     modify it and store it back"
+                        .to_string(),
+                ))
+            }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
@@ -763,11 +877,98 @@ impl Builder<'_> {
         }
     }
 
+    fn lower_guarded_place_base(
+        &mut self,
+        e: Idx<Expr>,
+        absent_join: Idx<Block>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let flat_field = match self.body.expr_arena[e].clone() {
+            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => match self.field_base_ty(base) {
+                Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) =>
+                    Some(self.struct_field_plan(sname, field, false)?),
+                _ => None,
+            },
+            _ => None,
+        };
+        match self.body.expr_arena[e].clone() {
+            Expr::SafeNav { base, field } => {
+                let recv = self.lower_guarded_place_base(base, absent_join)?;
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+                let present = self.f.new_block();
+                self.f.set_term(
+                    self.cur,
+                    Term::Branch {
+                        cond: is_nil,
+                        then_bb: absent_join,
+                        else_bb: present,
+                    },
+                );
+                self.cur = present;
+                Ok(self.emit_cur(Inst::Field { base: recv, field }))
+            }
+            Expr::FieldAccess { base, field }
+                if self.swizzle_of(base, field).is_none()
+                    && !flat_field.as_ref().is_some_and(|p| p.flat_shape().is_some()) =>
+            {
+                let (pbase, key) = self.physical_field(base, field)?;
+                let base = self.lower_guarded_place_base(pbase, absent_join)?;
+                Ok(self.emit_cur(Inst::Field { base, field: key }))
+            }
+            _ => self.lower_place_base(e),
+        }
+    }
+
+    /// `place.f = v` on a stdlib descriptor. Copies share its one Lua table, so
+    /// the write builds a fresh descriptor and stores it back into `place`.
+    fn descriptor_field_store(
+        &mut self,
+        place: Idx<Expr>,
+        field: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        enum Owner {
+            Field(Idx<Inst>, Ustr),
+            Global(Ustr),
+        }
+        let owner = match self.body.expr_arena[place].clone() {
+            Expr::FieldAccess { base, field: slot } => {
+                let (pbase, key) = self.physical_field(base, slot)?;
+                Owner::Field(self.lower_place_base(pbase)?, key)
+            }
+            Expr::Global(name) => Owner::Global(name),
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                Owner::Global(self.static_cells[&raw(b)])
+            }
+            _ => {
+                return Err(self.gap_here(
+                    "a descriptor field write must name the field or global holding the \
+                     descriptor; replace it wholesale instead",
+                ));
+            }
+        };
+        let old = match owner {
+            Owner::Field(b, key) => self.emit_cur(Inst::Field { base: b, field: key }),
+            Owner::Global(name) => self.emit_cur(Inst::Global(name)),
+        };
+        let key = self.emit_cur(Inst::Const(Lit::Str(field)));
+        let v = self.lower_expr(value)?;
+        let fresh = self.call_spine("__descriptor_with", vec![old, key, v])?;
+        match owner {
+            Owner::Field(b, key) => self.emit_cur(Inst::StoreField { base: b, field: key, value: fresh }),
+            Owner::Global(name) => self.emit_cur(Inst::StoreGlobal { name, value: fresh }),
+        };
+        Ok(())
+    }
+
     pub(crate) fn lower_assign_effect(
         &mut self,
         target: Idx<Expr>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        if self.assign_target_is_f32(target) {
+            self.f32_round_exprs.insert(value);
+        }
         let nobox_global_place = self.nobox_global_place(target)?;
         match self.body.expr_arena[target].clone() {
             // A threaded (group_binds) var -- a scalarized flat-enum local or value
@@ -812,16 +1013,27 @@ impl Builder<'_> {
                 let (leaves, shape) = nobox_global_place.clone().expect("guard matched");
                 self.nobox_global_store(&leaves, shape, value)?;
             }
+            Expr::FieldAccess { base, field }
+                if !self.scx.values_first_class
+                    && matches!(
+                        self.field_base_ty(base),
+                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
+                            if bone_semantic::prelude::is_descriptor_key(name)
+                    ) =>
+            {
+                self.descriptor_field_store(base, field, value)?;
+            }
             Expr::FieldAccess { base, field } => {
                 // `xs[i].x = v` / `xs[i].at.x = v` on a column-stored or strided
                 // Vec: there is no element slot to take a place base of, so the
-                // write lands directly in the leaf named by the dotted path.
-                let (root, path) = self.flat_leaf_path(base, field)?.unwrap_or((base, field));
+                // write lands directly in the leaf columns under the dotted path.
+                let (root, path, nested) =
+                    self.flat_field_path(base, field)?.unwrap_or((base, field, None));
                 if let Some((vec, idx, elem)) = self.column_index_place(root)? {
-                    return self.column_leaf_store(vec, idx, elem, path, value);
+                    return self.column_leaf_store(vec, idx, elem, path, nested.as_ref(), value);
                 }
                 if let Some((vec, idx, elem)) = self.strided_index_place(root)? {
-                    return self.strided_leaf_store(vec, idx, elem, path, value);
+                    return self.strided_leaf_store(vec, idx, elem, path, nested.as_ref(), value);
                 }
                 // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
                 // leaf-addressed NativeBuffer: there is no element slot to take a
@@ -834,7 +1046,7 @@ impl Builder<'_> {
                 // A whole embedded field (`p.f = Foo { .. }`): the child has no
                 // slot of its own, so write its leaves. Composition happens
                 // BEFORE this, so `p.f` here is the child, not a physical key.
-                let embed_plan = match self.expr_ty(base) {
+                let embed_plan = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                         if self.swizzle_of(base, field).is_none() =>
                         Some(self.struct_field_plan(sname, field, false)?),
@@ -849,7 +1061,12 @@ impl Builder<'_> {
                 // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
-                let spliced_embed = match self.expr_ty(base) {
+                if let Some(sname) = self.leaf_table_base(base)?
+                    && self.leaf_table_value_child(sname, field)?.is_some()
+                {
+                    return self.store_leaf_table_child(b, sname, field, key, value);
+                }
+                let spliced_embed = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                         if key != field && self.swizzle_of(base, field).is_none() =>
                         self.struct_field_plan(sname, field, true)?.embed(),
@@ -864,7 +1081,7 @@ impl Builder<'_> {
                 }
                 // A flattened enum field: write the discriminant + payload slots
                 // directly on the parent table (no nested box).
-                let flat_plan = match self.expr_ty(base) {
+                let flat_plan = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                         if self.swizzle_of(base, field).is_none() =>
                         Some(self.struct_field_plan(sname, field, false)?),
@@ -874,6 +1091,39 @@ impl Builder<'_> {
                     let cells = self.lower_flat_value(&shape, value)?;
                     self.store_flat_cells(b, key, cells);
                     return Ok(());
+                }
+                // A whole `nobox` child that is not inline lives nested in its
+                // cdata parent: write its leaves through the stored child, the
+                // inverse of `cdata_leaves`, rather than box a copy to store.
+                if !self.scx.values_first_class
+                    && let Some(cname) = self.value_struct_of(target)
+                    && self.is_nobox_struct(cname)
+                {
+                    let shape = self.nominal_rep_shape_required(cname, false)?;
+                    if self.shape_is_plain_keys(&shape) {
+                        let r = self.lower_expr_repr(value)?;
+                        let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
+                        let paths = self.boxed_leaf_paths(&shape)?;
+                        if paths.len() != leaves.len() {
+                            return Err(self.gap_here(format!(
+                                "`{cname}` has {} leaf paths but the value produced {} leaves",
+                                paths.len(),
+                                leaves.len()
+                            )));
+                        }
+                        let child = self.emit_cur(Inst::Field { base: b, field: key });
+                        for (path, leaf) in paths.into_iter().zip(leaves) {
+                            let (last, walk) = path
+                                .split_last()
+                                .ok_or_else(|| self.gap_here(format!("`{cname}` has an empty leaf path")))?;
+                            let mut at = child;
+                            for seg in walk {
+                                at = self.emit_cur(Inst::Field { base: at, field: *seg });
+                            }
+                            self.emit_cur(Inst::StoreField { base: at, field: *last, value: leaf });
+                        }
+                        return Ok(());
+                    }
                 }
                 let expected = self.concrete_expr_ty(target);
                 let v = self.lower_expr_with_expected(value, expected.as_deref())?;
@@ -933,11 +1183,11 @@ impl Builder<'_> {
             // non-null path. Deep `a?.b?.c = v` works: `base` (`a?.b`) is itself
             // a SafeNav that lowers to nil if any inner link is null.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_place_base(base)?;
+                let join = self.f.new_block();
+                let recv = self.lower_guarded_place_base(base, join)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
-                let join = self.f.new_block();
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: join, else_bb: store_bb });
                 self.cur = store_bb;
                 let v = self.lower_expr(value)?;
@@ -956,6 +1206,26 @@ impl Builder<'_> {
     /// target uses native arith; a non-scalar target (struct/value with an
     /// operator overload) routes `op_fn(target, value)` through the resolved
     /// overload (bone records it on the CompoundAssign expr).
+    /// Whether `target` is a field declared `f32`, so a write rounds.
+    pub(crate) fn assign_target_is_f32(&self, target: Idx<Expr>) -> bool {
+        let Expr::FieldAccess { base, field } = self.body.expr_arena[target] else {
+            return false;
+        };
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) else {
+            return false;
+        };
+        self.ws.struct_by_name.get(&sname).is_some_and(|sid| {
+            self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
+                f.name == field
+                    && matches!(
+                        f.storage_ty,
+                        TyId::Static(m, i)
+                            if matches!(self.ws.module(m).ty_arena[i], TypeExpr::Builtin(BuiltinTy::F32))
+                    )
+            })
+        })
+    }
+
     pub(crate) fn lower_compound_assign_effect(
         &mut self,
         e: Idx<Expr>,
@@ -963,6 +1233,7 @@ impl Builder<'_> {
         op_fn: Ustr,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        let f32_target = self.assign_target_is_f32(target);
         let nobox_global_place = self.nobox_global_place(target)?;
         let scalar = self.arith_ty(target).zip(self.arith_ty(value));
         // Non-scalar: resolve the operator overload once (overload target on the
@@ -980,7 +1251,7 @@ impl Builder<'_> {
                 let name = self.static_cells[&raw(b)];
                 let cur = self.emit_cur(Inst::Global(name));
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::Var(b) => {
@@ -990,7 +1261,7 @@ impl Builder<'_> {
                     .ok_or_else(|| gap("compound-assign to an unbound variable"))?;
                 let cur = self.emit_cur(Inst::Load(cell));
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::Store { cell, value: new_v });
             }
             // A `nobox` global is stored as leaves, so neither the whole-group
@@ -1006,14 +1277,14 @@ impl Builder<'_> {
             Expr::Global(name) => {
                 let cur = self.emit_cur(Inst::Global(name));
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
                 if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
                     let cur = self.nb_leaf_load(buf, checked, &place);
                     let rv = self.lower_expr(value)?;
-                    let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                    let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                     self.nb_leaf_store(buf, checked, &place, new_v);
                     return Ok(());
                 }
@@ -1021,7 +1292,7 @@ impl Builder<'_> {
                 let b = self.lower_place_base(pbase)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field: key });
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreField { base: b, field: key, value: new_v });
             }
             Expr::Index { base, index } => {
@@ -1029,22 +1300,22 @@ impl Builder<'_> {
                 let i = self.lower_expr(index)?;
                 let cur = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreIndex { base: b, index: i, value: new_v, kind });
             }
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
             // The read-modify-write and `value` run only on the non-null path.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_place_base(base)?;
+                let join = self.f.new_block();
+                let recv = self.lower_guarded_place_base(base, join)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
-                let join = self.f.new_block();
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: join, else_bb: store_bb });
                 self.cur = store_bb;
                 let cur = self.emit_cur(Inst::Field { base: recv, field });
                 let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::StoreField { base: recv, field, value: new_v });
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
@@ -1056,6 +1327,20 @@ impl Builder<'_> {
 
     /// `cur <op> rv`: native arith for a scalar target, else the resolved
     /// operator-overload call `op_fn(cur, rv)`.
+    /// [`Self::compound_combine`], rounding the result for an `f32` target.
+    fn compound_combine_f32(
+        &mut self,
+        f32_target: bool,
+        scalar: Option<(ArithTy, ArithTy)>,
+        op_fn: Ustr,
+        overload: Option<FuncRef>,
+        cur: Idx<Inst>,
+        rv: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+        Ok(if f32_target { self.emit_cur(Inst::FloatToF32(v)) } else { v })
+    }
+
     pub(crate) fn compound_combine(
         &mut self,
         scalar: Option<(ArithTy, ArithTy)>,
@@ -1177,6 +1462,7 @@ impl Builder<'_> {
     pub(crate) fn safe_nav_call_value_repr(
         &mut self,
         e: Idx<Expr>,
+        receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
@@ -1184,13 +1470,12 @@ impl Builder<'_> {
         let value = if let Some(field) = self.fn_field_of_call(e) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
+            let plan = self
+                .struct_field_fn_rep_plan(receiver, field)?
+                .ok_or_else(|| gap("inferred safe-nav fn-field call has no representation plan"))?;
             let fieldv = self.emit_cur(Inst::Field { base: recv, field });
-            let mut argv = Vec::new();
-            for a in args {
-                argv.push(self.lower_expr(a)?);
-            }
-            let shape = self.peeled_tuple_shape(e)?;
-            ValueRepr::Scalar(self.emit_call_value_n(shape, fieldv, argv)?)
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            self.indirect_call_by_plan(plan, fieldv, &arg_idxs)?
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             // The whole call -- both ABIs, the delivery key, the bound tree, the
@@ -1214,18 +1499,19 @@ impl Builder<'_> {
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
         self.safe_nav_repr(receiver, shape, move |s, recv| {
-            s.safe_nav_call_value_repr(e, method, args, recv)
+            s.safe_nav_call_value_repr(e, receiver, method, args, recv)
         })
     }
 
     fn pack_safe_nav_call_value(
         &mut self,
         e: Idx<Expr>,
+        receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let r = self.safe_nav_call_value_repr(e, method, args, recv)?;
+        let r = self.safe_nav_call_value_repr(e, receiver, method, args, recv)?;
         Ok(self.pack(r.into_value())?)
     }
 
@@ -1291,7 +1577,9 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let result = self.f.new_cell(None);
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let nil_bb = self.f.new_block();
         let call_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -1303,7 +1591,7 @@ impl Builder<'_> {
 
         self.cur = call_bb;
         let recv_v = self.safe_nav_present_value(recv)?;
-        let cv = self.pack_safe_nav_call_value(e, method, args, recv_v)?;
+        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv_v)?;
         self.store_and_join(result, cv, join);
 
         self.cur = join;
@@ -1348,7 +1636,9 @@ impl Builder<'_> {
             return Ok(None);
         };
         let part = parts[i].clone();
-        let result = self.f.new_cell(None);
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let absent_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -1379,7 +1669,7 @@ impl Builder<'_> {
         let embed_plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
             None
         } else {
-            match self.expr_ty(base) {
+            match self.field_base_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                     if self.swizzle_of(base, field).is_none() =>
                     Some(self.struct_field_plan(sname, field, false)?),
@@ -1473,7 +1763,7 @@ impl Builder<'_> {
         let plan = if field.parse::<usize>().is_ok() || self.expr_is_newtype(base) {
             None
         } else {
-            match self.expr_ty(base) {
+            match self.field_base_ty(base) {
                 Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })
                     if self.swizzle_of(base, field).is_none() =>
                     Some(self.struct_field_plan(sname, field, false)?),
@@ -1522,7 +1812,9 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let result = self.f.new_cell(None);
+        let result = self
+            .f
+            .new_cell_typed(None, self.current_expr_storage_ty_id());
         let nil_bb = self.f.new_block();
         let let_bb = self.f.new_block();
         let join = self.f.new_block();

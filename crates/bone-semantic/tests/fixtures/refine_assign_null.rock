@@ -5,7 +5,7 @@
 //! assignment"). Verified vs rock (path_refinement_assignment.rock).
 
 //- assign_null_to_refined_field
-struct Mid { v: int }
+value Mid { v: int }
 struct Top { mid: Mid? }
 fn f(top: Top) -> int {
     if top.mid != null {

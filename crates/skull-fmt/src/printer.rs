@@ -2443,6 +2443,8 @@ impl<'a> Printer<'a> {
             TypeExprKind::Int => Doc::text("int"),
             TypeExprKind::Uint => Doc::text("uint"),
             TypeExprKind::Float => Doc::text("float"),
+            TypeExprKind::F64 => Doc::text("f64"),
+            TypeExprKind::F32 => Doc::text("f32"),
             TypeExprKind::Bool => Doc::text("bool"),
             TypeExprKind::Ref(target) => {
                 let reference = Doc::concat([Doc::text("ref "), self.type_expr(*target)]);
@@ -2484,14 +2486,14 @@ impl<'a> Printer<'a> {
                         let inner = source[1..].trim_start();
                         inner[2..].trim_start().starts_with('(')
                     };
-                let prefix = if starts_parenthesized_fn {
+                let prefix = if starts_parenthesized_fn && !data.is_nullable {
                     "(fn("
-                } else if starts_fn {
+                } else if starts_fn || starts_parenthesized_fn {
                     "fn("
                 } else {
                     "("
                 };
-                let suffix = if starts_parenthesized_fn { ")" } else { "" };
+                let suffix = if starts_parenthesized_fn && !data.is_nullable { ")" } else { "" };
                 Doc::concat([
                     Doc::text(prefix),
                     Doc::join(Doc::text(", "), params.iter().map(|p| self.type_expr(*p))),
@@ -2504,7 +2506,11 @@ impl<'a> Printer<'a> {
             TypeExprKind::Hole(_, None) => Doc::text("?"),
         };
         if data.is_nullable {
-            Doc::concat([inner, Doc::text("?")])
+            if matches!(data.kind, TypeExprKind::Function { .. }) {
+                Doc::concat([Doc::text("("), inner, Doc::text(")?")])
+            } else {
+                Doc::concat([inner, Doc::text("?")])
+            }
         } else {
             inner
         }

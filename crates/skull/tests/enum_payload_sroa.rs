@@ -12,6 +12,87 @@
 //! see `enum_cdata.rs`.) Escaping table enums keep the table.
 use crate::common::{emit_module, function_body};
 
+const COALESCE_SRC: &str = r#"
+enum Resource { Image(int), Named(string), Empty }
+fn select_resource(input: Resource?) -> int {
+    let selected = input ?? Resource::Image(17)
+    return match selected {
+        Resource::Image(n) => n,
+        Resource::Named(_) => 29,
+        Resource::Empty => 31,
+    }
+}
+fn main() { print(select_resource(null)) }
+"#;
+
+#[test]
+fn nullable_enum_coalesce_keeps_join_in_leaves() {
+    let lua = emit_module(COALESCE_SRC);
+    let body = function_body(&lua, "select_resource");
+    assert!(!body.contains("{__variant"), "nullable enum coalesce boxes its join:\n{body}");
+}
+
+const COALESCE_SEMANTICS_SRC: &str = r#"
+value Snapshot { n: int }
+struct Shared { n: int }
+struct Owner { value: Snapshot }
+enum Resource { Image(int), Named(string), Pair(int, int), Owned(Snapshot), Ref(Shared), Empty }
+global lhs_calls: int = 0
+global rhs_calls: int = 0
+fn lhs(input: Resource?) -> Resource? { lhs_calls += 1; return input }
+fn rhs() -> Resource { rhs_calls += 1; return Resource::Pair(13, 17) }
+fn choose(input: Resource?) -> Resource { return lhs(input) ?? rhs() }
+fn classify(input: Resource?) -> int {
+    let selected = input ?? Resource::Empty
+    return match selected {
+        Resource::Image(n) => n,
+        Resource::Named(name) => name.len(),
+        Resource::Pair(a, b) => a + b,
+        Resource::Owned(v) => v.n,
+        Resource::Ref(v) => v.n,
+        Resource::Empty => 31,
+    }
+}
+fn diverging(input: Resource?) -> int {
+    let selected = input ?? return -7
+    return classify(selected)
+}
+@test
+fn t() {
+    let selected = choose(Resource::Image(5))
+    let escaped = [selected, choose(null), choose(Resource::Named("four")), choose(Resource::Empty)]
+    print("{classify(escaped[0])} {classify(escaped[1])} {classify(escaped[2])} {classify(escaped[3])}")
+    print("{lhs_calls} {rhs_calls}")
+    let original = Owner { value: Snapshot { n: 41 } }
+    let owned: Resource? = Resource::Owned(original.value)
+    let copied = owned ?? Resource::Empty
+    original.value.n = 99
+    owned = Resource::Image(1)
+    print(classify(copied))
+    let shared = Shared { n: 43 }
+    let referenced: Resource? = Resource::Ref(shared)
+    let alias = referenced ?? Resource::Empty
+    shared.n = 47
+    print(classify(alias))
+    let source: Resource? = Resource::Pair(3, 7)
+    let saved = source ?? Resource::Empty
+    let captured = () => classify(saved)
+    source = Resource::Empty
+    print(captured())
+    print("{diverging(null)} {diverging(Resource::Image(53))}")
+    let absent: Resource? = null
+    let other: Resource? = null
+    print(classify(absent ?? other ?? Resource::Image(59)))
+}
+fn main() { t() }
+"#;
+
+#[test]
+fn nullable_enum_coalesce_preserves_evaluation_and_escaping_payloads() {
+    let Some(stdout) = run_t(COALESCE_SEMANTICS_SRC) else { panic!("luajit required") };
+    assert_eq!(stdout, "5 30 4 31\n4 1\n41\n47\n10\n-7 53\n59");
+}
+
 // Direct ctor stores into `s` (the second guarded by an `if`), then match-with-
 // binding -- the non-escaping construct/match path. Only `w` (an int) is observed.
 const SRC: &str = r#"

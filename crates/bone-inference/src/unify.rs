@@ -36,6 +36,35 @@ pub(crate) fn contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
     visit(gamma, ty, &mut FxHashSet::default())
 }
 
+pub(crate) fn is_identity_struct_type(gamma: &Gamma, ty: TyId) -> bool {
+    fn visit(gamma: &Gamma, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match *gamma.get(ty) {
+            TypeExpr::Infer(var, _) => gamma
+                .out
+                .substitutions
+                .get(var)
+                .is_some_and(|next| visit(gamma, next, seen)),
+            TypeExpr::Nullable(inner) => visit(gamma, ty.with_idx(inner), seen),
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } => resolve_struct(gamma, name).is_some_and(|sid| {
+                !gamma.workspace.module(sid.module).structs[sid.def].is_value
+            }),
+            _ => false,
+        }
+    }
+
+    visit(gamma, ty, &mut FxHashSet::default())
+}
+
+pub(crate) fn is_frame_borrow_type(gamma: &Gamma, ty: TyId) -> bool {
+    contains_frame_ref(gamma, ty) || is_identity_struct_type(gamma, ty)
+}
+
 pub(crate) fn frame_ref_target(gamma: &Gamma, ty: TyId) -> Option<TyId> {
     match *gamma.get(ty) {
         TypeExpr::App {
@@ -628,8 +657,62 @@ pub(crate) fn has_unbound_infer(gamma: &Gamma, ty: TyId) -> bool {
 }
 
 pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(), CompilerError> {
+    coerce_impl(gamma, from, to, span, false)
+}
+
+pub(crate) fn coerce_contextual_lambda(
+    gamma: &mut Gamma,
+    from: TyId,
+    to: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    coerce_impl(gamma, from, to, span, true)
+}
+
+fn coerce_impl(
+    gamma: &mut Gamma,
+    from: TyId,
+    to: TyId,
+    span: Span,
+    contextual_lambda: bool,
+) -> Result<(), CompilerError> {
     let from_r = resolve(gamma, from, span);
     let to_r = resolve(gamma, to, span);
+
+    // A stored function value keeps its declared return ABI. Lifting a `nobox`
+    // return into a nullable one adds a presence slot at indirect call sites.
+    // Lambda literals checked against the target type get that ABI directly.
+    let function_return = |ty: TyId| {
+        let ty = match *gamma.get(ty) {
+            TypeExpr::Nullable(inner) => ty.with_idx(inner),
+            _ => ty,
+        };
+        match *gamma.get(ty) {
+            TypeExpr::Function { ret, .. } => Some(ty.with_idx(ret)),
+            _ => None,
+        }
+    };
+    if !contextual_lambda
+        && let (Some(from_ret), Some(to_ret)) = (function_return(from_r), function_return(to_r))
+    {
+        let from_ret = resolve(gamma, from_ret, span);
+        let to_ret = resolve(gamma, to_ret, span);
+        if let TypeExpr::Nullable(inner) = *gamma.get(to_ret) {
+            let to_inner = resolve(gamma, to_ret.with_idx(inner), span);
+            if !matches!(gamma.get(from_ret), TypeExpr::Nullable(_))
+                && let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = *gamma.get(to_inner)
+                && resolve_struct(gamma, name).is_some_and(|sid| {
+                    gamma.workspace.module(sid.module).structs[sid.def].is_nobox
+                })
+                && gamma.trial(|g| unify(g, from_ret, to_inner, span).is_ok())
+            {
+                return Err(CompilerError::new_with_label(
+                    span,
+                    "a function returning a `nobox` value cannot be used as one returning a nullable value; wrap the call in a lambda with the target return type".to_string(),
+                ));
+            }
+        }
+    }
 
     if matches!(gamma.get(from_r), TypeExpr::Builtin(BuiltinTy::Never)) {
         return Ok(());
@@ -677,7 +760,14 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         }
     }
 
+    if is_identity_struct_type(gamma, to_r)
+        && let Some(target) = frame_ref_target(gamma, from_r)
+    {
+        return unify(gamma, target, to_r, span);
+    }
+
     if matches!(to_ty, TypeExpr::Builtin(BuiltinTy::Any)) {
+        gamma.out.any_erasures.push((span, from_r));
         return Ok(());
     }
 
@@ -750,7 +840,7 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
             _ => from_r,
         };
 
-        return coerce(gamma, from_inner, to_inner, span);
+        return coerce_impl(gamma, from_inner, to_inner, span, contextual_lambda);
     }
 
     unify(gamma, from_r, to_r, span)

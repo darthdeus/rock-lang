@@ -191,3 +191,45 @@ fn a_top_level_nullable_global_keeps_data_flags_aligned() {
     assert_eq!(acc.ctor_suffix, "_ct");
     assert!(acc.unbuildable.is_none());
 }
+
+/// stone-core's `SpriteAnimation` shape: a GC-tier `nobox value` (the nullable
+/// `int` keeps it off the leaf tiers) with a nested `nobox` field. Its `_vt`
+/// box keys the nested field's leaves by dotted path, so the ctor IS the
+/// accessor's leaf sequence.
+const GC_TIER_NESTED_NOBOX: &str = r#"
+nobox value IRect { x: int, y: int, w: int, h: int }
+nobox value Anim { start: IRect, frames: int, step: int? }
+
+global LEGS: Anim = Anim { start: IRect { x: 1, y: 2, w: 3, h: 4 }, frames: 4, step: null }
+
+fn main() { print("{LEGS.frames}") }
+"#;
+
+/// The bound: a nested child that is NOT `nobox` stays a whole key in the
+/// `_vt` box, while the global's storage still splits it into leaves.
+const GC_TIER_NESTED_BOXED: &str = r#"
+value Leaf { v: int }
+nobox value Held { inner: Leaf, label: string }
+
+global HB: Held = Held { inner: Leaf { v: 1 }, label: "h" }
+
+fn main() { print("{HB.label}") }
+"#;
+
+#[test]
+fn a_gc_tier_global_with_a_nested_nobox_field_is_buildable() {
+    let (_ws, acc) = accessor_of(GC_TIER_NESTED_NOBOX, "LEGS");
+    assert_eq!(acc.ctor_suffix, "_vt");
+    assert_eq!(
+        acc.paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+        ["start.x", "start.y", "start.w", "start.h", "frames", "step"]
+    );
+    assert!(acc.unbuildable.is_none(), "{:?}", acc.unbuildable);
+}
+
+#[test]
+fn a_gc_tier_global_with_a_nested_boxed_field_stays_unbuildable() {
+    let (_ws, acc) = accessor_of(GC_TIER_NESTED_BOXED, "HB");
+    assert_eq!(acc.ctor_suffix, "_vt");
+    assert!(acc.unbuildable.is_some(), "`Held_vt` takes `inner` whole, not `inner.v`");
+}

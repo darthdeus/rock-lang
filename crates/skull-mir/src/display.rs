@@ -103,6 +103,7 @@ fn fmt_inst(
         Inst::FloatToInt(x) => format!("float_to_int v{}", v(*x)),
         Inst::IntToFloat(x) => format!("int_to_float v{}", v(*x)),
         Inst::UintToFloat(x) => format!("uint_to_float v{}", v(*x)),
+        Inst::FloatToF32(x) => format!("float_to_f32 v{}", v(*x)),
         Inst::IntToUint(x) => format!("int_to_uint v{}", v(*x)),
         Inst::UintToInt(x) => format!("uint_to_int v{}", v(*x)),
         Inst::FloatToUint(x) => format!("float_to_uint v{}", v(*x)),
@@ -288,6 +289,9 @@ fn fmt_inst(
             let parts: Vec<String> =
                 fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
             format!("{name}_ct({})", parts.join(", "))
+        }
+        Inst::MakeNullableValue { present, value } => {
+            format!("nullable(v{}, v{})", v(*present), v(*value))
         }
         Inst::MaterializeValueStruct { name, fields, .. } => {
             let parts: Vec<String> =

@@ -1,0 +1,116 @@
+//! @no_check
+//! Across-yield flow through loops (docs/identity-storage-plan.md S0b, S6). A
+//! loop variable is bound fresh on every iteration, and `continue`, `break`
+//! and `return` leave the path they end, so neither carries a borrow past a
+//! yield. A borrow bound before the loop still reaches the next iteration.
+
+//- while_let_variable_is_rebound_each_iteration
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T? { return get(a, e) }
+co fn tick(a: Arena<Mob>, e: Entity<Mob>) -> Coroutine<int> {
+    while let mob = get(a, e) {
+        let hp = mob.hp
+          //^ int
+        yield hp
+    }
+}
+
+//- for_variable_is_rebound_each_iteration
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+value Live<T> { a: Arena<T> }
+fn next<T>(l: Live<T>) -> (bool, T) { return next(l) }
+co fn tick(a: Arena<Mob>) -> Coroutine<int> {
+    let live = Live { a: a }
+    for mob in live {
+        let hp = mob.hp
+          //^ int
+        yield hp
+    }
+}
+
+//- yield_then_exit_leaves_the_path
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T { return get(a, e) }
+co fn tick(a: Arena<Mob>, e: Entity<Mob>) -> Coroutine<int> {
+    while true {
+        let mob = get(a, e)
+        if mob.hp == 0 {
+            yield 0
+            continue
+        }
+        if mob.hp < 0 {
+            yield 1
+            break
+        }
+        if mob.hp > 100 {
+            yield 2
+            return
+        }
+        let hp = mob.hp
+          //^ int
+        yield hp
+    }
+}
+
+//- borrow_before_loop_reaches_next_iteration @fail=identity borrow `mob` is used after a coroutine suspension
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T { return get(a, e) }
+fn opt<T>(a: Arena<T>, e: Entity<T>) -> T? { return opt(a, e) }
+co fn tick(a: Arena<Mob>, e: Entity<Mob>) -> Coroutine<int> {
+    let mob = get(a, e)
+    while let other = opt(a, e) {
+        let m = mob.hp
+        let o = other.hp
+        yield m
+    }
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- borrow_before_loop_reaches_head_through_continue @fail=identity borrow `mob` is used after a coroutine suspension
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T { return get(a, e) }
+co fn tick(a: Arena<Mob>, e: Entity<Mob>) -> Coroutine<int> {
+    let mob = get(a, e)
+    while true {
+        if mob.hp == 0 {
+            yield 0
+            continue
+        }
+        break
+    }
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- borrow_before_loop_reaches_exit_through_break @fail=identity borrow `mob` is used after a coroutine suspension
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T { return get(a, e) }
+co fn tick(a: Arena<Mob>, e: Entity<Mob>) -> Coroutine<int> {
+    let mob = get(a, e)
+    while true {
+        yield 0
+        break
+    }
+    yield mob.hp
+}
+fn marker() -> int {
+    5
+  //^ int
+}

@@ -4,7 +4,7 @@
 //! `infer_branch(body, detect_null_narrow(cond).then)`. Verified vs rock.
 
 //- while_refine_field
-struct Val { n: int }
+value Val { n: int }
 struct Box { val: Val? }
 fn f(b: Box) -> int {
     while b.val != null {

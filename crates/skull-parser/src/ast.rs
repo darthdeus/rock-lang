@@ -521,6 +521,10 @@ pub enum TypeExprKind {
     Int,
     Uint,
     Float,
+    /// `f64`: the explicit wide spelling of `float`, the same type.
+    F64,
+    /// `f32`: narrow float storage, legal only as a field type.
+    F32,
     Bool,
     Ref(Idx<TypeExprData>),
     Ident(Ident),

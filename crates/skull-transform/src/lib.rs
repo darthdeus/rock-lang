@@ -20,10 +20,9 @@
 //!   4. prepends a dispatch entry that branches on `s.__state` to the resume
 //!      block for each state (falling through to the original entry for state 0).
 //!
-//! Frame = every cell except the state table `s` and `__resume_arg` (the step's
-//! two params). This is a correct over-approximation (hoisting a block-local
-//! cell to `s` is still correct; precise liveness is a later perf refinement —
-//! the plan's P2). The constructor seeds only the declared param fields.
+//! Frame = cells live at a resume point, plus parameters and cells retained by a
+//! closure or detached lifecycle body. The constructor seeds only the declared
+//! param fields.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -324,6 +323,30 @@ pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
     Ok(())
 }
 
+/// A store through a NativeBuffer's `float` leaf view converts to f32 itself,
+/// so an `f32` write's explicit rounding feeding it is redundant: an inlined
+/// constructor's per-leaf rounding meets the buffer store here.
+fn drop_f32_rounding_into_float_views(func: &mut MirFunc) -> bool {
+    let float_view = skull_mir::lower::leaf_view_field("float");
+    let mut changed = false;
+    let insts: Vec<Idx<Inst>> = func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
+    for i in insts {
+        let Inst::StoreIndex { base, value, kind: ContainerKind::NativeBufferLeaf, .. } = func.insts[i] else {
+            continue;
+        };
+        if !matches!(func.insts[base], Inst::Field { field, .. } if field == float_view) {
+            continue;
+        }
+        if let Inst::FloatToF32(unrounded) = func.insts[value] {
+            if let Inst::StoreIndex { value, .. } = &mut func.insts[i] {
+                *value = unrounded;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 fn has_scalarizable_store(func: &MirFunc) -> bool {
     func.blocks.iter().any(|(_, b)| {
         b.insts.iter().any(|&i| {
@@ -603,16 +626,18 @@ fn leaf_operand(
 /// dotted path (`("pos.x", ..)`). The nested ctors then have no users and DCE
 /// removes them.
 ///
-/// Flattening happens at the OUTERMOST materialization: rewriting bottom-up
-/// would satisfy the guarantee too, but allocate an intermediate cdata per
-/// construction. A ctor that is itself a field operand of another ctor is
-/// therefore skipped -- the outer one absorbs it.
+/// Flattening happens at the OUTERMOST cdata materialization: rewriting
+/// bottom-up would satisfy the guarantee too, but allocate an intermediate cdata
+/// per construction. A ctor that is itself a field operand of another cdata
+/// ctor is therefore skipped -- the outer one absorbs it.
 ///
 /// Only the CDATA tier is rewritten, because only a cdata parent has physical
 /// fields to splice the child's leaves into. The other two tiers need nothing
 /// from this pass: a leaf-table box is already built from leaves by `pack`, and
 /// a GC-table box keeps its declared keys, so a `nobox` child inside one is a
-/// real box that the verifier rejects at its own span.
+/// real box that the verifier rejects at its own span. A plain cdata child of
+/// a GC-table box (`RoomC { span: Span2 { lo: Cell { .. } } }`) is flattened
+/// here like any outermost cdata ctor.
 ///
 /// The dotted form exists only between here (end of `cleanup`) and emit. Field
 /// names are documented as MIR-pass metadata rather than the wire shape, and
@@ -625,13 +650,27 @@ pub fn flatten_nobox_nested_ctors(
 ) -> Result<bool, CompilerError> {
     let all: Vec<Idx<Inst>> =
         func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
-    // A ctor used as a field operand of another ctor is not the outermost one.
+    // A ctor used as a field operand of another CDATA ctor is not the
+    // outermost one. A table parent absorbs nothing, so a cdata child of a
+    // GC-table or leaf-table ctor is itself the outermost cdata materialization.
     let mut inner: HashSet<Idx<Inst>> = HashSet::default();
     for &i in &all {
-        if let Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } =
-            &func.insts[i]
+        if let Inst::MakeValueStruct { fields, representation, .. }
+        | Inst::MaterializeValueStruct { fields, representation, .. } = &func.insts[i]
         {
-            inner.extend(fields.iter().map(|(_, op)| *op));
+            let table_parent = matches!(
+                func.rep_arena
+                    .as_ref()
+                    .and_then(|arena| arena.try_get(*representation))
+                    .and_then(|plan| plan.value_storage()),
+                Some(
+                    skull_mir::lower::ValueStorage::GcTable
+                        | skull_mir::lower::ValueStorage::LeafTable
+                )
+            );
+            if !table_parent {
+                inner.extend(fields.iter().map(|(_, op)| *op));
+            }
         }
     }
     let targets: Vec<Idx<Inst>> = all
@@ -804,6 +843,11 @@ pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), Comp
     }
     dce(func);
     promote_direct_cells(func);
+    // After promotion, so a rounding that reached the store through a cell
+    // (an inlined constructor with a defaulted argument) is seen directly.
+    if drop_f32_rounding_into_float_views(func) {
+        dce(func);
+    }
     Ok(())
 }
 
@@ -850,9 +894,11 @@ enum StructId {
 enum FieldSrc {
     Operand(Idx<Inst>),
     ConstStr(ustr::Ustr),
-    /// Leaf-wise copy from another family's field cell (a value-struct alias
-    /// member, see `copy_alias`) -- materializes a `Load` at the store site.
+    /// Leaf-wise copy from another family member's field cell (a value-struct
+    /// alias member, see `copy_alias`) -- materializes a `Load` at the store site.
     CellLoad(Idx<Cell>),
+    /// A nullable value cell's presence leaf on a ctor store.
+    ConstTrue,
 }
 
 /// If `inst` is a scalarizable aggregate ctor, its identity + logical field list.
@@ -1024,6 +1070,12 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     let mut has_store = vec![false; nc];
     for c in &func.params {
         disq[raw(*c) as usize] = true; // params are the Lua signature; never split
+    }
+    // Written through a `ref` alias this pass cannot see (`Cell::borrowed`).
+    for (c, cell) in func.cells.iter() {
+        if cell.borrowed {
+            disq[raw(c) as usize] = true;
+        }
     }
     if let Some(ra) = func.resume_arg {
         disq[raw(ra) as usize] = true;
@@ -1232,6 +1284,12 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
         }
     }
     let mut enum_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
+    // A nullable value cell (a `V?` read joined with `nil`, as `if let` and an
+    // inlined `unwrap()` produce) is tested against nil before its fields are
+    // read. The split cell answers that test from a presence leaf.
+    let mut value_nil_tests: Vec<(Idx<Inst>, Idx<Inst>, Idx<Cell>)> = Vec::new();
+    // Roots of families that split only because a copy of a copy is accepted.
+    let mut chained_roots: HashSet<usize> = HashSet::default();
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             value_operands(&func.insts[i], &mut |op| {
@@ -1247,6 +1305,17 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         // An enum positional payload read: `v[index+1]`, named `_<index>`.
                         Inst::TupleIndex { base, index } => {
                             *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
+                        }
+                        Inst::Eq(a, b) | Inst::NotEq(a, b)
+                            if matches!(cand[rep[raw(c) as usize]], Some(StructId::Value(_))) =>
+                        {
+                            let other = if *a == op { *b } else { *a };
+                            let is_nil = (*a == op) != (*b == op)
+                                && matches!(func.insts[other], Inst::Const(Lit::Nil));
+                            if is_nil {
+                                value_nil_tests.push((i, op, c));
+                            }
+                            is_nil
                         }
                         Inst::Eq(a, b)
                             if matches!(cand[rep[raw(c) as usize]], Some(StructId::Enum(_))) =>
@@ -1267,14 +1336,20 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         }
                         // The alias store itself: `Store(y, Load(x))` where y and x
                         // unify to the same root (deleted by the rewrite), or where
-                        // y copies x's leaves (expanded to leaf-wise stores).
+                        // y copies x's leaves (expanded to leaf-wise stores). A copy
+                        // of a copy (`let t = h.t ?? return` feeding a loop body's
+                        // binding) reads its immediate source's leaves.
                         Inst::Store { cell, value } => {
                             let yk = raw(*cell) as usize;
-                            *value == op
+                            let accepted = *value == op
                                 && alias[yk].is_some()
                                 && !disq[yk]
                                 && (rep[yk] == rep[raw(c) as usize]
-                                    || copy_alias[yk] == Some(c))
+                                    || (copy_alias[yk].is_some() && alias[yk] == Some(c)));
+                            if accepted && copy_alias[yk].is_some_and(|r| r != c) {
+                                chained_roots.insert(raw(copy_alias[yk].unwrap()) as usize);
+                            }
+                            accepted
                         }
                         _ => false,
                     };
@@ -1299,6 +1374,16 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 }
             }
         });
+    }
+
+    // A chained family that also escapes would rebuild its value at every
+    // escaping use, which can cost more than the one copy it replaces.
+    for (_, c) in &escape_loads {
+        let k = raw(*c) as usize;
+        let root = copy_alias[k].map_or(rep[k], |r| raw(r) as usize);
+        if chained_roots.contains(&root) {
+            disq[root] = true;
+        }
     }
 
     // Disqualification is family-wide: an escaping alias member keeps the
@@ -1329,6 +1414,29 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
             }
         }
     }
+
+    // A family whose nullable value is nil-tested carries a presence leaf,
+    // written by every store: a constant on a ctor, nil on a nil store. Copy
+    // members read the root's leaves, so the whole family gets it.
+    let present_field = ustr::Ustr::from("__present");
+    let mut presence_roots: HashSet<usize> = HashSet::default();
+    for (_, _, c) in &value_nil_tests {
+        let k = raw(*c) as usize;
+        let root = copy_alias[k].map_or(rep[k], |r| raw(r) as usize);
+        presence_roots.insert(root);
+    }
+    for k in 0..nc {
+        let root = copy_alias[k].map_or(rep[k], |r| raw(r) as usize);
+        if presence_roots.contains(&root) {
+            if let Some(fields) = cand_fields[k].as_mut() {
+                fields.insert(present_field);
+            }
+        }
+    }
+    let needs_presence = |c: Idx<Cell>| {
+        let k = raw(c) as usize;
+        k < nc && presence_roots.contains(&copy_alias[k].map_or(rep[k], |r| raw(r) as usize))
+    };
 
     // `k < nc` guards the field cells `get_field_cell` allocates during the
     // rewrite (a `StoreField`->`Store` rewrite emits a `Store` to a fresh field
@@ -1386,6 +1494,24 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 }
             }
             _ => unreachable!("recorded enum nil test changed instruction kind"),
+        }
+        nil_test_loads.insert(test, present);
+    }
+    for (test, old, c) in value_nil_tests {
+        if !is_cand(c) {
+            continue;
+        }
+        let present_cell = get_field_cell(func, to_rep(c), present_field);
+        let present = func.alloc_inst(Inst::Load(present_cell));
+        match &mut func.insts[test] {
+            Inst::Eq(a, b) | Inst::NotEq(a, b) => {
+                if *a == old {
+                    *a = present;
+                } else if *b == old {
+                    *b = present;
+                }
+            }
+            _ => unreachable!("recorded value nil test changed instruction kind"),
         }
         nil_test_loads.insert(test, present);
     }
@@ -1510,20 +1636,27 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         fs.into_iter().map(|f| (f, FieldSrc::Operand(*value))).collect(),
                     )));
                 }
-                // A value-struct alias member copies the root's leaves.
-                if let (Inst::Load(_), Some(root)) =
+                // A value-struct alias member copies its source's leaves.
+                if let (Inst::Load(src), Some(_)) =
                     (&func.insts[*value], copy_alias[raw(*cell) as usize])
                 {
+                    let src = to_rep(*src);
                     let mut fs = candidate_fields(*cell)?;
                     fs.sort_unstable();
                     return Ok(Some((
                         i,
                         *cell,
-                        fs.into_iter().map(|f| (f, FieldSrc::CellLoad(root))).collect(),
+                        fs.into_iter().map(|f| (f, FieldSrc::CellLoad(src))).collect(),
                     )));
                 }
-                Ok(ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
-                    .map(|(_, fields)| (i, *cell, fields)))
+                Ok(ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize]).map(
+                    |(_, mut fields)| {
+                        if needs_presence(*cell) {
+                            fields.push((present_field, FieldSrc::ConstTrue));
+                        }
+                        (i, *cell, fields)
+                    },
+                ))
             }
             _ => Ok(None),
             }
@@ -1588,6 +1721,11 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 // or it floats free of any block and regalloc/codegen never emit it.
                 FieldSrc::ConstStr(s) => {
                     let cv = func.alloc_inst(Inst::Const(Lit::Str(s)));
+                    news.push(cv);
+                    cv
+                }
+                FieldSrc::ConstTrue => {
+                    let cv = func.alloc_inst(Inst::Const(Lit::Bool(true)));
                     news.push(cv);
                     cv
                 }
@@ -1696,7 +1834,8 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
     // `escaping` cell flag, `subst` value->value chain, and per-block `cur`
     // cell->value. `cur` is reset between blocks via a touched-list so the clear
     // stays O(stores-in-block), not O(cells).
-    let mut escaping = vec![false; func.cells.len()];
+    // A `ref`-borrowed cell is written through an alias this pass cannot see.
+    let mut escaping: Vec<bool> = func.cells.iter().map(|(_, cell)| cell.borrowed).collect();
     for (bid, b) in func.blocks.iter() {
         if main.contains(&bid) {
             continue;
@@ -1854,6 +1993,7 @@ fn raw<T>(i: Idx<T>) -> u32 {
 pub struct CoroutineFramePlan {
     frame_cells: HashSet<Idx<Cell>>,
     frame_slots: HashMap<Idx<Cell>, u32>,
+    spill_values: Vec<Idx<Inst>>,
     layout_hash: i64,
 }
 
@@ -1861,9 +2001,10 @@ impl CoroutineFramePlan {
     fn new(
         frame_cells: HashSet<Idx<Cell>>,
         frame_slots: HashMap<Idx<Cell>, u32>,
+        spill_values: Vec<Idx<Inst>>,
         layout_hash: i64,
     ) -> Self {
-        Self { frame_cells, frame_slots, layout_hash }
+        Self { frame_cells, frame_slots, spill_values, layout_hash }
     }
 
     pub fn fields(&self) -> &HashSet<Idx<Cell>> {
@@ -1876,6 +2017,10 @@ impl CoroutineFramePlan {
 
     pub fn slot(&self, cell: Idx<Cell>) -> Option<u32> {
         self.frame_slots.get(&cell).copied()
+    }
+
+    pub fn spill_values(&self) -> &[Idx<Inst>] {
+        &self.spill_values
     }
 
     pub fn layout_hash(&self) -> i64 {
@@ -1976,7 +2121,7 @@ mod tests {
             "co fn f(x: int) -> Coroutine<int> { let saved = x yield saved }",
             "f",
         );
-        let lowered = transform_coroutine(&func, None);
+        let lowered = transform_coroutine(&func, None, false);
         assert!(
             !lowered.frame_plan.slots().is_empty(),
             "the coroutine fixture must have a nonzero frame population"
@@ -1985,6 +2130,131 @@ mod tests {
             lowered.frame_plan.slots().len(),
             lowered.frame_plan.fields().len(),
             "one frame plan must own both membership and physical slots"
+        );
+    }
+
+    #[test]
+    fn coroutine_demotes_a_local_confined_to_one_resume_segment() {
+        let func = lower(
+            "co fn f(x: int) -> Coroutine<int> {\n\
+                 yield 1\n\
+                 let after = x\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        assert!(
+            lowered
+                .frame_plan
+                .fields()
+                .iter()
+                .all(|&cell| lowered.step.cells[cell].name != Some(ustr::Ustr::from("after"))),
+            "a local used only after the last yield must stay out of the frame:\n{}",
+            lowered.step
+        );
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_conditional_yields() {
+        let func = lower(
+            "co fn f(flag: bool) -> Coroutine<int> {\n\
+                 if flag { yield 1 yield 2 } else { yield 10 yield 20 }\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_null_coalesce() {
+        let func = lower(
+            "co fn f(x: int?) -> Coroutine<int> {\n\
+                 yield x ?? -1\n\
+                 yield x ?? -2\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+    }
+
+    #[test]
+    fn coroutine_frame_cells_retain_types_across_tuple_destructure() {
+        let func = lower(
+            "fn pair() -> (int, int) { return (10, 20) }\n\
+             co fn f() -> Coroutine<int> {\n\
+                 let (a, b) = pair()\n\
+                 yield a\n\
+                 yield b\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        let untyped: Vec<_> = lowered
+            .frame_plan
+            .fields()
+            .iter()
+            .copied()
+            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
+            .map(|cell| (cell, lowered.step.cells[cell].name))
+            .collect();
+        assert!(untyped.is_empty(), "untyped frame cells: {untyped:?}\n{}", lowered.step);
+    }
+
+    #[test]
+    fn coroutine_frame_rematerializes_cross_block_constants_but_spills_a_live_global() {
+        let mut func = MirFunc::new(ustr::Ustr::from("f"));
+        func.is_coroutine = true;
+        func.resume_arg = Some(func.new_cell(Some(ustr::Ustr::from("__resume_arg"))));
+        let resume = func.new_block();
+        let then_bb = func.new_block();
+        let else_bb = func.new_block();
+        let global = func.emit(func.entry, Inst::Global(ustr::Ustr::from("SELF")));
+        let constant = func.emit(func.entry, Inst::Const(Lit::Int(7)));
+        func.set_term(func.entry, Term::Yield { values: vec![constant], resume });
+        func.emit(
+            resume,
+            Inst::StoreGlobal {
+                name: ustr::Ustr::from("SAVED"),
+                value: global,
+            },
+        );
+        let condition = func.emit(resume, Inst::IntLt(constant, constant));
+        func.set_term(resume, Term::Branch { cond: condition, then_bb, else_bb });
+        func.set_term(then_bb, Term::Return(Vec::new()));
+        func.set_term(else_bb, Term::Return(Vec::new()));
+        let lowered = transform_coroutine(&func, None, false);
+        let spills = lowered.frame_plan.spill_values();
+        assert!(
+            spills
+                .iter()
+                .any(|value| matches!(lowered.step.insts[*value], Inst::Global(name) if name.as_str() == "SELF")),
+            "the evaluated global handle must retain its pre-branch identity:\n{}",
+            lowered.step
+        );
+        assert!(
+            spills
+                .iter()
+                .all(|value| !matches!(lowered.step.insts[*value], Inst::Const(_))),
+            "constants must not acquire frame fields: {spills:?}\n{}",
+            lowered.step
         );
     }
 
@@ -2290,6 +2560,29 @@ mod tests {
             "the emitted artifact must have no detached residual lambda"
         );
     }
+
+    #[test]
+    fn detached_nested_closure_reaches_frame_only_capture_through_state() {
+        let mut source = lower(
+            "fn f(seed: int) -> int { let get = () => seed; return get() }",
+            "f",
+        );
+        let entry = source.entry();
+        let seed = source.params[0];
+        let s_cell = source.new_cell(Some(Ustr::from("s")));
+        let frame = FrameInfo {
+            s_cell,
+            fields: [seed].into_iter().collect(),
+            slots: [(seed, 0)].into_iter().collect(),
+        };
+        let aux = lower_detached_region(&source, entry, "f__detached", &frame);
+        let plan = aux
+            .closure_env_plans
+            .values()
+            .next()
+            .expect("nested closure must have an environment plan");
+        assert_eq!(plan.captures(), &[s_cell]);
+    }
 }
 
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
@@ -2371,7 +2664,7 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
         | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { p(a); p(b); }
         Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
-        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::FloatToF32(x) | Inst::IntToUint(x)
         | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x)
         | Inst::VecStrideNilToFalse(x)
@@ -2398,6 +2691,10 @@ pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }
         | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
+        Inst::MakeNullableValue { present, value } => {
+            p(present);
+            p(value);
+        }
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
@@ -2441,7 +2738,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
         | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { f(a); f(b); }
         Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
-        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::FloatToF32(x) | Inst::IntToUint(x)
         | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x)
         | Inst::VecStrideNilToFalse(x)
@@ -2468,6 +2765,10 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }
         | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
+        Inst::MakeNullableValue { present, value } => {
+            f(present);
+            f(value);
+        }
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));
@@ -2517,15 +2818,19 @@ fn vfield(v: Idx<Inst>) -> ustr::Ustr {
     ustr::Ustr::from(format!("v{}", raw(v)).as_str())
 }
 
-/// Spill every CROSS-BLOCK value (defined in one block, used in another) to the
-/// state table at its def and reload it at each using block — so a value that
-/// outlives a yield (a loop-carried collection/bound, a multi-yield arg)
-/// survives the suspend/resume. (P2 — "only cells cross a yield" — is an
-/// over-statement: lowering routes some data through values; this is the
-/// canonical stackless spill, documented as a finding.) `protect` are param-like
-/// values never spilled. Returns the sorted spill field names (`v<N>`) — an
-/// input to the frame layout stamp.
-fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) -> Vec<String> {
+/// Spill a CROSS-BLOCK value that is also live across a suspension to the state
+/// table at its def and reload it at each using block. Values crossing ordinary
+/// branches stay as step locals; only a value live into a yield's resume block
+/// needs persistence. Constants are rematerialized at each use block: they have
+/// no evaluation-time identity to preserve, and polymorphic null has no
+/// standalone physical type for a frame field. Returns the sorted spilled
+/// values; their `v<N>` fields are part of the frame layout stamp.
+fn spill_cross_block_values(
+    step: &mut MirFunc,
+    s_cell: Idx<Cell>,
+    block_ids: &[Idx<Block>],
+    resume_blocks: &[Idx<Block>],
+) -> Vec<Idx<Inst>> {
     // def block of every value.
     let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
     for &bid in block_ids {
@@ -2535,8 +2840,8 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
             }
         }
     }
-    // frame_values = values used in a block other than where defined.
-    let mut frame_values: HashSet<Idx<Inst>> = HashSet::default();
+    // cross_block_values = values used in a block other than where defined.
+    let mut cross_block_values: HashSet<Idx<Inst>> = HashSet::default();
     for &bid in block_ids {
         let mut used: Vec<Idx<Inst>> = Vec::new();
         for &id in &step.blocks[bid].insts {
@@ -2545,11 +2850,25 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         used.extend(term_value(&step.blocks[bid].term));
         for v in used {
             if def_block.get(&v).copied() != Some(bid) {
-                frame_values.insert(v);
+                cross_block_values.insert(v);
             }
         }
     }
-    if frame_values.is_empty() {
+    let live_values = values_live_at_resume_blocks(step, block_ids, resume_blocks);
+    let persistent_values = cross_block_values
+        .intersection(&live_values)
+        .copied()
+        .collect::<HashSet<_>>();
+    let rematerialized = persistent_values
+        .iter()
+        .copied()
+        .filter(|value| matches!(step.insts[*value], Inst::Const(_)))
+        .collect::<HashSet<_>>();
+    let frame_values = persistent_values
+        .difference(&rematerialized)
+        .copied()
+        .collect::<HashSet<_>>();
+    if persistent_values.is_empty() {
         return Vec::new();
     }
 
@@ -2561,13 +2880,19 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
             let mut seen = HashSet::default();
             for &id in &step.blocks[bid].insts {
                 value_operands(&step.insts[id], &mut |v| {
-                    if frame_values.contains(&v) && def_block.get(&v).copied() != Some(bid) && seen.insert(v) {
+                    if persistent_values.contains(&v)
+                        && def_block.get(&v).copied() != Some(bid)
+                        && seen.insert(v)
+                    {
                         used_here.push(v);
                     }
                 });
             }
             if let Some(v) = term_value(&step.blocks[bid].term) {
-                if frame_values.contains(&v) && def_block.get(&v).copied() != Some(bid) && seen.insert(v) {
+                if persistent_values.contains(&v)
+                    && def_block.get(&v).copied() != Some(bid)
+                    && seen.insert(v)
+                {
                     used_here.push(v);
                 }
             }
@@ -2578,9 +2903,13 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         let mut reload: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
         let mut new_list: Vec<Idx<Inst>> = Vec::new();
         for v in used_here {
-            let sv = step.alloc_inst(Inst::Load(s_cell));
-            let rv = step.alloc_inst(Inst::Field { base: sv, field: vfield(v) });
-            new_list.push(sv);
+            let rv = if rematerialized.contains(&v) {
+                step.alloc_inst(step.insts[v].clone())
+            } else {
+                let sv = step.alloc_inst(Inst::Load(s_cell));
+                new_list.push(sv);
+                step.alloc_inst(Inst::Field { base: sv, field: vfield(v) })
+            };
             new_list.push(rv);
             reload.insert(v, rv);
         }
@@ -2601,13 +2930,206 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         remap_term(&mut term, &m);
         step.blocks[bid].term = term;
     }
-    let mut names: Vec<String> = frame_values.iter().map(|&v| vfield(v).as_str().to_string()).collect();
-    names.sort();
-    names
+    let mut values: Vec<Idx<Inst>> = frame_values.into_iter().collect();
+    values.sort_by_key(|value| raw(*value));
+    values
+}
+
+/// Cells needed on the far side of at least one suspension. Ordinary CFG
+/// branches do not make a cell persistent; only a cell live into a yield's
+/// resume block does. The dataflow is deliberately cell-only because MIR
+/// values crossing blocks already use `spill_cross_block_values`.
+fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
+    let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
+    let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
+    for &block in blocks {
+        let mut uses = HashSet::default();
+        let mut defs = HashSet::default();
+        for &id in &func.blocks[block].insts {
+            match &func.insts[id] {
+                Inst::Load(cell) => {
+                    if !defs.contains(cell) {
+                        uses.insert(*cell);
+                    }
+                }
+                Inst::Store { cell, .. } => {
+                    defs.insert(*cell);
+                }
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => {
+                    defs.extend(dests.iter().copied());
+                }
+                Inst::MapNext { key_cell, val_cell, .. } => {
+                    if !defs.contains(key_cell) {
+                        uses.insert(*key_cell);
+                    }
+                    defs.insert(*key_cell);
+                    defs.insert(*val_cell);
+                }
+                _ => {}
+            }
+        }
+        block_use.insert(block, uses);
+        block_def.insert(block, defs);
+    }
+
+    let mut live_in: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    let mut live_out: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for &block in blocks.iter().rev() {
+            let mut out = HashSet::default();
+            term_succs(&func.blocks[block].term, |succ| {
+                if let Some(next) = live_in.get(&succ) {
+                    out.extend(next.iter().copied());
+                }
+            });
+            let mut input = block_use[&block].clone();
+            input.extend(out.difference(&block_def[&block]).copied());
+            if live_out.insert(block, out.clone()).is_some_and(|old| old != out) {
+                changed = true;
+            }
+            if live_in.insert(block, input.clone()).is_some_and(|old| old != input) {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut live = HashSet::default();
+    for &block in blocks {
+        if let Term::Yield { resume, .. } = func.blocks[block].term {
+            live.extend(live_in[&resume].iter().copied());
+        }
+    }
+    live
+}
+
+/// Cells used by detached defer/hook regions must remain in the shared frame;
+/// those regions run independently of the current step segment.
+fn cells_referenced_by_detached_regions(
+    func: &MirFunc,
+    entries: impl IntoIterator<Item = Idx<Block>>,
+) -> HashSet<Idx<Cell>> {
+    let mut cells = HashSet::default();
+    for entry in entries {
+        for block in detached_region_blocks(func, entry) {
+            for &id in &func.blocks[block].insts {
+                func.insts[id].cells_each(&mut |cell| {
+                    cells.insert(cell);
+                });
+            }
+        }
+    }
+    cells
+}
+
+/// Values live into resume blocks, used to narrow the cross-block spill
+/// candidates to values that must survive a suspension rather than a branch.
+fn values_live_at_resume_blocks(
+    func: &MirFunc,
+    blocks: &[Idx<Block>],
+    resume_blocks: &[Idx<Block>],
+) -> HashSet<Idx<Inst>> {
+    let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = HashMap::default();
+    let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = HashMap::default();
+    for &block in blocks {
+        let mut uses = HashSet::default();
+        let mut defs = HashSet::default();
+        for &id in &func.blocks[block].insts {
+            value_operands(&func.insts[id], &mut |value| {
+                if !defs.contains(&value) {
+                    uses.insert(value);
+                }
+            });
+            if func.insts[id].produces_value() {
+                defs.insert(id);
+            }
+        }
+        term_uses_each(&func.blocks[block].term, &mut |value| {
+            if !defs.contains(&value) {
+                uses.insert(value);
+            }
+        });
+        block_use.insert(block, uses);
+        block_def.insert(block, defs);
+    }
+
+    let mut live_in: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    let mut live_out: HashMap<Idx<Block>, HashSet<Idx<Inst>>> = blocks
+        .iter()
+        .copied()
+        .map(|block| (block, HashSet::default()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for &block in blocks.iter().rev() {
+            let mut out = HashSet::default();
+            term_succs(&func.blocks[block].term, |succ| {
+                if let Some(next) = live_in.get(&succ) {
+                    out.extend(next.iter().copied());
+                }
+            });
+            let mut input = block_use[&block].clone();
+            input.extend(out.difference(&block_def[&block]).copied());
+            if live_out.insert(block, out.clone()).is_some_and(|old| old != out) {
+                changed = true;
+            }
+            if live_in.insert(block, input.clone()).is_some_and(|old| old != input) {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut live = HashSet::default();
+    for &resume in resume_blocks {
+        live.extend(live_in[&resume].iter().copied());
+    }
+    live
 }
 
 /// Transform a lowered `co fn` into its `__step` state machine + frame info.
-pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldChannel>) -> CoroLowered {
+pub fn transform_coroutine(
+    func: &MirFunc,
+    channel: Option<&skull_mir::lower::YieldChannel>,
+    has_return_value: bool,
+) -> CoroLowered {
+    transform_coroutine_with_nonescaping_lambdas(
+        func,
+        channel,
+        has_return_value,
+        &HashSet::default(),
+    )
+}
+
+/// Transform a coroutine while excluding captures proven to be consumed by a
+/// synchronous callback call from the persistent frame. The proof is supplied
+/// by the backend that owns the callable ABI; an empty set preserves the
+/// conservative frame pin for backends without that proof.
+pub fn transform_coroutine_with_nonescaping_lambdas(
+    func: &MirFunc,
+    channel: Option<&skull_mir::lower::YieldChannel>,
+    has_return_value: bool,
+    nonescaping_lambdas: &HashSet<Idx<Inst>>,
+) -> CoroLowered {
     let frame_slot_channel = channel.is_some();
     let mut step = func.clone();
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
@@ -2652,13 +3174,12 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
         }
     }
 
-    // 0b. Frame membership is OWNERSHIP-based (P1 of
-    // docs/coroutine-frame-lambda-plan.md): a cell owned by a live lambda scope
-    // is that lambda's plain local in its hoisted body, NOT a frame field.
-    // Everything else (ROOT-owned, or accessed only from dead/peeled/detached
-    // blocks -- hook bodies, defer copies -- which have no owner) stays in the
-    // frame. Built post-peel so hook lambdas are dead, pre-rewrite so `Yield`
-    // resume edges still link the CFG (`successors` follows them).
+    // 0b. Frame membership is liveness-based with ownership pins (P1 of
+    // docs/coroutine-frame-lambda-plan.md): root cells live at a resume point
+    // become fields. Root cells captured by a live lambda or referenced by a
+    // detached hook/defer stay fields even when the local CFG has no later use.
+    // Built post-peel so hook lambdas are detached, pre-rewrite so `Yield`
+    // resume edges still link the CFG.
     // The tree + ownership are built ONCE here (post-hook-peel, pre-yield-rewrite)
     // and threaded to emission through `CoroLowered` -- emission reuses them for
     // the step's hoist plan instead of rebuilding on the post-rewrite CFG. The
@@ -2669,23 +3190,38 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     let tree = crate::scope::ScopeTree::build(&step);
     let own = tree.analyze(&step);
     let frame_cells: HashSet<Idx<Cell>> = {
-        // Ghost cells (cause B of the P2 finding): a cell referenced in NO block
-        // anywhere -- scanned over ALL blocks incl. detached defer copies and
-        // peeled hook bodies, deliberately broader than `scope::accesses` (which
-        // only walks live-scope regions) -- is dropped. A dead lambda-local has
-        // no owner so it would fall to ROOT/frame, but it is read/written
-        // nowhere; a hook-only cell IS referenced in its detached block, so it
-        // stays. Params always stay (the ctor seeds a field for each, used or
-        // not) regardless of references.
-        let referenced = referenced_cells(&step);
-        let is_param: HashSet<Idx<Cell>> = params.iter().copied().collect();
-        step.cells
+        let root = crate::scope::ROOT;
+        let root_owned = |cell: &Idx<Cell>| own.owner.get(cell).is_some_and(|&owner| owner == root);
+        let captured_by_escaping_lambda = own
+            .captures
             .iter()
-            .map(|(id, _)| id)
-            .filter(|&c| c != s_cell && c != resume_arg)
-            .filter(|c| is_param.contains(c) || referenced.contains(c))
-            .filter(|c| own.owner.get(c).is_none_or(|&o| o == crate::scope::ROOT))
-            .collect()
+            .enumerate()
+            .filter(|(scope, _)| {
+                tree.scopes[*scope]
+                    .lambda
+                    .is_none_or(|lambda| !nonescaping_lambdas.contains(&lambda))
+            })
+            .flat_map(|(_, cells)| cells.iter().copied())
+            .collect::<HashSet<_>>();
+        let mut fields = cells_live_at_yield_resumes(&step, &orig_blocks);
+        fields.extend(params.iter().copied());
+        fields.extend(
+            captured_by_escaping_lambda
+                .into_iter()
+                .filter(|cell| root_owned(cell)),
+        );
+        let detached_entries = step
+            .coro_defers
+            .iter()
+            .map(|(_, entry)| *entry)
+            .chain(hooks.iter().map(|(_, entry)| *entry));
+        fields.extend(
+            cells_referenced_by_detached_regions(&step, detached_entries)
+                .into_iter()
+                .filter(|cell| root_owned(cell)),
+        );
+        fields.retain(|cell| *cell != s_cell && *cell != resume_arg && root_owned(cell));
+        fields
     };
     // Dense per-frame slots: frame cells numbered 0.. in raw-id order. Both the
     // emitted `s.c<slot>` field names and the layout canon key on the slot, so a
@@ -2723,6 +3259,13 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     // Per state, also record the yielded variant tag when statically known (a
     // `Const` tag leaf) -- a layout-stamp input that catches cross-variant yield
     // reordering, which cell/spill/state-count hashing alone cannot see.
+    let suspension_resumes: Vec<Idx<Block>> = orig_blocks
+        .iter()
+        .filter_map(|&block| match step.blocks[block].term {
+            Term::Yield { resume, .. } => Some(resume),
+            _ => None,
+        })
+        .collect();
     let mut resume_of_state: Vec<Idx<Block>> = Vec::new();
     let mut state_tags: Vec<String> = Vec::new();
     let mut yield_blocks: HashSet<Idx<Block>> = HashSet::default();
@@ -2781,9 +3324,10 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
         if yield_blocks.contains(&bid) {
             continue;
         }
-        let ret_val = match &step.blocks[bid].term {
+        let ret_val = match (&step.blocks[bid].term, has_return_value) {
             // A co fn's completion value is single (never scalarized); take it.
-            Term::Return(vs) => Some(vs.first().copied()),
+            (Term::Return(vs), true) => Some(vs.first().copied()),
+            (Term::Return(_), false) => Some(None),
             _ => None,
         };
         if let Some(v0) = ret_val {
@@ -2815,7 +3359,8 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
 
     // 3b. Spill cross-block values (loop-carried collections/bounds, multi-yield
     // args) so they survive a suspend/resume — see `spill_cross_block_values`.
-    let spill_fields = spill_cross_block_values(&mut step, s_cell, &orig_blocks);
+    let spill_values =
+        spill_cross_block_values(&mut step, s_cell, &orig_blocks, &suspension_resumes);
 
     // 3c. Frame layout stamp. Hash everything that fixes the frame's field
     // meanings + the state numbering: (cell idx, source name) pairs, the spill
@@ -2836,8 +3381,8 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
                 let _ = write!(canon, "c{}:{};", slot, cell.name.map(|n| n.as_str().to_string()).unwrap_or_default());
             }
         }
-        for f in &spill_fields {
-            let _ = write!(canon, "{f};");
+        for &value in &spill_values {
+            let _ = write!(canon, "{};", vfield(value));
         }
         for (i, t) in state_tags.iter().enumerate() {
             let _ = write!(canon, "s{i}:{t};");
@@ -2913,46 +3458,13 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     CoroLowered {
         step,
         s_cell,
-        frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, layout_hash),
+        frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, spill_values, layout_hash),
         params,
         num_states,
         hooks,
         step_tree: tree,
         step_own: own,
     }
-}
-
-/// Cells referenced (read or written) anywhere in `func`'s block inst-lists --
-/// over ALL blocks in the arena, including detached defer/hook bodies not
-/// reachable from the entry. Matches `scope::accesses`'s reference set (`Load`,
-/// `Store`, `MapNext` dests, multi-call dests) but is deliberately broader in
-/// block coverage. Used to distinguish a genuinely-dead ghost cell (referenced
-/// nowhere) from a hook-only cell (referenced in a detached block).
-fn referenced_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
-    let mut set: HashSet<Idx<Cell>> = HashSet::default();
-    for (_, blk) in func.blocks.iter() {
-        for &iid in &blk.insts {
-            match &func.insts[iid] {
-                Inst::Load(c) => {
-                    set.insert(*c);
-                }
-                Inst::Store { cell, .. } => {
-                    set.insert(*cell);
-                }
-                Inst::MapNext { key_cell, val_cell, .. } => {
-                    set.insert(*key_cell);
-                    set.insert(*val_cell);
-                }
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => {
-                    set.extend(dests.iter().copied());
-                }
-                _ => {}
-            }
-        }
-    }
-    set
 }
 
 /// Dense per-frame slot map: the given cells numbered 0.. by raw-id order.
@@ -3016,12 +3528,17 @@ fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Bloc
 /// closure conversion over it. The detached function receives the coroutine
 /// state table as its only parameter; cells owned by the coroutine root still
 /// resolve through that table, while cells introduced by the region are locals.
-pub fn lower_detached_region(
+pub struct LoweredDetachedRegion {
+    pub source: MirFunc,
+    pub lowered: MirFunc,
+}
+
+pub fn lower_detached_region_with_source(
     source: &MirFunc,
     entry: Idx<Block>,
     name: &str,
     frame: &FrameInfo,
-) -> MirFunc {
+) -> LoweredDetachedRegion {
     let region = detached_region_blocks(source, entry);
     let mut aux = source.clone();
     aux.name = Ustr::from(name);
@@ -3072,6 +3589,7 @@ pub fn lower_detached_region(
         }
     }
 
+    let source = aux.clone();
     convert_closures_framed(&mut aux, name, Some(frame), None);
     let aux_entry = aux.entry;
     materialize_frame_cells(&mut aux, aux_entry, frame.s_cell, &frame.slots);
@@ -3079,7 +3597,19 @@ pub fn lower_detached_region(
         !aux.insts.iter().any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
         "detached region `{name}` retained an Inst::Lambda after conversion"
     );
-    aux
+    LoweredDetachedRegion {
+        source,
+        lowered: aux,
+    }
+}
+
+pub fn lower_detached_region(
+    source: &MirFunc,
+    entry: Idx<Block>,
+    name: &str,
+    frame: &FrameInfo,
+) -> MirFunc {
+    lower_detached_region_with_source(source, entry, name, frame).lowered
 }
 
 fn detached_region_site(
@@ -3128,11 +3658,9 @@ pub fn erase_detached_lambdas(func: &mut MirFunc, entries: impl IntoIterator<Ite
 /// reachable from `entry` via terminators, a bare `Load`/`Store` of a cell in
 /// `slots` becomes a `Field`/`StoreField` on `s` (field `c<slot>`), and a
 /// multi-call dest that is a frame cell is redirected through a fresh temp
-/// cell + a spliced store-back. `MapNext` cells are left untouched (out of the
-/// JS subset; its own inst rejects downstream). Afterwards every remaining
-/// `Load`/`Store` cell in the region must be `s`, one of `mf.params`, or a
-/// temp this pass minted -- anything else is a frame-membership finding, so it
-/// panics rather than emitting an undeclared local.
+/// cell + a spliced store-back. `MapNext`'s key and value cells use the same
+/// seeded-temp/store-back shape. Non-frame cells remain ordinary step locals;
+/// every remaining bare frame cell is a transform finding.
 pub fn materialize_frame(
     mf: &mut MirFunc,
     entry: Idx<Block>,
@@ -3279,17 +3807,16 @@ fn materialize_frame_inner(
     if !strict {
         return;
     }
-    // Exhaustiveness: a surviving bare cell is a frame-membership finding.
-    let allowed = |c: Idx<Cell>| {
-        c == s_cell || mf.params.contains(&c) || minted.contains(&c) || mf.resume_arg == Some(c)
-    };
+    // Exhaustiveness: a surviving bare cell is permitted only when it is not a
+    // planned frame slot. Precise liveness intentionally leaves segment-local
+    // cells bare; the slot check still catches a missed materialization.
     for &bid in &region {
         for &id in &mf.blocks[bid].insts {
             let bad = match &mf.insts[id] {
-                Inst::Load(c) if !allowed(*c) => Some(*c),
-                Inst::Store { cell, .. } if !allowed(*cell) => Some(*cell),
-                Inst::MapNext { key_cell, .. } if !allowed(*key_cell) => Some(*key_cell),
-                Inst::MapNext { val_cell, .. } if !allowed(*val_cell) => Some(*val_cell),
+                Inst::Load(c) if slots.contains_key(c) => Some(*c),
+                Inst::Store { cell, .. } if slots.contains_key(cell) => Some(*cell),
+                Inst::MapNext { key_cell, .. } if slots.contains_key(key_cell) => Some(*key_cell),
+                Inst::MapNext { val_cell, .. } if slots.contains_key(val_cell) => Some(*val_cell),
                 _ => None,
             };
             if let Some(c) = bad {

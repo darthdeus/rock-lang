@@ -21,9 +21,9 @@ fn layout(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<LeafSlot>
 }
 
 const SHAPES: &str = r#"
-value Flat { x: float, y: float }
+value Flat { x: f32, y: f32 }
 value Nested { pos: Flat, uv: Flat }
-value Mixed { a: float, n: int, b: bool }
+value Mixed { a: f32, n: int, b: bool }
 value DeepMixed { lo: Mixed, hi: Mixed, tag: int }
 value Bools { p: bool, q: bool, r: bool }
 value Deep3 { inner: Nested, tail: Flat }
@@ -131,4 +131,33 @@ fn nested_struct_trailing_padding_is_respected() {
             ("tag", 24),
         ]
     );
+}
+
+/// `float` is f64 in a value's C layout; `f32` is the explicit 4-byte leaf.
+#[test]
+fn float_width_follows_the_declared_type() {
+    let ws = ws_of(
+        "value Narrow { x: f32, y: f32, n: int }\nvalue Wide { x: float, n: int }\nvalue Spelled { x: f64 }\nfn main() { }\n",
+    );
+    let arena = RepArena::default();
+    let (narrow, size, _) = arena
+        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, Ustr::from("Narrow"))
+        .expect("Narrow layout");
+    let leaves: Vec<(&str, &str, usize)> =
+        narrow.iter().map(|l| (l.path.as_str(), l.cty, l.byte_off)).collect();
+    assert_eq!(leaves, vec![("x", "float", 0), ("y", "float", 4), ("n", "int", 8)]);
+    assert_eq!(size, 12);
+
+    let (wide, size, align) = arena
+        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, Ustr::from("Wide"))
+        .expect("Wide layout");
+    let leaves: Vec<(&str, &str, usize)> =
+        wide.iter().map(|l| (l.path.as_str(), l.cty, l.byte_off)).collect();
+    assert_eq!(leaves, vec![("x", "double", 0), ("n", "int", 8)]);
+    assert_eq!((size, align), (16, 8));
+
+    let (spelled, _, _) = arena
+        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, Ustr::from("Spelled"))
+        .expect("Spelled layout");
+    assert_eq!(spelled[0].cty, "double");
 }

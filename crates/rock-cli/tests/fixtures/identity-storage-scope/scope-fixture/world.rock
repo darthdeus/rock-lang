@@ -1,0 +1,4 @@
+pub mod world;
+
+pub struct WorldMob { hp: int }
+pub struct WorldRoom { mobs: [WorldMob] }

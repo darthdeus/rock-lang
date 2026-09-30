@@ -1745,6 +1745,8 @@ impl<'a> Parser<'a> {
                 "int" => TypeExprKind::Int,
                 "uint" => TypeExprKind::Uint,
                 "float" => TypeExprKind::Float,
+                "f64" => TypeExprKind::F64,
+                "f32" => TypeExprKind::F32,
                 "bool" => TypeExprKind::Bool,
                 _ => TypeExprKind::Ident(ident.clone()),
             };
@@ -2161,6 +2163,8 @@ impl<'a> Parser<'a> {
                     "int" => TypeExprKind::Int,
                     "uint" => TypeExprKind::Uint,
                     "float" => TypeExprKind::Float,
+                    "f64" => TypeExprKind::F64,
+                    "f32" => TypeExprKind::F32,
                     "bool" => TypeExprKind::Bool,
                     "ref" => TypeExprKind::Ref(self.parse_type()?),
                     _ => {

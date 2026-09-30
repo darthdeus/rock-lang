@@ -543,8 +543,20 @@ thread_local! {
 /// backend-stats regalloc/stringify split counts cell coloring as regalloc, not
 /// stringify — it is the second half of register allocation).
 fn color_cells_timed(func: &MirFunc, inlinable: &[bool]) -> Vec<u32> {
+    color_cells_timed_with_pins(func, inlinable, &[])
+}
+
+fn color_cells_timed_with_pins(
+    func: &MirFunc,
+    inlinable: &[bool],
+    extra_pinned: &[Idx<Cell>],
+) -> Vec<u32> {
     let t = std::time::Instant::now();
-    let colors = regalloc::color_cells_with_inlined_loads(func, Some(inlinable));
+    let colors = regalloc::color_cells_with_inlined_loads_and_pinned_cells(
+        func,
+        Some(inlinable),
+        extra_pinned,
+    );
     REGALLOC_TIME.with(|c| c.set(c.get() + t.elapsed()));
     colors
 }
@@ -2097,11 +2109,12 @@ fn emit_named_framed_with_statics_impl(
             inlinable[raw_id] = true;
         }
     }
-    // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
-    // a coroutine `__step` keeps raw `c<raw>` names (frame-field naming depends on
-    // the raw id), so it gets an empty map.
-    let cell_colors = if frame.is_some() {
-        vec![u32::MAX; func.cells.len()]
+    // Frame fields map to their dense slots before this table is consulted.
+    // Frame accesses name `s` implicitly in the printer rather than through a
+    // MIR cell use; reserve its parameter's color so a later local can never
+    // overwrite the state table itself.
+    let cell_colors = if let Some(frame) = frame {
+        color_cells_timed_with_pins(func, &inlinable, &[frame.s_cell])
     } else {
         color_cells_timed(func, &inlinable)
     };
@@ -2470,7 +2483,7 @@ fn collect_const_hoists(
             );
             continue;
         };
-        let _ = write!(defs, "{gname} = {name}{suffix}(");
+        let _ = write!(defs, "{gname} = {}{suffix}(", skull_mir::mangle::type_symbol(ws, *name));
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
                 defs.push_str(", ");
@@ -2484,9 +2497,8 @@ fn collect_const_hoists(
 }
 
 /// The Lua name for a cell read/write: a coroutine frame cell renders as the
-/// state-table field `<s>.c<raw>`; everything else is its colored local
-/// (`c<color>`) or — when uncolored (a coroutine `__step`, passed an empty
-/// color map) — the raw `c<raw>`.
+/// state-table field `<s>.c<slot>`; everything else is its colored local
+/// (`c<color>`) or, when uncolored, the raw `c<raw>` fallback.
 fn cellname(func: &MirFunc, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
     let mut s = String::new();
     write_cellname(&mut s, func, frame, colors, c);
@@ -3030,11 +3042,12 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
             | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. }
+            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. }
+            | Inst::MakeNullableValue { .. } | Inst::MakeEnum { .. }
             | Inst::MakeEnumDyn { .. }
     )
 }
@@ -3351,7 +3364,7 @@ fn render_scope(
     if is_top {
         // Declare each cell LOCAL exactly once. Colored cells collapse onto their
         // shared `c<color>` (deduped, and excluding any color already named by a
-        // param); uncolored cells (coroutine `__step`) declare per raw id.
+        // param); any remaining uncolored cells declare per raw id.
         let param_colors: HashSet<u32> = params
             .iter()
             .map(|c| cell_colors[raw(*c) as usize])
@@ -4480,6 +4493,11 @@ impl Emitter<'_> {
             Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::UintToInt(x) => {
                 self.write_opnd(out, *x)
             }
+            Inst::FloatToF32(x) => {
+                out.push_str("__rock_f32(");
+                self.write_opnd(out, *x);
+                out.push(')');
+            }
             Inst::IntToUint(x) | Inst::FloatToUint(x) => {
                 self.write_checked_u32(out, *x, "uint conversion out of range")
             }
@@ -4687,6 +4705,13 @@ impl Emitter<'_> {
                     self.write_opnd(out, *id);
                 }
                 out.push(')');
+            }
+            Inst::MakeNullableValue { present, value } => {
+                out.push('(');
+                self.write_opnd(out, *present);
+                out.push_str(" and ");
+                self.write_opnd(out, *value);
+                out.push_str(" or nil)");
             }
             Inst::MakeEnum {
                 tag,

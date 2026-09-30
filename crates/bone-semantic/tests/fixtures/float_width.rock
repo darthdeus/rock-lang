@@ -1,0 +1,49 @@
+//! `f64` is `float`; `f32` is narrow field storage whose reads and writes
+//! are `float`, so calls and assignments need no casts. (Arithmetic needs the
+//! stdlib operators; `tests/value_float_width.rock` covers it.)
+
+//- f64_is_float
+fn widen(x: f64) -> float {
+    return x
+}
+fn main() {
+    let a: f64 = 0.5
+    let b: float = widen(a)
+    b
+  //^ float
+}
+
+//- f32_field_reads_and_writes_as_float
+value Narrow { x: f32, n: int }
+struct Cell { x: f32 }
+fn takes_float(v: float) -> float {
+    return v
+}
+fn main() {
+    let v = Narrow { x: 0.7, n: 1 }
+    let c = Cell { x: v.x }
+    c.x = takes_float(v.x)
+    c.x = 3
+    let y = takes_float(v.x)
+    let r = v.x
+    r
+  //^ float
+}
+
+//- f32_local @fail=legal only as a struct field type
+fn main() {
+    let x: f32 = 0.5
+}
+
+//- f32_param @fail=legal only as a struct field type
+fn half(x: f32) -> float {
+    return x
+}
+
+//- f32_generic_arg @fail=legal only as a struct field type
+fn main() {
+    let xs: [f32] = []
+}
+
+//- f32_enum_payload @fail=legal only as a struct field type
+enum Shape { Circle(f32) }

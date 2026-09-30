@@ -51,7 +51,8 @@ pub fn check_types(src: &str) -> Result<(), String> {
         return Err(stage("parse_rock", e.clone()));
     }
 
-    let ws = semantic_pass(&mut [module]).map_err(|e| stage("semantic_pass", e))?;
+    let ws = crate::semantic_passes::semantic_pass_enforcing_identity_storage(&mut [module])
+        .map_err(|e| stage("semantic_pass", e))?;
 
     // `semantic_pass` Ok means "lowered and checked", not "no type errors" —
     // body-level errors are collected per BodyOwner. A fixture section fails
@@ -317,7 +318,7 @@ fn check_types_packages_inner(
         aliases.packages.push(entry);
     }
 
-    let ws = semantic_pass_with_aliases(&mut modules, &aliases)
+    let ws = crate::semantic_passes::semantic_pass_enforcing_identity_storage_with_aliases(&mut modules, &aliases)
         .map_err(|e| render_err(&srcs, &e))?;
 
     // Body / lowering / interface errors fail the fixture (an `@fail` caller

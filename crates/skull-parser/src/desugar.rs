@@ -96,7 +96,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
         let specs = match ast.types[nt.wrapped].kind {
             TypeExprKind::Int => int_specs,
             TypeExprKind::Uint => uint_specs,
-            TypeExprKind::Float => float_specs,
+            TypeExprKind::Float | TypeExprKind::F64 => float_specs,
             TypeExprKind::String => string_specs,
             _ => continue,
         };

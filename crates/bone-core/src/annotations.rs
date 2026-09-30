@@ -82,12 +82,12 @@ fn validate_one(
             no_args(anno)
         }
         "pure" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
-        | "frame_ref_source"
+        | "frame_ref_source" | "identity_erasure" | "relocates"
         | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand"
         | "uniform_values" | "scene_type_key"
         | "materialize" | "gpu_only"
-        | "scalar_abi" | "inline" | "sim"
+        | "scalar_abi" | "inline" | "sim" | "sim_entry"
         | "sim_render" | "shadow_root" => {
             at(anno, pos, AnnoPos::FnItem)?;
             no_args(anno)
@@ -285,7 +285,7 @@ fn validate_one(
             }
             Ok(())
         }
-        "flat" => {
+        "flat" | "identity_storage" => {
             at(anno, pos, AnnoPos::StructField)?;
             no_args(anno)
         }

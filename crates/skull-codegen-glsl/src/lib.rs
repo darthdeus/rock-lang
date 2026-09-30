@@ -126,9 +126,9 @@ fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 /// The tier-0 GLSL type of a nominal, or `None`.
 fn nominal_glsl_ty(n: &str) -> Option<GlslTy> {
     match n {
-        "Vec2" => Some(GlslTy::Vec2),
-        "Vec3" => Some(GlslTy::Vec3),
-        "Vec4" => Some(GlslTy::Vec4),
+        "Vec2" | "Vec2f" => Some(GlslTy::Vec2),
+        "Vec3" | "Vec3f" => Some(GlslTy::Vec3),
+        "Vec4" | "Vec4f" => Some(GlslTy::Vec4),
         "Bvec3" => Some(GlslTy::Bvec3),
         "Mat4" => Some(GlslTy::Mat4),
         "Sampler2D" => Some(GlslTy::Sampler2D),
@@ -411,7 +411,7 @@ fn profile_body(
             | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
             | Inst::UintShl(..) | Inst::UintShr(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::MakeValueStruct { .. }
             | Inst::MaterializeValueStruct { .. }
@@ -598,7 +598,7 @@ pub fn renders_inline_instance(
             Some(GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 | GlslTy::Mat4)
         ) || matches!(
             ws.render(None, param.ty).as_str(),
-            "Vec2" | "Vec3" | "Vec4" | "Mat4"
+            "Vec2" | "Vec3" | "Vec4" | "Vec2f" | "Vec3f" | "Vec4f" | "Mat4"
         )
     })
 }
@@ -1420,7 +1420,7 @@ impl FnEmit<'_> {
             Inst::Neg(x) | Inst::BitNot(x) | Inst::UintBitNot(x) => self.ty_of(*x)?,
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
-            Inst::UintToFloat(_) => GlslTy::Float,
+            Inst::UintToFloat(_) | Inst::FloatToF32(_) => GlslTy::Float,
             Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => GlslTy::Uint,
             Inst::UintToInt(_) | Inst::UintBitcastInt(_) => GlslTy::Int,
             Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..) => GlslTy::Int,
@@ -1441,9 +1441,9 @@ impl FnEmit<'_> {
             }
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => {
                 match name.as_str() {
-                "Vec2" => GlslTy::Vec2,
-                "Vec3" => GlslTy::Vec3,
-                "Vec4" => GlslTy::Vec4,
+                "Vec2" | "Vec2f" => GlslTy::Vec2,
+                "Vec3" | "Vec3f" => GlslTy::Vec3,
+                "Vec4" | "Vec4f" => GlslTy::Vec4,
                 "Bvec3" => GlslTy::Bvec3,
                 "Mat4" => GlslTy::Mat4,
                 _ => GlslTy::Float,
@@ -1595,6 +1595,8 @@ impl FnEmit<'_> {
                 _ => format!("float({})", self.render_val(*x)?),
             },
             Inst::UintToFloat(x) => format!("float({})", self.render_val(*x)?),
+            // Shader floats are already single precision.
+            Inst::FloatToF32(x) => self.render_val(*x)?,
             Inst::IntToUint(x) | Inst::FloatToUint(x) => format!("uint({})", self.render_val(*x)?),
             Inst::UintToInt(x) => format!("int({})", self.render_val(*x)?),
             Inst::UintBitcastInt(x) => format!("uintBitsToInt({})", self.render_val(*x)?),
@@ -1625,9 +1627,9 @@ impl FnEmit<'_> {
                 // Bvec3 components render at a bool context; the vecN ctors take
                 // float components (int operands materialize an IntToFloat).
                 let (ctor, comp_ty) = match name.as_str() {
-                    "Vec2" => ("vec2", GlslTy::Float),
-                    "Vec3" => ("vec3", GlslTy::Float),
-                    "Vec4" => ("vec4", GlslTy::Float),
+                    "Vec2" | "Vec2f" => ("vec2", GlslTy::Float),
+                    "Vec3" | "Vec3f" => ("vec3", GlslTy::Float),
+                    "Vec4" | "Vec4f" => ("vec4", GlslTy::Float),
                     "Bvec3" => ("bvec3", GlslTy::Bool),
                     other => return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0"))),
                 };

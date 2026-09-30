@@ -59,14 +59,15 @@ pub struct DispatchCtx<'a> {
 
 /// What a `{x}` interpolation hole's default (spec-free) render lowers to.
 ///
-/// [`Self::synthesized_callee`] is the whole point: it is the ONE answer to
-/// "does this hole synthesize a call, and to what".
+/// [`Self::obligations`] is the whole point: it is the ONE answer to "does
+/// this hole synthesize calls, and to what".
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StringifyRoute {
     /// `tostring(v)` -- int, bool, string, and a literal `null` hole.
     ToString,
-    /// `"\"" .. v .. "\""` -- a string FIELD of a nobox value, which quotes.
-    QuotedString,
+    /// `__rock_quote_string(v)` -- a string inside a structural rendering,
+    /// quoted and escaped as a Rock literal.
+    EscapedString,
     /// `__rock_format_float(v)`.
     FormatFloat,
     /// `Name(<tostring inner>)` for a transparent newtype.
@@ -75,6 +76,11 @@ pub enum StringifyRoute {
     EnumNames(Ustr),
     /// `inspect(v)`.
     Inspect,
+    /// The structural enum / value-record / handle rendering.
+    Structural(Box<super::format::FmtNode>),
+    /// The structural formatter cannot print this type; the reason names the
+    /// part it rejects.
+    Unprintable(String),
     /// No render exists -- lowering gaps.
     Unsupported,
 }
@@ -85,8 +91,22 @@ impl StringifyRoute {
     pub fn synthesized_callee(&self) -> Option<&'static str> {
         match self {
             Self::FormatFloat => Some("__rock_format_float"),
+            Self::EscapedString => Some("__rock_quote_string"),
             Self::Inspect => Some("inspect"),
             _ => None,
+        }
+    }
+
+    /// Every call this route synthesizes, with its path within the hole. Only
+    /// a structural rendering makes more than one.
+    pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
+        match self {
+            Self::Structural(tree) => {
+                let mut out = Vec::new();
+                tree.obligations(&mut Vec::new(), &mut out);
+                out
+            }
+            route => route.synthesized_callee().map(|n| (Vec::new(), n)).into_iter().collect(),
         }
     }
 }
@@ -211,27 +231,27 @@ impl FormatPlan {
     /// The structural branch pads UNCONDITIONALLY -- `pad_to_width` with no
     /// width is a no-op on the string, not a skipped call -- so the pad
     /// obligation is present there whatever the spec says.
-    pub fn obligations(&self) -> Vec<&'static str> {
-        let mut out: Vec<&'static str> = Vec::new();
+    pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
+        let mut out: Vec<(Vec<u32>, &'static str)> = Vec::new();
         match &self.structural {
             Some(StructuralRender::Formatted) => {
-                out.push("inspect_formatted");
-                out.push("__rock_fmt_pad");
+                out.push((Vec::new(), "inspect_formatted"));
+                out.push((Vec::new(), "__rock_fmt_pad"));
                 return out;
             }
             Some(StructuralRender::Plain(route)) => {
-                out.extend(route.synthesized_callee());
-                out.push("__rock_fmt_pad");
+                out.extend(route.obligations());
+                out.push((Vec::new(), "__rock_fmt_pad"));
                 return out;
             }
             None => {}
         }
-        out.extend(self.special);
+        out.extend(self.special.map(|n| (Vec::new(), n)));
         if self.grouping.is_some() {
-            out.push("__rock_fmt_grouping");
+            out.push((Vec::new(), "__rock_fmt_grouping"));
         }
         if self.needs_pad {
-            out.push("__rock_fmt_pad");
+            out.push((Vec::new(), "__rock_fmt_pad"));
         }
         out
     }
@@ -242,11 +262,6 @@ impl FormatPlan {
 pub enum HolePlan {
     /// No spec: render by the hole's own type.
     Plain(StringifyRoute),
-    /// No spec, and the hole is a nobox `value`: it was destructured into
-    /// leaves before it got here, so it renders one field at a time. The path
-    /// is the field-index chain, which is what distinguishes two float fields
-    /// of one value at one expression.
-    NoboxLeaves(Vec<(Vec<u32>, StringifyRoute)>),
     /// A format spec.
     Formatted(FormatPlan),
 }
@@ -256,18 +271,8 @@ impl HolePlan {
     /// path that identifies it within the hole.
     pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
         match self {
-            Self::Plain(route) => {
-                route.synthesized_callee().map(|n| (Vec::new(), n)).into_iter().collect()
-            }
-            Self::NoboxLeaves(leaves) => leaves
-                .iter()
-                .filter_map(|(path, route)| {
-                    route.synthesized_callee().map(|n| (path.clone(), n))
-                })
-                .collect(),
-            Self::Formatted(plan) => {
-                plan.obligations().into_iter().map(|n| (Vec::new(), n)).collect()
-            }
+            Self::Plain(route) => route.obligations(),
+            Self::Formatted(plan) => plan.obligations(),
         }
     }
 }
@@ -510,7 +515,7 @@ impl<'a> DispatchCtx<'a> {
         self.ws
             .struct_by_name
             .get(&name)
-            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
+            .is_some_and(|sid| crate::lower::has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]))
     }
 
     /// The declared `value` struct name of `e`'s (nullable-peeled) static
@@ -620,6 +625,9 @@ impl<'a> DispatchCtx<'a> {
         if self.is_null_lit(expr) {
             return StringifyRoute::ToString;
         }
+        if let Some(route) = self.structural_route(expr) {
+            return route;
+        }
         if let Some(ty) = self.concrete_expr_ty(expr) {
             let (payload, _) = ty.peel_nullable();
             return match payload {
@@ -680,34 +688,65 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
-    /// The route ONE FIELD of a nobox value takes when its owner is
-    /// interpolated. Keyed on the field's declared type rather than on an
-    /// expression: the field has none -- the value was destructured into leaves
-    /// before it got here.
-    pub fn struct_leaf_route(&self, ty: TyId) -> StringifyRoute {
-        let Some(ty) = self.resolve_tyid(ty) else {
-            return StringifyRoute::Unsupported;
+    /// The structural rendering of `expr`'s non-null type, when that type is
+    /// one the structural formatter owns (an enum with a payload, a value
+    /// record, a handle). `None` leaves the hole to the by-type routes.
+    pub fn structural_route(&self, expr: Idx<Expr>) -> Option<StringifyRoute> {
+        let ty = self.hole_mono(expr)?;
+        let (payload, _) = ty.peel_nullable();
+        let name = payload.nominal()?;
+        if !super::format::formats_structurally(self.ws, name) {
+            return None;
+        }
+        Some(match super::format::format_tree(self.ws, payload) {
+            Ok(tree) => StringifyRoute::Structural(Box::new(tree)),
+            Err(reason) => StringifyRoute::Unprintable(reason),
+        })
+    }
+
+    /// `tostring(x)` / `to_string(x)` where `x` formats structurally: the
+    /// argument and its route. Only the stdlib's extern `tostring` and the
+    /// `to_string(any)` fallback qualify -- a user function or a typed overload
+    /// of either name is an ordinary call.
+    pub fn tostring_route(&self, call: Idx<Expr>) -> Option<(Idx<Expr>, StringifyRoute)> {
+        let Expr::Call { callee: bone_semantic::hir::Callee::Unresolved { name, .. }, args, .. } =
+            &self.body.expr_arena[call]
+        else {
+            return None;
         };
-        if matches!(self.ty_node(ty), Some(TypeExpr::Nullable(_))) {
-            return StringifyRoute::Inspect;
+        if !matches!(name.as_str(), "tostring" | "to_string") {
+            return None;
         }
-        match self.resolve_ty(ty) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool)) => StringifyRoute::ToString,
-            Some(TypeExpr::Builtin(BuiltinTy::String)) => StringifyRoute::QuotedString,
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => StringifyRoute::FormatFloat,
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if self.ws.newtypes_by_name.contains_key(&name) =>
-            {
-                StringifyRoute::Newtype(name)
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if payload_free_enum_variants(self.ws, name).is_some() =>
-            {
-                StringifyRoute::EnumNames(name)
-            }
-            Some(_) => StringifyRoute::Inspect,
-            None => StringifyRoute::Unsupported,
+        let mut args = args.clone();
+        let (Some(arg), None) = (args.next(), args.next()) else { return None };
+        let resolved = match self.inf.and_then(|i| i.resolved_overload_calls.get(&call)) {
+            Some(&(module, func)) => vec![(module, func)],
+            None => self.ws.functions_by_name.get(name)?.to_vec(),
+        };
+        let [(module, func)] = resolved[..] else { return None };
+        let def = &self.ws.module(module).functions[func];
+        let takes_any = match def.param_decls.as_slice() {
+            [param] => matches!(self.raw_ty_node(param.ty), Some(TypeExpr::Builtin(BuiltinTy::Any))),
+            _ => false,
+        };
+        if !takes_any || (name.as_str() == "tostring" && !def.is_extern) {
+            return None;
         }
+        Some((arg, self.structural_route(arg)?))
+    }
+
+    /// The logical type of `expr` from whichever plan this context carries.
+    fn hole_mono(&self, expr: Idx<Expr>) -> Option<crate::monoty::MonoTy> {
+        if let Some(ty) = self.concrete_expr_ty(expr) {
+            return Some((*ty).clone());
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
+        let inf = self.inf?;
+        let ty = *inf.expr_types.get(expr)?;
+        let empty = MonoSubst::default();
+        crate::monoty::convert(self.ws, inf, ty, self.logical_subst.unwrap_or(&empty)).ok()
     }
 
     /// Whether `e`'s type is a composite (tuple/array/map/struct/enum) -- what
@@ -745,42 +784,9 @@ impl<'a> DispatchCtx<'a> {
     /// THE plan for one interpolation hole. `spec` is the hole's format spec.
     pub fn hole_plan(&self, hole: Idx<Expr>, spec: Option<&InterpSpec>) -> HolePlan {
         let Some(spec) = spec else {
-            if let Some(name) = self.nobox_value_name(hole) {
-                let mut leaves = Vec::new();
-                self.nobox_leaf_routes(name, &mut Vec::new(), &mut leaves);
-                return HolePlan::NoboxLeaves(leaves);
-            }
             return HolePlan::Plain(self.stringify_route(hole));
         };
         HolePlan::Formatted(self.format_plan(hole, spec))
-    }
-
-    /// The leaf renders a nobox `value` interpolates, depth-first in declared
-    /// field order -- the order `stringify_nobox_repr` walks its `ValueRepr`.
-    ///
-    /// A field whose own type is a nobox value arrives as a nested group and
-    /// recurses; everything else is a leaf keyed on its DECLARED type, which is
-    /// all lowering has left at that point.
-    fn nobox_leaf_routes(
-        &self,
-        name: Ustr,
-        path: &mut Vec<u32>,
-        out: &mut Vec<(Vec<u32>, StringifyRoute)>,
-    ) {
-        let Some(sid) = self.ws.struct_by_name.get(&name) else { return };
-        let fields = self.ws.modules[sid.module.index()].structs[sid.def].fields.clone();
-        for (i, field) in fields.iter().enumerate() {
-            path.push(i as u32);
-            match self.resolve_ty(field.ty) {
-                Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. })
-                    if self.is_nobox_struct(n) =>
-                {
-                    self.nobox_leaf_routes(n, path, out);
-                }
-                _ => out.push((path.clone(), self.struct_leaf_route(field.ty))),
-            }
-            path.pop();
-        }
     }
 
     /// THE plan for a `{x:spec}` hole. Every branch that decides a stdlib call

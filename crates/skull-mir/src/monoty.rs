@@ -375,6 +375,8 @@ impl MonoTy {
 pub enum MonoTyReason {
     /// `BuiltinTy::Error` -- inference recovery poison. An invalid program.
     RecoveryError,
+    /// `BuiltinTy::F32` -- a field's storage type, which no value has.
+    StorageOnly,
     /// An inference variable with no substitution: inference did not finish.
     UnresolvedInfer(Ustr),
     /// A declared generic absent from the enclosing substitution. Expected in
@@ -397,6 +399,7 @@ impl MonoTyReason {
     pub fn bucket(&self) -> &'static str {
         match self {
             Self::RecoveryError => "recovery-error",
+            Self::StorageOnly => "storage-only",
             Self::UnresolvedInfer(_) => "unresolved-infer",
             Self::UnboundGeneric(_) => "unbound-generic",
             Self::NoNode => "no-node",
@@ -922,6 +925,7 @@ fn convert_at<S: std::hash::BuildHasher>(
             BuiltinTy::Unit => MonoTy::Unit,
             BuiltinTy::Never => MonoTy::Never,
             BuiltinTy::Error => return Err(MonoTyReason::RecoveryError),
+            BuiltinTy::F32 => return Err(MonoTyReason::StorageOnly),
         },
         TypeExpr::Infer(var, name) => {
             // An unbound var the CALLER can answer. A struct's field default is

@@ -202,6 +202,7 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
             hir::BuiltinTy::Int => "int",
             hir::BuiltinTy::Uint => "uint",
             hir::BuiltinTy::Float => "float",
+            hir::BuiltinTy::F32 => "f32",
             hir::BuiltinTy::Bool => "bool",
             hir::BuiltinTy::String => "string",
             hir::BuiltinTy::Never => "never",

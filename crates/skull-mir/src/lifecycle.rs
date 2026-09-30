@@ -134,22 +134,26 @@ impl LifecycleQualification {
     }
 }
 
+pub const LIFECYCLE_PHASES: [&str; 12] = [
+    "early_init",
+    "init",
+    "late_init",
+    "wire",
+    "update",
+    "late_update",
+    "draw",
+    "late_draw",
+    "post_imgui_draw",
+    "reset",
+    "shutdown",
+    "window_resized",
+];
+
 fn phase_rank(phase: Ustr) -> Option<u8> {
-    Some(match phase.as_str() {
-        "early_init" => 0,
-        "init" => 1,
-        "late_init" => 2,
-        "wire" => 3,
-        "update" => 4,
-        "late_update" => 5,
-        "draw" => 6,
-        "late_draw" => 7,
-        "post_imgui_draw" => 8,
-        "reset" => 9,
-        "shutdown" => 10,
-        "window_resized" => 11,
-        _ => return None,
-    })
+    LIFECYCLE_PHASES
+        .iter()
+        .position(|candidate| *candidate == phase.as_str())
+        .map(|rank| rank as u8)
 }
 
 pub fn sim_wire_name(function: &bone_semantic::hir::Function) -> Option<Ustr> {

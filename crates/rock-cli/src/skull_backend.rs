@@ -1902,11 +1902,12 @@ fn build_state_nobox_accessors(
             let writes = leaves
                 .iter()
                 .zip(&paths)
-                // Flattened leaf tables store dotted paths as literal keys;
-                // declared cdata fields remain ordinary nested field reads.
+                // Table boxes (leaf-table, and a GC table's `nobox` fields) store
+                // dotted paths as literal keys; cdata fields remain ordinary
+                // nested field reads.
                 .zip(&value_keys)
                 .map(|((_, p), key)| {
-                    let value = if storage == skull_mir::lower::ValueStorage::LeafTable {
+                    let value = if storage != skull_mir::lower::ValueStorage::CData {
                         format!("v[{:?}]", p.as_str())
                     } else {
                         format!("v.{}", p.as_str())

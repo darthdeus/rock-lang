@@ -36,7 +36,7 @@ fn use_it() -> string {
 // The headline sigil case: `Box1<int>` as a `ty` arg only parses via the
 // `!()` form (the cursor-backtracking type-arg parser), recovered to an
 // `App` TypeExpr by `expr_to_type_expr` and spliced into the field type.
-struct Box1<T> { v: T }
+value Box1<T> { v: T }
 macro wrap(Name: ident, Elem: ty) {
     struct Name { v: Elem }
 }

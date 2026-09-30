@@ -3433,6 +3433,7 @@ fn literal_temporary_path_mag_product_smoke() {
         740,
         &replay_s,
         &[
+            ("STONE_TEST_FIXED_DT", "0.1"),
             ("MAG_BOOT_MENU", "1"),
             ("MAG_LITERAL_PRODUCT_SMOKE", "1"),
             ("STONE_TEST_FIXED_DT", "0.1"),
@@ -3474,7 +3475,10 @@ fn literal_temporary_path_mag_product_smoke() {
     );
     let diag = &run.state["__stone_diag"];
     assert_eq!(diag["MAG_LITERAL_SMOKE_MENU"].as_i64(), Some(1), "{diag}");
-    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1),
+        "screen={} slots={} consent={} play_effect={} diag={diag}",
+        run.state["mag"]["SCREEN"], run.state["mag"]["SAVE_SLOTS_OPEN"],
+        run.state["mag"]["CONSENT_OPEN"], diag["MAG_PLAY_EFFECT_SCREEN"]);
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "{diag}");
     assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(270), "the second scrub must start at the backward target: {diag}");
     assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(300), "the second scrub must move forward: {diag}");

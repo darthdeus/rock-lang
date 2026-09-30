@@ -55,7 +55,14 @@ struct Run {
 }
 
 fn rock(cwd: &Path, args: &[&str]) -> Run {
-    let out = Command::new(rock_bin()).current_dir(cwd).args(args).output().expect("spawn rock");
+    // The fixtures live in a temp dir, so without ROCK_DIR the binary falls
+    // back to a fixed checkout path and checks against that tree's stdlib.
+    let out = Command::new(rock_bin())
+        .current_dir(cwd)
+        .env("ROCK_DIR", repo_root())
+        .args(args)
+        .output()
+        .expect("spawn rock");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),

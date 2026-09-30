@@ -219,7 +219,7 @@ impl Builder<'_> {
     ) -> Result<BackendFnAbiPlanHandle, CompilerError> {
         crate::lower::abi::callee_abi_plan_for_instance(
             self.ws,
-            self.scx,
+            self.call_scx,
             self.concrete_plans,
             inst,
         )
@@ -306,6 +306,24 @@ impl Builder<'_> {
                 }
             }
         }
+        if let Callee::Unresolved { name, .. } = callee {
+            if self.borrows_flat_arena_element(e, name)? {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "the Lua backend does not yet support `borrow` on an arena whose `value` \
+                     elements are stored as flat columns or rows (they have no table to alias); \
+                     declare the element a `struct` to borrow it"
+                        .to_string(),
+                ));
+            }
+        }
+        // `tostring` of an enum, value record or handle is the structural
+        // rendering, never the backend's own rendering of its representation.
+        if let Some((arg, _)) = self.dispatch().tostring_route(e) {
+            return self
+                .with_site_expr(arg, |s| s.stringify_structural(arg))
+                .map(ValueRepr::Scalar);
+        }
         // `cast<T>(v)` is identity at runtime (`return value`), so a `nobox`
         // RESULT threads the argument's repr instead of packing it for the boxed
         // `any` param and field-reading the leaves back off that box. This is
@@ -323,6 +341,31 @@ impl Builder<'_> {
                 if let [inner] = arg_idxs[..] {
                     if self.resolves_to_inline_builtin(e, name) {
                         return self.lower_expr_repr(inner).map(ValueBundle::into_value);
+                    }
+                }
+            }
+        }
+        // On Lua a value with no mutable heap storage is already the owner's
+        // copy, so `clone_into` is its argument; the inline body allocated a
+        // `seen` table per call even for a string. C keeps the call: its
+        // strings are bytes the destination owner must own.
+        if let Callee::Unresolved { name, .. } = callee {
+            if name.as_str() == "clone_into"
+                && self.scx.target() == bone_semantic::hir::FnBackend::Lua
+            {
+                if let [value, storage] = arg_idxs[..] {
+                    let positional = arg_idxs.iter().all(|a| {
+                        !self.body.arg_names.contains_key(a) && !self.body.spread_args.contains(a)
+                    });
+                    if positional
+                        && self.resolves_to_inline_builtin(e, name)
+                        && self
+                            .concrete_expr_ty(value)
+                            .is_some_and(|ty| super::shape::lua_value_is_immutable(self.ws, &ty))
+                    {
+                        let copy = self.lower_expr_repr(value)?;
+                        self.lower_expr(storage)?;
+                        return Ok(copy.into_value());
                     }
                 }
             }
@@ -359,7 +402,9 @@ impl Builder<'_> {
                 let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count, representation });
                 let mut fields =
                     vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
-                fields.extend(self.leaf_view_fields(ctype, ptr));
+                if representation.is_some() && self.is_leaf_addressed(ctype)? {
+                    fields.extend(self.leaf_view_fields(ctype, ptr));
+                }
                 let nb = self.emit_cur(Inst::MakeStruct {
                     ty: Some(Ustr::from("NativeBuffer")),
                     fields,
@@ -555,11 +600,15 @@ impl Builder<'_> {
             .iter()
             .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
         if let Some(field) = self.fn_field_of_call(e) {
-            let arg_vals: Vec<Idx<Inst>> =
-                arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-            let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field });
-            let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec())?;
-            return Ok(ValueRepr::Scalar(v));
+            let Some(&recv_expr) = arg_idxs.first() else {
+                return Err(gap("inferred fn-field call has no receiver argument"));
+            };
+            let plan = self
+                .struct_field_fn_rep_plan(recv_expr, field)?
+                .ok_or_else(|| gap("inferred fn-field call has no representation plan"))?;
+            let recv = self.lower_expr(recv_expr)?;
+            let fieldv = self.emit_cur(Inst::Field { base: recv, field });
+            return self.indirect_call_by_plan(plan, fieldv, &arg_idxs[1..]);
         }
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at
@@ -628,11 +677,20 @@ impl Builder<'_> {
                 if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
                     self.f.hoisted_fn_globals.push(abi.hoisted);
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
+                    if let Some(identity) = self.f.nested_fn_identities.get(&abi.hoisted).cloned() {
+                        self.f.code_value_identities.insert(g, identity);
+                    }
                     let param_shapes = abi.param_slots(&self.scx.rep_arena());
-                    let arg_vals =
-                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs, &[])?;
+                    let arg_vals = self.slotted_call_args(
+                        e,
+                        &abi.param_names,
+                        &param_shapes,
+                        &arg_idxs,
+                        &[],
+                    )?;
                     let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
+                        self.f.call_rep_plans.insert(v, abi.representation.clone());
                         return Ok(ValueRepr::Scalar(v));
                     };
                     let dests: Vec<Idx<Cell>> =
@@ -702,11 +760,15 @@ impl Builder<'_> {
         e: Idx<Expr>,
         func: FuncRef,
     ) -> Result<DirectCall, CompilerError> {
-        let tree = self
-            .inf
-            .and_then(|i| i.bound_call_trees.get(&e))
-            .filter(|t| !t.is_empty())
-            .cloned();
+        // A dispatched helper shares the hole's expression, not its user call's bound tree.
+        let tree = if matches!(self.cur_op, crate::site::SiteOp::DirectCall) {
+            self.inf
+                .and_then(|i| i.bound_call_trees.get(&e))
+                .filter(|t| !t.is_empty())
+                .cloned()
+        } else {
+            None
+        };
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
@@ -846,7 +908,7 @@ impl Builder<'_> {
         } else {
             self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
         }
-        let lua_opaque = self.scx.target() == bone_semantic::hir::FnBackend::Lua
+        let lua_opaque = self.call_scx.target() == bone_semantic::hir::FnBackend::Lua
             && callee.inline_body.is_some()
             && !callee.generics.is_empty()
             && !callee.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
@@ -857,7 +919,16 @@ impl Builder<'_> {
                 e,
                 &dc.callee_inst,
             )?;
-            let args = if any_named {
+            let has_tuple_storage = dc
+                .plan
+                .representation()
+                .params()
+                .iter()
+                .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
+            let args = if has_tuple_storage {
+                let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
+                self.scalar_call_args(e, func, arg_idxs, any_named, &opaque)?
+            } else if any_named {
                 self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
                 let mut args: Vec<Idx<Inst>> = arg_idxs
@@ -867,8 +938,12 @@ impl Builder<'_> {
                         let t = self
                             .concrete_callee_param_ty(e, &dc.callee_inst, i)?
                             .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
-                        let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
-                        Ok(self.coerced_mono(v, a, t.as_ref()))
+                        if self.is_ref_call_arg(e, a) {
+                            self.lower_ref_borrow(a)
+                        } else {
+                            let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+                            Ok(self.coerced_mono(v, a, t.as_ref()))
+                        }
                     })
                     .collect::<Result<_, CompilerError>>()?;
                 args.extend(self.trailing_default_args(func, arg_idxs.len(), None)?);
@@ -879,7 +954,7 @@ impl Builder<'_> {
             // day a `@gpu_only` intrinsic returns a tuple.
             self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
-                return Ok(self.emit_tuple_call_tree(func, args, shape, &dc)?);
+                return Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?);
             }
             let call = self.emit_cur(Inst::Call { func, args });
             self.record_call(call, func, &dc)?;
@@ -887,6 +962,7 @@ impl Builder<'_> {
         }
         let param_shapes = dc.plan.param_shapes();
         let args = self.scalar_call_args(
+            e,
             func,
             arg_idxs,
             any_named,
@@ -905,7 +981,7 @@ impl Builder<'_> {
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
             None => match &ret_tuple {
-                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, &dc)?),
+                Some(shape) => Ok(self.emit_tuple_call_tree(e, func, args, shape, &dc)?),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
                     self.record_call(call, func, &dc)?;
@@ -932,13 +1008,17 @@ impl Builder<'_> {
     /// target.
     pub(crate) fn emit_tuple_call_tree(
         &mut self,
+        e: Idx<Expr>,
         func: FuncRef,
         args: Vec<Idx<Inst>>,
         shape: &TupleRetShape,
         dc: &DirectCall,
     ) -> Result<ValueRepr, CompilerError> {
-        let dests: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let slot_types = self.tuple_opaque_slot_types(e, shape);
+        let dests: Vec<Idx<Cell>> = slot_types
+            .into_iter()
+            .map(|ty| self.f.new_cell_typed(None, ty))
+            .collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
         self.record_call(call, func, dc)?;
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
@@ -1081,7 +1161,7 @@ impl Builder<'_> {
             // join forwards that tag rather than minting `true` -- `a?.m()` is
             // absent when either link is.
             return Ok(match dc.plan.ret_tuple() {
-                Some(shape) => self.emit_tuple_call_tree(func, argv, &shape, &dc)?,
+                Some(shape) => self.emit_tuple_call_tree(e, func, argv, &shape, &dc)?,
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args: argv });
                     self.record_call(call, func, &dc)?;
@@ -1146,6 +1226,7 @@ impl Builder<'_> {
     /// fires; an omitted scalar param emits one nil).
     pub(crate) fn scalar_call_args(
         &mut self,
+        e: Idx<Expr>,
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
@@ -1162,7 +1243,7 @@ impl Builder<'_> {
                     |slot| slot.clone(),
                     |message| self.gap_here(message),
                 )?;
-                out.extend(self.arg_values_for_slot(&slot, a)?);
+                out.extend(self.arg_values_for_call_slot(e, &slot, a)?);
             }
             out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
@@ -1173,7 +1254,7 @@ impl Builder<'_> {
             .map(|pd| pd.name)
             .collect();
         let defaults = self.literal_param_defaults(func);
-        self.slotted_call_args(&param_names, param_shapes, arg_idxs, &defaults)
+        self.slotted_call_args(e, &param_names, param_shapes, arg_idxs, &defaults)
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -1187,6 +1268,7 @@ impl Builder<'_> {
     /// callee is not a declaration the emitter can read (a nested fn value).
     pub(crate) fn slotted_call_args(
         &mut self,
+        e: Idx<Expr>,
         param_names: &[Ustr],
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
@@ -1206,7 +1288,12 @@ impl Builder<'_> {
                 }
                 continue;
             }
-            let r = self.lower_expr_repr(a)?;
+            let r = if self.is_ref_call_arg(e, a) {
+                let place = self.lower_ref_borrow(a)?;
+                self.value_bundle_for_expr(a, ValueRepr::Scalar(place))?
+            } else {
+                self.lower_expr_repr(a)?
+            };
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names
                     .iter()
@@ -1387,6 +1474,62 @@ impl Builder<'_> {
         }
     }
 
+    pub(crate) fn pack_bundle(
+        &mut self,
+        bundle: &ValueBundle,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        if let ValueRepr::Group { present: Some(present), .. } = bundle.value() {
+            let value = self.pack(bundle.value().clone())?;
+            return Ok(self.emit_cur(Inst::MakeNullableValue {
+                present: *present,
+                value,
+            }));
+        }
+        let Some(shape) = self
+            .scx
+            .rep_arena()
+            .tuple_shape(bundle.representation())
+        else {
+            return self.pack(bundle.value().clone());
+        };
+        let mut slots = self.tuple_repr_to_slots(bundle.value().clone(), &shape)?;
+        if !shape.nullable {
+            return Ok(self.emit_cur(Inst::MakeTuple(slots)));
+        }
+        let present = slots.remove(0);
+        let result = self.f.new_cell(None);
+        let absent_bb = self.f.new_block();
+        let present_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch {
+                cond: present,
+                then_bb: present_bb,
+                else_bb: absent_bb,
+            },
+        );
+
+        self.cur = absent_bb;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: nil,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = present_bb;
+        let tuple = self.emit_cur(Inst::MakeTuple(slots));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: tuple,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
     /// [`Self::pack`] for a consumer that can observe NIL-ness of the result --
     /// a boxed slot an absent value has to reach as `nil`, not as a statically
     /// non-nil ctor.
@@ -1443,6 +1586,77 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
+    /// The physical layout of GC-table value `name` when some field is stored
+    /// inline (a `nobox` child keyed by dotted leaf paths); `None` for every
+    /// other box, which keys each declared field whole. First-class targets
+    /// nest children as declared fields, so they never take this layout.
+    pub(crate) fn gc_table_inline_layout(
+        &self,
+        name: Ustr,
+    ) -> Result<Option<Vec<GcTableField>>, CompilerError> {
+        if self.scx.values_first_class || !self.is_value_struct(name) {
+            return Ok(None);
+        }
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, name)
+            .map_err(|e| self.gap_here(e.message))?;
+        if storage != ValueStorage::GcTable {
+            return Ok(None);
+        }
+        let fields = crate::lower::gc_table_fields(self.ws, self.scx.target, name)
+            .map_err(|e| self.gap_here(e.message))?;
+        Ok(fields.iter().any(GcTableField::is_inline).then_some(fields))
+    }
+
+    /// A GC-table Group's `<Name>_vt` operands, keyed as `layout` stores them:
+    /// a whole field packs, an inline child contributes its leaves. A presence
+    /// tag canonicalizes to `true`/`nil`, the form a `= null` write stores; the
+    /// scalar ABI spells absence `false`, and `__eq` compares tags per key.
+    fn gc_table_box_fields(
+        &mut self,
+        name: Ustr,
+        layout: &[GcTableField],
+        parts: Vec<ValueRepr>,
+        kind: BoxKind,
+    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if parts.len() != layout.len() {
+            return Err(self.gap_here(format!(
+                "GC-table value `{name}` has {} parts for {} fields",
+                parts.len(),
+                layout.len()
+            )));
+        }
+        let mut out = Vec::new();
+        for (field, part) in layout.iter().zip(parts) {
+            let Some(sub) = &field.inline else {
+                out.push((field.name, self.pack_boxed(part, kind)?));
+                continue;
+            };
+            let leaves = self.repr_to_leaves_shape(&part, sub)?;
+            let keys = field.keys();
+            if keys.len() != leaves.len() {
+                return Err(self.gap_here(format!(
+                    "`{name}.{}` has {} keys but the value produced {} leaves",
+                    field.name,
+                    keys.len(),
+                    leaves.len()
+                )));
+            }
+            for ((key, presence), leaf) in keys.into_iter().zip(leaves) {
+                let value = if presence {
+                    let tag = self.emit_cur(Inst::Const(Lit::Bool(true)));
+                    self.emit_cur(Inst::MakeNullableValue { present: leaf, value: tag })
+                } else {
+                    leaf
+                };
+                out.push((key, value));
+            }
+        }
+        Ok(out)
+    }
+
     /// The `<name>_ct(..)` cdata for a Group's parts, with no presence test.
     ///
     /// The parts are in declared field order (the positional ctor ABI requires
@@ -1457,6 +1671,11 @@ impl Builder<'_> {
         kind: BoxKind,
     ) -> Result<Idx<Inst>, CompilerError> {
         let representation = self.nominal_value_representation(name)?;
+        if let Some(layout) = self.gc_table_inline_layout(name)? {
+            let fields = self.gc_table_box_fields(name, &layout, parts, kind)?;
+            let ctor = kind.value_ctor(name, representation, ValueCtorForm::Declared, fields);
+            return Ok(self.emit_cur(ctor));
+        }
         let names = struct_field_names(self.ws, name);
         let fields = parts
             .into_iter()
@@ -1469,6 +1688,15 @@ impl Builder<'_> {
                 let fname = *names
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
+                // A nullable nobox field is observable as null through its
+                // parent, so its presence must reach the field; `pack_boxed`
+                // alone would build a statically present child.
+                if let ValueRepr::Group { name, parts, present: Some(present) } = p {
+                    let value =
+                        self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
+                    let field = self.emit_cur(Inst::MakeNullableValue { present, value });
+                    return Ok((fname, field));
+                }
                 Ok((fname, self.pack_boxed(p, kind)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1750,7 +1978,7 @@ impl Builder<'_> {
         slot: &RetSlot,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         match slot {
-            RetSlot::Opaque => self.pack(bundle.value().clone()).map(|value| vec![value]),
+            RetSlot::Opaque => self.pack_bundle(bundle).map(|value| vec![value]),
             RetSlot::Leaves(expected) => {
                 let plan = self
                     .scx
@@ -1891,8 +2119,17 @@ impl Builder<'_> {
                 .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))
                 .collect());
         }
+        // A GC-table box keys an inline child's leaves by dotted path: the
+        // exact inverse of `gc_table_box_fields`, presence tag included.
+        let inline = self.gc_table_inline_layout(shape.name)?;
         let mut out = Vec::new();
-        for (fname, fs) in &shape.fields {
+        for (i, (fname, fs)) in shape.fields.iter().enumerate() {
+            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
+                for (key, _) in field.keys() {
+                    out.push(self.emit_cur(Inst::Field { base: v, field: key }));
+                }
+                continue;
+            }
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             match fs {
                 FieldShape::Prim => out.push(fv),
@@ -1990,7 +2227,16 @@ impl Builder<'_> {
             }
             return Ok(());
         }
-        for (fname, fs) in &shape.fields {
+        let inline = self.gc_table_inline_layout(shape.name)?;
+        for (i, (fname, fs)) in shape.fields.iter().enumerate() {
+            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
+                for (key, _) in field.keys() {
+                    let mut full = prefix.clone();
+                    full.push(key);
+                    out.push(full);
+                }
+                continue;
+            }
             prefix.push(*fname);
             match fs {
                 FieldShape::Prim => out.push(prefix.clone()),

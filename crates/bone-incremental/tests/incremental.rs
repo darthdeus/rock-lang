@@ -2791,3 +2791,33 @@ fn coroutine_body_edit_is_reported_in_reinferred() {
         r.reinferred.len()
     );
 }
+
+/// ALIASING is whole-program: editing only the callee's file must change the
+/// verdict at the unchanged caller's element-reference call, both ways.
+#[test]
+fn relocation_verdict_follows_an_edit_to_the_callee() {
+    let clean_callee = "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cell.v = cells.len() }";
+    let growing_callee =
+        "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cells.push(Cell { v: 2 })\n cell.v = 7 }";
+    let caller = "fn main() { let cells: [Cell] = [Cell { v: 1 }]\n touch(cells[0], cells) }";
+    let relocations = |session: &Session| {
+        session
+            .diagnostics()
+            .iter()
+            .filter(|e| e.message.contains("relocatable Vec or Map element"))
+            .count()
+    };
+    let mut session = Session::new(
+        stdlib_warm_modules(),
+        files(&[("cell.rock", clean_callee), ("main.rock", caller)]),
+        &bone_core::modules::NsAliases::default(),
+    )
+    .expect("session");
+    assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
+
+    session.update_file("cell.rock", growing_callee).expect("update");
+    assert_eq!(relocations(&session), 1, "{:?}", session.diagnostics());
+
+    session.update_file("cell.rock", clean_callee).expect("update");
+    assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
+}

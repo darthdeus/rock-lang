@@ -584,10 +584,8 @@ const SEEDS: &[SeedCase] = &[
         file: "fn_value_off_field.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::LoudReject {
-            names: "survived lowering",
-        },
-        gap: Some("fn value called off a struct field (LIVE)"),
+        expect: Expect::Correct,
+        gap: None,
     },
     SeedCase {
         name: "fn_value_off_field_bound",

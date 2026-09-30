@@ -270,6 +270,16 @@ impl ScopeTree {
                 }
             }
         }
+        // The prologue store for a defaulted parameter establishes the value
+        // seen by the body; it is not a mutation that a captured closure must
+        // share. Explicit stores remain counted below the one initialization.
+        for (cell, data) in func.cells.iter() {
+            if data.default_param {
+                if let Some(count) = writes.get_mut(&cell) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
         (acc, writes, writing, sites)
     }
 
@@ -434,6 +444,9 @@ pub fn non_dominating_by_value_captures(
             // snapshot of a frame field) -- never box candidates.
             if frame.is_some_and(|f| f.fields.contains(&c)) {
                 continue;
+            }
+            if func.cells[c].default_param {
+                continue; // the incoming parameter value dominates the default fill
             }
             if own.owner[&c] != parent {
                 continue; // transitive -> arrives via the parent env, always available

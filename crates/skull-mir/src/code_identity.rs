@@ -963,6 +963,7 @@ impl BodyHasher {
             Inst::FloatToInt(value) => self.unary(36, *value),
             Inst::IntToFloat(value) => self.unary(37, *value),
             Inst::UintToFloat(value) => self.unary(38, *value),
+            Inst::FloatToF32(value) => self.unary(93, *value),
             Inst::IntToUint(value) => self.unary(39, *value),
             Inst::UintToInt(value) => self.unary(40, *value),
             Inst::FloatToUint(value) => self.unary(41, *value),
@@ -1113,6 +1114,11 @@ impl BodyHasher {
                     self.string(field.as_str());
                     self.inst_idx(*value);
                 }
+            }
+            Inst::MakeNullableValue { present, value } => {
+                self.tag(89);
+                self.inst_idx(*present);
+                self.inst_idx(*value);
             }
             Inst::MakeEnum { tag, ty, positional, named } => {
                 self.tag(71);

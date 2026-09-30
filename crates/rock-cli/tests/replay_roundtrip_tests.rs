@@ -4,12 +4,12 @@
 //!
 //! Determinism scope: the plan's contract carves out wall-clock DIAGNOSTICS
 //! (`stone_get_time()` "is fine in diagnostics") from the determinism
-//! guarantee. Those live entirely under `stone.PROFILER` (per-frame CPU/GPU
-//! timing metrics + `frame_t*` timestamps) and are inherently
-//! non-reproducible. We strip that one subtree and assert byte-identity of
-//! everything else. This matches the repo's existing dump tests
-//! (game_snapshot_tests), which all compare curated game-state subtrees and
-//! never the profiler. Everything outside PROFILER is dt-derived and replay
+//! guarantee. Those live under `stone.PROFILER` and its frame series
+//! (`FRAME_*`, `PROFILE_HEAP_KB`) and are inherently non-reproducible; the
+//! dump names them in `__stone_nonreproducible`. We strip those and assert
+//! byte-identity of everything else. This matches the repo's existing dump
+//! tests (game_snapshot_tests), which all compare curated game-state subtrees
+//! and never the profiler. Everything else is dt-derived and replay
 //! reproduces it from the logged dt.
 //!
 //! Heavy: spawns `rock frame` against a compiled game. Excluded from the

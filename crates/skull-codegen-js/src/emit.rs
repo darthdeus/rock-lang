@@ -1893,6 +1893,7 @@ impl Emitter<'_> {
             // Identity on JS (all doubles), like codegen-lua on luajit.
             Inst::IntToFloat(x) => self.render_val(*x)?,
             Inst::UintToFloat(x) => self.render_val(*x)?,
+            Inst::FloatToF32(x) => format!("Math.fround({})", self.render_val(*x)?),
             Inst::IntToUint(x) | Inst::FloatToUint(x) => {
                 let value = self.render_val(*x)?;
                 format!(
@@ -2216,6 +2217,7 @@ impl Emitter<'_> {
             Inst::FfiViewCast { cty, ptr } => {
                 let p = self.render_val(*ptr)?;
                 let array = match cty.as_str() {
+                    "double" => "Float64Array",
                     "float" => "Float32Array",
                     "int" => "Int32Array",
                     "uint32_t" => "Uint32Array",
@@ -2234,6 +2236,13 @@ impl Emitter<'_> {
             // `.len`, a leaf VIEW field and Vec `._data`/`.len` are all the same
             // shape; a read THROUGH a buffer element is decomposed by lowering.
             Inst::Field { base, field } => js_member(&self.render_val(*base)?, field)?,
+            // Presence is a bool on the scalar ABI, so JS truthiness agrees with
+            // luajit's `present and value or nil`.
+            Inst::MakeNullableValue { present, value } => format!(
+                "({} ? {} : null)",
+                self.render_val(*present)?,
+                self.render_val(*value)?
+            ),
             // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
             // value (Lua path). `__rock_sprintf` is the single-value C printf port
             // (d/i/u/x/X/o/f/F/e/E/g/G/s/c, flags, width, precision; half-even
@@ -5372,15 +5381,18 @@ fn emit_vt_eq(
         return Ok(String::new());
     };
     let arena = registry.arena();
-    let mut vt_names: BTreeSet<ustr::Ustr> = BTreeSet::new();
+    let mut vt_names: BTreeMap<ustr::Ustr, skull_mir::lower::ValueStorage> = BTreeMap::new();
     for (&name, &representation) in registry.value_plans() {
         let plan = arena.try_get(representation).ok_or_else(|| {
             err(format!(
                 "JS subset: value equality registry `{name}` carries a foreign representation plan"
             ))
         })?;
-        if plan.value_storage() != Some(skull_mir::lower::ValueStorage::CData) {
-            vt_names.insert(name);
+        match plan.value_storage() {
+            Some(skull_mir::lower::ValueStorage::CData) | None => {}
+            Some(storage) => {
+                vt_names.insert(name, storage);
+            }
         }
     }
     build_vt_eq_defs(ws, &vt_names)
@@ -6536,25 +6548,42 @@ fn build_inspect_ty_defs(
 /// nested value structs; `===` (by reference, luajit's `rawequal`) for a Vec /
 /// Map / Arena / reference-struct / generic-`T` / string field. `===` on a JS
 /// string is by-value, matching luajit's interning.
-fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<String, CompilerError> {
+fn build_vt_eq_defs(
+    ws: &Workspace,
+    names: &BTreeMap<ustr::Ustr, skull_mir::lower::ValueStorage>,
+) -> Result<String, CompilerError> {
     let mut out = String::new();
-    for name in names {
+    for (name, storage) in names {
         let sid = ws.struct_by_name.get(name).ok_or_else(|| {
             err(format!("JS subset: value equality registry type `{name}` is not declared"))
         })?;
         let s = &ws.module(sid.module).structs[sid.def];
-        let cmps: Vec<String> = s
-            .fields
-            .iter()
-            .map(|f| {
-                let (a, b) = (format!("a.{}", f.name), format!("b.{}", f.name));
-                if skull_mir::lower::gc_eq_is_structural(ws, f.ty) {
-                    format!("__op_eq({a}, {b})")
-                } else {
-                    format!("{a} === {b}")
+        let compare = |key: &str, structural: bool| -> Result<String, CompilerError> {
+            let (a, b) = if key.contains('.') {
+                (format!("a[{}]", js_string_lit(key)?), format!("b[{}]", js_string_lit(key)?))
+            } else {
+                (format!("a.{key}"), format!("b.{key}"))
+            };
+            Ok(if structural { format!("__op_eq({a}, {b})") } else { format!("{a} === {b}") })
+        };
+        // A GC-table box keys an inline child's leaves by dotted path.
+        let cmps: Vec<String> = if *storage == skull_mir::lower::ValueStorage::GcTable {
+            let fields =
+                skull_mir::lower::gc_table_fields(ws, bone_semantic::hir::FnBackend::Js, *name)
+                    .map_err(|e| err(e.message))?;
+            let mut cmps = Vec::new();
+            for f in &fields {
+                for ((key, _), structural) in f.keys().into_iter().zip(f.keys_eq_structural(ws)) {
+                    cmps.push(compare(key.as_str(), structural)?);
                 }
-            })
-            .collect();
+            }
+            cmps
+        } else {
+            s.fields
+                .iter()
+                .map(|f| compare(f.name.as_str(), skull_mir::lower::gc_eq_is_structural(ws, f.ty)))
+                .collect::<Result<_, _>>()?
+        };
         let body = if cmps.is_empty() { "true".to_string() } else { cmps.join(" && ") };
         out.push_str(&format!(
             "__rock_vt_eq[{}] = function(a, b) {{ return {body}; }};\n",
@@ -6633,7 +6662,7 @@ fn emit_coroutine_js(
     globals: &GlobalCtx,
 ) -> Result<(String, CodeArtifact), CompilerError> {
     let channel = plan.channel.as_ref();
-    let mut lowered = skull_transform::transform_coroutine(mf, channel);
+    let mut lowered = skull_transform::transform_coroutine(mf, channel, plan.has_return_value());
     let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
     let step_name = plan.step();
     // Convert detached hook/defer regions as ordinary functions. Their own
@@ -7081,10 +7110,8 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("int_to_float", 1) => Some("$1"),
         ("to_float", 1) => Some("$1"),
         // `phantom<T>()` is a nil placeholder (iterator `done`, post-`error`
-        // unreachable). `__debug_traceback` is error-message-only (never on
-        // stdout, so an empty string suffices). `is_null` mirrors `== nil`.
+        // unreachable). `is_null` mirrors `== nil`.
         ("phantom", 0) => Some("null"),
-        ("__debug_traceback", 0) => Some("\"\""),
         ("is_null", 1) => Some("($1 == null)"),
         // `cast`/`transmute` are runtime identities (type recovery only).
         ("cast", 1) | ("transmute", 1) => Some("$1"),
@@ -7427,6 +7454,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         | Inst::FloatToInt(x)
         | Inst::IntToFloat(x)
         | Inst::UintToFloat(x)
+        | Inst::FloatToF32(x)
         | Inst::IntToUint(x)
         | Inst::UintToInt(x)
         | Inst::FloatToUint(x)
@@ -7470,6 +7498,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
                 f(*v);
             }
         }
+        Inst::MakeNullableValue { present, value } => mark(&[*present, *value]),
         Inst::MakeEnum { positional, named, .. } => {
             mark(positional);
             for (_, v) in named {
@@ -7528,11 +7557,13 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
             | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
-            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::FloatToF32(_) | Inst::IntToUint(_)
             | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }
+            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. }
+            | Inst::MakeNullableValue { .. }
+            | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }
             | Inst::MakeEnv { .. }
     )
 }

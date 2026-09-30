@@ -127,6 +127,22 @@ impl Builder<'_> {
                     self.test_tag(scrut, name, scrut_enum, fail);
                     return Ok(());
                 }
+                // A threaded flat enum binds as its cells; boxing it here cost a
+                // table that the arm's join or first payload read unpacked again.
+                // Native backends bind their own tagged enum value.
+                if let Scrut::Cells { tag, positional, named, shape } = scrut {
+                    let whole = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
+                    if !self.scx.native_flat_enums
+                        && whole.is_some_and(|ty| ty.nominal() == Some(shape.name))
+                    {
+                        let mut leaves = Vec::with_capacity(shape.leaf_count());
+                        leaves.push(*tag);
+                        leaves.extend(positional.iter().copied());
+                        leaves.extend(named.iter().map(|(_, value)| *value));
+                        self.bind_leaves(b, &leaves, shape.value_shape())?;
+                        return Ok(());
+                    }
+                }
                 let val = self.scrut_value(scrut);
                 let cell = self.new_binding_cell(
                     b,
@@ -159,15 +175,16 @@ impl Builder<'_> {
                 let cdata = en.is_some_and(|e| {
                     EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
                 });
+                let flat_shape = en.and_then(|e| {
+                    EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned())
+                });
                 for (i, sp) in sub.into_iter().enumerate() {
                     // POSITION -> SLOT. They differ once any position ahead of
                     // this one is widened: `V2(Vec2)` at position 0 spans two
                     // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
                     // Indexing by position read the widened value's second leaf
                     // and handed `nil` to the count.
-                    let slot = en
-                        .and_then(|e| EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned()))
-                        .map_or(i, |s| s.slot_offset(i));
+                    let slot = flat_shape.as_ref().map_or(i, |s| s.slot_offset(i));
                     // Thread the sub-pattern's enum (from this variant's payload
                     // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
                     // repr -- else an unqualified `J` defaults to the `.__variant`
@@ -178,8 +195,11 @@ impl Builder<'_> {
                     // materialization the widening exists to avoid.
                     if let Some(vs) = self.flat_payload_leaf_shape(en, variant, i) {
                         if let Pattern::Bind(b) = self.body.pattern_arena[sp] {
-                            let leaves = self.scrut_payload_leaves(scrut, i, &vs);
-                            self.bind_leaves(b, &leaves, vs);
+                            let Some(shape) = flat_shape.as_ref() else {
+                                return Err(gap("flat enum payload lost its compiler-owned shape"));
+                            };
+                            let leaves = self.scrut_payload_leaves(scrut, i, &vs, shape);
+                            self.bind_leaves(b, &leaves, vs)?;
                             continue;
                         }
                         // A position widened for a NESTED FLAT ENUM holds that
@@ -192,7 +212,9 @@ impl Builder<'_> {
                             continue;
                         }
                     }
+
                     let payload = self.scrut_payload(scrut, slot, cdata);
+
                     self.match_pattern(&Scrut::Val(payload), sp, fail, variants, false, sub_enum)?;
                 }
                 Ok(())
@@ -383,7 +405,7 @@ impl Builder<'_> {
     /// else lowers to an ordinary value.
     pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
         if let Expr::FieldAccess { base, field } = self.body.expr_arena[e].clone() {
-            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base) {
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) {
                 if let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape() {
                     let parent = self.lower_expr(base)?;
                     return Ok(Scrut::Flat { parent, prefix: field, shape });
@@ -404,7 +426,7 @@ impl Builder<'_> {
 
     /// Preserve a tuple element's flat-enum representation until the pattern
     /// proves it needs a whole value.
-    fn scrut_from_repr(&mut self, repr: ValueRepr) -> Result<Scrut, CompilerError> {
+    pub(crate) fn scrut_from_repr(&mut self, repr: ValueRepr) -> Result<Scrut, CompilerError> {
         match repr {
             ValueRepr::Group { name, parts, .. }
                 if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
@@ -480,13 +502,9 @@ impl Builder<'_> {
         scrut: &Scrut,
         i: usize,
         vs: &ValueShape,
+        shape: &EnumFlatShape,
     ) -> Vec<Idx<Inst>> {
-        let shape = match scrut {
-            Scrut::Cells { shape, .. } => Some(shape.clone()),
-            Scrut::Flat { shape, .. } => Some(shape.clone()),
-            Scrut::Val(_) | Scrut::Tuple(_) => None,
-        };
-        let off = shape.as_ref().map_or(i, |s| s.slot_offset(i));
+        let off = shape.slot_offset(i);
         (0..vs.leaf_count())
             .map(|k| self.scrut_slot(scrut, off + k))
             .collect()
@@ -502,7 +520,7 @@ impl Builder<'_> {
     /// reserved for the position, so a parent that reserved less than the inner
     /// plan needs would read a neighbouring position's slot; that is a plan
     /// disagreement, not something to paper over.
-    fn nested_flat_enum_scrut(
+    pub(crate) fn nested_flat_enum_scrut(
         &mut self,
         scrut: &Scrut,
         slot: usize,
@@ -665,6 +683,30 @@ impl Builder<'_> {
         else_branch: Option<Idx<Expr>>,
         result_shape: Option<RetSlot>,
     ) -> Result<ValueRepr, CompilerError> {
+        self.lower_if_let_inner(pattern, value, then_branch, else_branch, result_shape, false)?
+            .ok_or_else(|| gap("value-position if let produced no result"))
+    }
+
+    pub(crate) fn lower_if_let_stmt(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+    ) -> Result<(), CompilerError> {
+        self.lower_if_let_inner(pattern, value, then_branch, else_branch, None, true)
+            .map(drop)
+    }
+
+    fn lower_if_let_inner(
+        &mut self,
+        pattern: Idx<Pattern>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        result_shape: Option<RetSlot>,
+        statement: bool,
+    ) -> Result<Option<ValueRepr>, CompilerError> {
         enum IfLetScrutinee {
             Generic,
             Nobox {
@@ -683,6 +725,18 @@ impl Builder<'_> {
 
         let use_repr = result_shape.is_some();
         let shape = result_shape.unwrap_or(RetSlot::Opaque);
+        let result_count = if statement {
+            0
+        } else if use_repr {
+            shape.slot_count()
+        } else {
+            1
+        };
+        let result_ty = if statement || use_repr {
+            None
+        } else {
+            self.current_expr_unit_storage_ty_id()
+        };
         let nobox_binding = match self.body.pattern_arena[pattern] {
             Pattern::Bind(binding) if self.expr_is_nullable(value) => {
                 self.nobox_binding_shape(binding)?.map(|shape| (binding, shape))
@@ -705,11 +759,15 @@ impl Builder<'_> {
             let (present, values) = leaves
                 .split_first()
                 .expect("a nullable shape carries its presence leaf first");
-            let results: Vec<Idx<Cell>> = if use_repr {
-                (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect()
-            } else {
-                vec![self.f.new_cell(None)]
-            };
+            let results: Vec<Idx<Cell>> = (0..result_count)
+                .map(|_| {
+                    if use_repr {
+                        self.f.new_cell(None)
+                    } else {
+                        self.f.new_cell_typed(None, result_ty)
+                    }
+                })
+                .collect();
             let then_bb = self.f.new_block();
             let else_bb = self.f.new_block();
             let join = self.f.new_block();
@@ -729,11 +787,15 @@ impl Builder<'_> {
                 join,
             )
         } else if let Some(tuple_shape) = tuple_shape {
-            let results: Vec<Idx<Cell>> = if use_repr {
-                (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect()
-            } else {
-                vec![self.f.new_cell(None)]
-            };
+            let results: Vec<Idx<Cell>> = (0..result_count)
+                .map(|_| {
+                    if use_repr {
+                        self.f.new_cell(None)
+                    } else {
+                        self.f.new_cell_typed(None, result_ty)
+                    }
+                })
+                .collect();
             let repr = self.lower_expr_repr(value)?.into_value();
             let ValueRepr::Tuple {
                 parts,
@@ -771,16 +833,18 @@ impl Builder<'_> {
                 join,
             )
         } else {
-            let results: Vec<Idx<Cell>> = if use_repr {
-                (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect()
-            } else {
-                vec![self.f.new_cell(None)]
-            };
+            let results: Vec<Idx<Cell>> = (0..result_count)
+                .map(|_| {
+                    if use_repr {
+                        self.f.new_cell(None)
+                    } else {
+                        self.f.new_cell_typed(None, result_ty)
+                    }
+                })
+                .collect();
             let scrut = self.lower_scrut(value)?;
             let else_bb = self.f.new_block();
             let join = self.f.new_block();
-            // A nullable scrutinee fails the bind on nil. A flattened enum
-            // field is never nullable, so its scrutinee is always a plain value.
             if self.expr_is_nullable(value) {
                 let val_v = self.scrut_value(&scrut);
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -806,7 +870,7 @@ impl Builder<'_> {
                 then_bb,
             } => {
                 self.cur = then_bb;
-                self.bind_leaves(binding, &values, shape);
+                self.bind_leaves(binding, &values, shape)?;
             }
             IfLetScrutinee::Tuple {
                 pattern,
@@ -821,7 +885,21 @@ impl Builder<'_> {
             IfLetScrutinee::Generic => {}
         }
 
-        if use_repr {
+        if statement {
+            self.lower_stmt_expr(then_branch)?;
+            if self.is_open() {
+                self.f.set_term(self.cur, Term::Goto(join));
+            }
+            self.cur = else_bb;
+            if let Some(else_branch) = else_branch {
+                self.lower_stmt_expr(else_branch)?;
+            }
+            if self.is_open() {
+                self.f.set_term(self.cur, Term::Goto(join));
+            }
+            self.cur = join;
+            Ok(None)
+        } else if use_repr {
             let tv = self.lower_expr_repr(then_branch)?;
             self.store_bundle_and_join(&results, &shape, &tv, join)?;
 
@@ -839,7 +917,7 @@ impl Builder<'_> {
             let slots: Vec<Idx<Inst>> =
                 results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
             let mut idx = 0;
-            Ok(self.slot_repr(&shape, &slots, &mut idx))
+            Ok(Some(self.slot_repr(&shape, &slots, &mut idx)))
         } else {
             let result = results[0];
             let tv = self.lower_expr(then_branch)?;
@@ -853,7 +931,7 @@ impl Builder<'_> {
             self.store_and_join(result, ev, join);
 
             self.cur = join;
-            Ok(ValueRepr::Scalar(self.emit_cur(Inst::Load(result))))
+            Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Load(result)))))
         }
     }
 

@@ -65,6 +65,14 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
 
             gamma.assign_named_type(*name, binding_ty)?;
 
+            if contains_frame_ref(gamma, binding_ty) {
+                let provenance = frame_ref_provenance(c, gamma, *value);
+                if !provenance.retainable() {
+                    reject_unstable_frame_ref(c.body.expr_spans[*value], provenance)?;
+                }
+                gamma.ref_binding_provenance.insert(*name, provenance);
+            }
+
             // ctx.assign_named_type(*name, inf_ty);
             // ctx.assign_type(name, ty)?;
             // ctx.assign_type(e, ty)
@@ -119,6 +127,11 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
                     .declared_ty
                     .unwrap_or_else(|| gamma.workspace.builtins.error());
                 gamma.assign_named_type(pb, ty)?;
+                if contains_frame_ref(gamma, ty) {
+                    gamma
+                        .ref_binding_provenance
+                        .insert(pb, RefProvenance::Stable);
+                }
                 param_tys.push(ty);
             }
 
@@ -338,7 +351,8 @@ pub fn infer_expr_used(
         Expr::InterpolatedString(parts) => {
             for p in *parts {
                 if let InterpPart::Value { expr, spec } = c.body.interp_part_arena[p] {
-                    infer_expr(c, gamma, expr)?;
+                    let hole_ty = infer_expr(c, gamma, expr)?;
+                    check_interpolated_value(gamma, hole_ty, c.body.expr_spans[expr])?;
 
                     if let Some(s) = spec {
                         if let Some(we) = s.width_expr {
@@ -1652,6 +1666,170 @@ pub fn infer_expr(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> Result<TyId, C
     infer_expr_used(c, gamma, e, Use::Value)
 }
 
+/// A Vec or Map: growth, removal or a rehash can move its elements.
+fn type_is_relocatable_collection(gamma: &mut Gamma, mut ty: TyId, span: Span) -> bool {
+    loop {
+        ty = resolve(gamma, ty, span);
+        match *gamma.get(ty) {
+            TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
+            TypeExpr::App {
+                ctor: TypeCtor::Ref,
+                params,
+            } => {
+                let Some(inner) = params.into_iter().next() else {
+                    return false;
+                };
+                ty = ty.with_idx(inner);
+            }
+            TypeExpr::App {
+                ctor: TypeCtor::Array | TypeCtor::Map,
+                ..
+            } => return true,
+            _ => return false,
+        }
+    }
+}
+
+fn resolved_call_is_frame_source(gamma: &Gamma, e: Idx<Expr>) -> bool {
+    let Some(&(mid, fid)) = gamma.out.resolved_overload_calls.get(&e) else {
+        return false;
+    };
+    gamma.workspace.module(mid).functions[fid]
+        .annotations
+        .iter()
+        .any(|annotation| annotation.name.name.as_str() == "frame_ref_source")
+}
+
+fn static_type_contains_ref(ws: &Workspace, ty: TyId) -> bool {
+    fn visit(ws: &Workspace, ty: TyId, seen: &mut FxHashSet<TyId>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match ty {
+            TyId::Local(_) => false,
+            TyId::Static(mid, idx) => match ws.module(mid).ty_arena[idx] {
+                TypeExpr::App {
+                    ctor: TypeCtor::Ref,
+                    ..
+                } => true,
+                TypeExpr::Nullable(inner) => visit(ws, ty.with_idx(inner), seen),
+                TypeExpr::App { mut params, .. } => {
+                    params.any(|part| visit(ws, ty.with_idx(part), seen))
+                }
+                TypeExpr::Function { mut params, ret } => {
+                    params.any(|part| visit(ws, ty.with_idx(part), seen))
+                        || visit(ws, ty.with_idx(ret), seen)
+                }
+                TypeExpr::Tuple { mut elements } => {
+                    elements.any(|part| visit(ws, ty.with_idx(part), seen))
+                }
+                TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
+            },
+        }
+    }
+    visit(ws, ty, &mut FxHashSet::default())
+}
+
+fn call_ref_provenance(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> RefProvenance {
+    if resolved_call_is_frame_source(gamma, e) {
+        return RefProvenance::Stable;
+    }
+    let args = gamma.out.ref_call_args.get(&e).cloned().unwrap_or_default();
+    if args.is_empty() {
+        let Some(&(mid, fid)) = gamma.out.resolved_overload_calls.get(&e) else {
+            return RefProvenance::Unknown;
+        };
+        let has_ref_input = gamma.workspace.module(mid).functions[fid]
+            .param_decls
+            .iter()
+            .any(|param| static_type_contains_ref(gamma.workspace, param.ty));
+        return if has_ref_input {
+            RefProvenance::Unknown
+        } else {
+            RefProvenance::Stable
+        };
+    }
+    args.into_iter().fold(RefProvenance::Stable, |origin, arg| {
+        origin.merge(frame_ref_provenance(c, gamma, arg))
+    })
+}
+
+fn frame_ref_provenance(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> RefProvenance {
+    let span = c.body.expr_spans[e];
+    match c.body.expr_arena[e] {
+        Expr::Null | Expr::Global(_) => RefProvenance::Stable,
+        Expr::Var(binding) => gamma
+            .ref_binding_provenance
+            .get(&binding)
+            .copied()
+            .unwrap_or(RefProvenance::Local),
+        Expr::FieldAccess { base, .. }
+        | Expr::SafeNav { base, .. }
+        | Expr::TupleIndex { tuple: base, .. }
+        | Expr::As { value: base, .. } => frame_ref_provenance(c, gamma, base),
+        Expr::Index { base, .. } => {
+            let base_ty = gamma
+                .out
+                .expr_types
+                .get(base)
+                .copied()
+                .or_else(|| infer_expr(c, gamma, base).ok());
+            if base_ty.is_some_and(|ty| type_is_relocatable_collection(gamma, ty, span)) {
+                RefProvenance::Relocatable
+            } else {
+                frame_ref_provenance(c, gamma, base)
+            }
+        }
+        Expr::Call { .. } | Expr::SafeNavCall { .. } => call_ref_provenance(c, gamma, e),
+        Expr::BinOp {
+            op: hir::BinOp::NullCoalesce,
+            lhs,
+            ..
+        } => frame_ref_provenance(c, gamma, lhs),
+        Expr::Block { tail, .. } => tail
+            .map(|tail| frame_ref_provenance(c, gamma, tail))
+            .unwrap_or(RefProvenance::Unknown),
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        }
+        | Expr::IfLet {
+            then_branch,
+            else_branch,
+            ..
+        } => else_branch.map_or(RefProvenance::Unknown, |else_branch| {
+            frame_ref_provenance(c, gamma, then_branch)
+                .merge(frame_ref_provenance(c, gamma, else_branch))
+        }),
+        Expr::Match { arms, .. } => arms.into_iter().fold(
+            RefProvenance::Stable,
+            |origin, arm| {
+                origin.merge(frame_ref_provenance(
+                    c,
+                    gamma,
+                    c.body.match_arm_arena[arm].body,
+                ))
+            },
+        ),
+        _ => RefProvenance::Unknown,
+    }
+}
+
+fn reject_unstable_frame_ref(span: Span, provenance: RefProvenance) -> Result<(), CompilerError> {
+    match provenance {
+        RefProvenance::Relocatable => comp_error!(
+            span,
+            "cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref T` parameter"
+        ),
+        RefProvenance::Unknown => comp_error!(
+            span,
+            "cannot retain a frame reference whose storage origin is unknown"
+        ),
+        RefProvenance::Stable | RefProvenance::Local => Ok(()),
+    }
+}
+
 pub(crate) fn validate_frame_ref_return(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -1664,51 +1842,13 @@ pub(crate) fn validate_frame_ref_return(
         return Ok(());
     }
 
-    fn has_valid_origin(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> bool {
-        let span = c.body.expr_spans[e];
-        if let Some(ty) = gamma.out.expr_types.get(e).copied() {
-            let ty = resolve(gamma, ty, span);
-            if contains_frame_ref(gamma, ty) {
-                return true;
-            }
-        }
-
-        match c.body.expr_arena[e] {
-            Expr::Null | Expr::Global(_) => true,
-            Expr::FieldAccess { base, .. }
-            | Expr::SafeNav { base, .. }
-            | Expr::Index { base, .. }
-            | Expr::TupleIndex { tuple: base, .. }
-            | Expr::As { value: base, .. } => has_valid_origin(c, gamma, base),
-            Expr::Block { tail, .. } => tail.is_some_and(|tail| has_valid_origin(c, gamma, tail)),
-            Expr::If {
-                then_branch,
-                else_branch,
-                ..
-            }
-            | Expr::IfLet {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                has_valid_origin(c, gamma, then_branch)
-                    && else_branch.is_some_and(|branch| has_valid_origin(c, gamma, branch))
-            }
-            Expr::Match { arms, .. } => {
-                let mut arms = arms.into_iter();
-                arms.next().is_some_and(|arm| {
-                    has_valid_origin(c, gamma, c.body.match_arm_arena[arm].body)
-                        && arms.all(|arm| {
-                            has_valid_origin(c, gamma, c.body.match_arm_arena[arm].body)
-                        })
-                })
-            }
-            _ => false,
-        }
+    let provenance = frame_ref_provenance(c, gamma, e);
+    if provenance.returnable() {
+        return Ok(());
     }
 
-    if has_valid_origin(c, gamma, e) {
-        return Ok(());
+    if provenance == RefProvenance::Relocatable {
+        return reject_unstable_frame_ref(span, provenance);
     }
 
     comp_error!(
@@ -1880,7 +2020,7 @@ pub(crate) fn check_expr(
         if !contains_frame_ref(gamma, actual_r)
             && !matches!(
                 c.body.expr_arena[e],
-                Expr::Var(_) | Expr::FieldAccess { .. } | Expr::Index { .. }
+                Expr::Var(_) | Expr::Global(_) | Expr::FieldAccess { .. } | Expr::Index { .. }
             )
         {
             comp_error!(
@@ -1951,7 +2091,7 @@ pub(crate) fn check_expr(
                 Some(fn_ty.with_idx(ret)),
                 c.body.expr_spans[e],
             )?;
-            coerce(gamma, lam_ty, expected, span)?;
+            coerce_contextual_lambda(gamma, lam_ty, expected, span)?;
             // The EXPECTED type, not the lambda's own -- same as the `Array` and
             // `SiblingRef` arms below. A lambda's inferred return is narrower than
             // the hole it fills (`if c { P {..} } else { null }` infers `P`, the
@@ -2216,8 +2356,11 @@ pub(crate) fn check_cast(
     // the answer is a classification and not inference evidence.
     let snap = gamma.out.checkpoint();
     let compatible = gamma.trial(|g| coerce(g, from_r, to_r, span).is_ok());
+    let erased = gamma.out.any_erasures_since(snap);
     gamma.out.rollback_to(snap);
     if compatible {
+        // The cast's value is the erased one.
+        gamma.out.any_erasures.extend(erased);
         return Ok(());
     }
 
@@ -2229,6 +2372,22 @@ pub(crate) fn check_cast(
              `as` converts only between numeric types, or where `{from_str}` \
              is already assignable to `{to_str}`"
         ),
+    ))
+}
+
+/// A function or unit value has no text; without this a hole naming a global fn
+/// (meant as a local) passes and fails only in lowering, with no location.
+fn check_interpolated_value(gamma: &mut Gamma, ty: TyId, span: Span) -> Result<(), CompilerError> {
+    let resolved = resolve(gamma, ty, span);
+    let what = match gamma.get(resolved) {
+        TypeExpr::Function { .. } => "a function",
+        TypeExpr::Builtin(BuiltinTy::Unit) => "a value of type `()`",
+        _ => return Ok(()),
+    };
+    let rendered = gamma.render(resolved);
+    Err(CompilerError::new_with_label(
+        span,
+        format!("cannot interpolate {what} (`{rendered}`) into a string"),
     ))
 }
 

@@ -1,0 +1,83 @@
+//! @no_check
+//! Identity-to-`any` erasure (docs/identity-storage-plan.md S0c, IDENTITY ANY
+//! ERASURE): an `any` is ordinary storage, so an identity struct never
+//! coerces to one, directly, nullable or through `as`. Handles and values do.
+//! Stdlib-free: each section declares its own handles.
+
+//- any_erasure_call_arg @fail=cannot erase identity struct `Mob` to `any`
+struct Mob { hp: int }
+fn keep(x: any) -> int { return 0 }
+fn f(mob: Mob) -> int {
+    keep(mob)
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- any_erasure_let @fail=cannot erase identity struct `Mob` to `any`
+struct Mob { hp: int }
+fn f(mob: Mob) -> int {
+    let erased: any = mob
+    0
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- any_erasure_nullable @fail=cannot erase identity struct `Mob` to `any`
+struct Mob { hp: int }
+fn keep(x: any?) -> int { return 0 }
+fn f(mob: Mob?) -> int {
+    keep(mob)
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- any_erasure_cast @fail=cannot erase identity struct `Mob` to `any`
+struct Mob { hp: int }
+fn f(mob: Mob) -> int {
+    let erased = mob as any
+    0
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- any_erasure_return @fail=cannot erase identity struct `Mob` to `any`
+struct Mob { hp: int }
+fn f(mob: Mob) -> any {
+    return mob
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+// A handle or a value carries no identity of its own.
+//- any_erasure_of_handle_and_value
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Point { x: int }
+fn keep(x: any) -> int { return 0 }
+fn f(e: Entity<Mob>, p: Point) -> int {
+    keep(e)
+    keep(p)
+  //^ int
+}
+
+// The erasure capability belongs to the stdlib Arena and Scene registries.
+//- identity_erasure_capability_is_reserved @fail=`@identity_erasure` is reserved
+struct Mob { hp: int }
+@identity_erasure
+fn erase(mob: Mob) -> any {
+    return mob
+}
+fn f() -> int {
+    5
+  //^ int
+}

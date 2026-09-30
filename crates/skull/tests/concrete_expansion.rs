@@ -55,7 +55,7 @@ fn main() {
 "#;
 
 const VERTEX_VALID: &str = r#"
-value V { pos: Vec2, rot: float }
+value V { pos: Vec2f, rot: f32 }
 
 @vertex_expand inline(lua) fn stride<T>(buf: FlatVec<T>) -> int = """
     error("stride must be compiler-expanded")
@@ -72,7 +72,7 @@ fn main() {
 "#;
 
 const VERTEX_INVALID: &str = r#"
-value WithId { pos: Vec2, id: int }
+value WithId { pos: Vec2f, id: int }
 
 @vertex_expand inline(lua) fn stride<T>(buf: FlatVec<T>) -> int = """
     error("stride must be compiler-expanded")

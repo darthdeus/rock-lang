@@ -1,0 +1,214 @@
+//! @no_check
+//! Identity storage (docs/identity-storage-plan.md S0a). A `struct` has
+//! identity and lives only as an Arena row or a Scene/Session root; every
+//! ordinary declaration position holds values or handles. Fields of structs
+//! and values, enum payloads, nullable wrappers, newtypes, non-root globals,
+//! and the type arguments a constructor stores (transitively) reject an
+//! identity struct. `value`s, phantom-`T` handles, roots, parameters and
+//! function types are admitted.
+
+//- identity_struct_field @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+struct Room { boss: Mob }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_nullable_field @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+struct Room { boss: Mob? }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_field_of_value @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+value Slot { mob: Mob }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_vec_element @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+struct Room { mobs: [Mob] }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_map_value @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+struct Room { by_id: Map<int, Mob> }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_tuple_element @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+value Pair { both: (Mob, int) }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_enum_tuple_payload @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+enum Event { Spawned(Mob), Cleared }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_enum_record_payload @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+enum Event { Spawned { mob: Mob }, Cleared }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_newtype @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+newtype Boss(Mob)
+fn f() -> int {
+    5
+  //^ int
+}
+
+// A direct `T?` at the top of a global is an optional one-row Session root:
+// the nullable is occupancy, not nested storage.
+//- identity_nullable_root_global
+struct Mob { hp: int }
+global BOSS: Mob? = null
+fn f() -> int {
+    5
+  //^ int
+}
+
+// The root privilege is the global's top position alone: a nullable root's
+// type arguments and a nullable inside another constructor still store.
+//- identity_nullable_root_global_argument @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+struct Bag<T> { items: [T] }
+global BAG: Bag<Mob>? = null
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_nullable_global_in_tuple @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+global PAIR: (Mob?, int) = (null, 0)
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_vec_global @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+global MOBS: [Mob] = []
+fn f() -> int {
+    5
+  //^ int
+}
+
+// A user generic whose field stores its parameter makes that argument a
+// storage position.
+//- identity_user_generic_argument @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+value Holder<T> { item: T }
+struct Room { held: Holder<Mob> }
+fn f() -> int {
+    5
+  //^ int
+}
+
+// Storage is transitive through a generic that forwards its parameter.
+//- identity_transitive_generic_argument @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+value Holder<T> { items: [T] }
+value Outer<U> { inner: Holder<U> }
+struct Room { held: Outer<Mob> }
+fn f() -> int {
+    5
+  //^ int
+}
+
+// A generic that stores its parameter under a nullable or a Vec still stores
+// it.
+//- identity_generic_argument_nullable_storage @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+value Maybe<T> { item: T? }
+global LAST: Maybe<Mob> = Maybe { item: nil }
+fn f() -> int {
+    5
+  //^ int
+}
+
+//- identity_storage_capability_is_reserved @fail=`@identity_storage` is reserved
+struct Store<T> {
+    @identity_storage
+    rows: [T],
+}
+fn f() -> int {
+    5
+  //^ int
+}
+
+// Values have no identity: any position may hold them.
+//- values_store_anywhere
+value Pos { x: int }
+enum Shape { Dot(Pos), Line { a: Pos, b: Pos } }
+newtype Origin(Pos)
+struct Path { points: [Pos], by_id: Map<int, Pos>, last: Pos?, pair: (Pos, Pos) }
+global POINTS: [Pos] = []
+fn f() -> int {
+    5
+  //^ int
+}
+
+// A phantom parameter is never stored, so a handle over an identity is a
+// value: `Arena<T>`/`Entity<T>`/`Scene<T>` are admitted by structure.
+//- phantom_handles_admit_identity
+struct Mob { hp: int }
+value Handle<T> { slot: int, generation: int }
+value HandleBox<T> { handle: Handle<T> }
+struct Room { boss: Handle<Mob>, mobs: [Handle<Mob>], boxed: HandleBox<Mob>, by_id: Map<int, Handle<Mob>> }
+enum Event { Spawned(Handle<Mob>) }
+global HANDLES: [Handle<Mob>] = []
+fn f() -> int {
+    5
+  //^ int
+}
+
+// A global of exactly an identity type is its Session root.
+//- identity_root_global
+struct World { tick: int }
+global WORLD: World = World { tick: 0 }
+fn f() -> int {
+    5
+  //^ int
+}
+
+// A root's own type arguments are still storage positions.
+//- identity_root_global_argument @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+struct Bag<T> { items: [T] }
+global BAG: Bag<Mob> = Bag { items: [] }
+fn f() -> int {
+    5
+  //^ int
+}
+
+// Parameters, returns and function types are borrows, not storage.
+//- identity_params_and_function_types
+struct Mob { hp: int }
+value Callbacks { on_hit: (Mob) -> int, pick: () -> Mob }
+fn spawn(mob: Mob) -> Mob {
+    mob
+  //^ Mob
+}

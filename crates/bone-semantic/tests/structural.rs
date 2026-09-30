@@ -22,7 +22,7 @@ fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, Comp
 /// `.is_err()`. One place to touch when the front-end entry signature changes.
 fn check(src: &str) -> Result<bone_semantic::inference::Workspace, CompilerError> {
     let mut module = [parse_rock(src)?];
-    semantic_pass(&mut module)
+    bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut module)
 }
 
 #[test]
@@ -692,6 +692,30 @@ fn return_mismatch_does_not_mask_genuine_body_error() {
          return-type error; got: {:?}",
         errs.iter().map(|e| &e.message).collect::<Vec<_>>()
     );
+}
+
+// A bare `{name}` that meant a local but named a global fn passed the checker
+// and failed in lowering with no location.
+#[test]
+fn interpolation_hole_rejects_a_function_value_at_the_hole() {
+    let src = "fn name(a: int) -> string {\n    return \"\"\n}\nfn f() -> string {\n    return \"x {name}\"\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded hole error");
+    assert!(err.message.contains("cannot interpolate"), "got: {:?}", err.message);
+    let span = err.labels.first().expect("labeled error").span;
+    assert_eq!(text(src, &span), "name");
+}
+
+#[test]
+fn interpolation_hole_rejects_a_unit_value_at_the_hole() {
+    let src = "fn u() {\n}\nfn f() -> string {\n    return \"x {u()}\"\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded hole error");
+    assert!(err.message.contains("cannot interpolate"), "got: {:?}", err.message);
+    let span = err.labels.first().expect("labeled error").span;
+    assert_eq!(text(src, &span), "u()");
 }
 
 // Companion to body_type_error_does_not_abort_other_bodies for the
@@ -1609,7 +1633,7 @@ fn local_place_cannot_be_returned_as_a_frame_reference() {
 
 #[test]
 fn returned_frame_reference_must_propagate_a_valid_origin() {
-    let propagated = "struct Stats { hp: int }\nstruct Player { stats: Stats }\nfn stats(player: ref Player) -> ref Stats { return player.stats }";
+    let propagated = "value Stats { hp: int }\nstruct Player { stats: Stats }\nfn stats(player: ref Player) -> ref Stats { return player.stats }";
     assert!(
         !bone_rejects(propagated),
         "a returned field ref may inherit an input ref's lifetime"
@@ -1619,6 +1643,96 @@ fn returned_frame_reference_must_propagate_a_valid_origin() {
     assert!(
         bone_rejects(forged),
         "the privileged storage-origin marker is unavailable to ordinary source"
+    );
+}
+
+#[test]
+fn ref_into_vec_storage_cannot_be_retained_across_growth() {
+    let src = r#"
+value Position { x: int }
+fn vec_push(values: [Position], value: Position) {}
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = positions[0]
+    vec_push(positions, Position { x: 2 })
+    position.x = 3
+}
+"#;
+    let errors = main_body_error_messages(src);
+    assert!(
+        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
+        "a retained Vec-element ref would dangle when growth relocates the buffer: {errors:?}"
+    );
+}
+
+#[test]
+fn ref_return_cannot_launder_a_vec_element_into_a_retained_ref() {
+    let src = r#"
+value Position { x: int }
+fn same(position: ref Position) -> ref Position { return position }
+fn vec_push(values: [Position], value: Position) {}
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = same(positions[0])
+    vec_push(positions, Position { x: 2 })
+    position.x = 3
+}
+"#;
+    let errors = main_body_error_messages(src);
+    assert!(
+        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
+        "a ref-returning helper must preserve its Vec-element argument's ephemeral origin: {errors:?}"
+    );
+}
+
+#[test]
+fn ref_return_cannot_expose_an_element_of_a_relocatable_vec() {
+    let src = r#"
+value Position { x: int }
+fn main(positions: [Position]) -> ref Position { return positions[0] }
+"#;
+    let errors = main_body_error_messages(src);
+    assert!(
+        errors.iter().any(|message| message.contains("relocatable Vec or Map storage")),
+        "borrowing the Vec header does not pin its relocatable element buffer: {errors:?}"
+    );
+}
+
+#[test]
+fn vec_element_can_be_borrowed_for_one_immediate_call() {
+    let src = r#"
+value Position { x: int }
+fn vec_push(values: [Position], value: Position) {}
+fn move(position: ref Position) { position.x = 2 }
+fn main() {
+    let positions = [Position { x: 1 }]
+    move(positions[0])
+    vec_push(positions, Position { x: 2 })
+}
+"#;
+    assert!(
+        !bone_rejects(src),
+        "a Vec element stays live through the immediate ref-parameter call"
+    );
+}
+
+#[test]
+fn ref_parameter_subfields_and_globals_remain_retainable() {
+    let src = r#"
+value Position { x: int }
+struct Player { position: Position }
+global ORIGIN: Position = Position { x: 0 }
+fn position(player: ref Player) -> ref Position { return player.position }
+fn same(position: ref Position) -> ref Position { return position }
+fn main(player: ref Player) {
+    let from_player: ref Position = same(player.position)
+    let from_global: ref Position = ORIGIN
+    from_player.x = from_global.x
+}
+"#;
+    assert!(
+        !bone_rejects(src),
+        "frame-stable input subfields and globals remain retainable"
     );
 }
 
@@ -1672,6 +1786,60 @@ fn ref_cannot_live_across_a_coroutine_suspension() {
 fn ref_finished_before_a_coroutine_suspension_is_allowed() {
     let src = "struct Player { hp: int }\nco fn fine(player: ref Player) -> Coroutine<int> { player.hp = 1  yield 1 }";
     assert!(!bone_rejects(src), "last use before yield does not put the ref in the coroutine frame");
+}
+
+// IDENTITY BORROW ACROSS SUSPENSION (docs/identity-storage-plan.md): an
+// identity parameter is an implicit borrow that coroutine construction would
+// retain before the first resume, so a `co fn` cannot take one at all.
+#[test]
+fn implicit_identity_parameter_is_rejected_on_a_coroutine() {
+    for src in [
+        "struct Player { hp: int }\nco fn bad(player: Player) -> Coroutine<int> { yield 1  player.hp = 1 }",
+        "struct Player { hp: int }\nco fn bad(player: Player) -> Coroutine<int> { player.hp = 1  yield 1 }",
+    ] {
+        let err = rejection_messages(src);
+        assert!(
+            err.contains("coroutine parameter `player` cannot hold identity struct `Player`"),
+            "a co fn identity parameter must reject, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn identity_local_cannot_live_across_a_coroutine_suspension() {
+    let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn bad() -> Coroutine<int> { let player = make_player()  yield 1  player.hp = 2 }";
+    let err = rejection_messages(src);
+    assert!(
+        err.contains("identity borrow `player` is used after a coroutine suspension"),
+        "a coroutine frame cannot retain an identity across yield, got: {err}"
+    );
+}
+
+#[test]
+fn identity_local_finished_before_suspension_is_allowed() {
+    let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }";
+    assert!(!bone_rejects(src), "last use before yield does not retain the identity borrow");
+}
+
+#[test]
+fn explicit_identity_ref_fills_an_implicit_identity_borrow_parameter() {
+    let src = r#"
+struct Player { hp: int }
+fn damage(player: Player) { player.hp = 1 }
+fn main(player: ref Player) { damage(player) }
+"#;
+    let ws = check(src).expect("semantic pass");
+    let errors = ws
+        .modules
+        .iter()
+        .filter_map(|module| ws.inference(module.id))
+        .flat_map(|inference| inference.errors.values().flatten())
+        .map(|error| error.message.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "an explicit ref to an identity is the same borrow expected by an identity parameter: {errors:?}"
+    );
 }
 
 #[test]
@@ -2395,4 +2563,227 @@ fn argument_matching_errors_name_the_parameter() {
         let msgs = all_err_msgs(src);
         assert!(msgs.iter().any(|m| m == want), "expected `{want}` for\n{src}\ngot: {msgs:?}");
     }
+}
+
+fn identity_storage_errors(std_file: &str, std_src: &str, package: Option<&str>, user_src: &str) -> Vec<String> {
+    let std_module = parse_rock_with_file(std_src, std_file).expect("parse stdlib module");
+    let mut user_module = parse_rock_with_file(user_src, "main.rock").expect("parse user module");
+    user_module.package = package.map(|name| rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: name.to_string(),
+    });
+    let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
+    module_error_messages(&ws)
+}
+
+/// Every declaration and body diagnostic in `ws`.
+fn module_error_messages(ws: &bone_semantic::inference::Workspace) -> Vec<String> {
+    ws.modules
+        .iter()
+        .flat_map(|m| {
+            m.interface_errors
+                .iter()
+                .chain(ws.inference(m.id).into_iter().flat_map(|inf| inf.errors.values().flatten()))
+                .map(|e| e.to_string())
+        })
+        .collect()
+}
+
+/// The diagnostics bone reports for one standalone, identity-enforced source.
+fn rejection_messages(src: &str) -> String {
+    match check(src) {
+        Ok(ws) => module_error_messages(&ws).join("\n"),
+        Err(err) => err.to_string(),
+    }
+}
+
+const MINI_ARENA_STORE: &str = "struct ArenaStore<T> {\n    generations: [int],\n    @identity_storage\n    data: [T],\n}\nstruct PlainStore<T> { data: [T] }";
+
+#[test]
+fn identity_storage_edge_admits_only_direct_rows() {
+    let arena = "<stdlib>/arena.rock";
+    let admitted = identity_storage_errors(
+        arena,
+        MINI_ARENA_STORE,
+        Some("game"),
+        "struct Mob { hp: int }\nglobal MOBS: ArenaStore<Mob> = ArenaStore { generations: [], data: [] }",
+    );
+    assert!(admitted.is_empty(), "the annotated edge stores Arena rows: {admitted:?}");
+
+    for (label, user) in [
+        (
+            "not a recursive waiver",
+            "struct Mob { hp: int }\nglobal MOBS: ArenaStore<[Mob]> = ArenaStore { generations: [], data: [] }",
+        ),
+        (
+            "ordinary Vec field",
+            "struct Mob { hp: int }\nglobal MOBS: PlainStore<Mob> = PlainStore { data: [] }",
+        ),
+    ] {
+        let errors = identity_storage_errors(arena, MINI_ARENA_STORE, Some("game"), user);
+        assert!(
+            errors.iter().any(|e| e.contains("cannot store identity struct `Mob`")),
+            "{label} must reject: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn identity_storage_capability_is_the_arena_files_alone() {
+    let forged = identity_storage_errors("<stdlib>/scene.rock", MINI_ARENA_STORE, Some("game"), "fn main() {}");
+    assert!(
+        forged.iter().any(|e| e.contains("`@identity_storage` is reserved")),
+        "another stdlib file cannot claim the Arena row store: {forged:?}"
+    );
+    let not_vec = identity_storage_errors(
+        "<stdlib>/arena.rock",
+        "struct ArenaStore<T> {\n    @identity_storage\n    row: T,\n}",
+        Some("game"),
+        "fn main() {}",
+    );
+    assert!(
+        not_vec.iter().any(|e| e.contains("marks the Vec field")),
+        "the capability names the row Vec: {not_vec:?}"
+    );
+}
+
+#[test]
+fn identity_storage_exemptions_follow_the_package() {
+    use bone_semantic::identity_storage::{IDENTITY_STORAGE_EXEMPT, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS};
+    let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
+    let enforced = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("game"), user);
+    assert!(
+        enforced.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        "a package off the exemption list is enforced: {enforced:?}"
+    );
+    assert!(
+        enforced.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
+        "the body check follows the same exemption list: {enforced:?}"
+    );
+    let unpackaged = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", None, user);
+    assert!(unpackaged.is_empty(), "unpackaged programs are exempt outside bone fixtures: {unpackaged:?}");
+    let package = IDENTITY_STORAGE_EXEMPT
+        .iter()
+        .find(|p| **p != STDLIB_PACKAGE && **p != UNPACKAGED_PROGRAMS)
+        .expect("a package is exempt while S0a's census is nonzero");
+    let exempt = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some(package), user);
+    assert!(exempt.is_empty(), "an exempt package gets no diagnostics: {exempt:?}");
+}
+
+// A module exemption covers a qualified module path prefix of one package,
+// read from each file's `mod` header: the module it names and every module
+// below it, never a sibling that shares its spelling or a file with no path.
+#[test]
+fn identity_storage_module_exemption_follows_the_module_path() {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    use bone_semantic::identity_storage::{
+        identity_storage_exempt, IdentityStorageExemption, IdentityStorageExemptions,
+    };
+    use bone_semantic::semantic_passes::semantic_pass_with_aliases;
+    use skull_parser::{parse_module_with_dialect, Dialect};
+
+    let files = [
+        ("nav.rock", "pub mod nav;", "NavMob"),
+        ("nav/graph.rock", "pub mod nav::graph;", "GraphMob"),
+        ("navigation.rock", "pub mod navigation;", "NavigationMob"),
+        ("world.rock", "pub mod world;", "WorldMob"),
+        ("lib.rock", "", "RootMob"),
+    ];
+    let mut modules: Vec<_> = files
+        .iter()
+        .map(|(file, header, mob)| {
+            let src = format!("{header}\npub struct {mob} {{ hp: int }}\npub struct {mob}Room {{ mobs: [{mob}] }}\n");
+            let mut module = parse_module_with_dialect(&src, ustr(file), Dialect::V1).expect("parse v1");
+            module.package = Some(rock_core::source_code::PackageTag {
+                id: 1,
+                self_name: "game".to_string(),
+            });
+            module
+        })
+        .collect();
+    let mut legacy = parse_module_with_dialect(
+        "struct LegacyMob { hp: int }\nstruct LegacyMobRoom { mobs: [LegacyMob] }\n",
+        ustr("legacy.rock"),
+        Dialect::Legacy,
+    )
+    .expect("parse legacy");
+    legacy.package = Some(rock_core::source_code::PackageTag {
+        id: 1,
+        self_name: "game".to_string(),
+    });
+    modules.push(legacy);
+    let aliases = NsAliases {
+        packages: vec![PackageAliases {
+            id: 1,
+            self_name: ustr("game"),
+            aliases: vec![],
+        }],
+    };
+    let ws = semantic_pass_with_aliases(&mut modules, &aliases).expect("semantic pass");
+    let errors = module_error_messages(&ws);
+    for (_, _, mob) in files {
+        assert!(
+            errors.iter().any(|e| e.contains("cannot store identity struct") && e.contains(&format!("{mob}`;"))),
+            "every module holds the same violation while `game` is enforced: {errors:?}"
+        );
+    }
+
+    let exemptions = IdentityStorageExemptions {
+        packages: &[],
+        modules: &[("game", "nav"), ("other", "world")],
+    };
+    let exemption_of = |file: &str| {
+        let module = ws.modules.iter().find(|m| m.file == ustr(file)).expect("fixture module");
+        assert!(!identity_storage_exempt(&ws, module), "`game` has no listed exemption");
+        exemptions.exemption(&ws, module)
+    };
+    assert_eq!(exemption_of("nav.rock"), Some(IdentityStorageExemption::Module("nav")));
+    assert_eq!(exemption_of("nav/graph.rock"), Some(IdentityStorageExemption::Module("nav")));
+    assert_eq!(exemption_of("navigation.rock"), None, "a prefix matches whole segments");
+    assert_eq!(exemption_of("world.rock"), None, "an entry covers its own package only");
+    assert_eq!(exemption_of("lib.rock"), None, "the package root is not under `nav`");
+    assert!(ws.fragment_scopes.get(&ustr("legacy.rock")).is_none());
+    assert_eq!(exemption_of("legacy.rock"), None, "a module with no v1 path matches no prefix");
+}
+
+#[test]
+fn chess_sfx_identity_storage_is_enforced() {
+    let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
+    let errors = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("chess_sfx"), user);
+    assert!(
+        errors.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
+        "chess_sfx fields must reject ordinary identity storage: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
+        "chess_sfx bodies must reject ordinary identity storage: {errors:?}"
+    );
+    assert!(
+        !bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT.contains(&"chess_sfx"),
+        "chess_sfx has no remaining identity-storage sites"
+    );
+}
+
+// Identity-to-`any` erasure is recorded where `coerce` accepts the `any`
+// target, and a coercion inside a trial that is rolled back leaves no record:
+// overload scoring and `as` classification try coercions they then undo.
+#[test]
+fn any_erasure_record_follows_trial_rollback() {
+    use bone_semantic::inference::{coerce, Gamma};
+
+    let ws = check("struct Mob { hp: int }\nfn main() { }").expect("semantic pass");
+    let mid = ws.modules.iter().find(|m| m.file == ustr("<parse_rock>")).unwrap().id;
+    let body = bone_core::hir::Body::default();
+    let mut gamma = Gamma::new(&ws, &body, mid);
+    let mob = gamma.nominal_app(ustr("Mob"), &[], Span::unknown());
+    let any = ws.builtins.any();
+
+    let snap = gamma.out.checkpoint();
+    assert!(gamma.trial(|g| coerce(g, mob, any, Span::unknown()).is_ok()));
+    assert_eq!(gamma.out.any_erasures.len(), 1, "the accepted erasure is recorded");
+    gamma.out.rollback_to(snap);
+    assert!(gamma.out.any_erasures.is_empty(), "a rolled-back trial keeps no erasure");
+
+    coerce(&mut gamma, mob, any, Span::unknown()).expect("identity coerces to any at inference");
+    assert_eq!(gamma.out.any_erasures.len(), 1, "a committed coercion keeps its erasure");
 }

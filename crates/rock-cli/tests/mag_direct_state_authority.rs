@@ -693,7 +693,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let feedback = fs::read_to_string(repo.join("mag/combat_text.rock"))
         .expect("read MAG feedback source");
     assert!(
-        feedback.contains("fn mag_player_feedback_pos(target: Entity<Player>)"),
+        feedback.contains("fn mag_player_feedback_follower_in(world: WorldState, target: Entity<Player>)"),
         "deferred Player feedback must re-resolve the Scene entity"
     );
 
@@ -701,7 +701,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for field in [
         "bank_gold: int",
         "events: Map<string, EventRecord>",
-        "quest_runs: Map<string, QuestProgress>",
+        "quest_rows: Arena<QuestProgress>",
+        "quest_runs: Map<string, Entity<QuestProgress>>",
         "quest_tracked: [string]",
         "quest_collapsed: Map<string, bool>",
         "quest_quarantined: [JsonValue]",
@@ -717,7 +718,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let world_levels = fs::read_to_string(repo.join("mag/world_levels.rock"))
         .expect("read MAG world source");
     for (constructed, domain) in [
-        ("progress: ProgressState {},", "progress"),
+        ("progress: ProgressState { quest_rows: b.arena() },", "progress"),
         ("quest_runtime: QuestRuntimeState {},", "quest runtime"),
     ] {
         assert_eq!(
@@ -726,7 +727,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "each new world must construct its own {domain} domain exactly once"
         );
     }
-    for stale in ["ProgressState {}", "quest_runtime_reset()"] {
+    for stale in ["ProgressState {", "quest_runtime_reset()"] {
         assert!(
             !run.contains(stale),
             "run reset still replaces world-owned state with `{stale}`"
@@ -1092,7 +1093,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "active.update_ground_pickup(world)",
         "cull_dead_mobs_in(world)",
         "tick_corpses(world, dt)",
-        "player.tick_wisp_intent_in(world, dt)",
+        "active.player.tick_wisp_intent_in(world, dt)",
         "wisp_motes_tick_in(world, dt)",
     ] {
         assert!(tick.contains(call), "canonical tick is missing authoritative call `{call}`");
@@ -1133,7 +1134,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "status sampling must stay between its owner tick and late wall contact"
     );
     let wisp_intent = tick
-        .find("player.tick_wisp_intent_in(world, dt)")
+        .find("active.player.tick_wisp_intent_in(world, dt)")
         .expect("authoritative wisp intent in canonical tick");
     let wisp_tick = tick
         .find("wisp_motes_tick_in(world, dt)")

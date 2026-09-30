@@ -24,6 +24,7 @@ pub mod lower;
 pub mod mangle;
 pub mod mir;
 pub mod monoty;
+pub mod placement;
 pub mod reach;
 pub mod shader_ir;
 pub mod instance;

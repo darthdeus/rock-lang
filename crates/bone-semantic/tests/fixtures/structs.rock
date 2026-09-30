@@ -15,7 +15,7 @@ fn f(p: Point) -> int {
 
 // a struct field whose type is another struct resolves.
 //- struct_field_of_struct
-struct Inner { a: int }
+value Inner { a: int }
 struct Outer { inner: Inner }
 fn f(o: Outer) -> int {
    //^ Outer
@@ -25,7 +25,7 @@ fn f(o: Outer) -> int {
 // forward reference: Outer's field names Inner, declared later -> two-pass.
 //- struct_forward_ref
 struct Outer { inner: Inner }
-struct Inner { a: int }
+value Inner { a: int }
 fn f(o: Outer) -> int {
    //^ Outer
     5
@@ -108,7 +108,7 @@ fn f() -> int {
 
 // a struct-typed field reads back as that struct.
 //- struct_field_is_struct
-struct Inner { a: int }
+value Inner { a: int }
 struct Outer { inner: Inner }
 fn f(o: Outer) -> int {
     let i = o.inner
@@ -118,7 +118,7 @@ fn f(o: Outer) -> int {
 
 // field access chains through nested structs.
 //- struct_field_chain
-struct Inner { a: int }
+value Inner { a: int }
 struct Outer { inner: Inner }
 fn f(o: Outer) -> int {
     let a = o.inner.a

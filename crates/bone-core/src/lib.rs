@@ -11,6 +11,8 @@
 pub mod prelude;
 pub mod annotations;
 pub mod hir;
+pub mod escape;
+pub mod identity_storage;
 pub mod suspension;
 pub mod workspace;
 pub mod modules;
