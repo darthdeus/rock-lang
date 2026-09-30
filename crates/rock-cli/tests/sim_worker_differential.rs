@@ -1552,6 +1552,36 @@ fn an_entry_that_runs_the_games_shutdown_systems_keeps_its_worker() {
     );
 }
 
+/// A boot image holds no metatables, so the restore must re-attach each
+/// GC-carrying value struct's `__rock_vt_<T>`: without it `==` falls back to
+/// table identity and a restored MAG `LevelAssetId` stops equalling the same
+/// id built after the boundary. The probe passes in a fresh process either
+/// way, so it only means something when it followed the seed.
+#[test]
+fn a_restored_value_struct_still_compares_by_value() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "mag",
+        &[
+            "mag::worker_value_struct_eq_seed".to_string(),
+            "mag::worker_value_struct_eq_probe".to_string(),
+        ],
+    )
+    .expect("the suite call itself must not error");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+
+    let (seed, _) = &records[0];
+    assert_eq!(seed.verdict(), "PASS", "the seed boots a world: {seed:?}");
+
+    let (probe, probe_crossed) = &records[1];
+    assert!(*probe_crossed, "the probe must follow the seed in one worker");
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "a level id restored from the boot image equals a fresh one: {probe:?}"
+    );
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
