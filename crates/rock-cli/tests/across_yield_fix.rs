@@ -390,3 +390,51 @@ fn suspension_before_a_use_in_the_same_statement_is_refused() {
     assert!(!out.contains("p = world.player()\n}"), "{}\n{out}", shown(&run));
     assert_eq!(run.code, Some(3), "{}", shown(&run));
 }
+
+#[test]
+fn unrelated_world_locals_are_renamed_by_binding_with_fresh_names() {
+    let (out, run) = applied("world_collision", "value Coordinate { world: int }\n@sim\nco fn collides() -> Coroutine<int> {\n    let local_world = 0\n    let world = 7\n    let coords = Coordinate { world }\n    let read_world = () => world\n    world = world + 1\n    await frame(1)\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    p.hp = world + coords.world + read_world() + local_world\n    if true {\n        let world = 9\n        p.hp = world\n    }\n}\n");
+    assert!(out.contains("collides(world: Scene<WorldState>)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("let local_world_2 = 7"), "{}\n{out}", shown(&run));
+    assert!(out.contains("Coordinate { world: local_world_2 }"), "{}\n{out}", shown(&run));
+    assert!(out.contains("() => local_world_2"), "{}\n{out}", shown(&run));
+    assert!(out.contains("local_world_2 = local_world_2 + 1"), "{}\n{out}", shown(&run));
+    assert!(out.contains("let local_world_3 = 9"), "{}\n{out}", shown(&run));
+    assert!(out.contains("let p = world.player()"), "{}\n{out}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}
+
+#[test]
+fn active_world_local_uses_a_fresh_state_name() {
+    let (out, run) = applied("world_state_collision", "@sim\nco fn collides() -> Coroutine<int> {\n    let state = 0\n    let world_state = 0\n    let world = MAG_ACTIVE_WORLD.unwrap().get().unwrap()\n    await frame(1)\n    let hp = world.player.get().unwrap().hp\n    let mobs = world.mobs\n}\n");
+    assert!(out.contains("let state_2 = world.get().unwrap()"), "{}\n{out}", shown(&run));
+    assert!(out.contains("state_2 = world.get().unwrap()\n"), "{}\n{out}", shown(&run));
+    assert!(out.contains("let hp = world.player().hp"), "{}\n{out}", shown(&run));
+    assert!(out.contains("let mobs = state_2.mobs"), "{}\n{out}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}
+
+#[test]
+fn new_check_errors_revert_entry_and_helper_edits_before_writing() {
+    for (tag, sim, stage) in [
+        ("entry", "@sim\nco fn caller() -> Coroutine<int> {\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    p.hp = 2\n}\n", "refused entry"),
+        ("helper", "co fn helper(p: Player) -> Coroutine<int> {\n    await frame(1)\n    p.hp = 2\n}\n", "refused rebind"),
+    ] {
+        let root = package(&format!("revert_{tag}"), &[("sim", sim)]);
+        write(&root.join("main.rock"), &WORLD.replace("pub fn player(world: Scene<WorldState>) -> Player {\n    return world.get().unwrap().player.get().unwrap()", "pub fn player(world: Scene<WorldState>) -> int {\n    return 0"));
+        let run = fix(&root, &["sim"], true);
+        assert_eq!(read(&root.join("sim.rock")), sim, "{}", shown(&run));
+        assert!(run.stdout.contains(stage), "{}", shown(&run));
+        assert_eq!(run.code, Some(3), "{}", shown(&run));
+    }
+}
+
+#[test]
+fn all_world_semantics_flags_skip_the_entire_file() {
+    for (tag, marker) in [("run-lifecycle", "run_stop()"), ("restore", "snapshot_restore()"), ("menu-boot", "MAG_BOOT_MENU")] {
+        let sim = format!("// {marker}\nco fn helper(p: Player) -> Coroutine<int> {{\n    await frame(1)\n    p.hp = 2\n}}\n@sim\nco fn caller() -> Coroutine<int> {{\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    await helper(p)\n}}\n");
+        let (out, run) = applied(&format!("skip_{tag}"), &sim);
+        assert_eq!(out, sim, "{}", shown(&run));
+        assert!(run.stdout.contains(&format!("skipped ({tag})")), "{}", shown(&run));
+    }
+}

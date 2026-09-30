@@ -4,7 +4,9 @@
 //!
 //! Stage one gives each `@sim co fn` the `world: Scene<WorldState>` entry
 //! parameter and replaces the `MAG_ACTIVE_WORLD` chains; a local named
-//! `world` becomes `state`. Stage two reads the identity borrows that cross a
+//! `world` becomes `state` (or a fresh local name for another type).
+//! File-local coroutine helpers pass Scene/Entity handles and resolve their
+//! identity parameters at entry. Stage two reads the identity borrows that cross a
 //! suspension (`bone_core::suspension::suspension_crossings`) and, for a
 //! borrow whose `let` initializer resolves a handle rooted in a parameter or
 //! an unreassigned local, rebinds it after each suspension it crosses, and
@@ -17,7 +19,7 @@
 //! worlds, drive the run lifecycle, restore a WorldImage or boot the menu are
 //! skipped whole (the flags of `tools/sim_world_entry_shards.py`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -82,8 +84,8 @@ pub fn run(files: &[String], apply: bool) -> Result<i32> {
         f.rebound = apply_edits(&f.helpers, &edits).map_err(|e| anyhow::anyhow!(e))?;
     }
     let done = plan.settle(&base, "rebind", |f| &f.rebound, |f| {
-        let changed = f.rebound != f.entry;
-        f.rebound = f.entry.clone();
+        let changed = f.rebound != f.original;
+        f.rebound = f.original.clone();
         f.left.clear();
         f.bindings = [0; 2];
         changed
@@ -215,7 +217,18 @@ impl Plan {
         for _ in 0..MAX_ROUNDS {
             let checked = check(&self.sources, &self.texts(&text));
             let errors = match &checked {
-                Ok(c) => new_errors(&base.errors, &c.errors),
+                Ok(c) => {
+                    let mut errors = new_errors(&base.errors, &c.errors);
+                    if stage == "entry" {
+                        // Renaming an existing borrow changes its diagnostic's
+                        // binding name. Rebindings must resolve it before write.
+                        let pending: BTreeSet<_> = c.ws.modules.iter().flat_map(|m| identity_module_body_sites(&c.ws, m))
+                            .filter(|s| matches!(s.kind, IdentityStorageKind::AcrossYield | IdentityStorageKind::Capture))
+                            .map(|s| (s.span.file, s.span.line_range.0, s.message)).collect();
+                        errors.retain(|e| !pending.contains(&(e.location.file, e.location.line, e.message.clone())));
+                    }
+                    errors
+                },
                 Err(errs) => new_errors(&base.errors, &flatten(errs.clone())),
             };
             if errors.is_empty() {
@@ -396,36 +409,39 @@ fn function_entry_edits(f: &Function, body: &Body, text: &str) -> std::result::R
     Ok(edits)
 }
 
-/// A sim's `let world = <the active WorldState>` becomes `state`, so the
-/// name is free for the entry parameter; `state.player.get().unwrap()`
-/// becomes `world.player()`.
+/// Free the sim entry name by binding identity, preserving shorthand field
+/// labels and collapsing player reads only for the active WorldState alias.
 fn rename_world_local(body: &Body, text: &str) -> std::result::Result<Vec<Edit>, String> {
-    let named = |name: &'static str| {
-        body.binding_arena.iter().filter(move |(_, b)| b.name.as_str() == name && b.kind != BindingKind::Param)
-    };
-    let Some((world, _)) = named("world").next() else { return Ok(Vec::new()) };
-    let init = let_value(body, world).map(|v| slice(text, body.expr_spans[v]).trim());
-    let is_state = init.is_some_and(|i| {
-        i == "mag_world_state()" || i == "MAG_ACTIVE_WORLD.unwrap().get().unwrap()" || i == "world.get().unwrap()"
-    });
-    if !is_state || named("world").count() > 1 {
-        return Err("a local `world` that is not the active WorldState would shadow the entry parameter".to_string());
-    }
-    let state = ["state", "world_state"]
-        .into_iter()
-        .find(|name| named(name).next().is_none())
-        .ok_or("`state` and `world_state` are both taken")?;
-    let mut edits = vec![Edit::new(body.binding_spans[world].offset_range, state)];
-    const PLAYER: &str = ".player.get().unwrap()";
-    for (e, expr) in body.expr_arena.iter() {
-        if !matches!(expr, Expr::Var(b) if *b == world) {
-            continue;
+    let mut used: BTreeSet<String> = body.binding_arena.iter().map(|(_, b)| b.name.to_string()).collect();
+    let mut edits = Vec::new();
+    for (world, info) in body.binding_arena.iter().filter(|(_, b)| b.name.as_str() == "world" && b.kind != BindingKind::Param) {
+        if info.kind == BindingKind::Fn {
+            return Err("a local function named `world` shadows the entry parameter".to_string());
         }
-        let (s, t) = body.expr_spans[e].offset_range;
-        if text[t..].starts_with(PLAYER) {
-            edits.push(Edit::new((s, t + PLAYER.len()), "world.player()"));
+        let init = let_value(body, world).map(|v| slice(text, body.expr_spans[v]).trim());
+        let is_state = init.is_some_and(|i| {
+            i == "mag_world_state()" || i == "MAG_ACTIVE_WORLD.unwrap().get().unwrap()" || i == "world.get().unwrap()"
+        });
+        let name = if is_state && !used.contains("world_state") && used.contains("state") {
+            fresh_name(&mut used, "world_state")
         } else {
-            edits.push(Edit::new((s, t), state));
+            fresh_name(&mut used, if is_state { "state" } else { "local_world" })
+        };
+        edits.push(Edit::new(body.binding_spans[world].offset_range, name.clone()));
+        const PLAYER: &str = ".player.get().unwrap()";
+        for (e, expr) in body.expr_arena.iter() {
+            if !matches!(expr, Expr::Var(b) if *b == world) {
+                continue;
+            }
+            let (s, t) = body.expr_spans[e].offset_range;
+            if is_state && text[t..].starts_with(PLAYER) {
+                edits.push(Edit::new((s, t + PLAYER.len()), "world.player()"));
+            } else {
+                let shorthand = body.struct_lit_field_arena.iter().any(|(_, field)| {
+                    field.value == e && field.name_span.offset_range == (s, t)
+                });
+                edits.push(Edit::new((s, t), if shorthand { format!("world: {name}") } else { name.clone() }));
+            }
         }
     }
     Ok(edits)
@@ -565,12 +581,18 @@ fn helper_parameter_edits(
 }
 
 fn free_name(body: &Body, base: &str) -> String {
+    let mut used = body.binding_arena.iter().map(|(_, b)| b.name.to_string()).collect();
+    fresh_name(&mut used, base)
+}
+
+fn fresh_name(used: &mut BTreeSet<String>, base: &str) -> String {
     let mut name = base.to_string();
     let mut suffix = 2;
-    while body.binding_arena.iter().any(|(_, b)| b.name.as_str() == name) {
+    while used.contains(&name) {
         name = format!("{base}_{suffix}");
         suffix += 1;
     }
+    used.insert(name.clone());
     name
 }
 
@@ -850,7 +872,7 @@ fn after_statement(body: &Body, binding: Idx<BindingInfo>, suspension: Idx<Expr>
     Ok(RebindPoint { range: (end, next), indent, suffix })
 }
 
-/// Across-yield and capture sites in `id`, unique by line and identity as the
+/// Across-yield, capture and co-param sites in `id`, unique by line and identity as the
 /// census counts them.
 fn site_counts(ws: &Workspace, id: Ustr) -> [usize; 3] {
     let Some(module) = module_of(ws, id) else { return [0, 0, 0] };
