@@ -6,8 +6,9 @@ impl Builder<'_> {
     /// Lower an interpolated string to a left-folded `..` chain. A `Literal` part
     /// is a string const; a `{x}` hole stringifies by its static type (D8: the
     /// dispatch is decided HERE, not at the backend) — scalar -> [`Inst::ToString`]
-    /// (`tostring`), float -> a `__rock_format_float` call, composite -> `inspect`,
-    /// transparent newtype -> `Name(<tostring inner>)`. A `{x:spec}` hole gaps
+    /// (`tostring`), float -> a `__rock_format_float` call, enum / value record /
+    /// handle -> the structural rendering (`format.rs`), other composite ->
+    /// `inspect`, transparent newtype -> `Name(<tostring inner>)`. A `{x:spec}` hole gaps
     /// (format-spec lowering is its own follow-up; skull refuses rather than
     /// mis-format). An empty interpolation is the `""` const.
     pub(crate) fn lower_interp(
@@ -40,7 +41,7 @@ impl Builder<'_> {
         spec: Option<bone_semantic::hir::InterpSpec>,
     ) -> Result<Idx<Inst>, CompilerError> {
         match spec {
-            None if self.nobox_value_name(expr).is_some() => self.stringify_nobox_expr(expr),
+            None if self.dispatch().structural_route(expr).is_some() => self.stringify_structural(expr),
             // A tuple whose box would WIDEN is packed narrow here -- one slot
             // per element, the nobox part materialized. The widening exists for
             // readers that derive the layout from the declared type; `inspect`
@@ -68,130 +69,54 @@ impl Builder<'_> {
         }
     }
 
-    pub(crate) fn stringify_nobox_expr(&mut self, expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let name = self
-            .nobox_value_name(expr)
-            .ok_or_else(|| self.gap_here("nobox interpolation type"))?;
+    /// A structural hole renders from the value's own representation, so a
+    /// scalarized or flat value is never packed just to be printed.
+    pub(crate) fn stringify_structural(&mut self, expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let route = self
+            .dispatch()
+            .structural_route(expr)
+            .ok_or_else(|| self.gap_here("structural hole lost its route"))?;
         let repr = self.lower_expr_repr(expr)?.into_value();
-        self.stringify_nobox_repr(name, Vec::new(), repr)
-    }
-
-    /// `path` is the field-index chain reached so far. Each leaf render is a
-    /// distinct callee obligation at ONE expression, so the chain is its site
-    /// identity -- see `DispatchCtx::hole_plan`, which enumerates the same
-    /// chains from the declared field tree.
-    pub(crate) fn stringify_nobox_repr(
-        &mut self,
-        name: Ustr,
-        path: Vec<u32>,
-        repr: ValueRepr,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let ValueRepr::Group {
-            parts, present, ..
-        } = repr
-        else {
-            return Err(self.gap_here(format!(
-                "nobox value `{name}` reached interpolation boxed"
-            )));
-        };
-        if let Some(present) = present {
-            let result = self.f.new_cell(None);
-            let value_bb = self.f.new_block();
-            let nil_bb = self.f.new_block();
-            let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: present,
-                    then_bb: value_bb,
-                    else_bb: nil_bb,
-                },
-            );
-
-            self.cur = nil_bb;
-            let nil = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("nil"))));
-            self.store_and_join(result, nil, join);
-
-            self.cur = value_bb;
-            let rendered = self.stringify_nobox_repr(
-                name,
-                path,
-                ValueRepr::Group {
-                    name,
-                    parts,
-                    present: None,
-                },
-            )?;
-            self.store_and_join(result, rendered, join);
-
-            self.cur = join;
-            return Ok(self.emit_cur(Inst::Load(result)));
-        }
-        let sid = *self
-            .ws
-            .struct_by_name
-            .get(&name)
-            .ok_or_else(|| gap(format!("nobox value `{name}` has no definition")))?;
-        let fields = self.ws.modules[sid.module.index()].structs[sid.def]
-            .fields
-            .clone();
-        if fields.len() != parts.len() {
-            return Err(gap(format!(
-                "nobox value `{name}` interpolation shape mismatch"
-            )));
-        }
-
-        let mut out = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
-            format!("{name} {{ ").as_str(),
-        ))));
-        for (i, (field, part)) in fields.into_iter().zip(parts).enumerate() {
-            if i > 0 {
-                let comma = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(", "))));
-                out = self.emit_cur(Inst::StringConcat(out, comma));
+        match repr {
+            ValueRepr::Scalar(v) if self.expr_is_nullable(expr) => {
+                self.nil_guarded_render(v, |s| s.render_stringify(&route, Vec::new(), v))
             }
-            let label = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
-                format!("{} = ", field.name).as_str(),
-            ))));
-            out = self.emit_cur(Inst::StringConcat(out, label));
-            let mut child_path = path.clone();
-            child_path.push(i as u32);
-            let rendered = match part {
-                ValueRepr::Group {
-                    name: child_name,
-                    parts,
-                    ..
-                } => self.stringify_nobox_repr(
-                    child_name,
-                    child_path,
-                    ValueRepr::Group {
-                        name: child_name,
-                        parts,
-                        present: None,
-                    },
-                )?,
-                ValueRepr::Scalar(value) => {
-                    self.stringify_struct_leaf(field.ty, child_path, value)?
-                }
-                part @ ValueRepr::Tuple { .. } => {
-                    let value = self.pack(part)?;
-                    self.stringify_struct_leaf(field.ty, child_path, value)?
-                }
-            };
-            out = self.emit_cur(Inst::StringConcat(out, rendered));
+            ValueRepr::Group { name, parts, present: Some(present) } => {
+                let group = ValueRepr::Group { name, parts, present: None };
+                self.render_structural_route(&route, group, Some(present))
+            }
+            repr => self.render_structural_route(&route, repr, None),
         }
-        let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(" }"))));
-        Ok(self.emit_cur(Inst::StringConcat(out, close)))
     }
 
-    pub(crate) fn stringify_struct_leaf(
+    fn render_structural_route(
         &mut self,
-        ty: TyId,
-        path: Vec<u32>,
-        value: Idx<Inst>,
+        route: &StringifyRoute,
+        repr: ValueRepr,
+        present: Option<Idx<Inst>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        match self.dispatch().struct_leaf_route(ty) {
-            StringifyRoute::Unsupported => Err(gap("nobox interpolation field type")),
-            route => self.render_stringify(&route, path, value),
+        let tree = match route {
+            StringifyRoute::Structural(tree) => tree.as_ref().clone(),
+            StringifyRoute::Unprintable(reason) => {
+                return Err(self.unprintable_error(reason));
+            }
+            _ => return Err(self.gap_here("structural hole with a non-structural route")),
+        };
+        let Some(present) = present else {
+            return self.render_fmt(&tree, Vec::new(), repr);
+        };
+        // A nullable scalarized hole: the same null text as any other hole.
+        self.render_present_or_null(present, true, "nil", |s| s.render_fmt(&tree, Vec::new(), repr))
+    }
+
+    pub(crate) fn unprintable_error(&self, reason: &str) -> CompilerError {
+        let msg = format!(
+            "cannot format this value: {reason}; the structural formatter prints scalars, \
+             strings, handles, enums and value records composed of those"
+        );
+        match self.cur_expr {
+            Some(e) => CompilerError::new_with_label(self.body.expr_spans[e], msg),
+            None => CompilerError::new_no_location(msg),
         }
     }
 
@@ -266,11 +191,6 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match route {
             StringifyRoute::ToString => Ok(self.emit_cur(Inst::ToString(v))),
-            StringifyRoute::QuotedString => {
-                let quote = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("\""))));
-                let open = self.emit_cur(Inst::StringConcat(quote, v));
-                Ok(self.emit_cur(Inst::StringConcat(open, quote)))
-            }
             StringifyRoute::FormatFloat => {
                 self.dispatched_call("__rock_format_float", path, vec![v])
             }
@@ -299,6 +219,12 @@ impl Builder<'_> {
                 Ok(self.emit_cur(Inst::Index { base: names, index: v, kind: ContainerKind::Map }))
             }
             StringifyRoute::Inspect => self.dispatched_call("inspect", path, vec![v]),
+            StringifyRoute::EscapedString => self.dispatched_call("__rock_quote_string", path, vec![v]),
+            StringifyRoute::Structural(tree) => {
+                let tree = tree.as_ref().clone();
+                self.render_fmt(&tree, path, ValueRepr::Scalar(v))
+            }
+            StringifyRoute::Unprintable(reason) => Err(self.unprintable_error(reason)),
             StringifyRoute::Unsupported => {
                 Err(gap("interpolation hole of unknown/unsupported type"))
             }

@@ -65,6 +65,8 @@ mod mag_worker_product_tests;
 mod sim_memory_cap;
 #[path = "sim_v1_names.rs"]
 mod sim_v1_names;
+#[path = "sim_world_entry.rs"]
+mod sim_world_entry;
 #[path = "headless_scope.rs"]
 mod headless_scope;
 #[path = "sim_reload_lane.rs"]

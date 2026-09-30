@@ -159,7 +159,10 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
     collect(__stone_log_counts)
     if #rows == 0 then return end
 
-    table.sort(rows, function(a, b) return a.n > b.n end)
+    table.sort(rows, function(a, b)
+        if a.n ~= b.n then return a.n > b.n end
+        return a.site < b.site
+    end)
     for i = 1, #rows do
         local r = rows[i]
         local rec = (__stone_log_sites or {})[r.site] or "|"

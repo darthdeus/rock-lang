@@ -238,7 +238,7 @@ fn nullable_nobox_local_keeps_presence_in_leaf_cells() {
     );
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable_local"),
-        "nil\nNV2 { x = 1, y = 2 }"
+        "nil\nNV2 { x: 1, y: 2 }"
     );
 }
 
@@ -1779,4 +1779,319 @@ fn a_loop_element_binds_a_nobox_value_by_leaves() {
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_loop_element"),
         "3 -1"
     );
+}
+
+// A GC-tier `value` (its array field keeps it off the cdata and leaf-table
+// tiers) holding `nobox` fields: the `ScenarioMap` shape.
+const NOBOX_IN_GC_VALUE_DECLS: &str = r#"
+nobox value Id { value: int }
+nobox value Grid { x: int, y: int }
+value Map { space: Id, size: Grid, tiles: [int] }
+struct World { map: Map, n: int }
+enum Slot { Empty, Has(Map) }
+fn total(m: Map) -> int { return m.space.value + m.size.x + m.size.y + m.tiles.len() }
+"#;
+
+fn nobox_in_gc_value_src(site: &str, main: &str) -> String {
+    format!("{NOBOX_IN_GC_VALUE_DECLS}{site}\nfn main() {{ {main} }}\n")
+}
+
+// Positions that carry the outer value as leaves: a flat-enum payload and a
+// scalar-ABI argument. Neither builds the `Map_vt` box, so neither boxes a
+// nobox field.
+const NOBOX_IN_GC_VALUE_LEAF_SITES: [(&str, &str, &str, &str); 2] = [
+    (
+        "enum payload",
+        "fn site(s: int) -> Slot { return Slot::Has(Map { space: Id { value: s }, size: Grid { x: 1, y: 1 }, tiles: [] }) }",
+        "match site(7) { Slot::Has(m) => print(m.space.value + m.size.x), Slot::Empty => print(-1) }",
+        "8",
+    ),
+    (
+        "call argument",
+        "fn site(s: int) -> int { return total(Map { space: Id { value: s }, size: Grid { x: 1, y: 1 }, tiles: [9] }) }",
+        "print(site(7))",
+        "10",
+    ),
+];
+
+#[test]
+fn a_gc_tier_value_threaded_as_leaves_keeps_its_nobox_fields_unboxed() {
+    for (what, site, main, expected) in NOBOX_IN_GC_VALUE_LEAF_SITES {
+        let lua = match try_emit_module(&nobox_in_gc_value_src(site, main)) {
+            Ok(lua) => lua,
+            Err(e) => panic!("the {what} site must emit: {e:?}"),
+        };
+        let body = function_body(&lua, "site");
+        assert!(
+            !body.contains("Id_ct(") && !body.contains("Grid_ct(") && !body.contains("Map_vt("),
+            "the {what} site boxed:\n{body}"
+        );
+        assert_eq!(
+            run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_leaves"),
+            expected,
+            "the {what} site"
+        );
+    }
+}
+
+// Positions that store the outer value in a table slot, so its `Map_vt` box
+// is real. The box keys each `nobox` field's leaves by dotted path
+// (`size.x`), the layout a plain struct and a leaf-table value already use, so
+// storing it builds no `Id_ct`/`Grid_ct`.
+const NOBOX_IN_GC_VALUE_BOXED_SITES: [(&str, &str, &str, &str); 3] = [
+    (
+        "struct literal field",
+        "fn site(s: int) -> World { return World { map: Map { space: Id { value: s }, size: Grid { x: 2, y: 3 }, tiles: [4] }, n: 1 } }",
+        "let w = site(7)\n w.map.size.x = 11\n print(\"{w.map.space.value} {w.map.size.x} {w.map.size.y} {total(w.map)}\")",
+        "7 11 3 22",
+    ),
+    (
+        "Vec element",
+        "fn site(s: int) -> [Map] { return [Map { space: Id { value: s }, size: Grid { x: 1, y: 1 }, tiles: [] }] }",
+        "let v = site(5)\n v[0].size.y = 12\n v.push(v[0])\n print(\"{v[1].space.value} {v[1].size.y} {v.len()} {v[0] == v[1]}\")",
+        "5 12 2 true",
+    ),
+    (
+        "global",
+        "global G: Map\nfn site(s: int) { G = Map { space: Id { value: s }, size: Grid { x: 4, y: 5 }, tiles: [1, 2] } }",
+        "site(9)\n G.size.y = 6\n print(\"{G.space.value} {G.size.x} {G.size.y} {total(G)}\")",
+        "9 4 6 21",
+    ),
+];
+
+#[test]
+fn a_stored_gc_tier_value_keeps_its_nobox_fields_as_leaves() {
+    for (what, site, main, expected) in NOBOX_IN_GC_VALUE_BOXED_SITES {
+        let lua = match try_emit_module(&nobox_in_gc_value_src(site, main)) {
+            Ok(lua) => lua,
+            Err(e) => panic!("the {what} site must emit: {e:?}"),
+        };
+        let body = function_body(&lua, "site");
+        assert!(
+            !body.contains("Id_ct(") && !body.contains("Grid_ct("),
+            "the {what} site boxed a nobox field:\n{body}"
+        );
+        assert_eq!(
+            run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_stored"),
+            expected,
+            "the {what} site"
+        );
+    }
+}
+
+// The observable surface of a stored GC-tier value with a `nobox` field --
+// field write through a row, `==`, structural `tostring`, a Vec of them -- is
+// the unmarked twin's, which boxes `V2` as an ordinary value. Both must print
+// the same text; the marked one must not build a `V2` box to do it.
+const NOBOX_IN_GC_VALUE_SURFACE: &str = r#"
+nobox value V2 { x: float, y: float }
+value Row { label: string, pos: V2 }
+struct Holder { row: Row }
+global G: Row
+fn mk(l: string, x: float) -> Row { return Row { label: l, pos: V2 { x: x, y: 2.0 } } }
+fn main() {
+    let h = Holder { row: mk("a", 1.0) }
+    print("{h.row}")
+    h.row.pos.x = 5.0
+    print("{h.row.pos.x} {h.row == mk("a", 5.0)} {h.row == mk("a", 6.0)}")
+    let rows = [mk("b", 3.0), mk("c", 4.0)]
+    rows.push(mk("d", 7.0))
+    rows[1].pos.y = 8.0
+    let total = 0.0
+    for r in rows { total += r.pos.x + r.pos.y }
+    print("{total} {rows[1]} {rows.len()}")
+    G = mk("g", 8.0)
+    G.pos.y = 9.0
+    print("{G} {G.pos.y} {to_string(rows[2])}")
+}
+"#;
+
+#[test]
+fn a_stored_gc_tier_value_with_a_nobox_field_matches_its_unmarked_twin() {
+    let marked = match try_emit_module(NOBOX_IN_GC_VALUE_SURFACE) {
+        Ok(lua) => lua,
+        Err(e) => panic!("a stored GC-tier value with a nobox field must emit: {e:?}"),
+    };
+    let plain = emit_module(&NOBOX_IN_GC_VALUE_SURFACE.replacen("nobox value V2", "value V2", 1));
+    for name in ["mk", "main"] {
+        let body = function_body(&marked, name);
+        assert!(!body.contains("V2_ct("), "`{name}` boxed the nobox field:\n{body}");
+    }
+    let expected = "Row { label: \"a\", pos: V2 { x: 1, y: 2 } }\n\
+                    5 true false\n\
+                    26 Row { label: \"c\", pos: V2 { x: 4, y: 8 } } 3\n\
+                    Row { label: \"g\", pos: V2 { x: 8, y: 9 } } 9 Row { label: \"d\", pos: V2 { x: 7, y: 2 } }";
+    assert_eq!(run_luajit(&format!("{plain}\nmain()\n"), "nobox_in_gc_value_plain"), expected);
+    assert_eq!(run_luajit(&format!("{marked}\nmain()\n"), "nobox_in_gc_value_marked"), expected);
+}
+
+// Nullable, nested and generic-parent `nobox` fields of a stored GC-tier value:
+// whole-field and nested-leaf writes, an absent tag written back to `null`, an
+// enum payload, and `==` over the presence tag. The unmarked twin is no oracle
+// for `==` here: it compares a `V2?` field by reference.
+const NOBOX_IN_GC_VALUE_NULLABLE_NESTED: &str = r#"
+nobox value V2 { x: float, y: float }
+nobox value Rect { lo: V2, hi: V2 }
+value Row { label: string, pos: V2, at: V2?, r: Rect }
+value Gen<T> { t: T, pos: V2 }
+struct Holder { row: Row, g: Gen<string> }
+enum Slot { Empty, Has(Row) }
+global G: Row
+fn mk(l: string, x: float) -> Row {
+    return Row { label: l, pos: V2 { x: x, y: 2.0 }, at: null, r: Rect { lo: V2 { x: 1.0, y: 2.0 }, hi: V2 { x: 3.0, y: 4.0 } } }
+}
+fn mk_at(l: string, x: float) -> Row {
+    return Row { label: l, pos: V2 { x: x, y: 2.0 }, at: V2 { x: 1.5, y: 2.5 }, r: Rect { lo: V2 { x: 1.0, y: 2.0 }, hi: V2 { x: 3.0, y: 4.0 } } }
+}
+fn area(r: Rect) -> float { return (r.hi.x - r.lo.x) * (r.hi.y - r.lo.y) }
+fn ax(r: Row) -> float {
+    if let a = r.at { return a.x }
+    return -1.0
+}
+fn main() {
+    let h = Holder { row: mk("a", 1.0), g: Gen { t: "gt", pos: V2 { x: 6.0, y: 7.0 } } }
+    h.row.pos = V2 { x: 10.0, y: 11.0 }
+    h.row.at = V2 { x: 5.0, y: 6.0 }
+    h.row.r.hi.x = 13.0
+    print("{h.row}")
+    print("{area(h.row.r)} {ax(h.row)} {h.g.t} {h.g.pos.y}")
+    h.row.at = null
+    print("{ax(h.row)} {h.row == mk("a", 10.0)}")
+    let slots = [Slot::Has(mk("s", 4.0)), Slot::Empty, Slot::Has(mk_at("t", 5.0))]
+    for s in slots {
+        match s {
+            Slot::Has(r) => print("has {r.label} {r.pos.x} {r.r.lo.y} {ax(r)}"),
+            Slot::Empty => print("empty"),
+        }
+    }
+    G = mk("g", 8.0)
+    G.at = V2 { x: 1.5, y: 2.5 }
+    print("{G == mk_at("g", 8.0)} {G == mk("g", 8.0)}")
+    G.at = null
+    print("{G == mk("g", 8.0)}")
+}
+"#;
+
+#[test]
+fn a_stored_gc_tier_value_keeps_nullable_and_nested_nobox_fields_as_leaves() {
+    let lua = match try_emit_module(NOBOX_IN_GC_VALUE_NULLABLE_NESTED) {
+        Ok(lua) => lua,
+        Err(e) => panic!("nullable and nested nobox fields of a GC-tier value must emit: {e:?}"),
+    };
+    for name in ["mk", "mk_at", "main"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("V2_ct(") && !body.contains("Rect_ct("),
+            "`{name}` boxed a nobox field:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_nullable_nested"),
+        "Row { label: \"a\", pos: V2 { x: 10, y: 11 }, at: V2 { x: 5, y: 6 }, \
+         r: Rect { lo: V2 { x: 1, y: 2 }, hi: V2 { x: 13, y: 4 } } }\n\
+         24 5 gt 7\n\
+         -1 false\n\
+         has s 4 2 -1\n\
+         empty\n\
+         has t 5 2 1.5\n\
+         true false\n\
+         true"
+    );
+}
+
+// A leaf read through a `nobox` field of an UNBOXED GC-tier value (a scalar-ABI
+// param) projects the leaf off the value's Group. The `_vt` box keys that leaf
+// as `lock.place.x`, but building the box just to read the key back is an
+// allocation the leaf-threaded value never needed (MAG's
+// `hostile_target_evaluate` reads `input.lock.target` this way per mob).
+const NOBOX_IN_GC_VALUE_PARAM_LEAF_READ: &str = r#"
+nobox value P { x: int, y: int }
+nobox value Id { a: int, b: int }
+enum Who { Player, Mob(Id) }
+nobox value Cand { target: Who, place: P, ok: bool }
+nobox value Decision { target: Who, place: P }
+enum Eval { Found(Decision, bool), Nothing(bool) }
+value Snap { label: string, lock: Cand, rest: [int] }
+fn pick(s: Snap) -> Eval {
+    if s.lock.ok { return Eval::Found(Decision { target: s.lock.target, place: s.lock.place }, false) }
+    return Eval::Nothing(true)
+}
+fn main() {
+    let e = pick(Snap { label: "s", lock: Cand { target: Who::Mob(Id { a: 5, b: 6 }), place: P { x: 3, y: 4 }, ok: true }, rest: [] })
+    match e {
+        Eval::Found(d, _) => match d.target {
+            Who::Mob(id) => print(id.b + d.place.x + d.place.y),
+            Who::Player => print(0),
+        },
+        Eval::Nothing(_) => print(-1),
+    }
+}
+"#;
+
+#[test]
+fn a_leaf_read_through_a_nobox_field_of_a_gc_tier_param_does_not_box() {
+    let lua = emit_module(NOBOX_IN_GC_VALUE_PARAM_LEAF_READ);
+    let body = function_body(&lua, "pick");
+    assert!(!body.contains("Snap_vt("), "`pick` boxed its param to read a leaf:\n{body}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_param_leaf"), "13");
+}
+
+// Functional update of a GC-tier value whose base is a local: the fields the
+// literal does not name come off the base by the box's layout, so a `nobox`
+// field is read by its leaves (MAG's `CarriedItemView { ..view, id }`).
+const NOBOX_IN_GC_VALUE_FUNCTIONAL_UPDATE: &str = r#"
+nobox value C { r: float, g: float }
+enum Kind { Plain, Tagged(string) }
+value View { id: int, kind: Kind, name: string, color: C }
+fn mk(k: Kind) -> View { return View { id: 1, kind: k, name: "n", color: C { r: 0.5, g: 0.25 } } }
+fn use_it(v: View) -> float { return v.color.r + v.color.g + v.id }
+fn main() {
+    let view = mk(Kind::Tagged("t"))
+    print(use_it(View { ..view, id: 3 }))
+}
+"#;
+
+#[test]
+fn a_functional_update_of_a_gc_tier_value_reads_nobox_fields_by_leaf() {
+    let lua = emit_module(NOBOX_IN_GC_VALUE_FUNCTIONAL_UPDATE);
+    let body = function_body(&lua, "main");
+    assert!(!body.contains("View_vt("), "the update boxed its base:\n{body}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_update"), "3.75");
+}
+
+// The same read off a BOXED GC-tier local (reassigned in a loop, so it lives in
+// one cell): the enum inside the `nobox` field is keyed by its leaves
+// (`lock.target.__tag`, ...), so reading the whole enum off `lock.target`
+// found nil. MAG's `scenario_world_hostile_target` has this shape.
+const NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ: &str = r#"
+nobox value P { x: int, y: int }
+nobox value Id { a: int, b: int }
+enum Who { Player, Mob(Id) }
+nobox value Cand { target: Who, place: P, ok: bool }
+value Snap { label: string, lock: Cand, rest: [int] }
+fn vis(c: Cand, v: bool) -> Cand { return Cand { target: c.target, place: c.place, ok: v } }
+fn look(s0: Snap) -> int {
+    let s = s0
+    for _ in 0..4 {
+        let id = match s.lock.target {
+            Who::Player => return -1,
+            Who::Mob(id) => id,
+        }
+        if s.lock.ok { return id.b + s.lock.place.y }
+        let lock = vis(s.lock, true)
+        s = Snap { ..s, lock }
+    }
+    return -2
+}
+fn main() {
+    print(look(Snap { label: "s", lock: Cand { target: Who::Mob(Id { a: 5, b: 6 }), place: P { x: 3, y: 4 }, ok: false }, rest: [] }))
+}
+"#;
+
+#[test]
+fn an_enum_in_a_nobox_field_of_a_boxed_gc_tier_local_reads_by_leaf() {
+    let lua = emit_module(NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_boxed_local"), "10");
+    let body = function_body(&lua, "look");
+    assert!(!body.contains("Snap_vt("), "`look` boxed its local to read a field:\n{body}");
 }

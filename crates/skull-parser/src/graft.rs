@@ -448,6 +448,8 @@ fn graft_type_kind(src: &Ast, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKin
         | TypeExprKind::Int
         | TypeExprKind::Uint
         | TypeExprKind::Float
+        | TypeExprKind::F64
+        | TypeExprKind::F32
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
         | TypeExprKind::Ident(_)

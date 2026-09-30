@@ -1,0 +1,220 @@
+//! @no_check
+//! Identity storage in bodies (docs/identity-storage-plan.md S0b). An identity
+//! local, parameter or return is a borrow; a body may not put one into
+//! ordinary storage: a Vec or Map local, a `[x]` literal, a value or enum
+//! constructor that stores it. A `co fn` parameter lives in the coroutine
+//! frame, so an identity there is storage; an identity borrow may not be used
+//! after a suspension; an escaping or unknown-escape closure may not capture
+//! one. Stdlib-free: each section declares its own handles.
+
+//- body_identity_vec_local @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+fn empty<T>() -> [T] { return empty() }
+fn f() -> int {
+    let mobs: [Mob] = empty()
+    0
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- body_identity_vec_literal @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+fn count<T>(items: [T]) -> int { return 0 }
+fn f(mob: Mob) -> int {
+    count([mob])
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- body_identity_map_local @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+fn map_empty<K, V>() -> Map<K, V> { return map_empty() }
+fn f() -> int {
+    let by_id: Map<int, Mob> = map_empty()
+    0
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- body_identity_vec_param @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+fn f(mobs: [Mob]) -> int {
+    0
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- body_identity_value_constructor @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+value Holder<T> { item: T }
+fn take<T>(x: T) -> int { return 0 }
+fn f(mob: Mob) -> int {
+    take(Holder { item: mob })
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- body_identity_enum_constructor @fail=cannot store identity struct `Mob`
+struct Mob { hp: int }
+enum Maybe<T> { Some(T), Nothing }
+fn take<T>(x: T) -> int { return 0 }
+fn f(mob: Mob) -> int {
+    take(Maybe::Some(mob))
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+// Borrows: identity locals, nullable locals, tuples of borrows, parameters
+// and returns. Handles over identities are values.
+//- body_identity_borrows
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T? { return get(a, e) }
+fn pick(a: Arena<Mob>, e: Entity<Mob>) -> Mob? {
+    let found = get(a, e)
+    found
+}
+fn pair(e: Entity<Mob>, mob: Mob) -> (Entity<Mob>, Mob) {
+    let both = (e, mob)
+    both
+}
+fn f(mob: Mob, a: Arena<Mob>, handles: [Entity<Mob>]) -> Mob {
+    let same = mob
+    let maybe: Mob? = pick(a, handles[0])
+    let (e, m) = pair(handles[0], same)
+    m
+  //^ Mob
+}
+
+//- co_fn_identity_param @fail=coroutine parameter `mob` cannot hold identity struct `Mob`
+struct Mob { hp: int }
+co fn tick(mob: Mob) -> Coroutine<int> {
+    yield mob.hp
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- co_fn_nullable_identity_param @fail=coroutine parameter `mob` cannot hold identity struct `Mob`
+struct Mob { hp: int }
+co fn tick(mob: Mob?) -> Coroutine<int> {
+    yield 0
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+// A coroutine takes a persistent handle and resolves it per resume segment;
+// a borrow finished with before the yield is fine.
+//- co_fn_entity_param
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T { return get(a, e) }
+co fn tick(a: Arena<Mob>, e: Entity<Mob>) -> Coroutine<int> {
+    let before = get(a, e)
+    yield before.hp
+    let after = get(a, e)
+    let hp = after.hp
+      //^ int
+    yield hp
+}
+
+//- identity_borrow_across_yield @fail=identity borrow `mob` is used after a coroutine suspension
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
+fn get<T>(a: Arena<T>, e: Entity<T>) -> T { return get(a, e) }
+co fn tick(a: Arena<Mob>, e: Entity<Mob>) -> Coroutine<int> {
+    let mob = get(a, e)
+    yield 0
+    yield mob.hp
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+// A closure passed to a parameter the callee only calls cannot outlive the
+// borrow it captures.
+//- nonescaping_closure_captures_identity
+struct Mob { hp: int }
+fn apply(g: () -> int) -> int { return g() }
+fn forward(g: () -> int) -> int { return apply(g) }
+fn f(mob: Mob) -> int {
+    let direct = apply(() => mob.hp)
+      //^ int
+    forward(() => mob.hp)
+}
+
+//- escaping_closure_captures_identity @fail=closure that may escape cannot capture identity struct `Mob` (`mob`)
+struct Mob { hp: int }
+fn f(mob: Mob) -> () -> int {
+    return () => mob.hp
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- stored_closure_captures_identity @fail=closure that may escape cannot capture identity struct `Mob` (`mob`)
+struct Mob { hp: int }
+value Callback { run: () -> int }
+fn f(mob: Mob) -> Callback {
+    Callback { run: () => mob.hp }
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+//- closure_to_retaining_callee_captures_identity @fail=closure that may escape cannot capture identity struct `Mob` (`mob`)
+struct Mob { hp: int }
+value Callback { run: () -> int }
+fn keep(g: () -> int) -> Callback { return Callback { run: g } }
+fn f(mob: Mob) -> int {
+    let cb = keep(() => mob.hp)
+    0
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+// A closure held in a local is not proven nonescaping: rejected
+// conservatively.
+//- local_closure_captures_identity @fail=closure that may escape cannot capture identity struct `Mob` (`mob`)
+struct Mob { hp: int }
+fn f(mob: Mob) -> int {
+    let g = () => mob.hp
+    g()
+}
+fn marker() -> int {
+    5
+  //^ int
+}
+
+// Capturing a handle is always fine.
+//- closure_captures_handle
+struct Mob { hp: int }
+value Entity<T> { idx: int }
+fn f(e: Entity<Mob>) -> () -> int {
+    let g = () => e.idx
+      //^ fn() -> int
+    return g
+}

@@ -1,0 +1,24 @@
+@sim
+co fn world_sim_receives_the_active_world(world: Scene<FixtureWorld>) -> Coroutine<Wait> {
+    start_game "sim-world-entry"
+    sim_eq_int(world._scene_id, FIXTURE_WORLD_ID, "the sim receives the active world")
+    await frame(2)
+    sim_eq_int(world.get().unwrap().marker, 42, "the world resolves after a yield")
+    stop_sim()
+}
+
+@sim
+co fn no_arg_sim_still_runs() -> Coroutine<Wait> {
+    start_game "sim-world-entry"
+    await frame(2)
+    sim_expect(true, "a no-argument sim runs")
+    stop_sim()
+}
+
+@sim
+@sim_env("FIXTURE_NO_WORLD", "1")
+co fn world_sim_without_a_world(world: Scene<FixtureWorld>) -> Coroutine<Wait> {
+    start_game "sim-world-entry"
+    sim_expect(true, "unreachable: the entry fails before the body")
+    stop_sim()
+}

@@ -96,7 +96,7 @@ fn sums() -> int {
 
 //- compound_assignment_reads_the_operator_family
 //-- geo.rock @pkg=geo,1 @v1
-pub struct Pt {
+pub value Pt {
     pub x: int,
     pub y: int,
 }

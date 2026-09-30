@@ -701,7 +701,14 @@ pub fn lower_type_expr_in(
     let idx = match &te.kind {
         TypeExprKind::Int => ctx.workspace.builtins.int(),
         TypeExprKind::Uint => ctx.workspace.builtins.uint(),
-        TypeExprKind::Float => ctx.workspace.builtins.float(),
+        TypeExprKind::Float | TypeExprKind::F64 => ctx.workspace.builtins.float(),
+        TypeExprKind::F32 => {
+            return Err(CompilerError::new_with_label(
+                te.span,
+                "`f32` is narrow float storage and is legal only as a struct field type; use `float`"
+                    .to_string(),
+            ));
+        }
         TypeExprKind::Bool => ctx.workspace.builtins.bool(),
         TypeExprKind::String => ctx.workspace.builtins.string(),
         TypeExprKind::Unit => ctx.workspace.builtins.unit(),
@@ -2869,7 +2876,15 @@ pub fn lower_struct_def(
     let def_scope = body.alloc_root_scope();
 
     for field in s.fields.iter() {
-        let ty = lower_type_expr(ctx, a, &mut body, a.te(&field.ty))?;
+        let (ty, storage_ty) = match a.te(&field.ty).kind {
+            skull_parser::TypeExprKind::F32 => {
+                (ctx.workspace.builtins.float(), ctx.workspace.builtins.f32())
+            }
+            _ => {
+                let ty = lower_type_expr(ctx, a, &mut body, a.te(&field.ty))?;
+                (ty, ty)
+            }
+        };
         let default = field
             .default
             .as_ref()
@@ -2921,6 +2936,7 @@ pub fn lower_struct_def(
         fields.push(hir::StructFieldDef {
             name: field.name.name,
             ty,
+            storage_ty,
             span: field.name.span,
             has_default: field.default.is_some(),
             annotations: field_annotations,
@@ -2986,9 +3002,11 @@ pub fn lower_enum_def(
                                 f.name.name
                             );
                         }
+                        let ty = lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?;
                         Ok(hir::StructFieldDef {
                             name: f.name.name,
-                            ty: lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?,
+                            ty,
+                            storage_ty: ty,
                             span: f.name.span,
                             has_default: false,
                             annotations: annos,
@@ -3381,6 +3399,7 @@ fn lower_state_metadata(
                 metadata.realization = match value {
                     "fresh_session" => StateRealization::FreshSession,
                     "rebuild_host_projection" => StateRealization::RebuildHostProjection,
+                    "native_frame_delta" => StateRealization::NativeFrameDelta,
                     "font" => StateRealization::Font,
                     "asset_cache" => StateRealization::AssetCache,
                     "asset_paths" => StateRealization::AssetPaths,

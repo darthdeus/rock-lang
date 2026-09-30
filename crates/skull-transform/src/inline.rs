@@ -1304,6 +1304,15 @@ fn compact_live_template(
                 .map(|new_id| (*new_id, fingerprint.clone()))
         })
         .collect();
+    template.lambda_abi_representations = source
+        .lambda_abi_representations
+        .iter()
+        .filter_map(|(old_id, representation)| {
+            inst_map
+                .get(old_id)
+                .map(|new_id| (*new_id, representation.clone()))
+        })
+        .collect();
     template.nested_fn_identities = source.nested_fn_identities.clone();
     template.rep_arena = source.rep_arena.clone();
     template.params = source.params.iter().map(|param| cell_map[param]).collect();
@@ -1370,6 +1379,17 @@ fn compact_live_template(
     remap_inst_table!(call_abi_plans);
     remap_inst_table!(call_rep_plans);
     remap_inst_table!(fn_value_symbols);
+    remap_inst_table!(param_default_guards);
+    remap_inst_table!(inst_logical_types);
+    for (param, values) in &source.param_default_values {
+        let values = values
+            .iter()
+            .filter_map(|value| inst_map.get(value).copied())
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            template.param_default_values.insert(*param, values);
+        }
+    }
     for (old_id, identity) in &source.code_value_identities {
         if let Some(&new_id) = inst_map.get(old_id) {
             template.code_value_identities.insert(new_id, identity.clone());
@@ -2620,6 +2640,11 @@ fn import_spec_bindings(
             func.inst_spans.insert(new_id, *span);
         }
     }
+    for (old_id, ty) in &callee.inst_logical_types {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.inst_logical_types.insert(new_id, *ty);
+        }
+    }
     // Site identity travels with the body, and its OWNER travels with it: a
     // spliced call is the CALLEE instance's obligation, so the owner is
     // re-interned into the caller's table and the entry re-pointed. Copying the
@@ -3273,6 +3298,23 @@ mod tests {
         assert_eq!(template.emit_cell_span(), 2);
         assert_eq!(template.blocks.len(), 1);
         assert_eq!(template.emit_block_span(), 2);
+    }
+
+    #[test]
+    fn compact_template_remaps_parameter_default_guards() {
+        let mut source = MirFunc::new(Ustr::from("template_default_guard"));
+        let dead = source.new_block();
+        source.emit(dead, Inst::Const(Lit::Bool(false)));
+        source.set_term(dead, Term::Return(Vec::new()));
+        let guard = source.emit(source.entry, Inst::Const(Lit::Bool(true)));
+        source.param_default_guards.insert(guard, 2);
+        source.set_term(source.entry, Term::Return(vec![guard]));
+
+        let live = live_closure(&source);
+        let (template, _) = compact_live_template(source, &live);
+
+        let remapped_guard = template.blocks[template.entry].insts[0];
+        assert_eq!(template.param_default_guards.get(&remapped_guard), Some(&2));
     }
 
     #[test]

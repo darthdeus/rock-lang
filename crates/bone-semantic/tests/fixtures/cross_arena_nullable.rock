@@ -5,7 +5,7 @@
 //! nested generic like `[Foo<T>]` flowing through a `-> U?` return.
 
 //- nested_generic_nullable
-struct Foo<T> { v: T }
+value Foo<T> { v: T }
 inline(lua) fn first<U>(xs: [U]) -> U? = "return nil"
 fn f<T>(xs: [Foo<T>]) -> int {
     let e = first(xs)

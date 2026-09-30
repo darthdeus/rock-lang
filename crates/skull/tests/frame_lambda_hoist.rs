@@ -2,8 +2,8 @@
 //! (S3 of docs/closure-conversion-mir-plan.md): lambdas inside a `co fn` hoist
 //! exactly like non-frame lambdas -- capture-free to a bare top-level fn,
 //! capturing to an env record -- with coroutine state captured through the
-//! frame table `s` itself (record field `c<S> = <s>`; body reads compose
-//! `<env>.c<S>.c<slot>`). Since S3 the conversion is materialized as MIR by
+//! frame table `s` itself (the record stores the step param under its stable
+//! emit-cell key; the body reads `<env>.c<S>.c<slot>`). Since S3 the conversion is materialized as MIR by
 //! `convert_closures`, so the env param is a COLORED cell (not the literal
 //! `__rock_env`) and the composed access is split across temps -- these pins
 //! discriminate the via-`s` collapse (body reads THROUGH the s-field) from a
@@ -39,6 +39,16 @@ fn fn_params(lua: &str, name: &str) -> Vec<String> {
     after[..close].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
+fn state_capture_field(step: &str, state_param: &str) -> Option<String> {
+    let start = step.find("setmetatable({")? + "setmetatable({".len();
+    let record = &step[start..];
+    let end = record.find("}, __rock_fn_mt)")?;
+    record[..end].split(',').find_map(|field| {
+        let (name, value) = field.split_once('=')?;
+        (value.trim() == state_param).then(|| name.trim().to_string())
+    })
+}
+
 const PARAM_CAPTURE: &str = r#"
 enum Ev { Tick(int) }
 global R: int = 0
@@ -65,16 +75,17 @@ fn param_lambda_hoists_as_record_under_frame() {
     let w = mangled_name(&lua, "worker");
     let step_name = format!("{w}__step");
     let step = function_body(&lua, &step_name);
-    // `s` is the step's first param cell; the frame capture collapses to it, so
-    // the record field is named `c<raw(s)>` == the step's first param name.
+    // `s` is the step's first param cell. Its environment field keeps the
+    // stable emit-cell key, while the field value is the colored param name.
     let s = fn_params(&lua, &step_name).swap_remove(0);
+    let state_field = state_capture_field(&step, &s);
     // the co-fn lambda hoists to a sibling top-level fn taking (env, <param>).
     let lp = fn_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
     assert!(
         step.contains(&format!("__slot = __rock_code_slot_ref("))
-            && step.contains(&format!(", {s} =")),
-        "the step must build a CodeRef env record collapsing the frame capture to `s` (field `{s}`):\n{step}"
+            && state_field.is_some(),
+        "the step must build a CodeRef env record carrying the frame state param `{s}`: {step}"
     );
     assert!(
         !step.contains("function("),
@@ -90,11 +101,14 @@ fn param_lambda_hoists_as_record_under_frame() {
 fn frame_capture_composes_env_then_frame() {
     let lua = emit_module(PARAM_CAPTURE);
     let w = mangled_name(&lua, "worker");
+    let step = function_body(&lua, &format!("{w}__step"));
     let s = fn_params(&lua, &format!("{w}__step")).swap_remove(0);
+    let state_field = state_capture_field(&step, &s)
+        .unwrap_or_else(|| panic!("the step must capture its state param `{s}`:\n{step}"));
     let body = function_body(&lua, &format!("{w}__step__lambda0"));
     assert!(
-        body.contains(&format!(".{s}")),
-        "the hoisted body must reach the frame capture through the s-field `.{s}` (via-`s` collapse):\n{body}"
+        body.contains(&format!(".{state_field}")) && contains_digit_bridge(&body, ".c", ""),
+        "the hoisted body must read the captured state table field `.{state_field}` and then a frame slot:\n{body}"
     );
 }
 

@@ -2922,9 +2922,9 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
             ctor: TypeCtor::Nominal(name),
             ..
         } => match declared_name(name.as_str()) {
-            "Vec2" => Some(ValueKind::Vec2),
-            "Vec3" => Some(ValueKind::Vec3),
-            "Vec4" => Some(ValueKind::Vec4),
+            "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+            "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+            "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
             "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
@@ -2955,9 +2955,9 @@ fn value_kind_for_instance_type(
             ctor: skull_mir::monoty::MonoCtor::Nominal(name),
             ..
         } => match declared_name(name.as_str()) {
-            "Vec2" => Some(ValueKind::Vec2),
-            "Vec3" => Some(ValueKind::Vec3),
-            "Vec4" => Some(ValueKind::Vec4),
+            "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+            "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+            "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
             "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
@@ -3967,6 +3967,7 @@ impl<'a> FunctionEmitter<'a> {
                 | Inst::FloatToInt(_)
                 | Inst::IntToFloat(_)
                 | Inst::UintToFloat(_)
+                | Inst::FloatToF32(_)
                 | Inst::IntToUint(_)
                 | Inst::UintToInt(_)
                 | Inst::FloatToUint(_)
@@ -4192,7 +4193,7 @@ impl<'a> FunctionEmitter<'a> {
             | Inst::Not(_) => Ok(ValueKind::Bool),
             Inst::FloatToInt(_) => Ok(ValueKind::I32),
             Inst::IntToFloat(_) => Ok(ValueKind::F32),
-            Inst::UintToFloat(_) => Ok(ValueKind::F32),
+            Inst::UintToFloat(_) | Inst::FloatToF32(_) => Ok(ValueKind::F32),
             Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => {
                 Ok(ValueKind::U32)
             }
@@ -4741,6 +4742,8 @@ impl<'a> FunctionEmitter<'a> {
                 self.reject_compute_numeric_conversion("uint as float", *value)?;
                 Ok(format!("f32({})", self.render_val(*value)?))
             }
+            // Shader floats are already single precision.
+            Inst::FloatToF32(value) => self.render_val(*value),
             Inst::IntToUint(value) => {
                 self.reject_compute_numeric_conversion("int as uint", *value)?;
                 Ok(format!("u32({})", self.render_val(*value)?))
@@ -5591,9 +5594,9 @@ fn struct_field_kind_by_name(ws: &Workspace, name: Ustr, field: Ustr) -> Option<
 
 fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
     match declared_name(name.as_str()) {
-        "Vec2" => Some(ValueKind::Vec2),
-        "Vec3" => Some(ValueKind::Vec3),
-        "Vec4" => Some(ValueKind::Vec4),
+        "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+        "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+        "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
         "Bvec3" => Some(ValueKind::BVec3),
         "Mat4" => Some(ValueKind::Mat4),
         _ => Some(ValueKind::Struct(name)),

@@ -12,6 +12,7 @@ pub struct Builtins {
     pub int: Idx<TypeExpr>,
     pub uint: Idx<TypeExpr>,
     pub float: Idx<TypeExpr>,
+    pub f32: Idx<TypeExpr>,
     pub bool: Idx<TypeExpr>,
     pub string: Idx<TypeExpr>,
     pub unit: Idx<TypeExpr>,
@@ -31,6 +32,10 @@ impl Builtins {
 
     pub fn float(&self) -> TyId {
         TyId::Static(ModuleId::builtin(), self.float)
+    }
+
+    pub fn f32(&self) -> TyId {
+        TyId::Static(ModuleId::builtin(), self.f32)
     }
 
     pub fn bool(&self) -> TyId {
@@ -92,6 +97,9 @@ pub enum BuiltinTy {
     Int,
     Uint,
     Float,
+    /// Narrow float STORAGE: only ever a field's `storage_ty`. Expressions,
+    /// and the field's `ty`, see `Float`; layout reads the storage type.
+    F32,
     Bool,
     String,
     Never,
@@ -380,6 +388,9 @@ pub struct Module {
     pub lower_var_high_water: u32,
 
     pub file: Ustr,
+    /// The owning package's manifest name, stamped by the host graph. `None`
+    /// for stdlib files and for programs outside any package.
+    pub package: Option<Ustr>,
 
     pub functions: Arena<Function>,
     pub functions_by_name: FxHashMap<Ustr, FnList>,
@@ -440,6 +451,7 @@ impl Default for Module {
             lower_var_high_water: 0,
 
             file: Ustr::from(""),
+            package: None,
 
             functions: Default::default(),
             functions_by_name: Default::default(),
@@ -1133,6 +1145,10 @@ pub struct HostResource {
 pub struct StructFieldDef {
     pub name: Ustr,
     pub ty: TyId,
+    /// The type the field is STORED as: `ty`, except that an `f32` field has
+    /// `ty` = `float` (what reads and writes see) and `storage_ty` = `f32`.
+    /// Layout and serialization read this; inference never does.
+    pub storage_ty: TyId,
     pub span: Span,
     pub has_default: bool,
     pub annotations: Vec<Annotation>,
@@ -1240,6 +1256,7 @@ impl StateWorldPolicy {
 pub enum StateRealization {
     FreshSession,
     RebuildHostProjection,
+    NativeFrameDelta,
     Font,
     AssetCache,
     AssetPaths,
@@ -1258,6 +1275,7 @@ impl StateRealization {
         match self {
             Self::FreshSession => "fresh-session",
             Self::RebuildHostProjection => "rebuild-host-projection",
+            Self::NativeFrameDelta => "native-frame-delta",
             Self::Font => "font",
             Self::AssetCache => "asset-cache",
             Self::AssetPaths => "asset-paths",

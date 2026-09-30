@@ -245,6 +245,16 @@ fn real_sources_are_idempotent_reparse_and_keep_comments() {
 }
 
 #[test]
+fn nullable_function_returning_nullable_value_keeps_its_outer_parens() {
+    let source = "struct Hooks {\n    callback: (() -> Vec2?)? = null,\n}\n";
+    let formatted = skull_fmt::format_code(source);
+    let ast = skull_parser::parse_module_clean(&formatted, "<roundtrip>".into())
+        .expect("formatted nullable callback must parse");
+    assert!(ast.recovery_errors.is_empty(), "{formatted}");
+    assert!(formatted.contains("(() -> Vec2?)?"), "{formatted}");
+}
+
+#[test]
 fn nullable_parenthesized_function_type_roundtrips_as_the_same_ast() {
     let source = "struct Hooks {\n    on_close: (fn())? = null,\n}\n";
     let source_ast = skull_parser::parse_module_clean(source, "<source>".into())

@@ -203,6 +203,11 @@ pub fn convert_closures_framed(
                     false
                 }
             });
+            // A detached hook/defer has only `s` as a parameter. Rebuilding its
+            // scope tree therefore makes a frame field used solely by a nested
+            // lambda look lambda-owned; the coroutine transform remains the
+            // authority for that cell's ownership.
+            via_s |= f.fields.iter().any(|c| own.owner.get(c) == Some(&sid));
             if via_s {
                 caps.push(f.s_cell);
             }
@@ -430,14 +435,18 @@ pub fn convert_closures_framed(
             code_identity,
             code_abi_fingerprint: mf.lambda_abi_fingerprints.get(&lambda).cloned(),
             lambda_abi_fingerprints: mf.lambda_abi_fingerprints.clone(),
+            lambda_abi_representations: mf.lambda_abi_representations.clone(),
             code_value_identities: mf.code_value_identities.clone(),
             nested_fn_identities: mf.nested_fn_identities.clone(),
             code_compatibility: compatibility,
             params,
+            param_default_guards: mf.param_default_guards.clone(),
+            param_default_values: mf.param_default_values.clone(),
             lower_timing_enabled: mf.lower_timing_enabled,
             lower_attribution: mf.lower_attribution.clone(),
             abi_plan: None,
-            abi_representation: mf.abi_representation.clone(),
+            abi_representation: mf.lambda_abi_representations.get(&lambda).cloned(),
+            abi_logical_type: None,
             rep_arena: mf.rep_arena.clone(),
             global_plan: mf.global_plan.clone(),
             statics: Vec::new(),
@@ -472,6 +481,7 @@ pub fn convert_closures_framed(
             // Same arena clone, same `Idx` space: the parent's spans address the
             // instructions this body now owns.
             inst_spans: mf.inst_spans.clone(),
+            inst_logical_types: mf.inst_logical_types.clone(),
             // Same arena clone, same `Idx` space -- and the same reason the
             // `spec_bindings` above come across: this lambda's own calls are
             // keyed to insts whose only reachable home is now this body, so

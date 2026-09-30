@@ -36,7 +36,7 @@ fn h() -> float {
 // is to push the expected binding type back through the invariant Holder and the
 // array-typed `items` field into Duo. Regressing array inference would break this.
 //- nested_generic_infers_through_array
-struct Duo<K, V> { k: K, v: V }
+value Duo<K, V> { k: K, v: V }
 struct Holder<T> { items: [T] }
 fn mk<K, V>() -> Holder<Duo<K, V>> {
     return Holder { items: [] }

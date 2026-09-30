@@ -585,7 +585,7 @@ const SEEDS: &[SeedCase] = &[
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
-        gap: Some("FIXED: a fn value called off a struct field uses the fn-value ABI"),
+        gap: None,
     },
     SeedCase {
         name: "fn_value_off_field_bound",

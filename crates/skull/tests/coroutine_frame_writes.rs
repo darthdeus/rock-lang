@@ -1,4 +1,11 @@
 use crate::common;
+use rustc_hash::{FxHashMap, FxHashSet};
+use skull_codegen_lua::{CodegenCtx, FrameCtx};
+use skull_mir::{
+    mir::{Inst, Lit, MirFunc, Term},
+    monoty::MonoInterner,
+};
+use ustr::Ustr;
 
 const FRAME_WRITES: &str = r#"
 enum FrameYield { Empty, Pair(int, int) }
@@ -87,4 +94,39 @@ fn main() {}
     let (resumed, built) = out.split_once(' ').expect("two tags");
     assert_eq!(resumed, built, "the erased resume box and a constructed value disagree on the tag");
     assert!(!resumed.contains("::"), "a runtime tag is the minted symbol, not the DefKey: {resumed}");
+}
+
+#[test]
+fn coroutine_step_colors_sequential_locals_below_luajit_limit() {
+    let ws = bone_semantic::prelude::Workspace::new();
+    let ctx = CodegenCtx::new(&ws);
+    let interner = MonoInterner::default();
+    let mut func = MirFunc::new(Ustr::from("wide_step"));
+    let entry = func.entry();
+    let s_cell = func.new_cell(Some(Ustr::from("s")));
+    func.params.push(s_cell);
+    for i in 0..220 {
+        let cell = func.new_cell(Some(Ustr::from(format!("value_{i}").as_str())));
+        let value = func.emit(entry, Inst::Const(Lit::Int(i)));
+        func.emit(entry, Inst::Store { cell, value });
+    }
+    let saved = func.new_cell(Some(Ustr::from("saved")));
+    let saved_value = func.emit(entry, Inst::Const(Lit::Int(7)));
+    func.emit(entry, Inst::Store { cell: saved, value: saved_value });
+    let saved_load = func.emit(entry, Inst::Load(saved));
+    func.set_term(entry, Term::Return(vec![saved_load]));
+
+    let frame = FrameCtx {
+        s_cell,
+        fields: FxHashSet::from_iter([saved]),
+        slots: FxHashMap::from_iter([(saved, 0)]),
+    };
+    let lua = skull_codegen_lua::emit_named_framed(
+        &ws, &ctx, &interner, "wide_step", &func, Some(&frame), None,
+    );
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nprint(wide_step({{}}))\n"), "coroutine_cell_colors"),
+        "7",
+        "sequential step locals must not overwrite the implicit frame-state parameter"
+    );
 }

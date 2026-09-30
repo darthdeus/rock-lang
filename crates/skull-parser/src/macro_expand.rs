@@ -896,6 +896,8 @@ fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData
                 "int" => TypeExprKind::Int,
                 "uint" => TypeExprKind::Uint,
                 "float" => TypeExprKind::Float,
+                "f64" => TypeExprKind::F64,
+                "f32" => TypeExprKind::F32,
                 "string" => TypeExprKind::String,
                 "bool" => TypeExprKind::Bool,
                 "any" => TypeExprKind::Any,

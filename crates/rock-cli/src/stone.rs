@@ -2047,6 +2047,32 @@ mod watch_reload_tests {
         panic!("watcher never reported {}", expected.display());
     }
 
+    // FSEvents can miss a write made shortly after `refresh` returns, and can
+    // deliver the fixture's own setup writes, batched, after the stream starts;
+    // both happen arbitrarily late under load. Rewrite `path` until it is
+    // reported, so the wait covers a lost first write.
+    fn write_until_reported(rx: &Receiver<FileChangeEvent>, path: &PathBuf, text: &str) -> FileChangeEvent {
+        for _ in 0..8 {
+            std::fs::write(path, text).unwrap();
+            let attempt_end = Instant::now() + Duration::from_millis(1500);
+            while let Ok(event) = rx.recv_timeout(attempt_end.saturating_duration_since(Instant::now())) {
+                if event.paths.contains(path) {
+                    return event;
+                }
+            }
+        }
+        panic!("watcher never reported {}", path.display());
+    }
+
+    // Events arrive in order, so once a fresh barrier file is reported every
+    // earlier event, including the fixture's setup writes, has been consumed.
+    // Returns the barrier, whose own trailing events may still arrive later.
+    fn drain_setup_events(rx: &Receiver<FileChangeEvent>, dir: &std::path::Path) -> PathBuf {
+        let barrier = dir.join("barrier.rock");
+        write_until_reported(rx, &barrier, "fn barrier() {}\n");
+        barrier
+    }
+
     #[test]
     fn stone_direct_save_under_tmp_ancestor_reloads_live_state() {
         Fixture::new(false).assert_reload(false);
@@ -2073,10 +2099,15 @@ mod watch_reload_tests {
         let (tx, rx) = channel();
         let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
         watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
+        let barrier = drain_setup_events(&rx, &sims);
 
-        std::fs::write(&sim, "fn probe( {\n").unwrap();
-        let event = receive_path(&rx, &sim);
+        let event = write_until_reported(&rx, &sim, "fn probe( {\n");
         let mut changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+        // Setup writes of the fixture may be reported in the same batch; they are
+        // not the edit under test.
+        for setup in [&barrier, &fixture.root.join("main.rock"), &fixture.root.join("stick.toml")] {
+            changes.changed_paths.remove(setup);
+        }
         assert_eq!(changes.changed_paths, HashSet::from([sim.clone()]));
         retain_production_changes(&mut changes.changed_paths, fixture.root.to_str().unwrap(), fixture.compiler.package_roots(), &Default::default());
         assert!(changes.changed_paths.is_empty(), "sim edit reached the game compiler");

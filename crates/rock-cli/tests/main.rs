@@ -20,6 +20,8 @@ mod modules_audit;
 mod modules_emit;
 #[path = "modules_migrate.rs"]
 mod modules_migrate;
+#[path = "across_yield_fix.rs"]
+mod across_yield_fix;
 #[path = "modules_fix.rs"]
 mod modules_fix;
 #[path = "formatting_modules.rs"]
@@ -147,3 +149,5 @@ mod content_boundary;
 mod state_memory_class;
 #[path = "state_globals_none.rs"]
 mod state_globals_none;
+#[path = "identity_storage_census.rs"]
+mod identity_storage_census;

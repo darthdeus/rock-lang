@@ -534,7 +534,10 @@ fn spawn_runner(
 
     let mut cmd = Command::new(runner);
     cmd.arg("--profile").arg(profile);
-    cmd.env(rock_host::project::lib_path_var(), runner_lib_path());
+    cmd.env(
+        rock_host::project::lib_path_var(),
+        rock_host::project::lib_path_with_inherited(),
+    );
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
     child
@@ -549,20 +552,6 @@ fn spawn_runner(
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
-}
-
-/// The library search path the runner needs: the prebuilt gamelibs (SDL2) +
-/// inherited value + `$NIX_LD_LIBRARY_PATH` (where libGL lives on NixOS, the
-/// same path the game's nix-ld'd luajit resolves it through).
-fn runner_lib_path() -> String {
-    let mut value = rock_host::project::lib_path_with_inherited();
-    if let Some(nix_ld) = std::env::var_os("NIX_LD_LIBRARY_PATH") {
-        if !nix_ld.is_empty() {
-            value.push(':');
-            value.push_str(&nix_ld.to_string_lossy());
-        }
-    }
-    value
 }
 
 // --- A3: compile-validate registered render shaders on real GL contexts ---

@@ -154,7 +154,7 @@ fn direct_refs(
         for &iid in &block.insts {
             match &mf.insts[iid] {
                 Inst::Global(n) => globals.push(*n),
-                Inst::Call { func, .. } => {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                     let f = &ws.module(func.module).functions[func.func];
                     calls.push(Ustr::from(&mangle_fn(ws, f)));
                 }
@@ -3120,7 +3120,7 @@ struct ShaderRegistrations {
 struct RootCache {
     project_root: Option<String>,
     interface_roots: Vec<FuncRef>,
-    sim_root: Option<FuncRef>,
+    sim_roots: Vec<FuncRef>,
     shader_roots: Vec<FuncRef>,
     roots: Vec<FuncRef>,
 }
@@ -4584,6 +4584,35 @@ fn register_sim_candidates(ws: &Workspace) -> Vec<FuncRef> {
         .collect()
 }
 
+/// The game's `@sim_entry` providers. A provider is how a game hands a sim its
+/// entry argument while the engine's registry stays game-agnostic: a sim that
+/// takes one parameter is registered as `provider(sim)`, and the provider
+/// (a `co fn(body: fn(P) -> Coroutine<Wait>) -> Coroutine<Wait>`) resolves the
+/// argument when the runner starts the sim and awaits the body with it.
+fn sim_entry_providers(ws: &Workspace) -> Vec<FuncRef> {
+    ws.modules
+        .iter()
+        .filter(|m| m.id != ModuleId::builtin())
+        .flat_map(|m| {
+            m.functions
+                .iter()
+                .filter(|(_, f)| f.annotations.iter().any(|a| a.is_builtin("sim_entry")))
+                .map(|(fid, _)| FuncRef { module: m.id, func: fid })
+        })
+        .collect()
+}
+
+/// Functions the generated sim registration text names: `register_sim` and the
+/// `@sim_entry` providers. Empty when the build has no sims.
+fn sim_glue_roots(ws: &Workspace) -> Vec<FuncRef> {
+    if collect_sim_fns(ws).is_empty() {
+        return Vec::new();
+    }
+    let mut roots: Vec<FuncRef> = register_sim_fn(ws).into_iter().collect();
+    roots.extend(sim_entry_providers(ws));
+    roots
+}
+
 /// Every function this build roots from, by the emitter's own predicate.
 ///
 /// It lives in the DRIVER, not in `skull_graph`: which declarations a build
@@ -4650,10 +4679,7 @@ fn all_roots_with_census(
 ) -> Vec<FuncRef> {
     let mut roots = emission_roots_with_census(ws, project_root, census.as_deref_mut());
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
-    let mut glue: Vec<FuncRef> = Vec::new();
-    if !collect_sim_fns(ws).is_empty() {
-        glue.extend(register_sim_fn(ws));
-    }
+    let mut glue: Vec<FuncRef> = sim_glue_roots(ws);
     glue.extend(shader_roots.iter().copied());
     // Deterministic: `dependencies` is a hash set, so its iteration order is not.
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
@@ -4669,15 +4695,12 @@ fn all_roots_with_census(
 /// workspace for its declarations or sim functions.
 fn cached_roots(
     interface_roots: &[FuncRef],
-    sim_root: Option<FuncRef>,
+    sim_roots: &[FuncRef],
     shader_roots: &[FuncRef],
 ) -> Vec<FuncRef> {
     let mut roots = interface_roots.to_vec();
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
-    let mut glue = Vec::new();
-    if let Some(register_sim) = sim_root {
-        glue.push(register_sim);
-    }
+    let mut glue = sim_roots.to_vec();
     glue.extend(shader_roots.iter().copied());
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
@@ -4734,9 +4757,90 @@ fn sim_registration_lines(
         })?;
         let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(fref));
         let key = identity.logical_key(ws, scx.interner());
-        let _ = writeln!(out, "{}({:?}, __rock_code_slot_ref({:?}))", register_name, wire, key);
+        let body = format!("__rock_code_slot_ref({:?})", key);
+        let entry = match f.param_decls.len() {
+            0 => body,
+            1 => {
+                let provider = sim_entry_provider_for(ws, f, &wire)?;
+                // The provider is called when the runner STARTS the sim, so the
+                // argument is resolved against the world live at that moment.
+                format!("function() return {}({}) end", provider, body)
+            }
+            n => {
+                return Err(CompilerError::new_with_label(
+                    f.span,
+                    format!(
+                        "`@sim` `{wire}` takes {n} parameters; a sim takes none or one entry \
+                         argument supplied by the game's `@sim_entry` provider"
+                    ),
+                ))
+            }
+        };
+        let _ = writeln!(out, "{}({:?}, {})", register_name, wire, entry);
     }
     Ok(out)
+}
+
+/// The mangled name of the `@sim_entry` provider that supplies `sim`'s single
+/// parameter. The provider must be unique and its `body` parameter must take
+/// exactly the sim's parameter type, so a sim cannot be started with an
+/// argument of the wrong type.
+fn sim_entry_provider_for(
+    ws: &Workspace,
+    sim: &bone_semantic::hir::Function,
+    wire: &str,
+) -> Result<String, CompilerError> {
+    use skull_mir::monoty::{convert_decl, MonoSubst, MonoTy};
+    let providers = sim_entry_providers(ws);
+    let provider_ref = match providers.as_slice() {
+        [only] => *only,
+        [] => {
+            return Err(CompilerError::new_with_label(
+                sim.span,
+                format!(
+                    "`@sim` `{wire}` takes an entry argument but no `@sim_entry` provider is \
+                     defined; the game declares one \
+                     `@sim_entry co fn(body: fn(T) -> Coroutine<Wait>) -> Coroutine<Wait>`"
+                ),
+            ))
+        }
+        many => {
+            let names: Vec<&str> = many
+                .iter()
+                .map(|f| ws.module(f.module).functions[f.func].name.as_str())
+                .collect();
+            return Err(CompilerError::new_no_location(format!(
+                "`@sim_entry` is ambiguous: {} are all providers",
+                names.join(", ")
+            )));
+        }
+    };
+    let provider = &ws.module(provider_ref.module).functions[provider_ref.func];
+    let subst = MonoSubst::default();
+    let sim_param = convert_decl(ws, sim.param_decls[0].ty, &subst).ok();
+    let provider_param = match provider.param_decls.as_slice() {
+        [only] => convert_decl(ws, only.ty, &subst).ok(),
+        _ => None,
+    };
+    let accepted = match &provider_param {
+        Some(MonoTy::Function { params, .. }) if params.len() == 1 => Some(&params[0]),
+        _ => None,
+    };
+    match (accepted, &sim_param) {
+        (Some(accepted), Some(sim_param)) if accepted == sim_param => {}
+        _ => {
+            return Err(CompilerError::new_with_label(
+                sim.span,
+                format!(
+                    "`@sim` `{wire}` takes `{}`, but the `@sim_entry` provider `{}` supplies `{}`",
+                    sim_param.as_ref().map_or("<unresolved>".to_string(), MonoTy::render),
+                    provider.name,
+                    accepted.map_or("<not a one-argument body>".to_string(), MonoTy::render),
+                ),
+            ))
+        }
+    }
+    Ok(mangle_fn(ws, provider))
 }
 
 /// A Lua long-bracket string literal (`[==[ ... ]==]`) holding `s`, at the
@@ -4846,8 +4950,23 @@ fn graph_rejection_error(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
 ) -> Option<CompilerError> {
+    let mut callers: Option<FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>> = None;
     for rejection in graph.rejections() {
         let caller = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
+        if rejection.kind == crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage {
+            // A language rejection, not a totality gap: fatal in ablation runs too.
+            let callers = callers.get_or_insert_with(|| {
+                let mut map: FxHashMap<_, Vec<_>> = FxHashMap::default();
+                for edge in graph.edges() {
+                    map.entry(&edge.to).or_default().push(edge);
+                }
+                map
+            });
+            if let Some(err) = identity_instance_rejection_error(ws, graph, callers, rejection) {
+                return Some(err);
+            }
+            continue;
+        }
         if skull_mir::ablation::enabled() {
             let category = match rejection.kind {
                 crate::instance_graph::RejectionKind::ChangingInstanceRecursion => {
@@ -4859,6 +4978,9 @@ fn graph_rejection_error(
                 }
                 crate::instance_graph::RejectionKind::ConcreteTypeUnavailable => {
                     skull_mir::ablation::FatalCategory::CompilerInvariant
+                }
+                crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage => {
+                    unreachable!("identity rejections are handled before ablation")
                 }
             };
             skull_mir::ablation::note_examined();
@@ -4889,6 +5011,53 @@ fn graph_rejection_error(
         ));
     }
     None
+}
+
+/// An instance's identity-storage rejection belongs to the package whose call
+/// site instantiated it (docs/identity-storage-plan.md S0c). The walk goes back
+/// from the instance through its callers; a caller in an exempt package whose
+/// own type arguments carry an identity only forwarded it, so its callers are
+/// asked in turn. Any other caller introduced the identity, and the rejection is
+/// fatal when that caller's package is not exempt.
+fn identity_instance_rejection_error(
+    ws: &Workspace,
+    graph: &crate::instance_graph::InstanceGraph,
+    callers: &FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>,
+    rejection: &crate::instance_graph::Rejection,
+) -> Option<CompilerError> {
+    let exempt = |instance: &crate::instance_graph::Instance| {
+        bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
+    };
+    let mut seen = FxHashSet::default();
+    let mut work = vec![&rejection.at];
+    let mut reached_by_edge = false;
+    while let Some(instance) = work.pop() {
+        if !seen.insert(instance) {
+            continue;
+        }
+        for edge in callers.get(instance).into_iter().flatten() {
+            reached_by_edge = true;
+            let forwarded = exempt(&edge.from)
+                && edge.from.args.iter().any(|arg| {
+                    skull_graph::identity_storage::stores_identity(ws, &graph.interner().get(*arg))
+                });
+            if forwarded {
+                work.push(&edge.from);
+            } else if !exempt(&edge.from) {
+                let callee = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
+                return Some(
+                    CompilerError::new_with_label(rejection.span, rejection.message.clone()).with_label(
+                        edge.span,
+                        format!("`{}` is instantiated from here with an identity struct", callee.name),
+                    ),
+                );
+            }
+        }
+    }
+    // An instance no edge reaches is rooted by an always-emitted body; the
+    // instance's own package answers for it.
+    (!reached_by_edge && !exempt(&rejection.at))
+        .then(|| CompilerError::new_with_label(rejection.span, rejection.message.clone()))
 }
 
 /// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
@@ -6644,8 +6813,8 @@ fn emit_full_in_with_mutation(
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
     let interface_roots = emission_roots(ws, project_root);
-    let sim_root = (!collect_sim_fns(ws).is_empty()).then(|| register_sim_fn(ws)).flatten();
-    let emission_roots = cached_roots(&interface_roots, sim_root, &shader_roots);
+    let sim_roots = sim_glue_roots(ws);
+    let emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
     #[cfg(test)]
     assert_eq!(
         emission_roots,
@@ -7064,7 +7233,7 @@ fn emit_full_in_with_mutation(
         roots: RootCache {
             project_root: project_root.map(str::to_string),
             interface_roots,
-            sim_root,
+            sim_roots,
             shader_roots,
             roots: emission_roots.clone(),
         },
@@ -7795,7 +7964,7 @@ fn update_chunk_cache(
             .filter(|root| !current_shader_roots.contains(root))
         {
             if cache.roots.interface_roots.contains(root)
-                || cache.roots.sim_root == Some(*root)
+                || cache.roots.sim_roots.contains(root)
             {
                 continue;
             }

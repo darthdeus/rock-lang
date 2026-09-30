@@ -44,6 +44,7 @@ impl Builder<'_> {
         self.f.statics.push(StaticCell {
             cell,
             done_flag,
+            ty,
             logical_name: sname,
             ordinal: ctr,
             type_str,
@@ -80,26 +81,27 @@ impl Builder<'_> {
     ) -> Result<NestedFn, CompilerError> {
         let param_names: Vec<Ustr> =
             params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
+        let fn_ty = self
+            .binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
         let boxed = NestedFn {
             hoisted,
             param_names: param_names.clone(),
-            representation: self.scx.rep_arena().boxed_function(self.scx.target, param_names.len()),
+            representation: self.scx.rep_arena().boxed_function(self.call_scx.target, param_names.len()),
+            logical_type: (*fn_ty).clone(),
         };
         let taken_by_value = self
             .body
             .expr_arena
             .iter()
             .any(|(_, e)| matches!(e, Expr::Var(b) if *b == name));
-        if self.scx.values_first_class {
+        if self.call_scx.values_first_class {
             return Ok(boxed);
         }
-        let fn_ty = self
-            .binding_ty(name)
-            .and_then(|ty| self.concrete_ty_id(ty))
-            .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
         let representation = BackendFnAbiPlan::for_function_value_with_mode(
             self.ws,
-            self.scx,
+            self.call_scx,
             &fn_ty,
             taken_by_value,
         )
@@ -107,7 +109,12 @@ impl Builder<'_> {
             Some(span) => CompilerError::new_with_label(span, error.message),
             None => CompilerError::new_no_location(error.message),
         })?;
-        let abi = NestedFn { hoisted, param_names, representation };
+        let abi = NestedFn {
+            hoisted,
+            param_names,
+            representation,
+            logical_type: (*fn_ty).clone(),
+        };
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
 
@@ -156,6 +163,7 @@ impl Builder<'_> {
         let mut child = Builder {
             ws: self.ws,
             scx: self.scx,
+            call_scx: self.call_scx,
             concrete_plan: self.concrete_plan,
             concrete_plans: self.concrete_plans,
             concrete_type_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -190,6 +198,7 @@ impl Builder<'_> {
             cur_op: crate::site::SiteOp::DirectCall,
             site_owner: self.site_owner.clone(),
             group_binds: HashMap::new(),
+            f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
@@ -203,6 +212,7 @@ impl Builder<'_> {
         };
 
         child.f.abi_representation = Some(abi.representation.clone());
+        child.f.abi_logical_type = Some(abi.logical_type.clone());
         child.f.code_identity = nested_identity;
         child.f.code_abi_fingerprint = Some(
             abi.representation.logical_fingerprint(&self.scx.rep_arena()),
@@ -227,7 +237,7 @@ impl Builder<'_> {
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
             let slot = child.param_slot(i)?;
-            child.bind_param_slot(pb, pname, &slot);
+            child.bind_param_slot(pb, pname, &slot)?;
         }
 
         child.defers.push(Vec::new());
@@ -284,20 +294,32 @@ impl Builder<'_> {
                             let shape = actual;
                             let leaves = self.repr_to_leaves_bundle(&r)?;
                             let bname = self.body.binding_arena[name].name;
-                            let cells: Vec<Idx<Cell>> = leaves
-                                .into_iter()
-                                .enumerate()
-                                .map(|(li, lv)| {
-                                    let c = self.new_binding_cell(
-                                        name,
-                                        Ustr::from(format!("{bname}__{li}").as_str()),
-                                        None,
-                                        Ustr::from(li.to_string().as_str()),
-                                    );
-                                    self.emit_cur(Inst::Store { cell: c, value: lv });
-                                    c
-                                })
-                                .collect();
+                            let owner = self
+                                .binding_ty(name)
+                                .and_then(|ty| self.concrete_ty_id(ty));
+                            let cells = self
+                                .new_flat_enum_cells(name, bname, &shape, owner.as_deref())?
+                                .unwrap_or_else(|| {
+                                    (0..leaves.len())
+                                        .map(|li| self.new_binding_cell(
+                                            name,
+                                            Ustr::from(format!("{bname}__{li}").as_str()),
+                                            None,
+                                            Ustr::from(li.to_string().as_str()),
+                                        ))
+                                        .collect()
+                                });
+                            if cells.len() != leaves.len() {
+                                return Err(self.gap_here(format!(
+                                    "flat enum {} has {} call-binding cells for {} leaves",
+                                    shape.name,
+                                    cells.len(),
+                                    leaves.len()
+                                )));
+                            }
+                            for (cell, value) in cells.iter().copied().zip(leaves) {
+                                self.emit_cur(Inst::Store { cell, value });
+                            }
                             self.group_binds.insert(raw(name), (cells, shape));
                             threaded = true;
                         } else {
@@ -321,6 +343,7 @@ impl Builder<'_> {
                         let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                         let v = match opaque_repr {
                             Some(r) => self.pack(r.into_value())?,
+                            None if self.binding_is_ref(name) => self.lower_ref_borrow(value)?,
                             None => self.lower_expr_with_expected(value, expected.as_deref())?,
                         };
                         let v = self.coerced_to_binding(v, value, name);
@@ -570,6 +593,12 @@ impl Builder<'_> {
             Expr::If { cond, then_branch, else_branch } => {
                 self.lower_if_stmt(cond, then_branch, else_branch)
             }
+            Expr::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => self.lower_if_let_stmt(pattern, value, then_branch, else_branch),
             Expr::Match { scrutinee, arms } => self.lower_match_stmt(scrutinee, arms),
             // Assignments are statements (unit value); lower the effect directly
             // so statement position leaves no dead unit.

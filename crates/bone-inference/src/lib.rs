@@ -67,6 +67,28 @@ pub enum Use {
     Discard,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RefProvenance {
+    Stable,
+    Local,
+    Relocatable,
+    Unknown,
+}
+
+impl RefProvenance {
+    pub(crate) fn merge(self, other: Self) -> Self {
+        self.max(other)
+    }
+
+    pub(crate) fn retainable(self) -> bool {
+        matches!(self, Self::Stable | Self::Local)
+    }
+
+    pub(crate) fn returnable(self) -> bool {
+        self == Self::Stable
+    }
+}
+
 struct RefSuspensionPolicy<'a> {
     gamma: &'a Gamma<'a>,
 }
@@ -128,6 +150,7 @@ pub struct Gamma<'a> {
     pub(crate) inaccessible_overloads: RefCell<FxHashMap<Ustr, FnList>>,
 
     pub(crate) allow_frame_ref_return_place: bool,
+    pub(crate) ref_binding_provenance: FxHashMap<Idx<BindingInfo>, RefProvenance>,
 
     pub out: BodyInference,
 }
@@ -165,6 +188,7 @@ impl<'a> Gamma<'a> {
             inaccessible_overloads: Default::default(),
 
             allow_frame_ref_return_place: false,
+            ref_binding_provenance: Default::default(),
 
             out: BodyInference {
                 body_generation: body.generation,
@@ -450,6 +474,11 @@ pub fn check_function(
         match (&binding.kind, binding.declared_ty) {
             (BindingKind::Param, Some(ty)) => {
                 gamma.assign_named_type(param_binding, ty)?;
+                if contains_frame_ref(&mut gamma, ty) {
+                    gamma
+                        .ref_binding_provenance
+                        .insert(param_binding, RefProvenance::Stable);
+                }
             }
 
             (BindingKind::Param, None) => {
@@ -565,7 +594,7 @@ pub fn check_function(
         for at in uses_after_suspension(c.body, &policy) {
             gamma.body_errors.push(CompilerError::new_with_label(
                 c.body.expr_spans[at],
-                "frame reference is used after a coroutine suspension; retain an `Entity<T>` and resolve it after the yield"
+                "frame borrow is used after a coroutine suspension; retain an `Entity<T>` and resolve it after the yield"
                     .to_string(),
             ));
         }

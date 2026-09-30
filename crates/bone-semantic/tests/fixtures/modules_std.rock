@@ -59,6 +59,7 @@
 // prelude: SkipIter
 // prelude: StatSummary
 // prelude: StepByIter
+// prelude: Storage
 // prelude: StorageBuffer
 // prelude: StringBuilder
 // prelude: TAU
@@ -68,8 +69,11 @@
 // prelude: UniformArray
 // prelude: Vec
 // prelude: Vec2
+// prelude: Vec2f
 // prelude: Vec3
+// prelude: Vec3f
 // prelude: Vec4
+// prelude: Vec4f
 // prelude: VecIter
 // prelude: WorkgroupArray
 // prelude: WriteFieldRef
@@ -92,10 +96,12 @@
 // prelude: __arena_reinitialize
 // prelude: __arena_store
 // prelude: __arena_store_any
+// prelude: __arena_store_erased
 // prelude: __arena_store_mut
 // prelude: __arena_store_or_dead
 // prelude: __arena_store_or_empty
 // prelude: __debug_traceback
+// prelude: __descriptor_with
 // prelude: __entity_arena
 // prelude: __ffi_new_float_1
 // prelude: __ffi_new_int_1
@@ -178,6 +184,7 @@
 // prelude: __rock_materialize_strided_element
 // prelude: __rock_native_buffer_prefix_eq
 // prelude: __rock_parse_float_at_setup
+// prelude: __rock_quote_string
 // prelude: __rock_range
 // prelude: __rock_repeat
 // prelude: __rock_scene_type_key
@@ -198,6 +205,7 @@
 // prelude: __scene_reserve
 // prelude: __scene_retire
 // prelude: __scene_root_any
+// prelude: __scene_root_erased
 // prelude: __scene_state
 // prelude: __scene_type_bucket_index
 // prelude: __scene_type_bucket_insert
@@ -265,6 +273,7 @@
 // prelude: clamp
 // prelude: clear
 // prelude: clone
+// prelude: clone_into
 // prelude: collect
 // prelude: completed
 // prelude: contains
@@ -391,6 +400,7 @@
 // prelude: json_indent
 // prelude: json_int
 // prelude: json_is_null
+// prelude: json_key_listed
 // prelude: json_max_depth
 // prelude: json_null
 // prelude: json_object
@@ -438,6 +448,7 @@
 // prelude: lt
 // prelude: map
 // prelude: map_new
+// prelude: map_storage
 // prelude: mat4_identity
 // prelude: mat4_ortho
 // prelude: mat4_rotate_x
@@ -567,6 +578,7 @@
 // prelude: step_by
 // prelude: stone_log_clear_now
 // prelude: stone_log_set_now
+// prelude: storage
 // prelude: storage_load
 // prelude: storage_store
 // prelude: string_char
@@ -594,6 +606,8 @@
 // prelude: texture_id
 // prelude: texture_size
 // prelude: to_array
+// prelude: to_f32
+// prelude: to_f64
 // prelude: to_float
 // prelude: to_int
 // prelude: to_string

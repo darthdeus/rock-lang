@@ -45,6 +45,19 @@ pub struct ContainerPlan {
 }
 
 impl ContainerPlan {
+    pub(crate) fn into_row_storage(mut self) -> Self {
+        match self.storage {
+            ContainerStorage::Columns { element }
+            | ContainerStorage::Strided { element }
+            | ContainerStorage::LeafAddressed { element } => {
+                self.storage = ContainerStorage::Boxed { element };
+                self.leaf_addresses = None;
+            }
+            ContainerStorage::Boxed { .. } => {}
+        }
+        self
+    }
+
     pub fn matches_type(family: ContainerFamily, ty: &crate::monoty::MonoTy) -> bool {
         match (family, ty.peel_nullable().0) {
             (

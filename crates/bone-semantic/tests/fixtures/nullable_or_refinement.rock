@@ -31,7 +31,7 @@ fn f(c: Corpse?) -> bool {
 
 // chained: each `== null` clause narrows its own path for the following clause.
 //- refine_or_rhs_chain
-struct Inner { v: int }
+value Inner { v: int }
 struct Mid { inner: Inner? }
 fn f(m: Mid?) -> bool {
     let ok = m == null || m.inner == null || m.inner.v > 0

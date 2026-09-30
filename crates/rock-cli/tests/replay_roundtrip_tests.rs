@@ -4,12 +4,12 @@
 //!
 //! Determinism scope: the plan's contract carves out wall-clock DIAGNOSTICS
 //! (`stone_get_time()` "is fine in diagnostics") from the determinism
-//! guarantee. Those live entirely under `stone.PROFILER` (per-frame CPU/GPU
-//! timing metrics + `frame_t*` timestamps) and are inherently
-//! non-reproducible. We strip that one subtree and assert byte-identity of
-//! everything else. This matches the repo's existing dump tests
-//! (game_snapshot_tests), which all compare curated game-state subtrees and
-//! never the profiler. Everything outside PROFILER is dt-derived and replay
+//! guarantee. Those live under `stone.PROFILER` and its frame series
+//! (`FRAME_*`, `PROFILE_HEAP_KB`) and are inherently non-reproducible; the
+//! dump names them in `__stone_nonreproducible`. We strip those and assert
+//! byte-identity of everything else. This matches the repo's existing dump
+//! tests (game_snapshot_tests), which all compare curated game-state subtrees
+//! and never the profiler. Everything else is dt-derived and replay
 //! reproduces it from the logged dt.
 //!
 //! Heavy: spawns `rock frame` against a compiled game. Excluded from the
@@ -777,7 +777,7 @@ fn main() {
 
 #[test]
 fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
-    const FRAMES: u32 = 200;
+    const FRAMES: u32 = 420;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("mag.replay");
     let settings = dir.path().join("settings.json");
@@ -796,14 +796,14 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
         ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_history.to_str().unwrap()),
         ("STONE_PHYSICAL_MOUSE_PRESS_AT", "2"),
         ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "2"),
-        ("STONE_PHYSICAL_KEY_PRESS_AT", "100"),
-        ("STONE_PHYSICAL_KEY_RELEASE_AT", "101"),
+        ("STONE_PHYSICAL_KEY_PRESS_AT", "130"),
+        ("STONE_PHYSICAL_KEY_RELEASE_AT", "131"),
         ("STONE_PHYSICAL_KEY", "down"), ("STONE_PHYSICAL_SCANCODE", "down"),
-        ("STONE_PHYSICAL_KEY_PRESS_AT_2", "105"),
-        ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "106"),
+        ("STONE_PHYSICAL_KEY_PRESS_AT_2", "135"),
+        ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "136"),
         ("STONE_PHYSICAL_KEY_2", "return"), ("STONE_PHYSICAL_SCANCODE_2", "return"),
-        ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "110"),
-        ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "111"),
+        ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "140"),
+        ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "141"),
         ("STONE_PHYSICAL_MOUSE_X_2", "640"),
         ("STONE_PHYSICAL_MOUSE_Y_2", "247"),
     ]);

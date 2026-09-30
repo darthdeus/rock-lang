@@ -104,6 +104,11 @@ pub struct Workspace {
     /// that reach exists. Empty in LSP/typecheck-only contexts, where no
     /// expansion runs.
     pub comptime_inputs: ComptimeInputs,
+
+    /// Enforce identity storage in files outside any package instead of
+    /// counting them as unmigrated unpackaged programs. The bone fixture
+    /// harness sets it: its programs are the rule's fixtures.
+    pub identity_storage_enforce_unpackaged: bool,
 }
 
 /// See [`Workspace::comptime_inputs`].
@@ -157,6 +162,7 @@ impl Workspace {
             int: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Int)),
             uint: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Uint)),
             float: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Float)),
+            f32: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::F32)),
             bool: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Bool)),
             string: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::String)),
             unit: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Unit)),
@@ -196,6 +202,7 @@ impl Workspace {
             defs: Default::default(),
             legacy_projections: Default::default(),
             legacy_imports: Default::default(),
+            identity_storage_enforce_unpackaged: false,
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());
@@ -394,6 +401,7 @@ impl Workspace {
                 BuiltinTy::Int => "int".into(),
                 BuiltinTy::Uint => "uint".into(),
                 BuiltinTy::Float => "float".into(),
+                BuiltinTy::F32 => "f32".into(),
                 BuiltinTy::Bool => "bool".into(),
                 BuiltinTy::String => "string".into(),
                 BuiltinTy::Unit => "()".into(),
@@ -556,6 +564,9 @@ pub struct BodyInference {
 
     pub expr_types: ArenaMap<Idx<Expr>, TyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, TyId>,
+    /// The actual arguments that filled `ref T` parameters at a resolved call.
+    /// MIR uses this to preserve the argument place instead of copying it.
+    pub ref_call_args: FxHashMap<Idx<Expr>, Vec<Idx<Expr>>>,
     pub resolved_overload_calls: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
     /// Calls to GENERIC fns: the winning candidate's instantiated generics in
     /// declaration order, keyed like `resolved_overload_calls`. Entries may
@@ -617,7 +628,20 @@ pub struct BodyInference {
 
     pub trail: Vec<(VarId, Option<TyId>)>,
 
+    /// Every coercion `coerce` accepted into an `any` target: the span and the
+    /// source type. A trial's rollback drops the ones it recorded. The
+    /// identity-storage body check reads them (docs/identity-storage-plan.md
+    /// IDENTITY ANY ERASURE).
+    pub any_erasures: Vec<(Span, TyId)>,
+
     pub deps: FxHashSet<Ustr>,
+}
+
+/// What [`BodyInference::rollback_to`] restores.
+#[derive(Copy, Clone, Debug)]
+pub struct BodyCheckpoint {
+    trail: usize,
+    any_erasures: usize,
 }
 
 impl BodyInference {
@@ -648,15 +672,25 @@ impl BodyInference {
         self.trail.push((v, prev));
     }
 
-    pub fn checkpoint(&self) -> usize {
-        self.trail.len()
+    pub fn checkpoint(&self) -> BodyCheckpoint {
+        BodyCheckpoint {
+            trail: self.trail.len(),
+            any_erasures: self.any_erasures.len(),
+        }
     }
 
-    pub fn rollback_to(&mut self, cp: usize) {
-        while self.trail.len() > cp {
+    pub fn rollback_to(&mut self, cp: BodyCheckpoint) {
+        while self.trail.len() > cp.trail {
             let (v, prev) = self.trail.pop().unwrap();
             self.substitutions.restore(v, prev);
         }
+        self.any_erasures.truncate(cp.any_erasures);
+    }
+
+    /// The erasures recorded since `cp`, for a caller whose rollback undoes a
+    /// classification's bindings but keeps its erasure.
+    pub fn any_erasures_since(&self, cp: BodyCheckpoint) -> Vec<(Span, TyId)> {
+        self.any_erasures[cp.any_erasures..].to_vec()
     }
 }
 

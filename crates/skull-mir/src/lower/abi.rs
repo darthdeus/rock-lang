@@ -1106,7 +1106,7 @@ fn column_eligible_for_shape(
         return false;
     };
     let Some(sid) = ws.struct_by_name.get(&name) else { return false };
-    ws.modules[sid.module.index()].structs[sid.def].is_value
+    super::shape::has_value_plan(&ws.modules[sid.module.index()].structs[sid.def])
         && super::shape::planned_value(ws, shape.name).is_some_and(|plan| {
             plan.shape.is_some() || (declared_nobox(ws, ty) && plan.gc_shape.is_some())
         })
@@ -1757,12 +1757,32 @@ impl RepArena {
         self.function_value_with_mode(ws, target, ty, true)
     }
 
+    pub fn function_value_first_class(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+    ) -> Result<FunctionRepPlan, RepError> {
+        self.function_value_with_policy(ws, target, ty, false, true)
+    }
+
     pub fn function_value_with_mode(
         &self,
         ws: &Workspace,
         target: FnBackend,
         ty: &crate::monoty::MonoTy,
         nobox_only: bool,
+    ) -> Result<FunctionRepPlan, RepError> {
+        self.function_value_with_policy(ws, target, ty, nobox_only, false)
+    }
+
+    fn function_value_with_policy(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+        nobox_only: bool,
+        first_class: bool,
     ) -> Result<FunctionRepPlan, RepError> {
         let (ty, _) = ty.peel_nullable();
         let crate::monoty::MonoTy::Function { params: fn_params, ret } = ty else {
@@ -1787,18 +1807,26 @@ impl RepArena {
                 } else {
                     false
                 };
-                self.plan(
-                    ws,
-                    target,
-                    param,
-                    RepUse::Parameter,
-                    &RepUseFacts { tuple_spelled, span: None },
-                    RepGuarantees { nobox: nobox_only, allow_opaque: true },
-                )
+                if first_class && !tuple_spelled {
+                    Ok(self.intern(target, RepUse::Parameter, RepLayout::Opaque))
+                } else {
+                    self.plan(
+                        ws,
+                        target,
+                        param,
+                        RepUse::Parameter,
+                        &RepUseFacts { tuple_spelled, span: None },
+                        RepGuarantees { nobox: nobox_only, allow_opaque: true },
+                    )
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
             None
+        } else if first_class
+            && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_))
+        {
+            Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
         } else {
             Some(self.plan(
                 ws,
@@ -1853,6 +1881,14 @@ impl RepArena {
                         span: None,
                     },
                     RepGuarantees { nobox: mode.nobox_only, allow_opaque: true },
+                )?,
+                (None, Some(ty)) if declared_tuple_spelled(ws, param.ty) => self.plan(
+                    ws,
+                    target,
+                    &ty,
+                    RepUse::Parameter,
+                    &RepUseFacts { tuple_spelled: true, span: None },
+                    RepGuarantees { nobox: false, allow_opaque: true },
                 )?,
                 _ => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
             };
@@ -1958,7 +1994,22 @@ impl RepArena {
         } else {
             params
                 .iter()
-                .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
+                .zip(param_tuple_spelled)
+                .map(|(ty, &tuple_spelled)| {
+                    if tuple_spelled {
+                        self.plan(
+                            ws,
+                            target,
+                            ty,
+                            RepUse::Parameter,
+                            &RepUseFacts { tuple_spelled: true, span: None },
+                            RepGuarantees { nobox: false, allow_opaque: true },
+                        )
+                        .expect("concrete ABI planner must accept a validated tuple parameter")
+                    } else {
+                        self.intern(target, RepUse::Parameter, RepLayout::Opaque)
+                    }
+                })
                 .collect()
         };
         let mut result = result_ty.map(|ty| {
@@ -2358,7 +2409,11 @@ impl BackendFnAbiPlan {
         scx: &ScalarCtx,
         ty: &crate::monoty::MonoTy,
     ) -> Result<FunctionRepPlan, RepError> {
-        scx.rep_arena().function_value(ws, scx.target, ty)
+        if scx.values_first_class {
+            scx.rep_arena().function_value_first_class(ws, scx.target, ty)
+        } else {
+            scx.rep_arena().function_value(ws, scx.target, ty)
+        }
     }
 
     pub fn for_function_value_with_mode(

@@ -250,7 +250,7 @@ pub const NATIVE_C64_DESKTOP: TargetSpec = TargetSpec {
     name: "native-c64-desktop",
     platform: DESKTOP,
     execution: NATIVE_C64,
-    shader: None,
+    shader: Some(GLSL_330),
 };
 
 pub const WASM32_WASI: TargetSpec =

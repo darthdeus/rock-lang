@@ -1,0 +1,4 @@
+pub mod navigation;
+
+pub struct NavigationMob { hp: int }
+pub struct NavigationRoom { mobs: [NavigationMob] }

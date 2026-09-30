@@ -312,6 +312,8 @@ fn clone_type_kind(ast: &mut Ast, kind: TypeExprKind) -> TypeExprKind {
         | TypeExprKind::Int
         | TypeExprKind::Uint
         | TypeExprKind::Float
+        | TypeExprKind::F64
+        | TypeExprKind::F32
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
         | TypeExprKind::Ident(_)

@@ -62,9 +62,9 @@ inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 // ============================================================================
 //
 // `Ptr<T>` and the sized variants (PtrU8/PtrI8/PtrU16/PtrI16/PtrU32) are
-// empty phantom structs. At runtime they carry raw LuaJIT cdata (no
-// wrapper table — the inline(lua) constructors return the cdata directly
-// and Rock's static typing is nominal). At compile time they give
+// empty phantom values whose representation the backend supplies: raw
+// LuaJIT cdata on Lua (no wrapper table; the inline(lua) constructors return
+// the cdata directly), a native pointer on C. Copying one shares the referent. At compile time they give
 // extern(ffi) signatures the power to say "this argument must be a
 // float* (not an int*, not a uint8_t*)" without runtime cost.
 //
@@ -73,12 +73,15 @@ inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 // keeps working — the runtime value is still cdata, the Rock type just
 // became more specific.
 
-struct Ptr<T> { }
-struct PtrU8  { }
-struct PtrI8  { }
-struct PtrU16 { }
-struct PtrI16 { }
-struct PtrU32 { }
+value Ptr<T> { }
+value PtrU8  { }
+value PtrI8  { }
+value PtrU16 { }
+value PtrI16 { }
+value PtrU32 { }
+
+// Compiler-owned destination capability for explicit deep copies.
+value Storage { }
 
 // ============================================================================
 // NativeBuffer<T> — typed contiguous ffi buffers
@@ -95,8 +98,11 @@ struct PtrU32 { }
 //
 // Bounds: reads/writes past `len` yield LuaJIT garbage; indexing is 0-based.
 // T ∈ {int, uint, float}; extend with more primitives as needed.
+//
+// A `value` descriptor: copying one copies the whole descriptor (on Lua, the
+// one table with its hidden leaf views) and shares the storage.
 
-struct NativeBuffer<T> {
+value NativeBuffer<T> {
     ptr: Ptr<T>,
     len: int,
 }
@@ -468,11 +474,11 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 // can declare the exact variant they accept — passing `PtrI16` where
 // `PtrU8` is expected is a compile error.
 
-struct NativeBufferU8  { ptr: PtrU8,  len: int }
-struct NativeBufferI8  { ptr: PtrI8,  len: int }
-struct NativeBufferU16 { ptr: PtrU16, len: int }
-struct NativeBufferI16 { ptr: PtrI16, len: int }
-struct NativeBufferU32 { ptr: PtrU32, len: int }
+value NativeBufferU8  { ptr: PtrU8,  len: int }
+value NativeBufferI8  { ptr: PtrI8,  len: int }
+value NativeBufferU16 { ptr: PtrU16, len: int }
+value NativeBufferI16 { ptr: PtrI16, len: int }
+value NativeBufferU32 { ptr: PtrU32, len: int }
 
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'local r = ffi.new("uint8_t[?]", n); return r'
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'local r = ffi.new("int8_t[?]", n); return r'
@@ -544,6 +550,21 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     for field, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
         if buf[field] ~= nil then buf[field] = ffi.cast(cast_ty, buf.ptr) end
     end
+"""
+
+// Copy-on-write for a Rock-level field write on a descriptor (`buf.len = n`):
+// copies share the descriptor table, so the write lands on a fresh one that
+// keeps the leaf views, reseated when `ptr` changes. The compiler emits the call.
+@nomangle inline(lua) fn __descriptor_with(d: any, field: string, v: any) -> any = """
+    local out = {}
+    for k, x in pairs(d) do out[k] = x end
+    out[field] = v
+    if field == "ptr" then
+        for view, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
+            if out[view] ~= nil then out[view] = ffi.cast(cast_ty, v) end
+        end
+    end
+    return setmetatable(out, getmetatable(d))
 """
 
 // Bounds-check WITHOUT taking a slot reference: returns the index unchanged.
@@ -1105,7 +1126,7 @@ extern(lua) fn print(args: ...any)
 fn print_float(value: float) { print(to_string(value)) }
 
 // Error handling
-extern(lua) fn error(message: string)
+@intrinsic extern(lua) fn error(message: string)
 
 // Note: Lua has built-in tostring(), declare as extern
 extern(lua) fn tostring(value: any) -> string
@@ -1259,7 +1280,7 @@ inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
 // so it makes no layout claim and carries the contract that says so. It stays
 // spelled `T`: that is the inference edge giving `vec_new()` its element type,
 // and `any`/`any?` would sever it. See `docs/boundary-contracts.md` 2.4.
-@inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
+@relocates @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
 """
@@ -1367,7 +1388,7 @@ fn Vec<T>.remove_at(vec, index: int) -> T? {
     }
     let value: T? = cast(__vec_data_get(vec, index))
     for i in index..(vec.len - 1) {
-        __vec_data_set(vec, i, __vec_data_get(vec, i + 1))
+        __vec_data_set(vec, i, cast(__vec_data_get(vec, i + 1)))
     }
     __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
@@ -1380,7 +1401,7 @@ fn Vec<T>.swap_remove(vec, index: int) -> T? {
     }
     let value: T? = cast(__vec_data_get(vec, index))
     if index + 1 < vec.len {
-        __vec_data_set(vec, index, __vec_data_get(vec, vec.len - 1))
+        __vec_data_set(vec, index, cast(__vec_data_get(vec, vec.len - 1)))
     }
     __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
@@ -1486,7 +1507,7 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
 
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
-@inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
+@intrinsic @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
 
 @inline fn unwrap<T>(value: T?) -> T {
     if value != null { return value }
@@ -1666,6 +1687,14 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // Rock name rather than the emitted symbol.
 inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(obj, {})
+"""
+
+@intrinsic @native_required inline(lua) fn clone_into<T>(value: T, storage: Storage) -> T = """
+    return __rock_deepcopy_value(value, {})
+"""
+
+@intrinsic @native_required inline(lua) fn map_storage<K, V>(map: Map<K, V>) -> Storage = """
+    return nil
 """
 
 @materialize @intrinsic @pure fn materialize<T>(value: T) -> T {
@@ -1865,7 +1894,7 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
 // representation, so a missing column route fell through to the boxed body.
 // Both callers are Map methods (`remove`, `clear`).
-@inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
+@relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -1876,15 +1905,17 @@ inline(lua) fn table_new() -> any = """return {}"""
 // no call frame.
 // The RECEIVER is typed so 2.4 can protect these: spelled `any` they claimed no
 // representation, and a missing column route fell through to the boxed body and
-// died at runtime on `_data` instead of rejecting. The VALUE stays `any` -- it
-// is stored opaquely. `docs/boundary-contracts.md` 2.3b.
+// died at runtime on `_data` instead of rejecting. The stored VALUE is spelled
+// `T` with `@repr(opaque)`, as `vec_push`'s item is: it makes no layout claim,
+// and an `any` would erase an Arena row (docs/identity-storage-plan.md S0d).
+// `docs/boundary-contracts.md` 2.3b.
 // Not `@nomangle`: nothing calls these by their bare name. `@nomangle` is what
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
 @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, value: any) = "vec._data[index + 1] = value"
-@inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
+@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
+@relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
@@ -1907,7 +1938,7 @@ inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
 
 inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
 
-inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+@relocates inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
     table.insert(vec._data, lua_index, value)
 """
 
@@ -1917,7 +1948,7 @@ inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     return { _data = copy, len = vec.len, __ty = "Vec" }
 """
 
-inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+@relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
@@ -2406,7 +2437,7 @@ const EPSILON: float = 0.0000001
     return tostring(a) < tostring(b)
 """
 
-@nomangle inline(lua) fn __sort_map_keys(keys: any) = """
+@relocates @nomangle inline(lua) fn __sort_map_keys<K>(keys: [K]) = """
     table.sort(keys._data, __rock_inspect_key_lt)
 """
 
@@ -2436,6 +2467,20 @@ const EPSILON: float = 0.0000001
 // Thin wrapper kept for compiler codegen compatibility (incremental.rs emits inspect_formatted calls).
 @nomangle inline(lua) fn inspect_formatted(obj: any, precision: int) -> string = """
     return inspect(obj, true, precision)
+"""
+
+// A string inside a structural rendering (enum payload, value-record field):
+// quoted and escaped as a Rock literal so the text stays on one line.
+@nomangle inline(lua) fn __rock_quote_string(s: string) -> string = """
+    local escaped = string.gsub(s, "[%c\"\\]", function(c)
+        if c == "\\" then return "\\\\" end
+        if c == "\"" then return "\\\"" end
+        if c == "\n" then return "\\n" end
+        if c == "\t" then return "\\t" end
+        if c == "\r" then return "\\r" end
+        return string.format("\\u{%X}", string.byte(c))
+    end)
+    return "\"" .. escaped .. "\""
 """
 
 // Smart float formatting for `"{x}"` interpolation: scientific for
@@ -2920,6 +2965,7 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
 struct Vec<T> {
     _data: any,
     len: int,
+    storage: Storage = phantom(),
 }
 
 // Vec iteration -- `for x in vec` desugars through this iter/next pair
@@ -3332,23 +3378,28 @@ fn RingBuffer<T>.clear(rb) {
     rb.head = 0
 }
 
+// Holds the shared `data` descriptor and the oldest slot rather than the
+// buffer, which is a mutable identity and cannot be stored in a field.
 struct RingIter<T> {
-    rb: RingBuffer<T>,
+    data: [T],
+    oldest: int,
+    cap: int,
+    n: int,
     i: int,
 }
 
 @inline
 fn RingBuffer<T>.iter(rb) -> RingIter<T> {
-    return RingIter { rb: rb, i: 0 }
+    let n = rb.data.len
+    return RingIter { data: rb.data, oldest: (rb.head + rb.cap - n) % rb.cap, cap: rb.cap, n: n, i: 0 }
 }
 
 @inline
 fn RingIter<T>.next(it) -> (bool, T) {
-    let n = it.rb.data.len
-    if it.i >= n { return (false, phantom()) }
-    let idx = (it.rb.head + it.rb.cap - n + it.i) % it.rb.cap
+    if it.i >= it.n { return (false, phantom()) }
+    let idx = (it.oldest + it.i) % it.cap
     it.i = it.i + 1
-    return (true, it.rb.data[idx])
+    return (true, it.data[idx])
 }
 
 // Vec operations

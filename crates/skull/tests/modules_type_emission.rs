@@ -100,7 +100,7 @@ fn v1_nominal_types_mint_identifiers_and_keep_the_key_for_identity() {
     );
     assert!(
         emitted.lua.contains("\"v1ty::a::Color::Blue\""),
-        "display text stays the readable path"
+        "display text is the package-qualified path"
     );
 }
 
