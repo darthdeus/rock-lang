@@ -8,8 +8,8 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::TyId;
 use ustr::Ustr;
 
-use super::shape::{declared_value_storage, static_ty};
-use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueStorage};
+use super::shape::{declared_value_storage, static_ty, GcFieldEq};
+use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueShape, ValueStorage};
 use crate::mir::{Inst, MirFunc};
 
 /// One physical answer for one logical field. Inline/nobox fields and flat
@@ -106,7 +106,7 @@ impl StructRegistryPlan {
                 .get(&name)
                 .ok_or_else(|| plan_error(format!("struct registry type `{name}` is not declared")))?;
             let s = &ws.modules[sid.module.index()].structs[sid.def];
-            if s.is_value && !value_plans.contains_key(&name) {
+            if crate::lower::has_value_plan(s) && !value_plans.contains_key(&name) {
                 value_plans.insert(name, arena.plan_nominal_value(ws, target, name)?);
             }
             for field in &s.fields {
@@ -237,7 +237,7 @@ pub fn struct_field_plan(
         )));
     }
 
-    let parent_is_value = sd.is_value;
+    let parent_is_value = crate::lower::has_value_plan(sd);
     let parent_storage = if parent_is_value && !spliced {
         Some(declared_value_storage(ws, target, sname).ok_or_else(|| {
             plan_error(format!("struct `{sname}` has no resolved value storage plan"))
@@ -245,8 +245,10 @@ pub fn struct_field_plan(
     } else {
         None
     };
+    // Only a cdata parent nests a child whole; every table parent keys an
+    // inline child's leaves by dotted path.
     if (fdef.is_embed || child.is_some_and(|s| s.is_nobox))
-        && (spliced || !parent_is_value || parent_storage == Some(ValueStorage::LeafTable))
+        && (spliced || !parent_is_value || parent_storage != Some(ValueStorage::CData))
     {
         return Ok(StructFieldPlan::Inline { child: child_name, nullable, flat: None });
     }
@@ -260,4 +262,152 @@ pub fn struct_field_plan(
         }
     }
     Ok(StructFieldPlan::Direct { child: Some(child_name), nullable })
+}
+
+/// One declared field of a GC-table (`<Name>_vt`) value box: a single key, or
+/// an inline (`nobox`/embed) child whose leaves the box keys by dotted path
+/// under the field's name, presence tag at the name itself -- the layout a
+/// plain struct and a leaf-table value already give such a child.
+#[derive(Clone, Debug)]
+pub struct GcTableField {
+    pub name: Ustr,
+    pub ty: TyId,
+    pub(crate) inline: Option<ValueShape>,
+}
+
+impl GcTableField {
+    /// This field's box keys in ctor order, each flagged when it is a nullable
+    /// child's presence tag rather than a data leaf.
+    pub fn keys(&self) -> Vec<(Ustr, bool)> {
+        let Some(sub) = &self.inline else {
+            return vec![(self.name, false)];
+        };
+        let mut presence = Vec::new();
+        super::shape::presence_flags_rec(sub, true, &mut presence);
+        super::shape::leaf_names(sub, self.name.as_str(), ".")
+            .into_iter()
+            .map(|key| Ustr::from(&key))
+            .zip(presence)
+            .collect()
+    }
+
+    pub fn is_inline(&self) -> bool {
+        self.inline.is_some()
+    }
+
+    /// Per key of [`Self::keys`]: the declared field's equality operation.
+    pub fn keys_eq(&self, ws: &Workspace) -> Vec<GcFieldEq> {
+        let Some(sub) = &self.inline else {
+            return vec![super::shape::gc_field_eq(ws, self.ty)];
+        };
+        let mut out = Vec::new();
+        leaf_eq(ws, sub, true, &mut out);
+        out
+    }
+
+    /// The Lua expression rendering this field's value off box `v` for the
+    /// box's `__tostring`: an inline child renders as its own box would.
+    pub fn lua_tostring(&self) -> String {
+        match &self.inline {
+            None => format!("tostring(v.{})", self.name),
+            Some(sub) => lua_tostring_inline(sub, self.name.as_str()),
+        }
+    }
+}
+
+fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFieldEq>) {
+    if shape.nullable && nested {
+        out.push(GcFieldEq::Native);
+    }
+    if ws.enums_by_name.contains_key(&shape.name) {
+        // Flat enum payload slots may contain reference structs or boxed enums;
+        // native equality on those slots would lose the enum's contents walk.
+        let payload_eq = if super::shape::flat_enum_equality_is_leafwise(ws, shape.name) {
+            GcFieldEq::Native
+        } else {
+            GcFieldEq::Structural
+        };
+        out.push(GcFieldEq::Native);
+        out.extend(std::iter::repeat_n(payload_eq, shape.leaf_count() - 1));
+        return;
+    }
+    let decl = ws
+        .struct_by_name
+        .get(&shape.name)
+        .map(|sid| &ws.modules[sid.module.index()].structs[sid.def]);
+    for (fname, fs) in &shape.fields {
+        match fs {
+            super::FieldShape::Prim => out.push(
+                decl.and_then(|s| s.fields.iter().find(|f| f.name == *fname))
+                    .map_or(GcFieldEq::Native, |f| super::shape::gc_field_eq(ws, f.ty)),
+            ),
+            super::FieldShape::Nested(sub) => leaf_eq(ws, sub, true, out),
+        }
+    }
+}
+
+fn lua_tostring_inline(shape: &ValueShape, prefix: &str) -> String {
+    let parts: Vec<String> = shape
+        .fields
+        .iter()
+        .map(|(fname, fs)| {
+            let key = format!("{prefix}.{fname}");
+            let value = match fs {
+                super::FieldShape::Prim => format!("tostring(v[\"{key}\"])"),
+                super::FieldShape::Nested(sub) => lua_tostring_inline(sub, &key),
+            };
+            format!("\"{fname}: \" .. {value}")
+        })
+        .collect();
+    let body = if parts.is_empty() {
+        format!("\"{} {{ }}\"", shape.name)
+    } else {
+        format!("\"{} {{ \" .. {} .. \" }}\"", shape.name, parts.join(" .. \", \" .. "))
+    };
+    if shape.nullable {
+        format!("(v[\"{prefix}\"] == nil and \"nil\" or ({body}))")
+    } else {
+        format!("({body})")
+    }
+}
+
+/// The declared fields of GC-table value `name` with their physical layout, in
+/// declaration order. The concatenated [`GcTableField::keys`] are the
+/// `<Name>_vt` ctor's parameters and the box's keys; every reader and writer of
+/// the box takes them from here.
+pub fn gc_table_fields(
+    ws: &Workspace,
+    target: FnBackend,
+    name: Ustr,
+) -> Result<Vec<GcTableField>, RepError> {
+    let sid = ws
+        .struct_by_name
+        .get(&name)
+        .ok_or_else(|| plan_error(format!("GC-table value `{name}` is not a declared struct")))?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    let shape = super::shape::value_shape_gc(ws, name)
+        .ok_or_else(|| plan_error(format!("GC-table value `{name}` has no GC shape")))?;
+    if shape.fields.len() != sd.fields.len() {
+        return Err(plan_error(format!("GC-table value `{name}` shape does not match its fields")));
+    }
+    sd.fields
+        .iter()
+        .zip(shape.fields)
+        .map(|(f, (_, fs))| {
+            let inline = if struct_field_plan(ws, target, name, f.name, false)?.embed().is_some() {
+                match fs {
+                    super::FieldShape::Nested(sub) => Some(sub),
+                    super::FieldShape::Prim => {
+                        return Err(plan_error(format!(
+                            "GC-table value `{name}` inlines field `{}` with no leaf shape",
+                            f.name
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
+            Ok(GcTableField { name: f.name, ty: f.ty, inline })
+        })
+        .collect()
 }

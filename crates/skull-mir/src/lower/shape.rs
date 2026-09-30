@@ -18,6 +18,14 @@ use ustr::Ustr;
 use crate::concrete::ConcreteSignature;
 use crate::monoty::{MonoCtor, MonoTy};
 
+/// Whether `sd` is a `value` lowered through the value plans. A stdlib
+/// descriptor (`Ptr`, `NativeBuffer`) is a `value` whose representation the
+/// backend supplies: on Lua, the one host slot holding the cdata or the buffer
+/// table with its leaf views, which a copy shares and never rebuilds.
+pub fn has_value_plan(sd: &bone_semantic::hir::StructDef) -> bool {
+    sd.is_value && !bone_semantic::prelude::is_descriptor_key(sd.name)
+}
+
 pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<usize> {
     all_float_leaf_count_rec(ws, name, &mut Vec::new())
 }
@@ -25,14 +33,14 @@ pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<u
 pub(crate) fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value || visiting.contains(&name) {
+    if !has_value_plan(sd) || visiting.contains(&name) {
         return None;
     }
     visiting.push(name);
     let mut total = 0usize;
     for f in &sd.fields {
-        let n = match static_ty(ws, f.ty)? {
-            TypeExpr::Builtin(BuiltinTy::Float) => 1,
+        let n = match static_ty(ws, f.storage_ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float | BuiltinTy::F32) => 1,
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
                 match all_float_leaf_count_rec(ws, n, visiting) {
                     Some(k) => k,
@@ -74,8 +82,8 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
     let mut out = Vec::with_capacity(sd.fields.len());
     let mut offset = 0usize;
     for f in &sd.fields {
-        match static_ty(ws, f.ty)? {
-            TypeExpr::Builtin(BuiltinTy::Float) => {
+        match static_ty(ws, f.storage_ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float | BuiltinTy::F32) => {
                 out.push(ValueSlotField { name: f.name, offset, nested: None });
                 offset += 1;
             }
@@ -113,7 +121,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
                     return false;
                 };
                 let decl = &ws.modules[sid.module.index()].structs[sid.def];
-                if !decl.is_value || visiting.contains(&child) {
+                if !has_value_plan(decl) || visiting.contains(&child) {
                     return false;
                 }
                 visiting.push(child);
@@ -257,6 +265,7 @@ pub(crate) fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &
 /// leaf type here reaches all of them; a hand-written list in any of them is the
 /// bug this replaces.
 pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
+    ("double", "__vd", "double*"),
     ("float", "__vf", "float*"),
     ("int", "__vi", "int*"),
     ("uint32_t", "__vu", "uint32_t*"),
@@ -399,6 +408,7 @@ pub struct LeafSlot {
 /// types [`value_field_c_type`] admits as leaves.
 pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     match cty {
+        "double" => Some((8, 8)),
         "int" | "uint32_t" | "float" => Some((4, 4)),
         "bool" => Some((1, 1)),
         _ => None,
@@ -649,7 +659,7 @@ fn planned_value_rec(
     }
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value || visiting.contains(&name) {
+    if !has_value_plan(sd) || visiting.contains(&name) {
         return None;
     }
     visiting.push(name);
@@ -657,10 +667,11 @@ fn planned_value_rec(
     let mut cdata = sd.generics.is_empty();
     let mut scalarizable = true;
     for field in &sd.fields {
-        let planned = match static_ty(ws, field.ty) {
+        let planned = match static_ty(ws, field.storage_ty) {
             Some(TypeExpr::Builtin(BuiltinTy::Int)) => PlannedField::Primitive("int"),
             Some(TypeExpr::Builtin(BuiltinTy::Uint)) => PlannedField::Primitive("uint32_t"),
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => PlannedField::Primitive("float"),
+            Some(TypeExpr::Builtin(BuiltinTy::Float)) => PlannedField::Primitive("double"),
+            Some(TypeExpr::Builtin(BuiltinTy::F32)) => PlannedField::Primitive("float"),
             Some(TypeExpr::Builtin(BuiltinTy::Bool)) => PlannedField::Primitive("bool"),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), .. })
                 if payload_free_enum_variants(ws, child).is_some() =>
@@ -767,6 +778,48 @@ pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<V
         out.push(v.name);
     }
     Some(out)
+}
+
+/// Whether a Lua value of `ty` holds no mutable heap storage: every leaf is a
+/// scalar, a string or a payload-free enum, through nullables and non-generic
+/// nobox value structs. Such a value is already its own copy.
+pub(crate) fn lua_value_is_immutable(ws: &Workspace, ty: &MonoTy) -> bool {
+    match ty {
+        MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool | MonoTy::String => true,
+        MonoTy::Nullable(inner) => lua_value_is_immutable(ws, inner),
+        MonoTy::App { ctor: MonoCtor::Nominal(name), params } if params.is_empty() => {
+            lua_nominal_is_immutable(ws, *name, &mut Vec::new())
+        }
+        _ => false,
+    }
+}
+
+fn lua_nominal_is_immutable(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> bool {
+    if payload_free_enum_variants(ws, name).is_some() {
+        return true;
+    }
+    let Some(sid) = ws.struct_by_name.get(&name) else { return false };
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !has_value_plan(sd) || !sd.is_nobox || !sd.generics.is_empty() || visiting.contains(&name) {
+        return false;
+    }
+    visiting.push(name);
+    let immutable = sd.fields.iter().all(|field| lua_decl_is_immutable(ws, field.ty, visiting));
+    visiting.pop();
+    immutable
+}
+
+fn lua_decl_is_immutable(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> bool {
+    match static_ty(ws, ty) {
+        Some(TypeExpr::Builtin(
+            BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String,
+        )) => true,
+        Some(TypeExpr::Nullable(inner)) => lua_decl_is_immutable(ws, ty.with_idx(inner), visiting),
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(child), params }) if params.is_empty() => {
+            lua_nominal_is_immutable(ws, child, visiting)
+        }
+        _ => false,
+    }
 }
 
 /// `Some(ordinal)` iff `name` is a payload-free enum and `variant` is one of its
@@ -1207,7 +1260,7 @@ pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
 pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    if !sd.is_value {
+    if !has_value_plan(sd) {
         return None;
     }
     Some(sd.fields.iter().map(|f| (f.name, f.ty)).collect())
@@ -1326,8 +1379,9 @@ pub struct NoboxGlobalAccessorShape {
     /// shape unbuildable.
     pub presence_path: Option<Ustr>,
     /// Why no accessor can be built, if so. `_lct` is positional over physical
-    /// leaves, while `_vt` is positional over declared fields; nested GC-table
-    /// fields therefore cannot be rebuilt from the flattened global storage.
+    /// leaves, while `_vt` is positional over its box keys (`gc_table_fields`),
+    /// which split only `nobox` fields into leaves; a GC table with a nested
+    /// boxed child therefore cannot be rebuilt from the flattened storage.
     pub unbuildable: Option<String>,
 }
 
@@ -1373,14 +1427,20 @@ pub fn nobox_global_accessor_shape(
         ValueStorage::CData if has_nested => "_lct",
         ValueStorage::CData => "_ct",
     };
+    // `_vt` is positional over its box keys: a declared field whole, a `nobox`
+    // field by its dotted leaves. It is the accessor's ctor exactly when those
+    // keys are the storage's leaf paths.
     let unbuildable = if storage == ValueStorage::GcTable {
-        paths.iter().find(|p| p.contains('.')).map(|nested| {
+        let keys: Vec<Ustr> = super::gc_table_fields(ws, scx.target, shape.name)?
+            .iter()
+            .flat_map(|f| f.keys().into_iter().map(|(key, _)| key))
+            .collect();
+        (keys != paths).then(|| {
             format!(
-                "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
-                 storage is {} leaves including a nested one (`{nested}`), so the accessor \
-                 would pass a leaf where the ctor wants a nested value",
+                "`{}{ctor_suffix}` is positional over its box keys {keys:?}, but this \
+                 type's storage is the leaves {paths:?}, so the accessor would pass a leaf \
+                 where the ctor wants a nested value",
                 shape.name,
-                paths.len(),
             )
         })
     } else {
@@ -1989,7 +2049,7 @@ pub(crate) fn scalar_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
     match static_ty(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some("int"),
         TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t"),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some("float"),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some("double"),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool"),
         _ => None,
     }
@@ -2054,7 +2114,8 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
     match static_ty(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some("int".into()),
         TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t".into()),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some("float".into()),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some("double".into()),
+        TypeExpr::Builtin(BuiltinTy::F32) => Some("float".into()),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
         // A nested value struct is C-mappable iff it is itself FFI-clean; a
         // GC-carrying nested value struct makes this field (and its parent)
@@ -2080,24 +2141,33 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId) -> Option<Str
     }
 }
 
-/// Whether a value-struct field is compared STRUCTURALLY in a GC-tier `__eq`
-/// (`==`, which for scalars/enums is value-equality and for a nested value
-/// struct fires that struct's own metatable), versus BY REFERENCE (`rawequal`).
-/// Scalars, enums, and nested value structs (either tier) are structural; a true
-/// GC-ref field (`[T]`, `Arena<T>`, `Map`, a generic `T`, `string`) is by
-/// reference -- `string` gives the same answer either way (Lua interns; JS `===`
-/// matches), and the contract fixes GC-refs to identity. Consumed by BOTH the
-/// Lua GC-tier `_vt.__eq` emitter (`skull::value_struct_gc_defs`) and the JS
-/// `__rock_vt_eq` registry -- the single field-dispatch oracle, sibling to
-/// the shared physical storage plan.
-pub fn gc_eq_is_structural(ws: &Workspace, ty: TyId) -> bool {
+/// The equality operation for a GC-table value field, shared by Lua and JS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcFieldEq {
+    /// A true GC reference, including generic fields and interned strings.
+    Reference,
+    /// Scalars, cdata enums and nested value structs with native equality.
+    Native,
+    /// Boxed enums use the same structural helper as direct enum equality.
+    Structural,
+}
+
+pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
     if value_field_c_type(ws, ty).is_some() {
-        return true;
+        return GcFieldEq::Native;
     }
-    matches!(
-        static_ty(ws, ty),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name)
-    )
+    match static_ty(ws, ty) {
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
+            if map_is_value_struct(ws, name) {
+                GcFieldEq::Native
+            } else if ws.enums_by_name.contains_key(&name) {
+                GcFieldEq::Structural
+            } else {
+                GcFieldEq::Reference
+            }
+        }
+        _ => GcFieldEq::Reference,
+    }
 }
 
 pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr) -> bool {
@@ -2174,7 +2244,7 @@ impl EnumFlatShape {
     /// The first slot index of payload position `pos`. Positions past the end
     /// answer with the total width, so a variant narrower than the union simply
     /// has nothing to write.
-    pub(crate) fn slot_offset(&self, pos: usize) -> usize {
+    pub fn slot_offset(&self, pos: usize) -> usize {
         self.slots.iter().take(pos).map(FlatSlot::width).sum()
     }
 
@@ -2189,6 +2259,10 @@ impl EnumFlatShape {
         };
         let n = name?;
         vss.iter().find(|vs| vs.name == n)
+    }
+
+    pub fn position_leaf_paths(&self, pos: usize, name: Ustr) -> Option<Vec<Ustr>> {
+        self.position_shape(pos, Some(name)).map(value_leaf_paths)
     }
 
     /// The number of scalar leaves this enum threads as across a call: the
@@ -2396,6 +2470,7 @@ fn equality_payload_is_leafwise(
             | BuiltinTy::Int
             | BuiltinTy::Uint
             | BuiltinTy::Float
+            | BuiltinTy::F32
             | BuiltinTy::Bool
             | BuiltinTy::String
             | BuiltinTy::Never,

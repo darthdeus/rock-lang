@@ -574,6 +574,14 @@ assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refres
 -- as a table key, and because a typedef'd anonymous struct only gets its
 -- `struct <n>` spelling from LuaJIT. Registering through the same `ffi.typeof`
 -- the lookup uses is what makes the two agree.
+-- The write into an `f32` field: round through one reused float cell, so the
+-- field holds the same number in a table, a scalarized local or cdata.
+local __rock_f32_cell = ffi.new("float[1]")
+local function __rock_f32(x)
+  __rock_f32_cell[0] = x
+  return __rock_f32_cell[0]
+end
+_G.__rock_f32 = __rock_f32
 _G.__ROCK_NB_STORAGE = {}
 local function __rock_nb_storage(ctype, elem_size, views)
   local ok, ct = pcall(ffi.typeof, ctype .. "[?]")
@@ -974,7 +982,7 @@ fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<Stri
 fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
-        .and_then(|sid| ws.modules.get(sid.module.index()).map(|m| m.structs[sid.def].is_value))
+        .and_then(|sid| ws.modules.get(sid.module.index()).map(|m| skull_mir::lower::has_value_plan(&m.structs[sid.def])))
         .unwrap_or(false)
 }
 
@@ -987,7 +995,7 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
         .values()
         .filter_map(|sid| {
             let s = &ws.modules.get(sid.module.index())?.structs[sid.def];
-            s.is_value.then(|| s.clone())
+            skull_mir::lower::has_value_plan(s).then(|| s.clone())
         })
         .collect();
     v.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
@@ -1104,7 +1112,7 @@ fn value_struct_defs(
             for f in &s.fields {
                 // An FFI-clean struct has every field C-mappable by construction
                 // (that is what the `CData` storage plan means).
-                let ct = c_field_type(ws, f.ty).expect(
+                let ct = c_field_type(ws, f.storage_ty).expect(
                     "FFI-clean value-struct field must be C-mappable (CData storage invariant)",
                 );
                 let dep = ustr::Ustr::from(ct.as_str());
@@ -1306,60 +1314,81 @@ fn value_struct_gc_defs(
             ));
             continue;
         }
+        // The box's keys: a declared field's name, or an inline child's dotted
+        // leaf paths (`skull_mir::lower::gc_table_fields`, shared with every
+        // MIR reader and writer of the box).
+        let fields = skull_mir::lower::gc_table_fields(ws, bone_semantic::hir::FnBackend::Lua, n)
+            .map_err(|e| CompilerError::new_no_location(e.message))?;
         // value __eq
         out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
         out.push_str("  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n");
-        if s.fields.is_empty() {
+        let cmps: Vec<String> = fields
+            .iter()
+            .flat_map(|f| f.keys().into_iter().zip(f.keys_eq(ws)))
+            .map(|((key, _), equality)| {
+                let (a, b) = (lua_key_read("a", key.as_str()), lua_key_read("b", key.as_str()));
+                match equality {
+                    skull_mir::lower::GcFieldEq::Reference => format!("rawequal({a}, {b})"),
+                    skull_mir::lower::GcFieldEq::Native => format!("{a} == {b}"),
+                    skull_mir::lower::GcFieldEq::Structural => format!("__op_eq({a}, {b})"),
+                }
+            })
+            .collect();
+        if cmps.is_empty() {
             out.push_str("  return true\n");
         } else {
-            let cmps: Vec<String> = s
-                .fields
-                .iter()
-                .map(|f| {
-                    if skull_mir::lower::gc_eq_is_structural(ws, f.ty) {
-                        format!("a.{n} == b.{n}", n = f.name)
-                    } else {
-                        format!("rawequal(a.{n}, b.{n})", n = f.name)
-                    }
-                })
-                .collect();
             out.push_str(&format!("  return {}\n", cmps.join(" and ")));
         }
         out.push_str("end\n");
         // __tostring: field-wise, mirroring the cdata tier's `Name { f: v, .. }`.
         out.push_str(&format!("{mt}.__tostring = function(v)\n"));
-        if s.fields.is_empty() {
+        if fields.is_empty() {
             out.push_str(&format!("  return \"{n} {{ }}\"\n"));
         } else {
-            let ts: Vec<String> = s
-                .fields
-                .iter()
-                .map(|f| format!("\"{}: \" .. tostring(v.{})", f.name, f.name))
-                .collect();
+            let ts: Vec<String> =
+                fields.iter().map(|f| format!("\"{}: \" .. {}", f.name, f.lua_tostring())).collect();
             out.push_str(&format!(
                 "  return \"{n} {{ \" .. {} .. \" }}\"\n",
                 ts.join(" .. \", \" .. ")
             ));
         }
         out.push_str("end\n");
-        // `<Name>_vt(...)` positional ctor in declared field order.
-        let params: Vec<String> = s.fields.iter().map(|f| f.name.as_str().to_string()).collect();
-        let assigns: Vec<String> =
-            s.fields.iter().map(|f| format!("{n} = {n}", n = f.name)).collect();
-        let mut body = assigns.join(", ");
-        if !body.is_empty() {
-            body.push_str(", ");
+        // `<Name>_vt(...)` positional ctor over the box keys. A declared field's
+        // parameter keeps its name; an inline leaf's is positional, since a
+        // dotted path has no injective identifier spelling.
+        let mut params = Vec::new();
+        let mut body = String::new();
+        for f in &fields {
+            for (key, presence) in f.keys() {
+                let param = if f.is_inline() {
+                    format!("__rock_l{}", params.len())
+                } else {
+                    key.as_str().to_string()
+                };
+                // An absent tag canonicalizes to `nil`, as the leaf-table ctor's.
+                let value = if presence { format!("{param} or nil") } else { param.clone() };
+                if f.is_inline() {
+                    body.push_str(&format!("[\"{key}\"] = {value}, "));
+                } else {
+                    body.push_str(&format!("{key} = {value}, "));
+                }
+                params.push(param);
+            }
         }
         out.push_str(&format!(
             "{sym}_vt = function({p})\n{r}\nend\n",
             p = params.join(", "),
             r = skull_codegen_lua::wrapper_return(&format!(
-                "setmetatable({{ {b}__ty = \"{sym}\" }}, {mt})",
-                b = body,
+                "setmetatable({{ {body}__ty = \"{sym}\" }}, {mt})",
             )),
         ));
     }
     Ok(out)
+}
+
+/// `t.key`, or `t["a.b"]` for a dotted leaf key.
+fn lua_key_read(table: &str, key: &str) -> String {
+    if key.contains('.') { format!("{table}[\"{key}\"]") } else { format!("{table}.{key}") }
 }
 
 /// Emit the `ffi.cdef` typedef + `<Enum>_ct` ctor for every cdata-eligible enum
@@ -1959,7 +1988,7 @@ fn type_table_defs(
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
             // immutable Lua tables (`value_table`).
-            let kind = if !s.is_value {
+            let kind = if !skull_mir::lower::has_value_plan(s) {
                 "struct"
             } else if gc.contains(&s.name) {
                 "value_table"
@@ -2421,6 +2450,37 @@ mod tests {
     fn exec_global_init_dep_through_call() {
         exec_eq("global A: int = read_b()\nglobal B: int = 42\n\
                    fn read_b() -> int { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
+    }
+
+    /// PINNED BUG (sentinel, docs/test-sentinels.md): a plain FFI-clean value
+    /// nested in a `nobox` value that a struct field holds. The struct stores
+    /// the child's leaves under fully dotted keys (`place.pos.x`), but a read
+    /// of `h.place.pos.x` loads the undotted `place.pos` key, gets nil and
+    /// fails at runtime. Found migrating mag-simulation's `ContinuousPlace`
+    /// (worked around by making `SpacePoint` nobox). When this fails, the
+    /// read and store agree: flip it into an execution test that prints 9.5.
+    #[test]
+    fn nobox_value_holding_a_plain_value_reads_an_unstored_key_sentinel() {
+        let lua = emit(
+            "nobox value Sid { value: int }\nvalue Pt { x: float, y: float }\n\
+             nobox value CPlace { space: Sid, pos: Pt }\nstruct Holder { place: CPlace }\n\
+             fn make(p: CPlace) -> Holder { return Holder { place: p } }\n\
+             fn pos_x(h: Holder) -> float { return h.place.pos.x }",
+        );
+        assert!(
+            lua.contains("[\"place.pos.x\"]") && lua.contains("[\"place.pos\"]"),
+            "PINNED BUG: expected a dotted-leaf store and an undotted read; got:\n{lua}"
+        );
+    }
+
+    /// The same edge when the helper returns a value through the scalar ABI:
+    /// the init calls it as a multi-return (`Inst::CallMulti`), which must count
+    /// as a call edge too, or `A` runs before `B` and indexes nil.
+    #[test]
+    fn exec_global_init_dep_through_value_returning_call() {
+        exec_eq("global A: int = read_b().x\nvalue P { x: int, s: string }\n\
+                   global B: P = P { x: 42, s: \"b\" }\n\
+                   fn read_b() -> P { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
     }
 
 
