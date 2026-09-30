@@ -25,15 +25,14 @@ easy to break, so keep these habits:
   `crates/bone-semantic/src/query.rs` is just `type_at`, the position->type primitive that
   bone's `//^` fixtures and LSP hover both read.
 
-## Verify against real rock before deciding bone's behavior
+## Verify expected Rock behavior before changing bone
 
-bone is a STRICT port of rock's type system, so "what should bone do here?" is
-always answered by what REAL rock does -- not by an existing fixture or a
-plausible assumption. Probe it: `cargo run --bin rock test /tmp/x.rock`. This
-has caught wrong assumptions that were baked into fixtures/docs (comparison
-int/float widening -- the doc said "strict", rock widens; `any` coercion --
-feared too-generous, was actually mostly-correct). 30 seconds of probing beats
-implementing the wrong spec.
+Bone is Rock's only typechecker; Skull consumes Bone's typed program. A
+`cargo run --bin rock test /tmp/x.rock` probe reproduces current behavior but
+is not an independent typechecker oracle. Check the language contract and
+focused fixtures before changing semantics; use a probe to test an assumption
+against the current compiler, then make the expected behavior explicit in a
+RED fixture. If the contract and behavior disagree, diagnose the discrepancy.
 
 ## Testing incremental work: deterministic gates first
 
@@ -50,9 +49,11 @@ The deterministic work-counter now exists: `Workspace.reinferred_body_count`
 (`Arc<AtomicUsize>`) -- `check_module_incremental` bumps it on the non-reuse
 (real `check_function`) branch, and `Session::update_file` resets it per edit. So
 re-inference reuse asserts `== 1` deterministically (`body_edit_reinfers_only_
-the_changed_body`, which replaced the flaky timing ratio). An analogous
-`relowered` counter for per-body LOWERING (rung 2, `docs/parked/skull.md`) is
-still missing -- add it the same way.
+the_changed_body`, which replaced the flaky timing ratio).
+`Workspace.relowered_body_count` is the lowering twin, reset per edit and
+bumped by full, partial, and body-fast-path lowering. Use it to assert lowering
+work directly; `UpdateResult.relowered` has different semantics when lowering
+fails.
 
 ## Design docs -- read first
 

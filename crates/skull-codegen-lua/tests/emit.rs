@@ -1099,7 +1099,7 @@ fn for_vec_backed_iter_inline_is_zero_alloc() {
 // --- Slice 4.5 acceptance gate: the desugared+inlined counted loop is rewritten
 // into the codegen CountedLoop shape and prints as a native numeric `for` (FORL
 // bytecode). The goto-LOOP form of the same loop measured 1.8x slower on a
-// type-stable 2M-element sum (docs/iterator-implementation-plan.md, slice 4.5).
+// type-stable 2M-element sum (docs/iterator-implementation-plan.md, "FORL recovery").
 #[test]
 fn for_user_iter_inline_emits_forl() {
     let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");

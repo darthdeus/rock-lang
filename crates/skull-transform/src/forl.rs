@@ -4,7 +4,7 @@
 //! `for` (LuaJIT FORL bytecode: hoisted bounds check, counted back-edge,
 //! int<->double transition tolerance). The goto-LOOP form of the same loop
 //! measures 1.8x slower on a type-stable 2M-element sum
-//! (`docs/iterator-implementation-plan.md` slice 4.5).
+//! (`docs/iterator-implementation-plan.md`, "FORL recovery").
 //!
 //! Fires ONLY on loops tagged by `lower_for_user_iter`
 //! (`MirFunc::for_iter_headers`). The one observable change is bound SNAPSHOT:
