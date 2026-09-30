@@ -32,7 +32,7 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 288 | 216 | 8 | 0 | 1374 | 29 | 137 | 3229 | 85 | 5366 |
+| mag | exempt | 231 | 191 | 7 | 0 | 1029 | 26 | 118 | 2795 | 85 | 4482 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 1 | 2 | 0 | 6 | 0 | 0 | 0 | 0 | 9 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -47,7 +47,7 @@ const PINNED: &str = "\
 | testbed | exempt | 5 | 3 | 0 | 0 | 135 | 2 | 2 | 74 | 68 | 289 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| unpackaged programs | exempt | 104 | 13 | 5 | 0 | 131 | 49 | 1 | 0 | 50 | 353 |
+| unpackaged programs | exempt | 104 | 13 | 6 | 0 | 131 | 49 | 1 | 0 | 50 | 354 |
 | void | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |
 
