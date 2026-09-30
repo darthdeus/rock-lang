@@ -332,3 +332,44 @@ fn receiver_and_identity_returning_helpers_are_refused() {
         assert!(run.stdout.contains(if tag == "receiver" { "receiver-style" } else { "returns an identity" }), "{}", shown(&run));
     }
 }
+
+#[test]
+fn mob_helpers_forward_the_original_entity() {
+    let (out, run) = applied("mob_helper", "co fn inner(m: Mob) -> Coroutine<int> {\n    await frame(1)\n    m.hp = 3\n}\nco fn outer(m: Mob) -> Coroutine<int> {\n    await inner(m)\n    m.hp = 4\n}\n@sim\nco fn caller() -> Coroutine<int> {\n    let target = spawn_mob(5)\n    let m = target.get() ?? return\n    await outer(m)\n}\n");
+    assert!(out.contains("co fn inner(e: Entity<Mob>)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("let m = e.get().unwrap()\n    await frame(1)\n    m = e.get().unwrap()"), "{}\n{out}", shown(&run));
+    assert!(out.contains("await inner(e)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("await outer(target)"), "{}\n{out}", shown(&run));
+    assert!(run.stdout.contains("co-param 2 -> 0"), "{}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}
+
+#[test]
+fn mob_helper_without_a_local_entity_is_refused() {
+    for (tag, init) in [("found", "find_boss()"), ("global", "BOSS.get().unwrap()")] {
+        let helper = "co fn helper(m: Mob) -> Coroutine<int> {\n    await frame(1)\n    m.hp = 3\n}\n";
+        let sim = format!("{helper}@sim\nco fn caller() -> Coroutine<int> {{\n    let m = {init}\n    await helper(m)\n}}\n");
+        let (out, run) = applied(&format!("mob_helper_{tag}"), &sim);
+        assert!(out.contains(helper), "{}\n{out}", shown(&run));
+        assert!(run.stdout.contains("refused helper"), "{}", shown(&run));
+        assert_eq!(run.code, Some(3), "{}", shown(&run));
+    }
+}
+
+#[test]
+fn mob_helper_avoids_handle_name_collisions_and_updates_named_calls() {
+    let (out, run) = applied("mob_collision", "co fn helper(m: Mob) -> Coroutine<int> {\n    let e = 1\n    await frame(e)\n    m.hp = e\n}\n@sim\nco fn caller() -> Coroutine<int> {\n    let target = spawn_mob(5)\n    await helper(m: target.get().unwrap())\n}\n");
+    assert!(out.contains("helper(e_2: Entity<Mob>)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("await helper(e_2: target)"), "{}\n{out}", shown(&run));
+    assert!(out.contains("m = e_2.get().unwrap()"), "{}\n{out}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}
+
+#[test]
+fn mob_helper_does_not_move_death_tested_handles_into_the_helper() {
+    let helper = "co fn helper(m: Mob) -> Coroutine<int> {\n    await frame(1)\n    m.hp = 3\n}\n";
+    let sim = format!("{helper}@sim\nco fn caller() -> Coroutine<int> {{\n    let target = spawn_mob(5)\n    await helper(target.get().unwrap())\n    let gone = target.get() == null\n}}\n");
+    let (out, run) = applied("mob_helper_death", &sim);
+    assert!(out.contains(helper), "{}\n{out}", shown(&run));
+    assert!(run.stdout.contains("for death"), "{}", shown(&run));
+}

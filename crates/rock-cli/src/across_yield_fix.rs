@@ -430,6 +430,7 @@ struct HelperParam {
     index: usize,
     binding: Idx<BindingInfo>,
     identity: String,
+    handle: String,
 }
 
 /// All callers must migrate with the declaration. Refuse this file's helper
@@ -455,9 +456,7 @@ fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             Some("co helper returns an identity")
         } else if identities.len() != 1 {
             Some("co helper has multiple identity parameters")
-        } else if identities[0].1 == "Mob" {
-            Some("Mob co helper needs Entity forwarding")
-        } else if body.binding_arena.iter().any(|(_, b)| b.name.as_str() == "world") {
+        } else if identities[0].1 != "Mob" && body.binding_arena.iter().any(|(_, b)| b.name.as_str() == "world") {
             Some("co helper already binds `world`")
         } else if f.param_decls[identities[0].0].has_default {
             Some("identity parameter has a default")
@@ -471,7 +470,10 @@ fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
         let (index, identity) = identities.into_iter().next().expect("one identity");
         let binding = body.binding_arena.iter().find(|(_, b)| b.kind == BindingKind::Param && b.name == f.param_decls[index].name)
             .map(|(b, _)| b).expect("parameter binding");
-        params.insert(fid, HelperParam { index, binding, identity });
+        let handle = if identity == "Mob" {
+            free_name(body, "e")
+        } else { "world".to_string() };
+        params.insert(fid, HelperParam { index, binding, identity, handle });
     }
     if params.is_empty() {
         return (Vec::new(), refused);
@@ -493,10 +495,12 @@ fn helper_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             refused.push(format!("refused helper `{}`: unsupported parameter declaration", f.name));
             continue;
         };
-        edits.push(Edit::new((f.span.offset_range.0 + found.start(), f.span.offset_range.0 + found.end()), "world: Scene<WorldState>"));
+        let declaration = if param.identity == "Mob" { format!("{}: Entity<Mob>", param.handle) }
+            else { format!("{}: Scene<WorldState>", param.handle) };
+        edits.push(Edit::new((f.span.offset_range.0 + found.start(), f.span.offset_range.0 + found.end()), declaration));
         let line_start = text[..f.name_span.offset_range.0].rfind('\n').map_or(0, |i| i + 1);
         let indent: String = text[line_start..f.name_span.offset_range.0].chars().take_while(|c| c.is_whitespace()).collect();
-        let resolution = if param.identity == "Player" { "world.player()" } else { "world.get().unwrap()" };
+        let resolution = format!("{}.{}", param.handle, if param.identity == "Player" { "player()" } else { "get().unwrap()" });
         edits.push(Edit::new((start + 1, start + 1), format!("\n{indent}    let {name} = {resolution}")));
     }
     if refused.is_empty() { (edits, refused) } else { (Vec::new(), refused) }
@@ -534,7 +538,11 @@ fn helper_parameter_edits(
                 }).ok_or("caller does not supply the identity parameter")?;
                 let caller_param = (m.id == module.id).then(|| params.get(caller)).flatten();
                 let caller_f = &m.functions[*caller];
-                let source = scene_argument(ws, caller_f, body, arg, text, caller_param, &param.identity)?;
+                let source = if param.identity == "Mob" {
+                    entity_argument(ws, m, *owner, body, arg, text, caller_param)?
+                } else {
+                    scene_argument(ws, caller_f, body, arg, text, caller_param, &param.identity)?
+                };
                 let span = body.expr_spans[arg];
                 let mut range = span.offset_range;
                 let replacement = if body.arg_names.contains_key(&arg) {
@@ -542,7 +550,7 @@ fn helper_parameter_edits(
                     let label = Regex::new(&format!(r"\b{}\s*:\s*$", f.param_decls[param.index].name)).expect("identifier regex");
                     let found = label.find(before).ok_or("unsupported named argument span")?;
                     range.0 = body.expr_spans[e].offset_range.0 + found.start();
-                    format!("world: {source}")
+                    format!("{}: {source}", param.handle)
                 } else { source };
                 edits.push(Edit::new(range, replacement));
             }
@@ -551,13 +559,58 @@ fn helper_parameter_edits(
     Ok(edits)
 }
 
+fn free_name(body: &Body, base: &str) -> String {
+    let mut name = base.to_string();
+    let mut suffix = 2;
+    while body.binding_arena.iter().any(|(_, b)| b.name.as_str() == name) {
+        name = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    name
+}
+
+fn entity_argument(
+    ws: &Workspace, module: &Module, owner: BodyOwner, body: &Body, arg: Idx<Expr>, text: &str,
+    helper: Option<&HelperParam>,
+) -> std::result::Result<String, String> {
+    let (resolution, span) = match body.expr_arena[arg] {
+        Expr::Var(b) => {
+            if helper.is_some_and(|p| p.binding == b && p.identity == "Mob") && !assigned(body, b) {
+                return Ok(helper.expect("matched").handle.clone());
+            }
+            let init = let_value(body, b).ok_or("caller Mob is not bound by a plain `let`")?;
+            (rebind_text(body, b, text)?, body.expr_spans[init])
+        }
+        _ => (slice(text, body.expr_spans[arg]).trim().to_string(), body.expr_spans[arg]),
+    };
+    let root = body.expr_arena.iter()
+        .filter(|(e, _)| body.expr_spans[*e].offset_range.0 == span.offset_range.0)
+        .min_by_key(|(e, _)| body.expr_spans[*e].offset_range.1).map(|(_, expr)| expr);
+    let Some(Expr::Var(root)) = root else { return Err("caller Mob is not resolved from a local Entity".to_string()) };
+    let name = body.binding_arena[*root].name;
+    if resolution != format!("{name}.get().unwrap()") || assigned(body, *root) {
+        return Err("caller Mob is not resolved from an unreassigned Entity".to_string());
+    }
+    if death_tested(body, text, name.as_str()) {
+        return Err(format!("the sim tests `{name}` for death, so a rebinding could fail; read what it needs before the suspension"));
+    }
+    let bi = ws.inference(module.id).and_then(|i| i.per_fn.get(&owner)).ok_or("caller was not inferred")?;
+    let ty = ws.render(Some(bi), bi.binding_types[*root]);
+    if !ty.rsplit_once("Entity<").is_some_and(|(_, inner)| {
+        inner.strip_suffix('>').is_some_and(|name| name.rsplit("::").next() == Some("Mob"))
+    }) {
+        return Err("caller Mob handle is not an Entity<Mob>".to_string());
+    }
+    Ok(name.to_string())
+}
+
 fn scene_argument(
     ws: &Workspace, f: &Function, body: &Body, arg: Idx<Expr>, text: &str,
     helper: Option<&HelperParam>, identity: &str,
 ) -> std::result::Result<String, String> {
     if let Expr::Var(b) = body.expr_arena[arg] {
         if helper.is_some_and(|p| p.binding == b && p.identity == identity) && !assigned(body, b) {
-            return Ok("world".to_string());
+            return Ok(helper.expect("matched").handle.clone());
         }
     }
     let has_scene = f.param_decls.iter().any(|p| {
@@ -566,7 +619,7 @@ fn scene_argument(
             inner.strip_suffix('>').is_some_and(|name| name.rsplit("::").next() == Some("WorldState"))
         })
     });
-    if !has_scene && helper.is_none() {
+    if !has_scene && !helper.is_some_and(|p| p.identity != "Mob") {
         return Err("caller has no scene parameter to forward".to_string());
     }
     let wanted = if identity == "Player" { "world.player()" } else { "world.get().unwrap()" };
@@ -704,8 +757,7 @@ fn rebind_text(body: &Body, binding: Idx<BindingInfo>, text: &str) -> std::resul
         }
         _ => return Err(format!("`{}` is not a parameter or local", &m[1])),
     }
-    let death_test = Regex::new(&format!(r"\b{}\.(get\(\)\s*[!=]=\s*null|is_live\(\))", &m[1])).expect("escaped name");
-    if death_test.is_match(slice(text, body.expr_spans[body.root.ok_or("no body")?])) {
+    if death_tested(body, text, &m[1]) {
         return Err(format!("the sim tests `{}` for death, so a rebinding could fail; read what it needs before the suspension", &m[1]));
     }
     let rebind = format!("{}.{}", &m[1], if &m[2] == "player()" { "player()" } else { "get().unwrap()" });
@@ -719,6 +771,11 @@ fn rebind_text(body: &Body, binding: Idx<BindingInfo>, text: &str) -> std::resul
         return Err("it is reassigned".to_string());
     }
     Ok(rebind)
+}
+
+fn death_tested(body: &Body, text: &str, name: &str) -> bool {
+    let death_test = Regex::new(&format!(r"\b{name}\.(get\(\)\s*[!=]=\s*null|is_live\(\))")).expect("identifier regex");
+    body.root.is_some_and(|root| death_test.is_match(slice(text, body.expr_spans[root])))
 }
 
 fn assigned(body: &Body, binding: Idx<BindingInfo>) -> bool {
