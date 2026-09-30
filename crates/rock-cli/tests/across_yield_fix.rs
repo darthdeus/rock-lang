@@ -377,9 +377,20 @@ fn mob_helper_does_not_move_death_tested_handles_into_the_helper() {
 #[test]
 fn compact_loop_and_branch_rebind_inside_the_block() {
     let (out, run) = applied("compact", "@sim\nco fn compact() -> Coroutine<int> {\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    while p.hp < 3 { await frame(1) }\n    if p.hp == 3 { await frame(2) }\n    p.hp = 4\n}\n");
-    assert!(out.contains("while p.hp < 3 { await frame(1)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
-    assert!(out.contains("if p.hp == 3 { await frame(2)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
+    assert!(out.contains("while p.hp < 3 {\n        await frame(1)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
+    assert!(out.contains("if p.hp == 3 {\n        await frame(2)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
     assert!(run.stdout.contains("across-yield 3 -> 0"), "{}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+}
+
+#[test]
+fn one_line_block_rebind_expands_the_block() {
+    let (out, run) = applied("one_line_block", "@sim\nco fn one_line_block() -> Coroutine<int> {\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    if true { await frame(1) }\n    p.hp = 4\n}\n");
+    assert!(out.contains("if true {\n        await frame(1)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
+    assert_eq!(run.code, Some(0), "{}", shown(&run));
+
+    let (out, run) = applied("one_line_block_multiple", "@sim\nco fn one_line_block_multiple() -> Coroutine<int> {\n    let p = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    if true { let delay = 1; await frame(delay) }\n    p.hp = 4\n}\n");
+    assert!(out.contains("if true {\n        let delay = 1;\n        await frame(delay)\n        p = world.player()\n    }"), "{}\n{out}", shown(&run));
     assert_eq!(run.code, Some(0), "{}", shown(&run));
 }
 

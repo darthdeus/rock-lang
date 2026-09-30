@@ -689,7 +689,12 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
             crossed.entry((c.function, c.binding)).or_default().extend(c.suspensions);
         }
     }
+    let mut function_suspensions = BTreeMap::new();
+    for ((fid, _), suspensions) in &crossed {
+        function_suspensions.entry(*fid).or_insert_with(Vec::new).extend(suspensions.iter().copied());
+    }
     let mut inserts: BTreeMap<(usize, usize), (String, Vec<(usize, String)>)> = BTreeMap::new();
+    let mut block_expansions = BTreeMap::new();
     let mut rebound = std::collections::BTreeSet::new();
     let mut captured = std::collections::BTreeSet::new();
     let mut edits = Vec::new();
@@ -699,7 +704,7 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
         let at = rebind_text(body, binding, text).and_then(|rebind| {
             let mut lines = Vec::new();
             for s in suspensions {
-                lines.push((after_statement(body, binding, s, text)?, rebind.clone()));
+                lines.push((after_statement(body, binding, s, text, &function_suspensions[&fid])?, rebind.clone()));
             }
             Ok(lines)
         });
@@ -709,6 +714,9 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
                 let decl = body.binding_spans[binding].offset_range.0;
                 rebound.insert((fid, binding));
                 for (point, rebind) in lines {
+                    for (range, text) in point.expansion {
+                        block_expansions.entry(range).or_insert(text);
+                    }
                     let line = format!("\n{}{name} = {rebind}", point.indent);
                     let (_, at) = inserts.entry(point.range).or_insert_with(|| (point.suffix, Vec::new()));
                     if !at.iter().any(|(_, l)| *l == line) {
@@ -725,6 +733,7 @@ fn rebind_edits(ws: &Workspace, module: &Module, id: Ustr, text: &str) -> (Vec<E
         insert.push_str(&suffix);
         edits.push(Edit::new(range, insert));
     }
+    edits.extend(block_expansions.into_iter().map(|(range, text)| Edit::new(range, text)));
 
     let mut closures: BTreeMap<(Idx<Function>, Idx<Expr>, Idx<BindingInfo>), ()> = BTreeMap::new();
     for site in identity_module_body_sites(ws, module) {
@@ -844,11 +853,18 @@ struct RebindPoint {
     range: (usize, usize),
     indent: String,
     suffix: String,
+    expansion: Vec<((usize, usize), String)>,
 }
 
 /// Insert after the holding statement, staying inside compact blocks. A use
 /// inside a larger expression needs an expression rewrite, not a later rebind.
-fn after_statement(body: &Body, binding: Idx<BindingInfo>, suspension: Idx<Expr>, text: &str) -> std::result::Result<RebindPoint, String> {
+fn after_statement(
+    body: &Body,
+    binding: Idx<BindingInfo>,
+    suspension: Idx<Expr>,
+    text: &str,
+    suspensions: &[Idx<Expr>],
+) -> std::result::Result<RebindPoint, String> {
     let span = body.expr_spans[suspension];
     let block = innermost(body, span, |e| matches!(e, Expr::Block { .. })).ok_or("suspension outside a block")?;
     let Expr::Block { statements, tail } = &body.expr_arena[block] else { unreachable!() };
@@ -870,9 +886,48 @@ fn after_statement(body: &Body, binding: Idx<BindingInfo>, suspension: Idx<Expr>
     let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
     let leading: String = text[line_start..start].chars().take_while(|c| c.is_whitespace()).collect();
     let compact = !text[line_start..start].trim().is_empty();
-    let indent = if compact { format!("{leading}    ") } else { leading.clone() };
+    let inline_depth = body
+        .expr_arena
+        .iter()
+        .filter(|(e, expr)| {
+            matches!(expr, Expr::Block { .. })
+                && contains(body.expr_spans[*e], span)
+                && body.expr_spans[*e].offset_range.0 >= line_start
+        })
+        .count();
+    let indent = if compact { format!("{leading}{}", "    ".repeat(inline_depth.max(1))) } else { leading.clone() };
+    let closing_indent = if compact { format!("{leading}{}", "    ".repeat(inline_depth.saturating_sub(1))) } else { leading.clone() };
+    let (block_start, block_end) = body.expr_spans[block].offset_range;
+    let mut block_items: Vec<_> = statements
+        .clone()
+        .map(|s| body.statement_spans[s])
+        .chain(tail.map(|t| body.expr_spans[t]))
+        .collect();
+    block_items.sort_by_key(|item| item.offset_range.0);
+    let (body_start, close) = (block_start + 1, block_end - 1);
+    let mut expansion = Vec::new();
+    if !block_items.is_empty()
+        && text.get(block_start..block_start + 1) == Some("{")
+        && text.get(close..block_end) == Some("}")
+        && text.get(block_start..block_end).is_some_and(|s| !s.contains('\n'))
+    {
+        let (first_start, _) = block_items[0].offset_range;
+        let prefix = &text[body_start..first_start];
+        if prefix.chars().all(char::is_whitespace) {
+            expansion.push(((body_start, first_start), format!("\n{indent}")));
+            for pair in block_items.windows(2) {
+                let (_, previous_end) = pair[0].offset_range;
+                let (next_start, _) = pair[1].offset_range;
+                let gap = &text[previous_end..next_start];
+                if suspensions.iter().any(|s| contains(pair[0], body.expr_spans[*s])) || gap.contains('\n') {
+                    continue;
+                }
+                expansion.push(((previous_end, next_start), format!("{}\n{indent}", gap.trim_end())));
+            }
+        }
+    }
     if rest.is_empty() || rest.starts_with("//") {
-        return Ok(RebindPoint { range: (line_end, line_end), indent, suffix: String::new() });
+        return Ok(RebindPoint { range: (line_end, line_end), indent, suffix: String::new(), expansion });
     }
     let mut next = end;
     if text[next..].starts_with(';') { next += 1; }
@@ -880,8 +935,8 @@ fn after_statement(body: &Body, binding: Idx<BindingInfo>, suspension: Idx<Expr>
     if next >= body.expr_spans[block].offset_range.1 {
         return Err(format!("line {} continues outside the suspension's block", holder.line_range.1 + 1));
     }
-    let suffix = if text[next..].starts_with('}') { format!("\n{leading}") } else { format!("\n{indent}") };
-    Ok(RebindPoint { range: (end, next), indent, suffix })
+    let suffix = if text[next..].starts_with('}') { format!("\n{closing_indent}") } else { format!("\n{indent}") };
+    Ok(RebindPoint { range: (end, next), indent, suffix, expansion })
 }
 
 /// Across-yield, capture and co-param sites in `id`, unique by line and identity as the
