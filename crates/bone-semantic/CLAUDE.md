@@ -58,12 +58,11 @@ fails.
 ## Design docs -- read first
 
 These predate recent work and may lag current state (check against the source
-and the parked note before trusting them):
+before trusting them):
 
 - `docs/bone-backend-plan.md` -- current state, capability, open items (entry point).
 - `docs/bone-typechecker-architecture.md` -- architecture + how inference / stdlib loading work.
 - `docs/bone-hir-mir-plan.md`
-- `docs/parked/bone.md` -- current state + next steps (kept fresh via `/park`).
 
 ## Cross-arena copy invariant (learned the hard way)
 
