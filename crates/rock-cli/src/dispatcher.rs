@@ -403,6 +403,18 @@ impl CommandContext {
         if self.args.allocation_census.is_some() && self.args.allocation_sites.is_some() {
             anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms");
         }
+        if self.args.sim_plan {
+            if self.args.files.is_empty() {
+                anyhow::bail!("sim --plan needs a project: rock sim --plan <project> [names]");
+            }
+            return crate::run_sim::do_plan_sims(
+                backend,
+                &self.args.files[0],
+                &self.args.files[1..],
+                self.args.jobs,
+                crate::run_sim::sim_batch_quantum(self.args.batch_quantum)?,
+            );
+        }
         if let Some(path) = self.args.allocation_sites.as_deref() {
             if self.args.list {
                 anyhow::bail!("--allocation-sites cannot be combined with sim --list");

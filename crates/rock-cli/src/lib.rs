@@ -735,6 +735,8 @@ pub struct Args {
     /// one per line, then exit. Skips the runner. Used by
     /// `just anvil-sim` to avoid hardcoding the sim array.
     pub list: bool,
+    /// For `rock sim`: print the ordinary worker plan as JSON without running sims.
+    pub sim_plan: bool,
 
     pub app_args: Vec<String>,
 
@@ -972,6 +974,9 @@ impl Args {
             .arg(Arg::new("budget-ms").long("budget-ms")
                 .value_parser(clap::value_parser!(f64))
                 .help("For `rock iter-completion`: fail when the worst per-keystroke median exceeds this many ms (the completion perf gate)."))
+            .arg(Arg::new("plan").long("plan").action(ArgAction::SetTrue)
+                .conflicts_with_all(["list", "isolated", "multi-order", "allocation-census", "allocation-sites", "update-snapshots"])
+                .help("For `rock sim`: compile/discover and print ordinary worker signature sizes and lane counts as JSON, without spawning sims. Honors named selections, --jobs and --batch-quantum."))
             .arg(Arg::new("list").long("list").action(ArgAction::SetTrue)
                 .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."))
             .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
@@ -1094,6 +1099,7 @@ impl Args {
             stride: *m.get_one::<usize>("stride").unwrap(),
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
+            sim_plan: m.get_flag("plan"),
             app_args: many_str("app_args"),
             jv: m.get_flag("jv"),
             agent_headless: m.get_flag("agent-headless"),
@@ -1190,6 +1196,18 @@ mod arg_tests {
         for value in ["0", "bad", "-1"] {
             assert!(Args::command().try_get_matches_from(
                 ["rock", "sim", "mag", "--boot-concurrency", value]).is_err());
+        }
+    }
+
+    #[test]
+    fn batch_quantum_plan_cli_selects_offline_worker_planning() {
+        let args = Args::from_matches(Args::command().try_get_matches_from(
+            ["rock", "sim", "mag", "--plan", "--jobs", "14", "--batch-quantum", "28"]).unwrap());
+        assert!(args.sim_plan);
+        assert_eq!(args.jobs, Some(14));
+        assert_eq!(args.batch_quantum, Some(28));
+        for flag in ["--list", "--isolated", "--multi-order", "--update-snapshots"] {
+            assert!(Args::command().try_get_matches_from(["rock", "sim", "mag", "--plan", flag]).is_err());
         }
     }
 
