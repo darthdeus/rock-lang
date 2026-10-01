@@ -3541,7 +3541,7 @@ pub(crate) fn sim_positive_count(requested: Option<usize>, env_name: &str) -> Re
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => return Err(anyhow!("{env_name}: {error}")),
     };
-    resolve_positive_count(None, env.as_deref()).with_context(|| env_name.to_string())
+    resolve_positive_count(None, env.as_deref()).map_err(|error| anyhow!("{env_name} {error}"))
 }
 
 /// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
