@@ -8,6 +8,8 @@ mod ablation_census_survives_failure;
 mod child_lifetime;
 #[path = "arena_reuse_alloc_gate.rs"]
 mod arena_reuse_alloc_gate;
+#[path = "entity_get_trace_gate.rs"]
+mod entity_get_trace_gate;
 #[path = "allocation_jit_trace_gate.rs"]
 mod allocation_jit_trace_gate;
 #[path = "bone_incremental_timing.rs"]

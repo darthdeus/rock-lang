@@ -18,13 +18,14 @@ struct ArenaStore<T> {
     _owner_scene_id: int,
     generations: [int],
     occupied: [bool],
+    @identity_storage
     data: [T],
     free_indices: [int],
     occupied_count: int = 0,
     next_generation: int = 0,
 }
 
-struct ArenaGenerationSnapshot {
+value ArenaGenerationSnapshot {
     generations: [int],
     free_indices: [int],
     next_generation: int,
@@ -55,15 +56,21 @@ global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
     live_count: 0, retired_since_compact: 0,
 }
 
+// The registry holds each store erased, since one map spans every row type. An
+// `ArenaStore<T>` is an identity, and identities never coerce to ordinary
+// `any`; this is the Arena's only erasure (`@identity_erasure`,
+// docs/identity-storage-plan.md S0d). `cast` recovers the type; neither side
+// does anything at runtime.
+@identity_erasure @inline
+fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
+
 // THE resolution oracle: every Arena operation, the `enumerate(arena)` loop
 // lowering, and the serializer's logical-Arena projection all reach backing
 // through this one function. Non-generic so a synthesized `Inst::Call` and an
 // `inline(lua)` walker can both target it; the element type is recovered by the
 // typed wrapper below, which is a no-op at runtime.
-@nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
-    let found = __ARENA_REGISTRY.stores.get(arena_id)
-    if is_null(found) { return null }
-    let store = found.unwrap()
+@inline @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
+    let store = __ARENA_REGISTRY.stores.get(arena_id) ?? return null
     let owner: ArenaStore<int> = cast(store)
     if owner._owner_scene_id != scene_id { return null }
     return store
@@ -84,7 +91,7 @@ fn __arena_store<T>(arena: Arena<T>) -> ArenaStore<T>? {
 // reject here.
 fn __arena_store_mut<T>(arena: Arena<T>) -> ArenaStore<T> {
     let store = __arena_store(arena)
-    if is_null(store) {
+    if store == null {
         error("Arena {arena._arena_id} is not live (destroyed, or its scene was unloaded)")
     }
     return store.unwrap()
@@ -107,8 +114,8 @@ global __ARENA_DEAD_STORE: ArenaStore<int> = ArenaStore {
 
 fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
     let found = __arena_store(arena)
-    if is_null(found) {
-        let dead: ArenaStore<T> = cast(__ARENA_DEAD_STORE)
+    if found == null {
+        let dead: ArenaStore<T> = cast(__arena_store_erased(__ARENA_DEAD_STORE))
         return dead
     }
     return found.unwrap()
@@ -116,7 +123,7 @@ fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
 
 @nomangle fn __arena_store_or_empty(scene_id: int, arena_id: int) -> any {
     let boxed = __arena_store_any(scene_id, arena_id)
-    if is_null(boxed) { return __ARENA_DEAD_STORE }
+    if is_null(boxed) { return __arena_store_erased(__ARENA_DEAD_STORE) }
     return boxed.unwrap()
 }
 
@@ -136,7 +143,7 @@ fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
         generations: [], occupied: [], data: [], free_indices: [],
         occupied_count: 0, next_generation: 0,
     }
-    __ARENA_REGISTRY.stores.insert(id, store)
+    __ARENA_REGISTRY.stores.insert(id, __arena_store_erased(store))
     __ARENA_REGISTRY.live_count += 1
     return Arena { _scene_id: scene_id, _arena_id: id }
 }
@@ -149,7 +156,7 @@ fn __arena_reinitialize<T>(arena: Arena<T>) {
         generations: [], occupied: [], data: [], free_indices: [],
         occupied_count: 0, next_generation: 0,
     }
-    __ARENA_REGISTRY.stores.insert(arena._arena_id, store)
+    __ARENA_REGISTRY.stores.insert(arena._arena_id, __arena_store_erased(store))
 }
 
 // Retires one Arena incarnation, releasing its rows. True on the first call,
@@ -223,12 +230,17 @@ fn __entity_arena<T>(entity: Entity<T>) -> Arena<T> {
 // slots there. Text traces reach their glyph loop with both nearly spent
 // (docs/trace-pressure-work-plan.md).
 fn Entity<T>.get(entity) -> T? {
-    let boxed = __arena_store_any(entity._scene_id, entity._arena_id)
-    if is_null(boxed) { return null }
-    let store: ArenaStore<T> = cast(boxed.unwrap())
+    let boxed = __arena_store_any(entity._scene_id, entity._arena_id) ?? return null
+    let store: ArenaStore<T> = cast(boxed)
+    // A live slot is in range for `data` (see `arena_slot_live`).
     if !arena_slot_live(store, entity._slot, entity._generation) { return null }
-    return store.data[entity._slot]
+    return cast(__vec_data_get(store.data, entity._slot))
 }
+
+@intrinsic @native_required inline(lua)
+fn Entity<T>.storage(entity) -> Storage = """
+    return nil
+"""
 
 fn Entity<T>.borrow(entity) -> (ref T)? { return borrow(__entity_arena(entity), entity) }
 
@@ -249,12 +261,19 @@ fn entity_key<T>(entity: Entity<T>) -> string {
 }
 
 // Whether `slot` names a live row matching `generation`. The single
-// occupancy+generation test every op shares -- `occupied.get` doubles as the
-// range check, returning null past the end.
+// occupancy+generation test every op shares, inlined into every trace that
+// reads a row, so it carries no guard the answer does not need (ledger B2a,
+// ENTITY READ TRACE COST). There is no range check: the occupancy column only
+// grows one slot at a time through `__slot_alloc` and `clear` replaces it, so
+// it holds no element outside `[0, len)` and an out-of-range slot reads as
+// absent, which is "not live". The three columns always have one length, so a
+// live slot is in range for `generations` and `data` too.
+@inline
 fn arena_slot_live<T>(store: ArenaStore<T>, slot: int, generation: int) -> bool {
-    let live = store.occupied.get(slot)
-    if is_null(live) || !live.unwrap() { return false }
-    return store.generations[slot] == generation
+    let live: bool? = cast(__vec_data_get(store.occupied, slot))
+    if live == null || !live.unwrap() { return false }
+    let current: int = cast(__vec_data_get(store.generations, slot))
+    return current == generation
 }
 
 // A handle only addresses the Arena that issued it. Checking identity BEFORE
@@ -271,7 +290,7 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
 
     // Fresh slots arrive at the occupancy column's old length; the other two
     // columns are still one short, which is exactly the test for "grow".
-    let slot = __slot_alloc(store, store.occupied)
+    let slot = __slot_alloc(__arena_store_erased(store), store.occupied)
     if slot == vec_len(store.generations) {
         vec_push(store.generations, generation)
         vec_push(store.data, value)
@@ -291,7 +310,7 @@ fn Arena<T>.reuse_retained_entity(arena) -> Entity<T>? {
 
     let generation = store.next_generation
     store.next_generation = generation + 1
-    let slot = __slot_alloc(store, store.occupied)
+    let slot = __slot_alloc(__arena_store_erased(store), store.occupied)
     assert(slot < vec_len(store.data), "Arena retained slot is outside its data column")
     store.generations.set(slot, generation)
     store.occupied.set(slot, true)
@@ -306,18 +325,14 @@ fn Arena<T>.reuse_retained(arena) -> T? {
 
 fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
     if !__arena_owns(arena, entity) { return null }
-    let found = __arena_store(arena)
-    if is_null(found) { return null }
-    let store = found.unwrap()
-    if !arena_slot_live(store, entity._slot, entity._generation) { return null }
-    return store.data[entity._slot]
+    return entity.get()
 }
 
 @frame_ref_source
 fn Arena<T>.borrow(arena, entity: Entity<T>) -> (ref T)? {
     if !__arena_owns(arena, entity) { return null }
     let found = __arena_store(arena)
-    if is_null(found) { return null }
+    if found == null { return null }
     let store = found.unwrap()
     if !arena_slot_live(store, entity._slot, entity._generation) { return null }
     return store.data[entity._slot]
@@ -326,27 +341,27 @@ fn Arena<T>.borrow(arena, entity: Entity<T>) -> (ref T)? {
 fn Arena<T>.contains(arena, entity: Entity<T>) -> bool {
     if !__arena_owns(arena, entity) { return false }
     let found = __arena_store(arena)
-    if is_null(found) { return false }
+    if found == null { return false }
     return arena_slot_live(found.unwrap(), entity._slot, entity._generation)
 }
 
 fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
     if !__arena_owns(arena, entity) { return null }
     let found = __arena_store(arena)
-    if is_null(found) { return null }
+    if found == null { return null }
     let store = found.unwrap()
     let slot = entity._slot
     if !arena_slot_live(store, slot, entity._generation) { return null }
     // `data[slot]` is left as-is: nothing reads a free slot (every read goes
     // through the occupancy test), and clearing it would mean inventing a T.
     store.occupied.set(slot, false)
-    __slot_release(store, slot)
+    __slot_release(__arena_store_erased(store), slot)
     return store.data[slot]
 }
 
 fn Arena<T>.len(arena) -> int {
     let found = __arena_store(arena)
-    if is_null(found) { return 0 }
+    if found == null { return 0 }
     return found.unwrap().occupied_count
 }
 
@@ -373,7 +388,7 @@ fn arena_registry_storage_bound() -> int {
 // reuses slots leaves this flat while `len()` moves.
 fn arena_slot_count<T>(arena: Arena<T>) -> int {
     let found = __arena_store(arena)
-    if is_null(found) { return 0 }
+    if found == null { return 0 }
     return vec_len(found.unwrap().occupied)
 }
 
@@ -381,7 +396,7 @@ fn arena_slot_count<T>(arena: Arena<T>) -> int {
 // mutable backing store or omitting generations left in vacant slots.
 fn arena_generation_snapshot<T>(arena: Arena<T>) -> ArenaGenerationSnapshot {
     let found = __arena_store(arena)
-    if is_null(found) {
+    if found == null {
         return ArenaGenerationSnapshot {
             generations: [], free_indices: [], next_generation: 0,
         }
@@ -412,7 +427,7 @@ fn Arena<T>.clear(arena) {
 
 fn Arena<T>.random(arena) -> (Entity<T>, T)? {
     let found = __arena_store(arena)
-    if is_null(found) { return null }
+    if found == null { return null }
     let store = found.unwrap()
     let len = store.occupied_count
     if len == 0 { return null }
@@ -453,10 +468,13 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
 // over an empty column rather than an error, matching `len() == 0`.
 //
 // Each iterator snapshots only the columns it yields from: `values()` never
-// touches generations, `keys()` never touches data.
+// touches generations, `keys()` never touches data. The `data` snapshot is
+// the store's own row column, so it is an `@identity_storage` edge like
+// `ArenaStore.data` (docs/identity-storage-plan.md S0d).
 
 struct ArenaValIter<T> {
     occupied: [bool],
+    @identity_storage
     data: [T],
     n: int,
     i: int,
@@ -484,6 +502,7 @@ struct ArenaPairIter<T> {
     arena: Arena<T>,
     occupied: [bool],
     generations: [int],
+    @identity_storage
     data: [T],
     n: int,
     i: int,
