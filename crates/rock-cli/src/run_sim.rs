@@ -1429,6 +1429,7 @@ pub fn do_run_named_sims(
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     boot_concurrency: Option<usize>,
+    batch_quantum: Option<usize>,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
     // is nothing to overlap, so `--jobs` does not apply -- nor `--workers`,
@@ -1464,6 +1465,7 @@ pub fn do_run_named_sims(
         mode,
         &recorder,
         boot_concurrency,
+        batch_quantum,
     );
     let error = result.as_ref().err().map(ToString::to_string);
     recorder.finish(result.is_ok(), error.as_deref());
@@ -1481,6 +1483,7 @@ fn do_run_named_sims_recorded(
     mode: SimExecMode,
     recorder: &SimRunRecorder,
     boot_concurrency: Option<usize>,
+    batch_quantum: Option<usize>,
 ) -> Result<()> {
 
     let project_path = recorder.phase("resolve_project", || {
@@ -1556,6 +1559,7 @@ fn do_run_named_sims_recorded(
             Some(recorder),
             Some(&entry_ids),
             boot_width.as_ref(),
+            batch_quantum,
         )?;
         let mut passed = 0usize;
         let mut excluded = 0usize;
@@ -1964,6 +1968,7 @@ pub fn do_run_all_sims(
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     boot_concurrency: Option<usize>,
+    batch_quantum: Option<usize>,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
@@ -1984,6 +1989,7 @@ pub fn do_run_all_sims(
         mode,
         &recorder,
         boot_concurrency,
+        batch_quantum,
     );
     let error = result.as_ref().err().map(ToString::to_string);
     recorder.finish(result.is_ok(), error.as_deref());
@@ -2000,6 +2006,7 @@ fn do_run_all_sims_recorded(
     mode: SimExecMode,
     recorder: &SimRunRecorder,
     boot_concurrency: Option<usize>,
+    batch_quantum: Option<usize>,
 ) -> Result<()> {
 
     let project_path = recorder.phase("resolve_project", || {
@@ -2081,6 +2088,7 @@ fn do_run_all_sims_recorded(
             Some(recorder),
             Some(&entry_ids),
             boot_width.as_ref(),
+            batch_quantum,
         )?;
         let mut passed = 0usize;
         let mut excluded = manual_excluded;
@@ -2902,6 +2910,7 @@ fn run_specs_worker_mode(
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
     boot_width: Option<&Arc<PoolWidth>>,
+    batch_quantum: Option<usize>,
 ) -> Result<Vec<(String, SimSummary)>> {
 
     let jobs = resolve_jobs(jobs, update_snapshots);
@@ -2939,7 +2948,7 @@ fn run_specs_worker_mode(
     // predecessor for no gain. Keep one boot for a group that fits in one
     // scheduling quantum. A larger group gets the fewest lanes that keep each
     // lane within that quantum, capped by the global pool size.
-    let lanes: Vec<Vec<usize>> = allocate_worker_lanes(&groups, jobs)
+    let lanes: Vec<Vec<usize>> = allocate_worker_lanes(&groups, jobs, batch_quantum)
         .into_iter()
         .map(|lane| lane.into_iter().map(|idx| active_indices[idx]).collect())
         .collect();
@@ -3504,6 +3513,31 @@ pub(crate) fn sim_boot_concurrency(requested: Option<usize>) -> Result<Option<us
         Err(error) => return Err(anyhow!("ROCK_SIM_BOOT_CONCURRENCY: {error}")),
     };
     resolve_boot_concurrency(None, env.as_deref()).context("ROCK_SIM_BOOT_CONCURRENCY")
+}
+
+pub(crate) fn parse_batch_quantum(value: &str) -> std::result::Result<usize, String> {
+    value.parse::<usize>().ok().filter(|cap| *cap > 0)
+        .ok_or_else(|| format!("batch quantum must be a positive integer, got `{value}`"))
+}
+
+fn resolve_batch_quantum(requested: Option<usize>, env: Option<&str>) -> Result<Option<usize>> {
+    match requested {
+        Some(0) => Err(anyhow!("batch quantum must be a positive integer")),
+        Some(cap) => Ok(Some(cap)),
+        None => env.map(parse_batch_quantum).transpose().map_err(anyhow::Error::msg),
+    }
+}
+
+pub(crate) fn sim_batch_quantum(requested: Option<usize>) -> Result<Option<usize>> {
+    if requested.is_some() {
+        return resolve_batch_quantum(requested, None);
+    }
+    let env = match std::env::var("ROCK_SIM_BATCH_QUANTUM") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(anyhow!("ROCK_SIM_BATCH_QUANTUM: {error}")),
+    };
+    resolve_batch_quantum(None, env.as_deref()).context("ROCK_SIM_BATCH_QUANTUM")
 }
 
 /// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
@@ -4180,20 +4214,21 @@ fn group_worker_specs(
     (groups.into_iter().map(|(_, members)| members).collect(), isolated)
 }
 
-fn worker_lane_count(group_len: usize, jobs: usize) -> usize {
+fn worker_lane_count(group_len: usize, jobs: usize, batch_quantum: Option<usize>) -> usize {
     if group_len == 0 {
         return 0;
     }
     let jobs = jobs.max(1);
-    let full_lanes = group_len / jobs;
-    let partial_lane = usize::from(group_len % jobs != 0);
+    let quantum = batch_quantum.unwrap_or(jobs).max(1);
+    let full_lanes = group_len / quantum;
+    let partial_lane = usize::from(group_len % quantum != 0);
     (full_lanes + partial_lane).min(jobs).max(1)
 }
 
-fn allocate_worker_lanes(groups: &[Vec<usize>], jobs: usize) -> Vec<Vec<usize>> {
+fn allocate_worker_lanes(groups: &[Vec<usize>], jobs: usize, batch_quantum: Option<usize>) -> Vec<Vec<usize>> {
     let mut lanes = Vec::new();
     for group in groups {
-        let blocks = worker_lane_count(group.len(), jobs);
+        let blocks = worker_lane_count(group.len(), jobs, batch_quantum);
         for block in 0..blocks {
             let lo = group.len() * block / blocks;
             let hi = group.len() * (block + 1) / blocks;
@@ -7516,6 +7551,18 @@ mod tests {
     }
 
     #[test]
+    fn batch_quantum_is_opt_in_and_cli_overrides_env() {
+        assert_eq!(resolve_batch_quantum(None, None).unwrap(), None);
+        assert_eq!(resolve_batch_quantum(None, Some("2")).unwrap(), Some(2));
+        assert_eq!(resolve_batch_quantum(Some(4), Some("2")).unwrap(), Some(4));
+        assert_eq!(resolve_batch_quantum(Some(4), Some("bad")).unwrap(), Some(4));
+        for value in ["0", "-1", "", "no", "1.5", "184467440737095516160"] {
+            assert!(resolve_batch_quantum(None, Some(value)).is_err(), "{value}");
+        }
+        assert!(resolve_batch_quantum(Some(0), None).is_err());
+    }
+
+    #[test]
     fn boot_concurrency_running_entries_can_fill_all_jobs() {
         let width = Arc::new(PoolWidth::fixed(1));
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -7778,14 +7825,14 @@ mod tests {
     #[test]
     fn worker_lane_allocation_keeps_small_groups_intact() {
         let groups = vec![vec![0, 1], vec![2, 3]];
-        assert_eq!(allocate_worker_lanes(&groups, 4), groups);
+        assert_eq!(allocate_worker_lanes(&groups, 4, None), groups);
     }
 
     #[test]
     fn worker_lane_allocation_uses_available_work_for_large_groups() {
         let group: Vec<usize> = (0..16).collect();
         assert_eq!(
-            allocate_worker_lanes(&[group], 4),
+            allocate_worker_lanes(&[group], 4, None),
             vec![
                 vec![0, 1, 2, 3],
                 vec![4, 5, 6, 7],
@@ -7793,8 +7840,34 @@ mod tests {
                 vec![12, 13, 14, 15],
             ]
         );
-        assert_eq!(worker_lane_count(0, 4), 0);
-        assert_eq!(worker_lane_count(3, 0), 1);
+        assert_eq!(worker_lane_count(0, 4, None), 0);
+        assert_eq!(worker_lane_count(3, 0, None), 1);
+    }
+
+    #[test]
+    fn batch_quantum_lane_counts_preserve_default_and_bound_opt_in() {
+        for (entries, default, quantum) in [
+            (0, 0, 0), (1, 1, 1), (14, 1, 1), (15, 2, 1),
+            (28, 2, 1), (29, 3, 2), (196, 14, 7), (1660, 14, 14),
+        ] {
+            assert_eq!(worker_lane_count(entries, 14, None), default, "N={entries}");
+            assert_eq!(worker_lane_count(entries, 14, Some(28)), quantum, "N={entries}");
+        }
+        assert_eq!(worker_lane_count(usize::MAX, 14, Some(28)), 14);
+        assert_eq!(worker_lane_count(3, 0, Some(28)), 1);
+    }
+
+    #[test]
+    fn batch_quantum_partitions_every_entry_once_in_group_order() {
+        let groups = vec![(0..15).collect(), (15..1675).collect(), vec![], vec![1675]];
+        for quantum in [None, Some(1), Some(28), Some(56), Some(112), Some(usize::MAX)] {
+            let lanes = allocate_worker_lanes(&groups, 14, quantum);
+            assert_eq!(lanes.concat(), (0..1676).collect::<Vec<_>>());
+            assert!(lanes.iter().all(|lane| !lane.is_empty()));
+            for lane in lanes {
+                assert!(groups.iter().any(|group| group.windows(lane.len()).any(|w| w == lane)));
+            }
+        }
     }
 
     /// A comma-chain is scheduled as one entry, so ONE reload part makes the

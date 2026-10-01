@@ -461,6 +461,7 @@ impl CommandContext {
                 self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
                 crate::run_sim::sim_boot_concurrency(self.args.boot_concurrency)?,
+                crate::run_sim::sim_batch_quantum(self.args.batch_quantum)?,
             )
         } else {
             // files[0] = project, files[1..] = one or more sim names. One name
@@ -478,6 +479,7 @@ impl CommandContext {
                 self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
                 crate::run_sim::sim_boot_concurrency(self.args.boot_concurrency)?,
+                crate::run_sim::sim_batch_quantum(self.args.batch_quantum)?,
             )
         }
     }

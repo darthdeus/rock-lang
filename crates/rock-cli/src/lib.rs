@@ -689,6 +689,9 @@ pub struct Args {
     /// For `rock sim`: simultaneous boots, from spawn to first entry. Unset
     /// leaves admission unchanged; ROCK_SIM_BOOT_CONCURRENCY is the env form.
     pub boot_concurrency: Option<usize>,
+    /// For `rock sim`: opt-in entries per scheduling quantum; unset uses jobs.
+    /// ROCK_SIM_BATCH_QUANTUM is the env form.
+    pub batch_quantum: Option<usize>,
     /// For `rock sim`: force one fresh process per entry. This is the permanent
     /// fresh-process reference oracle; the ordinary default uses eligible
     /// boot-checkpoint workers, including rendered sims.
@@ -940,6 +943,9 @@ impl Args {
             .arg(Arg::new("boot-concurrency").long("boot-concurrency").value_name("N")
                 .value_parser(crate::run_sim::parse_boot_concurrency)
                 .help("For `rock sim`: allow at most N workers between spawn and first entry, independently of --jobs. Positive integer; default uncapped. Overrides ROCK_SIM_BOOT_CONCURRENCY, which tools/gate-sims.sh inherits."))
+            .arg(Arg::new("batch-quantum").long("batch-quantum").value_name("Q")
+                .value_parser(crate::run_sim::parse_batch_quantum)
+                .help("For `rock sim`: allocate min(jobs, ceil(entries/Q)) shared-worker lanes per boot signature. Positive integer; unset uses jobs as Q. Overrides ROCK_SIM_BATCH_QUANTUM."))
             .arg(Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other lanes. Default 2. Bounded by --jobs."))
@@ -1077,6 +1083,7 @@ impl Args {
             jobs: m.get_one::<usize>("jobs").copied(),
             full_asset_jobs: m.get_one::<usize>("full-asset-jobs").copied(),
             boot_concurrency: m.get_one::<usize>("boot-concurrency").copied(),
+            batch_quantum: m.get_one::<usize>("batch-quantum").copied(),
             isolated: m.get_flag("isolated"),
             workers: m.get_flag("workers"),
             multi_order: m.get_flag("multi-order"),
@@ -1183,6 +1190,20 @@ mod arg_tests {
         for value in ["0", "bad", "-1"] {
             assert!(Args::command().try_get_matches_from(
                 ["rock", "sim", "mag", "--boot-concurrency", value]).is_err());
+        }
+    }
+
+    #[test]
+    fn batch_quantum_cli_requires_a_positive_integer() {
+        let args = Args::from_matches(Args::command().try_get_matches_from(
+            ["rock", "sim", "mag", "--batch-quantum", "4"]).unwrap());
+        assert_eq!(args.batch_quantum, Some(4));
+        let args = Args::from_matches(Args::command().try_get_matches_from(
+            ["rock", "sim", "mag"]).unwrap());
+        assert_eq!(args.batch_quantum, None);
+        for value in ["0", "bad", "-1"] {
+            assert!(Args::command().try_get_matches_from(
+                ["rock", "sim", "mag", "--batch-quantum", value]).is_err());
         }
     }
 
