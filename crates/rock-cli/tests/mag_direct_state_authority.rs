@@ -145,7 +145,7 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         .expect("read SpaceState body");
     for field in [
         "harvest: HarvestVisualState",
-        "simulation: SpaceSimulationState",
+        "layout: WorldSpaceLayout",
     ] {
         assert_eq!(
             space_state.matches(field).count(),
@@ -159,6 +159,27 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
             "SpaceState must keep `{field}` under its package simulation state"
         );
     }
+    assert!(
+        !space_state.lines().any(|line| line.trim_start().starts_with("simulation:")),
+        "SpaceState must share the package root's simulation record through its layout"
+    );
+    let root = fs::read_to_string(repo.join("mag-world/world_root.rock"))
+        .expect("read package world root");
+    let root_state = root
+        .split_once("pub struct MagWorldRoot<M> {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read MagWorldRoot body");
+    let layout_state = root
+        .split_once("pub struct WorldSpaceLayout {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read WorldSpaceLayout body");
+    assert_eq!(root_state.matches("spaces: [WorldSpaceLayout]").count(), 1);
+    assert_eq!(layout_state.matches("simulation: SpaceSimulationState").count(), 1);
+    assert!(world.contains("root.spaces = layouts"));
+    assert!(world.contains("spaces.push(SpaceState {\n            layout,"));
+    assert!(world.contains("for space in world.root.spaces { simulation_space_advance(space.simulation) }"));
     let simulation = fs::read_to_string(repo.join("mag-simulation/world_space.rock"))
         .expect("read package space state");
     let simulation_state = simulation
@@ -430,10 +451,14 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
 
     let world = fs::read_to_string(repo.join("mag/world_levels.rock"))
         .expect("read MAG world source");
+    let world_state = world
+        .split_once("struct WorldState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read WorldState body");
     for field in [
         "players: Arena<Player>",
         "player: Entity<Player>",
-        "tasks: CoroutinePoller",
         "wisp_motes: Arena<Mote>",
         "wisps: [MagicWisp]",
         "wisp_scatter_t: float",
@@ -442,8 +467,18 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "wisp_mood: MoteMood",
         "tutorial: TutorialState",
     ] {
-        assert!(world.contains(field), "WorldState is missing Scene-owned `{field}`");
+        assert!(world_state.contains(field), "WorldState is missing Scene-owned `{field}`");
     }
+    assert!(world_state.contains("root: MagWorldRoot<Mob>"));
+    assert!(!world_state.lines().any(|line| line.trim() == "tasks: CoroutinePoller,"));
+    let root = fs::read_to_string(repo.join("mag-world/world_root.rock"))
+        .expect("read package world root");
+    let root_state = root
+        .split_once("pub struct MagWorldRoot<M> {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read MagWorldRoot body");
+    assert_eq!(root_state.matches("tasks: CoroutinePoller").count(), 1);
 
     let tutorial = fs::read_to_string(repo.join("mag-simulation/tutorial_state.rock"))
         .expect("read package tutorial state");
@@ -453,16 +488,9 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         .map(|(body, _)| body)
         .expect("read TutorialState body");
     for field in [
-        "precast_dummy: MobId?",
         "precast_dummy_tile: IVec2",
-        "precast_entrance_tiles: [IVec2]",
-        "precast_barrier_tiles: [IVec2]",
         "precast_highlight_next: float",
-        "practice_dummies: [MobId?]",
         "practice_dummy_tiles: [IVec2]",
-        "practice_rewarded: [bool]",
-        "practice_entrance_tiles: [IVec2]",
-        "practice_exit_tiles: [IVec2]",
         "space: SpaceId",
         "space_ready: bool",
     ] {
@@ -470,6 +498,89 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             tutorial_state.matches(field).count(),
             1,
             "TutorialState must contain `{field}` exactly once"
+        );
+    }
+    for former_field in [
+        "precast_dummy:",
+        "practice_dummies:",
+        "precast_entrance_tiles:",
+        "precast_barrier_tiles:",
+        "practice_rewarded:",
+        "practice_entrance_tiles:",
+        "practice_exit_tiles:",
+    ] {
+        assert!(
+            !tutorial_state.lines().any(|line| line.trim_start().starts_with(former_field)),
+            "TutorialState must not duplicate removed `{former_field}` authority"
+        );
+    }
+    let tutorial_runtime = fs::read_to_string(repo.join("mag/tutorial.rock"))
+        .expect("read MAG tutorial runtime");
+    let mob_lookup = rock_function_body(&tutorial_runtime, "fn tutorial_mob_at_in(");
+    for predicate in [
+        "world.root.mobs",
+        "place.space, space",
+        "place.grid == g",
+        "mob.objective_tag == tag",
+    ] {
+        assert!(mob_lookup.contains(predicate), "tutorial mob lookup is missing `{predicate}`");
+    }
+    assert!(tutorial_runtime.contains("\"tutorial.precast_dummy\", tutorial.space"));
+    let practice_drops = rock_function_body(
+        &tutorial_runtime,
+        "fn Player.tutorial_update_practice_drops_in(",
+    );
+    for receipt in [
+        "quest_run_receipt_seen_in(world, \"tutorial.lightning\", \"kill:{tag}\")",
+        "quest_run_receipt_seen_in(world, \"tutorial.lightning\", \"practice_drop:{i}\")",
+        "quest_run_receipt_add_in(world, \"tutorial.lightning\", \"practice_drop:{i}\")",
+    ] {
+        assert!(practice_drops.contains(receipt), "practice reward is missing `{receipt}`");
+    }
+    let quests = fs::read_to_string(repo.join("mag/quests.rock"))
+        .expect("read MAG quest source");
+    let receipt_owner = rock_function_body(&quests, "fn quest_run_receipt_seen_in(");
+    assert!(receipt_owner.contains("quest_run(world.progress, id)"));
+    let quest_logic = fs::read_to_string(repo.join("mag-simulation/quest.rock"))
+        .expect("read quest simulation source");
+    let run_lookup = rock_function_body(&quest_logic, "pub fn quest_run(");
+    assert!(run_lookup.contains("progress.quest_runs.get(id)"));
+    assert!(run_lookup.contains("entity.get()"));
+    let doors = fs::read_to_string(repo.join("mag/doors.rock"))
+        .expect("read MAG gate source");
+    let gate_lock = rock_function_body(&doors, "fn gate_locked_in(");
+    assert!(gate_lock.contains("gate_member_spawners_in(world, gate, space)"));
+    assert!(gate_lock.contains("gate_has_live_mobs_in(world, gate, space)"));
+    let spawners = fs::read_to_string(repo.join("mag/spawners.rock"))
+        .expect("read MAG spawner source");
+    let gate_members = rock_function_body(&spawners, "fn gate_member_spawners_in(");
+    assert!(gate_members.contains("world.root.spawners"));
+    assert!(gate_members.contains("sp.spec.gate == gate"));
+    let crypt: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo.join("mag/levels/crypt.json"))
+            .expect("read authored Crypt level"),
+    )
+    .expect("parse authored Crypt level");
+    let authored_spawners = crypt["spawners"].as_array().expect("Crypt spawners");
+    let authored_doors = crypt["doors"].as_array().expect("Crypt doors");
+    for (tag, gate, expected) in [
+        ("tutorial.precast_dummy", 1, 1),
+        ("tutorial.practice_dummy:", 2, 3),
+    ] {
+        assert_eq!(
+            authored_spawners
+                .iter()
+                .filter(|spawner| {
+                    spawner["objective_tag"].as_str().is_some_and(|value| value.starts_with(tag))
+                        && spawner["gate"].as_i64() == Some(gate)
+                })
+                .count(),
+            expected,
+            "Crypt must bind {tag} targets to authored gate {gate}"
+        );
+        assert!(
+            authored_doors.iter().any(|door| door["gate_id"].as_i64() == Some(gate)),
+            "Crypt must have a door for authored gate {gate}"
         );
     }
 
@@ -693,7 +804,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let feedback = fs::read_to_string(repo.join("mag/combat_text.rock"))
         .expect("read MAG feedback source");
     assert!(
-        feedback.contains("fn mag_player_feedback_pos(target: Entity<Player>)"),
+        feedback.contains("fn mag_player_feedback_follower_in(world: WorldState, target: Entity<Player>)"),
         "deferred Player feedback must re-resolve the Scene entity"
     );
 
@@ -701,7 +812,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for field in [
         "bank_gold: int",
         "events: Map<string, EventRecord>",
-        "quest_runs: Map<string, QuestProgress>",
+        "quest_rows: Arena<QuestProgress>",
+        "quest_runs: Map<string, Entity<QuestProgress>>",
         "quest_tracked: [string]",
         "quest_collapsed: Map<string, bool>",
         "quest_quarantined: [JsonValue]",
@@ -717,7 +829,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let world_levels = fs::read_to_string(repo.join("mag/world_levels.rock"))
         .expect("read MAG world source");
     for (constructed, domain) in [
-        ("progress: ProgressState {},", "progress"),
+        ("progress: ProgressState { quest_rows: b.arena() },", "progress"),
         ("quest_runtime: QuestRuntimeState {},", "quest runtime"),
     ] {
         assert_eq!(
@@ -726,7 +838,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "each new world must construct its own {domain} domain exactly once"
         );
     }
-    for stale in ["ProgressState {}", "quest_runtime_reset()"] {
+    for stale in ["ProgressState {", "quest_runtime_reset()"] {
         assert!(
             !run.contains(stale),
             "run reset still replaces world-owned state with `{stale}`"
@@ -977,6 +1089,13 @@ fn mag_world_presentation_state_has_explicit_owners() {
         .and_then(|(_, rest)| rest.split_once("\n}"))
         .map(|(body, _)| body)
         .expect("read WorldState body");
+    let root = fs::read_to_string(repo.join("mag-world/world_root.rock"))
+        .expect("read package world root");
+    let root_state = root
+        .split_once("pub struct MagWorldRoot<M> {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read MagWorldRoot body");
     let presentation_state = presentation
         .split_once("struct MagWorldPresentation {")
         .and_then(|(_, rest)| rest.split_once("\n}"))
@@ -1020,10 +1139,14 @@ fn mag_world_presentation_state_has_explicit_owners() {
         ("corpses", "Arena<Corpse>", "[[CorpsePresentation]?]"),
     ] {
         assert!(
-            world_state
+            root_state
                 .lines()
                 .any(|line| line.trim() == format!("{field}: {record},")),
-            "WorldState must own the authoritative {field} arena"
+            "MagWorldRoot must own the authoritative {field} arena"
+        );
+        assert!(
+            !world_state.lines().any(|line| line.trim_start().starts_with(&format!("{field}:"))),
+            "WorldState must not duplicate the package root's {field} arena"
         );
         assert!(
             presentation_state
@@ -1045,7 +1168,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 33, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 28, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
@@ -1080,22 +1203,54 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     );
     let tick = rock_function_body(&run, "fn mag_simulation_tick(");
     for call in [
-        "coroutine_poller_update(world.tasks)",
+        "coroutine_poller_update(world.root.tasks)",
         "flow_frame_reset()",
         "world_tick_all(world)",
-        "active.update_casting_in(world, intents.cast)",
-        "player.apply_target_intent_in(world, intents.target)",
-        "player.update_movement_in(world, intents.movement, dt)",
         "player.apply_inventory_command_in(world, intents.inventory)",
-        "player.apply_bandage_intent_in(world, intents.consumables)",
-        "player.update_walls_in(world, dt)",
-        "active.update_ground_pickup(world)",
-        "cull_dead_mobs_in(world)",
-        "tick_corpses(world, dt)",
-        "player.tick_wisp_intent_in(world, dt)",
-        "wisp_motes_tick_in(world, dt)",
+        "world_expedition_schedule_tick(context,",
     ] {
         assert!(tick.contains(call), "canonical tick is missing authoritative call `{call}`");
+    }
+    let phases = [
+        ("mag_tick_actor_pre_mob", &["active.update_casting_in(world, ctx.intents.cast)",
+            "player.apply_target_intent_in(world, ctx.intents.target)",
+            "player.update_movement_in(world, ctx.intents.movement, dt)"][..]),
+        ("mag_tick_actors", &[][..]),
+        ("mag_tick_rows_pickup", &[][..]),
+        ("mag_tick_ratcatcher_and_guards", &[][..]),
+        ("mag_tick_spawners", &[][..]),
+        ("mag_tick_player_recovery", &[][..]),
+        ("mag_tick_doors", &[][..]),
+        ("mag_tick_player_actions_harvest_hazards", &[
+            "player.update_player_statuses_in(world, dt)",
+            "player.apply_bandage_intent_in(world, ctx.intents.consumables)",
+            "mag_capture_status_presentation(world)",
+            "player.update_walls_in(world, dt)",
+            "active.update_ground_pickup(world)"][..]),
+        ("mag_tick_death_cull", &["cull_dead_mobs_in(ctx.world)"][..]),
+        ("mag_tick_corpses_respawns", &["tick_corpses(ctx.world, ctx.dt)"][..]),
+        ("mag_tick_wisp_sacrifice", &[
+            "active.player.tick_wisp_intent_in(ctx.world, ctx.dt)",
+            "wisp_motes_tick_in(ctx.world, ctx.dt)"][..]),
+    ];
+    let schedule = fs::read_to_string(repo.join("mag-world/expedition_schedule.rock"))
+        .expect("read package expedition schedule");
+    let schedule_tick = rock_function_body(&schedule, "pub fn world_expedition_schedule_tick<W>(");
+    let mut previous = 0;
+    for (index, (phase, calls)) in phases.iter().enumerate() {
+        assert!(tick.contains(phase), "canonical tick does not register phase `{phase}`");
+        let marker = format!("{}(context)", ["actor_pre_mob", "actors", "rows_pickup",
+            "ratcatcher_and_guards", "spawners", "player_recovery", "doors",
+            "player_actions_harvest_hazards", "death_cull", "corpses_respawns",
+            "wisp_sacrifice"][index]);
+        let position = schedule_tick.find(&marker)
+            .unwrap_or_else(|| panic!("package schedule omits `{marker}`"));
+        assert!(index == 0 || previous < position, "package schedule changed phase order");
+        previous = position;
+        let body = rock_function_body(&run, &format!("fn {phase}("));
+        for call in *calls {
+            assert!(body.contains(call), "phase `{phase}` is missing authoritative call `{call}`");
+        }
     }
     for presentation in [
         "update_projectiles()",
@@ -1114,29 +1269,38 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             !tick.contains(presentation),
             "presentation call `{presentation}` must remain outside the canonical tick"
         );
+        for (phase, _) in phases {
+            let body = rock_function_body(&run, &format!("fn {phase}("));
+            assert!(
+                !body.contains(presentation),
+                "presentation call `{presentation}` must remain outside phase `{phase}`"
+            );
+        }
     }
-    let status_owner = tick
+    let player_actions = rock_function_body(&run, "fn mag_tick_player_actions_harvest_hazards(");
+    let status_owner = player_actions
         .find("player.update_player_statuses_in(world, dt)")
         .expect("status owner in canonical tick");
     assert!(
-        !tick.contains("mag_present_status_effects(world)"),
+        !player_actions.contains("mag_present_status_effects(world)"),
         "simulation must not call the status presenter"
     );
-    let status_sample = tick
+    let status_sample = player_actions
         .find("mag_capture_status_presentation(world)")
         .expect("status sample in canonical tick");
-    let late_wall_contact = tick
+    let late_wall_contact = player_actions
         .find("player.update_walls_in(world, dt)")
         .expect("late wall contact in canonical tick");
     assert!(
         status_owner < status_sample && status_sample < late_wall_contact,
         "status sampling must stay between its owner tick and late wall contact"
     );
-    let wisp_intent = tick
-        .find("player.tick_wisp_intent_in(world, dt)")
+    let wisp_phase = rock_function_body(&run, "fn mag_tick_wisp_sacrifice(");
+    let wisp_intent = wisp_phase
+        .find("active.player.tick_wisp_intent_in(ctx.world, ctx.dt)")
         .expect("authoritative wisp intent in canonical tick");
-    let wisp_tick = tick
-        .find("wisp_motes_tick_in(world, dt)")
+    let wisp_tick = wisp_phase
+        .find("wisp_motes_tick_in(ctx.world, ctx.dt)")
         .expect("authoritative wisp integration in canonical tick");
     assert!(wisp_intent < wisp_tick,
         "wisp effectors must be prepared before authoritative integration");
