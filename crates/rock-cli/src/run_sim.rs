@@ -3518,54 +3518,30 @@ fn default_sim_jobs() -> usize {
         .unwrap_or(1)
 }
 
-pub(crate) fn parse_boot_concurrency(value: &str) -> std::result::Result<usize, String> {
-    value.parse::<usize>().ok().filter(|cap| *cap > 0)
-        .ok_or_else(|| format!("boot concurrency must be a positive integer, got `{value}`"))
+pub(crate) fn parse_positive_count(value: &str) -> std::result::Result<usize, String> {
+    value.parse::<usize>().ok().filter(|count| *count > 0)
+        .ok_or_else(|| format!("must be a positive integer, got `{value}`"))
 }
 
-fn resolve_boot_concurrency(requested: Option<usize>, env: Option<&str>) -> Result<Option<usize>> {
+fn resolve_positive_count(requested: Option<usize>, env: Option<&str>) -> Result<Option<usize>> {
     match requested {
-        Some(0) => Err(anyhow!("boot concurrency must be a positive integer")),
-        Some(cap) => Ok(Some(cap)),
-        None => env.map(parse_boot_concurrency).transpose().map_err(anyhow::Error::msg),
+        Some(0) => Err(anyhow!("must be a positive integer")),
+        Some(count) => Ok(Some(count)),
+        None => env.map(parse_positive_count).transpose().map_err(anyhow::Error::msg),
     }
 }
 
-pub(crate) fn sim_boot_concurrency(requested: Option<usize>) -> Result<Option<usize>> {
+/// An opt-in positive count from the CLI, else from `env_name`; the CLI wins.
+pub(crate) fn sim_positive_count(requested: Option<usize>, env_name: &str) -> Result<Option<usize>> {
     if requested.is_some() {
-        return resolve_boot_concurrency(requested, None);
+        return resolve_positive_count(requested, None);
     }
-    let env = match std::env::var("ROCK_SIM_BOOT_CONCURRENCY") {
+    let env = match std::env::var(env_name) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(anyhow!("ROCK_SIM_BOOT_CONCURRENCY: {error}")),
+        Err(error) => return Err(anyhow!("{env_name}: {error}")),
     };
-    resolve_boot_concurrency(None, env.as_deref()).context("ROCK_SIM_BOOT_CONCURRENCY")
-}
-
-pub(crate) fn parse_batch_quantum(value: &str) -> std::result::Result<usize, String> {
-    value.parse::<usize>().ok().filter(|cap| *cap > 0)
-        .ok_or_else(|| format!("batch quantum must be a positive integer, got `{value}`"))
-}
-
-fn resolve_batch_quantum(requested: Option<usize>, env: Option<&str>) -> Result<Option<usize>> {
-    match requested {
-        Some(0) => Err(anyhow!("batch quantum must be a positive integer")),
-        Some(cap) => Ok(Some(cap)),
-        None => env.map(parse_batch_quantum).transpose().map_err(anyhow::Error::msg),
-    }
-}
-
-pub(crate) fn sim_batch_quantum(requested: Option<usize>) -> Result<Option<usize>> {
-    if requested.is_some() {
-        return resolve_batch_quantum(requested, None);
-    }
-    let env = match std::env::var("ROCK_SIM_BATCH_QUANTUM") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => return Err(anyhow!("ROCK_SIM_BATCH_QUANTUM: {error}")),
-    };
-    resolve_batch_quantum(None, env.as_deref()).context("ROCK_SIM_BATCH_QUANTUM")
+    resolve_positive_count(None, env.as_deref()).with_context(|| env_name.to_string())
 }
 
 /// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
@@ -7608,27 +7584,15 @@ mod tests {
     /// because it writes baseline files whose destinations are not proven
     /// unique before spawning.
     #[test]
-    fn boot_concurrency_is_opt_in_and_cli_overrides_env() {
-        assert_eq!(resolve_boot_concurrency(None, None).unwrap(), None);
-        assert_eq!(resolve_boot_concurrency(None, Some("2")).unwrap(), Some(2));
-        assert_eq!(resolve_boot_concurrency(Some(4), Some("2")).unwrap(), Some(4));
-        assert_eq!(resolve_boot_concurrency(Some(4), Some("bad")).unwrap(), Some(4));
+    fn positive_count_options_are_opt_in_and_cli_overrides_env() {
+        assert_eq!(resolve_positive_count(None, None).unwrap(), None);
+        assert_eq!(resolve_positive_count(None, Some("2")).unwrap(), Some(2));
+        assert_eq!(resolve_positive_count(Some(4), Some("2")).unwrap(), Some(4));
+        assert_eq!(resolve_positive_count(Some(4), Some("bad")).unwrap(), Some(4));
         for value in ["0", "-1", "", "no", "1.5", "184467440737095516160"] {
-            assert!(resolve_boot_concurrency(None, Some(value)).is_err(), "{value}");
+            assert!(resolve_positive_count(None, Some(value)).is_err(), "{value}");
         }
-        assert!(resolve_boot_concurrency(Some(0), None).is_err());
-    }
-
-    #[test]
-    fn batch_quantum_is_opt_in_and_cli_overrides_env() {
-        assert_eq!(resolve_batch_quantum(None, None).unwrap(), None);
-        assert_eq!(resolve_batch_quantum(None, Some("2")).unwrap(), Some(2));
-        assert_eq!(resolve_batch_quantum(Some(4), Some("2")).unwrap(), Some(4));
-        assert_eq!(resolve_batch_quantum(Some(4), Some("bad")).unwrap(), Some(4));
-        for value in ["0", "-1", "", "no", "1.5", "184467440737095516160"] {
-            assert!(resolve_batch_quantum(None, Some(value)).is_err(), "{value}");
-        }
-        assert!(resolve_batch_quantum(Some(0), None).is_err());
+        assert!(resolve_positive_count(Some(0), None).is_err());
     }
 
     #[test]
