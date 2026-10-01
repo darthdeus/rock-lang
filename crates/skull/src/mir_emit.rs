@@ -6216,11 +6216,13 @@ fn overlay_code_artifact(
             for entry in chunk.code_artifact.entries.values().filter(|entry| entry.escaping) {
                 let mut entry = entry.clone();
                 if entry.body_name.is_none() {
-                    entry.body_name = cache
+                    // An unchanged named value needs the resolved ABI as well as its body.
+                    entry = cache
                         .code_artifact
                         .entries
                         .get(&entry.identity)
-                        .and_then(|published| published.body_name);
+                        .expect("every escaping chunk entry belongs to the resolved code artifact")
+                        .clone();
                 }
                 artifact.insert(entry);
             }
