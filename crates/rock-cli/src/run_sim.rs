@@ -1145,6 +1145,7 @@ fn do_run_sim_opts_recorded(
         "single",
         update_snapshots,
         &prepared.source_files,
+        None,
     );
     sim_spawn_barrier();
 
@@ -1160,6 +1161,7 @@ fn do_run_sim_opts_recorded(
         None,
         Some(&recorder),
         entry_ids.first().copied(),
+        None,
     )?;
     let sim_name = display_name.as_str();
 
@@ -1283,6 +1285,7 @@ fn run_named_entry(
     census_warmup_frames: Option<usize>,
     recorder: Option<&SimRunRecorder>,
     occurrence_id: Option<u64>,
+    boot_width: Option<&Arc<PoolWidth>>,
 ) -> Result<(String, SimSummary)> {
     let artifacts = SimArtifacts::new()?;
     let out_path = artifacts.path().to_path_buf();
@@ -1340,6 +1343,7 @@ fn run_named_entry(
             recorder,
             occurrence_id,
             part_index,
+            boot_width,
         )?;
         combined.merge(part_summary);
     }
@@ -1424,6 +1428,7 @@ pub fn do_run_named_sims(
     jobs: Option<usize>,
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
+    boot_concurrency: Option<usize>,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
     // is nothing to overlap, so `--jobs` does not apply -- nor `--workers`,
@@ -1458,6 +1463,7 @@ pub fn do_run_named_sims(
         full_asset_jobs,
         mode,
         &recorder,
+        boot_concurrency,
     );
     let error = result.as_ref().err().map(ToString::to_string);
     recorder.finish(result.is_ok(), error.as_deref());
@@ -1474,6 +1480,7 @@ fn do_run_named_sims_recorded(
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
+    boot_concurrency: Option<usize>,
 ) -> Result<()> {
 
     let project_path = recorder.phase("resolve_project", || {
@@ -1511,6 +1518,7 @@ fn do_run_named_sims_recorded(
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let boot_width = boot_concurrency.map(|cap| Arc::new(PoolWidth::fixed(cap)));
     let requested_full_asset_jobs = full_asset_jobs;
     let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
@@ -1524,6 +1532,7 @@ fn do_run_named_sims_recorded(
         sim_exec_mode_name(mode),
         update_snapshots,
         &source_files,
+        boot_concurrency,
     );
     let mut reload_lane = reload_lane_session(
         backend,
@@ -1546,6 +1555,7 @@ fn do_run_named_sims_recorded(
             reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
+            boot_width.as_ref(),
         )?;
         let mut passed = 0usize;
         let mut excluded = 0usize;
@@ -1614,6 +1624,7 @@ fn do_run_named_sims_recorded(
             None,
             Some(recorder),
             Some(entry_ids[i]),
+            boot_width.as_ref(),
         )?;
         let _lock = report.lock().unwrap();
         if !quiet {
@@ -1749,12 +1760,25 @@ impl PoolWidth {
     }
 
     fn enter(&self) -> PoolSlot<'_> {
+        self.acquire();
+        PoolSlot(self)
+    }
+
+    fn acquire(&self) {
         let mut slots = self.slots.lock().unwrap();
         while slots.1 >= slots.0 {
             slots = self.changed.wait(slots).unwrap();
         }
         slots.1 += 1;
-        PoolSlot(self)
+    }
+
+    fn release(&self) {
+        // A poisoned count accompanies a task panic, which the joining scope
+        // re-raises. Wake other waiters even during teardown.
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.1 -= 1;
+        }
+        self.changed.notify_all();
     }
 }
 
@@ -1762,12 +1786,41 @@ struct PoolSlot<'a>(&'a PoolWidth);
 
 impl Drop for PoolSlot<'_> {
     fn drop(&mut self) {
-        // Poisoning means a task panicked, and that panic is re-raised when
-        // the scope joins; the count no longer matters then.
-        if let Ok(mut slots) = self.0.slots.lock() {
-            slots.1 -= 1;
+        self.0.release();
+    }
+}
+
+/// A boot slot is released by the first validated entry boundary, or by
+/// teardown if the child never enters. The parent retains it while the stderr
+/// reader runs, so EOF alone cannot admit another boot.
+struct BootSlot {
+    width: Arc<PoolWidth>,
+    released: std::sync::atomic::AtomicBool,
+}
+
+impl BootSlot {
+    fn enter(width: &Arc<PoolWidth>) -> Arc<Self> {
+        width.acquire();
+        Arc::new(Self {
+            width: Arc::clone(width),
+            released: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn first_entry(&self) {
+        self.release();
+    }
+
+    fn release(&self) {
+        if !self.released.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.width.release();
         }
-        self.0.changed.notify_all();
+    }
+}
+
+impl Drop for BootSlot {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -1910,6 +1963,7 @@ pub fn do_run_all_sims(
     jobs: Option<usize>,
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
+    boot_concurrency: Option<usize>,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
@@ -1929,6 +1983,7 @@ pub fn do_run_all_sims(
         full_asset_jobs,
         mode,
         &recorder,
+        boot_concurrency,
     );
     let error = result.as_ref().err().map(ToString::to_string);
     recorder.finish(result.is_ok(), error.as_deref());
@@ -1944,6 +1999,7 @@ fn do_run_all_sims_recorded(
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
+    boot_concurrency: Option<usize>,
 ) -> Result<()> {
 
     let project_path = recorder.phase("resolve_project", || {
@@ -1972,6 +2028,7 @@ fn do_run_all_sims_recorded(
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let boot_width = boot_concurrency.map(|cap| Arc::new(PoolWidth::fixed(cap)));
     let requested_full_asset_jobs = full_asset_jobs;
     let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
@@ -1985,6 +2042,7 @@ fn do_run_all_sims_recorded(
         sim_exec_mode_name(mode),
         update_snapshots,
         &source_files,
+        boot_concurrency,
     );
     let selected = wire_names.len();
     let mut routine_names = Vec::new();
@@ -2022,6 +2080,7 @@ fn do_run_all_sims_recorded(
             reload_lane.as_mut(),
             Some(recorder),
             Some(&entry_ids),
+            boot_width.as_ref(),
         )?;
         let mut passed = 0usize;
         let mut excluded = manual_excluded;
@@ -2117,6 +2176,7 @@ fn do_run_all_sims_recorded(
             None,
             Some(recorder),
             Some(entry_ids[i]),
+            boot_width.as_ref(),
         )?;
 
         let _lock = report.lock().unwrap();
@@ -2329,6 +2389,7 @@ pub fn do_run_allocation_census(
     names: &[String],
     output_path: &str,
     jobs: Option<usize>,
+    boot_concurrency: Option<usize>,
 ) -> Result<()> {
     let path = PathBuf::from(output_path);
     if path.exists() {
@@ -2373,6 +2434,7 @@ pub fn do_run_allocation_census(
         }
     }
     let jobs = resolve_jobs(jobs, false);
+    let boot_width = boot_concurrency.map(|cap| Arc::new(PoolWidth::fixed(cap)));
     // Reload entries own the Session and an isolated copy of the boot chunk.
     let mut reload_lane = reload_lane_session(
         backend,
@@ -2399,6 +2461,7 @@ pub fn do_run_allocation_census(
             Some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
             None,
             None,
+            boot_width.as_ref(),
         )
     };
 
@@ -2589,6 +2652,7 @@ pub fn do_run_allocation_sites(
     names: &[String],
     output_dir: &str,
     jobs: Option<usize>,
+    boot_concurrency: Option<usize>,
 ) -> Result<()> {
     let artifact_dir = PathBuf::from(output_dir);
     if artifact_dir.exists() {
@@ -2642,6 +2706,7 @@ pub fn do_run_allocation_sites(
     }
 
     let jobs = resolve_jobs(jobs, false);
+    let boot_width = boot_concurrency.map(|cap| Arc::new(PoolWidth::fixed(cap)));
     let run_at = |index: usize| -> Result<(String, SimSummary)> {
         let name = &selected[index];
         let stem = allocation_site_artifact_stem(index, name);
@@ -2667,6 +2732,7 @@ pub fn do_run_allocation_sites(
             None,
             None,
             None,
+            boot_width.as_ref(),
         )
     };
     let mut results = HashMap::new();
@@ -2835,6 +2901,7 @@ fn run_specs_worker_mode(
     reload_lane: Option<&mut ReloadLaneSession>,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
+    boot_width: Option<&Arc<PoolWidth>>,
 ) -> Result<Vec<(String, SimSummary)>> {
 
     let jobs = resolve_jobs(jobs, update_snapshots);
@@ -3032,6 +3099,7 @@ fn run_specs_worker_mode(
                 recorder,
                 lane_entry_ids.as_deref(),
                 None,
+                boot_width,
             )?;
             if results.len() != lane.len() {
                 return Err(anyhow!(
@@ -3059,6 +3127,7 @@ fn run_specs_worker_mode(
                 None,
                 recorder,
                 entry_ids.and_then(|ids| ids.get(i)).copied(),
+                boot_width,
             )?;
             Ok(vec![(i, summary)])
         }
@@ -3103,6 +3172,7 @@ fn run_specs_worker_mode(
                 None,
                 recorder,
                 entry_ids.and_then(|ids| ids.get(i)).copied(),
+                boot_width,
             )?;
             done.push((i, summary));
         }
@@ -3121,6 +3191,7 @@ fn run_specs_worker_mode(
                 recorder,
                 lane_entry_ids.as_deref(),
                 Some(&mut *lane_stone),
+                boot_width,
             )?;
             if results.len() != lane_chained.len() {
                 return Err(anyhow!(
@@ -3408,6 +3479,31 @@ fn default_sim_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+pub(crate) fn parse_boot_concurrency(value: &str) -> std::result::Result<usize, String> {
+    value.parse::<usize>().ok().filter(|cap| *cap > 0)
+        .ok_or_else(|| format!("boot concurrency must be a positive integer, got `{value}`"))
+}
+
+fn resolve_boot_concurrency(requested: Option<usize>, env: Option<&str>) -> Result<Option<usize>> {
+    match requested {
+        Some(0) => Err(anyhow!("boot concurrency must be a positive integer")),
+        Some(cap) => Ok(Some(cap)),
+        None => env.map(parse_boot_concurrency).transpose().map_err(anyhow::Error::msg),
+    }
+}
+
+pub(crate) fn sim_boot_concurrency(requested: Option<usize>) -> Result<Option<usize>> {
+    if requested.is_some() {
+        return resolve_boot_concurrency(requested, None);
+    }
+    let env = match std::env::var("ROCK_SIM_BOOT_CONCURRENCY") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(anyhow!("ROCK_SIM_BOOT_CONCURRENCY: {error}")),
+    };
+    resolve_boot_concurrency(None, env.as_deref()).context("ROCK_SIM_BOOT_CONCURRENCY")
 }
 
 /// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
@@ -4524,6 +4620,7 @@ fn run_worker(
     census_warmup_frames: Option<usize>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
     recorder: Option<&SimRunRecorder>,
+    boot_width: Option<&Arc<PoolWidth>>,
 ) -> Result<Vec<SimSummary>> {
     let Some(first) = parts.first() else {
         return Err(anyhow!("worker got an empty entry queue"));
@@ -4706,6 +4803,7 @@ fn run_worker(
     }
 
     let label = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(",");
+    let boot_slot = boot_width.map(BootSlot::enter);
     let worker_attempt = recorder
         .map(|recorder| {
             let mut entries = Vec::new();
@@ -4770,6 +4868,7 @@ fn run_worker(
             .iter()
             .map(|part| (part.occurrence_id, part.name.clone(), part.part_index))
             .collect::<Vec<_>>();
+        let boot_slot = boot_slot.clone();
         let mut first_entry_seen = false;
         let mut deadline_guard = DeadlineGuard::for_parts(parts);
         // Buffered runs must not write anything from this thread: several
@@ -4835,6 +4934,11 @@ fn run_worker(
                             }
                         }
                         _ => {}
+                    }
+                }
+                if matches!(boundary, Some(EnvelopeStep::Started(_))) {
+                    if let Some(slot) = boot_slot.as_ref() {
+                        slot.first_entry();
                     }
                 }
                 if let Some(rest) = line.strip_prefix("__SIM__ ") {
@@ -5315,6 +5419,7 @@ fn run_one_sim(
     recorder: Option<&SimRunRecorder>,
     occurrence_id: Option<u64>,
     part_index: usize,
+    boot_width: Option<&Arc<PoolWidth>>,
 ) -> Result<SimSummary> {
     let part = WorkerPart {
         name: sim_part.to_string(),
@@ -5335,6 +5440,7 @@ fn run_one_sim(
         census_warmup_frames,
         stone,
         recorder,
+        boot_width,
     )?;
     Ok(summaries.remove(0))
 }
@@ -5403,7 +5509,7 @@ fn run_entries(
     // Not quiet, but buffered: nothing is written live (several entries share
     // one stream), and every diagnostic is retained into its record instead.
     let summaries = match grouping {
-        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None, None, None)?,
+        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None, None, None, None)?,
         Grouping::PerPart => {
             let mut out = Vec::with_capacity(parts.len());
             for part in &parts {
@@ -5415,6 +5521,7 @@ fn run_entries(
                     false,
                     output,
                     true,
+                    None,
                     None,
                     None,
                     None,
@@ -5468,6 +5575,7 @@ fn run_specs_recovering(
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
     mut stone: Option<&mut crate::skull_backend::SkullStone>,
+    boot_width: Option<&Arc<PoolWidth>>,
 ) -> Result<Vec<(String, SimSummary, bool)>> {
     let mut plans = Vec::with_capacity(entry_specs.len());
     for (entry_index, spec) in entry_specs.iter().enumerate() {
@@ -5527,6 +5635,7 @@ fn run_specs_recovering(
                 None,
                 stone.as_deref_mut(),
                 recorder,
+                boot_width,
             )?;
 
         // Reassemble per spec and decide how far this round got. Specs whose
@@ -5711,7 +5820,7 @@ fn run_worker_arm(
 
     for members in groups {
         let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
-        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None, None)?;
+        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None, None, None)?;
         if results.len() != members.len() {
             return Err(anyhow!(
                 "worker group returned {} results for {} specs",
@@ -6058,7 +6167,7 @@ pub fn run_worker_suite(
         "child_execution",
         &project_path,
         Some(Path::new(&output)),
-        || run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None, None),
+        || run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None, None, None),
     )?;
     Ok(results
         .into_iter()
@@ -7395,6 +7504,121 @@ mod tests {
     /// because it writes baseline files whose destinations are not proven
     /// unique before spawning.
     #[test]
+    fn boot_concurrency_is_opt_in_and_cli_overrides_env() {
+        assert_eq!(resolve_boot_concurrency(None, None).unwrap(), None);
+        assert_eq!(resolve_boot_concurrency(None, Some("2")).unwrap(), Some(2));
+        assert_eq!(resolve_boot_concurrency(Some(4), Some("2")).unwrap(), Some(4));
+        assert_eq!(resolve_boot_concurrency(Some(4), Some("bad")).unwrap(), Some(4));
+        for value in ["0", "-1", "", "no", "1.5", "184467440737095516160"] {
+            assert!(resolve_boot_concurrency(None, Some(value)).is_err(), "{value}");
+        }
+        assert!(resolve_boot_concurrency(Some(0), None).is_err());
+    }
+
+    #[test]
+    fn boot_concurrency_running_entries_can_fill_all_jobs() {
+        let width = Arc::new(PoolWidth::fixed(1));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let running = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let task_width = Arc::clone(&width);
+        let task_running = Arc::clone(&running);
+        let pool = std::thread::spawn(move || {
+            run_bounded(&PoolWidth::fixed(4), 4, |_| {
+                let slot = BootSlot::enter(&task_width);
+                slot.first_entry();
+                entered_tx.send(()).unwrap();
+                let (done, changed) = &*task_running;
+                let mut done = done.lock().unwrap();
+                while !*done {
+                    done = changed.wait(done).unwrap();
+                }
+                drop(slot);
+                Ok(())
+            })
+        });
+        let mut entries = 0;
+        for _ in 0..4 {
+            if entered_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+                entries += 1;
+            } else {
+                break;
+            }
+        }
+        *running.0.lock().unwrap() = true;
+        running.1.notify_all();
+        let results = pool.join().unwrap();
+        assert_eq!(entries, 4, "all jobs can run entries while boot cap is one");
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(|(_, result)| result.is_ok()));
+        assert_eq!(width.slots.lock().unwrap().1, 0);
+    }
+
+    #[test]
+    fn boot_concurrency_is_part_of_the_opted_in_journal_identity() {
+        for cap in [None, Some(2), Some(4)] {
+            let root = tempfile::tempdir().unwrap();
+            let recorder = SimRunRecorder::begin_at(root.path(), "testbed", "a b", true, None, "workers");
+            recorder.configure(root.path(), &specs(&["a", "b"]), None, 4,
+                None, 2, "workers", "workers", false, &HashMap::new(), cap);
+            recorder.finish(true, None);
+            let records: Vec<serde_json::Value> = std::fs::read_to_string(recorder.events_path().unwrap())
+                .unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            let config = records.iter().find(|event| event["event"] == "run_config").unwrap();
+            match cap {
+                None => assert!(config.get("boot_concurrency").is_none()),
+                Some(cap) => assert_eq!(config["boot_concurrency"], cap),
+            }
+        }
+    }
+
+    #[test]
+    fn boot_concurrency_blocks_spawn_until_first_entry_but_not_running_entries() {
+        let width = Arc::new(PoolWidth::fixed(2));
+        let first = BootSlot::enter(&width);
+        let second = BootSlot::enter(&width);
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (spawn_tx, spawn_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let next_width = Arc::clone(&width);
+        let next = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            let third = BootSlot::enter(&next_width);
+            spawn_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            third.first_entry();
+        });
+        attempt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let blocked = spawn_rx.recv_timeout(Duration::from_millis(100)).is_err();
+        first.first_entry();
+        if blocked {
+            spawn_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        // Both prior workers remain alive; only the first has entered.
+        assert_eq!(width.slots.lock().unwrap().1, 2);
+        second.first_entry();
+        finish_tx.send(()).unwrap();
+        next.join().unwrap();
+        assert!(blocked, "a third worker spawned while two others were booting");
+        assert_eq!(width.slots.lock().unwrap().1, 0);
+        drop((first, second));
+        assert_eq!(width.slots.lock().unwrap().1, 0, "entry and teardown release once");
+    }
+
+    #[test]
+    fn boot_concurrency_teardown_releases_a_worker_that_never_entered() {
+        let width = Arc::new(PoolWidth::fixed(1));
+        let parent = BootSlot::enter(&width);
+        let reader = Arc::clone(&parent);
+        drop(reader);
+        assert_eq!(width.slots.lock().unwrap().1, 1, "EOF alone is not child exit");
+        drop(parent);
+        assert_eq!(width.slots.lock().unwrap().1, 0);
+        let replacement = BootSlot::enter(&width);
+        replacement.first_entry();
+        assert_eq!(width.slots.lock().unwrap().1, 0);
+    }
+
+    #[test]
     fn resolve_full_asset_jobs_is_bounded_by_jobs_and_defaults_to_two() {
         assert_eq!(resolve_full_asset_jobs(None, 12), DEFAULT_FULL_ASSET_JOBS);
         assert_eq!(resolve_full_asset_jobs(None, 1), 1);
@@ -8562,7 +8786,8 @@ mod tests {
         let ids = recorder.plan_entries(&specs(&["gpu_only"]));
         let env = wires(&[("gpu_only", &[("SIM_BACKEND", "wgpu")])]);
         let (_, summary) = run_named_entry("testbed", "gpu_only", true, false, false,
-            "", &env, None, None, Some(&recorder), Some(ids[0])).unwrap();
+            "", &env, None, None, Some(&recorder), Some(ids[0]),
+            None).unwrap();
         assert!(entry_excluded(&summary));
         recorder.finish(true, None);
         let records: Vec<serde_json::Value> = std::fs::read_to_string(recorder.events_path().unwrap())

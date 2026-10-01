@@ -173,26 +173,28 @@ impl SimRunRecorder {
         effective_mode: &str,
         update_snapshots: bool,
         source_files: &HashMap<String, String>,
+        boot_concurrency: Option<usize>,
     ) {
         if let Ok(mut state) = self.inner.lock() {
             state.timings.set_source_files(source_files);
         } else {
             self.warn_once("sim history lock was poisoned while recording sim source files".into());
         }
-        self.event(
-            "run_config",
-            json!({
-                "project_path": project_path,
-                "resolved_entries": resolved_entries,
-                "requested_jobs": requested_jobs,
-                "effective_jobs": effective_jobs,
-                "requested_full_asset_jobs": requested_full_asset_jobs,
-                "effective_full_asset_jobs": effective_full_asset_jobs,
-                "requested_mode": requested_mode,
-                "effective_mode": effective_mode,
-                "update_snapshots": update_snapshots,
-            }),
-        );
+        let mut config = json!({
+            "project_path": project_path,
+            "resolved_entries": resolved_entries,
+            "requested_jobs": requested_jobs,
+            "effective_jobs": effective_jobs,
+            "requested_full_asset_jobs": requested_full_asset_jobs,
+            "effective_full_asset_jobs": effective_full_asset_jobs,
+            "requested_mode": requested_mode,
+            "effective_mode": effective_mode,
+            "update_snapshots": update_snapshots,
+        });
+        if let Some(cap) = boot_concurrency {
+            config["boot_concurrency"] = json!(cap);
+        }
+        self.event("run_config", config);
     }
 
     pub fn phase_start(&self, phase: &str) {

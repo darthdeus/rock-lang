@@ -157,6 +157,54 @@ const EIGHT: [&str; 8] = [
     "testbed::b0_static_called_probe",
 ];
 
+#[test]
+fn boot_concurrency_bounds_shared_isolated_and_reload_worker_spawns() {
+    for (mode, cap, cli) in [("--workers", 1, false), ("--isolated", 2, true)] {
+        let dir = tempfile::tempdir().expect("history tempdir");
+        let history = dir.path().join("history");
+        let mut args = vec!["sim", "testbed"];
+        args.extend_from_slice(&EIGHT);
+        args.extend_from_slice(&["testbed::reload_probe", "testbed::b1_checkpoint_arena_registry_restores", mode, "-j", "4"]);
+        if cli {
+            args.extend_from_slice(&["--boot-concurrency", "2"]);
+        }
+        let out = Command::new(rock_bin())
+            .args(&args)
+            .current_dir(workspace_root())
+            .env("ROCK_SIM_LOG_DIR", &history)
+            .env("ROCK_SIM_BOOT_CONCURRENCY", "1")
+            .env("ROCK_SIM_TIMEOUT_SECS", "180")
+            .env("ROCK_SKULL_CALLEE_BINDING", "upvalue")
+            .env_remove("SIM_SKIP_RENDER")
+            .output().expect("run boot-capped testbed");
+        let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{mode}: {combined}");
+        assert!(combined.contains("[sim] 10/10 sims passed"), "{combined}");
+        let events = history_events(&history);
+        let config = events.iter().find(|event| event["event"] == "run_config").unwrap();
+        assert_eq!(config["boot_concurrency"], cap);
+        assert_eq!(config["effective_jobs"], 4);
+        let mut booting = HashSet::new();
+        let mut workers = 0;
+        for event in &events {
+            let worker = event["worker_attempt"].as_u64().unwrap_or(0);
+            match event["event"].as_str().unwrap() {
+                "worker_spawn" => {
+                    assert!(booting.insert(worker));
+                    workers += 1;
+                    assert!(booting.len() <= cap as usize, "{mode}: exceeded cap at {event}");
+                }
+                "worker_first_entry" => assert!(booting.remove(&worker)),
+                "worker_end" => { booting.remove(&worker); }
+                _ => {}
+            }
+        }
+        assert!(workers >= 4, "must exercise multiple ordinary, isolated and reload boots");
+        assert!(booting.is_empty());
+        assert_eq!(events.iter().filter(|event| event["event"] == "entry_result").count(), 10);
+    }
+}
+
 /// The composition itself: eight entries of one boot signature under `-j 4`
 /// must run in several booted processes AT ONCE.
 ///

@@ -66,6 +66,7 @@ pub mod child_lifetime;
 mod allocation_join;
 #[cfg(feature = "backend-js")]
 mod mono_manifest;
+mod identity_storage_census;
 mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
@@ -87,6 +88,7 @@ pub mod unified_compile;
 mod modules_analysis;
 mod modules_audit;
 mod modules_fix;
+mod across_yield_fix;
 mod modules_migrate;
 mod watch;
 
@@ -225,6 +227,11 @@ pub enum CliCommand {
     /// distinct logical types, and failures bucketed by reason. Changes no
     /// emission. See `monoty_census::do_monoty_census`.
     MonoTyCensus,
+    /// `rock identity-storage-census [root]` -- the exact per-package,
+    /// per-kind count of identity structs in declaration storage
+    /// (`docs/identity-storage-plan.md` S0a). See
+    /// `identity_storage_census::do_identity_storage_census`.
+    IdentityStorageCensus,
     /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
     /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
     /// the closed world (instances keyed by `MonoTy`), and
@@ -345,7 +352,8 @@ pub enum CliCommand {
     Modules,
     /// `rock fix --imports <package|file> [--check|--apply]` -- add the
     /// imports a modules-v1 fragment's unresolved names need (spec 15.3).
-    /// See `modules_fix::run`.
+    /// See `modules_fix::run`. `rock fix --across-yield <files>` -- see
+    /// `across_yield_fix::run`.
     Fix,
 }
 
@@ -371,6 +379,7 @@ impl clap::ValueEnum for CliCommand {
             Self::SkullIncrementalProfile,
             Self::IterIncremental,
             Self::MonoTyCensus,
+            Self::IdentityStorageCensus,
             Self::MonoManifest,
             Self::AllocationJoin,
             Self::IterLsp,
@@ -434,6 +443,7 @@ impl CliCommand {
             Self::SkullIncrementalProfile => "skull-incremental-profile",
             Self::IterIncremental => "iter-incremental",
             Self::MonoTyCensus => "mono-ty-census",
+            Self::IdentityStorageCensus => "identity-storage-census",
             Self::MonoManifest => "mono-manifest",
             Self::AllocationJoin => "allocation-join",
             Self::IterLsp => "iter-lsp",
@@ -486,10 +496,9 @@ pub enum Backend {
     /// Tests with no `returns=` are outside the value class; tests whose GLSL
     /// emission rejects report SKIP(reason). Serves `test` only.
     Glsl,
-    /// `c` — the initial native scalar backend: bone type-checks, skull
-    /// monomorphizes, C is emitted for the supported closure, then Clang builds
-    /// it. Unsupported tests report SKIP(reason); compile/run reject unsupported
-    /// programs. Serves single-file `compile`, `test`, and `run`.
+    /// `c` — the native C backend: bone type-checks, skull monomorphizes, C is
+    /// emitted for the supported closure, then Clang builds it. Unsupported
+    /// tests report SKIP(reason); compile/run/frame reject unsupported programs.
     C,
 }
 
@@ -521,7 +530,7 @@ impl Backend {
             Self::Skull => "skull is a bone-HIR codegen",
             Self::Js => "js is a JS-subset executor (node); no game/engine runtime",
             Self::Glsl => "glsl is a GLSL value-test executor (GPU), not a program codegen",
-            Self::C => "c is an initial native scalar executor (Clang), not a game/runtime backend",
+            Self::C => "c is a native C executor (Clang) with a bounded OpenGL game runner",
         }
     }
 
@@ -548,7 +557,7 @@ impl Backend {
             ],
             Self::Js => &[Test, Run],
             Self::Glsl => &[Test],
-            Self::C => &[Compile, Test, Run],
+            Self::C => &[Compile, Test, Run, Frame],
         }
     }
 
@@ -610,6 +619,8 @@ fn resolve_backend(explicit: Option<Backend>, _command: CliCommand) -> Backend {
 pub struct Args {
     pub command: CliCommand,
     pub files: Vec<String>,
+    /// Named tests that must be discovered and pass under `rock test --backend c`.
+    pub required_tests: Vec<String>,
     pub output: Option<String>,
     /// For `rock sim`: opt into a complete sim-wide gross Lua allocation
     /// census and write its machine-readable artifact to this path.
@@ -675,6 +686,9 @@ pub struct Args {
     /// at once (real assets with the image cap declined). `None` takes the
     /// measured default in `run_sim::resolve_full_asset_jobs`.
     pub full_asset_jobs: Option<usize>,
+    /// For `rock sim`: simultaneous boots, from spawn to first entry. Unset
+    /// leaves admission unchanged; ROCK_SIM_BOOT_CONCURRENCY is the env form.
+    pub boot_concurrency: Option<usize>,
     /// For `rock sim`: force one fresh process per entry. This is the permanent
     /// fresh-process reference oracle; the ordinary default uses eligible
     /// boot-checkpoint workers, including rendered sims.
@@ -785,8 +799,11 @@ pub struct Args {
     /// `rock modules migrate --consumer <dir>` (repeatable): the consumer set
     /// whose references decide the package's exports (spec 15.2).
     pub consumer: Vec<String>,
-    /// `rock fix --imports`: the fix to run (the only one so far).
+    /// `rock fix --imports`: add missing `use` items.
     pub imports: bool,
+    /// `rock fix --across-yield`: rewrite sim identity borrows held across a
+    /// suspension (`across_yield_fix::run`).
+    pub across_yield: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
     /// (`libs/chess-core`) needs the repo root passed explicitly.
@@ -820,6 +837,13 @@ impl Args {
                     .value_parser(clap::value_parser!(CliCommand)),
             )
             .arg(Arg::new("files").num_args(0..))
+            .arg(
+                Arg::new("require-test")
+                    .long("require-test")
+                    .value_name("NAME")
+                    .action(ArgAction::Append)
+                    .help("For `rock test --backend c`: require this named @test to be discovered and pass (repeatable)."),
+            )
             .arg(Arg::new("output").long("output").alias("out"))
             .arg(Arg::new("allocation-census").long("allocation-census")
                 .value_name("PATH")
@@ -913,6 +937,9 @@ impl Args {
             .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: run up to N sim children concurrently (default: as many as the free GPU memory less a 6 GiB reserve affords at 2 GiB each, at most the core count; 1 = serial). Applies to the whole-suite and multi-name forms."))
+            .arg(Arg::new("boot-concurrency").long("boot-concurrency").value_name("N")
+                .value_parser(crate::run_sim::parse_boot_concurrency)
+                .help("For `rock sim`: allow at most N workers between spawn and first entry, independently of --jobs. Positive integer; default uncapped. Overrides ROCK_SIM_BOOT_CONCURRENCY, which tools/gate-sims.sh inherits."))
             .arg(Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other lanes. Default 2. Bounded by --jobs."))
@@ -972,6 +999,8 @@ impl Args {
                 .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
             .arg(Arg::new("imports").long("imports").action(ArgAction::SetTrue)
                 .help("For `rock fix`: add the `use` items a modules-v1 fragment's unresolved names need, when one accessible candidate exists (plans by default; --apply writes)."))
+            .arg(Arg::new("across-yield").long("across-yield").action(ArgAction::SetTrue)
+                .help("For `rock fix`: rewrite MAG sims' identity borrows held across a suspension to re-resolve from the handle they came from (plans by default; --apply writes)."))
             .arg(Arg::new("consumers").long("consumers")
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
@@ -999,6 +1028,7 @@ impl Args {
         Args {
             command,
             files: many_str("files"),
+            required_tests: many_str("require-test"),
             output: m.get_one::<String>("output").cloned(),
             allocation_census: m.get_one::<String>("allocation-census").cloned(),
             allocation_sites: m.get_one::<String>("allocation-sites").cloned(),
@@ -1046,6 +1076,7 @@ impl Args {
             update_snapshots: m.get_flag("update-snapshots"),
             jobs: m.get_one::<usize>("jobs").copied(),
             full_asset_jobs: m.get_one::<usize>("full-asset-jobs").copied(),
+            boot_concurrency: m.get_one::<usize>("boot-concurrency").copied(),
             isolated: m.get_flag("isolated"),
             workers: m.get_flag("workers"),
             multi_order: m.get_flag("multi-order"),
@@ -1077,6 +1108,7 @@ impl Args {
             apply: m.get_flag("apply"),
             consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
             imports: m.get_flag("imports"),
+            across_yield: m.get_flag("across-yield"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
@@ -1138,7 +1170,21 @@ impl Args {
 
 #[cfg(test)]
 mod arg_tests {
-    use super::{Args, Backend};
+    use super::{Args, Backend, CliCommand};
+
+    #[test]
+    fn boot_concurrency_cli_requires_a_positive_integer() {
+        let args = Args::from_matches(Args::command().try_get_matches_from(
+            ["rock", "sim", "mag", "--boot-concurrency", "4"]).unwrap());
+        assert_eq!(args.boot_concurrency, Some(4));
+        let args = Args::from_matches(Args::command().try_get_matches_from(
+            ["rock", "sim", "mag"]).unwrap());
+        assert_eq!(args.boot_concurrency, None);
+        for value in ["0", "bad", "-1"] {
+            assert!(Args::command().try_get_matches_from(
+                ["rock", "sim", "mag", "--boot-concurrency", value]).is_err());
+        }
+    }
 
     #[test]
     fn sibling_daemon_bin_is_the_daemon_next_to_rock_or_nothing() {
@@ -1214,10 +1260,26 @@ mod arg_tests {
     fn c_backend_parses_for_test() {
         let args = Args::from_matches(
             Args::command()
-                .try_get_matches_from(["rock", "test", "tests/c_backend_smoke.rock", "--backend", "c"])
+                .try_get_matches_from([
+                    "rock",
+                    "test",
+                    "mag-world",
+                    "--backend",
+                    "c",
+                    "--require-test",
+                    "mag_world::first_test",
+                    "--require-test",
+                    "mag_world::second_test",
+                ])
                 .expect("parse"),
         );
         assert_eq!(args.backend, Backend::C);
+        assert_eq!(args.command, CliCommand::Test);
+        assert_eq!(args.files, ["mag-world"]);
+        assert_eq!(
+            args.required_tests,
+            ["mag_world::first_test", "mag_world::second_test"]
+        );
     }
 
     #[test]
@@ -1345,7 +1407,8 @@ mod caps_tests {
         assert!(Backend::C.serves(Compile), "c serves compile");
         assert!(Backend::C.serves(Test), "c serves test");
         assert!(Backend::C.serves(Run), "c serves run");
-        for cmd in [CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
+        assert!(Backend::C.serves(Frame), "c serves frame");
+        for cmd in [CompileSingle, TestCompile, Watch, Stone, Perf, Sim] {
             assert!(!Backend::C.serves(cmd), "c should reject {:?}", cmd);
         }
         let msg = Backend::C.reject_reason(CliCommand::Stone).expect("c rejects stone");
