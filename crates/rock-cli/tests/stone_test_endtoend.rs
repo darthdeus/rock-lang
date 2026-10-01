@@ -248,12 +248,11 @@ fn caller_body_edit_preserves_cross_module_generic_callback_abi() {
     assert!(!after.trim().is_empty(), "body edit must emit an overlay");
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local callback = invoke\n\
-         assert(callback() == 10)\n\
+         assert(invoke() == 10)\n\
          bump()\n\
          _G.HOT_RELOAD = true\n{after}\n\
          _G.HOT_RELOAD = false\n\
-         assert(callback() == 20)\n\
+         assert(invoke() == 20)\n\
          bump()\n\
          assert(_G.SCORE == 2)\n\
          print('PASS')\n"
