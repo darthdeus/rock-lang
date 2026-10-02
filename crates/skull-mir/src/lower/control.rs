@@ -26,11 +26,31 @@ impl Builder<'_> {
         Ok(self.emit_cur(inst))
     }
 
+    fn lower_leafwise_value_eq(
+        &mut self,
+        op: BinOp,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+        shape: &ValueShape,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let lhs_repr = self.lower_expr_repr(lhs)?;
+        let lhs_leaves = self.repr_to_leaves_bundle_for_shape(&lhs_repr, shape)?;
+        let rhs_repr = self.lower_expr_repr(rhs)?;
+        let rhs_leaves = self.repr_to_leaves_bundle_for_shape(&rhs_repr, shape)?;
+        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
+        Ok(if matches!(op, BinOp::Eq) {
+            equal
+        } else {
+            self.emit_cur(Inst::Not(equal))
+        })
+    }
+
     pub(crate) fn lower_binop(
         &mut self,
         op: BinOp,
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
+        condition: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
         match op {
             BinOp::Lt | BinOp::Leq | BinOp::Gt | BinOp::Geq => {
@@ -115,11 +135,7 @@ impl Builder<'_> {
                                 self.emit_cur(Inst::NotEq(value, nil))
                             }
                         };
-                        return Ok(if matches!(op, BinOp::Eq) {
-                            self.emit_cur(Inst::Not(present))
-                        } else {
-                            present
-                        });
+                        return Ok(self.lower_presence_test(op, present, condition));
                     }
                     // The tuple twin of the nobox-value case above: a `(..)?`
                     // whose element splats carries its own presence SLOT, and
@@ -139,11 +155,7 @@ impl Builder<'_> {
                                 self.emit_cur(Inst::NotEq(value, nil))
                             }
                         };
-                        return Ok(if matches!(op, BinOp::Eq) {
-                            self.emit_cur(Inst::Not(present))
-                        } else {
-                            present
-                        });
+                        return Ok(self.lower_presence_test(op, present, condition));
                     }
                     if self.expr_is_flat_enum(v) {
                         let tag = match self.lower_expr_repr(v)?.into_value() {
@@ -177,10 +189,28 @@ impl Builder<'_> {
                             )));
                         }
                         shape.nullable |= rhs_shape.nullable;
-                        let lhs_repr = self.lower_expr_repr(lhs)?;
-                        let lhs_leaves = self.repr_to_leaves_bundle_for_shape(&lhs_repr, &shape)?;
-                        let rhs_repr = self.lower_expr_repr(rhs)?;
-                        let rhs_leaves = self.repr_to_leaves_bundle_for_shape(&rhs_repr, &shape)?;
+                        return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
+                    }
+                }
+                // A `value` that is not `nobox` (every generic one, e.g. `Entity<T>`)
+                // still arrives as leaf cells wherever its ABI splats it. Packing
+                // both operands to reach the per-type `__eq` allocated two tables
+                // per comparison; comparing the leaves is the same answer, since
+                // that metamethod is the field-wise `==` over the same leaves.
+                // Lua only: native C compares its own handle and struct layouts.
+                let same_value = self.scx.target() == bone_semantic::hir::FnBackend::Lua
+                    && !self.scx.values_first_class
+                    && matches!(
+                        (self.dispatch().value_struct_name(lhs), self.dispatch().value_struct_name(rhs)),
+                        (Some(ln), Some(rn)) if ln == rn
+                    );
+                if same_value {
+                    let lhs_repr = self.lower_expr_repr(lhs)?.into_value();
+                    let rhs_repr = self.lower_expr_repr(rhs)?.into_value();
+                    let (mut lhs_leaves, mut rhs_leaves) = (Vec::new(), Vec::new());
+                    if matches!(lhs_repr, ValueRepr::Group { .. })
+                        && matching_scalar_leaves(&lhs_repr, &rhs_repr, &mut lhs_leaves, &mut rhs_leaves)
+                    {
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal
@@ -188,6 +218,13 @@ impl Builder<'_> {
                             self.emit_cur(Inst::Not(equal))
                         });
                     }
+                    let lv = self.pack(lhs_repr)?;
+                    let rv = self.pack(rhs_repr)?;
+                    return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                        Inst::Eq(lv, rv)
+                    } else {
+                        Inst::NotEq(lv, rv)
+                    }));
                 }
                 if let (Some(lhs_shape), Some(rhs_shape)) = (
                     self.flat_enum_value_shape_of(lhs)?,
@@ -195,6 +232,7 @@ impl Builder<'_> {
                 ) {
                     if lhs_shape.name == rhs_shape.name
                         && lhs_shape.fields == rhs_shape.fields
+                        && !self.scx.native_flat_enums
                         && flat_enum_equality_is_leafwise(self.ws, lhs_shape.name)
                     {
                         let lhs_repr = self.lower_expr_repr(lhs)?;
@@ -220,6 +258,13 @@ impl Builder<'_> {
                 let route = self.dispatch().eq_route(lhs, rhs);
                 let lv = self.lower_expr(lhs)?;
                 let rv = self.lower_expr(rhs)?;
+                if self.scx.values_first_class && matches!(route, EqRoute::Structural) {
+                    return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                        Inst::Eq(lv, rv)
+                    } else {
+                        Inst::NotEq(lv, rv)
+                    }));
+                }
                 if let Some(name) = route.synthesized_callee(op) {
                     return self.dispatched_call(name, Vec::new(), vec![lv, rv]);
                 }
@@ -258,9 +303,21 @@ impl Builder<'_> {
             }
             // Short-circuit operators: the rhs may not evaluate, so they lower
             // to branches with the result flowing through a cell.
-            BinOp::And => self.lower_and(lhs, rhs),
-            BinOp::Or => self.lower_or(lhs, rhs),
+            BinOp::And => self.lower_and(lhs, rhs, condition),
+            BinOp::Or => self.lower_or(lhs, rhs, condition),
             BinOp::NullCoalesce => self.lower_nullcoalesce(lhs, rhs),
+        }
+    }
+
+    fn lower_presence_test(&mut self, op: BinOp, present: Idx<Inst>, condition: bool) -> Idx<Inst> {
+        if matches!(op, BinOp::Eq) {
+            self.emit_cur(Inst::Not(present))
+        } else if condition {
+            present
+        } else {
+            // An absent place can carry nil; escaped bools must carry false.
+            let absent = self.emit_cur(Inst::Not(present));
+            self.emit_cur(Inst::Not(absent))
         }
     }
 
@@ -286,9 +343,12 @@ impl Builder<'_> {
         else_branch: Option<Idx<Expr>>,
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
+        let result_ty = matches!(shape, RetSlot::Opaque)
+            .then(|| self.current_expr_unit_storage_ty_id())
+            .flatten();
         let results: Vec<Idx<Cell>> =
-            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
-        let cond_v = self.lower_expr(cond)?;
+            (0..shape.slot_count()).map(|_| self.f.new_cell_typed(None, result_ty)).collect();
+        let cond_v = self.lower_condition(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -331,7 +391,7 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<(), CompilerError> {
-        let cond_v = self.lower_expr(cond)?;
+        let cond_v = self.lower_condition(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -461,9 +521,14 @@ impl Builder<'_> {
     }
 
     /// `a && b` == `if a then b else false`.
-    pub(crate) fn lower_and(&mut self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
-        let lv = self.lower_expr(lhs)?;
+    fn lower_and(
+        &mut self,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+        condition: bool,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
+        let lv = self.lower_condition(lhs)?;
         let rhs_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -476,7 +541,11 @@ impl Builder<'_> {
             },
         );
         self.cur = rhs_bb;
-        let rv = self.lower_expr(rhs)?;
+        let rv = if condition {
+            self.lower_condition(rhs)?
+        } else {
+            self.lower_expr(rhs)?
+        };
         self.store_and_join(result, rv, join);
         self.cur = else_bb;
         let f = self.emit_cur(Inst::Const(Lit::Bool(false)));
@@ -486,9 +555,14 @@ impl Builder<'_> {
     }
 
     /// `a || b` == `if a then true else b`.
-    pub(crate) fn lower_or(&mut self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
-        let lv = self.lower_expr(lhs)?;
+    fn lower_or(
+        &mut self,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+        condition: bool,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
+        let lv = self.lower_condition(lhs)?;
         let then_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -504,7 +578,11 @@ impl Builder<'_> {
         let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
         self.store_and_join(result, t, join);
         self.cur = rhs_bb;
-        let rv = self.lower_expr(rhs)?;
+        let rv = if condition {
+            self.lower_condition(rhs)?
+        } else {
+            self.lower_expr(rhs)?
+        };
         self.store_and_join(result, rv, join);
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
@@ -516,7 +594,7 @@ impl Builder<'_> {
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_expr(lhs)?;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(lv, nil));
@@ -539,5 +617,30 @@ impl Builder<'_> {
         self.store_and_join(result, lv, join);
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
+    }
+}
+
+/// Pair the leaves of two unpacked operands of one value type, or answer false
+/// when either side is packed or carries a presence leaf.
+fn matching_scalar_leaves(
+    lhs: &ValueRepr,
+    rhs: &ValueRepr,
+    lhs_out: &mut Vec<Idx<Inst>>,
+    rhs_out: &mut Vec<Idx<Inst>>,
+) -> bool {
+    match (lhs, rhs) {
+        (
+            ValueRepr::Group { name: ln, parts: lp, present: None },
+            ValueRepr::Group { name: rn, parts: rp, present: None },
+        ) if ln == rn && lp.len() == rp.len() => lp
+            .iter()
+            .zip(rp)
+            .all(|(l, r)| matching_scalar_leaves(l, r, lhs_out, rhs_out)),
+        (ValueRepr::Scalar(l), ValueRepr::Scalar(r)) => {
+            lhs_out.push(*l);
+            rhs_out.push(*r);
+            true
+        }
+        _ => false,
     }
 }

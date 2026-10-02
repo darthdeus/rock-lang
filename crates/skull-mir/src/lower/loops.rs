@@ -30,7 +30,7 @@ impl Builder<'_> {
             // `break`, which is exactly what `used_break_targets` records.
             self.f.set_term(self.cur, Term::Goto(body_bb));
         } else {
-            let cond_v = self.lower_expr(cond)?;
+            let cond_v = self.lower_condition(cond)?;
             self.f.set_term(
                 self.cur,
                 Term::Branch {
@@ -931,7 +931,6 @@ impl Builder<'_> {
                 .transpose()?
                 .flatten()
             {
-                let name = self.body.binding_arena[*b].name;
                 let mono = self
                     .binding_ty(*b)
                     .and_then(|ty| self.concrete_ty_id(ty))
@@ -944,21 +943,7 @@ impl Builder<'_> {
                 )?;
                 let bundle = ValueBundle::new(representation, repr);
                 let leaves = self.repr_to_leaves_bundle_for_shape(&bundle, &shape)?;
-                let cells: Vec<Idx<Cell>> = leaves
-                    .iter()
-                    .enumerate()
-                    .map(|(li, &value)| {
-                        let c = self.new_binding_cell(
-                            *b,
-                            Ustr::from(format!("{name}__{li}").as_str()),
-                            None,
-                            Ustr::from(li.to_string().as_str()),
-                        );
-                        self.emit_cur(Inst::Store { cell: c, value });
-                        c
-                    })
-                    .collect();
-                self.group_binds.insert(raw(*b), (cells, shape));
+                self.bind_leaves(*b, &leaves, shape)?;
                 return Ok(());
             }
         }
@@ -1025,7 +1010,7 @@ impl Builder<'_> {
                 let n = shape.leaf_count();
                 let leaves = values[*idx..*idx + n].to_vec();
                 *idx += n;
-                self.bind_leaves(*b, &leaves, shape.clone());
+                self.bind_leaves(*b, &leaves, shape.clone())?;
             }
             (BindingPattern::Tuple(subs), RetSlot::Nested(inner))
                 if subs.len() == inner.slots.len() =>
@@ -1057,8 +1042,36 @@ impl Builder<'_> {
     /// Bind `b` to a value's LEAVES: one cell per leaf, registered in
     /// `group_binds`. The single form for "this binding is a scalarized value",
     /// shared by `if let` and the splatting tuple destructures.
-    pub(crate) fn bind_leaves(&mut self, b: Idx<BindingInfo>, leaves: &[Idx<Inst>], shape: ValueShape) {
+    pub(crate) fn bind_leaves(
+        &mut self,
+        b: Idx<BindingInfo>,
+        leaves: &[Idx<Inst>],
+        shape: ValueShape,
+    ) -> Result<(), CompilerError> {
         let bname = self.body.binding_arena[b].name;
+        let owner = self
+            .binding_ty(b)
+            .and_then(|ty| self.concrete_ty_id(ty));
+        if let Some(cells) = self.new_flat_enum_cells(b, bname, &shape, owner.as_deref())? {
+            if cells.len() != leaves.len() {
+                return Err(self.gap_here(format!(
+                    "flat enum {} has {} binding cells for {} leaves",
+                    shape.name,
+                    cells.len(),
+                    leaves.len()
+                )));
+            }
+            for (cell, &value) in cells.iter().zip(leaves) {
+                self.emit_cur(Inst::Store { cell: *cell, value });
+            }
+            self.group_binds.insert(raw(b), (cells, shape));
+            return Ok(());
+        }
+        let leaf_tys = self.value_shape_leaf_monos(&shape).map(|tys| {
+            tys.into_iter()
+                .map(|ty| self.scx.interner().intern(ty))
+                .collect::<Vec<_>>()
+        });
         let cells: Vec<Idx<Cell>> = leaves
             .iter()
             .enumerate()
@@ -1069,11 +1082,38 @@ impl Builder<'_> {
                     None,
                     Ustr::from(li.to_string().as_str()),
                 );
+                self.f.cells[c].native_ty = leaf_tys.as_ref().and_then(|tys| tys.get(li).copied());
                 self.emit_cur(Inst::Store { cell: c, value });
                 c
             })
             .collect();
         self.group_binds.insert(raw(b), (cells, shape));
+        Ok(())
+    }
+
+    fn value_shape_leaf_monos(&self, shape: &ValueShape) -> Option<Vec<MonoTy>> {
+        if shape.nullable {
+            return None;
+        }
+        let fields = value_struct_field_tys(self.ws, shape.name)?;
+        if fields.len() != shape.fields.len() {
+            return None;
+        }
+        let mut out = Vec::new();
+        for ((shape_name, field_shape), (field_name, field_ty)) in shape.fields.iter().zip(fields) {
+            if shape_name != &field_name {
+                return None;
+            }
+            match field_shape {
+                FieldShape::Prim => out.push(
+                    self.concrete_ty_id(field_ty)
+                        .map(|ty| ty.as_ref().clone())
+                        .or_else(|| crate::monoty::convert_decl(self.ws, field_ty, &SpecSubst::default()).ok())?,
+                ),
+                FieldShape::Nested(child) => out.extend(self.value_shape_leaf_monos(child)?),
+            }
+        }
+        Some(out)
     }
 
     /// Bind `b` to a splatting tuple's SLOTS: one cell per slot, registered in
