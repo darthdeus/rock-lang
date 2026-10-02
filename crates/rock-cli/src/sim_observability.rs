@@ -173,14 +173,13 @@ impl SimRunRecorder {
         effective_mode: &str,
         update_snapshots: bool,
         source_files: &HashMap<String, String>,
-        boot_concurrency: Option<usize>,
     ) {
         if let Ok(mut state) = self.inner.lock() {
             state.timings.set_source_files(source_files);
         } else {
             self.warn_once("sim history lock was poisoned while recording sim source files".into());
         }
-        let mut config = json!({
+        let config = json!({
             "project_path": project_path,
             "resolved_entries": resolved_entries,
             "requested_jobs": requested_jobs,
@@ -191,9 +190,6 @@ impl SimRunRecorder {
             "effective_mode": effective_mode,
             "update_snapshots": update_snapshots,
         });
-        if let Some(cap) = boot_concurrency {
-            config["boot_concurrency"] = json!(cap);
-        }
         self.event("run_config", config);
     }
 

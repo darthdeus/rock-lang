@@ -412,7 +412,6 @@ impl CommandContext {
                 &self.args.files[0],
                 &self.args.files[1..],
                 self.args.jobs,
-                crate::run_sim::sim_positive_count(self.args.batch_quantum, "ROCK_SIM_BATCH_QUANTUM")?,
             );
         }
         if let Some(path) = self.args.allocation_sites.as_deref() {
@@ -428,7 +427,6 @@ impl CommandContext {
                 &self.args.files[1..],
                 path,
                 self.args.jobs,
-                crate::run_sim::sim_positive_count(self.args.boot_concurrency, "ROCK_SIM_BOOT_CONCURRENCY")?,
             )
         } else if let Some(path) = self.args.allocation_census.as_deref() {
             if self.args.list {
@@ -443,7 +441,6 @@ impl CommandContext {
                 &self.args.files[1..],
                 path,
                 self.args.jobs,
-                crate::run_sim::sim_positive_count(self.args.boot_concurrency, "ROCK_SIM_BOOT_CONCURRENCY")?,
             )
         } else if self.args.list {
             if self.args.files.is_empty() {
@@ -472,8 +469,6 @@ impl CommandContext {
                 self.args.jobs,
                 self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
-                crate::run_sim::sim_positive_count(self.args.boot_concurrency, "ROCK_SIM_BOOT_CONCURRENCY")?,
-                crate::run_sim::sim_positive_count(self.args.batch_quantum, "ROCK_SIM_BATCH_QUANTUM")?,
             )
         } else {
             // files[0] = project, files[1..] = one or more sim names. One name
@@ -490,8 +485,6 @@ impl CommandContext {
                 self.args.jobs,
                 self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
-                crate::run_sim::sim_positive_count(self.args.boot_concurrency, "ROCK_SIM_BOOT_CONCURRENCY")?,
-                crate::run_sim::sim_positive_count(self.args.batch_quantum, "ROCK_SIM_BATCH_QUANTUM")?,
             )
         }
     }
