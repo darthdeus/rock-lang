@@ -60,6 +60,63 @@ Adversarial checks (both exact probe hunks removed, rebuilt and green):
   `nobox_plain_field_reads_after_whole_child_write` failing (12.5 expected,
   old 1.5 observed). This isolates the write witness from constructor corruption.
 
-Next checkpoint: record the final emission receipts and re-pin the census in
-its own final commit. The new Vec fixture adds one unpackaged container site;
-baseline and candidate census outputs are compared before re-pinning.
+The emission receipts below close validation. The new Vec fixture adds one
+unpackaged container site; baseline and candidate census outputs match.
+
+## Emission receipts and handoff
+
+Both compilers use this worktree's absolute source paths and stdlib. The
+baseline binary was built at `a0d305da92` before production edits; the final
+binary was rebuilt after undoing both mutations. Both emitted MAG with
+`--var BUILD_UNIX=0 --var BUILD_DATE=2000-01-01` in the same repository state,
+so source-revision and volatile build inputs match.
+
+Artifacts and logs: `/home/developer/tmp/rock-cb-nobox-read/`.
+Commands, with the dispatched `ROCK_DIR` and `CARGO_TARGET_DIR` exported:
+
+```sh
+/home/developer/tmp/rock-cb-nobox-read/rock-baseline compile mag --var BUILD_UNIX=0 --var BUILD_DATE=2000-01-01 /home/developer/tmp/rock-cb-nobox-read/baseline-mag.lua
+nice cargo run --bin rock -- compile mag --var BUILD_UNIX=0 --var BUILD_DATE=2000-01-01 /home/developer/tmp/rock-cb-nobox-read/final-mag.lua
+diff -u /home/developer/tmp/rock-cb-nobox-read/baseline-mag.lua /home/developer/tmp/rock-cb-nobox-read/final-mag.lua
+python3 /home/developer/tmp/rock-cb-nobox-read/emit-tests.py baseline /home/developer/tmp/rock-cb-nobox-read/rock-baseline
+python3 /home/developer/tmp/rock-cb-nobox-read/emit-tests.py final /home/developer/tmp/rock-cb-nobox-read/rock-final
+```
+
+The MAG diff exits 0 and contains zero lines: **not reachable: mag emits no
+changed lines**. No changed hot functions or native performance pair is needed.
+Compiler timing is not measured by this worker's dispatched quick gates.
+
+The fixture emit script enumerates all 718 `.rock` paths with `rg --files`,
+uses a 60-second bound per compile under an outer 900-second bound, and records
+all exit statuses. Both compilers emit 711/718; 710 pre-existing successful
+artifacts are byte-identical. Identical rejection names:
+
+- `tests/modules/chess-scoped/lib.rock`
+- `tests/modules/witness/witness-legacy/main.rock`
+- `tests/modules/witness/witness-lib/lib.rock`
+- `tests/modules/witness/witness-lib/secret.rock`
+- `tests/modules/witness/witness-v1/main.rock`
+- `tests/newtype_generic_unification_reject_map_conflict.rock`
+- `tests/newtype_generic_unification_reject_wrong_shape.rock`
+
+Only `tests/nobox_plain_value_field.rock` changes: 17 added / 42 removed Lua
+lines, 128 lines of unified diff including headers/context. The changed
+functions are `field_holder_float_ret_FieldHolder`,
+`field_x_FieldHolder_ret_float`, `field_y_FieldHolder_ret_float`,
+`deep_field_x_DeepFieldHolder_ret_float`,
+`deep_field_y_DeepFieldHolder_ret_float`,
+`__rock_mk_nobox_plain_field_reads_deep_plain_leaves`,
+`nobox_plain_nullable_field_reads_presence_and_leaves`, and
+`__rock_mk_nobox_plain_field_reads_after_whole_child_write`. The deep test's
+now-unused `FieldPoint_ct` constant hoist disappears. Every hunk concerns the
+requested shape's construction/read/write; nullable box/branch removal and
+register changes follow from optimization of the corrected leaf construction.
+There are no changed lines in an unrelated shape's artifact.
+
+The baseline and final identity census are byte-identical on the new fixture
+population. Against the committed pin, only unpackaged container sites rise
+132 -> 133 (total 355 -> 356), due to the Vec witness. Re-pin this in a separate
+final commit; do not fold it into the Lua fix.
+
+Implementation and evidence are complete. Next action: lead integration and
+its broader gates; the separately owned SpacePoint workaround remains intact.
