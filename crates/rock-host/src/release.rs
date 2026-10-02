@@ -334,6 +334,17 @@ pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset
     selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
 }
 
+fn is_runtime_data_asset(relative: &Path) -> bool {
+    let mut components = relative.components();
+    matches!(
+        (components.next(), components.next()),
+        (
+            Some(std::path::Component::Normal(asset_root)),
+            Some(std::path::Component::Normal(cache_dir))
+        ) if asset_root == OsStr::new("assets") && cache_dir == OsStr::new(".runtime-data")
+    )
+}
+
 fn add_path(
     by_key: &mut BTreeMap<String, PathBuf>,
     prefix: &str,
@@ -343,7 +354,16 @@ fn add_path(
     overwrite: bool,
 ) -> Result<()> {
     if source.is_dir() {
-        for entry in walkdir::WalkDir::new(source).sort_by_file_name() {
+        for entry in walkdir::WalkDir::new(source)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .map_or(true, |relative| !is_runtime_data_asset(relative))
+            })
+        {
             let entry = entry?;
             if entry.file_type().is_file() {
                 let rel = entry.path().strip_prefix(root).map_err(|_| {
@@ -365,6 +385,9 @@ fn add_path(
                 root.display()
             )
         })?;
+        if is_runtime_data_asset(rel) {
+            return Ok(());
+        }
         let key = key_for(prefix, &rel.to_string_lossy().replace('\\', "/"));
         insert_asset(by_key, key, source.to_path_buf(), overwrite);
     }
@@ -519,6 +542,37 @@ mod tests {
         assert_eq!(staged.file_count, keys.len());
         assert_eq!(std::fs::read(out.join("games/demo/assets/nested/a.txt")).unwrap(), b"a");
         assert_eq!(std::fs::read(out.join("stone/assets/sound.wav")).unwrap(), b"sound");
+    }
+
+    #[test]
+    fn selected_asset_directories_exclude_runtime_metadata_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("demo");
+        std::fs::create_dir_all(project.join("assets/ui")).unwrap();
+        std::fs::create_dir_all(project.join("assets/.runtime-data")).unwrap();
+        std::fs::write(project.join("assets/ui/hud.png"), b"hud").unwrap();
+        std::fs::write(project.join("assets/.runtime-data/boot.bin"), b"metadata").unwrap();
+        std::fs::write(project.join("assets/.runtime-data/explicit.bin"), b"metadata").unwrap();
+        let config = StickConfig::new_from_str(
+            concat!(
+                "[package]\nname = \"demo\"\n",
+                "[release]\nassets = [\"assets\", ",
+                "\"assets/.runtime-data/explicit.bin\"]\n",
+            ),
+        )
+        .unwrap();
+
+        let selection = select_assets(&project, "demo", Some(&config), root.path(), false).unwrap();
+        let keys: Vec<_> = selection.assets.iter().map(|asset| asset.key.as_str()).collect();
+        assert!(keys.contains(&"demo/assets/ui/hud.png"));
+        assert!(!keys.contains(&"demo/assets/.runtime-data/boot.bin"));
+        assert!(!keys.contains(&"demo/assets/.runtime-data/explicit.bin"));
+
+        let output = root.path().join("staged/assets");
+        let staged = stage_assets(&selection, &output).unwrap();
+        assert_eq!(staged.file_count, 1);
+        assert!(!output.join("demo/assets/.runtime-data/boot.bin").exists());
+        assert!(!output.join("demo/assets/.runtime-data/explicit.bin").exists());
     }
 
     #[test]
