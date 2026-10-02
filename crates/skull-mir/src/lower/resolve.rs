@@ -165,7 +165,12 @@ impl Builder<'_> {
     fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
-        let out = self.lower_expr_repr_unscoped(e);
+        let out = match self.lower_expr_repr_unscoped(e) {
+            Ok(ValueRepr::Scalar(v)) if self.f32_round_exprs.contains(&e) => {
+                Ok(ValueRepr::Scalar(self.emit_cur(Inst::FloatToF32(v))))
+            }
+            other => other,
+        };
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         out
@@ -291,7 +296,7 @@ impl Builder<'_> {
                 }
                 // A flattened enum field read as a WHOLE value re-materializes the
                 // box from the parent's slots (the single escape boundary).
-                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base)
+                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base)
                     && let Some(shape) = self
                         .struct_field_plan(sname, field, false)?
                         .flat_shape()
@@ -299,11 +304,15 @@ impl Builder<'_> {
                     let parent = self.lower_expr(base)?;
                     return Ok(ValueRepr::Scalar(self.materialize_flat(parent, field, &shape)));
                 }
+                if self.scx.values_first_class {
+                    let parent = self.lower_expr(base)?;
+                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field })));
+                }
                 // An embedded field read as a WHOLE value re-materializes from
                 // its leaves. Projection-only keeps every such read transient
                 // (never bound, returned, captured or stored), so this is the
                 // consuming boundary, not a reintroduced box.
-                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(base)
+                if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base)
                     && let Some((cname, _)) = self
                         .struct_field_plan(sname, field, false)?
                         .embed()
@@ -325,9 +334,48 @@ impl Builder<'_> {
                 }
                 // An embed LEAF read composes to one dotted key on the parent
                 // that holds it; no intermediate projection exists.
-                let (pbase, key) = self.physical_field(base, field)?;
+                let (pbase, mut key, projected_shape) = self.physical_field_layout(base, field)?;
                 if key != field {
-                    let parent = self.lower_expr(pbase)?;
+                    // A value parent can still be UNBOXED (a param, a local):
+                    // project the path off its Group rather than pack a box
+                    // just to read a dotted key back out of it.
+                    let mut repr = self.lower_expr_repr_inner(pbase)?;
+                    // A boxed GC-table parent keys an inline child's enum and
+                    // struct fields by their leaves too, so a whole-field read
+                    // is split back into the Group rather than read off one key.
+                    if let ValueRepr::Scalar(v) = repr {
+                        repr = match self.value_struct_name_of(pbase) {
+                            Some(sname) if self.gc_table_inline_layout(sname)?.is_some() => {
+                                self.boxed_value_copy_repr(v, sname)?
+                            }
+                            _ => ValueRepr::Scalar(v),
+                        };
+                    }
+                    let segs: Vec<Ustr> = key.as_str().split('.').map(Ustr::from).collect();
+                    let mut at = 0;
+                    while at < segs.len() {
+                        let ValueRepr::Group { name, parts, .. } = &repr else { break };
+                        let Some(i) = self.field_index(*name, segs[at]) else { break };
+                        repr = parts[i].clone();
+                        at += 1;
+                    }
+                    if at == segs.len() {
+                        return Ok(repr);
+                    }
+                    if at > 0 {
+                        let rest: Vec<&str> = segs[at..].iter().map(|s| s.as_str()).collect();
+                        key = Ustr::from(&rest.join("."));
+                    }
+                    let parent = self.pack(repr)?;
+                    if let Some(shape) = projected_shape {
+                        let leaves = super::shape::leaf_names(&shape, key.as_str(), ".")
+                            .into_iter()
+                            .map(|key| self.emit_cur(Inst::Field {
+                                base: parent, field: Ustr::from(&key),
+                            }))
+                            .collect::<Vec<_>>();
+                        return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut 0));
+                    }
                     if let Some(name) = self.value_struct_of(e)
                         && self.is_nobox_struct(name)
                     {
@@ -345,20 +393,10 @@ impl Builder<'_> {
                 // Split it back into leaves and project the rebuilt Group; the
                 // leaves nothing reads die in DCE.
                 if let ValueRepr::Scalar(v) = br {
-                    if let Some(sname) = self.value_struct_name_of(base) {
-                        let storage = self
-                            .scx
-                            .rep_arena()
-                            .nominal_value_storage_required(self.ws, self.scx.target, sname)
-                            .map_err(|e| self.gap_here(e.message))?;
-                        if storage == ValueStorage::LeafTable {
-                            br = self.boxed_value_copy_repr(v, sname)?;
-                        } else {
-                            br = ValueRepr::Scalar(v);
-                        }
-                    } else {
-                        br = ValueRepr::Scalar(v);
-                    }
+                    br = match self.leaf_table_base(base)? {
+                        Some(sname) => self.boxed_value_copy_repr(v, sname)?,
+                        None => ValueRepr::Scalar(v),
+                    };
                 }
                 if let ValueRepr::Group { name, parts, .. } = &br {
                     if let Some(i) = self.field_index(*name, field) {
@@ -385,6 +423,16 @@ impl Builder<'_> {
                     Some(name) => Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, name)?)),
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
+            }
+            // Native first-class values are copied by the target's value load. In
+            // particular, a nullable global may be statically narrowed after a
+            // presence guard while its storage still carries the wrapper; keep
+            // that wrapper until the native consumer reads it.
+            Expr::Global(g)
+                if self.scx.values_first_class
+                    && !self.ws.functions_by_name.contains_key(&g) =>
+            {
+                Ok(ValueRepr::Scalar(self.emit_cur(Inst::Global(g))))
             }
             // A `nobox` global lives in K scalar globals, so the read IS the leaf
             // snapshot -- no box to copy out of.
@@ -456,7 +504,8 @@ impl Builder<'_> {
             // store) rebuilds a fresh value instead of aliasing the array slot.
             // A `V?` element takes the same shape, gated on presence at the copy.
             Expr::Index { base, index }
-                if self.value_struct_of(e).is_some() || nullable_place_value.is_some() =>
+                if !self.scx.values_first_class
+                    && (self.value_struct_of(e).is_some() || nullable_place_value.is_some()) =>
             {
                 let nullable = self.value_struct_of(e).is_none();
                 let name = self
@@ -671,23 +720,7 @@ impl Builder<'_> {
                 for fname in decl {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
-                        None => match (&base_repr, base_boxed) {
-                            (Some(ValueRepr::Group { name: bn, parts, .. }), _) => {
-                                let i = self
-                                    .field_index(*bn, fname)
-                                    .expect("functional-update base covers every field");
-                                fs.push(parts[i].clone());
-                            }
-                            (Some(_), Some(bi)) => {
-                                fs.push(ValueRepr::Scalar(
-                                    self.emit_cur(Inst::Field { base: bi, field: fname }),
-                                ));
-                            }
-                            _ => {
-                                let v = self.lower_struct_default(name, fname)?;
-                                fs.push(ValueRepr::Scalar(v));
-                            }
-                        },
+                        None => fs.push(self.spread_base_field_repr(&base_repr, base_boxed, name, fname)?),
                     }
                 }
                 fs
@@ -767,8 +800,13 @@ impl Builder<'_> {
                     return Err(self.gap_here("concrete call has no callee parameter type"));
                 }
             };
-            let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
-            let v = self.coerced_mono(v, a, t.as_ref());
+            let is_ref = self.is_ref_call_arg(e, a);
+            let v = if is_ref {
+                self.lower_ref_borrow(a)?
+            } else {
+                let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+                self.coerced_mono(v, a, t.as_ref())
+            };
             slots[pidx] = Some(v);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
@@ -889,9 +927,9 @@ impl Builder<'_> {
         name: ustr::Ustr,
         rep: FuncRef,
     ) -> Result<FuncRef, CompilerError> {
-        match backend_variant(self.ws, name, rep, self.scx.target) {
+        match backend_variant(self.ws, name, rep, self.call_scx.target) {
             Ok(f) => Ok(f),
-            Err(NoServingBinding) => self.reject_or_defer(e, name, rep, self.scx.target),
+            Err(NoServingBinding) => self.reject_or_defer(e, name, rep, self.call_scx.target),
         }
     }
 

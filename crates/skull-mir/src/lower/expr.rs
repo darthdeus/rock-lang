@@ -1077,12 +1077,23 @@ impl Builder<'_> {
                 }
                 // An embed LEAF write composes to one dotted key on the parent
                 // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
-                let (pbase, key) = self.physical_field(base, field)?;
+                let (pbase, key, projected_shape) = self.physical_field_layout(base, field)?;
                 let b = self.lower_place_base(pbase)?;
                 if let Some(sname) = self.leaf_table_base(base)?
                     && self.leaf_table_value_child(sname, field)?.is_some()
                 {
                     return self.store_leaf_table_child(b, sname, field, key, value);
+                }
+                if let Some(shape) = projected_shape {
+                    let repr = self.lower_expr_repr(value)?;
+                    let leaves = self.repr_to_leaves_bundle_for_shape(&repr, &shape)?;
+                    let keys = super::shape::leaf_names(&shape, key.as_str(), ".");
+                    for (slot, value) in Self::pair_embed_leaves(
+                        keys.into_iter().map(|key| Ustr::from(&key)).collect(), leaves,
+                    )? {
+                        self.emit_cur(Inst::StoreField { base: b, field: slot, value });
+                    }
+                    return Ok(());
                 }
                 let spliced_embed = match self.field_base_ty(base) {
                     Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. })

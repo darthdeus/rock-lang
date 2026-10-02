@@ -10,8 +10,15 @@ impl Builder<'_> {
         field: Ustr,
         spliced: bool,
     ) -> Result<StructFieldPlan, CompilerError> {
-        crate::lower::struct_field_plan(self.ws, self.scx.target, sname, field, spliced)
-            .map_err(|e| self.gap_here(e.message))
+        let plan = crate::lower::struct_field_plan(self.ws, self.scx.target, sname, field, spliced)
+            .map_err(|e| self.gap_here(e.message))?;
+        // First-class targets store inline children as declared fields, not leaf keys.
+        if self.scx.values_first_class {
+            if let StructFieldPlan::Inline { child, nullable, flat: None } = plan {
+                return Ok(StructFieldPlan::Direct { child: Some(child), nullable });
+            }
+        }
+        Ok(plan)
     }
 
     // --- `embed` storage: a child's leaves ARE the parent's physical keys ---
@@ -23,63 +30,136 @@ impl Builder<'_> {
     // paths. Enforcement of the source-level rules (projection-only, site
     // legality) is bone's half; this is storage only.
 
-    /// Physical key for `base.field`, composing an `embed` chain into one dotted
-    /// path and returning the expression that actually HOLDS it. `t.a.b.c` with
-    /// `a` and `b` embedded is the single key `"a.b.c"` on `t` -- no intermediate
-    /// projection exists at any level, because no intermediate box does.
-    ///
-    /// Links are matched under the SPLICED rule and the innermost one is then
-    /// validated under the storage rule, because only the innermost link decides
-    /// whether a table is reached at all. An FFI-clean value struct one level in
-    /// (`o.m` at `struct O { m: Mid }`) splices its own nested leaves into `o`, so
-    /// `o.m.v.y` is the single key `"m.v.y"` -- while the same projection off a
-    /// standalone `Mid` local is real cdata and composes nothing. Matching every
-    /// link under the storage rule stopped at the first FFI-clean link and read a
-    /// `"m.v"` key nothing writes; matching every link under the spliced rule
-    /// would compose a dotted key on that cdata local.
+    /// Physical key and holder for a field projection.
     pub(crate) fn physical_field(
         &self,
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<(Idx<Expr>, Ustr), CompilerError> {
+        let (base, key, _) = self.physical_field_layout(base, field)?;
+        Ok((base, key))
+    }
+
+    /// A flattened value's projected shape comes from the same leaf layout
+    /// that stores it, even when an intermediate child permits boxing.
+    pub(crate) fn physical_field_layout(
+        &self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<(Idx<Expr>, Ustr, Option<ValueShape>), CompilerError> {
         let mut parts = vec![field];
         let mut cur = base;
-        let mut innermost = None;
-        while let Expr::FieldAccess { base: b2, field: f2 } = self.body.expr_arena[cur] {
-            if self.swizzle_of(b2, f2).is_some() {
+        let mut physical = (base, field, None);
+        while let Expr::FieldAccess { base: owner, field: child_field } = self.body.expr_arena[cur] {
+            if self.swizzle_of(owner, child_field).is_some() {
                 break;
             }
-            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(b2) else {
+            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(owner) else {
                 break;
             };
-            if self
-                .struct_field_plan(sname, f2, true)?
-                .inline_child()
-                .is_none()
-            {
-                break;
+            let plan = self.struct_field_plan(sname, child_field, false)?;
+            let child = match plan.inline_child() {
+                Some(child) => Some(child),
+                None => self.leaf_table_value_child(sname, child_field)?,
+            };
+            if let Some(child) = child {
+                let shape = self.nobox_plain_child_shape(child)?;
+                let paths = self.embed_leaf_paths(child)?;
+                let relative = parts.iter().rev().map(|p| p.as_str()).collect::<Vec<_>>().join(".");
+                let prefix = format!("{relative}.");
+                if paths.iter().any(|path| path.as_str() == relative || path.as_str().starts_with(&prefix)) {
+                    let mut projected = shape;
+                    for part in parts.iter().rev() {
+                        projected = projected.and_then(|shape| {
+                            match shape.fields.into_iter().find(|(name, _)| name == part)?.1 {
+                                FieldShape::Nested(sub) => Some(sub),
+                                FieldShape::Prim => None,
+                            }
+                        });
+                    }
+                    physical = (owner, Ustr::from(&format!("{child_field}.{relative}")), projected);
+                }
             }
-            parts.push(f2);
-            innermost = Some((sname, f2));
-            cur = b2;
+            parts.push(child_field);
+            cur = owner;
         }
-        if let Some((s, f)) = innermost
-            && self
-                .struct_field_plan(s, f, false)?
-                .inline_child()
-                .is_none()
-        {
-            return Ok((base, field));
+        Ok(physical)
+    }
+
+    /// The leaf-table value `base` projects a field out of, seen through `ref`.
+    pub(crate) fn leaf_table_base(&self, base: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(None);
         }
-        if innermost.is_none() {
-            return Ok((base, field));
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(base) else {
+            return Ok(None);
+        };
+        if !self.is_value_struct(sname) {
+            return Ok(None);
         }
-        if parts.len() == 1 {
-            return Ok((cur, field));
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, sname)
+            .map_err(|e| self.gap_here(e.message))?;
+        Ok((storage == ValueStorage::LeafTable).then_some(sname))
+    }
+
+    /// The plain (not `nobox`) value child `field` of leaf-table value `sname`.
+    /// Its field plan is `Direct`, yet the parent keys every nested leaf by
+    /// dotted path, so the child has no key of its own: `pos` of a leaf-table
+    /// parent lives at `pos.x`/`pos.y`, exactly like an inline child.
+    pub(crate) fn leaf_table_value_child(
+        &self,
+        sname: Ustr,
+        field: Ustr,
+    ) -> Result<Option<Ustr>, CompilerError> {
+        if self.scx.values_first_class || !self.is_value_struct(sname) {
+            return Ok(None);
         }
-        parts.reverse();
-        let key: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
-        Ok((cur, Ustr::from(&key.join("."))))
+        let Some(child) = self.struct_field_plan(sname, field, false)?.direct_child() else {
+            return Ok(None);
+        };
+        if !self.is_value_struct(child) {
+            return Ok(None);
+        }
+        let storage = self
+            .scx
+            .rep_arena()
+            .nominal_value_storage_required(self.ws, self.scx.target, sname)
+            .map_err(|e| self.gap_here(e.message))?;
+        Ok((storage == ValueStorage::LeafTable).then_some(child))
+    }
+
+    /// Write a whole [`Self::leaf_table_value_child`] `parent.{key} = value`:
+    /// the child's leaves go to the parent's dotted keys under `key`, in the
+    /// order the parent's `<Name>_lct` ctor keys them.
+    pub(crate) fn store_leaf_table_child(
+        &mut self,
+        parent: Idx<Inst>,
+        sname: Ustr,
+        field: Ustr,
+        key: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let shape = self.nominal_rep_shape_required(sname, false)?;
+        let Some((_, FieldShape::Nested(sub))) = shape.fields.iter().find(|(f, _)| *f == field) else {
+            return Err(self.gap_here(format!("leaf-table value `{sname}` has no nested field `{field}`")));
+        };
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves_bundle_for_shape(&repr, sub)?;
+        let keys = super::shape::leaf_names(sub, key.as_str(), ".");
+        if keys.len() != leaves.len() {
+            return Err(self.gap_here(format!(
+                "`{sname}.{field}` has {} leaf keys but the value produced {} leaves",
+                keys.len(),
+                leaves.len()
+            )));
+        }
+        for (k, v) in keys.into_iter().zip(leaves) {
+            self.emit_cur(Inst::StoreField { base: parent, field: Ustr::from(&k), value: v });
+        }
+        Ok(())
     }
 
     /// Re-materialize an embedded field `parent.{prefix}` from its physical
@@ -202,6 +282,20 @@ impl Builder<'_> {
         Ok(false)
     }
 
+    fn nobox_plain_child_shape(&self, cname: Ustr) -> Result<Option<ValueShape>, CompilerError> {
+        let Some(shape) = self.nobox_embed_group_shape(cname)? else { return Ok(None) };
+        fn has_plain_child(builder: &Builder<'_>, shape: &ValueShape) -> bool {
+            shape.fields.iter().any(|(_, field)| match field {
+                FieldShape::Prim => false,
+                FieldShape::Nested(child) => {
+                    (builder.is_value_struct(child.name) && !builder.is_nobox_struct(child.name))
+                        || has_plain_child(builder, child)
+                }
+            })
+        }
+        Ok(has_plain_child(self, &shape).then_some(shape))
+    }
+
     /// A whole read of a `nobox` embed field, as an unboxed Group over the
     /// parent's dotted leaves. Driven by the SHAPE rather than by the field
     /// list, so the parts line up with [`Builder::repr_to_leaves`]' order by
@@ -262,6 +356,12 @@ impl Builder<'_> {
         cname: Ustr,
         value: Idx<Expr>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if let Some(shape) = self.nobox_plain_child_shape(cname)? {
+            let paths = value_leaf_paths(&shape);
+            let repr = self.lower_expr_repr(value)?;
+            let leaves = self.repr_to_storage_leaves(&repr, &shape, "embedded value")?;
+            return Self::pair_embed_leaves(paths, leaves);
+        }
         if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[value].clone() {
             // A functional-update base reads unwritten fields off another
             // instance; leave that to the general path rather than duplicating
@@ -349,7 +449,7 @@ impl Builder<'_> {
         if let Some(shape) = self.nobox_embed_group_shape(cname)? {
             let paths = value_leaf_paths(&shape);
             let repr = self.lower_expr_repr(value)?;
-            let leaves = self.repr_to_leaves_bundle(&repr)?;
+            let leaves = self.repr_to_storage_leaves(&repr, &shape, "embedded value")?;
             return Self::pair_embed_leaves(paths, leaves);
         }
         let v = self.lower_expr(value)?;
@@ -358,6 +458,9 @@ impl Builder<'_> {
 
     /// Every relative leaf path of embedded child `cname`, declaration order.
     pub(crate) fn embed_leaf_paths(&self, cname: Ustr) -> Result<Vec<Ustr>, CompilerError> {
+        if let Some(shape) = self.nobox_plain_child_shape(cname)? {
+            return Ok(value_leaf_paths(&shape));
+        }
         let mut out = Vec::new();
         for f in self.struct_field_names_required(cname)? {
             match self
@@ -503,7 +606,7 @@ impl Builder<'_> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<bool, CompilerError> {
-        match self.expr_ty(base) {
+        match self.field_base_ty(base) {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) => {
                 Ok(self
                     .struct_field_plan(sname, field, false)?
@@ -590,7 +693,7 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    fn pair_embed_leaves(
+    pub(crate) fn pair_embed_leaves(
         paths: Vec<Ustr>,
         leaves: Vec<Idx<Inst>>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
