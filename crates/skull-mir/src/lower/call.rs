@@ -1717,7 +1717,17 @@ impl Builder<'_> {
                 let fname = *names
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
-                Ok((fname, self.pack_maybe_absent_boxed(p, kind)?))
+                // A nullable nobox field is observable as null through its
+                // parent, so its presence must reach the field as a typed
+                // nullable value; the branching packer's nil-or-box join has no
+                // single C representation.
+                if let ValueRepr::Group { name, parts, present: Some(present) } = p {
+                    let value =
+                        self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
+                    let field = self.emit_cur(Inst::MakeNullableValue { present, value });
+                    return Ok((fname, field));
+                }
+                Ok((fname, self.pack_boxed(p, kind)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ctor = kind.value_ctor(name, representation, ValueCtorForm::Declared, fields);
