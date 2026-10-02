@@ -167,7 +167,7 @@ impl Builder<'_> {
             // cdata (`pack` the rebuilt Group); a plain local is a cell load.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let r = self.lower_expr_repr(e)?.into_value();
-                Ok(self.pack(r)?)
+                self.pack_maybe_absent(r)
             }
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
@@ -188,7 +188,7 @@ impl Builder<'_> {
             // still reaches the guarantee's rejection.
             Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
                 let r = self.lower_expr_repr(e)?.into_value();
-                Ok(self.pack(r)?)
+                self.pack_maybe_absent(r)
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -298,9 +298,11 @@ impl Builder<'_> {
                 }
             }
 
-            Expr::BinOp { op: BinOp::NullCoalesce, .. } if self.expr_is_flat_enum(e) => {
+            Expr::BinOp { op: BinOp::NullCoalesce, lhs, .. }
+                if self.expr_is_flat_enum(e) || self.nullable_value_shape_of(lhs)?.is_some() =>
+            {
                 let r = self.lower_expr_repr(e)?.into_value();
-                self.pack(r)
+                self.pack_maybe_absent(r)
             }
             Expr::BinOp { op, lhs, rhs } => self.lower_binop(op, lhs, rhs, condition),
 
@@ -328,7 +330,7 @@ impl Builder<'_> {
 
             Expr::Block { statements, tail } => {
                 let repr = self.lower_block_repr(statements, tail)?;
-                Ok(self.pack(repr)?)
+                self.pack_maybe_absent(repr)
             }
 
             Expr::Call { callee, args, .. } => self.lower_call(e, callee, args),
@@ -386,7 +388,7 @@ impl Builder<'_> {
                             || self.nullable_place_value_of(e)?.is_some()))
                 {
                     let r = self.lower_expr_repr(e)?.into_value();
-                    return Ok(self.pack(r)?);
+                    return self.pack_maybe_absent(r);
                 }
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
@@ -401,7 +403,7 @@ impl Builder<'_> {
             // reads the field off the value as before.
             Expr::FieldAccess { .. } => {
                 let r = self.lower_expr_repr(e)?.into_value();
-                Ok(self.pack(r)?)
+                self.pack_maybe_absent(r)
             }
             Expr::TupleIndex { tuple, .. } => {
                 // `w.0` on a transparent newtype is identity -- its runtime value
@@ -414,13 +416,13 @@ impl Builder<'_> {
                 // a splatting base projects its part instead of packing a table
                 // and reading a boxed element back out.
                 let r = self.lower_expr_repr(e)?.into_value();
-                Ok(self.pack(r)?)
+                self.pack_maybe_absent(r)
             }
             // A value-struct literal is built via the repr layer (so a callsite
             // can splat it without a cdata); a plain struct is a Lua table.
             Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
                 let r = self.value_literal_repr(name, fields, bases)?;
-                Ok(self.pack(r)?)
+                self.pack_maybe_absent(r)
             }
             Expr::StructLiteral { name, fields, bases } => {
                 self.lower_struct_literal(e, name, fields, bases)
@@ -435,7 +437,7 @@ impl Builder<'_> {
                 if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
             {
                 let r = self.lower_expr_repr(e)?.into_value();
-                Ok(self.pack(r)?)
+                self.pack_maybe_absent(r)
             }
             Expr::EnumVariant {
                 enum_name,
@@ -1548,7 +1550,7 @@ impl Builder<'_> {
         recv: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let r = self.safe_nav_call_value_repr(e, receiver, method, args, recv)?;
-        Ok(self.pack(r.into_value())?)
+        self.pack_maybe_absent(r.into_value())
     }
 
     /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call

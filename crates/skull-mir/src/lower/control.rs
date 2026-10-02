@@ -34,9 +34,9 @@ impl Builder<'_> {
         shape: &ValueShape,
     ) -> Result<Idx<Inst>, CompilerError> {
         let lhs_repr = self.lower_expr_repr(lhs)?;
-        let lhs_leaves = self.repr_to_leaves_bundle_for_shape(&lhs_repr, shape)?;
+        let lhs_leaves = self.repr_to_storage_leaves(&lhs_repr, shape, "value equality left operand")?;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        let rhs_leaves = self.repr_to_leaves_bundle_for_shape(&rhs_repr, shape)?;
+        let rhs_leaves = self.repr_to_storage_leaves(&rhs_repr, shape, "value equality right operand")?;
         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
         Ok(if matches!(op, BinOp::Eq) {
             equal
@@ -129,7 +129,9 @@ impl Builder<'_> {
                             Inst::NotEq(value, nil)
                         }));
                     }
-                    if self.nobox_value_name(v).is_some() {
+                    if self.nobox_value_name(v).is_some()
+                        || self.nullable_value_shape_of(v)?.is_some()
+                    {
                         let repr = self.lower_expr_repr(v)?.into_value();
                         let present = match repr {
                             ValueRepr::Group {
@@ -215,6 +217,11 @@ impl Builder<'_> {
                         (Some(ln), Some(rn)) if ln == rn
                     );
                 if same_value {
+                    if let Some(shape) = self.nullable_value_shape_of(lhs)?
+                        .or(self.nullable_value_shape_of(rhs)?)
+                    {
+                        return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
+                    }
                     let lhs_repr = self.lower_expr_repr(lhs)?.into_value();
                     let rhs_repr = self.lower_expr_repr(rhs)?.into_value();
                     let (mut lhs_leaves, mut rhs_leaves) = (Vec::new(), Vec::new());
@@ -343,7 +350,7 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let repr =
             self.lower_if_repr(cond, then_branch, else_branch, RetSlot::Opaque)?;
-        Ok(self.pack(repr)?)
+        self.pack_maybe_absent(repr)
     }
 
     pub(crate) fn lower_if_repr(

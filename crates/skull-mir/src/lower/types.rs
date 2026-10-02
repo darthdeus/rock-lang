@@ -418,12 +418,12 @@ impl Builder<'_> {
         Ok(ValueBundle::new(representation, value))
     }
 
-    fn struct_field_representation(
+    pub(crate) fn struct_field_mono_ty(
         &self,
         sname: Ustr,
         field: Ustr,
         origin: Option<Idx<Expr>>,
-    ) -> Result<RepId, CompilerError> {
+    ) -> Result<Rc<MonoTy>, CompilerError> {
         let sid = *self
             .ws
             .struct_by_name
@@ -446,13 +446,13 @@ impl Builder<'_> {
             None => match origin.and_then(|subject| self.concrete_expr_ty(subject)) {
                 Some(ty)
                     if matches!(
-                        ty.as_ref(),
+                        ty.peel_nullable().0,
                         MonoTy::App {
                             ctor: crate::monoty::MonoCtor::Nominal(base),
                             ..
                         } if *base == sname
                     ) => {
-                        let MonoTy::App { params, .. } = ty.as_ref() else {
+                        let MonoTy::App { params, .. } = ty.peel_nullable().0 else {
                             unreachable!()
                         };
                         let def = &self.ws.modules[sid.module.index()].structs[sid.def];
@@ -488,7 +488,7 @@ impl Builder<'_> {
                 None => self.concrete_ty_id(fdef.ty),
             },
         };
-        let ty = match ty {
+        Ok(match ty {
             Some(ty) => ty,
             None => Rc::new(
                 crate::monoty::convert_decl(
@@ -502,7 +502,16 @@ impl Builder<'_> {
                     ))
                 })?,
             ),
-        };
+        })
+    }
+
+    fn struct_field_representation(
+        &self,
+        sname: Ustr,
+        field: Ustr,
+        origin: Option<Idx<Expr>>,
+    ) -> Result<RepId, CompilerError> {
+        let ty = self.struct_field_mono_ty(sname, field, origin)?;
         let tuple_spelled = matches!(ty.peel_nullable().0, MonoTy::Tuple(_));
         let nobox = matches!(
             ty.peel_nullable().0,
@@ -558,6 +567,95 @@ impl Builder<'_> {
         self.dispatch().expr_ty(e)
     }
 
+    /// The type a field access on `base` projects out of: [`Self::expr_ty`]
+    /// with a `ref T` seen through to `T`. A ref IS its referent's storage, so
+    /// the referent's field plan (inline leaves, flat slots) is the one its
+    /// fields are read and written by.
+    pub(crate) fn field_base_ty(&self, base: Idx<Expr>) -> Option<TypeExpr> {
+        let dispatch = self.dispatch();
+        let mut ty = *self.inf?.expr_types.get(base)?;
+        loop {
+            match dispatch.ty_node(ty)? {
+                TypeExpr::Infer(var, _) => ty = self.inf?.substitutions.get(var)?,
+                TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
+                TypeExpr::App { ctor: TypeCtor::Ref, params } => {
+                    return dispatch.resolve_ty(ty.with_idx(params.into_iter().next()?));
+                }
+                other => return Some(other),
+            }
+        }
+    }
+
+    pub(crate) fn current_expr_storage_ty_id(&self) -> Option<TyId> {
+        let ty = self.cur_expr.and_then(|e| self.inf?.expr_types.get(e).copied())?;
+        let resolved = self.resolve_tyid(ty)?;
+        if matches!(
+            self.dispatch().ty_node(resolved),
+            Some(TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error))
+        ) {
+            None
+        } else {
+            Some(ty)
+        }
+    }
+
+    pub(crate) fn current_expr_unit_storage_ty_id(&self) -> Option<TyId> {
+        let ty = self.cur_expr.and_then(|e| self.inf?.expr_types.get(e).copied())?;
+        let resolved = self.resolve_tyid(ty)?;
+        matches!(
+            self.dispatch().ty_node(resolved),
+            Some(TypeExpr::Builtin(BuiltinTy::Unit))
+        )
+        .then_some(ty)
+    }
+
+    pub(crate) fn tuple_opaque_slot_types(
+        &self,
+        e: Idx<Expr>,
+        shape: &TupleRetShape,
+    ) -> Vec<Option<TyId>> {
+        fn append(
+            b: &Builder<'_>,
+            ty: TyId,
+            shape: &TupleRetShape,
+            out: &mut Vec<Option<TyId>>,
+        ) -> Option<()> {
+            if shape.nullable {
+                out.push(None);
+            }
+            let ty = b.resolve_tyid(ty)?;
+            let ty = match b.dispatch().ty_node(ty)? {
+                TypeExpr::Nullable(inner) => ty.with_idx(inner),
+                _ => ty,
+            };
+            let TypeExpr::Tuple { elements } = b.dispatch().ty_node(ty)? else {
+                return None;
+            };
+            if elements.len() != shape.slots.len() {
+                return None;
+            }
+            for (element, slot) in elements.into_iter().zip(&shape.slots) {
+                let element = ty.with_idx(element);
+                match slot {
+                    RetSlot::Opaque => out.push(Some(element)),
+                    RetSlot::Leaves(value) => out.extend((0..value.leaf_count()).map(|_| None)),
+                    RetSlot::Nested(inner) => append(b, element, inner, out)?,
+                }
+            }
+            Some(())
+        }
+
+        let Some(ty) = self.inf.and_then(|inf| inf.expr_types.get(e).copied()) else {
+            return vec![None; shape.slot_count()];
+        };
+        let mut out = Vec::with_capacity(shape.slot_count());
+        if append(self, ty, shape, &mut out).is_some() && out.len() == shape.slot_count() {
+            out
+        } else {
+            vec![None; shape.slot_count()]
+        }
+    }
+
     /// `Some` iff `e`'s concrete or inferred type is a (non-nullable) tuple. Used
     /// to route a tuple result across a call boundary (the call expr's own type
     /// IS the callee's return type, so direct and INDIRECT calls agree).
@@ -594,7 +692,19 @@ impl Builder<'_> {
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
             return Ok(Some(RetSlot::Nested(shape)));
         }
-        let shape = match self.nobox_value_shape_of(e)? {
+        // A non-null flat enum joins in its leaves, so an arm that yields a
+        // threaded value (a ctor, a leaf-bound `other`) is never boxed to cross
+        // the join. A nullable one keeps the packed cell: its nil is the value.
+        // Native backends join their own tagged enum value.
+        if let Some(shape) = self.flat_enum_value_shape_of(e)? {
+            let non_null = self
+                .concrete_expr_ty(e)
+                .is_some_and(|ty| !matches!(*ty, MonoTy::Nullable(_)));
+            if !self.scx.native_flat_enums && non_null {
+                return Ok(Some(RetSlot::Leaves(shape)));
+            }
+        }
+        let shape = match self.nobox_value_shape_of(e)?.or(self.nullable_value_shape_of(e)?) {
             Some(shape) => shape,
             None => {
                 let Some(name) = self.value_struct_of(e) else { return Ok(None) };

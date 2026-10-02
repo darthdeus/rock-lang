@@ -234,7 +234,7 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let r = self.lower_call_repr(e, callee, args)?;
-        Ok(self.pack(r)?)
+        self.pack_maybe_absent(r)
     }
 
     /// Lower a call to a [`ValueRepr`]. A scalar-ABI value-returning direct call
@@ -1398,7 +1398,7 @@ impl Builder<'_> {
             ValueRepr::Tuple { parts, .. } => {
                 let vs = parts
                     .into_iter()
-                    .map(|p| self.pack_boxed(p, kind))
+                    .map(|p| self.pack_maybe_absent_boxed(p, kind))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
@@ -1421,7 +1421,7 @@ impl Builder<'_> {
                 }
                 let packed: Vec<Idx<Inst>> = parts
                     .into_iter()
-                    .map(|p| self.pack_boxed(p, kind))
+                    .map(|p| self.pack_maybe_absent_boxed(p, kind))
                     .collect::<Result<Vec<_>, _>>()?;
                 let cells = FlatCells {
                     tag: packed[0],
@@ -1511,12 +1511,8 @@ impl Builder<'_> {
         &mut self,
         bundle: &ValueBundle,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let ValueRepr::Group { present: Some(present), .. } = bundle.value() {
-            let value = self.pack(bundle.value().clone())?;
-            return Ok(self.emit_cur(Inst::MakeNullableValue {
-                present: *present,
-                value,
-            }));
+        if let ValueRepr::Group { present: Some(_), .. } = bundle.value() {
+            return self.pack_maybe_absent(bundle.value().clone());
         }
         let Some(shape) = self
             .scx
@@ -1664,7 +1660,7 @@ impl Builder<'_> {
         let mut out = Vec::new();
         for (field, part) in layout.iter().zip(parts) {
             let Some(sub) = &field.inline else {
-                out.push((field.name, self.pack_boxed(part, kind)?));
+                out.push((field.name, self.pack_maybe_absent_boxed(part, kind)?));
                 continue;
             };
             let leaves = self.repr_to_leaves_shape(&part, sub)?;
@@ -1721,16 +1717,7 @@ impl Builder<'_> {
                 let fname = *names
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
-                // A nullable nobox field is observable as null through its
-                // parent, so its presence must reach the field; `pack_boxed`
-                // alone would build a statically present child.
-                if let ValueRepr::Group { name, parts, present: Some(present) } = p {
-                    let value =
-                        self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
-                    let field = self.emit_cur(Inst::MakeNullableValue { present, value });
-                    return Ok((fname, field));
-                }
-                Ok((fname, self.pack_boxed(p, kind)?))
+                Ok((fname, self.pack_maybe_absent_boxed(p, kind)?))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let ctor = kind.value_ctor(name, representation, ValueCtorForm::Declared, fields);
@@ -1802,7 +1789,7 @@ impl Builder<'_> {
                 }
                 for ((_, fs), part) in shape.fields.iter().zip(parts) {
                     match fs {
-                        FieldShape::Prim => out.push(self.pack(part.clone())?),
+                        FieldShape::Prim => out.push(self.pack_maybe_absent(part.clone())?),
                         FieldShape::Nested(sub) => out.extend(self.repr_to_leaves_shape(part, sub)?),
                     }
                 }

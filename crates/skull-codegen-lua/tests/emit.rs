@@ -1963,9 +1963,19 @@ fn entity(present: bool, slot: int) -> Entity<Row>? {
     if !present { return null }
     return Entity { _scene_id: 11, _arena_id: 12, _slot: slot, _generation: 13 }
 }
+fn local_pair(present: bool, x: int) -> int {
+    let p = pair(present, x)
+    if let v = p { return v.x + v.y }
+    return -1
+}
+fn coalesced_pair(present: bool, x: int) -> int {
+    let p = pair(present, x) ?? Pair { x: 3, y: 4 }
+    return p.x + p.y
+}
+fn absent_pair(present: bool, x: int) -> bool { return pair(present, x) == null }
 "#;
     let mut materialized = Vec::new();
-    for name in ["pair", "label", "entity"] {
+    for name in ["pair", "label", "entity", "local_pair", "coalesced_pair", "absent_pair"] {
         let lua = emit_clean(src, name);
         if lua.contains("_ct(") || lua.contains("_vt(") || lua.contains("setmetatable(") {
             materialized.push(format!("{name}: {lua}"));

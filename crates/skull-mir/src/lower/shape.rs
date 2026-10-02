@@ -1331,9 +1331,10 @@ pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<V
         || (ws.struct_by_name.contains_key(&n)
             && planned_value(ws, n).is_some_and(|plan| plan.storage == ValueStorage::CData));
     if scalar {
-        let mut shape = value_shape(ws, n).or_else(|| value_shape_gc(ws, n))?;
-        shape.nullable = true;
-        return Some(shape);
+        if let Some(mut shape) = value_shape(ws, n).or_else(|| value_shape_gc(ws, n)) {
+            shape.nullable = true;
+            return Some(shape);
+        }
     }
     EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape()))
 }

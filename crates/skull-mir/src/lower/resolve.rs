@@ -178,10 +178,9 @@ impl Builder<'_> {
 
     fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         // Probed ahead of the match rather than in a guard: the wire-shape oracle
-        // is fallible, and a guard cannot propagate. Ordered after the `nobox`
-        // coalesce below, which is the narrower case.
+        // is fallible, and a guard cannot propagate.
         if let Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs } = self.body.expr_arena[e] {
-            if self.expr_is_flat_enum(e) {
+            if self.expr_is_flat_enum(e) || self.nullable_value_shape_of(lhs)?.is_some() {
                 return self.nullcoalesce_repr(e, lhs, rhs);
             }
             if self.nobox_value_name(e).is_none() && self.nullable_tuple_wire_shape(lhs)?.is_some() {
@@ -584,6 +583,10 @@ impl Builder<'_> {
         let shape = match flat_shape {
             Some(shape) => shape,
             None => self.nobox_value_shape_of(e)?
+                .or(self.nullable_value_shape_of(lhs)?.map(|mut shape| {
+                    shape.nullable = self.expr_is_nullable(e);
+                    shape
+                }))
                 .ok_or_else(|| gap("coalesce result has no scalar shape"))?,
         };
         let mut lhs_shape = shape.clone();
