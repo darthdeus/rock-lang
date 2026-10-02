@@ -2232,14 +2232,14 @@ pub fn requires_concrete_body_plan(
 #[derive(Clone, Copy, Debug)]
 struct AbiMode {
     nobox_only: bool,
-    inline_body: bool,
+    fixed_nullable_transport: bool,
 }
 
 impl AbiMode {
     fn nobox_only_for(self, ty: &crate::monoty::MonoTy) -> bool {
-        // Inline text keeps its declared nullable nominal transport. Only
+        // Declared boundaries keep their nullable nominal transport. Only
         // Rock bodies can adopt the ordinary value presence/leaf return.
-        self.nobox_only || (self.inline_body && matches!(ty,
+        self.nobox_only || (self.fixed_nullable_transport && matches!(ty,
             crate::monoty::MonoTy::Nullable(inner) if matches!(inner.as_ref(),
                 crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(_), .. })))
     }
@@ -2289,18 +2289,21 @@ fn abi_mode_spec(
         return None;
     }
     let has_scalar_abi = f.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
+    let name_is_fixed = f.annotations.iter().any(|a| {
+        (a.is_builtin("nomangle") && subst.is_empty()) || a.is_builtin("test")
+    });
     let nobox_only = if has_scalar_abi {
         false
     } else {
-        let name_is_fixed = f.annotations.iter().any(|a| {
-            (a.is_builtin("nomangle") && subst.is_empty()) || a.is_builtin("test")
-        });
         if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
             return None;
         }
         scx.taken_by_ref.contains(&f.name)
     };
-    Some(AbiMode { nobox_only, inline_body: f.inline_body.is_some() })
+    Some(AbiMode {
+        nobox_only,
+        fixed_nullable_transport: f.inline_body.is_some() || name_is_fixed || f.name.as_str() == "main",
+    })
 }
 
 /// **The backend ABI of one emitted body**, under one execution target.

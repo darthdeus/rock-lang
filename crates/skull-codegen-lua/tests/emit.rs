@@ -1983,3 +1983,16 @@ fn absent_pair(present: bool, x: int) -> bool { return pair(present, x) == null 
     }
     assert!(materialized.is_empty(), "nullable returns materialize boxes: {materialized:#?}");
 }
+
+#[test]
+fn fixed_scalar_nullable_value_return_keeps_boxed_transport() {
+    let src = r#"
+value Pair { x: int, y: int }
+@scalar_abi @nomangle fn fixed_pair(present: bool) -> Pair? {
+    if !present { return null }
+    return Pair { x: 20, y: 21 }
+}
+"#;
+    let lua = emit_clean(src, "fixed_pair");
+    assert!(lua.contains("_ct("), "fixed nullable return changed transport: {lua}");
+}
