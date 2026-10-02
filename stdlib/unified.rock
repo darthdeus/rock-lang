@@ -659,12 +659,13 @@ value SceneBuilder {
 
 // Rebuildable caches live outside Session state. Keys are owner handles;
 // retirement evicts values. Backing identity checks preserve cold reads after
-// an image replaces storage while retaining logical handle fields.
+// an image replaces storage while retaining logical handle fields. Scene entries
+// occupy the scene directory itself; numeric Arena keys share that directory.
 @nomangle inline(lua) fn __weak_cache_read(name: string, scene: int, arena: int, slot: int, generation: int, backing: any) -> any? = """
     local cache = _G[name]
     local scenes = cache and cache[scene]
     local slots = scenes and scenes[arena]
-    local entry = slots and slots[slot]
+    local entry = arena == -1 and scenes or (slots and slots[slot])
     if entry and entry.generation == generation and entry.backing == backing then
         return entry.value
     end
@@ -679,9 +680,15 @@ value SceneBuilder {
     if not cache then cache = {}; _G[name] = cache end
     local scenes = cache[scene]
     if not scenes then scenes = {}; cache[scene] = scenes end
-    local slots = scenes[arena]
-    if not slots then slots = {}; scenes[arena] = slots end
-    slots[slot] = { generation = generation, backing = backing, value = value }
+    if arena == -1 then
+        scenes.generation = generation
+        scenes.backing = backing
+        scenes.value = value
+    else
+        local slots = scenes[arena]
+        if not slots then slots = {}; scenes[arena] = slots end
+        slots[slot] = { generation = generation, backing = backing, value = value }
+    end
     local counts = _G.__rock_weak_cache_builds
     if not counts then counts = {}; _G.__rock_weak_cache_builds = counts end
     counts[name] = (counts[name] or 0) + 1
@@ -691,10 +698,16 @@ value SceneBuilder {
     local cache = _G[name]
     local scenes = cache and cache[scene]
     local slots = scenes and scenes[arena]
-    local entry = slots and slots[slot]
+    local entry = arena == -1 and scenes or (slots and slots[slot])
     if entry and entry.generation == generation then
-        slots[slot] = nil
-        if next(slots) == nil then scenes[arena] = nil end
+        if arena == -1 then
+            scenes.generation = nil
+            scenes.backing = nil
+            scenes.value = nil
+        else
+            slots[slot] = nil
+            if next(slots) == nil then scenes[arena] = nil end
+        end
         if next(scenes) == nil then cache[scene] = nil end
     end
 """
@@ -744,7 +757,10 @@ inline(lua) fn __weak_cache_scene_get<V>(name: string, scene: int) -> V? = """
     if not backing then
         return nil
     end
-    return __weak_cache_read(name, scene, -1, -1, 0, backing)
+    local cache = _G[name]
+    local entry = cache and cache[scene]
+    if entry and entry.backing == backing then return entry.value end
+    return nil
 """
 
 @inline
@@ -800,8 +816,11 @@ inline(lua) fn weak_cache_live(name: string) -> int = """
     if not cache then return 0 end
     local n = 0
     for _, scenes in pairs(cache) do
-        for _, slots in pairs(scenes) do
-            for _ in pairs(slots) do n = n + 1 end
+        if scenes.backing then n = n + 1 end
+        for arena, slots in pairs(scenes) do
+            if type(arena) == "number" then
+                for _ in pairs(slots) do n = n + 1 end
+            end
         end
     end
     return n
