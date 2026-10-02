@@ -278,7 +278,7 @@ fn lib_path_value_in(root: &Path) -> String {
 }
 
 /// `lib_path_value()` with platform graphics libraries and the caller's
-/// inherited search path appended.
+/// inherited search paths appended.
 /// Linux also gets the system Vulkan loader and driver directories when they
 /// exist; the bundled LuaJIT does not receive NixOS's nix-ld defaults itself.
 ///
@@ -291,7 +291,11 @@ fn lib_path_value_in(root: &Path) -> String {
 /// user puts on the path (e.g. via `programs.nix-ld.libraries` ->
 /// `$NIX_LD_LIBRARY_PATH`); clobbering instead of appending dropped them
 /// and broke `libstone_video` load.
-pub fn lib_path_with_inherited() -> String {
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn lib_path_with_values(
+    inherited: Option<&std::ffi::OsStr>,
+    nix_ld: Option<&std::ffi::OsStr>,
+) -> String {
     let mut value = lib_path_value();
     let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
 
@@ -301,13 +305,27 @@ pub fn lib_path_with_inherited() -> String {
         value.push_str(&path.to_string_lossy());
     }
 
-    if let Some(inherited) = std::env::var_os(lib_path_var()) {
+    if let Some(inherited) = inherited {
         if !inherited.is_empty() {
             value.push_str(sep);
             value.push_str(&inherited.to_string_lossy());
         }
     }
+
+    #[cfg(target_os = "linux")]
+    if let Some(nix_ld) = nix_ld {
+        if !nix_ld.is_empty() {
+            value.push_str(sep);
+            value.push_str(&nix_ld.to_string_lossy());
+        }
+    }
     value
+}
+
+pub fn lib_path_with_inherited() -> String {
+    let inherited = std::env::var_os(lib_path_var());
+    let nix_ld = std::env::var_os("NIX_LD_LIBRARY_PATH");
+    lib_path_with_values(inherited.as_deref(), nix_ld.as_deref())
 }
 
 #[cfg(target_os = "linux")]
@@ -606,7 +624,7 @@ pub fn is_game_project(path: &Path) -> Result<bool> {
 
 /// Parents a bare project name expands against (relative to the workspace
 /// root), beyond the literal path. `games/` holds the match3-class games;
-/// top-level projects (bitgun, mag, anvil) are picked up by the literal-path
+/// top-level projects (bitgun, mag) are picked up by the literal-path
 /// check, so they need no entry here.
 pub const PROJECT_PARENTS: &[&str] = &["games"];
 
@@ -784,7 +802,7 @@ mod tests {
     fn resolve_project_dir_literal_path_wins() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        // a top-level project dir (bitgun/mag/anvil-shaped) AND a games/ dir of
+        // a top-level project dir (bitgun/mag-shaped) AND a games/ dir of
         // the same name -- the literal path must win over expansion.
         fs::create_dir_all(root.join("bitgun")).unwrap();
         fs::create_dir_all(root.join("games/bitgun")).unwrap();
@@ -920,6 +938,19 @@ mod tests {
                 store.join("zzz-vulkan-loader-2/lib"),
                 driver,
             ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn authoritative_library_path_includes_nix_ld_after_the_inherited_path() {
+        let value = lib_path_with_values(
+            Some(std::ffi::OsStr::new("/inherited")),
+            Some(std::ffi::OsStr::new("/nix-ld")),
+        );
+        assert!(
+            value.ends_with(":/inherited:/nix-ld"),
+            "unexpected library path: {value}"
         );
     }
 

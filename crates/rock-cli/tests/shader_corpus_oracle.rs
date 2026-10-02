@@ -1048,7 +1048,7 @@ fn shader_oracle_rejects_a_view_population_missing_from_emission() {
 }
 
 #[test]
-#[ignore = "real 33-project Phase-4 corpus oracle"]
+#[ignore = "real 31-project Phase-4 corpus oracle"]
 fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
     let root = repo_root();
     let projects = discovered_bin_projects(&root);

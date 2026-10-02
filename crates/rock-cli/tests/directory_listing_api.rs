@@ -63,7 +63,7 @@ fn directory_listing_has_one_typed_fallible_cross_backend_api() {
     );
 
     let mut bypasses = Vec::new();
-    for top in ["anvil", "bitgun", "games", "libs", "stone"] {
+    for top in ["bitgun", "games", "libs", "stone"] {
         let mut paths = Vec::new();
         visit_rock_sources(&root().join(top), &mut paths);
         for path in paths {

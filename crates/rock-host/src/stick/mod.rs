@@ -98,7 +98,7 @@ pub struct StickConfig {
     /// Optional engine-side requirements for this game (cdylibs that the
     /// runner must stage into `tmp/` before luajit boots). Recognised
     /// entries: `"video"` gates the stone-video crate (ffmpeg-the-third +
-    /// bindgen — slow, only anvil needs it). Default: empty
+    /// bindgen — slow, only video games need it). Default: empty
     /// list = stone-rs only.
     pub engine: Option<EngineConfig>,
     /// The renderer is a build-time choice, independent of optional engine

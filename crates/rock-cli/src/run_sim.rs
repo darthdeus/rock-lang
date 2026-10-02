@@ -1028,8 +1028,8 @@ fn any_reload_lane_selected(
 }
 
 /// Compile the project and print each `@sim` wire name on stdout, one
-/// per line, sorted by source span. Lets `just anvil-sim` enumerate
-/// the suite without hardcoding names.
+/// per line, sorted by source span. Lets scripts enumerate the suite without
+/// hardcoding names.
 pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
@@ -1146,7 +1146,7 @@ fn do_run_sim_opts_recorded(
     // Compile once and collect `@sim_env("K", "V")` env pairs by wire name.
     // The runner applies them via `Command::env` before luajit spawns --
     // the in-process runtime `set_env()` runs after `@init`, so it can't
-    // influence env-var-driven game config like `ANVIL_VIDEO`.
+    // influence env-var-driven game config like `MATCH3_PRESET`.
     let mut prepared = recorder.phase("compile_and_discover", || {
         prepare_sims(backend, project_path.clone(), output_path.clone())
     })?;
@@ -4704,7 +4704,7 @@ fn run_worker(
     plan_file.flush()?;
 
     // Expand `$OUT` in env values to the entry's tempdir absolute path.
-    // Lets sims write `@sim_env("ANVIL_SESSION", "$OUT/resume.json")`
+    // Lets sims write `@sim_env("GAME_SESSION", "$OUT/resume.json")`
     // and have it resolve before luajit spawns. Runtime `set_env()`
     // runs after `@init` so it can't influence env-var-driven config.
     let out_str = first.out_dir.to_string_lossy().to_string();
@@ -8744,7 +8744,7 @@ mod tests {
     #[test]
     fn summary_counts_expects() {
         let stderr = r#"
-__SIM__ {"op":"start_game","name":"anvil","site":"foo.rock:1"}
+__SIM__ {"op":"start_game","name":"match3","site":"foo.rock:1"}
 __SIM__ {"op":"expect_ok","message":"a","site":"foo.rock:2"}
 __SIM__ {"op":"expect_ok","message":"b","site":"foo.rock:3"}
 __SIM__ {"op":"expect_fail","message":"c","site":"foo.rock:4"}

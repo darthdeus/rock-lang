@@ -726,8 +726,8 @@ pub struct Args {
     pub budget_ms: Option<f64>,
 
     /// For `rock sim`: list every `@sim` wire name in the project,
-    /// one per line, then exit. Skips the runner. Used by
-    /// `just anvil-sim` to avoid hardcoding the sim array.
+    /// one per line, then exit. Skips the runner. Lets scripts enumerate
+    /// a suite without hardcoding the sim array.
     pub list: bool,
     /// For `rock sim`: print the ordinary worker plan as JSON without running sims.
     pub sim_plan: bool,
