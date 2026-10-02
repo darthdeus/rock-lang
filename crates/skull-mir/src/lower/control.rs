@@ -101,16 +101,6 @@ impl Builder<'_> {
                     None
                 };
                 if let Some(v) = null_side {
-                    if let Some(lowered) = self.ordinary_value_call_presence(v)? {
-                        let present = match lowered {
-                            Ok((present, _)) => present,
-                            Err(boxed) => {
-                                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                                self.emit_cur(Inst::NotEq(boxed, nil))
-                            }
-                        };
-                        return Ok(self.lower_presence_test(op, present, condition));
-                    }
                     // A `V?` place read here is read for its PRESENCE: the copy
                     // such a read otherwise takes would allocate a cdata per nil
                     // test (`mouse_screen`'s `sim_mouse_override`, every frame).
@@ -612,28 +602,7 @@ impl Builder<'_> {
         rhs: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
-        let lowered = self.ordinary_value_call_presence(lhs)?;
-        if let Some(Ok((present, value))) = lowered {
-            let rhs_bb = self.f.new_block();
-            let lhs_bb = self.f.new_block();
-            let join = self.f.new_block();
-            self.f.set_term(
-                self.cur,
-                Term::Branch { cond: present, then_bb: lhs_bb, else_bb: rhs_bb },
-            );
-            self.cur = rhs_bb;
-            let rv = self.lower_expr(rhs)?;
-            self.store_and_join(result, rv, join);
-            self.cur = lhs_bb;
-            let lv = self.pack(value)?;
-            self.store_and_join(result, lv, join);
-            self.cur = join;
-            return Ok(self.emit_cur(Inst::Load(result)));
-        }
-        let lv = match lowered {
-            Some(Err(boxed)) => boxed,
-            _ => self.lower_expr(lhs)?,
-        };
+        let lv = self.lower_expr(lhs)?;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(lv, nil));
         let rhs_bb = self.f.new_block();
@@ -655,32 +624,6 @@ impl Builder<'_> {
         self.store_and_join(result, lv, join);
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
-    }
-
-    /// A call returning an ORDINARY `value?` over the scalar wire arrives as a
-    /// presence leaf plus payload leaves. Its presence consumers (`??`,
-    /// `== null`) read that leaf instead of packing the payload first, so the
-    /// payload is boxed only where it is used, and only when present.
-    /// `Ok(Ok((present, payload)))` with the payload's presence stripped;
-    /// `Ok(Err(boxed))` when the call crossed as one boxed slot (the wide-value
-    /// cut, an indirect callee) and the consumer takes its ordinary path.
-    /// `None` when `e` is not such a call, and nothing was lowered.
-    pub(crate) fn ordinary_value_call_presence(
-        &mut self,
-        e: Idx<Expr>,
-    ) -> Result<Option<Result<(Idx<Inst>, ValueRepr), Idx<Inst>>>, CompilerError> {
-        if !matches!(self.body.expr_arena[e], Expr::Call { .. }) {
-            return Ok(None);
-        }
-        if !self.value_struct_name_of(e).is_some_and(|name| !self.is_nobox_struct(name)) {
-            return Ok(None);
-        }
-        Ok(Some(match self.lower_expr_repr(e)?.into_value() {
-            ValueRepr::Group { name, parts, present: Some(present) } => {
-                Ok((present, ValueRepr::Group { name, parts, present: None }))
-            }
-            other => Err(self.pack(other)?),
-        }))
     }
 }
 

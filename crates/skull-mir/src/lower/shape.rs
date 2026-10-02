@@ -1326,6 +1326,8 @@ pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape
 /// (`Entity<T>?`, a string-carrying value) is mostly read out of storage that
 /// already holds the table, so spreading it at the callee and re-boxing it at
 /// the caller's escape measured +30% MAG allocation; it keeps the boxed slot.
+/// This is the one tier gate: returns, bindings, joins, `??` and `== null`
+/// all follow the planned shape this produces.
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     let scalar = is_nobox_nominal(ws, n)
         || (ws.struct_by_name.contains_key(&n)
