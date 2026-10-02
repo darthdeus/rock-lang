@@ -716,8 +716,7 @@ fn weak_cache_get<T, V>(name: string, owner: Entity<T>) -> V? {
 
 inline(lua) fn __weak_cache_entity_get<V>(name: string, scene: int, arena: int, slot: int, generation: int) -> V? = """
     local backing = __arena_store_any(scene, arena)
-    if not backing or not backing.occupied._data[slot + 1]
-        or backing.generations._data[slot + 1] ~= generation then
+    if not backing or backing.generations._data[slot + 1] ~= generation then
         return nil
     end
     return __weak_cache_read(name, scene, arena, slot, generation, backing)
@@ -730,8 +729,7 @@ fn weak_cache_put<T, V>(name: string, owner: Entity<T>, value: V) {
 
 inline(lua) fn __weak_cache_entity_put<V>(name: string, scene: int, arena: int, slot: int, generation: int, value: V) = """
     local backing = __arena_store_any(scene, arena)
-    if not backing or not backing.occupied._data[slot + 1]
-        or backing.generations._data[slot + 1] ~= generation then
+    if not backing or backing.generations._data[slot + 1] ~= generation then
         error("weak_cache_put requires a live owner")
     end
     __weak_cache_write(name, scene, arena, slot, generation, backing, value)

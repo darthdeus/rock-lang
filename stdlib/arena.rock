@@ -8,7 +8,12 @@
 
 // The bookkeeping SoA one Arena incarnation owns. A slot's index IS its
 // position in every column, so ops touch column SUBSETS -- `contains` reads
-// occupancy+generations, `get` adds data, `values()` never looks at generations.
+// generations, `get` adds data, `values()` never looks at generations.
+//
+// A vacant slot keeps its last generation complemented (`-1 - g`), so a live
+// slot is exactly one whose generation equals the handle's, which is always
+// >= 0 (`entity_new`). The complement keeps that generation recoverable for
+// `arena_generation_snapshot`; `occupied` stays for the walks that skip holes.
 //
 // `next_generation` is the per-Arena monotonic issuance counter: EVERY
 // insertion takes the next value and advances it, reused slot or fresh. That is
@@ -72,6 +77,9 @@ fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
 @inline @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
     let store = __ARENA_REGISTRY.stores.get(arena_id) ?? return null
     let owner: ArenaStore<int> = cast(store)
+    // The ID alone does not name one incarnation: IDs restart in every session
+    // materialized from a boot image, and a world-image restore merges its
+    // stores into the current registry by ID.
     if owner._owner_scene_id != scene_id { return null }
     return store
 }
@@ -223,7 +231,7 @@ fn __entity_arena<T>(entity: Entity<T>) -> Arena<T> {
 // pair of fields with themselves and `__arena_store`'s cast is already a
 // runtime no-op: four inlined frames whose only job is to be true. Dropping
 // them leaves the two oracles that decide the answer -- the registry lookup
-// and the occupancy+generation test -- reached from one frame instead of five.
+// and the generation test -- reached from one frame instead of five.
 //
 // It is not spelled this way for elegance. LuaJIT charges a trace two IR
 // constants per distinct global name plus one per inlined function object, and
@@ -262,18 +270,17 @@ fn entity_key<T>(entity: Entity<T>) -> string {
     return "{entity._scene_id}:{entity._arena_id}:{entity._slot}:{entity._generation}"
 }
 
-// Whether `slot` names a live row matching `generation`. The single
-// occupancy+generation test every op shares, inlined into every trace that
-// reads a row, so it carries no guard the answer does not need (ledger B2a,
-// ENTITY READ TRACE COST). There is no range check: the occupancy column only
-// grows one slot at a time through `__slot_alloc` and `clear` replaces it, so
-// it holds no element outside `[0, len)` and an out-of-range slot reads as
-// absent, which is "not live". The three columns always have one length, so a
-// live slot is in range for `generations` and `data` too.
+// Whether `slot` names a live row matching `generation`. The single liveness
+// test every op shares, inlined into every trace that reads a row, so it
+// carries no guard the answer does not need (ledger B2a, ENTITY READ TRACE
+// COST): a vacant slot's complemented generation never equals an issued one, so
+// occupancy needs no load of its own. There is no range check: the columns only
+// grow one slot at a time through `__slot_alloc` and `clear` replaces them, so
+// they hold no element outside `[0, len)` and an out-of-range slot reads as
+// absent (nil), which equals no generation. The three columns always have one
+// length, so a live slot is in range for `data` too.
 @inline
 fn arena_slot_live<T>(store: ArenaStore<T>, slot: int, generation: int) -> bool {
-    let live: bool? = cast(__vec_data_get(store.occupied, slot))
-    if live == null || !live.unwrap() { return false }
     let current: int = cast(__vec_data_get(store.generations, slot))
     return current == generation
 }
@@ -355,9 +362,10 @@ fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
     let slot = entity._slot
     if !arena_slot_live(store, slot, entity._generation) { return null }
     // `data[slot]` is left as-is: nothing reads a free slot (every read goes
-    // through the occupancy test), and clearing it would mean inventing a T.
+    // through the liveness test), and clearing it would mean inventing a T.
     __weak_cache_retire(entity._scene_id, entity._arena_id, slot)
     store.occupied.set(slot, false)
+    store.generations.set(slot, -1 - entity._generation)
     __slot_release(__arena_store_erased(store), slot)
     return store.data[slot]
 }
@@ -406,7 +414,9 @@ fn arena_generation_snapshot<T>(arena: Arena<T>) -> ArenaGenerationSnapshot {
     }
     let store = found.unwrap()
     let generations: [int] = []
-    for generation in store.generations { generations.push(generation) }
+    for generation in store.generations {
+        if generation < 0 { generations.push(-1 - generation) } else { generations.push(generation) }
+    }
     let free_indices: [int] = []
     for slot in store.free_indices { free_indices.push(slot) }
     return ArenaGenerationSnapshot {
