@@ -62,9 +62,9 @@ inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 // ============================================================================
 //
 // `Ptr<T>` and the sized variants (PtrU8/PtrI8/PtrU16/PtrI16/PtrU32) are
-// empty phantom structs. At runtime they carry raw LuaJIT cdata (no
-// wrapper table — the inline(lua) constructors return the cdata directly
-// and Rock's static typing is nominal). At compile time they give
+// empty phantom values whose representation the backend supplies: raw
+// LuaJIT cdata on Lua (no wrapper table; the inline(lua) constructors return
+// the cdata directly), a native pointer on C. Copying one shares the referent. At compile time they give
 // extern(ffi) signatures the power to say "this argument must be a
 // float* (not an int*, not a uint8_t*)" without runtime cost.
 //
@@ -73,12 +73,15 @@ inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 // keeps working — the runtime value is still cdata, the Rock type just
 // became more specific.
 
-struct Ptr<T> { }
-struct PtrU8  { }
-struct PtrI8  { }
-struct PtrU16 { }
-struct PtrI16 { }
-struct PtrU32 { }
+value Ptr<T> { }
+value PtrU8  { }
+value PtrI8  { }
+value PtrU16 { }
+value PtrI16 { }
+value PtrU32 { }
+
+// Compiler-owned destination capability for explicit deep copies.
+value Storage { }
 
 // ============================================================================
 // NativeBuffer<T> — typed contiguous ffi buffers
@@ -95,8 +98,11 @@ struct PtrU32 { }
 //
 // Bounds: reads/writes past `len` yield LuaJIT garbage; indexing is 0-based.
 // T ∈ {int, uint, float}; extend with more primitives as needed.
+//
+// A `value` descriptor: copying one copies the whole descriptor (on Lua, the
+// one table with its hidden leaf views) and shares the storage.
 
-struct NativeBuffer<T> {
+value NativeBuffer<T> {
     ptr: Ptr<T>,
     len: int,
 }
@@ -468,11 +474,11 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 // can declare the exact variant they accept — passing `PtrI16` where
 // `PtrU8` is expected is a compile error.
 
-struct NativeBufferU8  { ptr: PtrU8,  len: int }
-struct NativeBufferI8  { ptr: PtrI8,  len: int }
-struct NativeBufferU16 { ptr: PtrU16, len: int }
-struct NativeBufferI16 { ptr: PtrI16, len: int }
-struct NativeBufferU32 { ptr: PtrU32, len: int }
+value NativeBufferU8  { ptr: PtrU8,  len: int }
+value NativeBufferI8  { ptr: PtrI8,  len: int }
+value NativeBufferU16 { ptr: PtrU16, len: int }
+value NativeBufferI16 { ptr: PtrI16, len: int }
+value NativeBufferU32 { ptr: PtrU32, len: int }
 
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'local r = ffi.new("uint8_t[?]", n); return r'
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'local r = ffi.new("int8_t[?]", n); return r'
@@ -544,6 +550,21 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     for field, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
         if buf[field] ~= nil then buf[field] = ffi.cast(cast_ty, buf.ptr) end
     end
+"""
+
+// Copy-on-write for a Rock-level field write on a descriptor (`buf.len = n`):
+// copies share the descriptor table, so the write lands on a fresh one that
+// keeps the leaf views, reseated when `ptr` changes. The compiler emits the call.
+@nomangle inline(lua) fn __descriptor_with(d: any, field: string, v: any) -> any = """
+    local out = {}
+    for k, x in pairs(d) do out[k] = x end
+    out[field] = v
+    if field == "ptr" then
+        for view, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
+            if out[view] ~= nil then out[view] = ffi.cast(cast_ty, v) end
+        end
+    end
+    return setmetatable(out, getmetatable(d))
 """
 
 // Bounds-check WITHOUT taking a slot reference: returns the index unchanged.
@@ -636,54 +657,137 @@ value SceneBuilder {
     return obj.__ty
 """
 
-// --- weak-keyed caches beside an owner ---------------------------------------
-//
-// A value a struct can rebuild from the state beside it, parked next to the
-// owner instead of inside it. A plain field would be captured with the rest of
-// the object; these entries are captured nowhere.
-//
-// The backing tables live in `_G`, never in a Rock global, and that is the
-// point: a Rock global would be Session state, imaged into every keyframe and
-// mixed into the replay desync hash, which is exactly what a rebuildable value
-// must stay out of. `name` IS the `_G` key of one cache's own table, and it is
-// a constant at each call site, never built at the call -- so a hit is the same
-// two table reads a hand-written shim does. Namespace it with a dot
-// (`mag.blocker_index`), which no identifier-shaped global can collide with.
-//
-// Owner keys are WEAK, so an entry dies with its owner and never keeps one
-// alive. Two consequences the caller owns: a restore that replaces the owner
-// object reads as a MISS, which is the rebuild every accessor here already
-// does; and the stored value must hold no reference back to its owner, or the
-// pair survives for the life of the process.
-//
-// `weak_cache_builds` counts stores, so it is the rebuild witness a test reads.
-// A cache that rebuilds its value in place stores it again to record that.
-// `weak_cache_live` counts entries still held, which is what makes the weak
-// keying observable.
-inline(lua) fn weak_cache_get<K, V>(name: string, owner: K) -> V? = """
+// Rebuildable caches live outside Session state. Keys are owner handles;
+// retirement evicts values. Backing identity checks preserve cold reads after
+// an image replaces storage while retaining logical handle fields.
+@nomangle inline(lua) fn __weak_cache_read(name: string, scene: int, arena: int, slot: int, generation: int, backing: any) -> any? = """
     local cache = _G[name]
-    if not cache then return nil end
-    return cache[owner]
+    local scenes = cache and cache[scene]
+    local slots = scenes and scenes[arena]
+    local entry = slots and slots[slot]
+    if entry and entry.generation == generation and entry.backing == backing then
+        return entry.value
+    end
+    return nil
 """
 
-inline(lua) fn weak_cache_put<K, V>(name: string, owner: K, value: V) = """
+@nomangle inline(lua) fn __weak_cache_write(name: string, scene: int, arena: int, slot: int, generation: int, backing: any, value: any) = """
+    local names = _G.__rock_weak_cache_names
+    if not names then names = {}; _G.__rock_weak_cache_names = names end
+    names[name] = true
     local cache = _G[name]
-    if not cache then
-        cache = setmetatable({}, { __mode = "k" })
-        _G[name] = cache
-    end
-    cache[owner] = value
+    if not cache then cache = {}; _G[name] = cache end
+    local scenes = cache[scene]
+    if not scenes then scenes = {}; cache[scene] = scenes end
+    local slots = scenes[arena]
+    if not slots then slots = {}; scenes[arena] = slots end
+    slots[slot] = { generation = generation, backing = backing, value = value }
     local counts = _G.__rock_weak_cache_builds
-    if not counts then
-        counts = {}
-        _G.__rock_weak_cache_builds = counts
-    end
+    if not counts then counts = {}; _G.__rock_weak_cache_builds = counts end
     counts[name] = (counts[name] or 0) + 1
 """
 
-inline(lua) fn weak_cache_drop<K>(name: string, owner: K) = """
+@nomangle inline(lua) fn __weak_cache_delete(name: string, scene: int, arena: int, slot: int, generation: int) = """
     local cache = _G[name]
-    if cache then cache[owner] = nil end
+    local scenes = cache and cache[scene]
+    local slots = scenes and scenes[arena]
+    local entry = slots and slots[slot]
+    if entry and entry.generation == generation then
+        slots[slot] = nil
+        if next(slots) == nil then scenes[arena] = nil end
+        if next(scenes) == nil then cache[scene] = nil end
+    end
+"""
+
+@inline
+fn weak_cache_get<T, V>(name: string, owner: Entity<T>) -> V? {
+    let value: V? = __weak_cache_entity_get(name, owner._scene_id, owner._arena_id, owner._slot, owner._generation)
+    return value
+}
+
+inline(lua) fn __weak_cache_entity_get<V>(name: string, scene: int, arena: int, slot: int, generation: int) -> V? = """
+    local backing = __arena_store_any(scene, arena)
+    if not backing or not backing.occupied._data[slot + 1]
+        or backing.generations._data[slot + 1] ~= generation then
+        return nil
+    end
+    return __weak_cache_read(name, scene, arena, slot, generation, backing)
+"""
+
+@inline
+fn weak_cache_put<T, V>(name: string, owner: Entity<T>, value: V) {
+    __weak_cache_entity_put(name, owner._scene_id, owner._arena_id, owner._slot, owner._generation, value)
+}
+
+inline(lua) fn __weak_cache_entity_put<V>(name: string, scene: int, arena: int, slot: int, generation: int, value: V) = """
+    local backing = __arena_store_any(scene, arena)
+    if not backing or not backing.occupied._data[slot + 1]
+        or backing.generations._data[slot + 1] ~= generation then
+        error("weak_cache_put requires a live owner")
+    end
+    __weak_cache_write(name, scene, arena, slot, generation, backing, value)
+"""
+
+@inline
+fn weak_cache_drop<T>(name: string, owner: Entity<T>) {
+    __weak_cache_delete(name, owner._scene_id, owner._arena_id, owner._slot, owner._generation)
+}
+
+@inline
+fn weak_cache_get<T, V>(name: string, owner: Scene<T>) -> V? {
+    let value: V? = __weak_cache_scene_get(name, owner._scene_id)
+    return value
+}
+
+inline(lua) fn __weak_cache_scene_get<V>(name: string, scene: int) -> V? = """
+    local backing = __scene_root_any(scene)
+    if not backing then
+        return nil
+    end
+    return __weak_cache_read(name, scene, -1, -1, 0, backing)
+"""
+
+@inline
+fn weak_cache_put<T, V>(name: string, owner: Scene<T>, value: V) {
+    __weak_cache_scene_put(name, owner._scene_id, value)
+}
+
+inline(lua) fn __weak_cache_scene_put<V>(name: string, scene: int, value: V) = """
+    local backing = __scene_root_any(scene)
+    if not backing then
+        error("weak_cache_put requires a live owner")
+    end
+    __weak_cache_write(name, scene, -1, -1, 0, backing, value)
+"""
+
+@inline
+fn weak_cache_drop<T>(name: string, owner: Scene<T>) {
+    __weak_cache_delete(name, owner._scene_id, -1, -1, 0)
+}
+
+// arena/slot -1 selects an entire Scene/Arena, respectively. Called only at
+// retirement, never from the lookup path, including abrupt Scene discard.
+@nomangle inline(lua) fn __weak_cache_retire(scene: int, arena: int, slot: int) = """
+    local names = _G.__rock_weak_cache_names
+    if not names then return end
+    for name in pairs(names) do
+        local cache = _G[name]
+        local scenes = cache and cache[scene]
+        if scenes then
+            if arena == -1 then cache[scene] = nil
+            elseif slot == -1 then
+                scenes[arena] = nil
+                if next(scenes) == nil then cache[scene] = nil end
+            else
+                local slots = scenes[arena]
+                if slots then
+                    slots[slot] = nil
+                    if next(slots) == nil then scenes[arena] = nil end
+                    if next(scenes) == nil then cache[scene] = nil end
+                end
+            end
+        end
+    end
 """
 
 inline(lua) fn weak_cache_builds(name: string) -> int = """
@@ -695,7 +799,11 @@ inline(lua) fn weak_cache_live(name: string) -> int = """
     local cache = _G[name]
     if not cache then return 0 end
     local n = 0
-    for _ in pairs(cache) do n = n + 1 end
+    for _, scenes in pairs(cache) do
+        for _, slots in pairs(scenes) do
+            for _ in pairs(slots) do n = n + 1 end
+        end
+    end
     return n
 """
 
@@ -796,8 +904,10 @@ deco init on_reload {
     if type(x) ~= "table" or type(y) ~= "table" then return false end
     if x.ptr == nil or y.ptr == nil then return x.ptr == y.ptr end
     if x.ptr == y.ptr then return true end
-    local esz = ffi.sizeof(x.ptr[0])
-    if esz ~= ffi.sizeof(y.ptr[0]) then return false end
+    -- Scalar indexing returns a Lua number, so measure the typed pointer step.
+    local esz = ffi.cast("uint8_t*", x.ptr + 1) - ffi.cast("uint8_t*", x.ptr)
+    local ysz = ffi.cast("uint8_t*", y.ptr + 1) - ffi.cast("uint8_t*", y.ptr)
+    if esz ~= ysz then return false end
     return ffi.string(x.ptr, n * esz) == ffi.string(y.ptr, n * esz)
 """
 
@@ -1105,7 +1215,7 @@ extern(lua) fn print(args: ...any)
 fn print_float(value: float) { print(to_string(value)) }
 
 // Error handling
-extern(lua) fn error(message: string)
+@intrinsic extern(lua) fn error(message: string)
 
 // Note: Lua has built-in tostring(), declare as extern
 extern(lua) fn tostring(value: any) -> string
@@ -1259,7 +1369,7 @@ inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
 // so it makes no layout claim and carries the contract that says so. It stays
 // spelled `T`: that is the inference edge giving `vec_new()` its element type,
 // and `any`/`any?` would sever it. See `docs/boundary-contracts.md` 2.4.
-@inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
+@relocates @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
 """
@@ -1367,7 +1477,7 @@ fn Vec<T>.remove_at(vec, index: int) -> T? {
     }
     let value: T? = cast(__vec_data_get(vec, index))
     for i in index..(vec.len - 1) {
-        __vec_data_set(vec, i, __vec_data_get(vec, i + 1))
+        __vec_data_set(vec, i, cast(__vec_data_get(vec, i + 1)))
     }
     __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
@@ -1380,7 +1490,7 @@ fn Vec<T>.swap_remove(vec, index: int) -> T? {
     }
     let value: T? = cast(__vec_data_get(vec, index))
     if index + 1 < vec.len {
-        __vec_data_set(vec, index, __vec_data_get(vec, vec.len - 1))
+        __vec_data_set(vec, index, cast(__vec_data_get(vec, vec.len - 1)))
     }
     __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
@@ -1486,7 +1596,7 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
 
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
-@inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
+@intrinsic @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
 
 @inline fn unwrap<T>(value: T?) -> T {
     if value != null { return value }
@@ -1666,6 +1776,14 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // Rock name rather than the emitted symbol.
 inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(obj, {})
+"""
+
+@intrinsic @native_required inline(lua) fn clone_into<T>(value: T, storage: Storage) -> T = """
+    return __rock_deepcopy_value(value, {})
+"""
+
+@intrinsic @native_required inline(lua) fn map_storage<K, V>(map: Map<K, V>) -> Storage = """
+    return nil
 """
 
 @materialize @intrinsic @pure fn materialize<T>(value: T) -> T {
@@ -1865,7 +1983,7 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
 // representation, so a missing column route fell through to the boxed body.
 // Both callers are Map methods (`remove`, `clear`).
-@inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
+@relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -1876,15 +1994,17 @@ inline(lua) fn table_new() -> any = """return {}"""
 // no call frame.
 // The RECEIVER is typed so 2.4 can protect these: spelled `any` they claimed no
 // representation, and a missing column route fell through to the boxed body and
-// died at runtime on `_data` instead of rejecting. The VALUE stays `any` -- it
-// is stored opaquely. `docs/boundary-contracts.md` 2.3b.
+// died at runtime on `_data` instead of rejecting. The stored VALUE is spelled
+// `T` with `@repr(opaque)`, as `vec_push`'s item is: it makes no layout claim,
+// and an `any` would erase an Arena row (docs/identity-storage-plan.md S0d).
+// `docs/boundary-contracts.md` 2.3b.
 // Not `@nomangle`: nothing calls these by their bare name. `@nomangle` is what
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
 @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, value: any) = "vec._data[index + 1] = value"
-@inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
+@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
+@relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
@@ -1907,7 +2027,7 @@ inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
 
 inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
 
-inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+@relocates inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
     table.insert(vec._data, lua_index, value)
 """
 
@@ -1917,7 +2037,7 @@ inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     return { _data = copy, len = vec.len, __ty = "Vec" }
 """
 
-inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+@relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
@@ -2406,7 +2526,7 @@ const EPSILON: float = 0.0000001
     return tostring(a) < tostring(b)
 """
 
-@nomangle inline(lua) fn __sort_map_keys(keys: any) = """
+@relocates @nomangle inline(lua) fn __sort_map_keys<K>(keys: [K]) = """
     table.sort(keys._data, __rock_inspect_key_lt)
 """
 
@@ -2436,6 +2556,20 @@ const EPSILON: float = 0.0000001
 // Thin wrapper kept for compiler codegen compatibility (incremental.rs emits inspect_formatted calls).
 @nomangle inline(lua) fn inspect_formatted(obj: any, precision: int) -> string = """
     return inspect(obj, true, precision)
+"""
+
+// A string inside a structural rendering (enum payload, value-record field):
+// quoted and escaped as a Rock literal so the text stays on one line.
+@nomangle inline(lua) fn __rock_quote_string(s: string) -> string = """
+    local escaped = string.gsub(s, "[%c\"\\]", function(c)
+        if c == "\\" then return "\\\\" end
+        if c == "\"" then return "\\\"" end
+        if c == "\n" then return "\\n" end
+        if c == "\t" then return "\\t" end
+        if c == "\r" then return "\\r" end
+        return string.format("\\u{%X}", string.byte(c))
+    end)
+    return "\"" .. escaped .. "\""
 """
 
 // Smart float formatting for `"{x}"` interpolation: scientific for
@@ -2920,6 +3054,7 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
 struct Vec<T> {
     _data: any,
     len: int,
+    storage: Storage = phantom(),
 }
 
 // Vec iteration -- `for x in vec` desugars through this iter/next pair
@@ -3332,23 +3467,28 @@ fn RingBuffer<T>.clear(rb) {
     rb.head = 0
 }
 
+// Holds the shared `data` descriptor and the oldest slot rather than the
+// buffer, which is a mutable identity and cannot be stored in a field.
 struct RingIter<T> {
-    rb: RingBuffer<T>,
+    data: [T],
+    oldest: int,
+    cap: int,
+    n: int,
     i: int,
 }
 
 @inline
 fn RingBuffer<T>.iter(rb) -> RingIter<T> {
-    return RingIter { rb: rb, i: 0 }
+    let n = rb.data.len
+    return RingIter { data: rb.data, oldest: (rb.head + rb.cap - n) % rb.cap, cap: rb.cap, n: n, i: 0 }
 }
 
 @inline
 fn RingIter<T>.next(it) -> (bool, T) {
-    let n = it.rb.data.len
-    if it.i >= n { return (false, phantom()) }
-    let idx = (it.rb.head + it.rb.cap - n + it.i) % it.rb.cap
+    if it.i >= it.n { return (false, phantom()) }
+    let idx = (it.oldest + it.i) % it.cap
     it.i = it.i + 1
-    return (true, it.rb.data[idx])
+    return (true, it.data[idx])
 }
 
 // Vec operations

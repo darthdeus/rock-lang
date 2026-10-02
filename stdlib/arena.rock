@@ -149,6 +149,7 @@ fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
 }
 
 fn __arena_reinitialize<T>(arena: Arena<T>) {
+    __weak_cache_retire(arena._scene_id, arena._arena_id, -1)
     assert(!is_null(__arena_store_any(arena._scene_id, arena._arena_id)),
         "Arena {arena._arena_id} is not live")
     let store: ArenaStore<T> = ArenaStore {
@@ -193,6 +194,7 @@ fn __arena_compact_retired_registry() {
 // typed handles, so the drain cannot spell `Arena<T>` for each one.
 fn __arena_destroy_id(scene_id: int, arena_id: int) -> bool {
     if is_null(__arena_store_any(scene_id, arena_id)) { return false }
+    __weak_cache_retire(scene_id, arena_id, -1)
     __ARENA_REGISTRY.stores.remove(arena_id)
     __ARENA_REGISTRY.live_count -= 1
     __ARENA_REGISTRY.retired_since_compact += 1
@@ -354,6 +356,7 @@ fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
     if !arena_slot_live(store, slot, entity._generation) { return null }
     // `data[slot]` is left as-is: nothing reads a free slot (every read goes
     // through the occupancy test), and clearing it would mean inventing a T.
+    __weak_cache_retire(entity._scene_id, entity._arena_id, slot)
     store.occupied.set(slot, false)
     __slot_release(__arena_store_erased(store), slot)
     return store.data[slot]
@@ -418,6 +421,7 @@ fn arena_generation_snapshot<T>(arena: Arena<T>) -> ArenaGenerationSnapshot {
 // no pre-clear Entity can be reissued.
 fn Arena<T>.clear(arena) {
     let store = __arena_store_mut(arena)
+    __weak_cache_retire(arena._scene_id, arena._arena_id, -1)
     store.generations = []
     store.occupied = []
     store.data = []
