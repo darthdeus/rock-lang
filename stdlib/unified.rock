@@ -744,13 +744,13 @@ fn weak_cache_drop<T>(name: string, owner: Entity<T>) {
 
 @inline
 fn weak_cache_get<T, V>(name: string, owner: Scene<T>) -> V? {
-    // Keep live-owner validation out of the opaque helper's trace frame.
-    let backing = __scene_root_any(owner._scene_id) ?? return null
+    // Use the typed getter so its oracle guard stays outside the hot loop.
+    let backing = owner.get() ?? return null
     let value: V? = __weak_cache_scene_get(name, owner._scene_id, backing)
     return value
 }
 
-inline(lua) fn __weak_cache_scene_get<V>(name: string, scene: int, backing: any) -> V? = """
+inline(lua) fn __weak_cache_scene_get<T, V>(name: string, scene: int, backing: T) -> V? = """
     local owners = _G.__rock_weak_cache_owners
     local scenes = owners and owners[scene]
     local entry = scenes and scenes[name]
