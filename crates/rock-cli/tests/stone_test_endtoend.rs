@@ -226,3 +226,38 @@ fn a_body_edit_reaches_its_caller_even_with_callee_binding_requested() {
         out.combined(),
     );
 }
+
+#[test]
+fn caller_body_edit_preserves_cross_module_generic_callback_abi() {
+    let initial = "global SCORE: int = 0\n\
+        fn apply<T>(value: T, callback: fn(T) -> T) -> T { callback(value) }\n\
+        @nomangle fn bump() { SCORE = SCORE + 1 }\n\
+        @nomangle fn invoke() -> int { apply(7, unchanged) }\n";
+    let h = StoneHarness::spawn(&[
+        ("stick.toml", "[package]\nname = \"callbackwatch\"\n"),
+        ("caller.rock", initial),
+        ("callback.rock", "fn unchanged(value: int) -> int { value + 3 }\n"),
+    ]);
+    h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let before = h.compiled_lua();
+    let baseline = h.event_count();
+    h.write_file("caller.rock", &initial.replace("apply(7, unchanged)", "apply(17, unchanged)"));
+    let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
+    assert_eq!(log.last().expect("reload event").decision, "hot");
+    let after = h.overlay_lua();
+    assert!(!after.trim().is_empty(), "body edit must emit an overlay");
+    let script = format!(
+        "_G.HOT_RELOAD = false\n{before}\n\
+         assert(invoke() == 10)\n\
+         bump()\n\
+         _G.HOT_RELOAD = true\n{after}\n\
+         _G.HOT_RELOAD = false\n\
+         assert(invoke() == 20)\n\
+         bump()\n\
+         assert(_G.SCORE == 2)\n\
+         print('PASS')\n"
+    );
+    let out = run_lua_code(&script).expect("run watcher output under LuaJIT");
+    assert!(out.success && out.stdout.trim() == "PASS",
+        "a caller edit must apply without changing the unchanged callback ABI:\n{}", out.combined());
+}

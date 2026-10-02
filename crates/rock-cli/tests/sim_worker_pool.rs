@@ -157,8 +157,8 @@ const EIGHT: [&str; 8] = [
     "testbed::b0_static_called_probe",
 ];
 
-/// The composition itself: eight entries of one boot signature under `-j 4`
-/// must run in several booted processes AT ONCE.
+/// The composition itself: more than one quantum of entries of one boot
+/// signature under `-j 4` must run in several booted processes AT ONCE.
 ///
 /// Two facts, and both are needed. The peak says the lanes overlapped rather
 /// than ran back to back; the total says they are still WORKERS and not eight
@@ -166,10 +166,14 @@ const EIGHT: [&str; 8] = [
 /// also show a peak above one.
 #[test]
 fn several_booted_workers_run_at_once() {
-    let run = run_workers(&EIGHT, "4");
+    // One lane per 56 entries of a boot signature, so overlap inside a single
+    // group needs more than one quantum of work: EIGHT repeated to 64 entries
+    // gives two lanes at -j 4.
+    let specs: Vec<&str> = EIGHT.iter().copied().cycle().take(64).collect();
+    let run = run_workers(&specs, "4");
     assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
     assert!(
-        run.stdout.contains(&format!("[sim] {}/{} sims passed", EIGHT.len(), EIGHT.len())),
+        run.stdout.contains(&format!("[sim] {0}/{0} sims passed", specs.len())),
         "all entries must be accounted for:\n{}",
         run.stdout
     );
@@ -181,11 +185,11 @@ fn several_booted_workers_run_at_once() {
          another instead of overlapping\n{}",
         run.trace
     );
-    assert!(
-        total < EIGHT.len(),
-        "{total} processes for {} entries: the entries stopped sharing a boot, which \
-         is the whole point of a worker\n{}",
-        EIGHT.len(),
+    assert_eq!(
+        total, 2,
+        "{total} processes for {} entries: two lanes of one shared boot each is the \
+         whole point of a worker\n{}",
+        specs.len(),
         run.trace
     );
 }
@@ -404,14 +408,17 @@ fn one_job_still_runs_one_worker_at_a_time() {
 /// untouched.
 #[test]
 fn a_dead_worker_does_not_reach_another_lane() {
-    let specs = [
-        "testbed::b2_crash_head,testbed::b2_crash_tail",
+    // Lanes split a signature group per 56 entries, so the neighbours repeat to
+    // 60: 61 entries make two contiguous lanes at -j 3, the crash in the first.
+    const NEIGHBOURS: [&str; 5] = [
         "testbed::b0_leak_probe",
         "testbed::co_join2_tuple",
         "testbed::co_join3_tuple",
         "testbed::co_join_all_list",
         "testbed::co_field_poller",
     ];
+    let mut specs = vec!["testbed::b2_crash_head,testbed::b2_crash_tail"];
+    specs.extend(NEIGHBOURS.iter().copied().cycle().take(60));
     let run = run_workers(&specs, "3");
     let combined = run.combined();
 
@@ -420,14 +427,14 @@ fn a_dead_worker_does_not_reach_another_lane() {
         "the crash entry fails, so the invocation fails:\n{combined}"
     );
     // The neighbours are the point: each keeps its own PASS record.
-    for name in ["testbed::b0_leak_probe", "testbed::co_join2_tuple", "testbed::co_join3_tuple", "testbed::co_join_all_list", "testbed::co_field_poller"] {
+    for name in NEIGHBOURS {
         assert!(
             combined.contains(&format!("{name}: PASS")),
             "`{name}` shares no process with the crash and must still pass:\n{combined}"
         );
     }
     assert!(
-        run.stdout.contains("[sim] 5/6 sims passed -- FAILED: testbed::b2_crash_head,testbed::b2_crash_tail"),
+        run.stdout.contains("[sim] 60/61 sims passed -- FAILED: testbed::b2_crash_head,testbed::b2_crash_tail"),
         "exactly the crash entry fails, and it is the one named:\n{}",
         run.stdout
     );

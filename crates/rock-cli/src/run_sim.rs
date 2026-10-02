@@ -1046,6 +1046,41 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
     Ok(())
 }
 
+/// Compile/discover and report the ordinary worker plan without building engines
+/// or spawning children. Explicit names retain their occurrence semantics.
+pub fn do_plan_sims(
+    backend: crate::Backend,
+    project: &str,
+    names: &[String],
+    jobs: Option<usize>,
+) -> Result<()> {
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let out_dir = sim_output_dir()?;
+    let prepared = prepare_sims(backend, project_path.clone(), out_dir.path().to_path_buf())?;
+    let mut manual_excluded = 0;
+    let specs = if names.is_empty() {
+        let mut routine = Vec::new();
+        for name in &prepared.wire_names {
+            if manual_sim(prepared.env_by_wire.get(name).map_or(&[][..], |v| v))? {
+                manual_excluded += 1;
+            } else {
+                routine.push(name.clone());
+            }
+        }
+        routine
+    } else {
+        resolve_sim_specs(&prepared.wire_names, names)?
+    };
+    let mut plan = worker_lane_plan(
+        &specs, &prepared.env_by_wire, active_sim_renderer(&project_path),
+        resolve_jobs(jobs, false),
+    );
+    plan["manual_excluded"] = serde_json::json!(manual_excluded);
+    println!("{}", serde_json::to_string_pretty(&plan)?);
+    Ok(())
+}
+
 pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, quiet: bool, update_snapshots: bool) -> Result<()> {
     do_run_sim_opts_with_request(backend, project, sim_name, quiet, update_snapshots, Some(1), "single")
 }
@@ -1749,12 +1784,25 @@ impl PoolWidth {
     }
 
     fn enter(&self) -> PoolSlot<'_> {
+        self.acquire();
+        PoolSlot(self)
+    }
+
+    fn acquire(&self) {
         let mut slots = self.slots.lock().unwrap();
         while slots.1 >= slots.0 {
             slots = self.changed.wait(slots).unwrap();
         }
         slots.1 += 1;
-        PoolSlot(self)
+    }
+
+    fn release(&self) {
+        // A poisoned count accompanies a task panic, which the joining scope
+        // re-raises. Wake other waiters even during teardown.
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.1 -= 1;
+        }
+        self.changed.notify_all();
     }
 }
 
@@ -1762,12 +1810,7 @@ struct PoolSlot<'a>(&'a PoolWidth);
 
 impl Drop for PoolSlot<'_> {
     fn drop(&mut self) {
-        // Poisoning means a task panicked, and that panic is re-raised when
-        // the scope joins; the count no longer matters then.
-        if let Ok(mut slots) = self.0.slots.lock() {
-            slots.1 -= 1;
-        }
-        self.0.changed.notify_all();
+        self.0.release();
     }
 }
 
@@ -2861,15 +2904,7 @@ fn run_specs_worker_mode(
     let mut active_indices: Vec<usize> = Vec::new();
 
     for (i, spec) in specs.iter().enumerate() {
-        let mut excluded_reason = None;
-        for part in parse_sim_chain(spec) {
-            if let Some(req) = sim_required_backend(env_by_wire.get(part).map_or(&[][..], |v| v)) {
-                if req != active_renderer {
-                    excluded_reason = Some(format!("requires {req} renderer (active is {active_renderer})"));
-                    break;
-                }
-            }
-        }
+        let excluded_reason = entry_backend_exclusion(spec, env_by_wire, active_renderer);
         if let Some(reason) = excluded_reason {
             let mut s = SimSummary::default();
             s.excluded = Some(reason);
@@ -4101,13 +4136,58 @@ fn group_worker_specs(
     (groups.into_iter().map(|(_, members)| members).collect(), isolated)
 }
 
+fn entry_backend_exclusion(
+    spec: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    renderer: &str,
+) -> Option<String> {
+    for part in parse_sim_chain(spec) {
+        if let Some(required) = sim_required_backend(env_by_wire.get(part).map_or(&[][..], |v| v)) {
+            if required != renderer {
+                return Some(format!("requires {required} renderer (active is {renderer})"));
+            }
+        }
+    }
+    None
+}
+
+fn worker_lane_plan(
+    specs: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    renderer: &str,
+    jobs: usize,
+) -> serde_json::Value {
+    let active_specs: Vec<String> = specs.iter()
+        .filter(|spec| entry_backend_exclusion(spec, env_by_wire, renderer).is_none())
+        .cloned().collect();
+    let (groups, isolated) = group_worker_specs(&active_specs, env_by_wire);
+    let reload_entries = isolated.iter()
+        .filter(|(i, _)| entry_is_reload_lane(&active_specs[*i], env_by_wire)).count();
+    serde_json::json!({
+        "selected_entries": specs.len(),
+        "backend_excluded": specs.len() - active_specs.len(),
+        "jobs": jobs,
+        "batch_quantum": SIM_BATCH_QUANTUM,
+        "signature_entry_counts": groups.iter().map(Vec::len).collect::<Vec<_>>(),
+        "ordinary_entries": groups.iter().map(Vec::len).sum::<usize>(),
+        "ordinary_lanes": allocate_worker_lanes(&groups, jobs).len(),
+        "isolated_entries": isolated.len() - reload_entries,
+        "reload_entries": reload_entries,
+    })
+}
+
+/// Entries one shared worker serves before another lane pays for its own boot.
+/// Measured at 56 on the full MAG registry (`docs/gate-speed-plan.md` step 0).
+const SIM_BATCH_QUANTUM: usize = 56;
+
 fn worker_lane_count(group_len: usize, jobs: usize) -> usize {
     if group_len == 0 {
         return 0;
     }
     let jobs = jobs.max(1);
-    let full_lanes = group_len / jobs;
-    let partial_lane = usize::from(group_len % jobs != 0);
+    let quantum = SIM_BATCH_QUANTUM;
+    let full_lanes = group_len / quantum;
+    let partial_lane = usize::from(group_len % quantum != 0);
     (full_lanes + partial_lane).min(jobs).max(1)
 }
 
@@ -7407,10 +7487,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The job count is a safety bound, not a preference: it must never exceed
-    /// what the machine can run, and `--update-snapshots` must pin to serial
-    /// because it writes baseline files whose destinations are not proven
-    /// unique before spawning.
     #[test]
     fn resolve_full_asset_jobs_is_bounded_by_jobs_and_defaults_to_two() {
         assert_eq!(resolve_full_asset_jobs(None, 12), DEFAULT_FULL_ASSET_JOBS);
@@ -7531,6 +7607,10 @@ mod tests {
         assert_eq!(got, (0..5).map(|i| (i, i * 2)).collect::<Vec<_>>());
     }
 
+    /// The job count is a safety bound, not a preference: it must never exceed
+    /// what the machine can run, and `--update-snapshots` must pin to serial
+    /// because it writes baseline files whose destinations are not proven
+    /// unique before spawning.
     #[test]
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         let (cores, budget) = (32, 4);
@@ -7575,19 +7655,63 @@ mod tests {
     }
 
     #[test]
-    fn worker_lane_allocation_uses_available_work_for_large_groups() {
-        let group: Vec<usize> = (0..16).collect();
-        assert_eq!(
-            allocate_worker_lanes(&[group], 4),
-            vec![
-                vec![0, 1, 2, 3],
-                vec![4, 5, 6, 7],
-                vec![8, 9, 10, 11],
-                vec![12, 13, 14, 15],
-            ]
-        );
+    fn worker_lane_allocation_splits_a_group_into_contiguous_quantum_blocks() {
+        let fits: Vec<usize> = (0..SIM_BATCH_QUANTUM).collect();
+        assert_eq!(allocate_worker_lanes(&[fits.clone()], 4), vec![fits]);
+
+        let group: Vec<usize> = (0..2 * SIM_BATCH_QUANTUM + 1).collect();
+        let lanes = allocate_worker_lanes(&[group.clone()], 4);
+        assert_eq!(lanes.len(), 3);
+        assert_eq!(lanes.concat(), group);
         assert_eq!(worker_lane_count(0, 4), 0);
         assert_eq!(worker_lane_count(3, 0), 1);
+    }
+
+    #[test]
+    fn worker_lane_plan_counts_only_active_workers_and_keeps_occurrences() {
+        let mut specs = vec!["plain".to_string(); 2 * SIM_BATCH_QUANTUM + 1];
+        specs.extend(["full", "isolated", "reload", "other_backend"].map(str::to_string));
+        let env = HashMap::from([
+            ("full".into(), vec![("STONE_ASSET_STUB".into(), "0".into()), ("STONE_IMAGE_MAX_SIDE".into(), "0".into())]),
+            ("isolated".into(), vec![("SIM_WORKER_ISOLATED".into(), "1".into())]),
+            ("reload".into(), vec![("STONE_HOT_RELOAD".into(), "1".into())]),
+            ("other_backend".into(), vec![("SIM_REQUIRED_RENDERER".into(), "wgpu".into())]),
+        ]);
+        let plan = worker_lane_plan(&specs, &env, "gl", 14);
+        assert_eq!(plan["selected_entries"], 2 * SIM_BATCH_QUANTUM + 5);
+        assert_eq!(plan["backend_excluded"], 1);
+        assert_eq!(plan["ordinary_entries"], 2 * SIM_BATCH_QUANTUM + 2);
+        assert_eq!(plan["signature_entry_counts"], serde_json::json!([2 * SIM_BATCH_QUANTUM + 1, 1]));
+        assert_eq!(plan["ordinary_lanes"], 4);
+        assert_eq!(plan["isolated_entries"], 1);
+        assert_eq!(plan["reload_entries"], 1);
+        assert_eq!(plan["batch_quantum"], SIM_BATCH_QUANTUM);
+    }
+
+    #[test]
+    fn worker_lane_count_is_ceil_of_entries_over_the_quantum_capped_by_jobs() {
+        let q = SIM_BATCH_QUANTUM;
+        for (entries, lanes) in [
+            (0, 0), (1, 1), (14, 1), (15, 1), (q, 1), (q + 1, 2),
+            (2 * q, 2), (2 * q + 1, 3), (196, 4), (1660, 14),
+        ] {
+            assert_eq!(worker_lane_count(entries, 14), lanes, "N={entries}");
+        }
+        assert_eq!(worker_lane_count(10 * q, 4), 4);
+        assert_eq!(worker_lane_count(usize::MAX, 14), 14);
+    }
+
+    #[test]
+    fn worker_lane_partition_covers_every_entry_once_in_group_order() {
+        let groups = vec![(0..15).collect(), (15..1675).collect(), vec![], vec![1675]];
+        for jobs in [1, 4, 14, 64] {
+            let lanes = allocate_worker_lanes(&groups, jobs);
+            assert_eq!(lanes.concat(), (0..1676).collect::<Vec<_>>());
+            assert!(lanes.iter().all(|lane| !lane.is_empty()));
+            for lane in lanes {
+                assert!(groups.iter().any(|group| group.windows(lane.len()).any(|w| w == lane)));
+            }
+        }
     }
 
     /// A comma-chain is scheduled as one entry, so ONE reload part makes the

@@ -72,6 +72,7 @@ fn main() {
     print(d.gain)
     print(stored(h) != null)
     print(stored(h2) == null)
+    print((stored(h2) != null) == false)
     print(use_mix(stored(h)))
     let t = mk_tag(2.0) ?? Tag { name: "d", n: 0.0 }
     print(t.name)
@@ -103,6 +104,6 @@ fn optional_value_wire_keeps_null_present_nested_and_escape_semantics() {
     let lua = emit_module(OPTIONAL_VALUE);
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "optional_value_wire"),
-        "5\n-1\n5\ntrue\ntrue\ntrue\ntrue\n5\n0\n4\n7\n9\ntrue\ntrue\n4\nt\nd"
+        "5\n-1\n5\ntrue\ntrue\ntrue\ntrue\n5\n0\n4\n7\n9\ntrue\ntrue\ntrue\n4\nt\nd"
     );
 }

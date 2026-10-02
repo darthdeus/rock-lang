@@ -50,6 +50,7 @@ impl Builder<'_> {
         op: BinOp,
         lhs: Idx<Expr>,
         rhs: Idx<Expr>,
+        condition: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
         match op {
             BinOp::Lt | BinOp::Leq | BinOp::Gt | BinOp::Geq => {
@@ -108,11 +109,7 @@ impl Builder<'_> {
                                 self.emit_cur(Inst::NotEq(boxed, nil))
                             }
                         };
-                        return Ok(if matches!(op, BinOp::Eq) {
-                            self.emit_cur(Inst::Not(present))
-                        } else {
-                            present
-                        });
+                        return Ok(self.lower_presence_test(op, present, condition));
                     }
                     // A `V?` place read here is read for its PRESENCE: the copy
                     // such a read otherwise takes would allocate a cdata per nil
@@ -148,11 +145,7 @@ impl Builder<'_> {
                                 self.emit_cur(Inst::NotEq(value, nil))
                             }
                         };
-                        return Ok(if matches!(op, BinOp::Eq) {
-                            self.emit_cur(Inst::Not(present))
-                        } else {
-                            present
-                        });
+                        return Ok(self.lower_presence_test(op, present, condition));
                     }
                     // The tuple twin of the nobox-value case above: a `(..)?`
                     // whose element splats carries its own presence SLOT, and
@@ -172,11 +165,7 @@ impl Builder<'_> {
                                 self.emit_cur(Inst::NotEq(value, nil))
                             }
                         };
-                        return Ok(if matches!(op, BinOp::Eq) {
-                            self.emit_cur(Inst::Not(present))
-                        } else {
-                            present
-                        });
+                        return Ok(self.lower_presence_test(op, present, condition));
                     }
                     if self.expr_is_flat_enum(v) {
                         let tag = match self.lower_expr_repr(v)?.into_value() {
@@ -324,9 +313,21 @@ impl Builder<'_> {
             }
             // Short-circuit operators: the rhs may not evaluate, so they lower
             // to branches with the result flowing through a cell.
-            BinOp::And => self.lower_and(lhs, rhs),
-            BinOp::Or => self.lower_or(lhs, rhs),
+            BinOp::And => self.lower_and(lhs, rhs, condition),
+            BinOp::Or => self.lower_or(lhs, rhs, condition),
             BinOp::NullCoalesce => self.lower_nullcoalesce(lhs, rhs),
+        }
+    }
+
+    fn lower_presence_test(&mut self, op: BinOp, present: Idx<Inst>, condition: bool) -> Idx<Inst> {
+        if matches!(op, BinOp::Eq) {
+            self.emit_cur(Inst::Not(present))
+        } else if condition {
+            present
+        } else {
+            // An absent place can carry nil; escaped bools must carry false.
+            let absent = self.emit_cur(Inst::Not(present));
+            self.emit_cur(Inst::Not(absent))
         }
     }
 
@@ -357,7 +358,7 @@ impl Builder<'_> {
             .flatten();
         let results: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell_typed(None, result_ty)).collect();
-        let cond_v = self.lower_expr(cond)?;
+        let cond_v = self.lower_condition(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -400,7 +401,7 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<(), CompilerError> {
-        let cond_v = self.lower_expr(cond)?;
+        let cond_v = self.lower_condition(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -530,9 +531,14 @@ impl Builder<'_> {
     }
 
     /// `a && b` == `if a then b else false`.
-    pub(crate) fn lower_and(&mut self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+    fn lower_and(
+        &mut self,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+        condition: bool,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
-        let lv = self.lower_expr(lhs)?;
+        let lv = self.lower_condition(lhs)?;
         let rhs_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -545,7 +551,11 @@ impl Builder<'_> {
             },
         );
         self.cur = rhs_bb;
-        let rv = self.lower_expr(rhs)?;
+        let rv = if condition {
+            self.lower_condition(rhs)?
+        } else {
+            self.lower_expr(rhs)?
+        };
         self.store_and_join(result, rv, join);
         self.cur = else_bb;
         let f = self.emit_cur(Inst::Const(Lit::Bool(false)));
@@ -555,9 +565,14 @@ impl Builder<'_> {
     }
 
     /// `a || b` == `if a then true else b`.
-    pub(crate) fn lower_or(&mut self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+    fn lower_or(
+        &mut self,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+        condition: bool,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell_typed(None, self.current_expr_storage_ty_id());
-        let lv = self.lower_expr(lhs)?;
+        let lv = self.lower_condition(lhs)?;
         let then_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -573,7 +588,11 @@ impl Builder<'_> {
         let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
         self.store_and_join(result, t, join);
         self.cur = rhs_bb;
-        let rv = self.lower_expr(rhs)?;
+        let rv = if condition {
+            self.lower_condition(rhs)?
+        } else {
+            self.lower_expr(rhs)?
+        };
         self.store_and_join(result, rv, join);
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))

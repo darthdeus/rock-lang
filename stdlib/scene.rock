@@ -83,6 +83,12 @@ fn __scene_root_any(scene_id: int) -> any? {
     return slot.unwrap()
 }
 
+// A Scene root is an identity, and identities never coerce to ordinary `any`;
+// this is the registry's only erasure (`@identity_erasure`,
+// docs/identity-storage-plan.md S0d). `Scene.get`'s `cast` recovers the type.
+@identity_erasure @inline
+fn __scene_root_erased<T>(root: T) -> any { return root }
+
 fn Scene<T>.get(scene) -> T? {
     let boxed = __scene_root_any(scene._scene_id)
     if is_null(boxed) { return null }
@@ -219,6 +225,7 @@ fn __scene_retire(scene_id: int, graceful: bool) {
     }
     let empty: [int] = []
     __SCENE_REGISTRY.arena_ids.set(scene_id, empty)
+    __weak_cache_retire(scene_id, -1, -1)
     __SCENE_REGISTRY.roots.set(scene_id, null)
     __SCENE_REGISTRY.states.set(scene_id, __SCENE_DEAD)
     __scene_type_bucket_remove(scene_id)
@@ -237,12 +244,11 @@ fn __scene_retire(scene_id: int, graceful: bool) {
 fn scene_create<T>(build: fn(SceneBuilder) -> T?) -> Scene<T>? {
     let id = __scene_reserve()
     let root = build(SceneBuilder { _scene_id: id })
-    if is_null(root) {
+    if root == null {
         __scene_retire(id, true)
         return null
     }
-    let published: any = root.unwrap()
-    __SCENE_REGISTRY.roots.set(id, published)
+    __SCENE_REGISTRY.roots.set(id, __scene_root_erased(root.unwrap()))
     __SCENE_REGISTRY.states.set(id, __SCENE_LIVE)
     let type_key = __rock_scene_type_key<T>()
     __scene_type_bucket_insert(id, type_key)

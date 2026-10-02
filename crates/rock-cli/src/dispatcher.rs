@@ -24,6 +24,7 @@ impl CommandContext {
 
     /// Run the command directly without server
     pub fn run(&self) -> Result<()> {
+        self.require_required_test_support()?;
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
@@ -402,6 +403,17 @@ impl CommandContext {
         if self.args.allocation_census.is_some() && self.args.allocation_sites.is_some() {
             anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms");
         }
+        if self.args.sim_plan {
+            if self.args.files.is_empty() {
+                anyhow::bail!("sim --plan needs a project: rock sim --plan <project> [names]");
+            }
+            return crate::run_sim::do_plan_sims(
+                backend,
+                &self.args.files[0],
+                &self.args.files[1..],
+                self.args.jobs,
+            );
+        }
         if let Some(path) = self.args.allocation_sites.as_deref() {
             if self.args.list {
                 anyhow::bail!("--allocation-sites cannot be combined with sim --list");
@@ -583,11 +595,35 @@ impl CommandContext {
             }
             CliCommand::Test => {
                 let files = self.get_test_files()?;
-                crate::c_test::c_test(&files)
+                crate::c_test::c_test(&files, &self.args.required_tests)
             }
             CliCommand::Run => {
                 let file = self.get_required_file("run")?;
                 crate::c_test::c_run(file)
+            }
+            CliCommand::Frame => {
+                if self.args.dump_state {
+                    anyhow::bail!(
+                        "the C backend native frame runner does not support --dump-state"
+                    );
+                }
+                if self.args.record.is_some() || self.args.replay.is_some() {
+                    anyhow::bail!(
+                        "the C backend native frame runner does not support --record or --replay"
+                    );
+                }
+                if self.args.checkpoint_interval.is_some() {
+                    anyhow::bail!(
+                        "the C backend native frame runner does not support --checkpoint-interval"
+                    );
+                }
+                let file = self.get_game_file()?;
+                crate::c_test::c_frame(
+                    &file,
+                    self.args.frames,
+                    self.args.headless,
+                    self.args.renderer,
+                )
             }
             other => unreachable!(
                 "c dispatch reached unsupported command {:?}; the capability \
@@ -708,9 +744,19 @@ impl CommandContext {
             return Ok(());
         }
         if self.args.command == CliCommand::Fix {
-            let usage = "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]";
+            let usage = "usage: rock fix --imports <package|file> [--check|--apply] [--format pretty|json]\n       rock fix --across-yield <file>... [--check|--apply]";
+            if self.args.across_yield {
+                if self.args.files.is_empty() {
+                    anyhow::bail!("{usage}");
+                }
+                let code = crate::across_yield_fix::run(&self.args.files, self.args.apply)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
             if !self.args.imports {
-                anyhow::bail!("rock fix: name the fix to run (`--imports` is the only one)\n{usage}");
+                anyhow::bail!("rock fix: name the fix to run (`--imports` or `--across-yield`)\n{usage}");
             }
             let format = match self.args.perf_format.as_str() {
                 "pretty" => crate::modules_audit::Format::Pretty,
@@ -867,6 +913,10 @@ impl CommandContext {
             let root = self.get_path_or_current()?;
             return crate::monoty_census::do_monoty_census(Some(&root));
         }
+        if self.args.command == CliCommand::IdentityStorageCensus {
+            let root = self.get_path_or_current()?;
+            return crate::identity_storage_census::do_identity_storage_census(&root);
+        }
         // mono-manifest builds the Stage-0d shadow instance graph; a diagnostic
         // that touches no emission, dispatched early like its 0c sibling.
         #[cfg(feature = "backend-js")]
@@ -1018,5 +1068,56 @@ impl CommandContext {
         }
         self.require_backend_support()?;
         self.run_command_skull()
+    }
+
+    fn require_required_test_support(&self) -> Result<()> {
+        if !self.args.required_tests.is_empty()
+            && (self.args.command != CliCommand::Test || self.args.backend != Backend::C)
+        {
+            anyhow::bail!("`--require-test` is supported only by `rock test --backend c`");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod required_test_dispatch_tests {
+    use super::CommandContext;
+
+    fn context(argv: &[&str]) -> CommandContext {
+        let matches = crate::Args::command()
+            .try_get_matches_from(argv)
+            .expect("parse CLI arguments");
+        CommandContext::new(crate::Args::from_matches(matches))
+    }
+
+    #[test]
+    fn required_test_flag_rejects_a_non_c_backend_before_dispatch() {
+        let error = context(&["rock", "test", "mag-world", "--require-test", "test_name"])
+            .run()
+            .expect_err("the default Skull backend cannot honor --require-test");
+        assert!(
+            error.to_string().contains("only by `rock test --backend c`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn required_test_flag_rejects_a_non_test_command_before_dispatch() {
+        let error = context(&[
+            "rock",
+            "run",
+            "unused.rock",
+            "--backend",
+            "c",
+            "--require-test",
+            "test_name",
+        ])
+        .run()
+        .expect_err("the C run command cannot honor --require-test");
+        assert!(
+            error.to_string().contains("only by `rock test --backend c`"),
+            "{error}"
+        );
     }
 }

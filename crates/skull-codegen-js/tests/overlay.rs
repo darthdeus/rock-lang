@@ -686,3 +686,31 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
     ));
     assert_eq!(output.trim(), "one,two");
 }
+
+#[test]
+fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi() {
+    let source = "fn apply<T>(value: T, callback: fn(T) -> T) -> T { callback(value) }\n\
+        fn unchanged(value: int) -> int { value + 3 }\n\
+        @nomangle fn invoke() -> int { apply(7, unchanged) }\n\
+        @nomangle fn edited() -> int { 1 }\n\
+        fn main() { invoke(); edited() }\n";
+    let before = ws_with(source);
+    let after = ws_with(&source.replace("fn edited() -> int { 1 }", "fn edited() -> int { 2 }"));
+    let mid = function(&before, "main").module;
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let caller = function(&after, "edited");
+    let overlay = skull_codegen_js::emit::emit_overlay(
+        &after, mid, &mut cache,
+        &[(caller.module, BodyOwner::Function(caller.func))],
+    ).unwrap().expect_overlay();
+    let staged: Vec<_> = overlay.lines().filter(|line|
+        line.contains("__rock_code_slot_stage_one(") && line.contains("unchanged")
+    ).collect();
+    assert_eq!(staged.len(), 1, "unchanged callback must be staged: {staged:?}");
+    assert!(!staged[0].contains("unresolved-named-value"), "stage must carry the concrete ABI");
+    let output = node(&format!(
+        "{}\nvar __G = {{}};\n{}\nconsole.log(invoke(), edited());\n(0, eval)({:?});\nconsole.log(invoke(), edited());",
+        js_runtime(), program.program, overlay
+    ));
+    assert_eq!(output.trim(), "10 1\n10 2");
+}

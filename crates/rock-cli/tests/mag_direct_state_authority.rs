@@ -1168,7 +1168,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 27, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 28, "WorldState field census changed: {fields:?}");
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
