@@ -1944,3 +1944,32 @@ fn vec_index_with_folded_base_keeps_the_checked_call() {
     assert!(lua.contains("__vec_checked_get("), "{lua}");
     assert!(!lua.contains("__rock_vec_oob("), "{lua}");
 }
+
+#[test]
+fn ordinary_nullable_value_returns_do_not_materialize_boxes() {
+    let src = r#"
+value Pair { x: int, y: int }
+value Label { text: string, active: bool }
+struct Row { marker: int }
+fn pair(present: bool, x: int) -> Pair? {
+    if !present { return null }
+    return Pair { x: x, y: x + 1 }
+}
+fn label(present: bool, text: string) -> Label? {
+    if !present { return null }
+    return Label { text: text, active: false }
+}
+fn entity(present: bool, slot: int) -> Entity<Row>? {
+    if !present { return null }
+    return Entity { _scene_id: 11, _arena_id: 12, _slot: slot, _generation: 13 }
+}
+"#;
+    let mut materialized = Vec::new();
+    for name in ["pair", "label", "entity"] {
+        let lua = emit_clean(src, name);
+        if lua.contains("_ct(") || lua.contains("_vt(") || lua.contains("setmetatable(") {
+            materialized.push(format!("{name}: {lua}"));
+        }
+    }
+    assert!(materialized.is_empty(), "nullable returns materialize boxes: {materialized:#?}");
+}
