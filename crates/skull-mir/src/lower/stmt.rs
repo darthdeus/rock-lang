@@ -292,8 +292,11 @@ impl Builder<'_> {
                                     r.representation(), actual, shape
                                 )));
                             }
-                            let shape = actual;
-                            let leaves = self.repr_to_leaves_bundle(&r)?;
+                            // A nullable binding keeps its presence lane even when
+                            // the source plan is non-null with presence on the
+                            // Group (a map column `get`).
+                            let shape = if shape.nullable && !actual.nullable { shape } else { actual };
+                            let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
                             let bname = self.body.binding_arena[name].name;
                             let owner = self
                                 .binding_ty(name)
