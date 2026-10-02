@@ -1511,8 +1511,8 @@ impl Builder<'_> {
         &mut self,
         bundle: &ValueBundle,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let ValueRepr::Group { present: Some(_), .. } = bundle.value() {
-            return self.pack_maybe_absent(bundle.value().clone());
+        if let ValueRepr::Group { name, parts, present: Some(present) } = bundle.value() {
+            return self.pack_typed_nullable(*name, parts.clone(), *present, BoxKind::Implicit);
         }
         let Some(shape) = self
             .scx
@@ -1571,6 +1571,20 @@ impl Builder<'_> {
     /// presence buys the correct `nil` for free. Same split safe-nav uses.
     pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         self.pack_maybe_absent_boxed(r, BoxKind::Implicit)
+    }
+
+    /// A presence-carrying group as one typed nullable value. Straight-line,
+    /// unlike [`Self::pack_maybe_absent_boxed`]'s nil-or-box join, which has no
+    /// single C representation inside a parent constructor.
+    fn pack_typed_nullable(
+        &mut self,
+        name: Ustr,
+        parts: Vec<ValueRepr>,
+        present: Idx<Inst>,
+        kind: BoxKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let value = self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
+        Ok(self.emit_cur(Inst::MakeNullableValue { present, value }))
     }
 
     /// [`Self::pack_maybe_absent`] carrying the box's authorization, the shape
@@ -1718,14 +1732,9 @@ impl Builder<'_> {
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
                 // A nullable nobox field is observable as null through its
-                // parent, so its presence must reach the field as a typed
-                // nullable value; the branching packer's nil-or-box join has no
-                // single C representation.
+                // parent, so its presence must reach the field.
                 if let ValueRepr::Group { name, parts, present: Some(present) } = p {
-                    let value =
-                        self.pack_boxed(ValueRepr::Group { name, parts, present: None }, kind)?;
-                    let field = self.emit_cur(Inst::MakeNullableValue { present, value });
-                    return Ok((fname, field));
+                    return Ok((fname, self.pack_typed_nullable(name, parts, present, kind)?));
                 }
                 Ok((fname, self.pack_boxed(p, kind)?))
             })
