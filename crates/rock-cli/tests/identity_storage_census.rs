@@ -47,7 +47,7 @@ const PINNED: &str = "\
 | testbed | exempt | 5 | 3 | 0 | 0 | 135 | 2 | 2 | 74 | 68 | 289 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| unpackaged programs | exempt | 104 | 13 | 6 | 0 | 133 | 49 | 1 | 0 | 50 | 356 |
+| unpackaged programs | exempt | 104 | 13 | 6 | 0 | 137 | 49 | 1 | 0 | 50 | 360 |
 | void | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |
 
