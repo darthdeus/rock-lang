@@ -1978,18 +1978,13 @@ fn absent_pair(present: bool, x: int) -> bool { return pair(present, x) == null 
         lua.contains("_ct(") || lua.contains("_vt(") || lua.contains("setmetatable(")
     };
     let mut materialized = Vec::new();
-    for name in ["pair", "local_pair", "coalesced_pair", "absent_pair"] {
+    for name in ["pair", "label", "entity", "local_pair", "coalesced_pair", "absent_pair"] {
         let lua = emit_clean(src, name);
         if materializes(&lua) {
             materialized.push(format!("{name}: {lua}"));
         }
     }
     assert!(materialized.is_empty(), "nullable returns materialize boxes: {materialized:#?}");
-    // A GC-tier `T?` keeps its boxed slot (`sig_shape_of_nullable_nominal`).
-    for name in ["label", "entity"] {
-        let lua = emit_clean(src, name);
-        assert!(materializes(&lua), "GC-tier nullable return lost its box: {name}: {lua}");
-    }
 }
 
 #[test]
