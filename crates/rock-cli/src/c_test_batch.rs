@@ -105,13 +105,14 @@ fn run_file(
             let output_dir = compiled._dir.path();
             let timeout = C_NATIVE_TEST_TIMEOUT * batch_build.indices.len() as u32 + Duration::from_secs(5);
             let batch = run_supervisor(&compiled.binary, output_dir, None, timeout);
+            if let Err(error) = &batch {
+                log::warn!(target: "TEST", "C test supervisor failed: {error}");
+            }
             for (slot, index) in batch_build.indices.iter().enumerate() {
                 // A crashed supervisor may leave later tests unstarted. Reuse the
                 // binary in single-test mode, retaining every completed result.
                 if !output_dir.join(format!("{slot}.status")).exists() {
-                    if let Err(error) = &batch {
-                        log::warn!(target: "TEST", "C test supervisor failed; retrying {}: {error}", tests[*index].1.name);
-                    }
+                    log::warn!(target: "TEST", "C test supervisor failed; retrying {}", tests[*index].1.name);
                     if let Err(error) = run_supervisor(
                         &compiled.binary,
                         output_dir,

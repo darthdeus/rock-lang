@@ -324,6 +324,9 @@ for path in sys.argv[1:]:
         text += '\nint rock_duplicate_symbol = 1;\n'
     if mode == 'supervisor' and path.endswith('/supervisor.c'):
         text += '\n#error supervisor-compile-rejection\n'
+    if mode == 'exit' and path.endswith('/supervisor.c'):
+        before, after = text.rsplit('return 0;', 1)
+        text = before + 'fputs("supervisor-last-status-diagnostic\\n", stderr); return 9;' + after
     open(path, 'w').write(text)
 PYTHON
 fi
@@ -384,3 +387,16 @@ fn c_tests_report_supervisor_compile_failure_without_rebuilding() {
     check_batch_infrastructure_failure("supervisor");
 }
 
+#[test]
+fn c_tests_log_supervisor_failure_after_last_status_and_keep_results() {
+    let (output, compiles) = run_broken_batch("exit");
+    let report = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{report}\n{stderr}");
+    assert!(report.contains("2/2 @tests passed"), "{report}");
+    assert!(report.contains("PASS first") && report.contains("PASS second"), "{report}");
+    assert!(stderr.contains("C test supervisor failed:"), "{stderr}");
+    assert!(stderr.contains("supervisor-last-status-diagnostic"), "{stderr}");
+    assert!(stderr.contains("exit status: 9"), "{stderr}");
+    assert_eq!(compiles, 3);
+}
