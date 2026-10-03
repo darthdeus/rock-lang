@@ -96,12 +96,16 @@ fn run_file(
     if prepared.is_empty() {
         return results;
     }
-    match compile_batch(&prepared) {
-        Ok(compiled) => {
+    let batch_build = compile_batch(&prepared);
+    for (index, error) in batch_build.failures {
+        results.push((index, CTestRun::Ran(Err(error))));
+    }
+    match batch_build.compiled {
+        Ok(Some(compiled)) => {
             let output_dir = compiled._dir.path();
-            let timeout = C_NATIVE_TEST_TIMEOUT * prepared.len() as u32 + Duration::from_secs(5);
+            let timeout = C_NATIVE_TEST_TIMEOUT * batch_build.indices.len() as u32 + Duration::from_secs(5);
             let batch = run_supervisor(&compiled.binary, output_dir, None, timeout);
-            for (slot, (index, _)) in prepared.iter().enumerate() {
+            for (slot, index) in batch_build.indices.iter().enumerate() {
                 // A crashed supervisor may leave later tests unstarted. Reuse the
                 // binary in single-test mode, retaining every completed result.
                 if !output_dir.join(format!("{slot}.status")).exists() {
@@ -129,18 +133,13 @@ fn run_file(
                 results.push((*index, CTestRun::Ran(result)));
             }
         }
+        Ok(None) => {}
         Err(error) => {
-            // A clang rejection is per test, just like an emission rejection.
-            // Isolate the failed translation unit without failing its siblings.
-            log::warn!(target: "TEST", "C test batch did not build; retrying its tests individually: {}",
+            let error = format!("C test batch infrastructure failed: {error}");
+            log::error!(target: "TEST", "{}",
                 error.split("\n--- generated C ---").next().unwrap_or(&error));
-            for (index, test) in prepared {
-                let result = if tests[index].1.returns.is_some() {
-                    compile_and_run(&tests[index].1.name, &test.source)
-                } else {
-                    compile_and_run_program(&test.source, &test.link)
-                };
-                results.push((index, CTestRun::Ran(result)));
+            for index in batch_build.indices {
+                results.push((index, CTestRun::Ran(Err(error.clone()))));
             }
         }
     }
@@ -155,49 +154,79 @@ fn extend_unique<T: PartialEq + Clone>(target: &mut Vec<T>, source: &[T]) {
     }
 }
 
-fn compile_batch(tests: &[(usize, PreparedTest)]) -> std::result::Result<CompiledC, String> {
-    let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let binary = dir.path().join("test-bin");
-    let mut sources = Vec::new();
-    let mut link = CLinkPlan::default();
-    let mut supervisor = format!(
-        "#define ROCK_TEST_COUNT {}\n#define ROCK_TEST_TIMEOUT_SECONDS {}\n",
-        tests.len(),
-        C_NATIVE_TEST_TIMEOUT.as_secs()
-    );
-    let objects = tests
-        .par_iter()
-        .enumerate()
-        .map(|(slot, (_, test))| {
+struct CompiledBatch {
+    compiled: std::result::Result<Option<CompiledC>, String>,
+    indices: Vec<usize>,
+    failures: Vec<(usize, String)>,
+}
+
+fn compile_batch(tests: &[(usize, PreparedTest)]) -> CompiledBatch {
+    let mut batch = CompiledBatch {
+        compiled: Ok(None),
+        indices: tests.iter().map(|(index, _)| *index).collect(),
+        failures: Vec::new(),
+    };
+    batch.compiled = (|| {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let binary = dir.path().join("test-bin");
+        let objects = tests.par_iter().enumerate().map(|(slot, (_, test))| {
             let source = format!("#define main rock_c_test_{slot}\n{}", test.source);
             let path = dir.path().join(format!("test-{slot}.c"));
             let object = dir.path().join(format!("test-{slot}.o"));
-            fs_err::write(&path, &source).map_err(|error| error.to_string())?;
+            fs_err::write(&path, &source)
+                .map_err(|error| CObjectCompileError::Infrastructure(error.to_string()))?;
             clang_compile_object(&source, &path, &object, &test.link.include_dirs)?;
-            Ok((object, source))
-        })
-        .collect::<Vec<std::result::Result<_, String>>>();
-    for object in objects {
-        sources.push(object?);
-    }
-    for (slot, (_, test)) in tests.iter().enumerate() {
-        supervisor.push_str(&format!("extern int rock_c_test_{slot}(void);\n"));
-        extend_unique(&mut link.include_dirs, &test.link.include_dirs);
-        extend_unique(&mut link.library_dirs, &test.link.library_dirs);
-        extend_unique(&mut link.libraries, &test.link.libraries);
-        extend_unique(&mut link.rpaths, &test.link.rpaths);
-    }
-    supervisor.push_str("static int (*const rock_tests[])(void) = {\n");
-    for slot in 0..tests.len() {
-        supervisor.push_str(&format!("rock_c_test_{slot},\n"));
-    }
-    supervisor.push_str("};\n");
-    supervisor.push_str(include_str!("c_test_supervisor.c"));
-    let path = dir.path().join("supervisor.c");
-    fs_err::write(&path, &supervisor).map_err(|error| error.to_string())?;
-    sources.push((path, supervisor));
-    clang_compile_sources(&sources, &binary, &link)?;
-    Ok(CompiledC { _dir: dir, binary })
+            Ok((slot, object, source))
+        }).collect::<Vec<std::result::Result<_, CObjectCompileError>>>();
+        batch.indices.clear();
+        let mut sources = Vec::new();
+        let mut entries = Vec::new();
+        let mut link = CLinkPlan::default();
+        let mut infrastructure = Vec::new();
+        for ((index, test), object) in tests.iter().zip(objects) {
+            match object {
+                Ok((slot, object, source)) => {
+                    batch.indices.push(*index);
+                    entries.push(slot);
+                    sources.push((object, source));
+                    extend_unique(&mut link.include_dirs, &test.link.include_dirs);
+                    extend_unique(&mut link.library_dirs, &test.link.library_dirs);
+                    extend_unique(&mut link.libraries, &test.link.libraries);
+                    extend_unique(&mut link.rpaths, &test.link.rpaths);
+                }
+                Err(CObjectCompileError::Test(error)) => batch.failures.push((*index, error)),
+                Err(CObjectCompileError::Infrastructure(error)) => {
+                    batch.indices.push(*index);
+                    infrastructure.push(error);
+                }
+            }
+        }
+        if !infrastructure.is_empty() {
+            return Err(infrastructure.join("\n"));
+        }
+        if sources.is_empty() {
+            return Ok(None);
+        }
+        let mut supervisor = format!(
+            "#define ROCK_TEST_COUNT {}\n#define ROCK_TEST_TIMEOUT_SECONDS {}\n",
+            entries.len(), C_NATIVE_TEST_TIMEOUT.as_secs()
+        );
+        for slot in &entries {
+            supervisor.push_str(&format!("extern int rock_c_test_{slot}(void);\n"));
+        }
+        supervisor.push_str("static int (*const rock_tests[])(void) = {\n");
+        for slot in entries {
+            supervisor.push_str(&format!("rock_c_test_{slot},\n"));
+        }
+        supervisor.push_str("};\n");
+        supervisor.push_str(include_str!("c_test_supervisor.c"));
+        let path = dir.path().join("supervisor.c");
+        fs_err::write(&path, &supervisor).map_err(|error| error.to_string())?;
+        sources.push((path, supervisor));
+        clang_compile_sources(&sources, &binary, &link)?;
+        Ok(Some(CompiledC { _dir: dir, binary }))
+    })();
+    batch
 }
 
 struct SupervisorProcess(std::process::Child);

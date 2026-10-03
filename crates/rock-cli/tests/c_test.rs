@@ -296,3 +296,91 @@ fn c_tests_timeout_one_child_and_run_the_next_test() {
         "{report}"
     );
 }
+
+fn run_broken_batch(mode: &str) -> (std::process::Output, usize) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("broken.rock");
+    std::fs::write(&source, r#"
+@test(output = "first") fn first() { print("first") }
+@test(output = "second") fn second() { print("second") }
+"#).unwrap();
+    let clang = Command::new("sh").args(["-c", "command -v clang"]).output().unwrap();
+    assert!(clang.status.success());
+    let shim = dir.path().join("clang");
+    std::fs::write(&shim, r#"#!/bin/sh
+if [ "$1" != "--version" ]; then
+    printf 'compile\n' >> "$ROCK_TEST_CLANG_COUNT"
+    python3 - "$@" <<'PYTHON'
+import os, sys
+mode = os.environ['ROCK_TEST_BATCH_BREAK']
+for path in sys.argv[1:]:
+    if not path.endswith('.c'):
+        continue
+    text = open(path).read()
+    if (mode == 'compile' and path.endswith('/test-0.c')) or (mode == 'all_compile' and '/test-' in path):
+        text += '\n#error translation-unit-rejection\n'
+    if mode == 'link' and '/test-' in path:
+        text += '\nint rock_duplicate_symbol = 1;\n'
+    if mode == 'supervisor' and path.endswith('/supervisor.c'):
+        text += '\n#error supervisor-compile-rejection\n'
+    open(path, 'w').write(text)
+PYTHON
+fi
+exec "$ROCK_TEST_REAL_CLANG" "$@"
+"#).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let count = dir.path().join("count");
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["test", source.to_str().unwrap(), "--backend", "c", "--show-passing"])
+        .env("PATH", format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap()))
+        .env("ROCK_TEST_REAL_CLANG", String::from_utf8(clang.stdout).unwrap().trim())
+        .env("ROCK_TEST_CLANG_COUNT", &count)
+        .env("ROCK_TEST_BATCH_BREAK", mode)
+        .env_remove("FORCE_COLOR")
+        .output().unwrap();
+    let compiles = std::fs::read_to_string(count).unwrap().lines().count();
+    (output, compiles)
+}
+
+#[test]
+fn c_tests_attribute_translation_unit_rejection_without_rebuilding() {
+    let (output, compiles) = run_broken_batch("compile");
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{report}");
+    assert!(report.contains("FAIL first: generated C did not compile:"), "{report}");
+    assert!(report.contains("translation-unit-rejection"), "{report}");
+    assert!(report.contains("PASS second"), "{report}");
+    assert!(report.contains("1/2 @tests passed (1 failed, 0 skipped)"), "{report}");
+    assert_eq!(compiles, 3, "two objects and one batch link only");
+
+    let (output, compiles) = run_broken_batch("all_compile");
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{report}");
+    for name in ["first", "second"] {
+        assert!(report.contains(&format!("FAIL {name}: generated C did not compile:")), "{report}");
+    }
+    assert!(report.contains("0/2 @tests passed (2 failed, 0 skipped)"), "{report}");
+    assert_eq!(compiles, 2, "no supervisor link when every object was rejected");
+}
+
+fn check_batch_infrastructure_failure(mode: &str) {
+    let (output, compiles) = run_broken_batch(mode);
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{mode}: {report}");
+    assert!(report.contains("C test batch infrastructure failed:"), "{mode}: {report}");
+    assert!(report.contains(if mode == "link" { "rock_duplicate_symbol" } else { "supervisor-compile-rejection" }), "{report}");
+    assert!(report.contains("0/2 @tests passed (2 failed, 0 skipped)"), "{report}");
+    assert_eq!(compiles, 3, "no individual rebuild after {mode} failure");
+}
+
+#[test]
+fn c_tests_report_batch_infrastructure_failure_without_rebuilding() {
+    check_batch_infrastructure_failure("link");
+}
+
+#[test]
+fn c_tests_report_supervisor_compile_failure_without_rebuilding() {
+    check_batch_infrastructure_failure("supervisor");
+}
+

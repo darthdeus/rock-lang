@@ -640,6 +640,7 @@ fn run_test(
     )
 }
 
+#[cfg(not(unix))]
 fn compile_and_run_program(
     source: &str,
     link: &CLinkPlan,
@@ -656,6 +657,7 @@ fn compile_and_run_program(
     Ok(String::from_utf8_lossy(&run.stdout).into_owned())
 }
 
+#[cfg(not(unix))]
 fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String, String> {
     let compiled = compile_source(source)?;
     let run = run_native_test(&compiled.binary, C_NATIVE_TEST_TIMEOUT)?;
@@ -691,6 +693,7 @@ fn value_result(test_name: &str, stdout: &str) -> std::result::Result<String, St
     Ok(value.clone())
 }
 
+#[cfg(any(not(unix), test))]
 fn compile_source(source: &str) -> std::result::Result<CompiledC, String> {
     compile_source_with_link(source, &CLinkPlan::default())
 }
@@ -764,19 +767,27 @@ fn clang_command(include_dirs: &[std::path::PathBuf]) -> Command {
 }
 
 #[cfg(unix)]
+enum CObjectCompileError {
+    Test(String),
+    Infrastructure(String),
+}
+
+#[cfg(unix)]
 fn clang_compile_object(
     source: &str,
     c_path: &std::path::Path,
     object: &std::path::Path,
     include_dirs: &[std::path::PathBuf],
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), CObjectCompileError> {
     let compile = clang_command(include_dirs).arg("-c").arg(c_path).arg("-o").arg(object)
-        .output().map_err(|error| format!("could not run clang: {error}"))?;
+        .output().map_err(|error| CObjectCompileError::Infrastructure(format!("could not run clang: {error}")))?;
     if !compile.status.success() {
-        return Err(format!("generated C did not compile:\n{}\n--- generated C ---\n{}",
-            String::from_utf8_lossy(&compile.stderr), source));
+        return Err(CObjectCompileError::Test(format!("generated C did not compile:\n{}\n--- generated C ---\n{}",
+            String::from_utf8_lossy(&compile.stderr), source)));
     }
-    if !object.is_file() { return Err(format!("clang succeeded without creating {}", object.display())); }
+    if !object.is_file() {
+        return Err(CObjectCompileError::Infrastructure(format!("clang succeeded without creating {}", object.display())));
+    }
     Ok(())
 }
 
@@ -1008,6 +1019,7 @@ fn c_native_frame_command(
     command
 }
 
+#[cfg(any(not(unix), test))]
 fn run_native_test(
     binary: &std::path::Path,
     timeout: Duration,
