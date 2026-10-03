@@ -8,12 +8,12 @@
 
 use crate::*;
 
-/// A `@test` fn found by the front-end-only fallback parse. Only the two flags
-/// the sole caller (`skull_backend`) keys off are kept — `output` / type-hole
-/// metadata is verified on the typechecked path (`skull::SkullTest`), never
-/// here.
+/// A `@test` fn found by the front-end-only fallback parse. The name and
+/// compile-failure flags support reporting; output and value expectations
+/// are verified on the typechecked path (`skull::SkullTest`).
 #[derive(Debug, Clone)]
 pub struct TestMetadata {
+    pub name: String,
     pub ignored: bool,
     pub expect_failure: bool,
 }
@@ -39,9 +39,9 @@ pub(crate) fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<Tes
             _ => continue,
         };
         for item in &ast.items {
-            if !matches!(item.kind, skull_parser::ItemKind::Function(_)) {
+            let skull_parser::ItemKind::Function(function) = &item.kind else {
                 continue;
-            }
+            };
             let Some(test_ann) = item
                 .annotations
                 .iter()
@@ -58,6 +58,7 @@ pub(crate) fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<Tes
                 .iter()
                 .any(|a| a.name.name.as_str() == "ignore");
             test_functions.push(TestMetadata {
+                name: function.name.name.to_string(),
                 ignored,
                 expect_failure,
             });
@@ -101,6 +102,8 @@ fn not_a_test() {}
 ";
         let tests = discover(src);
         assert_eq!(tests.len(), 3, "three @test fns discovered");
+        assert_eq!(tests.iter().map(|test| test.name.as_str()).collect::<Vec<_>>(),
+            ["plain", "fails", "skipped"]);
         assert_eq!(
             tests.iter().filter(|t| t.expect_failure).count(),
             1,

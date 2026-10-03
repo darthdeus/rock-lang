@@ -595,7 +595,7 @@ impl CommandContext {
             }
             CliCommand::Test => {
                 let files = self.get_test_files()?;
-                crate::c_test::c_test(&files, &self.args.required_tests)
+                crate::c_test::c_test(&files, &self.args.required_tests, self.args.show_passing)
             }
             CliCommand::Run => {
                 let file = self.get_required_file("run")?;

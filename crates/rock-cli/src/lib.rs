@@ -621,6 +621,7 @@ pub struct Args {
     pub files: Vec<String>,
     /// Named tests that must be discovered and pass under `rock test --backend c`.
     pub required_tests: Vec<String>,
+    pub show_passing: bool,
     pub output: Option<String>,
     /// For `rock sim`: opt into a complete sim-wide gross Lua allocation
     /// census and write its machine-readable artifact to this path.
@@ -843,6 +844,8 @@ impl Args {
                     .action(ArgAction::Append)
                     .help("For `rock test --backend c`: require this named @test to be discovered and pass (repeatable)."),
             )
+            .arg(Arg::new("show-passing").long("show-passing").action(ArgAction::SetTrue)
+                .help("For `rock test --backend c`: list passing and skipped test names in declaration order."))
             .arg(Arg::new("output").long("output").alias("out"))
             .arg(Arg::new("allocation-census").long("allocation-census")
                 .value_name("PATH")
@@ -1028,6 +1031,7 @@ impl Args {
             command,
             files: many_str("files"),
             required_tests: many_str("require-test"),
+            show_passing: m.get_flag("show-passing"),
             output: m.get_one::<String>("output").cloned(),
             allocation_census: m.get_one::<String>("allocation-census").cloned(),
             allocation_sites: m.get_one::<String>("allocation-sites").cloned(),

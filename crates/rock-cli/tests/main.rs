@@ -85,6 +85,8 @@ mod modules_graph;
 mod fire_manifest;
 #[path = "fire_asset_archive.rs"]
 mod fire_asset_archive;
+#[path = "c_test.rs"]
+mod c_test;
 #[path = "c_run_gate.rs"]
 mod c_run_gate;
 #[path = "json_serialize_tests.rs"]

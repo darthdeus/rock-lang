@@ -8,6 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+#[path = "c_test_batch.rs"]
+mod batch;
+
 const C_NATIVE_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 const C_NATIVE_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -19,6 +23,7 @@ enum CUnitOutcome {
     },
     ExpectFailPass {
         tests: usize,
+        names: Vec<String>,
     },
     UnitFail {
         reason: String,
@@ -157,14 +162,14 @@ fn c_foreign_provider(library: &str) -> Option<CForeignProvider> {
     }
 }
 
-pub fn c_test(paths: &[String], required_tests: &[String]) -> Result<()> {
+pub fn c_test(paths: &[String], required_tests: &[String], show_passing: bool) -> Result<()> {
     let probe = Command::new("clang").arg("--version").output();
     if !matches!(probe, Ok(ref output) if output.status.success()) {
         anyhow::bail!("C backend requires `clang` on PATH");
     }
 
     let start = Instant::now();
-    let summary = c_test_run_with_required_tests(paths, true, required_tests)?;
+    let summary = c_test_run_with_required_tests(paths, true, required_tests, show_passing)?;
     println!(
         "\nc backend: {}/{} @tests passed ({} failed, {} skipped) across {} files ({:.2}s)",
         summary.tests_passed.to_string().green(),
@@ -209,13 +214,14 @@ pub fn c_test(paths: &[String], required_tests: &[String]) -> Result<()> {
 }
 
 pub fn c_test_run(paths: &[String], print: bool) -> Result<CSuiteSummary> {
-    c_test_run_with_required_tests(paths, print, &[])
+    c_test_run_with_required_tests(paths, print, &[], false)
 }
 
 fn c_test_run_with_required_tests(
     paths: &[String],
     print: bool,
     required_tests: &[String],
+    show_passing: bool,
 ) -> Result<CSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
     let mut summary = CSuiteSummary {
@@ -263,16 +269,24 @@ fn c_test_run_with_required_tests(
         for (index, outcome, required) in receiver {
             finished.insert(index, (outcome, required));
             while let Some((outcome, required)) = finished.remove(&next) {
-                for (name, outcome) in required {
-                    required_gate.record(&name, outcome);
-                }
                 record_unit(
                     &mut summary,
                     &mut all_skip_reasons,
                     short_path(units[next].0),
                     outcome,
                     print,
+                    show_passing,
                 );
+                for (name, outcome) in required {
+                    if print && show_passing {
+                        match &outcome {
+                            RequiredTestOutcome::Passed => println!("  PASS {name}"),
+                            RequiredTestOutcome::Skipped(reason) => println!("  SKIP {name}: {reason}"),
+                            RequiredTestOutcome::Failed(detail) => println!("  FAIL {name}: {detail}"),
+                        }
+                    }
+                    required_gate.record(&name, outcome);
+                }
                 next += 1;
             }
         }
@@ -288,6 +302,7 @@ fn record_unit(
     label: String,
     outcome: CUnitOutcome,
     print: bool,
+    show_passing: bool,
 ) {
     summary.files += 1;
     match outcome {
@@ -314,12 +329,14 @@ fn record_unit(
                     fails.len(),
                     skips.len()
                 );
-                for detail in &fails {
-                    println!("  {} {}", "FAIL".red(), detail);
+                if !show_passing {
+                    for detail in &fails {
+                        println!("  {} {}", "FAIL".red(), detail);
+                    }
                 }
             }
         }
-        CUnitOutcome::ExpectFailPass { tests } => {
+        CUnitOutcome::ExpectFailPass { tests, names } => {
             summary.tests_passed += tests;
             if print {
                 println!(
@@ -328,6 +345,9 @@ fn record_unit(
                     "ok".green(),
                     tests
                 );
+                if show_passing {
+                    for name in names { println!("  PASS {name}"); }
+                }
             }
         }
         CUnitOutcome::UnitFail { reason, rendered } => {
@@ -351,7 +371,20 @@ fn build_file(
         Ok(checked) => checked,
         Err(error) => {
             if let Some(tests) = error.expected_failure_tests {
-                return CUnitOutcome::ExpectFailPass { tests };
+                let mut sources = crate::SourceFiles::empty();
+                let source = match fs_err::read_to_string(file) {
+                    Ok(source) => source,
+                    Err(error) => return CUnitOutcome::UnitFail {
+                        reason: "cannot reread expected-failure test".to_string(),
+                        rendered: error.to_string(),
+                    },
+                };
+                sources.add_or_update_file(crate::source_file_from_path_and_contents(
+                    file.to_string(), file.to_string(), source,
+                ));
+                let names = crate::test::find_test_functions_from_sources(&sources)
+                    .into_iter().map(|test| test.name).collect();
+                return CUnitOutcome::ExpectFailPass { tests, names };
             }
             return CUnitOutcome::UnitFail {
                 reason: error.reason,
@@ -516,18 +549,18 @@ fn run_tests(
     required: &mut Vec<(String, RequiredTestOutcome)>,
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
-    // Rayon workers start with their own ablation census; enter the caller's
-    // so `ablation_report::report` still sees every emitted test.
-    let ablation = skull_mir::ablation::current_context();
-    // Each test emits its own program, clang invocation and process, so tests
-    // run concurrently; collect() keeps the results in declaration order.
-    let runs = tests
-        .par_iter()
-        .map_init(
+    #[cfg(unix)]
+    let runs = batch::run(path, ws, tests, engine_builds);
+    // The fork supervisor requires Unix. Other native hosts retain fresh
+    // processes for test isolation until they have a native supervisor.
+    #[cfg(not(unix))]
+    let runs = {
+        let ablation = skull_mir::ablation::current_context();
+        tests.par_iter().map_init(
             || skull_mir::ablation::enter_context(ablation.clone()),
             |_, (func, test)| run_test(path, ws, *func, test, engine_builds),
-        )
-        .collect::<Vec<_>>();
+        ).collect::<Vec<_>>()
+    };
 
     let mut passed = 0;
     let mut fails = Vec::new();
@@ -577,6 +610,7 @@ fn run_tests(
     }
 }
 
+#[cfg(not(unix))]
 fn run_test(
     path: &str,
     ws: &bone_semantic::inference::Workspace,
@@ -632,8 +666,11 @@ fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String,
             String::from_utf8_lossy(&run.stderr).trim()
         ));
     }
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    let markers = parse_skull_markers(&stdout).ok_or_else(|| {
+    value_result(test_name, &String::from_utf8_lossy(&run.stdout))
+}
+
+fn value_result(test_name: &str, stdout: &str) -> std::result::Result<String, String> {
+    let markers = parse_skull_markers(stdout).ok_or_else(|| {
         format!(
             "native test produced no result marker: stdout=<{}>",
             stdout.trim()
@@ -676,14 +713,18 @@ fn clang_compile(
     binary: &std::path::Path,
     link: &CLinkPlan,
 ) -> std::result::Result<(), String> {
+    clang_compile_sources(&[(c_path.to_path_buf(), source.to_string())], binary, link)
+}
+
+fn clang_compile_sources(
+    sources: &[(std::path::PathBuf, String)],
+    binary: &std::path::Path,
+    link: &CLinkPlan,
+) -> std::result::Result<(), String> {
     invalidate_artifact(binary)
         .map_err(|error| format!("could not invalidate {}: {error}", binary.display()))?;
-    let mut command = Command::new("clang");
-    command.args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"]);
-    for dir in &link.include_dirs {
-        command.arg("-I").arg(dir);
-    }
-    command.arg(c_path);
+    let mut command = clang_command(&link.include_dirs);
+    command.args(sources.iter().map(|(path, _)| path));
     for dir in &link.library_dirs {
         command.arg("-L").arg(dir);
     }
@@ -703,7 +744,7 @@ fn clang_compile(
         return Err(format!(
             "generated C did not compile:\n{}\n--- generated C ---\n{}",
             String::from_utf8_lossy(&compile.stderr),
-            source
+            sources.iter().map(|(_, source)| source.as_str()).collect::<Vec<_>>().join("\n")
         ));
     }
     if !binary.is_file() {
@@ -712,6 +753,30 @@ fn clang_compile(
             binary.display()
         ));
     }
+    Ok(())
+}
+
+fn clang_command(include_dirs: &[std::path::PathBuf]) -> Command {
+    let mut command = Command::new("clang");
+    command.args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"]);
+    for dir in include_dirs { command.arg("-I").arg(dir); }
+    command
+}
+
+#[cfg(unix)]
+fn clang_compile_object(
+    source: &str,
+    c_path: &std::path::Path,
+    object: &std::path::Path,
+    include_dirs: &[std::path::PathBuf],
+) -> std::result::Result<(), String> {
+    let compile = clang_command(include_dirs).arg("-c").arg(c_path).arg("-o").arg(object)
+        .output().map_err(|error| format!("could not run clang: {error}"))?;
+    if !compile.status.success() {
+        return Err(format!("generated C did not compile:\n{}\n--- generated C ---\n{}",
+            String::from_utf8_lossy(&compile.stderr), source));
+    }
+    if !object.is_file() { return Err(format!("clang succeeded without creating {}", object.display())); }
     Ok(())
 }
 
