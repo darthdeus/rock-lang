@@ -100,6 +100,11 @@ pub trait PlacementOracle {
         None
     }
 
+    /// The place of the arena behind an Arena or Entity handle value.
+    fn handle_owner_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
+        None
+    }
+
     fn carries_placement(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
 
     fn is_allocation_site(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
@@ -449,6 +454,11 @@ fn inferred_argument_place(
     arg: Idx<Inst>,
 ) -> Place {
     if let Some(place) = oracle.parameter_derived_place(mir, arg) {
+        return place;
+    }
+    // A handle is a plain value, but a callee result or owner expressed
+    // through it names a row of the handle's arena.
+    if let Some(place) = oracle.handle_owner_place(mir, arg) {
         return place;
     }
     if let Some(analysis) = analysis {
@@ -1294,11 +1304,12 @@ fn substitute_constraint(
     analysis: &mut PlacementAnalysis,
     constraint: OutlivesConstraint,
     argument_origins: &[Vec<Place>],
+    destination_origins: &[Vec<Place>],
     call_destination: Place,
     call_span: Span,
 ) {
-    let substitute = |place| match place {
-        Place::Param(index) => argument_origins
+    let substitute = |place, origins: &[Vec<Place>]| match place {
+        Place::Param(index) => origins
             .get(index as usize)
             .cloned()
             .filter(|places| !places.is_empty())
@@ -1306,8 +1317,8 @@ fn substitute_constraint(
         Place::Destination => vec![call_destination],
         place => vec![place],
     };
-    let values = substitute(constraint.value);
-    let destinations = substitute(constraint.destination);
+    let values = substitute(constraint.value, argument_origins);
+    let destinations = substitute(constraint.destination, destination_origins);
     for value in values {
         for destination in &destinations {
             let span = if matches!(value, Place::Param(_) | Place::Destination)
@@ -1634,6 +1645,18 @@ fn value_place(
                     }
                 }
             }
+            // A callee store through a handle parameter writes a row of the
+            // handle's arena; a stored handle itself stays a plain value.
+            let destination_origins = argument_origins
+                .iter()
+                .enumerate()
+                .map(|(index, origins)| {
+                    raw_args
+                        .get(index)
+                        .and_then(|arg| oracle.handle_owner_place(mir, *arg))
+                        .map_or_else(|| origins.clone(), |place| vec![place])
+                })
+                .collect::<Vec<_>>();
             for &constraint in &effect.constraints {
                 if let Place::Param(index) = constraint.value
                     && raw_args
@@ -1647,6 +1670,7 @@ fn value_place(
                     analysis,
                     constraint,
                     &argument_origins,
+                    &destination_origins,
                     allocation,
                     span,
                 );
