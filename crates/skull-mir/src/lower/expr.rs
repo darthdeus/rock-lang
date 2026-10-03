@@ -996,7 +996,7 @@ impl Builder<'_> {
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
                 let r = self.lower_expr_repr(value)?;
-                let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
+                let leaves = self.repr_to_storage_leaves(&r, &shape, "scalarized local assignment")?;
                 for (c, lv) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store { cell: *c, value: lv });
                 }
