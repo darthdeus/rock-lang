@@ -1,5 +1,5 @@
 use super::*;
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 
 struct PreparedTest {
     source: String,
@@ -200,6 +200,24 @@ fn compile_batch(tests: &[(usize, PreparedTest)]) -> std::result::Result<Compile
     Ok(CompiledC { _dir: dir, binary })
 }
 
+struct SupervisorProcess(std::process::Child);
+
+impl Drop for SupervisorProcess {
+    fn drop(&mut self) {
+        // Tests may leave descendants running after their direct child exits.
+        let group = self.0.id() as libc::pid_t;
+        if unsafe { libc::kill(-group, libc::SIGKILL) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                log::error!(target: "TEST", "C supervisor process group cleanup failed: {error}");
+            }
+        }
+        if let Err(error) = self.0.wait() {
+            log::error!(target: "TEST", "C supervisor reap failed: {error}");
+        }
+    }
+}
+
 fn run_supervisor(
     binary: &std::path::Path,
     output_dir: &std::path::Path,
@@ -207,28 +225,42 @@ fn run_supervisor(
     timeout: Duration,
 ) -> std::result::Result<(), String> {
     let mut command = c_native_command(binary);
+    command.process_group(0);
     command.arg(output_dir);
     if let Some(slot) = slot {
         command.arg(slot.to_string());
     }
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    // Files let group cleanup precede reading diagnostics even if a descendant
+    // inherits the supervisor's output descriptors.
+    let stdout = fs_err::File::create(output_dir.join("supervisor.out"))
+        .map_err(|error| format!("native test supervisor output failed: {error}"))?;
+    let stderr_path = output_dir.join("supervisor.err");
+    let stderr = fs_err::File::create(&stderr_path)
+        .map_err(|error| format!("native test supervisor output failed: {error}"))?;
+    let child = command
+        .stdout(Stdio::from(stdout.into_parts().0))
+        .stderr(Stdio::from(stderr.into_parts().0))
         .spawn()
         .map_err(|error| format!("native test supervisor could not start: {error}"))?;
-    let run = crate::common::ProcessManager::wait_with_timeout(&mut child, timeout)
+    let mut child = SupervisorProcess(child);
+    let run = crate::common::ProcessManager::wait_with_timeout(&mut child.0, timeout);
+    drop(child);
+    let run = run
         .map_err(|error| format!("native test supervisor wait failed: {error}"))?;
+    let stderr = fs_err::read(&stderr_path)
+        .map_err(|error| format!("native test supervisor diagnostic read failed: {error}"))?;
     if run.timed_out {
         return Err(format!(
-            "native test supervisor timed out after {}s",
-            timeout.as_secs()
+            "native test supervisor timed out after {}s: {}",
+            timeout.as_secs(),
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
     if !run.output.status.success() {
         return Err(format!(
             "native test supervisor exited {}: {}",
             run.output.status,
-            String::from_utf8_lossy(&run.output.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ));
     }
     Ok(())
@@ -241,7 +273,7 @@ fn read_result(dir: &std::path::Path, slot: usize) -> std::result::Result<String
         .parse::<i32>()
         .map_err(|error| format!("invalid native test status: {error}"))?;
     let status = std::process::ExitStatus::from_raw(raw);
-    if status.signal() == Some(libc::SIGALRM) {
+    if raw == -1 || status.signal() == Some(libc::SIGALRM) {
         return Err(format!(
             "native test timed out after {}s",
             C_NATIVE_TEST_TIMEOUT.as_secs()
@@ -258,4 +290,68 @@ fn read_result(dir: &std::path::Path, slot: usize) -> std::result::Result<String
     fs_err::read(dir.join(format!("{slot}.out")))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn supervisor_fixture(body: &str) -> CompiledC {
+        let source = format!(
+            "#define _POSIX_C_SOURCE 200809L\n#define ROCK_TEST_COUNT 2\n#define ROCK_TEST_TIMEOUT_SECONDS 1\n\
+             #include <signal.h>\n#include <stdio.h>\n#include <unistd.h>\n\
+             static int wedged(void) {{ printf(\"%ld\\n\", (long)getpid()); fflush(stdout); {body} return 0; }}\n\
+             static int survivor(void) {{ puts(\"finished\"); return 0; }}\n\
+             static int (*const rock_tests[])(void) = {{wedged, survivor}};\n{}",
+            include_str!("c_test_supervisor.c")
+        );
+        compile_source(&source).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn child_is_gone(dir: &std::path::Path) -> bool {
+        let pid: i32 = fs_err::read_to_string(dir.join("0.out")).unwrap().trim().parse().unwrap();
+        for _ in 0..100 {
+            if unsafe { libc::kill(pid, 0) } < 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Keep the RED run from leaving its reproducer alive.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        false
+    }
+
+    #[test]
+    fn supervisor_enforces_deadline_when_child_ignores_alarm() {
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}");
+        let dir = compiled._dir.path();
+        let start = Instant::now();
+        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3));
+        let gone = child_is_gone(dir);
+        assert!(run.is_ok(), "{run:?}");
+        assert!(gone, "timed-out child survived");
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(read_result(dir, 0).unwrap_err().contains("timed out"));
+        assert_eq!(read_result(dir, 1).unwrap().trim(), "finished");
+    }
+
+    #[test]
+    fn supervisor_death_cleans_up_running_child() {
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); kill(getppid(), SIGKILL); for (;;) {}");
+        let dir = compiled._dir.path();
+        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3));
+        let gone = child_is_gone(dir);
+        assert!(run.unwrap_err().contains("supervisor exited"));
+        assert!(gone, "child outlived dead supervisor");
+    }
+
+    #[test]
+    fn supervisor_watchdog_cleans_up_running_child() {
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}");
+        let dir = compiled._dir.path();
+        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_millis(200));
+        let gone = child_is_gone(dir);
+        assert!(run.unwrap_err().contains("supervisor timed out"));
+        assert!(gone, "child outlived supervisor watchdog");
+    }
 }
