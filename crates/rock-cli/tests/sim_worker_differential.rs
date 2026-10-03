@@ -1876,8 +1876,8 @@ fn a_boot_pixel_readback_slot_does_not_carry_its_submit_across_the_boundary() {
 ///
 /// The asset watcher's `CHANGED` set is a QUEUE a SUCCESSOR drains, and its
 /// stores are path-keyed, so id accounting cannot see them and neither
-/// per-handle axis has anything to hang them on. Live under the harness:
-/// `ASSET_DEV_MODE` is on for every `sim` invocation.
+/// per-handle axis has anything to hang them on. These sims opt into hot reload
+/// and share one reload-lane child, including the native entry boundary.
 ///
 /// The oracle is the EVENT, not the queue depth, and that distinction is
 /// measured rather than assumed: two earlier versions asserted on the queue and
