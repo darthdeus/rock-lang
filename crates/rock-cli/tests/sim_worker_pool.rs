@@ -32,6 +32,83 @@ fn rock_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
+#[test]
+fn renderer_excluded_entry_prints_one_verdict_beside_a_passing_sim() {
+    let run = run_project_workers(
+        "mag",
+        &["wgpu_water_packets", "a_mob_will_not_stand_on_a_pad"],
+        "1",
+    );
+    let combined = run.combined();
+    assert!(run.success, "{combined}");
+    let exclusions: Vec<_> = combined.lines()
+        .filter(|line| line.contains("mag::wgpu_water_packets: EXCLUDED"))
+        .collect();
+    assert_eq!(exclusions.len(), 1, "{combined}");
+    assert_eq!(exclusions[0],
+        "[sim] mag::wgpu_water_packets: EXCLUDED (requires wgpu renderer (active is gl))");
+    assert_eq!(combined.lines()
+        .filter(|line| line.starts_with("[sim] mag::a_mob_will_not_stand_on_a_pad: PASS"))
+        .count(), 1, "{combined}");
+    assert!(combined.contains("1/1 sims passed (selected 2, 1 excluded)"), "{combined}");
+}
+
+#[test]
+fn renderer_exclusions_print_once_in_named_runs_and_implicit_suites() {
+    let fixture = tempfile::tempdir().expect("renderer exclusion fixture");
+    let project = fixture.path().join("renderer_fixture");
+    std::fs::create_dir_all(project.join("tests/sims")).unwrap();
+    std::fs::write(project.join("stick.toml"), format!(
+        "[package]\nname = \"renderer_fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"fixture\"\n",
+        workspace_root().join("stone")
+    )).unwrap();
+    std::fs::write(project.join("main.rock"),
+        "fn main() { stone_run_game(GameConfig { title: \"renderer_fixture\", width: 64, height: 64 }) }\n"
+    ).unwrap();
+    std::fs::write(project.join("tests/sims/exclusions.rock"), r#"
+@sim
+co fn routine() -> Coroutine<Wait> {
+    start_game "renderer_fixture"
+    sim_expect(true, "routine executed")
+    stop_sim()
+}
+@sim_env("SIM_BACKEND", "wgpu")
+@sim
+co fn planned() -> Coroutine<Wait> {
+    sim_expect(false, "renderer-excluded body must not execute")
+    stop_sim()
+}
+@sim
+co fn runtime() -> Coroutine<Wait> {
+    start_game "renderer_fixture"
+    if !sim_require_renderer("wgpu") { return }
+    sim_expect(false, "renderer-excluded body must not continue")
+    stop_sim()
+}
+"#).unwrap();
+    for mode in ["--isolated", "--workers"] {
+        for names in [&[][..], &["planned", "runtime", "routine"][..], &["planned"][..]] {
+            let out = Command::new(rock_bin()).arg("sim").arg(&project).args(names)
+                .args([mode, "-j", "1"])
+                .current_dir(workspace_root())
+                .env("ROCK_SIM_TIMEOUT_SECS", "30")
+                .env("ROCK_SIM_LOG_DIR", fixture.path().join("history"))
+                .output().expect("run renderer fixture");
+            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success(), "{mode} {names:?}:\n{text}");
+            for name in if names.len() == 1 { &["planned"][..] } else { &["planned", "runtime"][..] } {
+                let verdict = format!("[sim] {name}: EXCLUDED (requires wgpu renderer (active is gl))");
+                assert_eq!(text.lines().filter(|line| *line == verdict).count(), 1,
+                    "{mode} {names:?}:\n{text}");
+            }
+            if names.len() != 1 {
+                assert_eq!(text.lines().filter(|line| line.starts_with("[sim] routine: PASS")).count(), 1, "{text}");
+                assert!(text.contains("1/1 sims passed (selected 3, 2 excluded)"), "{text}");
+            }
+        }
+    }
+}
+
 struct Run {
     stdout: String,
     stderr: String,

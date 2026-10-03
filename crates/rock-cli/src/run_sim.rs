@@ -2035,7 +2035,11 @@ fn do_run_all_sims_recorded(
     for (name, id) in wire_names.into_iter().zip(entry_ids) {
         if manual_sim(env_by_wire.get(&name).map_or(&[][..], |v| v))? {
             record_excluded_entry(Some(recorder), Some(id));
-            println!("[sim] {name}: EXCLUDED (manual; run by name)");
+            SimSummary {
+                excluded: Some("manual; run by name".to_string()),
+                saw_stop: true,
+                ..SimSummary::default()
+            }.print(&name, false);
         } else {
             routine_names.push(name);
             routine_ids.push(id);
@@ -2116,6 +2120,9 @@ fn do_run_all_sims_recorded(
                 s.excluded = Some(reason);
                 s.saw_stop = true;
                 record_excluded_entry(Some(recorder), Some(entry_ids[i]));
+                if !quiet {
+                    s.print(&wire_names[i], false);
+                }
                 summaries.insert(i, Ok(s));
                 continue;
             }
@@ -2991,13 +2998,6 @@ fn run_specs_worker_mode(
     }
 
     if !quiet {
-        for (i, slot) in slots.iter().enumerate() {
-            if let Some(s) = slot {
-                if let Some(reason) = &s.excluded {
-                    println!("[sim] {}: EXCLUDED ({reason})", specs[i]);
-                }
-            }
-        }
         // EVERY lane is a boot, so every lane reports one. A singleton lane
         // printed nothing, which made a sim that silently got its own process
         // indistinguishable in the log from one sharing a 46-way worker -- the
