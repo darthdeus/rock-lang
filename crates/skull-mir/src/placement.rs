@@ -69,6 +69,8 @@ pub struct OutlivesConstraint {
     pub value: Place,
     pub destination: Place,
     pub span: Span,
+    /// Construction may use the destination; retention only checks existing owners.
+    pub contextual: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -672,11 +674,12 @@ fn infer_call_requirements(
     });
     let unconditional_retention = !effect.opaque_retains.is_empty()
         || effect.constraints.iter().any(|constraint| {
-            matches!(constraint.value, Place::Param(_) | Place::Destination)
-                && !matches!(
-                    constraint.destination,
-                    Place::Param(_) | Place::Destination | Place::Pending
-                )
+            !constraint.contextual
+                || (matches!(constraint.value, Place::Param(_) | Place::Destination)
+                    && !matches!(
+                        constraint.destination,
+                        Place::Param(_) | Place::Destination | Place::Pending
+                    ))
         });
     let contextual_store = effect.stores.iter().any(|store| {
         let Some(destination) = raw_args.get(usize::from(store.destination)) else {
@@ -690,6 +693,9 @@ fn infer_call_requirements(
             && oracle.carries_placement(mir, *value)
     });
     let contextual_constraint = effect.constraints.iter().any(|constraint| {
+        if !constraint.contextual {
+            return false;
+        }
         let (Place::Param(value_index), Place::Param(destination_index)) =
             (constraint.value, constraint.destination)
         else {
@@ -779,6 +785,9 @@ fn infer_call_requirements(
     }
 
     for constraint in &effect.constraints {
+        if !constraint.contextual {
+            continue;
+        }
         let destination = match constraint.destination {
             Place::Destination => call_requirement,
             Place::Param(index) => explicit_call_argument(
@@ -1263,6 +1272,24 @@ fn composite_operand_needs_context(
 }
 
 fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: Place, span: Span) {
+    add_outlives_constraint(
+        analysis,
+        OutlivesConstraint {
+            value,
+            destination,
+            span,
+            contextual: true,
+        },
+    );
+}
+
+fn add_outlives_constraint(analysis: &mut PlacementAnalysis, constraint: OutlivesConstraint) {
+    let OutlivesConstraint {
+        value,
+        destination,
+        span,
+        contextual,
+    } = constraint;
     match known_outlives(value, destination) {
         Some(true) => {}
         None if matches!(value, Place::Pending) || matches!(destination, Place::Pending) => {}
@@ -1275,11 +1302,6 @@ fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: P
         None if matches!(value, Place::Param(_) | Place::Destination)
             || matches!(destination, Place::Param(_) | Place::Destination) =>
         {
-            let constraint = OutlivesConstraint {
-                value,
-                destination,
-                span,
-            };
             if !analysis.summary.constraints.contains(&constraint) {
                 analysis.summary.constraints.push(constraint);
             }
@@ -1288,7 +1310,11 @@ fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: P
             value,
             destination,
             span,
-            kind: PlacementViolationKind::UnknownProvenance,
+            kind: if contextual {
+                PlacementViolationKind::UnknownProvenance
+            } else {
+                PlacementViolationKind::OpaqueRetention
+            },
         }),
     }
 }
@@ -1328,7 +1354,15 @@ fn substitute_constraint(
             } else {
                 call_span
             };
-            add_constraint(analysis, value, *destination, span);
+            add_outlives_constraint(
+                analysis,
+                OutlivesConstraint {
+                    value,
+                    destination: *destination,
+                    span,
+                    ..constraint
+                },
+            );
         }
     }
 }
@@ -1658,7 +1692,8 @@ fn value_place(
                 })
                 .collect::<Vec<_>>();
             for &constraint in &effect.constraints {
-                if let Place::Param(index) = constraint.value
+                if constraint.contextual
+                    && let Place::Param(index) = constraint.value
                     && raw_args
                         .get(index as usize)
                         .copied()
