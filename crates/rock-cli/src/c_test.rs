@@ -229,26 +229,54 @@ fn c_test_run_with_required_tests(
     };
     let mut all_skip_reasons = Vec::new();
     let mut required_gate = RequiredTestGate::new(required_tests);
-    let mut engine_builds = CEngineBuilds::default();
+    let engine_builds = std::sync::Mutex::new(CEngineBuilds::default());
+    let units = files
+        .iter()
+        .map(|file| (file, true))
+        .chain(package_dirs.iter().map(|dir| (dir, false)))
+        .collect::<Vec<_>>();
 
-    for file in &files {
-        record_unit(
-            &mut summary,
-            &mut all_skip_reasons,
-            short_path(file),
-            build_file(file, &mut required_gate, &mut engine_builds),
-            print,
-        );
-    }
-    for dir in &package_dirs {
-        record_unit(
-            &mut summary,
-            &mut all_skip_reasons,
-            short_path(dir),
-            build_package(dir, &mut required_gate, &mut engine_builds),
-            print,
-        );
-    }
+    // Units check, emit and run concurrently; the reporter prints and records
+    // them in unit order as soon as each prefix is complete.
+    let ablation = skull_mir::ablation::current_context();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            units
+                .par_iter()
+                .enumerate()
+                .for_each_with(sender, |sender, (index, (path, is_file))| {
+                    let _ablation = skull_mir::ablation::enter_context(ablation.clone());
+                    let mut required = Vec::new();
+                    let outcome = if *is_file {
+                        build_file(path, &mut required, &engine_builds)
+                    } else {
+                        build_package(path, &mut required, &engine_builds)
+                    };
+                    sender
+                        .send((index, outcome, required))
+                        .expect("the C test reporter outlives its workers");
+                });
+        });
+        let mut finished = std::collections::BTreeMap::new();
+        let mut next = 0;
+        for (index, outcome, required) in receiver {
+            finished.insert(index, (outcome, required));
+            while let Some((outcome, required)) = finished.remove(&next) {
+                for (name, outcome) in required {
+                    required_gate.record(&name, outcome);
+                }
+                record_unit(
+                    &mut summary,
+                    &mut all_skip_reasons,
+                    short_path(units[next].0),
+                    outcome,
+                    print,
+                );
+                next += 1;
+            }
+        }
+    });
     summary.skip_reasons = reason_histogram(all_skip_reasons.iter().map(String::as_str));
     summary.required_failures = required_gate.finish();
     Ok(summary)
@@ -316,8 +344,8 @@ fn record_unit(
 
 fn build_file(
     file: &str,
-    required_gate: &mut RequiredTestGate,
-    engine_builds: &mut CEngineBuilds,
+    required: &mut Vec<(String, RequiredTestOutcome)>,
+    engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
     let checked = match check_file(file) {
         Ok(checked) => checked,
@@ -351,7 +379,7 @@ fn build_file(
             };
         }
     };
-    run_tests(file, &checked.ws, &tests, required_gate, engine_builds)
+    run_tests(file, &checked.ws, &tests, required, engine_builds)
 }
 
 fn check_file(file: &str) -> std::result::Result<CheckedFile, FileCheckError> {
@@ -395,8 +423,8 @@ fn check_file(file: &str) -> std::result::Result<CheckedFile, FileCheckError> {
 
 fn build_package(
     dir: &str,
-    required_gate: &mut RequiredTestGate,
-    engine_builds: &mut CEngineBuilds,
+    required: &mut Vec<(String, RequiredTestOutcome)>,
+    engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
     let checked = match check_project(dir, false) {
         Ok(checked) => checked,
@@ -416,7 +444,7 @@ fn build_package(
             };
         }
     };
-    run_tests(dir, &checked.ws, &tests, required_gate, engine_builds)
+    run_tests(dir, &checked.ws, &tests, required, engine_builds)
 }
 
 fn check_project(
@@ -485,10 +513,9 @@ fn run_tests(
     path: &str,
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
-    required_gate: &mut RequiredTestGate,
-    engine_builds: &mut CEngineBuilds,
+    required: &mut Vec<(String, RequiredTestOutcome)>,
+    engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
-    let engine_builds = std::sync::Mutex::new(engine_builds);
     // Rayon workers start with their own ablation census; enter the caller's
     // so `ablation_report::report` still sees every emitted test.
     let ablation = skull_mir::ablation::current_context();
@@ -498,7 +525,7 @@ fn run_tests(
         .par_iter()
         .map_init(
             || skull_mir::ablation::enter_context(ablation.clone()),
-            |_, (func, test)| run_test(path, ws, *func, test, &engine_builds),
+            |_, (func, test)| run_test(path, ws, *func, test, engine_builds),
         )
         .collect::<Vec<_>>();
 
@@ -508,7 +535,7 @@ fn run_tests(
     for ((_, test), run) in tests.iter().zip(runs) {
         let result = match run {
             CTestRun::Skipped(reason) => {
-                required_gate.record(&test.name, RequiredTestOutcome::Skipped(reason.clone()));
+                required.push((test.name.clone(), RequiredTestOutcome::Skipped(reason.clone())));
                 skips.push((test.name.clone(), reason));
                 continue;
             }
@@ -535,10 +562,10 @@ fn run_tests(
         match verdict {
             Ok(()) => {
                 passed += 1;
-                required_gate.record(&test.name, RequiredTestOutcome::Passed);
+                required.push((test.name.clone(), RequiredTestOutcome::Passed));
             }
             Err(detail) => {
-                required_gate.record(&test.name, RequiredTestOutcome::Failed(detail.clone()));
+                required.push((test.name.clone(), RequiredTestOutcome::Failed(detail.clone())));
                 fails.push(format!("{}: {detail}", test.name));
             }
         }
@@ -555,7 +582,7 @@ fn run_test(
     ws: &bone_semantic::inference::Workspace,
     func: FuncRef,
     test: &skull::SkullTest,
-    engine_builds: &std::sync::Mutex<&mut CEngineBuilds>,
+    engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CTestRun {
     if test.returns.is_some() {
         return match skull_codegen_c::emit_value_test(ws, func, &test.name) {
