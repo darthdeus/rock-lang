@@ -1559,7 +1559,15 @@ fn value_place(
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. } => {
-            let initial = if oracle.is_allocation_site(mir, id) {
+            // Absent owned fields have no source owner for later allocating writes.
+            let mutable_owned_struct = matches!(mir.insts[id], Inst::MakeStruct { .. })
+                && oracle.carries_placement(mir, id)
+                && fields.iter().any(|(_, value)| {
+                    matches!(mir.insts[*value], Inst::Const(Lit::Nil))
+                        && oracle.carries_placement(mir, *value)
+                })
+                && fields.iter().all(|(_, value)| inst_place(analysis, *value) == Place::Static);
+            let initial = if oracle.is_allocation_site(mir, id) || mutable_owned_struct {
                 allocation
             } else {
                 Place::Static
