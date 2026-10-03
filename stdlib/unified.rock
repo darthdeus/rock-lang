@@ -1132,7 +1132,7 @@ deco init on_reload {
 // backend with no mapping must fail loudly rather than silently fall back to a
 // structural walk that answers a different question.
 @intrinsic @native_required @pure @inline
-inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
+inline(lua) fn same_ref<A, B>(a: A, b: B) -> bool = "rawequal(a, b)"
 
 // Tag a newly-created struct table with its type. Emitted by structs.rs for
 // every struct literal in user code. `__ty` is the single, direct type marker
