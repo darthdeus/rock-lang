@@ -1322,12 +1322,15 @@ pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape
 /// [`sig_shape_of_nominal`] for a NULLABLE nominal: a presence leaf, then the
 /// payload leaves.
 ///
-/// Both cdata-tier and GC-tier values carry their leaves until a boxed sink.
+/// Both cdata-tier and GC-tier value structs carry leaves until a boxed sink.
 /// Returns, bindings, joins, `??` and `== null` follow this shared shape.
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
-    if let Some(mut shape) = value_shape(ws, n).or_else(|| value_shape_gc(ws, n)) {
-        shape.nullable = true;
-        return Some(shape);
+    let scalar = is_nobox_nominal(ws, n) || ws.struct_by_name.contains_key(&n);
+    if scalar {
+        if let Some(mut shape) = value_shape(ws, n).or_else(|| value_shape_gc(ws, n)) {
+            shape.nullable = true;
+            return Some(shape);
+        }
     }
     EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape()))
 }

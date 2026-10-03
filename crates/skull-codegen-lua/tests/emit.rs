@@ -1988,6 +1988,20 @@ fn absent_pair(present: bool, x: int) -> bool { return pair(present, x) == null 
 }
 
 #[test]
+fn ordinary_nullable_cdata_enum_return_keeps_boxed_transport() {
+    let src = r#"
+enum PackedResult { Number(int), Empty }
+fn packed_result(present: bool) -> PackedResult? {
+    if !present { return null }
+    return PackedResult::Number(7)
+}
+"#;
+    let lua = emit_clean(src, "packed_result");
+    assert!(lua.contains("return (nil)"), "nullable enum changed transport: {lua}");
+    assert!(lua.contains("_ct("), "nullable enum lost its box: {lua}");
+}
+
+#[test]
 fn fixed_scalar_nullable_value_return_keeps_boxed_transport() {
     let src = r#"
 value Pair { x: int, y: int }
