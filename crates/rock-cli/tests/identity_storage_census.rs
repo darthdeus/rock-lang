@@ -32,12 +32,12 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 236 | 186 | 7 | 0 | 1004 | 16 | 68 | 1281 | 68 | 2866 |
+| mag | exempt | 236 | 186 | 7 | 0 | 1004 | 18 | 68 | 1288 | 68 | 2875 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 2 | 2 | 0 | 6 | 0 | 0 | 0 | 0 | 10 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 |
-| mag_world | exempt | 71 | 5 | 0 | 0 | 57 | 2 | 0 | 0 | 20 | 155 |
+| mag_world | exempt | 71 | 5 | 0 | 0 | 59 | 2 | 0 | 0 | 20 | 157 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 15 | 6 | 21 |
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
@@ -47,7 +47,7 @@ const PINNED: &str = "\
 | testbed | exempt | 5 | 3 | 0 | 0 | 135 | 2 | 2 | 74 | 68 | 289 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | ui_shader_probe | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 1 |
-| unpackaged programs | exempt | 104 | 13 | 6 | 0 | 137 | 49 | 1 | 0 | 50 | 360 |
+| unpackaged programs | exempt | 104 | 13 | 6 | 0 | 137 | 50 | 1 | 0 | 50 | 361 |
 | void | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 7 | 162 |
 
