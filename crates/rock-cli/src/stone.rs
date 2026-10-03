@@ -264,6 +264,7 @@ impl StoneWatcher {
         // Arm new roots and input parents before dropping the previous watches.
         let handle = FileWatcher::default_for_rock_sources()
             .with_restart_trigger(true)
+            .with_initial_create_filter(true)
             .with_restart_files(self.restart_files.clone())
             .with_extensions(vec!["rock".to_string(), "rs".to_string(), "c".to_string(), "h".to_string(), "toml".to_string()])
             .with_shared_extra_files(self.extra_files.clone())
@@ -1207,6 +1208,8 @@ fn apply_perf_env(cmd: &mut Command) {
     let perf_no_sections =
         std::env::var("PERF_NO_SECTIONS").unwrap_or_else(|_| "1".to_string());
     cmd.env("PERF_MODE", "1")
+        .env("ROCK_FRAME_WATCHDOG", "1")
+        .env("ROCK_PERF_STARTUP_WATCHDOG", "1")
         .env("STONE_HEADLESS", "1")
         .env("MAG_BOOT_PLAYING", "1")
         .env("PERF_NO_SECTIONS", perf_no_sections)
@@ -1292,14 +1295,12 @@ pub fn do_perf(
         (None, None) => unreachable!(),
     }
 
-    // Give the game enough headroom to finish + dump summary. Base of
-    // 30s covers the default frame-count run; extend by seconds limit.
-    // ROCK_FRAME_TIMEOUT_SECS overrides it (same escape hatch as `rock frame`)
-    // for genuinely long benches -- and keeps frame_exit_result's message honest.
-    let timeout_duration = if let Some(secs) = std::env::var("ROCK_FRAME_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
+    // Asset loading is startup, not part of the budget for executing frames
+    // and dumping the summary. The override bounds each phase independently.
+    let timeout_override = frame_watchdog().override_secs;
+    let startup_timeout = timeout_override.map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(120));
+    let timeout_duration = if let Some(secs) = timeout_override {
         Duration::from_secs(secs)
     } else {
         let wall_budget = seconds.unwrap_or(0.0).max(15.0) + 15.0;
@@ -1307,7 +1308,9 @@ pub fn do_perf(
     };
 
     let mut child = cmd.spawn()?;
-    let process_result = ProcessManager::wait_with_timeout(&mut child, timeout_duration)?;
+    let process_result = ProcessManager::wait_with_startup_budget(
+        &mut child, startup_timeout, timeout_duration,
+    )?;
 
     // Extract and display the perf summary from stdout
     if !process_result.output.stdout.is_empty() {
@@ -1346,10 +1349,20 @@ pub fn do_perf(
     // summary -- error out (nonzero exit) instead of the old warn-and-Ok(0),
     // which let a corrupt/partial benchmark JSON sail past the gate recipes
     // (justfile render-bench). Same classifier as `rock frame`.
-    frame_exit_result(
+    let timeout_secs = if process_result.timeout_phase == Some(crate::common::TimeoutPhase::Startup) {
+        startup_timeout.as_secs()
+    } else {
+        timeout_duration.as_secs()
+    };
+    frame_exit_result_with_progress(
         process_result.timed_out,
         &process_result.output.status,
-        timeout_duration.as_secs(),
+        timeout_secs,
+        frame_cap,
+        None,
+        process_result.frame_progress.as_ref(),
+        process_result.progress_stopped,
+        process_result.timeout_phase,
     )?;
 
     Ok(())
@@ -1493,10 +1506,10 @@ pub fn do_one_frame(
     // (nonzero exit), not a warning-and-exit-0. Exiting 0 on timeout is precisely
     // how a load-starved run once masqueraded as a clean-but-empty log
     // (docs/replay-scrub-plan.md note 6).
-    let timeout_secs = if process_result.frame_progress.is_some() {
-        watchdog.inactivity.as_secs()
-    } else {
+    let timeout_secs = if process_result.timeout_phase == Some(crate::common::TimeoutPhase::Startup) {
         watchdog.startup.as_secs()
+    } else {
+        watchdog.inactivity.as_secs()
     };
     let requested_renderer = requested_renderer.map(|renderer| match renderer {
         RendererBackend::Gl => "gl",
@@ -1506,10 +1519,11 @@ pub fn do_one_frame(
         process_result.timed_out,
         &process_result.output.status,
         timeout_secs,
-        frames,
+        Some(frames),
         requested_renderer,
         process_result.frame_progress.as_ref(),
         process_result.progress_stopped,
+        process_result.timeout_phase,
     )?;
     if frames == 1 {
         info!("One frame executed successfully");
@@ -1524,35 +1538,40 @@ pub fn do_one_frame(
 /// watchdog timeout or a nonzero child exit is an error, so the CLI exits
 /// nonzero (test-games / callers actually fail). Split out to be unit-testable
 /// without spawning a real hang.
+#[cfg(test)]
 fn frame_exit_result(
     timed_out: bool,
     status: &std::process::ExitStatus,
     timeout_secs: u64,
 ) -> Result<()> {
-    frame_exit_result_with_progress(timed_out, status, timeout_secs, 0, None, None, false)
+    frame_exit_result_with_progress(timed_out, status, timeout_secs, None, None, None, false,
+        Some(crate::common::TimeoutPhase::TotalBudget))
 }
 
 fn frame_exit_result_with_progress(
     timed_out: bool,
     status: &std::process::ExitStatus,
     timeout_secs: u64,
-    requested: usize,
+    requested: Option<usize>,
     requested_renderer: Option<&str>,
     progress: Option<&crate::common::FrameProgress>,
     progress_stopped: bool,
+    timeout_phase: Option<crate::common::TimeoutPhase>,
 ) -> Result<()> {
     if timed_out {
+        let phase = timeout_phase.ok_or_else(|| anyhow::anyhow!("Stone timeout is missing its phase"))?;
         let (renderer, completed, requested) = match progress {
             Some(progress) => (
                 progress.renderer.as_str(),
                 progress.completed,
-                progress.requested.unwrap_or(requested),
+                progress.requested.or(requested),
             ),
             None => (requested_renderer.unwrap_or("unknown"), 0, requested),
         };
+        let requested = requested.map(|frames| frames.to_string()).unwrap_or_else(|| "-".into());
         anyhow::bail!(
-            "Stone process timed out after {timeout_secs}s -- renderer={renderer}, \
-             completed/requested={completed}/{requested}, progress_stopped={progress_stopped}; \
+            "Stone process timed out after {timeout_secs}s -- phase={phase}, renderer={renderer}, \
+             completed/requested={completed}/{requested} (last reported), progress_stopped={progress_stopped}; \
              no clean exit (a hang, an infinite loop, or a run starved past the watchdog). \
              For a legitimately slow run, raise ROCK_FRAME_TIMEOUT_SECS."
         );
@@ -1760,6 +1779,28 @@ mod tests {
             frame_exit_result(false, &failed, 3).is_err(),
             "a nonzero child exit must propagate"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_diagnostics_name_startup_and_frame_inactivity() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(0);
+        let startup = super::frame_exit_result_with_progress(
+            true, &status, 120, Some(240), None, None, false, Some(crate::common::TimeoutPhase::Startup),
+        ).unwrap_err().to_string();
+        assert!(startup.contains("phase=startup"), "{startup}");
+        assert!(startup.contains("completed/requested=0/240"), "{startup}");
+
+        let progress = crate::common::FrameProgress {
+            renderer: "gl".into(), completed: 1, requested: Some(240),
+        };
+        let inactivity = super::frame_exit_result_with_progress(
+            true, &status, 30, Some(240), None, Some(&progress), true,
+            Some(crate::common::TimeoutPhase::FrameInactivity),
+        ).unwrap_err().to_string();
+        assert!(inactivity.contains("phase=frame inactivity"), "{inactivity}");
+        assert!(inactivity.contains("renderer=gl, completed/requested=1/240"), "{inactivity}");
     }
 
     /// In-session load: the picker's request file is read once, returns the
@@ -2046,6 +2087,32 @@ mod watch_reload_tests {
         panic!("watcher never reported {}", expected.display());
     }
 
+    // FSEvents can miss a write made shortly after `refresh` returns, and can
+    // deliver the fixture's own setup writes, batched, after the stream starts;
+    // both happen arbitrarily late under load. Rewrite `path` until it is
+    // reported, so the wait covers a lost first write.
+    fn write_until_reported(rx: &Receiver<FileChangeEvent>, path: &PathBuf, text: &str) -> FileChangeEvent {
+        for _ in 0..8 {
+            std::fs::write(path, text).unwrap();
+            let attempt_end = Instant::now() + Duration::from_millis(1500);
+            while let Ok(event) = rx.recv_timeout(attempt_end.saturating_duration_since(Instant::now())) {
+                if event.paths.contains(path) {
+                    return event;
+                }
+            }
+        }
+        panic!("watcher never reported {}", path.display());
+    }
+
+    // Events arrive in order, so once a fresh barrier file is reported every
+    // earlier event, including the fixture's setup writes, has been consumed.
+    // Returns the barrier, whose own trailing events may still arrive later.
+    fn drain_setup_events(rx: &Receiver<FileChangeEvent>, dir: &std::path::Path) -> PathBuf {
+        let barrier = dir.join("barrier.rock");
+        write_until_reported(rx, &barrier, "fn barrier() {}\n");
+        barrier
+    }
+
     #[test]
     fn stone_direct_save_under_tmp_ancestor_reloads_live_state() {
         Fixture::new(false).assert_reload(false);
@@ -2072,10 +2139,15 @@ mod watch_reload_tests {
         let (tx, rx) = channel();
         let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
         watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
+        let barrier = drain_setup_events(&rx, &sims);
 
-        std::fs::write(&sim, "fn probe( {\n").unwrap();
-        let event = receive_path(&rx, &sim);
+        let event = write_until_reported(&rx, &sim, "fn probe( {\n");
         let mut changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+        // Setup writes of the fixture may be reported in the same batch; they are
+        // not the edit under test.
+        for setup in [&barrier, &fixture.root.join("main.rock"), &fixture.root.join("stick.toml")] {
+            changes.changed_paths.remove(setup);
+        }
         assert_eq!(changes.changed_paths, HashSet::from([sim.clone()]));
         retain_production_changes(&mut changes.changed_paths, fixture.root.to_str().unwrap(), fixture.compiler.package_roots(), &Default::default());
         assert!(changes.changed_paths.is_empty(), "sim edit reached the game compiler");

@@ -1,0 +1,16 @@
+@init
+fn perf_test_startup() {
+    stone_delay(get_env_int("PERF_TEST_STARTUP_MS", 0))
+}
+
+fn main() {
+    stone_run_game(GameConfig {
+        title: "perf-watchdog",
+        width: 640,
+        height: 360,
+        vsync: 0,
+        clear_color: color(0.0, 0.0, 0.0, 1.0),
+        esc_quits: true,
+        cap_height_fonts: true,
+    })
+}

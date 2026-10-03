@@ -125,6 +125,16 @@ impl ProcessManager {
         )
     }
 
+    /// Start the run budget at the first completed frame, bounding startup
+    /// separately. Perf needs only that marker, not logs on measured frames.
+    pub fn wait_with_startup_budget(
+        child: &mut Child,
+        startup: Duration,
+        budget: Duration,
+    ) -> Result<ProcessResult> {
+        Self::wait_with_policy(child, WaitPolicy::FrameBudget { startup, budget }, false, false)
+    }
+
     fn wait_with_policy(
         child: &mut Child,
         policy: WaitPolicy,
@@ -135,7 +145,7 @@ impl ProcessManager {
         use std::sync::mpsc::{self, Receiver, Sender};
         use std::thread;
 
-        let observe_progress = matches!(policy, WaitPolicy::Frame { .. });
+        let observe_progress = !matches!(policy, WaitPolicy::Total(_));
         let (progress_tx, progress_rx): (Option<Sender<FrameProgress>>, Option<Receiver<FrameProgress>>) =
             if observe_progress {
                 let (tx, rx) = mpsc::channel();
@@ -208,9 +218,11 @@ impl ProcessManager {
 
         let start_time = std::time::Instant::now();
         let mut last_progress_at = start_time;
+        let mut first_progress_at = None;
         let mut latest_progress = None;
         let mut saw_progress = false;
         let timed_out;
+        let timeout_phase;
         let status;
 
         loop {
@@ -218,6 +230,7 @@ impl ProcessManager {
                 for progress in rx.try_iter() {
                     saw_progress = true;
                     last_progress_at = std::time::Instant::now();
+                    first_progress_at.get_or_insert(last_progress_at);
                     latest_progress = Some(progress);
                 }
             }
@@ -226,24 +239,32 @@ impl ProcessManager {
                 Some(s) => {
                     status = s;
                     timed_out = false;
+                    timeout_phase = None;
                     break;
                 }
                 None => {
-                    let elapsed = if saw_progress {
-                        last_progress_at.elapsed()
-                    } else {
-                        start_time.elapsed()
-                    };
-                    let limit = match policy {
-                        WaitPolicy::Total(timeout) => timeout,
+                    let (elapsed, limit, phase) = match policy {
+                        WaitPolicy::Total(timeout) =>
+                            (start_time.elapsed(), timeout, TimeoutPhase::TotalBudget),
                         WaitPolicy::Frame { startup, inactivity } => {
-                            if saw_progress { inactivity } else { startup }
+                            if saw_progress {
+                                (last_progress_at.elapsed(), inactivity, TimeoutPhase::FrameInactivity)
+                            } else {
+                                (start_time.elapsed(), startup, TimeoutPhase::Startup)
+                            }
+                        }
+                        WaitPolicy::FrameBudget { startup, budget } => {
+                            match first_progress_at {
+                                Some(first) => (first.elapsed(), budget, TimeoutPhase::FrameBudget),
+                                None => (start_time.elapsed(), startup, TimeoutPhase::Startup),
+                            }
                         }
                     };
                     if elapsed >= limit {
                         child.kill()?;
                         status = child.wait()?;
                         timed_out = true;
+                        timeout_phase = Some(phase);
                         break;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -266,8 +287,9 @@ impl ProcessManager {
         Ok(ProcessResult {
             output: std::process::Output { status, stdout, stderr },
             timed_out,
+            timeout_phase,
             frame_progress: latest_progress,
-            progress_stopped: observe_progress && timed_out,
+            progress_stopped: matches!(policy, WaitPolicy::Frame { .. }) && saw_progress && timed_out,
         })
     }
 }
@@ -276,6 +298,26 @@ impl ProcessManager {
 enum WaitPolicy {
     Total(Duration),
     Frame { startup: Duration, inactivity: Duration },
+    FrameBudget { startup: Duration, budget: Duration },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutPhase {
+    TotalBudget,
+    Startup,
+    FrameInactivity,
+    FrameBudget,
+}
+
+impl std::fmt::Display for TimeoutPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TotalBudget => "total budget",
+            Self::Startup => "startup",
+            Self::FrameInactivity => "frame inactivity",
+            Self::FrameBudget => "frame budget",
+        })
+    }
 }
 
 fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
@@ -308,6 +350,7 @@ fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
 pub struct ProcessResult {
     pub output: std::process::Output,
     pub timed_out: bool,
+    pub timeout_phase: Option<TimeoutPhase>,
     pub frame_progress: Option<FrameProgress>,
     pub progress_stopped: bool,
 }

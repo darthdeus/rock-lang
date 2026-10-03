@@ -9,6 +9,8 @@ mod arena_serialization_tests;
 mod game_snapshot_tests;
 #[path = "perf_json_format_test.rs"]
 mod perf_json_format_test;
+#[path = "perf_watchdog_gate.rs"]
+mod perf_watchdog_gate;
 #[path = "quit_teardown_test.rs"]
 mod quit_teardown_test;
 #[path = "replay_desync_tests.rs"]
@@ -65,6 +67,8 @@ mod mag_worker_product_tests;
 mod sim_memory_cap;
 #[path = "sim_v1_names.rs"]
 mod sim_v1_names;
+#[path = "sim_world_entry.rs"]
+mod sim_world_entry;
 #[path = "headless_scope.rs"]
 mod headless_scope;
 #[path = "sim_reload_lane.rs"]
