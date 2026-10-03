@@ -794,6 +794,43 @@ fn weak_cache_drop<T>(name: string, owner: Scene<T>) {
     end
 """
 
+// Called while the retiring Session is published. Logical handles can also
+// name another live Session's backing, so evict only this incarnation.
+@nomangle fn __weak_cache_retire_backing(scene: int, arena: int) {
+    if arena == -1 {
+        if scene < 0 || scene >= __SCENE_REGISTRY.roots.len { return }
+        let backing = __SCENE_REGISTRY.roots[scene] ?? return
+        __weak_cache_retire_backing_entries(scene, arena, backing)
+    } else {
+        let backing = __arena_store_any(scene, arena) ?? return
+        __weak_cache_retire_backing_entries(scene, arena, backing)
+    }
+}
+
+inline(lua) fn __weak_cache_retire_backing_entries(scene: int, arena: int, backing: any) = """
+    local owners = _G.__rock_weak_cache_owners
+    local scenes = owners and owners[scene]
+    if not scenes then return end
+    if arena == -1 then
+        for name, entry in pairs(scenes) do
+            if type(name) == "string" and entry.backing == backing then
+                scenes[name] = nil
+            end
+        end
+    else
+        local slots = scenes[arena]
+        if not slots then return end
+        for slot, entries in pairs(slots) do
+            for name, entry in pairs(entries) do
+                if entry.backing == backing then entries[name] = nil end
+            end
+            if next(entries) == nil then slots[slot] = nil end
+        end
+        if next(slots) == nil then scenes[arena] = nil end
+    end
+    if next(scenes) == nil then owners[scene] = nil end
+"""
+
 inline(lua) fn weak_cache_builds(name: string) -> int = """
     local counts = _G.__rock_weak_cache_builds
     return counts and counts[name] or 0
