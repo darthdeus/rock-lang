@@ -41,7 +41,7 @@ const PINNED: &str = "\
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| stone | exempt | 30 | 47 | 6 | 0 | 170 | 5 | 0 | 0 | 2 | 260 |
+| stone | exempt | 30 | 47 | 6 | 0 | 171 | 5 | 0 | 0 | 2 | 261 |
 | survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
 | testbed | exempt | 5 | 3 | 0 | 0 | 111 | 2 | 2 | 64 | 56 | 243 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
