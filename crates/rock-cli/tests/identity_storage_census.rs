@@ -32,7 +32,7 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 244 | 192 | 7 | 0 | 1025 | 21 | 67 | 1283 | 73 | 2912 |
+| mag | exempt | 244 | 192 | 7 | 0 | 1028 | 21 | 67 | 1283 | 73 | 2915 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 3 | 2 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -56,15 +56,15 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/areas.rock:43 field mag_simulation::nav::areas::NavWorkCounters
 - mag_simulation::nav: mag-simulation/nav/areas.rock:46 container mag_simulation::nav::areas::NavArea
 - mag_simulation::nav: mag-simulation/nav/areas.rock:50 container mag_simulation::nav::areas::NavAreaPair
-- mag_simulation::nav: mag-simulation/nav/graph.rock:280 field mag_simulation::nav::query::NavQuery
+- mag_simulation::nav: mag-simulation/nav/graph.rock:285 field mag_simulation::nav::query::NavQuery
 - mag_simulation::nav: mag-simulation/nav/query.rock:142 field FlatVec
-- mag_simulation::nav: mag-simulation/nav/query.rock:158 container mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/query.rock:161 container mag_simulation::nav::query::NavPlan
-- mag_simulation::nav: mag-simulation/nav/query.rock:167 field mag_simulation::nav::areas::NavAreas
-- mag_simulation::nav: mag-simulation/nav/query.rock:208 field mag_simulation::nav::heap::NavHeap
-- mag_simulation::nav: mag-simulation/nav/query.rock:607 local-storage mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/query.rock:662 local-storage mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/query.rock:667 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:160 container mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:163 container mag_simulation::nav::query::NavPlan
+- mag_simulation::nav: mag-simulation/nav/query.rock:169 field mag_simulation::nav::areas::NavAreas
+- mag_simulation::nav: mag-simulation/nav/query.rock:210 field mag_simulation::nav::heap::NavHeap
+- mag_simulation::nav: mag-simulation/nav/query.rock:609 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:664 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:669 local-storage mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/walker.rock:23 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
