@@ -812,14 +812,12 @@ mod overlay_runtime_tests {
     #[test]
     fn overlay_referencing_baseline_value_ctor_runtime_eq() {
         // `P` is DEFINED in both versions but only CONSTRUCTED in v1's `compute`.
-        // v1 uses `P` as a WHOLE value (`==`), not pure field reads: SROA
-        // (`scalarize_struct_cells`) scalarizes a field-read-only struct away
-        // (no ctor), which would defeat this test's point -- it must reference the
-        // baseline's `P_ct`, so it must keep the cdata (`==` forces that).
-        let decl = "value P { x: int, y: int }\n";
+        // Runtime-derived fields prevent constant folding, and the float field
+        // sends value equality through the cdata metatype, so v1 must call `P_ct`.
+        let decl = "value P { x: int, y: int, marker: float }\nglobal INPUT: int = 5\n";
         let v0 = format!("{decl}fn compute() -> int {{ 1 }}\nfn main() {{ print(\"{{compute()}}\") }}\n");
         let v1 = format!(
-            "{decl}fn compute() -> int {{ let p = P {{ x: 5, y: 6 }}\n let q = P {{ x: 2, y: 9 }}\n if p == q {{ 0 }} else {{ p.x + p.y }} }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
+            "{decl}fn compute() -> int {{ let p = P {{ x: INPUT, y: INPUT + 1, marker: INPUT as float }}\n let q = P {{ x: INPUT - 3, y: INPUT + 4, marker: (INPUT + 1) as float }}\n if p == q {{ 0 }} else {{ p.x + p.y }} }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
         );
 
         let mut session = bone_session(files(&v0)).expect("session v0");
