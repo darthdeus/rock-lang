@@ -1828,7 +1828,7 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(value, {})
 """
 
-@intrinsic @native_required inline(lua) fn map_storage<K, V>(map: Map<K, V>) -> Storage = """
+@intrinsic @native_required inline(lua) fn map_storage<K, V>(@repr(opaque) map: Map<K, V>) -> Storage = """
     return nil
 """
 
