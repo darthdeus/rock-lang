@@ -816,6 +816,7 @@ fn run_test_program(program: &str, limit: std::time::Duration) -> Result<crate::
     let mut script = tempfile::NamedTempFile::new()?;
     script.write_all(program.as_bytes())?;
     let mut child = rock_host::project::build_luajit_command(script.path(), &[])
+        .env("STONE_HEADLESS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

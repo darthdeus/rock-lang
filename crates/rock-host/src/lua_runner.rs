@@ -44,14 +44,23 @@ pub fn run_lua_code_with_timeout(
     code: &str,
     timeout: Option<Duration>,
 ) -> Result<LuaRun, CompilerError> {
+    run_lua_code_with_timeout_and_env(code, timeout, &[])
+}
+
+pub fn run_lua_code_with_timeout_and_env(
+    code: &str,
+    timeout: Option<Duration>,
+    env: &[(&str, &str)],
+) -> Result<LuaRun, CompilerError> {
     let luajit_path = crate::project::luajit_path();
-    run_lua_code_with_timeout_at(&luajit_path, code, timeout)
+    run_lua_code_with_timeout_at(&luajit_path, code, timeout, env)
 }
 
 fn run_lua_code_with_timeout_at(
     luajit_path: &std::path::Path,
     code: &str,
     timeout: Option<Duration>,
+    env: &[(&str, &str)],
 ) -> Result<LuaRun, CompilerError> {
     let luajit_path_str = luajit_path.to_string_lossy().into_owned();
 
@@ -63,6 +72,7 @@ fn run_lua_code_with_timeout_at(
     }
 
     let mut cmd = std::process::Command::new(luajit_path);
+    cmd.envs(env.iter().copied());
     // `-` = "run stdin as a script". WITHOUT it luajit treats piped stdin as an
     // INTERACTIVE session: it prints a fatal error and still exits 0. That is the
     // root of the whole "`rock run` exits 0 while printing a LuaJIT crash" trap --
@@ -229,7 +239,7 @@ mod tests {
         let mut code = "ignored by child\n".to_string();
         code.push_str(&"-- valid filler\n".repeat(1_000_000));
 
-        let error = run_lua_code_with_timeout_at(&child_path, &code, Some(Duration::from_secs(5)))
+        let error = run_lua_code_with_timeout_at(&child_path, &code, Some(Duration::from_secs(5)), &[])
             .expect_err("a child with no diagnostic must not swallow the broken pipe");
 
         assert!(
