@@ -110,6 +110,37 @@ fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) 
 }
 
 #[test]
+fn absent_field_store_skips_nil_key_insertion_and_preserves_clearing() {
+    let lua = emit_clean(
+        "struct Row { payload: string? = null } fn update(row: Row, value: string?) { row.payload = value }",
+        "update",
+    );
+    assert!(lua.contains(" ~= nil or ") && lua.contains(".payload ~= nil then"), "{lua}");
+    let symbol = lua.lines().find_map(|line| line.strip_prefix("function "))
+        .expect("function definition").split('(').next().unwrap();
+    let driver = format!(r#"{lua}
+local row = {{}}
+{symbol}(row, nil)
+assert(row.payload == nil)
+{symbol}(row, 'live')
+assert(row.payload == 'live')
+{symbol}(row, nil)
+assert(row.payload == nil)
+local hits, reads = 0, 0
+local observed = setmetatable({{}}, {{
+    __newindex = function() hits = hits + 1 end,
+    __index = function() reads = reads + 1 end,
+}})
+{symbol}(observed, nil)
+{symbol}(observed, nil)
+assert(hits == 2 and reads == 0)
+"#);
+    let run = std::process::Command::new("luajit").arg("-e").arg(driver).output()
+        .expect("run field-store semantics");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+}
+
+#[test]
 fn numeric_selection_uses_native_minmax() {
     let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
     assert!(lua.contains("math.min("), "{lua}");

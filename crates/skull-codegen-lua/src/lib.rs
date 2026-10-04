@@ -5075,12 +5075,26 @@ impl Emitter<'_> {
                         return;
                     }
                 }
+                // LuaJIT can rehash when assigning nil to an absent key.
+                // Metatable writes remain observable; plain operands evaluate once.
+                let guard = self.opnd_is_plain(*base) && self.opnd_is_plain(*value);
+                if guard {
+                    out.push_str("  if ");
+                    self.write_opnd(out, *value);
+                    out.push_str(" ~= nil or getmetatable(");
+                    self.write_opnd(out, *base);
+                    out.push_str(") ~= nil or ");
+                    self.write_opnd(out, *base);
+                    write_field_key(out, field.as_str());
+                    out.push_str(" ~= nil then\n");
+                }
                 out.push_str("  ");
                 self.write_opnd(out, *base);
                 write_field_key(out, field.as_str());
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
+                if guard { out.push_str("  end\n"); }
             }
             Inst::StoreIndex {
                 base,
