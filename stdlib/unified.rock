@@ -4013,6 +4013,9 @@ fn get_env_float(var: string, default_val: float) -> float {
     return v.unwrap().parse_float() ?? default_val
 }
 
+// Durable decimal text that recovers the same IEEE double.
+@inline inline(lua) fn format_float_roundtrip(value: float) -> string = "string.format(\"%.17g\", value)"
+
 // TODO: format_lua is an escape hatch for printf-style formatting.
 // When Rock's string interpolation supports all common format specifiers
 // (including %q for Lua-style quoting), this should be removed.
