@@ -1076,8 +1076,13 @@ fn mag_world_presentation_state_has_explicit_owners() {
     let player = fs::read_to_string(repo.join("mag/player.rock")).expect("read Player source");
     assert!(player.contains("teleport_arrival: TeleportArrivalState"));
     let teleport = fs::read_to_string(repo.join("mag/teleport.rock")).expect("read teleport source");
+    let arrival_state = teleport
+        .split_once("struct TeleportArrivalState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read TeleportArrivalState body");
     for field in ["place: Place", "remaining: float", "color: Color"] {
-        assert_eq!(teleport.matches(field).count(), 1, "TeleportArrivalState owns {field}");
+        assert_eq!(arrival_state.matches(field).count(), 1, "TeleportArrivalState owns {field}");
     }
     assert!(teleport.contains("player.teleport_arrival.place = dest"));
     assert!(teleport.contains("player.teleport_arrival.remaining"));
