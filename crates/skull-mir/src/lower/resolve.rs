@@ -244,21 +244,30 @@ impl Builder<'_> {
                     .collect::<Result<_, CompilerError>>()?;
                 Ok(ValueRepr::Tuple { parts, present: None })
             }
-            // `t.0` off a splatting tuple projects the part REPR directly. Without
-            // this the base packs to a table and the index reads a boxed element
-            // back out, which re-materializes a `nobox` one. A newtype's `.0` is
-            // identity and a non-splatting base keeps the packed `TupleIndex`, so
-            // only the unboxed case changes.
+            // Project splatting tuples directly; boxed value slots use the same
+            // snapshot path as fields and array elements. Newtype `.0` is identity.
             Expr::TupleIndex { tuple, index } if !self.expr_is_newtype(tuple) => {
                 let r = self.lower_expr_repr_inner(tuple)?;
-                if let ValueRepr::Tuple { parts, .. } = r {
-                    return parts
-                        .into_iter()
-                        .nth(index)
-                        .ok_or_else(|| gap("tuple index past the end of a splatting tuple"));
+                let projected = if let ValueRepr::Tuple { parts, .. } = r {
+                    parts.into_iter().nth(index)
+                        .ok_or_else(|| gap("tuple index past the end of a splatting tuple"))?
+                } else {
+                    let base = self.pack(r)?;
+                    ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index }))
+                };
+                if !self.scx.values_first_class && let ValueRepr::Scalar(slot) = &projected {
+                    // A tuple slot is a place too: retaining its value must snapshot
+                    // the leaves, while container leaves keep their shared backing.
+                    if let Some(name) = self.value_struct_of(e)
+                        && (self.is_mutable_place(tuple)? || self.is_nobox_struct(name))
+                    {
+                        return self.boxed_value_copy_repr(*slot, name);
+                    }
+                    if let Some(name) = nullable_place_value {
+                        return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(*slot, name)?));
+                    }
                 }
-                let base = self.pack(r)?;
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
+                Ok(projected)
             }
             // A name bound to a splatting tuple: rebuild the unboxed Tuple repr
             // from its slot cells, so `t.0` projects a part instead of indexing a

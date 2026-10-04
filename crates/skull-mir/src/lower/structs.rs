@@ -12,10 +12,9 @@ impl Builder<'_> {
         range.into_iter().map(|e| self.lower_expr(e)).collect()
     }
 
-    /// A struct literal -> `MakeStruct`, fields in DECLARED order. Every declared
-    /// field must be present; an omitted (defaulted) field gaps for now —
-    /// injecting its default means lowering the `StructDefaults` body, a later
-    /// step. Emitting an incomplete struct would be a silent miscompile.
+    /// A struct literal -> `MakeStruct`, fields in DECLARED order. Omitted fields
+    /// are evaluated from the declaring `StructDefaults` body, so every declared
+    /// field reaches MIR explicitly.
     pub(crate) fn lower_struct_literal(
         &mut self,
         e: Idx<Expr>,
@@ -79,6 +78,7 @@ impl Builder<'_> {
                         v
                     }
                 };
+                let v = self.round_f32_field(name, lf.name, v);
                 lit_box.push((lf.name, v));
             }
         }
@@ -126,10 +126,9 @@ impl Builder<'_> {
                         // dotted slots, while the default is still a boxed enum.
                         let cells = match base_inst {
                             Some(bi) => self.load_flat_cells(bi, fname, &shape),
-                            None => {
-                                let dv = self.lower_struct_default(name, fname)?;
-                                self.spread_maybe_null_box_to_cells(dv, &shape)?
-                            }
+                            None => self.with_struct_default(name, fname, |s, def| {
+                                s.lower_flat_value(&shape, def)
+                            })?,
                         };
                         fs.extend(self.flat_literal_slots(fname, cells));
                     } else {
@@ -218,7 +217,7 @@ impl Builder<'_> {
         self.ws
             .struct_by_name
             .get(&name)
-            .map(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
+            .map(|sid| has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]))
             .unwrap_or(false)
     }
 
@@ -236,7 +235,8 @@ impl Builder<'_> {
     pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match &self.body.expr_arena[e] {
             Expr::Global(_) | Expr::Index { .. } => Ok(true),
-            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
+            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. }
+            | Expr::TupleIndex { tuple: base, .. } => {
                 self.is_mutable_place(*base)
             }
             // A reference-struct binding aliases shared storage; a value binding
@@ -293,7 +293,9 @@ impl Builder<'_> {
         let is_place = match &self.body.expr_arena[e] {
             Expr::Global(_) => self.nobox_global_place(e)?.is_none(),
             Expr::Index { .. } => true,
-            Expr::FieldAccess { base, .. } => self.is_mutable_place(*base)?,
+            Expr::FieldAccess { base, .. } | Expr::TupleIndex { tuple: base, .. } => {
+                self.is_mutable_place(*base)?
+            }
             _ => false,
         };
         if !is_place {
@@ -354,6 +356,28 @@ impl Builder<'_> {
     /// argument has a fn-typed field of that name.
     pub(crate) fn fn_field_of_call(&self, e: Idx<Expr>) -> Option<Ustr> {
         self.inf?.fn_field_calls.get(&e).copied()
+    }
+
+    pub(crate) fn struct_field_fn_rep_plan(
+        &self,
+        recv: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<FunctionRepPlan>, CompilerError> {
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(recv) else {
+            return Ok(None);
+        };
+        let Some(sid) = self.ws.struct_by_name.get(&sname) else {
+            return Ok(None);
+        };
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let Some(fdef) = sd.fields.iter().find(|f| f.name == field) else {
+            return Ok(None);
+        };
+        if !matches!(self.resolve_ty(fdef.ty), Some(TypeExpr::Function { .. })) {
+            return Ok(None);
+        }
+        let ty = self.struct_field_mono_ty(sname, field, Some(recv))?;
+        self.fn_value_rep_plan_for_mono(&ty)
     }
 
     /// Whether `name` is a module-level global of fn type — recovers `g(args)`
@@ -539,7 +563,7 @@ impl Builder<'_> {
                     // This variant has no such field -> pad with the slot's zero.
                     let zero = match *c {
                         "int" => Lit::Int(0),
-                        "float" => Lit::Float(0.0),
+                        "float" | "double" => Lit::Float(0.0),
                         "bool" => Lit::Bool(false),
                         "uint32_t" => Lit::Uint(0),
                         other => {
@@ -1057,7 +1081,7 @@ impl Builder<'_> {
         let Some(kind) = ret.and_then(|r| vertex_expand_return(self.ws, r)) else {
             return Err(reject(call_span, vertex_expand_ret_msg(self.ws, fname, ret)));
         };
-        let Some(elem) = self.nb_value_elem(arg)? else {
+        let Some(elem) = self.nb_type_value_elem(arg)? else {
             return Err(reject(arg_span, vertex_expand_arg_msg(fname)));
         };
 
@@ -1118,7 +1142,7 @@ impl Builder<'_> {
                     payload
                 } else {
                     let zero = match *c {
-                        "float" => Lit::Float(0.0),
+                        "float" | "double" => Lit::Float(0.0),
                         "bool" => Lit::Bool(false),
                         _ => Lit::Int(0),
                     };
