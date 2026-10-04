@@ -135,6 +135,12 @@ impl ProcessManager {
         Self::wait_with_policy(child, WaitPolicy::FrameBudget { startup, budget }, false, false)
     }
 
+    /// Bound program loading and each test file separately; only a file
+    /// boundary resets the budget, never output or individual test results.
+    pub fn wait_with_test_file_budget(child: &mut Child, limit: Duration) -> Result<ProcessResult> {
+        Self::wait_with_policy(child, WaitPolicy::TestFile(limit), false, false)
+    }
+
     fn wait_with_policy(
         child: &mut Child,
         policy: WaitPolicy,
@@ -142,13 +148,13 @@ impl ProcessManager {
         forward_stderr: bool,
     ) -> Result<ProcessResult> {
         use std::io::{self, BufRead, BufReader, Read, Write};
-        use std::sync::mpsc::{self, Receiver, Sender};
+        use std::sync::mpsc;
         use std::thread;
 
         let observe_progress = !matches!(policy, WaitPolicy::Total(_));
-        let (progress_tx, progress_rx): (Option<Sender<FrameProgress>>, Option<Receiver<FrameProgress>>) =
+        let (progress_tx, progress_rx) =
             if observe_progress {
-                let (tx, rx) = mpsc::channel();
+                let (tx, rx) = mpsc::channel::<(std::time::Instant, ProcessProgress)>();
                 (Some(tx), Some(rx))
             } else {
                 (None, None)
@@ -200,8 +206,13 @@ impl ProcessManager {
                                 let _ = stderr.flush();
                             }
                             if let Some(tx) = &progress_tx {
-                                if let Some(progress) = parse_frame_progress(&line) {
-                                    let _ = tx.send(progress);
+                                let progress = match policy {
+                                    WaitPolicy::TestFile(_) => parse_test_file_progress(&line)
+                                        .map(ProcessProgress::TestFile),
+                                    _ => parse_frame_progress(&line).map(ProcessProgress::Frame),
+                                };
+                                if let Some(progress) = progress {
+                                    let _ = tx.send((std::time::Instant::now(), progress));
                                 }
                             }
                         }
@@ -220,6 +231,7 @@ impl ProcessManager {
         let mut last_progress_at = start_time;
         let mut first_progress_at = None;
         let mut latest_progress = None;
+        let mut test_file = None;
         let mut saw_progress = false;
         let timed_out;
         let timeout_phase;
@@ -227,11 +239,18 @@ impl ProcessManager {
 
         loop {
             if let Some(rx) = &progress_rx {
-                for progress in rx.try_iter() {
+                for (at, progress) in rx.try_iter() {
                     saw_progress = true;
-                    last_progress_at = std::time::Instant::now();
+                    last_progress_at = if matches!(policy, WaitPolicy::TestFile(_)) {
+                        at
+                    } else {
+                        std::time::Instant::now()
+                    };
                     first_progress_at.get_or_insert(last_progress_at);
-                    latest_progress = Some(progress);
+                    match progress {
+                        ProcessProgress::Frame(frame) => latest_progress = Some(frame),
+                        ProcessProgress::TestFile(file) => test_file = Some(file),
+                    }
                 }
             }
 
@@ -253,6 +272,13 @@ impl ProcessManager {
                                 (start_time.elapsed(), startup, TimeoutPhase::Startup)
                             }
                         }
+                        WaitPolicy::TestFile(limit) => {
+                            if saw_progress {
+                                (last_progress_at.elapsed(), limit, TimeoutPhase::TestFile)
+                            } else {
+                                (start_time.elapsed(), limit, TimeoutPhase::Startup)
+                            }
+                        }
                         WaitPolicy::FrameBudget { startup, budget } => {
                             match first_progress_at {
                                 Some(first) => (first.elapsed(), budget, TimeoutPhase::FrameBudget),
@@ -272,23 +298,28 @@ impl ProcessManager {
             }
         }
 
-        // A child can exit between the last poll and the reader's final send.
-        // Drain those markers before producing diagnostics, but never use a
-        // post-exit marker to extend a live watchdog.
-        if let Some(rx) = &progress_rx {
-            for progress in rx.try_iter() {
-                latest_progress = Some(progress);
-            }
-        }
-
         let stdout = stdout_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
         let stderr = stderr_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
+
+        // Reader joins ensure the final markers have arrived. After a timeout
+        // retain the boundary that was active when the budget expired.
+        if !timed_out || !matches!(policy, WaitPolicy::TestFile(_)) {
+            if let Some(rx) = &progress_rx {
+                for (_, progress) in rx.try_iter() {
+                    match progress {
+                        ProcessProgress::Frame(frame) => latest_progress = Some(frame),
+                        ProcessProgress::TestFile(file) => test_file = Some(file),
+                    }
+                }
+            }
+        }
 
         Ok(ProcessResult {
             output: std::process::Output { status, stdout, stderr },
             timed_out,
             timeout_phase,
             frame_progress: latest_progress,
+            test_file,
             progress_stopped: matches!(policy, WaitPolicy::Frame { .. }) && saw_progress && timed_out,
         })
     }
@@ -299,6 +330,7 @@ enum WaitPolicy {
     Total(Duration),
     Frame { startup: Duration, inactivity: Duration },
     FrameBudget { startup: Duration, budget: Duration },
+    TestFile(Duration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,6 +339,7 @@ pub enum TimeoutPhase {
     Startup,
     FrameInactivity,
     FrameBudget,
+    TestFile,
 }
 
 impl std::fmt::Display for TimeoutPhase {
@@ -316,8 +349,20 @@ impl std::fmt::Display for TimeoutPhase {
             Self::Startup => "startup",
             Self::FrameInactivity => "frame inactivity",
             Self::FrameBudget => "frame budget",
+            Self::TestFile => "test file",
         })
     }
+}
+
+enum ProcessProgress {
+    Frame(FrameProgress),
+    TestFile(String),
+}
+
+fn parse_test_file_progress(line: &[u8]) -> Option<String> {
+    let line = std::str::from_utf8(line).ok()?;
+    let file = line.strip_prefix("ROCK_TEST_FILE\t")?.strip_suffix('\n')?;
+    serde_json::from_str(file).ok()
 }
 
 fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
@@ -352,6 +397,7 @@ pub struct ProcessResult {
     pub timed_out: bool,
     pub timeout_phase: Option<TimeoutPhase>,
     pub frame_progress: Option<FrameProgress>,
+    pub test_file: Option<String>,
     pub progress_stopped: bool,
 }
 
@@ -364,7 +410,15 @@ pub struct FrameProgress {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_frame_progress, FrameProgress};
+    use super::{parse_frame_progress, parse_test_file_progress, FrameProgress};
+
+    #[test]
+    fn test_file_progress_preserves_escaped_paths() {
+        assert_eq!(parse_test_file_progress(b"ROCK_TEST_FILE\t\"a\\tb\\nc.rock\"\n"),
+            Some("a\tb\nc.rock".to_owned()));
+        assert_eq!(parse_test_file_progress(b"ordinary output\n"), None);
+        assert_eq!(parse_test_file_progress(b"ROCK_TEST_FILE\tinvalid\n"), None);
+    }
 
     #[test]
     fn frame_progress_parser_keeps_renderer_and_denominator() {

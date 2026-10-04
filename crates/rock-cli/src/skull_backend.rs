@@ -492,7 +492,7 @@ pub(crate) fn skull_assemble_project(
 /// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line per test.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
-fn build_test_harness(tests: &[skull::SkullTest]) -> String {
+fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
     fn lua_str(s: &str) -> String {
         let mut o = String::from("\"");
         for c in s.chars() {
@@ -510,7 +510,7 @@ fn build_test_harness(tests: &[skull::SkullTest]) -> String {
     }
 
     let mut h = String::from("\nlocal __skull_T = {\n");
-    for t in tests {
+    for (t, file) in tests.iter().zip(files) {
         let out = match &t.output {
             Some(s) => lua_str(s),
             None => "nil".to_string(),
@@ -522,17 +522,25 @@ fn build_test_harness(tests: &[skull::SkullTest]) -> String {
         // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
         // line carrying the serialized return value; the HOST compares it.
         h.push_str(&format!(
-            "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
+            "  {{ f = {}, out = {}, name = {}, val = {}, file = {} }},\n",
             t.symbol,
             out,
             lua_str(&t.name),
-            t.returns.is_some()
+            t.returns.is_some(),
+            lua_str(&serde_json::to_string(file).expect("serialize file path"))
         ));
     }
     h.push_str("}\n");
     h.push_str(
         r#"local function __esc(s) return (s:gsub("\\", "\\\\"):gsub("\n", "\\n"):gsub("\t", "\\t")) end
+local __skull_file
+io.stdout:setvbuf("no")
 for _, t in ipairs(__skull_T) do
+  if t.file ~= __skull_file then
+    __skull_file = t.file
+    io.stderr:write("\nROCK_TEST_FILE\t", t.file, "\n")
+    io.stderr:flush()
+  end
   local buf = {}
   local rp = print
   local rw = io.write
@@ -657,7 +665,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             })
         }
     };
-    run_emitted_tests(&lua, &tests)
+    run_emitted_tests(&lua, &tests, &vec![file.to_owned(); tests.len()], std::time::Duration::from_secs(15))
 }
 
 /// `Some(count)` when `file` declares `@test` fns and EVERY one carries
@@ -686,57 +694,65 @@ pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<
 fn run_emitted_tests(
     lua: &str,
     tests: &[skull::SkullTest],
+    files: &[String],
+    limit: std::time::Duration,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
-    let timeout = Some(std::time::Duration::from_secs(15));
+    assert_eq!(tests.len(), files.len());
 
-    // No @test functions: fall back to the load-only validity gate.
+    // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
-        match rock_host::lua_runner::run_lua_code_with_timeout(lua, timeout) {
-            Ok(out) if out.success => return Ok(SkullOutcome::Pass { tests: 0 }),
-            Ok(out) => {
-                return Err(SkullFailure {
-                    reason: "invalid lua emitted (skull bug)".to_string(),
-                    rendered: format!(
-                        "{}\n\n--- emitted lua (truncated) ---\n{}",
-                        out.combined(),
-                        truncate(lua)
-                    ),
-                });
-            }
-            Err(e) => {
-                return Err(SkullFailure {
-                    reason: "invalid lua emitted (skull bug)".to_string(),
-                    rendered: e.message,
-                });
-            }
+        let run = run_test_program(lua, limit).map_err(|e| SkullFailure {
+            reason: "invalid lua emitted (skull bug)".to_string(),
+            rendered: e.to_string(),
+        })?;
+        if run.timed_out || !run.output.status.success() {
+            return Err(SkullFailure {
+                reason: "invalid lua emitted (skull bug)".to_string(),
+                rendered: if run.timed_out {
+                    format!("loading emitted program: timed out after {}s", limit.as_secs_f64())
+                } else {
+                    format!("{}\n\n--- emitted lua (truncated) ---\n{}",
+                        format!("{}{}", String::from_utf8_lossy(&run.output.stdout),
+                            String::from_utf8_lossy(&run.output.stderr)), truncate(lua))
+                },
+            });
         }
+        return Ok(SkullOutcome::Pass { tests: 0 });
     }
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
-    let program = format!("{lua}{}", build_test_harness(tests));
+    let program = format!("{lua}{}", build_test_harness(tests, files));
     // The harness `pcall`s each test, so an ordinary assertion failure becomes a
     // FAIL marker and the process still exits 0. A non-zero status therefore
     // means the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
     // after that point never ran. Keep the output either way: a truncated run
     // still has to say what it managed to report.
-    let (stdout, died) = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
-        Ok(run) => (run.combined(), !run.success),
-        Err(e) => {
-            return Err(SkullFailure {
-                reason: "test run errored (skull bug)".to_string(),
-                rendered: e.message,
-            });
+    let run = run_test_program(&program, limit).map_err(|e| SkullFailure {
+        reason: "test run errored (skull bug)".to_string(),
+        rendered: e.to_string(),
+    })?;
+    let stdout = format!("{}\n{}", String::from_utf8_lossy(&run.output.stdout),
+        String::from_utf8_lossy(&run.output.stderr));
+    let died = !run.output.status.success();
+    let timeout_failure = run.timed_out.then(|| {
+        match &run.test_file {
+            Some(file) => format!("{file}: timed out after {}s", limit.as_secs_f64()),
+            None => format!("loading emitted program: timed out after {}s", limit.as_secs_f64()),
         }
-    };
+    });
 
     // No result lines at all => the module didn't even load (a skull bug),
     // not a test failure.
-    let Some(markers) = crate::test_protocol::parse_skull_markers(&stdout) else {
+    let markers = crate::test_protocol::parse_skull_markers(&stdout);
+    if markers.is_none() && timeout_failure.is_none() {
         return Err(SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: format!("{stdout}\n\n--- emitted lua (truncated) ---\n{}", truncate(&program)),
         });
-    };
+    }
+    let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
+        passed: 0, fails: Vec::new(), values: Vec::new(),
+    });
 
     // VALUE lines: compare the serialized return value HOST-side against the
     // pinned `@test(returns = ...)` literal.
@@ -767,7 +783,9 @@ fn run_emitted_tests(
     // `os.exit(0)`, which exits success and emits no marker at all.
     // A PASS marker carries no test name, so this counts rather than names them.
     let reported = passed + fails.len();
-    if reported < tests.len() {
+    if let Some(failure) = timeout_failure {
+        fails.push(format!("{failure}; {} of {} @tests never reported", tests.len() - reported, tests.len()));
+    } else if reported < tests.len() {
         fails.push(format!(
             "the run stopped early: {} of {} @tests never reported{}",
             tests.len() - reported,
@@ -787,6 +805,34 @@ fn run_emitted_tests(
     } else {
         Ok(SkullOutcome::TestFail { passed, fails })
     }
+}
+
+fn run_test_program(program: &str, limit: std::time::Duration) -> Result<crate::common::ProcessResult> {
+    use std::io::Write;
+    use std::process::Stdio;
+    use rock_host::process_management::{register_child_process, unregister_child_process};
+
+    // A file avoids blocking on stdin before the startup watchdog is running.
+    let mut script = tempfile::NamedTempFile::new()?;
+    script.write_all(program.as_bytes())?;
+    let mut child = rock_host::project::build_luajit_command(script.path(), &[])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id();
+    register_child_process(pid);
+    let result = crate::common::ProcessManager::wait_with_test_file_budget(&mut child, limit);
+    if result.is_err() {
+        if let Err(error) = child.kill() {
+            log::error!(target: "CLI", "failed to kill Lua test process: {error}");
+        }
+        if let Err(error) = child.wait() {
+            log::error!(target: "CLI", "failed to reap Lua test process: {error}");
+        }
+    }
+    unregister_child_process(pid);
+    result
 }
 
 /// A directory that is a `stick.toml` package -- the unit `rock test` builds as
@@ -877,6 +923,13 @@ fn walk_test_units(
 /// `@test`s. The package analogue of [`skull_build`]. Cross-file references
 /// resolve because every file is in one workspace.
 fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFailure> {
+    skull_build_package_with_limit(dir, std::time::Duration::from_secs(15))
+}
+
+fn skull_build_package_with_limit(
+    dir: &str,
+    limit: std::time::Duration,
+) -> std::result::Result<SkullOutcome, SkullFailure> {
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| SkullFailure {
         reason: "cannot load project".to_string(),
@@ -908,12 +961,16 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
             });
         }
     };
-    let tests = collect_package_tests(&ws, dir).map_err(|e| SkullFailure {
+    let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
     })?;
+    let files = test_fns.iter().map(|(func, _)| {
+        ws.modules[func.module.index()].file.as_str().to_owned()
+    }).collect::<Vec<_>>();
+    let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
     let lua = prepend_package_preamble(lua, dir)?;
-    run_emitted_tests(&lua, &tests)
+    run_emitted_tests(&lua, &tests, &files, limit)
 }
 
 /// Package tests keep their configured asset roots and load Stone's CPU host
@@ -962,15 +1019,7 @@ fn prepend_package_preamble(lua: String, dir: &str) -> std::result::Result<Strin
 /// files and its `tests/`, but NOT stdlib or dependency packages (which live at
 /// other canonical paths). Module file paths are canonicalized absolute, so a
 /// prefix match against the canonicalized `dir` selects exactly this package.
-fn collect_package_tests(
-    ws: &bone_semantic::inference::Workspace,
-    dir: &str,
-) -> std::result::Result<Vec<skull::SkullTest>, CompilerError> {
-    Ok(collect_package_test_fns(ws, dir)?.into_iter().map(|(_, t)| t).collect())
-}
-
-/// [`collect_package_tests`] carrying each test's `FuncRef` (the JS executor
-/// lowers/emits per test fn).
+/// Carry each test's `FuncRef` so executors retain its source file.
 pub(crate) fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,

@@ -4754,3 +4754,76 @@ mod backend_stats_workspace_tests {
         assert_eq!(crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()), None);
     }
 }
+
+
+fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("timeout package");
+    std::fs::write(dir.path().join("stick.toml"),
+        "[package]\nname = \"file-limit\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(dir.path().join("first.rock"), format!(
+        "@test inline(lua) fn first_test() = \"{first}\"\n")).unwrap();
+    if let Some(second) = second {
+        std::fs::write(dir.path().join("second.rock"), format!(
+            "@test inline(lua) fn second_test() = \"{second}\"\n")).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn test_file_limit_allows_two_files_over_total_budget() {
+    let dir = file_limit_package("os.execute('sleep 0.7')", Some("os.execute('sleep 0.7')"));
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 2 })), "{result:?}");
+}
+
+#[test]
+fn test_file_limit_kills_and_names_stuck_file() {
+    let dir = file_limit_package("while true do end", None);
+    let start = std::time::Instant::now();
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(5), "stuck file was not bounded");
+    match result {
+        Ok(super::SkullOutcome::TestFail { passed: 0, fails }) => {
+            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")), "{fails:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn test_file_limit_keeps_completed_file_results() {
+    let dir = file_limit_package("print('done')", Some("while true do end"));
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    match result {
+        Ok(super::SkullOutcome::TestFail { passed: 1, fails }) => {
+            assert!(fails.iter().any(|f| f.contains("second.rock") && f.contains("timed out")), "{fails:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+
+#[test]
+fn test_file_limit_bounds_program_loading() {
+    let start = std::time::Instant::now();
+    let result = super::run_emitted_tests("while true do end", &[], &[], Duration::from_millis(100));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    let error = result.expect_err("loading must time out");
+    assert!(error.rendered.contains("loading emitted program: timed out"), "{error:?}");
+}
+
+#[test]
+fn test_file_limit_does_not_reset_for_each_test() {
+    let dir = file_limit_package("os.execute('sleep 0.7')", None);
+    let file = dir.path().join("first.rock");
+    let mut source = std::fs::read_to_string(&file).unwrap();
+    source.push_str("@test inline(lua) fn another_test() = \"os.execute('sleep 0.7')\"\n");
+    std::fs::write(file, source).unwrap();
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    match result {
+        Ok(super::SkullOutcome::TestFail { passed: 1, fails }) => {
+            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")), "{fails:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
