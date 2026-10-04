@@ -56,12 +56,12 @@ fn mag_run_readiness_predicate_has_no_replay_or_upload_side_effects() {
 
     let transition = rock_function_body(&run, "fn run_admission_try_finish() {");
     assert_eq!(
-        transition.matches("replay_job_ready(\"admission\", 1,").count(),
+        transition.matches("replay_job_ready(current_tick, \"admission\", 1,").count(),
         1,
         "one admission transition authority must record readiness exactly once per attempt"
     );
     assert_eq!(
-        run.matches("replay_job_ready(\"admission\", 1,").count(),
+        run.matches("replay_job_ready(current_tick, \"admission\", 1,").count(),
         1,
         "admission replay publication must have one production call site"
     );
@@ -145,7 +145,7 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         .expect("read SpaceState body");
     for field in [
         "harvest: HarvestVisualState",
-        "layout: WorldSpaceLayout",
+        "layout: Entity<WorldSpaceLayout>",
     ] {
         assert_eq!(
             space_state.matches(field).count(),
@@ -175,11 +175,20 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         .and_then(|(_, rest)| rest.split_once("\n}"))
         .map(|(body, _)| body)
         .expect("read WorldSpaceLayout body");
-    assert_eq!(root_state.matches("spaces: [WorldSpaceLayout]").count(), 1);
+    assert_eq!(root_state.matches("spaces: [Entity<WorldSpaceLayout>]").count(), 1);
     assert_eq!(layout_state.matches("simulation: SpaceSimulationState").count(), 1);
     assert!(world.contains("root.spaces = layouts"));
-    assert!(world.contains("spaces.push(SpaceState {\n            layout,"));
-    assert!(world.contains("for space in world.root.spaces { simulation_space_advance(space.simulation) }"));
+    assert_eq!(root_state.matches("space_layouts: Arena<WorldSpaceLayout>").count(), 1);
+    let build = rock_function_body(&world, "fn world_state_build(");
+    for shared_handle in ["let layout = space_layouts.insert(WorldSpaceLayout {",
+        "layouts.push(layout)", "spaces.push(space_states.insert(SpaceState {\n            layout,"] {
+        assert!(build.contains(shared_handle), "world constructor must share layout handle `{shared_handle}`");
+    }
+    let advance = rock_function_body(&world, "fn world_tick_all(");
+    for call in ["for space_handle in world.root.spaces", "let space = space_handle.get().unwrap()",
+        "simulation_space_advance(space.simulation)"] {
+        assert!(advance.contains(call), "world tick must advance each root-owned layout: `{call}`");
+    }
     let simulation = fs::read_to_string(repo.join("mag-simulation/world_space.rock"))
         .expect("read package space state");
     let simulation_state = simulation
@@ -549,13 +558,14 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let doors = fs::read_to_string(repo.join("mag/doors.rock"))
         .expect("read MAG gate source");
     let gate_lock = rock_function_body(&doors, "fn gate_locked_in(");
-    assert!(gate_lock.contains("gate_member_spawners_in(world, gate, space)"));
-    assert!(gate_lock.contains("gate_has_live_mobs_in(world, gate, space)"));
-    let spawners = fs::read_to_string(repo.join("mag/spawners.rock"))
-        .expect("read MAG spawner source");
-    let gate_members = rock_function_body(&spawners, "fn gate_member_spawners_in(");
-    assert!(gate_members.contains("world.root.spawners"));
-    assert!(gate_members.contains("sp.spec.gate == gate"));
+    assert!(gate_lock.contains("world_gate_locked(world.root, gate, space)"));
+    let package_doors = fs::read_to_string(repo.join("mag-world/world_doors.rock"))
+        .expect("read package gate source");
+    let gate_members = rock_function_body(&package_doors, "pub fn world_gate_locked<M>(");
+    for predicate in ["root.spawners", "space_id_equal(spawner.place.space, space)",
+        "spawner.spec.gate != gate", "spawner.lifecycle.members.len() > 0", "if members == 0"] {
+        assert!(gate_members.contains(predicate), "root-owned gate lock is missing `{predicate}`");
+    }
     let crypt: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(repo.join("mag/levels/crypt.json"))
             .expect("read authored Crypt level"),
@@ -1168,7 +1178,9 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 28, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 29, "WorldState field census changed: {fields:?}");
+    assert!(digest.contains("for space_handle in world.spaces"));
+    assert!(digest.contains("let space = space_handle.get().unwrap()"));
     for field in fields {
         let digested = digest.contains(&format!("world.{field}"));
         let excluded = world.contains(&format!("DIGEST_EXCLUDE({field})"));
@@ -1184,7 +1196,8 @@ fn mag_world_presentation_state_has_explicit_owners() {
 
     let blood = fs::read_to_string(repo.join("mag/blood.rock")).expect("read blood source");
     assert!(blood.contains("world_space_index(world, space)"));
-    assert!(blood.contains("world.spaces[index].decals"));
+    assert!(blood.contains("let state = world.spaces[index].get().unwrap()"));
+    assert!(blood.contains("let decals = state.decals"));
     assert!(blood.contains("presentation.drop_particle_seq"));
 }
 
@@ -1202,25 +1215,40 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "MAG must define exactly one canonical simulation tick"
     );
     let tick = rock_function_body(&run, "fn mag_simulation_tick(");
+    let prepare = rock_function_body(&run, "fn mag_tick_prepare(");
     for call in [
         "coroutine_poller_update(world.root.tasks)",
         "flow_frame_reset()",
         "world_tick_all(world)",
         "player.apply_inventory_command_in(world, intents.inventory)",
-        "world_expedition_schedule_tick(context,",
     ] {
-        assert!(tick.contains(call), "canonical tick is missing authoritative call `{call}`");
+        assert!(prepare.contains(call), "tick preparation is missing authoritative call `{call}`");
+    }
+    for call in ["prepare: mag_tick_prepare", "world_tick_runner(world.root, context, hooks, shells)",
+        "runtime.runner.unwrap().actor_host = mag_tick_actor_host()", "world_tick_advance(tick, dt)"] {
+        assert!(tick.contains(call), "canonical tick is missing runner delegation `{call}`");
+    }
+    let package_tick = fs::read_to_string(repo.join("mag-world/world_tick.rock"))
+        .expect("read package tick runner");
+    let advance = rock_function_body(&package_tick, "pub fn world_tick_advance<M, H>(");
+    assert!(advance.find("prepare(runner.host, dt)").unwrap()
+        < advance.find("world_expedition_schedule_tick(runner, runner.stages.unwrap())").unwrap(),
+        "runner preparation must precede the ordered package schedule");
+    let runner = rock_function_body(&package_tick, "pub fn world_tick_runner<M, H>(");
+    let actor_host = rock_function_body(&run, "fn mag_tick_actor_host(");
+    assert!(actor_host.contains("player_input:") && actor_host.contains("mag_tick_actor_pre_mob(r.host)"));
+    for call in ["input(r)", "world_tick_actors(r)",
+        "world_doors_update(r.root, r.host, r.door_host, player, r.dt)"] {
+        assert!(runner.contains(call), "package runner is missing authoritative stage `{call}`");
     }
     let phases = [
         ("mag_tick_actor_pre_mob", &["active.update_casting_in(world, ctx.intents.cast)",
             "player.apply_target_intent_in(world, ctx.intents.target)",
             "player.update_movement_in(world, ctx.intents.movement, dt)"][..]),
-        ("mag_tick_actors", &[][..]),
         ("mag_tick_rows_pickup", &[][..]),
         ("mag_tick_ratcatcher_and_guards", &[][..]),
         ("mag_tick_spawners", &[][..]),
         ("mag_tick_player_recovery", &[][..]),
-        ("mag_tick_doors", &[][..]),
         ("mag_tick_player_actions_harvest_hazards", &[
             "player.update_player_statuses_in(world, dt)",
             "player.apply_bandage_intent_in(world, ctx.intents.consumables)",
@@ -1237,16 +1265,19 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         .expect("read package expedition schedule");
     let schedule_tick = rock_function_body(&schedule, "pub fn world_expedition_schedule_tick<W>(");
     let mut previous = 0;
-    for (index, (phase, calls)) in phases.iter().enumerate() {
-        assert!(tick.contains(phase), "canonical tick does not register phase `{phase}`");
-        let marker = format!("{}(context)", ["actor_pre_mob", "actors", "rows_pickup",
-            "ratcatcher_and_guards", "spawners", "player_recovery", "doors",
-            "player_actions_harvest_hazards", "death_cull", "corpses_respawns",
-            "wisp_sacrifice"][index]);
+    for (index, stage) in ["actor_pre_mob", "actors", "rows_pickup", "ratcatcher_and_guards",
+        "spawners", "player_recovery", "doors", "player_actions_harvest_hazards", "death_cull",
+        "corpses_respawns", "wisp_sacrifice"].iter().enumerate() {
+        let marker = format!("{stage}(context)");
         let position = schedule_tick.find(&marker)
             .unwrap_or_else(|| panic!("package schedule omits `{marker}`"));
         assert!(index == 0 || previous < position, "package schedule changed phase order");
         previous = position;
+    }
+    for (phase, calls) in &phases {
+        if *phase != "mag_tick_actor_pre_mob" {
+            assert!(tick.contains(phase), "canonical tick does not register phase `{phase}`");
+        }
         let body = rock_function_body(&run, &format!("fn {phase}("));
         for call in *calls {
             assert!(body.contains(call), "phase `{phase}` is missing authoritative call `{call}`");
@@ -1265,6 +1296,9 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "cast_glyphs_present(world)",
         "cast_hand_vfx_present(world)",
     ] {
+        for body in [prepare, advance, runner, actor_host] {
+            assert!(!body.contains(presentation), "presentation call `{presentation}` must stay outside the runner");
+        }
         assert!(
             !tick.contains(presentation),
             "presentation call `{presentation}` must remain outside the canonical tick"

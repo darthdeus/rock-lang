@@ -55,7 +55,14 @@ struct Run {
 }
 
 fn rock(cwd: &Path, args: &[&str]) -> Run {
-    let out = Command::new(rock_bin()).current_dir(cwd).args(args).output().expect("spawn rock");
+    // The fixtures live in a temp dir, so without ROCK_DIR the binary falls
+    // back to a fixed checkout path and checks against that tree's stdlib.
+    let out = Command::new(rock_bin())
+        .current_dir(cwd)
+        .env("ROCK_DIR", repo_root())
+        .args(args)
+        .output()
+        .expect("spawn rock");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -690,7 +697,7 @@ fn a_package_that_does_not_check_is_an_analysis_failure() {
 /// into `dest`, keeping the repository layout so manifest paths resolve.
 fn copy_chess_graph(dest: &Path) {
     let root = repo_root();
-    for rel in ["stone", "stone-core", "libs/chess-core", "libs/chess-game", "libs/chess-render", "libs/chess-sfx", "games/chess", "games/chesslings"] {
+    for rel in ["stone", "stone-core", "stone-native", "libs/chess-core", "libs/chess-game", "libs/chess-render", "libs/chess-sfx", "games/chess", "games/chesslings"] {
         copy_sources(&root.join(rel), &dest.join(rel));
     }
 }
