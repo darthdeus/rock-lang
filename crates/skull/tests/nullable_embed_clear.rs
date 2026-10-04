@@ -97,3 +97,21 @@ io.write('ok')
 "#;
     assert_eq!(run_luajit(&format!("{lua}\n{driver}"), "absent_embed_clear"), "ok");
 }
+
+#[test]
+fn nullable_embed_clear_normalizes_dynamic_absence_before_boxed_read() {
+    let lua = emit_module(r#"
+struct Payload { n: int }
+struct State { embed payload: Payload? }
+fn absent() -> Payload? { return null }
+fn clear_payload(s: State) { s.payload = null }
+fn take(p: Payload?) -> int { if p == null { return -1 }; return p.n }
+fn main() {
+    let s = State { payload: Payload { n: 7 } }
+    s.payload = absent()
+    clear_payload(s)
+    print("{take(s.payload)}")
+}
+"#);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "embed_dynamic_absence"), "-1");
+}

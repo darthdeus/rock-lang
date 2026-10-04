@@ -605,9 +605,12 @@ impl Builder<'_> {
         // absent embed can therefore rehash the parent on every frame.
         let skip_clear = if nullable && matches!(self.body.expr_arena[value], Expr::Null) {
             let present = self.emit_cur(Inst::Field { base: parent, field });
+            // False presence still needs normalization for boxed embed readers.
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            let absent = self.emit_cur(Inst::Eq(present, nil));
             let clear = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: present, then_bb: clear, else_bb: join });
+            self.f.set_term(self.cur, Term::Branch { cond: absent, then_bb: join, else_bb: clear });
             self.cur = clear;
             Some(join)
         } else {
