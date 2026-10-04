@@ -70,7 +70,6 @@ pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
     "mag_encounter_worker",
     "mag_world",
     "match3",
-    "pixel_spirit",
     "spark",
     "stone",
     "survivors",

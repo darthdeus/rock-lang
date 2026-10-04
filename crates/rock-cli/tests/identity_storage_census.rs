@@ -21,7 +21,7 @@ const PINNED: &str = "\
 | package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | anvil | exempt | 0 | 4 | 0 | 0 | 10 | 0 | 0 | 0 | 0 | 14 |
-| bitgun | exempt | 14 | 8 | 0 | 0 | 56 | 1 | 1 | 47 | 1 | 128 |
+| bitgun | exempt | 14 | 8 | 0 | 0 | 56 | 1 | 1 | 26 | 1 | 107 |
 | bopt | exempt | 2 | 2 | 0 | 0 | 102 | 0 | 0 | 0 | 0 | 106 |
 | chess | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 19 | 0 | 21 |
 | chess_game | exempt | 4 | 1 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 7 |
@@ -32,17 +32,16 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 231 | 186 | 7 | 0 | 990 | 18 | 68 | 1285 | 4 | 2789 |
+| mag | exempt | 223 | 184 | 7 | 0 | 983 | 17 | 68 | 1271 | 4 | 2757 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 3 | 2 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 |
 | mag_world | exempt | 64 | 5 | 0 | 0 | 62 | 1 | 0 | 0 | 0 | 132 |
-| match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 15 | 6 | 21 |
-| pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
+| match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| stone | exempt | 38 | 47 | 6 | 0 | 169 | 5 | 0 | 0 | 2 | 267 |
+| stone | exempt | 30 | 47 | 6 | 0 | 169 | 5 | 0 | 0 | 2 | 259 |
 | survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
 | testbed | exempt | 5 | 3 | 0 | 0 | 111 | 2 | 2 | 64 | 56 | 243 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
