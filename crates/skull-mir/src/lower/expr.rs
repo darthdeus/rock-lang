@@ -8,7 +8,11 @@ impl Builder<'_> {
     }
 
     pub(crate) fn lower_condition(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        self.lower_expr_for_use(e, None, true)
+        self.lower_expr_for_use(e, None, true, true)
+    }
+
+    pub(crate) fn lower_iterable_collection(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        self.lower_expr_for_use(e, None, false, false)
     }
 
     pub(crate) fn lower_expr_with_expected(
@@ -16,7 +20,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         expected: Option<&crate::monoty::MonoTy>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.lower_expr_for_use(e, expected, false)
+        self.lower_expr_for_use(e, expected, false, true)
     }
 
     fn lower_expr_for_use(
@@ -24,6 +28,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         expected: Option<&crate::monoty::MonoTy>,
         condition: bool,
+        coerce_iterator: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
         // Source cursor for instruction-level diagnostics: whatever is lowered
         // from here down came from `e` unless a nested `lower_expr` narrows it,
@@ -85,7 +90,7 @@ impl Builder<'_> {
         // Implicit iterable->iterator coercion at a bounded call arg: bone
         // recorded the resolved `iter` fn; wrap the arg value in that call
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
-        if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
+        if coerce_iterator && let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
             let iter_ref = FuncRef { module: m, func: f };
             // This coercion belongs to `e`, but the cursor was already restored
@@ -271,8 +276,8 @@ impl Builder<'_> {
             Expr::Not(x, _) => {
                 match self.overload_target(e) {
                     Some(func) => {
-                        let v = self.lower_expr(x)?;
-                        Ok(self.emit_cur(Inst::Call { func, args: vec![v] }))
+                        let value = self.lower_direct_call_repr(e, func, &[x], false)?;
+                        self.pack_maybe_absent(value)
                     }
                     None => {
                         let v = self.lower_condition(x)?;
@@ -281,20 +286,31 @@ impl Builder<'_> {
                 }
             }
             Expr::BitNot(x) => {
-                let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
-                    Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
-                    None if self.arith_ty(x) == Some(ArithTy::Uint) => {
-                        Ok(self.emit_cur(Inst::UintBitNot(v)))
+                    Some(func) => {
+                        let value = self.lower_direct_call_repr(e, func, &[x], false)?;
+                        self.pack_maybe_absent(value)
                     }
-                    None => Ok(self.emit_cur(Inst::BitNot(v))),
+                    None => {
+                        let v = self.lower_expr(x)?;
+                        Ok(self.emit_cur(if self.arith_ty(x) == Some(ArithTy::Uint) {
+                            Inst::UintBitNot(v)
+                        } else {
+                            Inst::BitNot(v)
+                        }))
+                    }
                 }
             }
             Expr::UnaryMinus(x, _) => {
-                let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
-                    Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
-                    None => Ok(self.emit_cur(Inst::Neg(v))),
+                    Some(func) => {
+                        let value = self.lower_direct_call_repr(e, func, &[x], false)?;
+                        self.pack_maybe_absent(value)
+                    }
+                    None => {
+                        let v = self.lower_expr(x)?;
+                        Ok(self.emit_cur(Inst::Neg(v)))
+                    }
                 }
             }
 
@@ -1282,8 +1298,7 @@ impl Builder<'_> {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 let name = self.static_cells[&raw(b)];
                 let cur = self.emit_cur(Inst::Global(name));
-                let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::Var(b) => {
@@ -1292,8 +1307,7 @@ impl Builder<'_> {
                     .get(&raw(b))
                     .ok_or_else(|| gap("compound-assign to an unbound variable"))?;
                 let cur = self.emit_cur(Inst::Load(cell));
-                let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                 self.emit_cur(Inst::Store { cell, value: new_v });
             }
             // A `nobox` global is stored as leaves, so neither the whole-group
@@ -1308,31 +1322,27 @@ impl Builder<'_> {
             }
             Expr::Global(name) => {
                 let cur = self.emit_cur(Inst::Global(name));
-                let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
                 if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
                     let cur = self.nb_leaf_load(buf, checked, &place);
-                    let rv = self.lower_expr(value)?;
-                    let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
+                    let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                     self.nb_leaf_store(buf, checked, &place, new_v);
                     return Ok(());
                 }
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field: key });
-                let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                 self.emit_cur(Inst::StoreField { base: b, field: key, value: new_v });
             }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 let cur = self.emit_cur(Inst::Index { base: b, index: i, kind });
-                let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                 self.emit_cur(Inst::StoreIndex { base: b, index: i, value: new_v, kind });
             }
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
@@ -1346,8 +1356,7 @@ impl Builder<'_> {
                 self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: join, else_bb: store_bb });
                 self.cur = store_bb;
                 let cur = self.emit_cur(Inst::Field { base: recv, field });
-                let rv = self.lower_expr(value)?;
-                let new_v = self.compound_combine_f32(f32_target, scalar, op_fn, overload, cur, rv)?;
+                let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
                 self.emit_cur(Inst::StoreField { base: recv, field, value: new_v });
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
@@ -1362,34 +1371,38 @@ impl Builder<'_> {
     /// [`Self::compound_combine`], rounding the result for an `f32` target.
     fn compound_combine_f32(
         &mut self,
+        e: Idx<Expr>,
         f32_target: bool,
         scalar: Option<(ArithTy, ArithTy)>,
         op_fn: Ustr,
         overload: Option<FuncRef>,
         cur: Idx<Inst>,
-        rv: Idx<Inst>,
+        rhs: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+        let v = self.compound_combine(e, scalar, op_fn, overload, cur, rhs)?;
         Ok(if f32_target { self.emit_cur(Inst::FloatToF32(v)) } else { v })
     }
 
     pub(crate) fn compound_combine(
         &mut self,
+        e: Idx<Expr>,
         scalar: Option<(ArithTy, ArithTy)>,
         op_fn: Ustr,
         overload: Option<FuncRef>,
         cur: Idx<Inst>,
-        rv: Idx<Inst>,
+        rhs: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         match scalar {
             Some((lt, rt)) => {
+                let rv = self.lower_expr(rhs)?;
                 let inst = arith_inst(op_fn.as_str(), lt, rt, cur, rv)?;
                 Ok(self.emit_cur(inst))
             }
-            None => Ok(self.emit_cur(Inst::Call {
-                func: overload.expect("non-scalar compound-assign resolved an overload"),
-                args: vec![cur, rv],
-            })),
+            None => {
+                let func = overload.expect("non-scalar compound-assign resolved an overload");
+                let value = self.ufcs_call_repr(e, func, cur, &[rhs])?;
+                self.pack_maybe_absent(value)
+            }
         }
     }
 

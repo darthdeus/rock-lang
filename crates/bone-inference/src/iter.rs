@@ -91,7 +91,6 @@ pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
         TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => bone_core::modules::is_intrinsic_key_in(
             n,
             &[
-                "Arena",
                 "NativeBuffer",
                 "NativeBufferU8",
                 "NativeBufferI8",
@@ -118,6 +117,7 @@ pub(crate) fn infer_for_elem(
 
         // Builtin-collection `enumerate(coll)` keeps its template lowering
         // (Map has no protocol iterator; the counted paths are co-fn safe).
+        // Arena uses EnumIter so native backends receive its iterator witnesses.
         // `enumerate` over anything else -- an iterator chain -- falls through
         // to the default arm: the call resolves to the stdlib `EnumIter`
         // combinator and the result iterates via the protocol.
@@ -151,8 +151,8 @@ pub(crate) fn infer_for_elem(
             // native numeric `for` the deleted skull template did. `Arena<T>`
             // likewise routes through `ArenaPairIter` (fetch-outside skip
             // shape; element = the `(Entity<T>, T)` tuple).
-            // `for_elem_ty` keeps its Array/Arena arms -- `enumerate(..)`
-            // above still calls it directly for the element type.
+            // `for_elem_ty` keeps its Array arm for builtin `enumerate(..)`;
+            // Arena enumeration resolves the ordinary EnumIter combinator.
             let is_protocol_builtin = match *gamma.get(iter_ty) {
                 TypeExpr::App { ctor: TypeCtor::Array, .. } => true,
                 TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {

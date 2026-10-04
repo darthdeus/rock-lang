@@ -71,37 +71,30 @@ impl Builder<'_> {
                 BindingPattern::Tuple(_) => Err(gap("for-range with a tuple pattern")),
             };
         }
-        // User iterator protocol (bone recorded the resolution for this For):
-        // desugar to `it = iter(coll); loop { (ok, ..) = next(it); !ok -> break }`.
-        // Only populated for non-builtin collections, so this never shadows a
-        // builtin template. `iter: None` = identity (the collection IS the
-        // iterator); a `CallerGeneric` next = placeholder in a bounded body.
+        let enumerated_collection = match self.body.expr_arena[iter].clone() {
+            Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. }
+                if name.as_str() == "enumerate" && args.len() == 1 => Some(args.start()),
+            _ => None,
+        };
+        // User iterator protocol (bone recorded the resolution for this For).
         if let Some(info) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).cloned()) {
+            // Lua keeps its counted arena walk; native rows use the recorded iterator.
+            if !self.scx.row_value_containers
+                && let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c))
+            {
+                return self.lower_for_arena(&vars, collection, body, true);
+            }
             return self.lower_for_user_iter(&vars, iter, body, &info);
         }
-        if let Expr::Call {
-            callee: Callee::Unresolved { name, .. },
-            args,
-            ..
-        } = self.body.expr_arena[iter].clone()
-        {
-            if name.as_str() == "enumerate" {
-                let av: Vec<Idx<Expr>> = args.into_iter().collect();
-                if let [coll] = av[..] {
-                    if self.iter_is_arena(coll) {
-                        return self.lower_for_arena(&vars, coll, body, true);
-                    }
-                    return self.lower_for_enumerate(&vars, coll, body);
-                }
+        if let Some(collection) = enumerated_collection {
+            if self.iter_is_arena(collection) {
+                return Err(gap("enumerated Arena must have an iterator protocol"));
             }
-            // A non-enumerate call returning a collection: fall through to the
-            // collection dispatch below. `lower_for_*` lower the iter once into a
-            // value, so the call runs exactly once (no per-iteration re-eval).
+            return self.lower_for_enumerate(&vars, collection, body);
         }
         if self.iter_is_arena(iter) {
             // Direct `for .. in arena` arrives with `for_iter_protocol`
-            // populated (bone routes Arena to the stdlib ArenaPairIter); only
-            // `enumerate(arena)` still uses the template above.
+            // populated (bone routes Arena to the stdlib ArenaPairIter).
             return Err(gap(
                 "for over Arena must route through the iterator protocol (for_iter_protocol missing)",
             ));
@@ -443,7 +436,8 @@ impl Builder<'_> {
         // Resolved ONCE here, outside the counted loop: Scene ownership must not
         // put a registry lookup in front of every row. A retired handle resolves
         // to an empty store, which the `i < n` header exits immediately.
-        let arena = self.lower_expr(iter)?;
+        // This counted template consumes the collection, not its inferred iter(arg) wrapper.
+        let arena = self.lower_iterable_collection(iter)?;
         let scene_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_scene_id") });
         let arena_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_arena_id") });
         let store = self.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])?;
