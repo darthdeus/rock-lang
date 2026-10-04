@@ -32,7 +32,7 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 234 | 186 | 7 | 0 | 1011 | 18 | 68 | 1285 | 8 | 2817 |
+| mag | exempt | 234 | 186 | 7 | 0 | 1015 | 18 | 68 | 1285 | 4 | 2817 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 3 | 2 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
