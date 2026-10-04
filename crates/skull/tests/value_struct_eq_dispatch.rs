@@ -12,7 +12,10 @@ use crate::common::{emit_module, function_body, run_luajit};
 fn vector_handle_equality_does_not_materialize_carriers() {
     let lua = emit_module(include_str!("../../../tests/handle_equality.rock"));
     let body = function_body(&lua, "entity_matches");
-    assert!(body.contains("==") && body.contains("not"), "missing comparisons:\n{body}");
+    assert!(
+        body.contains("==") && (body.contains("~=") || body.contains("not")),
+        "missing comparisons:\n{body}"
+    );
     assert!(
         !body.contains("Entity_vt("),
         "vector handle comparisons must read identity leaves:\n{body}"
