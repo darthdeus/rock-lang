@@ -969,14 +969,18 @@ fn skull_build_package_with_limit(
         ws.modules[func.module.index()].file.as_str().to_owned()
     }).collect::<Vec<_>>();
     let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
-    let lua = prepend_package_preamble(lua, dir)?;
+    let lua = prepend_package_preamble(lua, dir, &ws)?;
     run_emitted_tests(&lua, &tests, &files, limit)
 }
 
-/// Package tests keep their configured asset roots and load Stone's CPU host
-/// when their dependency graph includes Stone. Lifecycle hooks and the frame
-/// runner are not invoked: no SDL, window, GL context or audio device is started.
-fn prepend_package_preamble(lua: String, dir: &str) -> std::result::Result<String, SkullFailure> {
+/// Package tests stage native Stone bindings and keep configured asset roots.
+/// Full Stone dependencies also load its CPU host. Lifecycle hooks and the
+/// frame runner are not invoked: no SDL, window, GL or audio device is started.
+fn prepend_package_preamble(
+    lua: String,
+    dir: &str,
+    ws: &bone_semantic::inference::Workspace,
+) -> std::result::Result<String, SkullFailure> {
     let path = std::path::Path::new(dir);
     let stone_dir = configured_stone_dir(path).map_err(|error| SkullFailure {
         reason: "Stone root resolution failed".to_string(),
@@ -986,7 +990,16 @@ fn prepend_package_preamble(lua: String, dir: &str) -> std::result::Result<Strin
         reason: "test host resolution failed".to_string(),
         rendered: error.to_string(),
     })?;
-    if is_game || stone_dir.is_some() {
+    // The resolved graph can supply native bindings without the full Stone host.
+    // Use the checked FFI namespace, independent of package names and aliases.
+    let needs_libstone = ws.modules.iter().any(|module| {
+        module.functions.iter().any(|(_, function)| {
+            function.is_extern
+                && function.backend != bone_semantic::hir::FnBackend::Js
+                && function.ffi_lib.is_some_and(|library| library.as_str() == "stone")
+        })
+    });
+    if is_game || stone_dir.is_some() || needs_libstone {
         // Core libstone only: the CPU host does not use optional game cdylibs.
         rock_host::engine_build::build_libstone().map_err(|error| SkullFailure {
             reason: "engine library staging failed".to_string(),
