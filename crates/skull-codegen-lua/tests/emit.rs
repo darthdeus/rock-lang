@@ -141,6 +141,13 @@ assert(hits == 2 and reads == 0)
 }
 
 #[test]
+fn non_nil_constant_field_store_keeps_direct_assignment() {
+    let lua = emit_clean("struct Row { count: int = 0 } fn update(row: Row) { row.count = 42 }", "update");
+    assert!(!lua.contains("getmetatable("), "{lua}");
+    assert!(lua.contains(".count = (42)"), "{lua}");
+}
+
+#[test]
 fn numeric_selection_uses_native_minmax() {
     let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
     assert!(lua.contains("math.min("), "{lua}");

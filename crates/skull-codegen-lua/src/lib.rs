@@ -5077,7 +5077,8 @@ impl Emitter<'_> {
                 }
                 // LuaJIT can rehash when assigning nil to an absent key.
                 // Metatable writes remain observable; plain operands evaluate once.
-                let guard = self.opnd_is_plain(*base) && self.opnd_is_plain(*value);
+                let guard = self.opnd_is_plain(*base) && self.opnd_is_plain(*value)
+                    && !matches!(&self.func.insts[*value], Inst::Const(lit) if !matches!(lit, Lit::Nil));
                 if guard {
                     out.push_str("  if ");
                     self.write_opnd(out, *value);
