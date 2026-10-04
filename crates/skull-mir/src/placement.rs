@@ -6,7 +6,7 @@ use ustr::Ustr;
 
 use crate::mir::{Cell, FuncRef, Inst, Lit, MirFunc, Term};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Place {
     Pending,
     Static,
@@ -164,6 +164,50 @@ pub struct FunctionPlacement {
     pub owner: Option<Place>,
     pub constraints: Vec<OutlivesConstraint>,
     pub default_params: Vec<Option<Place>>,
+}
+
+impl FunctionPlacement {
+    /// Retain discovered obligations and widen owners instead of replacing facts.
+    /// Place joins either retain an owner or move toward Unknown; exported places
+    /// have finite height. Constraints range over finite owners and source spans.
+    pub fn accumulate(&mut self, next: Self) -> bool {
+        fn widen(previous: &mut Option<Place>, next: Option<Place>) -> bool {
+            let Some(next) = next.map(export_place) else { return false };
+            let joined = previous.map_or(next, |previous| previous.join(next));
+            if *previous == Some(joined) { return false; }
+            *previous = Some(joined);
+            true
+        }
+
+        let mut changed = widen(&mut self.result, next.result);
+        changed |= widen(&mut self.entity_result, next.entity_result);
+        changed |= widen(&mut self.entity_content, next.entity_content);
+        changed |= widen(&mut self.owner, next.owner);
+        if self.default_params.len() < next.default_params.len() {
+            self.default_params.resize(next.default_params.len(), None);
+            changed = true;
+        }
+        for (previous, next) in self.default_params.iter_mut().zip(next.default_params) {
+            changed |= widen(previous, next);
+        }
+        for mut constraint in next.constraints {
+            constraint.value = export_place(constraint.value);
+            constraint.destination = export_place(constraint.destination);
+            if !self.constraints.contains(&constraint) {
+                self.constraints.push(constraint);
+                changed = true;
+            }
+        }
+        self.constraints.sort_by(|left, right| {
+            let key = |constraint: &OutlivesConstraint| (
+                constraint.value, constraint.destination, constraint.contextual,
+                constraint.span.file.as_str(), constraint.span.line_range,
+                constraint.span.col_range, constraint.span.offset_range,
+            );
+            key(left).cmp(&key(right))
+        });
+        changed
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2068,7 +2112,7 @@ pub fn analyze(
 
         for &block in &blocks {
             if let Term::Return(values) = &mir.blocks[block].term {
-                let result = values.iter().fold(Place::Static, |place, value| {
+                let result = values.iter().fold(Place::Pending, |place, value| {
                     place.join(inst_place(&analysis, *value))
                 });
                 let entity_result = values
@@ -2140,11 +2184,8 @@ pub fn analyze(
         }
 
         for (&index, roots) in &mir.param_default_values {
-            let place = roots.iter().fold(Place::Static, |place, root| {
-                let value = match analysis.values.get(*root).copied() {
-                    Some(Place::Pending) | None => Place::Unknown,
-                    Some(value) => value,
-                };
+            let place = roots.iter().fold(Place::Pending, |place, root| {
+                let value = analysis.values.get(*root).copied().unwrap_or(Place::Unknown);
                 place.join(value)
             });
             if analysis.summary.default_params.len() <= index {
@@ -2173,9 +2214,59 @@ pub fn analyze(
 mod tests {
     use super::*;
 
-    struct RuntimeResultOracle;
+    #[test]
+    fn summary_widening_has_finite_height() {
+        let places = [Place::Pending, Place::Static, Place::Destination,
+            Place::Session, Place::Frame, Place::Environment,
+            Place::Param(0), Place::Param(1), Place::Unknown];
+        let height = |place| match place {
+            Place::Pending => 0,
+            Place::Static => 1,
+            Place::Destination => 2,
+            Place::Session => 3,
+            Place::Frame => 4,
+            Place::Environment => 5,
+            Place::Param(_) => 6,
+            Place::Unknown => 7,
+            Place::Runtime(_) | Place::RuntimeAny => panic!("runtime owners must be exported"),
+        };
+        for previous in places {
+            for next in places {
+                let mut summary = FunctionPlacement { result: Some(previous), ..Default::default() };
+                summary.accumulate(FunctionPlacement { result: Some(next), ..Default::default() });
+                let widened = summary.result.unwrap();
+                assert!(widened == previous || height(widened) > height(previous),
+                    "summary owner went backward: {previous:?} + {next:?} -> {widened:?}");
+            }
+        }
+    }
 
-    impl PlacementOracle for RuntimeResultOracle {
+    #[test]
+    fn summary_accumulation_preserves_obligations_and_ignores_their_order() {
+        let left = OutlivesConstraint { value: Place::Param(0), destination: Place::Destination,
+            span: Span::default(), contextual: false };
+        let right = OutlivesConstraint { value: Place::Param(1), ..left };
+        let mut summary = FunctionPlacement::default();
+        assert!(summary.accumulate(FunctionPlacement {
+            result: Some(Place::Param(0)), constraints: vec![left, right],
+            default_params: vec![Some(Place::Session)], ..Default::default()
+        }));
+        assert!(!summary.accumulate(FunctionPlacement {
+            result: Some(Place::Pending), constraints: vec![right, left, left],
+            ..Default::default()
+        }));
+        assert!(summary.accumulate(FunctionPlacement {
+            result: Some(Place::Param(1)), ..Default::default()
+        }));
+        assert_eq!(summary.result, Some(Place::Unknown));
+        assert_eq!(summary.constraints, vec![left, right]);
+        assert_eq!(summary.default_params, vec![Some(Place::Session)]);
+        assert!(!summary.accumulate(FunctionPlacement::default()));
+    }
+
+    struct ResultOracle(Option<Place>);
+
+    impl PlacementOracle for ResultOracle {
         fn global_place(&self, _name: Ustr) -> Place {
             Place::Static
         }
@@ -2196,7 +2287,7 @@ mod tests {
             _default_allocation: Place,
         ) -> CallEffect {
             CallEffect {
-                result: Some(Place::Runtime(_inst)),
+                result: Some(self.0.unwrap_or(Place::Runtime(_inst))),
                 ..CallEffect::default()
             }
         }
@@ -2218,13 +2309,33 @@ mod tests {
         );
         mir.set_term(block, Term::Return(vec![call]));
 
-        let analysis = analyze(&mir, AnalysisContext::frame(), &RuntimeResultOracle);
+        let analysis = analyze(&mir, AnalysisContext::frame(), &ResultOracle(None));
 
         assert_eq!(analysis.summary.result, Some(Place::Frame));
         assert!(analysis.summary.constraints.iter().all(|constraint| {
             !matches!(constraint.value, Place::Runtime(_))
                 && !matches!(constraint.destination, Place::Runtime(_))
         }));
+    }
+
+    #[test]
+    fn unresolved_call_return_and_default_remain_pending() {
+        let mut mir = MirFunc::new(Ustr::from("pending_result"));
+        let parameter = mir.new_cell(Some(Ustr::from("argument")));
+        mir.params.push(parameter);
+        let block = mir.entry();
+        let call = mir.emit(block, Inst::Call {
+            func: FuncRef {
+                module: bone_semantic::prelude::ModuleId::builtin(),
+                func: Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+            },
+            args: Vec::new(),
+        });
+        mir.param_default_values.insert(0, vec![call]);
+        mir.set_term(block, Term::Return(vec![call]));
+        let analysis = analyze(&mir, AnalysisContext::frame(), &ResultOracle(Some(Place::Pending)));
+        assert_eq!(analysis.summary.result, Some(Place::Pending));
+        assert_eq!(analysis.summary.default_params, vec![Some(Place::Pending)]);
     }
 
     #[test]
