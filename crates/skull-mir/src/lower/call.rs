@@ -25,6 +25,62 @@ pub(crate) struct DirectCall {
 }
 
 impl Builder<'_> {
+    fn lower_nullable_field_get(
+        &mut self,
+        e: Idx<Expr>,
+        name: Ustr,
+        args: &[Idx<Expr>],
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        let func = self.resolve_funcref(e, name)?;
+        let module = self.ws.module(func.module);
+        if !bone_semantic::prelude::is_stdlib_module_file(module.file.as_str())
+            || module.functions[func.func].inline_body.is_none()
+        {
+            return Ok(None);
+        }
+        let inst = self.concrete_callee_for_site(e)?
+            .ok_or_else(|| self.gap_here("field_get has no concrete callee"))?;
+        let Some(ret) = self.concrete_callee_return_ty(e, &inst)? else { return Ok(None) };
+        let (payload, nullable) = ret.peel_nullable();
+        let Some(child) = payload.nominal() else { return Ok(None) };
+        if !nullable || !self.is_nobox_struct(child) {
+            return Ok(None);
+        }
+        let owner = self.concrete_callee_param_ty(e, &inst, 0)?
+            .ok_or_else(|| self.gap_here("field_get has no concrete owner type"))?;
+        let Some(parent) = owner.nominal() else { return Ok(None) };
+        let fields = self.struct_field_names_required(parent)?;
+        let mut flattened = false;
+        for field in fields {
+            if self.struct_field_plan(parent, field, false)?.embed() == Some((child, true)) {
+                flattened = true;
+                break;
+            }
+        }
+        if !flattened {
+            return Ok(None);
+        }
+        let id = self.concrete_rep_id(&ret, RepUse::Return, false, false)?;
+        let shape = self.scx.rep_arena().value_shape(id)
+            .ok_or_else(|| self.gap_here("flattened field_get result has no leaf shape"))?;
+        let args = self.reorder_named_args(e, args, func, Some(&inst))?;
+        let [owner, selector] = args.as_slice() else {
+            return Err(self.gap_here("field_get requires an owner and selector"));
+        };
+        // The field's own key is presence; its dotted keys hold the payload.
+        let mut leaves = vec![self.emit_cur(Inst::Index {
+            base: *owner, index: *selector, kind: ContainerKind::Map,
+        })];
+        for path in value_leaf_paths(&shape) {
+            let suffix = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(&format!(".{path}")))));
+            let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
+            leaves.push(self.emit_cur(Inst::Index {
+                base: *owner, index, kind: ContainerKind::Map,
+            }));
+        }
+        Ok(Some(self.rebuild_from_leaves(&shape, &leaves, &mut 0)))
+    }
+
     fn record_concrete_ablation(&self, e: Idx<Expr>, func: FuncRef) {
         if !crate::ablation::enabled() {
             return;
@@ -247,6 +303,15 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+        if self.scx.target() == bone_semantic::hir::FnBackend::Lua {
+            if let Callee::Unresolved { name, .. } = callee {
+                if name.as_str() == "field_get" {
+                    if let Some(repr) = self.lower_nullable_field_get(e, name, &arg_idxs)? {
+                        return Ok(repr);
+                    }
+                }
+            }
+        }
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "inspect" | "inspect_formatted") {
                 if let Some(&arg) = arg_idxs.first() {

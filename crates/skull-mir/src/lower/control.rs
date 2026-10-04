@@ -37,7 +37,31 @@ impl Builder<'_> {
         let lhs_leaves = self.repr_to_storage_leaves(&lhs_repr, shape, "value equality left operand")?;
         let rhs_repr = self.lower_expr_repr(rhs)?;
         let rhs_leaves = self.repr_to_storage_leaves(&rhs_repr, shape, "value equality right operand")?;
-        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
+        let equal = if shape.nullable && self.scx.target() == bone_semantic::hir::FnBackend::Lua {
+            let left_absent = self.emit_cur(Inst::Not(lhs_leaves[0]));
+            let right_absent = self.emit_cur(Inst::Not(rhs_leaves[0]));
+            let result = self.f.new_cell(None);
+            let absent = self.f.new_block();
+            let present = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(self.cur, Term::Branch {
+                cond: left_absent, then_bb: absent, else_bb: present,
+            });
+            self.cur = absent;
+            self.store_and_join(result, right_absent, join);
+            self.cur = present;
+            let no = self.emit_cur(Inst::Const(Lit::Bool(false)));
+            let mut left = vec![no];
+            left.extend_from_slice(&lhs_leaves[1..]);
+            let mut right = vec![right_absent];
+            right.extend_from_slice(&rhs_leaves[1..]);
+            let equal = self.emit_all_equal(&left, &right);
+            self.store_and_join(result, equal, join);
+            self.cur = join;
+            self.emit_cur(Inst::Load(result))
+        } else {
+            self.emit_all_equal(&lhs_leaves, &rhs_leaves)
+        };
         Ok(if matches!(op, BinOp::Eq) {
             equal
         } else {
@@ -211,6 +235,23 @@ impl Builder<'_> {
                         .or(self.nullable_value_shape_of(rhs)?)
                     {
                         return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
+                    }
+                    // Identity lanes are integral. Other values retain their
+                    // metatype's rounding, presence and structural field rules.
+                    let integral = self.value_struct_name_of(lhs)
+                        .and_then(|name| value_struct_field_tys(self.ws, name))
+                        .is_some_and(|fields| fields.iter().all(|(_, ty)| matches!(
+                            super::shape::static_ty(self.ws, *ty),
+                            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint))
+                        )));
+                    if integral {
+                        let ty = self.concrete_expr_ty(lhs)
+                            .ok_or_else(|| self.gap_here("value equality has no concrete type"))?;
+                        let id = self.concrete_rep_id(ty.peel_nullable().0, RepUse::Parameter, false, false)?;
+                        if let Some(mut shape) = self.scx.rep_arena().value_shape(id) {
+                            shape.nullable = self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);
+                            return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
+                        }
                     }
                     let lhs_repr = self.lower_expr_repr(lhs)?.into_value();
                     let rhs_repr = self.lower_expr_repr(rhs)?.into_value();

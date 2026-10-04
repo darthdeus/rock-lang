@@ -8,6 +8,17 @@
 // struct operands and routes to `EqRoute::Primitive`.
 use crate::common::{emit_module, function_body, run_luajit};
 
+#[test]
+fn vector_handle_equality_does_not_materialize_carriers() {
+    let lua = emit_module(include_str!("../../../tests/handle_equality.rock"));
+    let body = function_body(&lua, "entity_matches");
+    assert!(body.contains("==") && body.contains("not"), "missing comparisons:\n{body}");
+    assert!(
+        !body.contains("Entity_vt("),
+        "vector handle comparisons must read identity leaves:\n{body}"
+    );
+}
+
 const SCALAR_VALUE: &str = r#"
 value V2 { x: float, y: float }
 
@@ -155,4 +166,106 @@ fn value_struct_equality_preserves_semantics() {
     );
     let out = run_luajit(&lua, "value_struct_eq_semantics");
     assert_eq!(out.trim(), "true\tfalse\ttrue\tfalse\ttrue\ttrue", "semantic mismatch:\n{out}");
+}
+
+// Scalar `value` operands arrive as leaf cells. Comparing them must stay
+// leaf-wise: packing both sides into `*_vt` tables to reach `__eq` allocated
+// two tables per comparison (MAG's per-frame `Task.state == ...` checks on
+// `Entity<T>`, which is generic and so never answers `nobox_value_name`).
+const SCALAR_LEAF_EQUALITY: &str = r#"
+value V2 { x: float, y: float }
+value Handle<T> { slot: int, generation: int }
+
+fn eq_v2(a: V2, b: V2) -> bool { return a == b }
+fn ne_v2(a: V2, b: V2) -> bool { return a != b }
+fn eq_handle(a: Handle<int>, b: Handle<int>) -> bool { return a == b }
+fn ne_handle(a: Handle<int>, b: Handle<int>) -> bool { return a != b }
+
+value Tagged { tag: int, handle: Handle<int> }
+struct Slot { last: Tagged? = null }
+
+fn stored_matches(slot: Slot, x: Handle<int>) -> bool {
+    if let last = slot.last { return last.handle == x }
+    return false
+}
+"#;
+
+#[test]
+fn scalar_value_equality_compares_leaves_without_materializing() {
+    let lua = emit_module(SCALAR_LEAF_EQUALITY);
+    for name in ["eq_v2", "ne_v2", "eq_handle", "ne_handle", "stored_matches"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("_vt(") && !body.contains("__op_eq") && !body.contains("__op_ne"),
+            "`{name}` materialized its operands to compare them:\n{body}"
+        );
+    }
+}
+
+const SCALAR_LEAF_SEMANTICS: &str = r#"
+value Handle<T> { slot: int, generation: int }
+
+fn same(x: Handle<int>, y: Handle<int>) -> bool { return x == y }
+fn differ(x: Handle<int>, y: Handle<int>) -> bool { return x != y }
+
+@nomangle fn handle_eq(a: int, b: int, c: int, d: int) -> bool {
+    let x: Handle<int> = Handle { slot: a, generation: b }
+    return same(x, Handle { slot: c, generation: d })
+}
+
+@nomangle fn handle_ne(a: int, b: int, c: int, d: int) -> bool {
+    let x: Handle<int> = Handle { slot: a, generation: b }
+    return differ(x, Handle { slot: c, generation: d })
+}
+"#;
+
+#[test]
+fn scalar_value_leaf_equality_keeps_field_semantics() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit not found; skipping execution check");
+        return;
+    }
+    let mut lua = emit_module(SCALAR_LEAF_SEMANTICS);
+    lua.push_str(
+        "\nprint(handle_eq(1, 2, 1, 2), handle_eq(1, 2, 1, 3), handle_eq(1, 2, 4, 2))\
+         \nprint(handle_ne(1, 2, 1, 2), handle_ne(1, 2, 1, 3))\n",
+    );
+    let out = run_luajit(&lua, "value_struct_eq_leaf_semantics");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["true\tfalse\tfalse", "false\ttrue"], "unexpected results:\n{out}");
+}
+
+// A C-layout `value` stores `float` leaves as single precision, so leaves read
+// back from storage are rounded while a scalarized operand's leaves are not.
+// Equality must still see a stored `Tint { r: 0.4 }` equal to a fresh one.
+const STORED_FLOAT_VALUE: &str = r#"
+value Tint { r: float, g: float, n: int }
+struct Holder { tint: Tint? = null }
+
+fn same(h: Holder, t: Tint) -> bool { return h.tint.unwrap() == t }
+fn differ(h: Holder, t: Tint) -> bool { return h.tint.unwrap() != t }
+
+@nomangle fn stored_float_eq(r: float, g: float) -> bool {
+    let h = Holder {}
+    h.tint = Tint { r: r, g: g, n: 3 }
+    return same(h, Tint { r: r, g: g, n: 3 })
+}
+
+@nomangle fn stored_float_ne(r: float, g: float) -> bool {
+    let h = Holder {}
+    h.tint = Tint { r: r, g: g, n: 3 }
+    return differ(h, Tint { r: r, g: g, n: 3 })
+}
+"#;
+
+#[test]
+fn stored_float_value_equality_matches_a_fresh_operand() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit not found; skipping execution check");
+        return;
+    }
+    let mut lua = emit_module(STORED_FLOAT_VALUE);
+    lua.push_str("\nprint(stored_float_eq(0.4, 0.1), stored_float_ne(0.4, 0.1), stored_float_eq(0.5, 0.25))\n");
+    let out = run_luajit(&lua, "value_struct_eq_stored_float");
+    assert_eq!(out.trim(), "true\tfalse\ttrue", "stored float value equality:\n{out}");
 }
