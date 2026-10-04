@@ -21,18 +21,18 @@ const PINNED: &str = "\
 | package | status | field | container | payload | newtype | local-storage | capture | co-param | across-yield | any-erasure | total |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | anvil | exempt | 0 | 4 | 0 | 0 | 10 | 0 | 0 | 0 | 0 | 14 |
-| bitgun | exempt | 14 | 8 | 0 | 0 | 68 | 1 | 1 | 70 | 1 | 163 |
+| bitgun | exempt | 14 | 8 | 0 | 0 | 56 | 1 | 1 | 47 | 1 | 128 |
 | bopt | exempt | 2 | 2 | 0 | 0 | 102 | 0 | 0 | 0 | 0 | 106 |
 | chess | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 19 | 0 | 21 |
 | chess_game | exempt | 4 | 1 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 7 |
 | chesslings | exempt | 2 | 3 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
-| sample_game_c | exempt | 2 | 2 | 0 | 0 | 8 | 0 | 0 | 5 | 0 | 17 |
+| sample_game_c | exempt | 2 | 2 | 0 | 0 | 5 | 0 | 0 | 5 | 0 | 14 |
 | sample_game_c_v0 | exempt | 1 | 2 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 11 |
 | sample_game_b | exempt | 0 | 3 | 0 | 0 | 25 | 0 | 0 | 0 | 0 | 28 |
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 234 | 186 | 7 | 0 | 1015 | 18 | 68 | 1285 | 4 | 2817 |
+| mag | exempt | 231 | 186 | 7 | 0 | 990 | 18 | 68 | 1285 | 4 | 2789 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 3 | 2 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -42,13 +42,13 @@ const PINNED: &str = "\
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| stone | exempt | 40 | 58 | 6 | 0 | 226 | 5 | 0 | 0 | 2 | 337 |
+| stone | exempt | 38 | 47 | 6 | 0 | 169 | 5 | 0 | 0 | 2 | 267 |
 | survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
-| testbed | exempt | 5 | 3 | 0 | 0 | 135 | 2 | 2 | 74 | 56 | 277 |
+| testbed | exempt | 5 | 3 | 0 | 0 | 111 | 2 | 2 | 64 | 56 | 243 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | unpackaged programs | exempt | 110 | 14 | 8 | 0 | 137 | 50 | 1 | 0 | 47 | 367 |
 | void | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
-| wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 143 | 0 | 0 | 12 | 0 | 155 |
+| wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 142 | 0 | 0 | 9 | 0 | 151 |
 
 Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/areas.rock:25 container mag_simulation::nav::areas::NavAreaRoute
