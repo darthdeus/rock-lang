@@ -32,12 +32,12 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 238 | 191 | 7 | 0 | 1012 | 18 | 68 | 1150 | 68 | 2752 |
+| mag | exempt | 244 | 192 | 7 | 0 | 1025 | 21 | 67 | 1283 | 73 | 2912 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
-| mag_content | exempt | 0 | 2 | 2 | 0 | 6 | 0 | 0 | 0 | 0 | 10 |
+| mag_content | exempt | 0 | 3 | 2 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
-| mag_simulation::nav | exempt module | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 |
-| mag_world | exempt | 72 | 5 | 0 | 0 | 65 | 2 | 0 | 0 | 20 | 164 |
+| mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
+| mag_world | exempt | 111 | 17 | 0 | 0 | 169 | 11 | 0 | 0 | 46 | 354 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 15 | 6 | 21 |
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
@@ -58,13 +58,17 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/areas.rock:50 container mag_simulation::nav::areas::NavAreaPair
 - mag_simulation::nav: mag-simulation/nav/graph.rock:280 field mag_simulation::nav::query::NavQuery
 - mag_simulation::nav: mag-simulation/nav/query.rock:142 field FlatVec
-- mag_simulation::nav: mag-simulation/nav/query.rock:149 container mag_simulation::nav::query::NavPlan
-- mag_simulation::nav: mag-simulation/nav/query.rock:155 field mag_simulation::nav::areas::NavAreas
-- mag_simulation::nav: mag-simulation/nav/query.rock:196 field mag_simulation::nav::heap::NavHeap
+- mag_simulation::nav: mag-simulation/nav/query.rock:158 container mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:161 container mag_simulation::nav::query::NavPlan
+- mag_simulation::nav: mag-simulation/nav/query.rock:167 field mag_simulation::nav::areas::NavAreas
+- mag_simulation::nav: mag-simulation/nav/query.rock:208 field mag_simulation::nav::heap::NavHeap
+- mag_simulation::nav: mag-simulation/nav/query.rock:607 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:662 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:667 local-storage mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/walker.rock:23 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
-- tools/mag-encounter-lab: 1 other semantic errors
+- tools/mag-encounter-lab: 1 semantic errors
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
 - tests/newtype_generic_unification_reject_wrong_shape.rock: 1 other semantic errors
 - tests/test_utils.rock: Cannot run test-util files directly. Test utilities are meant to be used by test files.

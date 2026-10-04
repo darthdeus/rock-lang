@@ -562,7 +562,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let package_doors = fs::read_to_string(repo.join("mag-world/world_doors.rock"))
         .expect("read package gate source");
     let gate_members = rock_function_body(&package_doors, "pub fn world_gate_locked<M>(");
-    for predicate in ["root.spawners", "space_id_equal(spawner.place.space, space)",
+    for predicate in ["gate_index::world_gate_members(root, gate, space)",
+        "space_id_equal(spawner.place.space, space)",
         "spawner.spec.gate != gate", "spawner.lifecycle.members.len() > 0", "if members == 0"] {
         assert!(gate_members.contains(predicate), "root-owned gate lock is missing `{predicate}`");
     }
