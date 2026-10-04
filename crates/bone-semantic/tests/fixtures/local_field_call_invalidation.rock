@@ -1,0 +1,105 @@
+//- assignment_then_alias_call
+value Place { x: int }
+struct Row { goal: Place? }
+fn clear(row: Row) { row.goal = null }
+fn f(row: Row, goal: Place) {
+    let alias = row
+    row.goal = goal
+    clear(alias)
+    let observed = row.goal
+      //^ Place?
+}
+
+//- guard_then_call
+value Place { x: int }
+struct Row { goal: Place? }
+fn clear(row: Row) { row.goal = null }
+fn f(row: Row) {
+    if row.goal != null {
+        clear(row)
+        let observed = row.goal
+          //^ Place?
+    }
+}
+
+//- whole_local_survives_call
+value Place { x: int }
+fn opaque() {}
+fn f(goal: Place?) {
+    if goal != null {
+        opaque()
+        let observed = goal
+          //^ Place
+    }
+}
+
+//- field_survives_pure_call
+value Place { x: int }
+struct Row { goal: Place? }
+@pure fn noop() -> int { 1 }
+fn f(row: Row) {
+    if row.goal != null {
+        noop()
+        let observed = row.goal
+          //^ Place
+    }
+}
+
+//- argument_before_effect
+value Place { x: int }
+struct Row { goal: Place? }
+fn consume(goal: Place) {}
+fn f(row: Row) {
+    if row.goal != null {
+        consume(row.goal)
+        let observed = row.goal
+          //^ Place?
+    }
+}
+
+//- impure_condition
+value Place { x: int }
+struct Row { goal: Place? }
+fn clear(row: Row) -> bool { row.goal = null; true }
+fn f(row: Row) {
+    if row.goal != null && clear(row) {
+        let observed = row.goal
+          //^ Place?
+    }
+}
+
+//- fn_value_call
+value Place { x: int }
+struct Row { goal: Place? }
+fn f(row: Row, clear: fn()) {
+    if row.goal != null {
+        clear()
+        let observed = row.goal
+          //^ Place?
+    }
+}
+
+//- nested_block_effect
+value Place { x: int }
+struct Row { goal: Place? }
+fn clear(row: Row) { row.goal = null }
+fn f(row: Row) {
+    if row.goal != null {
+        { clear(row) }
+        let observed = row.goal
+          //^ Place?
+    }
+}
+
+//- access_after_alias_mutation @fail=cannot access field
+value Place { x: int }
+struct Row { goal: Place? }
+fn clear(row: Row) { row.goal = null }
+fn f(row: Row) -> int {
+    let alias = row
+    if row.goal != null {
+        clear(alias)
+        return row.goal.x
+    }
+    0
+}
