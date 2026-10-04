@@ -549,8 +549,15 @@ fn run_tests(
     required: &mut Vec<(String, RequiredTestOutcome)>,
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
+    let stone_dir = match crate::skull_backend::configured_stone_dir(std::path::Path::new(path)) {
+        Ok(stone_dir) => stone_dir,
+        Err(error) => return CUnitOutcome::UnitFail {
+            reason: "Stone root resolution failed".to_string(),
+            rendered: error.to_string(),
+        },
+    };
     #[cfg(unix)]
-    let runs = batch::run(path, ws, tests, engine_builds);
+    let runs = batch::run(path, ws, tests, engine_builds, stone_dir.as_deref());
     // The fork supervisor requires Unix. Other native hosts retain fresh
     // processes for test isolation until they have a native supervisor.
     #[cfg(not(unix))]
@@ -558,7 +565,7 @@ fn run_tests(
         let ablation = skull_mir::ablation::current_context();
         tests.par_iter().map_init(
             || skull_mir::ablation::enter_context(ablation.clone()),
-            |_, (func, test)| run_test(path, ws, *func, test, engine_builds),
+            |_, (func, test)| run_test(path, ws, *func, test, engine_builds, stone_dir.as_deref()),
         ).collect::<Vec<_>>()
     };
 
@@ -617,10 +624,11 @@ fn run_test(
     func: FuncRef,
     test: &skull::SkullTest,
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
+    stone_dir: Option<&std::path::Path>,
 ) -> CTestRun {
     if test.returns.is_some() {
         return match skull_codegen_c::emit_value_test(ws, func, &test.name) {
-            Ok(emitted) => CTestRun::Ran(compile_and_run(&test.name, &emitted.source)),
+            Ok(emitted) => CTestRun::Ran(compile_and_run(&test.name, &emitted.source, stone_dir)),
             Err(error) => CTestRun::Skipped(error.message),
         };
     }
@@ -636,7 +644,7 @@ fn run_test(
     };
     CTestRun::Ran(
         link.map_err(|error| error.to_string())
-            .and_then(|link| compile_and_run_program(&emitted.source, &link)),
+            .and_then(|link| compile_and_run_program(&emitted.source, &link, stone_dir)),
     )
 }
 
@@ -644,9 +652,10 @@ fn run_test(
 fn compile_and_run_program(
     source: &str,
     link: &CLinkPlan,
+    stone_dir: Option<&std::path::Path>,
 ) -> std::result::Result<String, String> {
     let compiled = compile_source_with_link(source, link)?;
-    let run = run_native_test(&compiled.binary, C_NATIVE_TEST_TIMEOUT)?;
+    let run = run_native_test(&compiled.binary, C_NATIVE_TEST_TIMEOUT, stone_dir)?;
     if !run.status.success() {
         return Err(format!(
             "native test exited {}: {}",
@@ -658,9 +667,13 @@ fn compile_and_run_program(
 }
 
 #[cfg(not(unix))]
-fn compile_and_run(test_name: &str, source: &str) -> std::result::Result<String, String> {
+fn compile_and_run(
+    test_name: &str,
+    source: &str,
+    stone_dir: Option<&std::path::Path>,
+) -> std::result::Result<String, String> {
     let compiled = compile_source(source)?;
-    let run = run_native_test(&compiled.binary, C_NATIVE_TEST_TIMEOUT)?;
+    let run = run_native_test(&compiled.binary, C_NATIVE_TEST_TIMEOUT, stone_dir)?;
     if !run.status.success() {
         return Err(format!(
             "native test exited {}: {}",
@@ -964,6 +977,20 @@ fn c_native_command(binary: &std::path::Path) -> Command {
     command
 }
 
+fn c_native_test_command(
+    binary: &std::path::Path,
+    stone_dir: Option<&std::path::Path>,
+) -> Command {
+    let mut command = c_native_command(binary);
+    // Match Lua's preamble priority without mutating the concurrent runner's environment.
+    if std::env::var_os("STONE_SOURCE_DIR").is_none() {
+        if let Some(stone_dir) = stone_dir {
+            command.env("STONE_SOURCE_DIR", stone_dir);
+        }
+    }
+    command
+}
+
 fn validate_c_frame_request(
     frames: usize,
     requested_renderer: Option<crate::RendererBackend>,
@@ -1023,8 +1050,9 @@ fn c_native_frame_command(
 fn run_native_test(
     binary: &std::path::Path,
     timeout: Duration,
+    stone_dir: Option<&std::path::Path>,
 ) -> std::result::Result<std::process::Output, String> {
-    let mut child = c_native_command(binary)
+    let mut child = c_native_test_command(binary, stone_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1311,7 +1339,7 @@ mod tests {
         let compiled = super::compile_source("int main(void) { for (;;) {} }")
             .expect("wedged fixture must compile");
         let start = Instant::now();
-        let error = super::run_native_test(&compiled.binary, Duration::from_millis(100))
+        let error = super::run_native_test(&compiled.binary, Duration::from_millis(100), None)
             .expect_err("wedged native test must time out");
         assert!(error.contains("timed out after 100ms"), "{error}");
         assert!(start.elapsed() < Duration::from_secs(5));

@@ -178,3 +178,64 @@ fn projects_without_stone_do_not_receive_an_invented_root() {
         "the preamble must not invent a Stone root for a project without a Stone dependency"
     );
 }
+
+fn check_test_asset_root(transitive: bool) {
+    let repo = root();
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch.path().join("project");
+    std::fs::create_dir_all(project.join("tests")).unwrap();
+    let stone = toml_path(&repo.join("stone"));
+    let (dependency, host) = if transitive {
+        let bridge = scratch.path().join("bridge");
+        std::fs::create_dir(&bridge).unwrap();
+        std::fs::write(bridge.join("stick.toml"), format!(
+            "[package]\nname = \"stone-root-bridge\"\ntype = \"lib\"\n\
+             [language]\nmodules = \"v1\"\n\
+             [dependencies]\nstone = {{ path = \"{stone}\" }}\n"
+        )).unwrap();
+        std::fs::write(bridge.join("exports.rock"),
+            "pub use stone::project_asset_path;\n"
+        ).unwrap();
+        (format!("bridge = {{ path = \"{}\" }}", toml_path(&bridge)), "bridge")
+    } else {
+        (format!("stone = {{ path = \"{stone}\" }}"), "stone")
+    };
+    std::fs::write(project.join("stick.toml"), format!(
+        "[package]\nname = \"stone-root-test\"\ntype = \"lib\"\n\
+         [language]\nmodules = \"v1\"\n\
+         [dependencies]\n{dependency}\n\
+         [build.vars]\nGIT_SHA = \"test\"\n"
+    )).unwrap();
+    let expected = toml_path(&repo.join("stone/engine/compat/assets.rock"));
+    std::fs::write(project.join("tests/assets.rock"), format!(
+        "use {host}::project_asset_path;\n\
+         @test fn engine_asset_root() {{\n\
+             assert_eq(project_asset_path(\"@engine/compat/assets.rock\"), \"{expected}\")\n\
+         }}\n"
+    )).unwrap();
+    for backend in ["skull", "c"] {
+        let result = Command::new(rock_bin())
+            .current_dir(&repo)
+            .arg("test").arg(project.join("tests"))
+            .args(["--backend", backend])
+            .env_remove("STONE_SOURCE_DIR")
+            .env_remove("__ROCK_STONE_DIR")
+            .env_remove("GAME_SOURCE_DIR")
+            .env("ROCK_TEST_VERBOSE", "1")
+            .output().expect("run Stone asset-root test");
+        let text = format!("{}{}", String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr));
+        assert!(result.status.success() && text.contains("1/1 @tests passed"),
+            "{backend} must resolve the dependency's Stone asset root without ambient configuration:\n{text}");
+    }
+}
+
+#[test]
+fn direct_stone_asset_root_is_supplied_to_both_test_backends() {
+    check_test_asset_root(false);
+}
+
+#[test]
+fn transitive_stone_asset_root_is_supplied_to_both_test_backends() {
+    check_test_asset_root(true);
+}

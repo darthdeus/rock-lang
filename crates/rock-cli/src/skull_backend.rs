@@ -3223,7 +3223,7 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
 // stone --backend skull: two-file incremental output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
-fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+pub(crate) fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let Some((config_path, _config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
         return Ok(None);

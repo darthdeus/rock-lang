@@ -11,6 +11,7 @@ pub(super) fn run(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
+    stone_dir: Option<&std::path::Path>,
 ) -> Vec<CTestRun> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     let mut files = HashMap::new();
@@ -27,7 +28,7 @@ pub(super) fn run(
         .par_iter()
         .map(|indices| {
             let _ablation = skull_mir::ablation::enter_context(ablation.clone());
-            run_file(path, ws, tests, indices, engine_builds)
+            run_file(path, ws, tests, indices, engine_builds, stone_dir)
         })
         .collect::<Vec<_>>();
     let mut runs = (0..tests.len()).map(|_| None).collect::<Vec<_>>();
@@ -75,6 +76,7 @@ fn run_file(
     tests: &[(FuncRef, skull::SkullTest)],
     indices: &[usize],
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
+    stone_dir: Option<&std::path::Path>,
 ) -> Vec<(usize, CTestRun)> {
     let mut results = Vec::new();
     let mut prepared = Vec::new();
@@ -104,7 +106,7 @@ fn run_file(
         Ok(Some(compiled)) => {
             let output_dir = compiled._dir.path();
             let timeout = C_NATIVE_TEST_TIMEOUT * batch_build.indices.len() as u32 + Duration::from_secs(5);
-            let batch = run_supervisor(&compiled.binary, output_dir, None, timeout);
+            let batch = run_supervisor(&compiled.binary, output_dir, None, timeout, stone_dir);
             if let Err(error) = &batch {
                 log::warn!(target: "TEST", "C test supervisor failed: {error}");
             }
@@ -118,6 +120,7 @@ fn run_file(
                         output_dir,
                         Some(slot),
                         C_NATIVE_TEST_TIMEOUT + Duration::from_secs(5),
+                        stone_dir,
                     ) {
                         results.push((*index, CTestRun::Ran(Err(error))));
                         continue;
@@ -253,8 +256,9 @@ fn run_supervisor(
     output_dir: &std::path::Path,
     slot: Option<usize>,
     timeout: Duration,
+    stone_dir: Option<&std::path::Path>,
 ) -> std::result::Result<(), String> {
-    let mut command = c_native_command(binary);
+    let mut command = c_native_test_command(binary, stone_dir);
     command.process_group(0);
     command.arg(output_dir);
     if let Some(slot) = slot {
@@ -356,7 +360,7 @@ mod tests {
         let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}");
         let dir = compiled._dir.path();
         let start = Instant::now();
-        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3));
+        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3), None);
         let gone = child_is_gone(dir);
         assert!(run.is_ok(), "{run:?}");
         assert!(gone, "timed-out child survived");
@@ -369,7 +373,7 @@ mod tests {
     fn supervisor_death_cleans_up_running_child() {
         let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); kill(getppid(), SIGKILL); for (;;) {}");
         let dir = compiled._dir.path();
-        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3));
+        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3), None);
         let gone = child_is_gone(dir);
         assert!(run.unwrap_err().contains("supervisor exited"));
         assert!(gone, "child outlived dead supervisor");
@@ -379,7 +383,7 @@ mod tests {
     fn supervisor_watchdog_cleans_up_running_child() {
         let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}");
         let dir = compiled._dir.path();
-        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_millis(200));
+        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_millis(200), None);
         let gone = child_is_gone(dir);
         assert!(run.unwrap_err().contains("supervisor timed out"));
         assert!(gone, "child outlived supervisor watchdog");
