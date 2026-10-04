@@ -32,12 +32,12 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 236 | 186 | 7 | 0 | 1007 | 18 | 68 | 1288 | 8 | 2818 |
+| mag | exempt | 234 | 186 | 7 | 0 | 1011 | 18 | 68 | 1285 | 8 | 2817 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 0 | 3 | 2 | 0 | 8 | 0 | 0 | 0 | 0 | 13 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 10 |
-| mag_world | exempt | 70 | 5 | 0 | 0 | 62 | 1 | 0 | 0 | 0 | 138 |
+| mag_world | exempt | 64 | 5 | 0 | 0 | 62 | 1 | 0 | 0 | 0 | 132 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 15 | 6 | 21 |
 | pixel_spirit | exempt | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 1 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
