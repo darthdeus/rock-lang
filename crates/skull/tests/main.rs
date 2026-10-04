@@ -235,6 +235,8 @@ mod nobox_values;
 mod nullable_generic_binding_sroa;
 #[path = "nullable_value_join_sroa.rs"]
 mod nullable_value_join_sroa;
+#[path = "nullable_embed_clear.rs"]
+mod nullable_embed_clear;
 #[path = "nullable_value_in_tuple_sentinel.rs"]
 mod nullable_value_in_tuple_sentinel;
 #[path = "plain_struct_scalarize.rs"]

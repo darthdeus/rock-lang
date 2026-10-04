@@ -601,9 +601,25 @@ impl Builder<'_> {
         nullable: bool,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        // LuaJIT inserts missing hash keys even for nil stores. Re-clearing an
+        // absent embed can therefore rehash the parent on every frame.
+        let skip_clear = if nullable && matches!(self.body.expr_arena[value], Expr::Null) {
+            let present = self.emit_cur(Inst::Field { base: parent, field });
+            let clear = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(self.cur, Term::Branch { cond: present, then_bb: clear, else_bb: join });
+            self.cur = clear;
+            Some(join)
+        } else {
+            None
+        };
         let leaves = self.embed_value_leaves(nullable, cname, value)?;
         for (key, v) in Self::embed_field_slots(field, leaves) {
             self.emit_cur(Inst::StoreField { base: parent, field: key, value: v });
+        }
+        if let Some(join) = skip_clear {
+            self.f.set_term(self.cur, Term::Goto(join));
+            self.cur = join;
         }
         Ok(())
     }
