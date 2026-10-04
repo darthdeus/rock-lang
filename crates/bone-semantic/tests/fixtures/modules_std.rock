@@ -238,6 +238,8 @@
 // prelude: __weak_cache_entity_put
 // prelude: __weak_cache_read
 // prelude: __weak_cache_retire
+// prelude: __weak_cache_retire_backing
+// prelude: __weak_cache_retire_backing_entries
 // prelude: __weak_cache_scene_get
 // prelude: __weak_cache_scene_put
 // prelude: __weak_cache_write
