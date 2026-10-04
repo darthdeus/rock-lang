@@ -361,6 +361,7 @@
 // prelude: float_to_int
 // prelude: floor
 // prelude: format_float
+// prelude: format_float_roundtrip
 // prelude: format_lua
 // prelude: fract
 // prelude: frag_coord
