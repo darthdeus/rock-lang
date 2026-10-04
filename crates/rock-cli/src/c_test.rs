@@ -882,31 +882,31 @@ fn c_link_plan_with(
     Ok(link)
 }
 
-fn emit_main_program(path: &str) -> Result<skull_codegen_c::CProgram> {
-    fn main_ref(
-        ws: &bone_semantic::inference::Workspace,
-        entry_mid: bone_semantic::prelude::ModuleId,
-    ) -> Result<FuncRef> {
-        let mut mains = ws
-            .module(entry_mid)
-            .functions
-            .iter()
-            .filter(|(_, function)| {
-                skull_mir::mangle::declared_name(function.name.as_str()) == "main"
-                    && function.param_decls.is_empty()
-            });
-        let Some((main, _)) = mains.next() else {
-            anyhow::bail!("C backend requires a nullary `main` in the entry file");
-        };
-        if mains.next().is_some() {
-            anyhow::bail!("C backend found more than one nullary `main` in the entry file");
-        }
-        Ok(FuncRef {
-            module: entry_mid,
-            func: main,
-        })
+fn main_ref(
+    ws: &bone_semantic::inference::Workspace,
+    entry_mid: bone_semantic::prelude::ModuleId,
+) -> Result<FuncRef> {
+    let mut mains = ws
+        .module(entry_mid)
+        .functions
+        .iter()
+        .filter(|(_, function)| {
+            skull_mir::mangle::declared_name(function.name.as_str()) == "main"
+                && function.param_decls.is_empty()
+        });
+    let Some((main, _)) = mains.next() else {
+        anyhow::bail!("C backend requires a nullary `main` in the entry file");
+    };
+    if mains.next().is_some() {
+        anyhow::bail!("C backend found more than one nullary `main` in the entry file");
     }
+    Ok(FuncRef {
+        module: entry_mid,
+        func: main,
+    })
+}
 
+fn emit_main_program(path: &str) -> Result<skull_codegen_c::CProgram> {
     if std::path::Path::new(path).is_dir() {
         let checked = check_project(path, true).map_err(|error| anyhow::anyhow!(error.rendered))?;
         let main = main_ref(&checked.ws, checked.entry_mid)?;
@@ -1070,6 +1070,42 @@ fn run_native_test(
         return Err(format!("native test timed out after {elapsed}"));
     }
     Ok(run.output)
+}
+
+pub fn c_rejections(path: &str, output: &str) -> Result<()> {
+    let out = std::path::Path::new(output);
+    reject_input_alias(path, out)?;
+    let report = if std::path::Path::new(path).is_dir() {
+        let checked = check_project(path, true).map_err(|error| anyhow::anyhow!(error.rendered))?;
+        let main = main_ref(&checked.ws, checked.entry_mid)?;
+        skull_codegen_c::diagnose_program(&checked.ws, main)
+    } else {
+        let checked = check_file(path).map_err(|error| anyhow::anyhow!(error.rendered))?;
+        let main = main_ref(&checked.ws, checked.user_mid)?;
+        skull_codegen_c::diagnose_program(&checked.ws, main)
+    };
+    if let Some(parent) = out.parent() && !parent.as_os_str().is_empty() {
+        fs_err::create_dir_all(parent)?;
+    }
+    rock_host::project::write_atomic(out, &report.to_tsv())?;
+    for row in &report.rejections {
+        let location = &row.source_location;
+        log::error!(target: "C-REJECTIONS", "{}:{}:{} [{} / {}] {} (symbol {}; in {})",
+            location.file, location.line_range.0 + 1, location.col_range.0 + 1, row.stage, row.status,
+            row.diagnostic.message, row.symbol, row.enclosing_function);
+    }
+    for limit in &report.coverage_limits {
+        log::warn!(target: "C-REJECTIONS", "coverage limit: {limit}");
+    }
+    log::info!(target: "C-REJECTIONS",
+        "{} rows; graph {} instances / {} concrete plans; visited {}; typed {} bodies / {} globals; no artifact emitted; report {}",
+        report.rejections.len(), report.graph_instances, report.concrete_plans, report.visited_instances,
+        report.typed_bodies, report.typed_globals, out.display());
+    if !report.rejections.is_empty() || !report.coverage_limits.is_empty() {
+        anyhow::bail!("C diagnostic traversal found {} rejection/continuation rows and {} coverage limits; no artifact emitted",
+            report.rejections.len(), report.coverage_limits.len());
+    }
+    Ok(())
 }
 
 pub fn c_compile(path: &str, output: Option<String>) -> Result<()> {

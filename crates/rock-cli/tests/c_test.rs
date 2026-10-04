@@ -3,6 +3,54 @@
 use std::process::Command;
 
 #[test]
+fn c_rejection_report_preserves_artifacts_and_reports_independent_sites() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    let source = dir.path().join("probe.rock");
+    let report = dir.path().join("rejections.tsv");
+    std::fs::write(&source, r#"
+        inline(lua) fn first() -> int = "return 1"
+        inline(lua) fn second() -> int = "return 2"
+        fn main() {
+            first();
+            second();
+        }
+    "#).unwrap();
+    std::fs::create_dir(dir.path().join("tmp")).unwrap();
+    for artifact in ["tmp/probe", "tmp/probe.c"] {
+        std::fs::write(dir.path().join(artifact), "existing artifact").unwrap();
+    }
+    let run = |extra: &[&str]| Command::new(env!("CARGO_BIN_EXE_rock"))
+        .current_dir(dir.path())
+        .args(["compile", "--backend", "c", "--all-rejections", source.to_str().unwrap(),
+            "--rejections-out", report.to_str().unwrap()])
+        .args(extra).env_remove("FORCE_COLOR").output().unwrap();
+    let output = run(&[]);
+    assert!(!output.status.success(), "unsupported program must reject");
+    let tsv = std::fs::read_to_string(&report).unwrap_or_else(|err|
+        panic!("report: {err}; stderr: {}", String::from_utf8_lossy(&output.stderr)));
+    assert_eq!(tsv.lines().count(), 3, "{tsv}");
+    for (line, symbol) in [(5, "first"), (6, "second")] {
+        let fields: Vec<_> = tsv.lines().find(|line| line.contains(&format!("\t{symbol}\t")))
+            .unwrap_or_else(|| panic!("missing {symbol}: {tsv}")).split('\t').collect();
+        assert!(fields[0].contains(&format!(":{line}:")), "{fields:?}");
+        assert_eq!(fields[2], "unsupported-boundary");
+        assert_eq!(fields[4], "main");
+    }
+    for artifact in ["tmp/probe", "tmp/probe.c"] {
+        assert_eq!(std::fs::read_to_string(dir.path().join(artifact)).unwrap(), "existing artifact");
+    }
+    let output = run(&["--output", "forbidden"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not accept an artifact output"));
+    assert!(!dir.path().join("forbidden").exists());
+    assert!(!dir.path().join("forbidden.c").exists());
+    std::fs::write(&source, "fn main() {}").unwrap();
+    let output = run(&[]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(std::fs::read_to_string(&report).unwrap().lines().count(), 1);
+}
+
+#[test]
 fn c_tests_build_one_binary_per_file() {
     check_build_count(false);
 }

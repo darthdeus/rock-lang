@@ -622,6 +622,8 @@ pub struct Args {
     /// Named tests that must be discovered and pass under `rock test --backend c`.
     pub required_tests: Vec<String>,
     pub show_passing: bool,
+    pub all_rejections: bool,
+    pub rejections_out: Option<String>,
     pub output: Option<String>,
     /// For `rock sim`: opt into a complete sim-wide gross Lua allocation
     /// census and write its machine-readable artifact to this path.
@@ -847,6 +849,12 @@ impl Args {
             .arg(Arg::new("show-passing").long("show-passing").action(ArgAction::SetTrue)
                 .help("For `rock test --backend c`: list passing and skipped test names in declaration order."))
             .arg(Arg::new("output").long("output").alias("out"))
+            .arg(Arg::new("all-rejections").long("all-rejections").action(ArgAction::SetTrue)
+                .requires("rejections-out")
+                .help("For `rock compile --backend c`: report independent rejections without emitting an artifact."))
+            .arg(Arg::new("rejections-out").long("rejections-out").value_name("FILE.tsv")
+                .requires("all-rejections")
+                .help("Write C rejection locations, diagnostics, classes, symbols and enclosing functions as TSV."))
             .arg(Arg::new("allocation-census").long("allocation-census")
                 .value_name("PATH")
                 .help("For `rock sim`: opt into a sim-wide gross Lua allocation census and write a complete JSON artifact to PATH (discovery evidence only)."))
@@ -1032,6 +1040,8 @@ impl Args {
             files: many_str("files"),
             required_tests: many_str("require-test"),
             show_passing: m.get_flag("show-passing"),
+            all_rejections: m.get_flag("all-rejections"),
+            rejections_out: m.get_one::<String>("rejections-out").cloned(),
             output: m.get_one::<String>("output").cloned(),
             allocation_census: m.get_one::<String>("allocation-census").cloned(),
             allocation_sites: m.get_one::<String>("allocation-sites").cloned(),

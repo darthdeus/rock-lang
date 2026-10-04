@@ -25,6 +25,11 @@ impl CommandContext {
     /// Run the command directly without server
     pub fn run(&self) -> Result<()> {
         self.require_required_test_support()?;
+        if self.args.all_rejections
+            && (self.args.command != CliCommand::Compile || self.args.backend != Backend::C)
+        {
+            anyhow::bail!("`--all-rejections` is supported only by `rock compile --backend c`");
+        }
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
@@ -591,6 +596,13 @@ impl CommandContext {
         match self.args.command {
             CliCommand::Compile => {
                 let file = self.get_required_file("compile")?;
+                if self.args.all_rejections {
+                    if self.get_compile_output()?.is_some() {
+                        anyhow::bail!("`--all-rejections` does not accept an artifact output");
+                    }
+                    return crate::c_test::c_rejections(file,
+                        self.args.rejections_out.as_deref().expect("required by --all-rejections"));
+                }
                 crate::c_test::c_compile(file, self.get_compile_output()?)
             }
             CliCommand::Test => {
