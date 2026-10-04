@@ -63,7 +63,7 @@ impl Builder<'_> {
                 None => self.leaf_table_value_child(sname, child_field)?,
             };
             if let Some(child) = child {
-                let shape = self.nobox_plain_child_shape(child)?;
+                let shape = self.nobox_embed_group_shape(child)?;
                 let paths = self.embed_leaf_paths(child)?;
                 let relative = parts.iter().rev().map(|p| p.as_str()).collect::<Vec<_>>().join(".");
                 let prefix = format!("{relative}.");
@@ -239,61 +239,16 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// The shape to read a `nobox` embed child back as, or `None` to fall
-    /// through to [`Builder::materialize_embed`] (and, for a marked child, to
-    /// the guarantee's rejection).
-    ///
-    /// `None` for an unmarked child -- its transient box is legal and sinks.
-    /// Also `None` when any field in the tree is a FLAT enum: those occupy
-    /// several parent slots under [`flat_slot_names`], which the shape carries
-    /// as one entry, so a Group built over them would hand the sink a leaf
-    /// sequence that lines up wrong. Rejecting loudly beats a silent
-    /// misalignment; the shape has no in-tree instance today.
+    /// The shared leaf shape for storing and projecting an embedded `nobox`
+    /// value, including flattened enum payloads and nullable children.
     pub(crate) fn nobox_embed_group_shape(
         &self,
         cname: Ustr,
     ) -> Result<Option<ValueShape>, CompilerError> {
-        if !self.is_nobox_struct(cname) || self.struct_has_flat_field(cname)? {
+        if !self.is_nobox_struct(cname) {
             return Ok(None);
         }
         self.nominal_rep_shape(cname, true)
-    }
-
-    /// Whether any field of `cname`, at any depth, flattens to several parent
-    /// slots rather than one.
-    pub(crate) fn struct_has_flat_field(&self, cname: Ustr) -> Result<bool, CompilerError> {
-        for f in self.struct_field_names_required(cname)? {
-            if self
-                .struct_field_plan(cname, f, false)?
-                .flat_shape()
-                .is_some()
-            {
-                return Ok(true);
-            }
-            if let Some(inner) = self
-                .struct_field_plan(cname, f, true)?
-                .inline_child()
-                && inner != cname
-                && self.struct_has_flat_field(inner)?
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    fn nobox_plain_child_shape(&self, cname: Ustr) -> Result<Option<ValueShape>, CompilerError> {
-        let Some(shape) = self.nobox_embed_group_shape(cname)? else { return Ok(None) };
-        fn has_plain_child(builder: &Builder<'_>, shape: &ValueShape) -> bool {
-            shape.fields.iter().any(|(_, field)| match field {
-                FieldShape::Prim => false,
-                FieldShape::Nested(child) => {
-                    (builder.is_value_struct(child.name) && !builder.is_nobox_struct(child.name))
-                        || has_plain_child(builder, child)
-                }
-            })
-        }
-        Ok(has_plain_child(self, &shape).then_some(shape))
     }
 
     /// A whole read of a `nobox` embed field, as an unboxed Group over the
@@ -301,17 +256,13 @@ impl Builder<'_> {
     /// list, so the parts line up with [`Builder::repr_to_leaves`]' order by
     /// construction instead of by two walks agreeing.
     pub(crate) fn embed_group(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &ValueShape) -> ValueRepr {
-        let mut parts = Vec::new();
-        for (fname, fs) in &shape.fields {
-            let key = Ustr::from(&format!("{prefix}.{fname}"));
-            parts.push(match fs {
-                FieldShape::Prim => {
-                    ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field: key }))
-                }
-                FieldShape::Nested(sub) => self.embed_group(parent, key, sub),
-            });
-        }
-        ValueRepr::Group { name: shape.name, parts, present: None }
+        let leaves = super::shape::leaf_names(shape, prefix.as_str(), ".")
+            .into_iter()
+            .map(|key| self.emit_cur(Inst::Field {
+                base: parent, field: Ustr::from(&key),
+            }))
+            .collect::<Vec<_>>();
+        self.rebuild_from_leaves(shape, &leaves, &mut 0)
     }
 
     /// Read one physically embedded child without rediscovering its representation.
@@ -356,7 +307,7 @@ impl Builder<'_> {
         cname: Ustr,
         value: Idx<Expr>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if let Some(shape) = self.nobox_plain_child_shape(cname)? {
+        if let Some(shape) = self.nobox_embed_group_shape(cname)? {
             let paths = value_leaf_paths(&shape);
             let repr = self.lower_expr_repr(value)?;
             let leaves = self.repr_to_storage_leaves(&repr, &shape, "embedded value")?;
@@ -446,19 +397,13 @@ impl Builder<'_> {
                 return Ok(out);
             }
         }
-        if let Some(shape) = self.nobox_embed_group_shape(cname)? {
-            let paths = value_leaf_paths(&shape);
-            let repr = self.lower_expr_repr(value)?;
-            let leaves = self.repr_to_storage_leaves(&repr, &shape, "embedded value")?;
-            return Self::pair_embed_leaves(paths, leaves);
-        }
         let v = self.lower_expr(value)?;
         Ok(self.embed_leaf_reads(cname, v)?)
     }
 
     /// Every relative leaf path of embedded child `cname`, declaration order.
     pub(crate) fn embed_leaf_paths(&self, cname: Ustr) -> Result<Vec<Ustr>, CompilerError> {
-        if let Some(shape) = self.nobox_plain_child_shape(cname)? {
+        if let Some(shape) = self.nobox_embed_group_shape(cname)? {
             return Ok(value_leaf_paths(&shape));
         }
         let mut out = Vec::new();
@@ -651,12 +596,11 @@ impl Builder<'_> {
     pub(crate) fn store_embed(
         &mut self,
         parent: Idx<Inst>,
-        base: Idx<Expr>,
         field: Ustr,
         cname: Ustr,
+        nullable: bool,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let nullable = self.embed_read_is_nullable(base, field)?;
         let leaves = self.embed_value_leaves(nullable, cname, value)?;
         for (key, v) in Self::embed_field_slots(field, leaves) {
             self.emit_cur(Inst::StoreField { base: parent, field: key, value: v });

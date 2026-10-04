@@ -1072,9 +1072,10 @@ impl Builder<'_> {
                         Some(self.struct_field_plan(sname, field, false)?),
                     _ => None,
                 };
-                if let Some((cname, _)) = embed_plan.as_ref().and_then(|p| p.embed()) {
-                    let b = self.lower_place_base(base)?;
-                    self.store_embed(b, base, field, cname, value)?;
+                if let Some((cname, nullable)) = embed_plan.as_ref().and_then(|p| p.embed()) {
+                    let (pbase, key) = self.physical_field(base, field)?;
+                    let b = self.lower_place_base(pbase)?;
+                    self.store_embed(b, key, cname, nullable, value)?;
                     return Ok(());
                 }
                 // An embed LEAF write composes to one dotted key on the parent
