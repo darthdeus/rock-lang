@@ -94,6 +94,10 @@ pub trait PlacementOracle {
         None
     }
 
+    fn field_content_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
+        None
+    }
+
     fn entity_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
         None
     }
@@ -1499,6 +1503,9 @@ fn value_place(
     id: Idx<Inst>,
 ) -> Place {
     let inst = &mir.insts[id];
+    if let Some(place) = oracle.field_content_place(mir, id) {
+        return place;
+    }
     let is_call = matches!(
         inst,
         Inst::Call { .. }
