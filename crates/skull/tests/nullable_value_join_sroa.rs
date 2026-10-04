@@ -7,6 +7,56 @@
 
 use crate::common::{emit_module, function_body, run_luajit};
 
+#[test]
+fn production_pipeline_nullable_transfers_do_not_materialize() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../stone/engine/rendering/pass.rock");
+    let source = std::fs::read_to_string(path).unwrap();
+    let start = source.lines().find(|line| line.contains("value Pipeline {")).unwrap();
+    let offset = source.find(start).unwrap();
+    let end = source[offset..].find("\n}").unwrap() + offset + 2;
+    let declaration = source[offset..end].replacen("pub ", "", 1);
+    let fixture = r#"
+struct RecipeHolder { pipeline: Pipeline? = null }
+fn publish(h: RecipeHolder, p: Pipeline) { h.pipeline = p }
+fn copy_recipe(dst: RecipeHolder, src: RecipeHolder) { dst.pipeline = src.pipeline }
+fn clear_recipe(h: RecipeHolder) { h.pipeline = null }
+fn cached_pipeline() -> Pipeline {
+    static p = materialize(Pipeline { shader_name: "ui" })
+    p
+}
+@nomangle inline(lua) fn __out(s: string) = "io.write(s, ' ')"
+fn describe(h: RecipeHolder) {
+    if let p = h.pipeline {
+        __out("{p.shader_name} {p.parametric_quads} {p.after_scene}")
+    } else { __out("empty") }
+}
+fn main() {
+    let src = RecipeHolder {}
+    let dst = RecipeHolder {}
+    publish(src, Pipeline { shader_name: "world", parametric_quads: true, after_scene: true })
+    copy_recipe(dst, src)
+    clear_recipe(src)
+    describe(src)
+    describe(dst)
+    copy_recipe(dst, src)
+    describe(dst)
+    publish(src, cached_pipeline())
+    copy_recipe(dst, src)
+    describe(dst)
+}
+"#;
+    let lua = emit_module(&format!("{declaration}\n{fixture}"));
+    for name in ["publish", "copy_recipe"] {
+        let body = function_body(&lua, name);
+        for ctor in ["Pipeline_vt(", "Pipeline_ct("] {
+            assert!(!body.contains(ctor), "{name} materializes `{ctor}`:\n{body}");
+        }
+    }
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "pipeline_nullable_transfers"),
+        "empty world true true empty ui false false");
+}
+
 const JOIN: &str = r#"
 value Ent { a: int, b: int }
 value Tk { co: string, st: Ent }
