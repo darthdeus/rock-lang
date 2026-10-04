@@ -351,7 +351,8 @@ impl Builder<'_> {
                         }
                     }
                     let boxed = self.pack(br)?;
-                    let nullable = self.embed_read_is_nullable(base, field)?;
+                    // Storage retains presence even when this read is narrowed.
+                    let nullable = self.expr_is_nullable(e);
                     return self.load_embed_repr(boxed, field, cname, nullable);
                 }
                 // An embed LEAF read composes to one dotted key on the parent
@@ -401,7 +402,7 @@ impl Builder<'_> {
                     if let Some(name) = self.value_struct_of(e)
                         && self.is_nobox_struct(name)
                     {
-                        let nullable = self.embed_read_is_nullable(base, field)?;
+                        let nullable = self.expr_is_nullable(e);
                         return self.load_embed_repr(parent, key, name, nullable);
                     }
                     return Ok(ValueRepr::Scalar(

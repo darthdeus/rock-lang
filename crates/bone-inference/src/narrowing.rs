@@ -3,18 +3,16 @@
 //! One home for the `if x != null { .. }` machinery: detect the null-check in a
 //! condition ([`detect_null_narrow`]), apply the resulting narrowings while
 //! inferring a branch ([`infer_branch`]), and the supporting helpers -- path
-//! keys/prefixes, the purity-aware condition effect check that guards GLOBAL
+//! keys/prefixes, the purity-aware condition effect check that guards mutable
 //! refinement ([`cond_has_effect`]), and the divergence test that lets a guard's
 //! narrowing escape into the rest of a block ([`stmt_guard_narrows`]).
 //!
 //! Locals and globals share one refinement set (`Gamma.refined_nonnull`), keyed
 //! on a [`Root`] + field path -- so `x.a` and `G.a` narrow through the same
 //! mechanism. A WHOLE local (`Root::Local`, empty path) is special-cased to peel
-//! its `binding_types` entry instead. The two roots differ only in invalidation:
-//! a global refinement dies at any intervening write / non-`@pure` call / `yield`
-//! (a callee or resumer can reassign a global), so those sites in `lib.rs` clear
-//! the `Root::Global` entries; locals survive calls (a call can't mutate a caller
-//! local).
+//! its `binding_types` entry instead. Calls and yields invalidate the path set:
+//! a callee or resumer can reassign globals or mutate local fields through an
+//! alias. Whole-local bindings survive because callees cannot reassign them.
 
 use bone_core::hir;
 use bone_core::hir::{BinOp, BindingInfo, CallFamily, Callee, Expr, Statement};
@@ -66,11 +64,11 @@ fn path_prefixes((root, fields): Narrow) -> Vec<Narrow> {
 }
 
 /// `@pure`-aware effect check over a CONDITION expression: true if evaluating it
-/// could mutate a global -- a non-`@pure` call (which may reassign one), a yield,
-/// or an assignment. Used to suppress GLOBAL narrows from a condition whose own
+/// could mutate a path -- a non-`@pure` call, a yield, or an assignment.
+/// Used to suppress mutable-path narrows from a condition whose own
 /// evaluation has an effect AFTER the null-check (`g != null && impure()`):
-/// `impure()` may null `g` before the body runs. Locals are immune (a call
-/// cannot mutate a caller local), so only globals are suppressed.
+/// `impure()` may null `g` before the body runs. Whole-local bindings are immune;
+/// their fields can change through aliases.
 ///
 /// A named call is effect-free iff every candidate it resolves to is `@pure`
 /// (a `@pure` body provably writes no global -- `verify_pure_expr`); the `all`
@@ -112,9 +110,8 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
 }
 
 /// Narrowings a condition implies for its then / else branches. Detects the
-/// null-check shape ([`detect_null_narrow_inner`]), then drops the GLOBAL
-/// narrows if the condition's own evaluation could reassign the global
-/// ([`cond_has_effect`]) -- locals are kept (a call can't mutate a caller local).
+/// null-check shape ([`detect_null_narrow_inner`]), then drops mutable paths if
+/// the condition's own evaluation could invalidate them ([`cond_has_effect`]).
 pub(crate) fn detect_null_narrow(
     gamma: &Gamma,
     c: BodyCtx,
@@ -122,8 +119,8 @@ pub(crate) fn detect_null_narrow(
 ) -> (Vec<Narrow>, Vec<Narrow>) {
     let (mut then_set, mut else_set) = detect_null_narrow_inner(c, cond);
     if cond_has_effect(gamma, c, cond) {
-        then_set.retain(|(root, _)| !root.is_global());
-        else_set.retain(|(root, _)| !root.is_global());
+        then_set.retain(|(root, fields)| !root.is_global() && fields.is_empty());
+        else_set.retain(|(root, fields)| !root.is_global() && fields.is_empty());
     }
     (then_set, else_set)
 }
@@ -191,7 +188,7 @@ fn detect_null_narrow_inner(c: BodyCtx, cond: Idx<Expr>) -> (Vec<Narrow>, Vec<Na
 
 /// Infer `branch` with `narrows` applied, restoring the prior state on exit. A
 /// whole local peels its `binding_types` entry; every other path (local field,
-/// whole global, global field) goes into `refined_nonnull`. A global cleared
+/// whole global, global field) goes into `refined_nonnull`. A path cleared
 /// mid-branch by an intervening effect stays cleared -- we only undo what this
 /// branch itself added.
 pub(crate) fn infer_branch(

@@ -1348,6 +1348,7 @@ pub(crate) fn resolve_named_call_inner(
                 };
 
                 gamma.out.fn_field_calls.insert(call_expr, field);
+                gamma.out.fn_field_call_types.insert(call_expr, field_ty);
                 return call_fn_value(c, gamma, field_ty, call_args, span);
             }
         }
@@ -1526,9 +1527,9 @@ pub(crate) fn resolve_named_call_inner(
                         if let Some((v, origin)) = deferrable_operand(gamma, &arg_tys, span) {
                             let result = defer_result_var(gamma, origin, span);
                             // The callee's purity is unknown until it
-                            // resolves; clear global refinements as any
+                            // resolves; clear path refinements as any
                             // non-`@pure` call would.
-                            gamma.refined_nonnull.retain(|(root, _)| !root.is_global());
+                            gamma.refined_nonnull.clear();
                             queue_pending(
                                 gamma,
                                 v,
@@ -1703,6 +1704,7 @@ pub(crate) fn commit_selected_call(
         SmallVec::new()
     };
 
+    let mut ref_call_args = Vec::new();
     for (fill, pty_decl) in pairs {
         if has_bounds {
             check_iterator_bounds(
@@ -1710,6 +1712,11 @@ pub(crate) fn commit_selected_call(
             )?;
         }
         let pty = substitute(gamma, pty_decl, &subs, span)?;
+        if frame_ref_target(gamma, pty).is_some()
+            && let SlotFill::Direct(arg) = fill
+        {
+            ref_call_args.push(arg);
+        }
         match fill {
             SlotFill::Direct(arg) => {
                 // Implicit iterable->iterator coercion at a bounded param:
@@ -1751,6 +1758,10 @@ pub(crate) fn commit_selected_call(
         }
     }
 
+    if !ref_call_args.is_empty() {
+        gamma.out.ref_call_args.insert(call_expr, ref_call_args);
+    }
+
     if has_bounds {
         check_iterator_bounds(
             c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, true, 0, span,
@@ -1789,10 +1800,10 @@ pub(crate) fn commit_selected_call(
         gamma.out.call_generic_bindings.insert(call_expr, bindings);
     }
 
-    // A non-`@pure` callee may reassign a global, so its call invalidates every
-    // global refinement. Args + receiver above were checked while the
+    // A non-`@pure` callee may reassign globals or mutate fields through aliases.
+    // Args + receiver above were checked while the
     // refinements still held (the call's effect is sequenced after them); a
-    // `@pure` callee provably can't write globals (verify_pure_expr), so it
+    // `@pure` callee provably can't mutate state (verify_pure_expr), so it
     // preserves them. Done here, after arg checking, so nested impure calls in
     // earlier args have already cleared in evaluation order.
     let callee_pure = fn_has_anno(
@@ -1805,7 +1816,7 @@ pub(crate) fn commit_selected_call(
         .unwrap_or_else(|| gamma.workspace.builtins.unit());
 
     if !callee_pure {
-        gamma.refined_nonnull.retain(|(root, _)| !root.is_global());
+        gamma.refined_nonnull.clear();
     }
 
     let ret_ty = substitute(gamma, ret_ty, &subs, span)?;
@@ -1838,10 +1849,10 @@ pub(crate) fn call_fn_value(
     );
     check_args(c, gamma, &param_tys, args, param_tys.len(), span, &what)?;
 
-    // A fn-value callee is opaque -- we can't prove it doesn't write globals, so
-    // conservatively drop all global refinements (args above were checked while
+    // A fn-value callee is opaque -- we can't prove it doesn't mutate state, so
+    // conservatively drop path refinements (args above were checked while
     // they still held).
-    gamma.refined_nonnull.retain(|(root, _)| !root.is_global());
+    gamma.refined_nonnull.clear();
 
     Ok(resolve(gamma, fn_ty.with_idx(ret), span))
 }
