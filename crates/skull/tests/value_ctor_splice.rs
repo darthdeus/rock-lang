@@ -19,15 +19,18 @@
 use skull::mir_emit::emit_full_with_value_ctor;
 use skull_codegen_lua::ValueCtorShape;
 
-use crate::common::ws_with_stdlib;
+use crate::common::{function_body, run_luajit, ws_with_stdlib};
 
 /// `Bag` carries a `[int]`, so it is GC-carrying and materializes as a table
 /// (`_vt`). `Pt` is FFI-clean, so it materializes as cdata (`_ct`) and must be
-/// left alone: `ffi.typeof` has no Lua body to splice. Both are returned through
-/// a nullable, which keeps the boxed ABI and forces materialization.
+/// left alone: `ffi.typeof` has no Lua body to splice. Nullable returns carry
+/// leaves; an escaping Holder's fields force both storage tiers to box.
 const SRC: &str = "\
 value Bag { xs: [int], n: int }
 value Pt { x: float, y: float }
+struct Holder { bag: Bag?, pt: Pt? }
+global HELD: Holder? = null
+global ABSENT_HELD: Holder? = null
 
 fn find_bag(want: int) -> Bag? {
     if want == 0 { return null }
@@ -42,8 +45,16 @@ fn find_pt(want: int) -> Pt? {
 fn main() {
     let b = find_bag(3)
     let p = find_pt(3)
+    let h = Holder { bag: b, pt: p }
+    let absent = Holder { bag: find_bag(0), pt: find_pt(0) }
+    HELD = h
+    ABSENT_HELD = absent
     if b != null { print(b.n) }
     if p != null { print(p.y) }
+    print(h.bag == b)
+    print(h.pt == p)
+    print(absent.bag == null)
+    print(absent.pt == null)
 }
 ";
 
@@ -67,6 +78,7 @@ fn splice_replaces_every_gc_table_construction_and_leaves_the_cdata_tier_alone()
         construction_sites(&call, "Bag_vt(") > 0,
         "fixture builds no GC-table value; the test would prove nothing:\n{call}"
     );
+    assert!(function_body(&call, "main").contains("Pt_ct("), "fixture stores no cdata value; the tier control would prove nothing");
     assert_eq!(
         construction_sites(&splice, "Bag_vt("),
         0,
@@ -89,6 +101,13 @@ fn splice_replaces_every_gc_table_construction_and_leaves_the_cdata_tier_alone()
         construction_sites(&splice, "Pt_ct("),
         "the cdata tier changed under the value-ctor switch"
     );
+    for lua in [&call, &splice] {
+        for (name, ctor) in [("find_bag", "Bag_vt("), ("find_pt", "Pt_ct(")] {
+            let body = function_body(lua, name);
+            assert!(!body.contains(ctor), "nullable return boxes before its field sink:\n{body}");
+        }
+        assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_ctor_splice_boxed_sink"), "3\n2\ntrue\ntrue\ntrue\ntrue");
+    }
 }
 
 /// The switch touches CONSTRUCTION SITES and nothing else: the two artifacts

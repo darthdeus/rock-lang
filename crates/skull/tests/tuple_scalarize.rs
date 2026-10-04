@@ -7,7 +7,7 @@
 //! `Iterator<T>` bound. `for (a, b) in it` construct-then-destructures the pair
 //! every iteration; the tuple must be split into scalars at codegen -- LuaJIT
 //! SINK only fires on compiled traces, and other backends have no SINK at all.
-use crate::common::{emit_module, function_body};
+use crate::common::{emit_module, function_body, run_luajit};
 
 // Straight-line pair iterator (the EnumIter/ZipIter shape): @inline `next`
 // builds a fresh 2-tuple per iteration, the `for` header destructures it.
@@ -191,12 +191,15 @@ fn arena_bare_loop_used_entity_scalarizes_into_call() {
 }
 
 // The door_at shape: a `for (e, d)` pair scan that RETURNS the matching entity.
-// The non-returning iterations scalarize away (no per-iteration table); only
-// the escaping return materializes, and it must go through `Entity_vt` -- the
-// tier-correct ctor carrying `__ty` + the value-`__eq` metatable (a raw
-// `MakeStruct` here silently broke cross-scan `==`, the item-6 fallout).
+// GC-tier nullable returns carry presence and leaves. Both the
+// scan and its return must stay unboxed; a field sink still needs a tagged box
+// that compares equal across scans (the item-6 raw MakeStruct fallout).
 const ARENA_SCAN_RETURN_ENTITY: &str = r#"
 struct Mob { health: int, tag: int }
+struct Found { entity: Entity<Mob>? }
+global STORED: Found? = null
+
+@nomangle inline(lua) fn __out(s: string) = "io.write(s, ' ')"
 
 fn scan_return_hit(mobs: Arena<Mob>, want: int) -> Entity<Mob>? {
     for (e, m) in mobs {
@@ -208,42 +211,36 @@ fn scan_return_hit(mobs: Arena<Mob>, want: int) -> Entity<Mob>? {
 fn main() {
     let mobs: Arena<Mob> = arena_new()
     insert(mobs, Mob { health: 10, tag: 1 })
-    let _ = scan_return_hit(mobs, 1)
+    insert(mobs, Mob { health: 20, tag: 2 })
+    let hit = scan_return_hit(mobs, 2).unwrap()
+    let again = scan_return_hit(mobs, 2)
+    STORED = Found { entity: scan_return_hit(mobs, 2) }
+    let empty: Arena<Mob> = arena_new()
+    __out("{scan_return_hit(mobs, 2) == again} {get(hit).unwrap().tag} {STORED.unwrap().entity == again}")
+    __out("{scan_return_hit(mobs, 3) == null} {scan_return_hit(empty, 1) == null}")
 }
 "#;
 
 #[test]
-fn arena_scan_returning_entity_materializes_via_vt() {
+fn arena_scan_returning_entity_keeps_leaves_until_a_boxed_sink() {
     let lua = emit_module(ARENA_SCAN_RETURN_ENTITY);
     let find = function_body(&lua, "scan_return_hit");
     assert!(
-        find.contains("Entity_vt("),
-        "the escaping returned entity must materialize via the tier-correct \
-         Entity_vt ctor (metatable-carrying), not a raw table:\n{find}"
+        !find.contains("Entity_vt(") && !find.contains("Entity_ct(") && !find.contains('{'),
+        "the nullable entity return and scan must not allocate a box:\n{find}"
     );
     // No un-tagged raw Entity table leaked (the lower_for_arena MakeStruct bug).
     assert!(
         !find.contains("_arena ="),
         "no raw metatable-less Entity table may be built in the scan:\n{find}"
     );
-    // Item 8 escape-site placement: the ctor moved OUT of the per-iteration yield
-    // block into the hit/return path. Exactly one Entity_vt SITE, and it sits on
-    // a `return` line -- so a MISS runs zero ctors, the scalars (arena/index/gen)
-    // ride loop-carried cells and rebuild only on the hit.
+    let main = function_body(&lua, "main");
     assert_eq!(
-        find.matches("Entity_vt(").count(),
+        main.matches("Entity_vt(").count(),
         1,
-        "expected exactly one Entity_vt pack site (the hit-path rebuild):\n{find}"
+        "only the Found field sink may materialize a tagged Entity box:\n{main}"
     );
-    let ctor_line = find
-        .lines()
-        .find(|l| l.contains("Entity_vt("))
-        .expect("Entity_vt line");
-    assert!(
-        ctor_line.contains("return"),
-        "the Entity_vt ctor must be on the hit-path return, not the yield block \
-         (item 8: misses allocate nothing):\n{ctor_line}"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "arena_nullable_entity_return"), "true 2 true true true");
 }
 
 const ARENA_ENTITY_IN_ENUM: &str = r#"
@@ -286,14 +283,12 @@ fn arena_entity_threads_through_enum_payload_without_boxing() {
     );
 }
 
-// Gate-stays-put pin (item 8): a NULLABLE value binding (`let v: V? = ...`) is
-// never flagged for escape-rematerialization -- so its escaping return stays a
-// boxed load, NOT a rebuild-from-field-cells (which would reconstruct a bogus
-// non-null value on the nil path). A future "simplification" of the lowering
-// gate goes red here. The `Bag`-vt ctor appears exactly ONCE (the `if` literal);
-// a second occurrence would mean the return got rematerialized.
+// GC-tier nullable bindings and returns carry presence and leaves.
+// The false arm must remain absent, rather than rebuilding a bogus present Bag.
 const NULLABLE_VALUE_RETURN: &str = r#"
 value Bag { xs: [int] }
+
+@nomangle inline(lua) fn __out(s: string) = "io.write(s, ' ')"
 
 fn pick(c: bool) -> Bag? {
     let v: Bag? = null
@@ -302,18 +297,23 @@ fn pick(c: bool) -> Bag? {
 }
 
 fn main() {
-    let _ = pick(true)
+    let present = pick(true).unwrap()
+    __out("{present.xs.len} {present.xs[0]} {pick(false) == null}")
 }
 "#;
 
 #[test]
-fn nullable_value_binding_return_stays_boxed() {
+fn nullable_value_binding_return_keeps_presence_and_leaves() {
     let lua = emit_module(NULLABLE_VALUE_RETURN);
     let pick = function_body(&lua, "pick");
     assert_eq!(
         pick.matches("Bag_vt(").count(),
-        1,
-        "a nullable value binding's return must stay a boxed load (one ctor, the \
-         `if` literal) -- a second Bag_vt means the escape was wrongly rebuilt:\n{pick}"
+        0,
+        "a nullable value binding and its return must not rebuild a Bag box:\n{pick}"
     );
+    assert!(!pick.contains("Bag_ct("), "nullable Bag uses the wrong storage tier:\n{pick}");
+    assert_eq!(pick.matches("__ty = \"Vec\"").count(), 1, "only the payload Vec may be allocated:\n{pick}");
+    assert_eq!(pick.matches('{').count(), 2, "only the Vec wrapper and its data table may be allocated:\n{pick}");
+    assert!(!pick.contains("__ty = \"Bag\""), "nullable return builds a raw Bag box:\n{pick}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_value_binding_return"), "1 1 true");
 }
