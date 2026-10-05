@@ -1486,6 +1486,23 @@ fn vec_len<T>(vec: [T]) -> int {
     return vec.len
 }
 
+// A non-retaining currency key, compared only within a live owner's cache.
+@intrinsic @native_required inline(lua) fn __vec_cache_key<T>(vec: [T]) -> int = """
+    local keys = _G.__rock_vec_cache_keys
+    if keys == nil then
+        keys = setmetatable({}, {__mode = "k"})
+        _G.__rock_vec_cache_keys = keys
+        _G.__rock_vec_cache_next = 0
+    end
+    local key = keys[vec]
+    if key == nil then
+        key = _G.__rock_vec_cache_next + 1
+        _G.__rock_vec_cache_next = key
+        keys[vec] = key
+    end
+    return key
+"""
+
 // Bare-name UFCS wrappers, so `xs.push(x)`/`xs.len()` resolve to the
 // prefix-named fns. Only `vec_new`/`vec_push` are @nomangle, and the reason
 // is inline(lua) BODIES that call them by name (`get_app_args`, the
