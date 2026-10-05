@@ -1230,8 +1230,8 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     ] {
         assert!(prepare.contains(call), "tick preparation is missing authoritative call `{call}`");
     }
-    for call in ["prepare: mag_tick_prepare", "world_tick_runner(world.root, context, hooks, shells)",
-        "runtime.runner.unwrap().actor_host = mag_tick_actor_host()", "world_tick_advance(tick, dt)"] {
+    for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)",
+        "runtime.runner.unwrap().get().unwrap().actor_host = mag_tick_actor_host()", "world_tick_advance(tick, dt)"] {
         assert!(tick.contains(call), "canonical tick is missing runner delegation `{call}`");
     }
     let package_tick = fs::read_to_string(repo.join("mag-world/world_tick.rock"))
@@ -1244,7 +1244,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let actor_host = rock_function_body(&run, "fn mag_tick_actor_host(");
     assert!(actor_host.contains("player_input:") && actor_host.contains("mag_tick_actor_pre_mob(r.host)"));
     for call in ["input(r)", "world_tick_actors(r)",
-        "world_doors_update(r.root, r.host, r.door_host, player, r.dt)"] {
+        "world_doors_update(r.root.get().unwrap(), r.host, r.door_host, player, r.dt)"] {
         assert!(runner.contains(call), "package runner is missing authoritative stage `{call}`");
     }
     let phases = [
