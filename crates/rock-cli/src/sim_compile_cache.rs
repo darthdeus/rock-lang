@@ -229,6 +229,7 @@ pub(super) fn prepare(
     output: &Path,
     root: &Path,
 ) -> Result<PreparedSims> {
+    let budget = budget_bytes()?;
     std::fs::create_dir_all(root)
         .with_context(|| format!("create sim compile cache {}", root.display()))?;
     let lookup = timed_sim_compile_phase("compile_sims", "cache_lookup", project, Some(output), || {
@@ -271,7 +272,7 @@ pub(super) fn prepare(
     let prepared = consume_sim_receipt(&receipt, project, output, None)?;
     match publish(&receipt, &entry, &lookup) {
         Ok(()) => {
-            if let Err(error) = evict_to_budget(root, budget_bytes()?, &entry) {
+            if let Err(error) = evict_to_budget(root, budget, &entry) {
                 eprintln!("[sim] compile cache: eviction failed: {error:#}");
             }
         }
@@ -286,16 +287,20 @@ pub(super) fn prepare(
 fn publish(receipt: &Path, entry: &Path, lookup: &Lookup) -> Result<()> {
     let (compiled, identity) = manifest_key(receipt)?;
     if compiled != lookup.key {
-        let changed = ["compiler_sha256", "stdlib", "preamble_sha256", "build_vars_sha256", "environment_sha256"]
+        const FIELDS: [&str; 5] =
+            ["compiler_sha256", "stdlib", "preamble_sha256", "build_vars_sha256", "environment_sha256"];
+        let changed = FIELDS
             .into_iter()
             .filter(|field| identity.get(field) != lookup.identity.get(field))
             .collect::<Vec<_>>();
         if changed == ["build_vars_sha256"] {
             return Err(anyhow!(
-                "[build.vars] values changed while compiling; a clock var caches only when declared `volatile = true`"
+                "[build.vars] values changed while compiling (a clock var not declared \
+                 `volatile = true` changes on every run)"
             ));
         }
-        return Err(anyhow!("inputs changed while compiling ({})", if changed.is_empty() { "sources or context".to_string() } else { changed.join(", ") }));
+        let changed = if changed.is_empty() { "sources or context".to_string() } else { changed.join(", ") };
+        return Err(anyhow!("inputs changed while compiling ({changed})"));
     }
     match std::fs::rename(receipt, entry) {
         Ok(()) => Ok(()),
