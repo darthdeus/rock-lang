@@ -2384,25 +2384,33 @@ impl Builder<'_> {
         name: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.nominal_rep_shape_required(name, false)?;
-        self.value_copy_stack.push(name);
+        self.enter_value_copy(name)?;
         let copy = self.boxed_copy_repr_of(boxed, &shape);
         self.value_copy_stack.pop();
         copy
     }
 
+    /// Copies are unrolled at compile time, so a copy of `name` inside its own
+    /// copy (`next: Node?` inside `Node`) would need a runtime copier. There
+    /// is none, so it is rejected rather than left sharing the child.
+    fn enter_value_copy(&mut self, name: Ustr) -> Result<(), CompilerError> {
+        if self.value_copy_stack.contains(&name) {
+            return Err(self.gap_here(format!(
+                "recursive value type `{name}` cannot be copied: its `{name}?` descendant would need a runtime copier"
+            )));
+        }
+        self.value_copy_stack.push(name);
+        Ok(())
+    }
+
     /// The ordinary value type of `owner.field` when it is declared `V?`. Its
-    /// shape plans it as one opaque slot, but it is a value. A recursive child
-    /// (`next: Node?` inside `Node`) cannot be unrolled into its own copy and
-    /// stays shared.
+    /// shape plans it as one opaque slot, but it is a value.
     fn nullable_value_child(&self, owner: Ustr, field: Ustr) -> Option<Ustr> {
         let ty = self.struct_field_ty(owner, field)?;
         let (child, true) = super::shape::nominal_name_from_ty(self.ws, ty)? else {
             return None;
         };
-        (self.is_value_struct(child)
-            && !self.is_nobox_struct(child)
-            && !self.value_copy_stack.contains(&child))
-        .then_some(child)
+        (self.is_value_struct(child) && !self.is_nobox_struct(child)).then_some(child)
     }
 
     /// A copy rebuilt from leaves keeps each `V?` value child as the source's
@@ -2437,7 +2445,6 @@ impl Builder<'_> {
                 if names.len() != parts.len() {
                     return Ok(ValueRepr::Group { name, parts, present });
                 }
-                self.value_copy_stack.push(name);
                 let mut out = Vec::with_capacity(parts.len());
                 let mut failed = None;
                 for (fname, part) in names.into_iter().zip(parts) {
@@ -2465,7 +2472,6 @@ impl Builder<'_> {
                     };
                     out.push(part);
                 }
-                self.value_copy_stack.pop();
                 match failed {
                     Some(e) => Err(e),
                     None => Ok(ValueRepr::Group { name, parts: out, present }),
@@ -2578,10 +2584,13 @@ impl Builder<'_> {
         let n = self.emit_cur(Inst::Const(Lit::Nil));
         self.store_and_join(result, n, join);
 
+        // The child copies made while packing are this copy's descendants.
         self.cur = val_bb;
-        let copy = self.boxed_value_copy_repr(boxed, name)?;
-        let packed = self.pack(copy)?;
-        self.store_and_join(result, packed, join);
+        let shape = self.nominal_rep_shape_required(name, false)?;
+        self.enter_value_copy(name)?;
+        let packed = self.boxed_copy_repr_of(boxed, &shape).and_then(|copy| self.pack(copy));
+        self.value_copy_stack.pop();
+        self.store_and_join(result, packed?, join);
 
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))

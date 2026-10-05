@@ -2173,7 +2173,7 @@ struct Builder<'a> {
     /// ([`Self::binding_ref_borrowed`]), collected on first use.
     ref_borrowed_binds: std::cell::OnceCell<HashSet<u32>>,
     /// Value types whose copy is being emitted, outermost first: a recursive
-    /// `V?` child is not unrolled into its own copy ([`Self::boxed_value_copy_repr`]).
+    /// `V?` child cannot be unrolled into its own copy ([`Self::enter_value_copy`]).
     value_copy_stack: Vec<Ustr>,
     /// `V?` value children a copy left as its source's box
     /// ([`Self::owned_value_children`]).

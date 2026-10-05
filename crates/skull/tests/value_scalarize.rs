@@ -535,3 +535,48 @@ fn a_copy_reads_a_later_write_through_its_sources_nullable_child() {
     let lua = emit_module(&nullable_child_snapshot_source());
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_nullable_child_snapshot"), "99");
 }
+
+const RECURSIVE_VALUE_COPY: &str = r#"
+value Chain { n: int, next: Chain?, xs: [int] }
+struct ChainHolder { c: Chain }
+fn main() {
+    let c = Chain { n: 0, next: Chain { n: 1, next: null, xs: [] }, xs: [] }
+    let a = ChainHolder { c: c }
+    let b = ChainHolder { c: c }
+    if a.c.next != null { a.c.next.n = 99 }
+    if b.c.next != null { print(b.c.next.n) }
+}
+"#;
+
+/// A copy of a recursive value must own its `Chain?` child, and so that
+/// child's child, to any depth; the Lua lowering unrolls copies at compile
+/// time and has no runtime copier, so it rejects the copy instead of sharing
+/// the child. The C backend rejects the type's by-value layout.
+#[test]
+fn a_recursive_value_copy_rejects() {
+    let err = crate::common::try_emit_module(RECURSIVE_VALUE_COPY)
+        .expect_err("a recursive value copy must not share its child");
+    assert!(
+        err.message.contains("recursive value type `Chain`"),
+        "the rejection must name the recursive type, got: {}",
+        err.message
+    );
+}
+
+/// The control: reading through a recursive value, and a copy that never
+/// escapes, need no copy of the child.
+#[test]
+fn a_recursive_value_read_compiles() {
+    let lua = emit_module(
+        r#"
+value Chain { n: int, next: Chain?, xs: [int] }
+struct ChainHolder { c: Chain }
+fn main() {
+    let h = ChainHolder { c: Chain { n: 0, next: Chain { n: 1, next: null, xs: [] }, xs: [] } }
+    let c = h.c
+    print(c.next?.n ?? -1)
+}
+"#,
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_recursive_read"), "1");
+}
