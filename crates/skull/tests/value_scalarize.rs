@@ -10,7 +10,7 @@
 //! (the mag `mag.grid.floors_walls` regression). The SROA forwarding pass in
 //! `skull-transform` forwards those reads to the ctor operands so DCE drops the
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
-use crate::common::{emit_module, function_body};
+use crate::common::{emit_module, function_body, run_luajit};
 
 const VALUE_FIELD_LOOP: &str = r#"
 value FixVec2 { x: float, y: float }
@@ -417,3 +417,45 @@ fn non_colliding_underscore_field_still_scalarizes() {
         "7 + 1*10 + 2*100 -- a wrong leaf order or a duplicate param would shift this"
     );
 }
+
+// `Mat4` is a leaf-form cdata: its ctor keys are dotted leaf paths
+// (`c0.x`), so a copy of a forwarded `Mat4` reads `Field(Field(ctor, c0), x)`.
+// Inside a closure body the binding's cell is forwarded to its ctor, and the
+// copy must fold those reads to the ctor's operands instead of building the
+// value twice.
+const LEAF_FORM_SAVED_IN_CLOSURE: &str = r#"
+global ACTIVE: bool = true
+global VIEW: Mat4 = mat4_identity()
+fn reset() {
+    ACTIVE = false
+    VIEW = mat4_identity()
+}
+fn with_fn(f: fn() -> ()) { f() }
+fn with_saved(draw: fn() -> ()) {
+    with_fn(() => {
+        let was = ACTIVE
+        let saved = VIEW
+        reset()
+        draw()
+        ACTIVE = was
+        VIEW = saved
+    })
+}
+fn main() {
+    with_saved(() => { VIEW = mat4_identity() })
+    print("{ACTIVE} {VIEW.c3.w}")
+}
+"#;
+
+#[test]
+fn leaf_form_value_copy_in_a_closure_builds_one_box() {
+    let lua = emit_module(LEAF_FORM_SAVED_IN_CLOSURE);
+    let body = function_body(&lua, "with_saved_fn_ret_unit_ret_unit__lambda0");
+    assert_eq!(
+        body.matches("Mat4_lct(").count() + body.matches("Mat4_ct(").count(),
+        1,
+        "restoring the saved Mat4 builds exactly one box:\n{body}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_leaf_form_saved"), "true 1");
+}
+
