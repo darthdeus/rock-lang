@@ -4651,7 +4651,7 @@ mod value_test_exec {
     fn value_mismatch_fails_with_detail() {
         let src = "@test(returns = 43)\nfn r() -> int { return 42 }\n";
         match skull_build("val.rock", src).expect("build ok") {
-            SkullOutcome::TestFail { passed, fails } => {
+            SkullOutcome::TestFail { passed, fails, .. } => {
                 assert_eq!(passed, 0);
                 assert_eq!(fails, vec!["r: value mismatch: expected <43> got <42>".to_string()]);
             }
@@ -4666,7 +4666,7 @@ mod value_test_exec {
                    @test(returns = true)\nfn c() -> bool { return true }\n\
                    @test(returns = 6, output = \"hi\")\nfn d() -> int { print(\"hi\")\n return 6 }\n";
         match skull_build("val.rock", src).expect("build ok") {
-            SkullOutcome::Pass { tests } => assert_eq!(tests, 4),
+            SkullOutcome::Pass { tests, .. } => assert_eq!(tests, 4),
             SkullOutcome::TestFail { fails, .. } => panic!("expected all pass, got {fails:?}"),
         }
     }
@@ -4771,7 +4771,7 @@ fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
 fn test_file_limit_allows_two_files_over_total_budget() {
     let dir = file_limit_package("os.execute('sleep 0.7')", Some("os.execute('sleep 0.7')"));
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
-    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 2 })), "{result:?}");
+    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 2, .. })), "{result:?}");
 }
 
 #[test]
@@ -4781,7 +4781,7 @@ fn test_file_limit_kills_and_names_stuck_file() {
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
     assert!(start.elapsed() < Duration::from_secs(5), "stuck file was not bounded");
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 0, fails }) => {
+        Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
             assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")), "{fails:?}");
         }
         other => panic!("{other:?}"),
@@ -4793,7 +4793,7 @@ fn test_file_limit_keeps_completed_file_results() {
     let dir = file_limit_package("print('done')", Some("while true do end"));
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 1, fails }) => {
+        Ok(super::SkullOutcome::TestFail { passed: 1, fails, .. }) => {
             assert!(fails.iter().any(|f| f.contains("second.rock") && f.contains("timed out")), "{fails:?}");
         }
         other => panic!("{other:?}"),
@@ -4819,7 +4819,7 @@ fn test_file_limit_does_not_reset_for_each_test() {
     std::fs::write(file, source).unwrap();
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 1, fails }) => {
+        Ok(super::SkullOutcome::TestFail { passed: 1, fails, .. }) => {
             assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")), "{fails:?}");
         }
         other => panic!("{other:?}"),

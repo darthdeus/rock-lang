@@ -13,17 +13,29 @@ pub(crate) struct SkullMarkers {
     /// `@test(returns = ...)` fn that ran without error; the HOST compares the
     /// value ([`compare_value`]) and turns it into pass/fail accounting.
     pub values: Vec<(String, String)>,
+    /// Every `TIME` line: one per test the harness finished, in run order.
+    pub times: Vec<TestTime>,
+}
+
+/// `__SKULL__\tTIME\t<name>\t<ms>\t<pass|fail|value>`: a test's wall time and
+/// the harness-side result; a `value` result is judged by the host.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TestTime {
+    pub name: String,
+    pub ms: f64,
+    pub result: String,
 }
 
 /// Parse the `__SKULL__\tPASS|FAIL\t<detail>` and
-/// `__SKULL__\tVALUE\t<name>\t<serialized>` marker lines out of a test
-/// program's stdout. `None` = no marker lines at all: the program never reached
-/// the harness (an emit/load bug, not a test failure).
+/// `__SKULL__\tVALUE\t<name>\t<serialized>` result lines and the
+/// [`TestTime`] lines out of a test program's stdout. `None` = no result lines
+/// at all: the program never reached the harness (an emit/load bug, not a test
+/// failure).
 pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
-    let results: Vec<&str> = stdout
+    let (time_lines, results): (Vec<&str>, Vec<&str>) = stdout
         .lines()
         .filter(|l| l.starts_with("__SKULL__\t"))
-        .collect();
+        .partition(|l| l.starts_with("__SKULL__\tTIME\t"));
     if results.is_empty() {
         return None;
     }
@@ -42,10 +54,26 @@ pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
             (name, val)
         })
         .collect();
+    let times = time_lines
+        .iter()
+        .filter_map(|l| {
+            let mut parts = l.splitn(5, '\t').skip(2);
+            let time = (|| Some(TestTime {
+                name: parts.next()?.to_string(),
+                ms: parts.next()?.parse().ok()?,
+                result: parts.next()?.to_string(),
+            }))();
+            if time.is_none() {
+                log::warn!(target: "CLI", "malformed test time line: {l:?}");
+            }
+            time
+        })
+        .collect();
     Some(SkullMarkers {
         passed: results.len() - fails.len() - values.len(),
         fails,
         values,
+        times,
     })
 }
 
@@ -144,6 +172,21 @@ mod tests {
                 "t_b: output mismatch: expected <1> got <2>".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn time_lines_are_parsed_and_not_counted_as_results() {
+        let stdout = "__SKULL__\tPASS\t\n\
+                      __SKULL__\tTIME\tt_a\t12.500\tpass\n\
+                      __SKULL__\tVALUE\tt_b\t42\n\
+                      __SKULL__\tTIME\tt_b\t0.031\tvalue\n";
+        let m = parse_skull_markers(stdout).expect("markers present");
+        assert_eq!(m.passed, 1);
+        assert_eq!(m.values.len(), 1);
+        assert_eq!(m.times, vec![
+            TestTime { name: "t_a".into(), ms: 12.5, result: "pass".into() },
+            TestTime { name: "t_b".into(), ms: 0.031, result: "value".into() },
+        ]);
     }
 
     #[test]

@@ -56,6 +56,8 @@ mod cimgui_prelude;
 mod test_exit_status_gate;
 #[path = "test_file_host.rs"]
 mod test_file_host;
+#[path = "test_timings.rs"]
+mod test_timings;
 #[path = "js_test_harness_globals_lua.rs"]
 mod js_test_harness_globals_lua;
 #[path = "js_backend_externs_lua.rs"]

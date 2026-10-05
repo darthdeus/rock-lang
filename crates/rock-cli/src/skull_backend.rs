@@ -18,7 +18,7 @@ use colored::Colorize;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Parse `src`, type-check it through bone WITH the stdlib injected (so
@@ -489,7 +489,8 @@ pub(crate) fn skull_assemble_project(
 
 /// A Lua harness appended after the emitted module: it runs each `@test` fn with
 /// its `print` AND `io.write` captured (both restored before the markers are
-/// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line per test.
+/// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line and one
+/// wall-time `TIME` line per test.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
 fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
@@ -534,6 +535,22 @@ fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
     h.push_str(
         r#"local function __esc(s) return (s:gsub("\\", "\\\\"):gsub("\n", "\\n"):gsub("\t", "\\t")) end
 local __skull_file
+-- os.clock is CPU time on POSIX and misses sleeps and waits, so tests are timed
+-- with the monotonic clock; MSVC's clock() is already wall time.
+local __skull_now = function() return os.clock() * 1e3 end
+do
+  local ffi = require("ffi")
+  if ffi.os ~= "Windows" then
+    ffi.cdef[[struct __skull_timespec { long tv_sec; long tv_nsec; };
+      int __skull_clock_gettime(int, struct __skull_timespec *) __asm__("clock_gettime");]]
+    local ts = ffi.new("struct __skull_timespec")
+    local monotonic = ffi.os == "OSX" and 6 or 1
+    __skull_now = function()
+      assert(ffi.C.__skull_clock_gettime(monotonic, ts) == 0, "clock_gettime failed")
+      return tonumber(ts.tv_sec) * 1e3 + tonumber(ts.tv_nsec) / 1e6
+    end
+  end
+end
 io.stdout:setvbuf("no")
 for _, t in ipairs(__skull_T) do
   if t.file ~= __skull_file then
@@ -557,23 +574,29 @@ for _, t in ipairs(__skull_T) do
   io.write = function(...)
     for i = 1, select('#', ...) do buf[#buf + 1] = tostring((select(i, ...))) end
   end
+  local start = __skull_now()
   local ok, ret = pcall(t.f)
+  local ms = __skull_now() - start
   print = rp
   io.write = rw
   local got = table.concat(buf, ""):gsub("%s+$", "")
+  local result = "fail"
   if not ok then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(ret)), "\n")
   elseif t.out ~= nil and got ~= t.out then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": output mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
   elseif t.val then
+    result = "value"
     -- %.17g round-trips any f64; booleans via tostring. The host does the
     -- comparison (test_protocol::compare_value), never this harness.
     local s
     if type(ret) == "number" then s = string.format("%.17g", ret) else s = tostring(ret) end
     io.write("\n__SKULL__\tVALUE\t", t.name, "\t", s, "\n")
   else
+    result = "pass"
     io.write("\n__SKULL__\tPASS\t\n")
   end
+  io.write("\n__SKULL__\tTIME\t", t.name, "\t", string.format("%.3f", ms), "\t", result, "\n")
 end
 "#,
     );
@@ -617,9 +640,18 @@ struct SkullFailure {
 enum SkullOutcome {
     /// All `@test`s passed (or the file had none). `tests` = number that ran
     /// green (0 for a load-only file with no `@test`s).
-    Pass { tests: usize },
+    Pass { tests: usize, timings: Vec<TestTiming> },
     /// Some `@test`s failed. `passed` ran green; `fails` holds the rest's detail.
-    TestFail { passed: usize, fails: Vec<String> },
+    TestFail { passed: usize, fails: Vec<String>, timings: Vec<TestTiming> },
+}
+
+/// Wall time of one `@test` that finished, for the slowest-tests report and
+/// the `ROCK_TEST_TIMINGS` file.
+#[derive(Debug, Clone)]
+struct TestTiming {
+    name: String,
+    ms: f64,
+    status: &'static str,
 }
 
 /// Run a source string through the full skull pipeline (bone type-check + skull
@@ -636,7 +668,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
             if let Some(tests) = all_tests_expect_compile_failure(file, src) {
-                return Ok(SkullOutcome::Pass { tests });
+                return Ok(SkullOutcome::Pass { tests, timings: Vec::new() });
             }
             return Err(SkullFailure {
                 reason: categorize(&errs[0].message),
@@ -717,7 +749,7 @@ fn run_emitted_tests(
                 },
             });
         }
-        return Ok(SkullOutcome::Pass { tests: 0 });
+        return Ok(SkullOutcome::Pass { tests: 0, timings: Vec::new() });
     }
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
@@ -751,13 +783,14 @@ fn run_emitted_tests(
         });
     }
     let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
-        passed: 0, fails: Vec::new(), values: Vec::new(),
+        passed: 0, fails: Vec::new(), values: Vec::new(), times: Vec::new(),
     });
 
     // VALUE lines: compare the serialized return value HOST-side against the
     // pinned `@test(returns = ...)` literal.
     let mut passed = markers.passed;
     let mut fails = markers.fails;
+    let mut value_fails = HashSet::new();
     let expects: HashMap<&str, &skull::ValueExpect> = tests
         .iter()
         .filter_map(|t| t.returns.as_ref().map(|v| (t.name.as_str(), v)))
@@ -772,9 +805,21 @@ fn run_emitted_tests(
         match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
         {
             Ok(()) => passed += 1,
-            Err(detail) => fails.push(format!("{name}: {detail}")),
+            Err(detail) => {
+                value_fails.insert(name.as_str());
+                fails.push(format!("{name}: {detail}"));
+            }
         }
     }
+    let timings = markers.times.iter().map(|time| TestTiming {
+        name: time.name.clone(),
+        ms: time.ms,
+        status: match time.result.as_str() {
+            "pass" => "pass",
+            "value" if !value_fails.contains(time.name.as_str()) => "pass",
+            _ => "fail",
+        },
+    }).collect();
 
     // Every declared test owes exactly one marker. Counting only the markers
     // that ARRIVED makes a truncated run self-consistent -- three tests, one
@@ -801,9 +846,9 @@ fn run_emitted_tests(
     }
 
     if fails.is_empty() {
-        Ok(SkullOutcome::Pass { tests: passed })
+        Ok(SkullOutcome::Pass { tests: passed, timings })
     } else {
-        Ok(SkullOutcome::TestFail { passed, fails })
+        Ok(SkullOutcome::TestFail { passed, fails, timings })
     }
 }
 
@@ -2350,6 +2395,30 @@ fn skull_run_project(dir: &str) -> Result<()> {
     }
 }
 
+/// One JSON line per finished `@test`: `{unit, name, ms, status}`.
+fn write_test_timings(path: &std::path::Path, timings: &[(String, TestTiming)]) -> Result<()> {
+    let mut text = String::new();
+    for (unit, t) in timings {
+        let row = serde_json::json!({ "unit": unit, "name": t.name, "ms": t.ms, "status": t.status });
+        text.push_str(&row.to_string());
+        text.push('\n');
+    }
+    fs_err::write(path, text)?;
+    Ok(())
+}
+
+fn print_slowest_tests(timings: &[(String, TestTiming)]) {
+    if timings.is_empty() {
+        return;
+    }
+    let mut slowest: Vec<&TestTiming> = timings.iter().map(|(_, t)| t).collect();
+    slowest.sort_by(|a, b| b.ms.total_cmp(&a.ms));
+    println!("\n{}", "=== slowest @tests (skull) ===".bold());
+    for t in slowest.iter().take(10) {
+        println!("  {:>10.1} ms  {}", t.ms, t.name);
+    }
+}
+
 /// `rock test <paths> --backend skull` — for every `.rock` file, run the skull
 /// pipeline and the luajit validity gate; report pass/fail + a bucketed
 /// failure-reason histogram (the skull analogue of the bone test histogram).
@@ -2380,6 +2449,7 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
 pub fn skull_test(paths: &[String]) -> Result<()> {
     crate::lint_pass::set_corpus_mode();
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
+    let timings_path = std::env::var_os("ROCK_TEST_TIMINGS");
 
     let (files, package_dirs) = collect_test_units(paths)?;
 
@@ -2391,6 +2461,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     let mut tests_passed = 0usize; // individual @test functions that passed
     let mut reason_counts: HashMap<String, usize> = HashMap::new();
     let mut details: Vec<(String, String)> = Vec::new();
+    let mut timings: Vec<(String, TestTiming)> = Vec::new();
 
     // bone can panic during inference on some inputs (a bone bug, not ours).
     // Silence the default panic print during the sweep and catch each unit's
@@ -2420,7 +2491,8 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
 
     for (label, outcome) in outcomes {
         match outcome {
-            Ok(Ok(SkullOutcome::Pass { tests })) => {
+            Ok(Ok(SkullOutcome::Pass { tests, timings: unit_timings })) => {
+                timings.extend(unit_timings.into_iter().map(|t| (label.clone(), t)));
                 emit_ok += 1;
                 exec_pass += 1;
                 tests_total += tests;
@@ -2429,7 +2501,8 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
                     println!("{:.<60} {}", label, "PASS".green());
                 }
             }
-            Ok(Ok(SkullOutcome::TestFail { passed, fails })) => {
+            Ok(Ok(SkullOutcome::TestFail { passed, fails, timings: unit_timings })) => {
+                timings.extend(unit_timings.into_iter().map(|t| (label.clone(), t)));
                 emit_ok += 1;
                 tests_total += passed + fails.len();
                 tests_passed += passed;
@@ -2497,6 +2570,11 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
             "(re-run with ROCK_TEST_VERBOSE=1 for full per-file errors)".dimmed()
         );
     }
+
+    if let Some(path) = &timings_path {
+        write_test_timings(std::path::Path::new(path), &timings)?;
+    }
+    print_slowest_tests(&timings);
 
     let total = emit_ok + failed;
     let test_fails = emit_ok - exec_pass;
