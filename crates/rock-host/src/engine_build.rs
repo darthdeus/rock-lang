@@ -326,6 +326,15 @@ fn validate_receipt_lib(root: &Path, receipt: &ReceiptLib) -> Result<()> {
 mod tests {
     use super::*;
 
+    // In-process callers (the sim differential's threads) stage the same
+    // library at once; a shared staging path lets one rename the other's
+    // half-written copy.
+    #[test]
+    fn concurrent_stagings_in_one_process_use_distinct_paths() {
+        let dst = Path::new("/tmp/libstone.dylib");
+        assert_ne!(staging_path(dst), staging_path(dst));
+    }
+
     fn game_with(needs: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         fs_err::write(
@@ -569,6 +578,11 @@ fn cargo_build_and_stage_lib(
 /// isolation), then atomically `rename` to the final name. `rename(2)`
 /// is atomic on macOS and Linux; concurrent dlopens see either the old
 /// or the new fully-signed file but never a torn or mid-resign one.
+/// The path a `stage_cdylib` call copies and signs into before its rename.
+fn staging_path(dst: &Path) -> String {
+    format!("{}.{}", dst.display(), std::process::id())
+}
+
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     // A receipt owns the destination even for callers that bypass the builder.
     if validate_receipted_lib(dst_stem)? {
@@ -578,7 +592,6 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     let target_debug = cargo_target_dir(&rock_root).join("debug");
     let dev_tmp = rock_root.join("tmp");
     fs_err::create_dir_all(&dev_tmp)?;
-    let pid = std::process::id();
 
     // Platform cdylib naming: Unix prefixes `lib`, Windows doesn't;
     // extension is .so / .dylib / .dll.
@@ -598,7 +611,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
         dev_tmp.join(format!("{dst_stem}.dll")),
     );
 
-    let staging = format!("{}.{pid}", dst.display());
+    let staging = staging_path(&dst);
 
     // `cargo build -p <pkg>` can exit 0 without producing the cdylib at
     // `target/debug/lib<stem>.dylib`: a cleaned/foreign target dir
