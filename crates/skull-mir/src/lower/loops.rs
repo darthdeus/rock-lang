@@ -713,7 +713,12 @@ impl Builder<'_> {
                 self.bind_for_pattern(&subs[0], kv);
                 let vv = match col_value {
                     Some(v) => v,
-                    None => self.emit_cur(Inst::Load(val_cell)),
+                    None => {
+                        let v = self.emit_cur(Inst::Load(val_cell));
+                        let ty = self.loop_binder_ty(&subs[1], None);
+                        let r = self.loop_element_snapshot(ty, ValueRepr::Scalar(v))?;
+                        self.pack(r)?
+                    }
                 };
                 self.bind_for_pattern(&subs[1], vv);
                 Ok(())
@@ -722,7 +727,12 @@ impl Builder<'_> {
                 let kv = self.emit_cur(Inst::Load(key_cell));
                 let vv = match col_value {
                     Some(v) => v,
-                    None => self.emit_cur(Inst::Load(val_cell)),
+                    None => {
+                        let v = self.emit_cur(Inst::Load(val_cell));
+                        let ty = self.loop_binder_ty(vars, Some(1));
+                        let r = self.loop_element_snapshot(ty, ValueRepr::Scalar(v))?;
+                        self.pack(r)?
+                    }
                 };
                 let pair = self.emit_cur(Inst::MakeTuple(vec![kv, vv]));
                 self.bind_for_pattern(vars, pair);
@@ -799,10 +809,11 @@ impl Builder<'_> {
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
         let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
-        let repr = match &split {
-            Some((_, xpat)) => self.loop_element_snapshot(xpat, repr)?,
-            None => repr,
+        let ty = match &split {
+            Some((_, xpat)) => self.loop_binder_ty(xpat, None),
+            None => self.loop_binder_ty(vars, Some(1)),
         };
+        let repr = self.loop_element_snapshot(ty, repr)?;
         match &split {
             // split: index already bound to i_cell; bind the element pattern.
             Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr)?,
@@ -886,7 +897,8 @@ impl Builder<'_> {
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
         let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
-        let repr = self.loop_element_snapshot(&vars, repr)?;
+        let ty = self.loop_binder_ty(&vars, None);
+        let repr = self.loop_element_snapshot(ty, repr)?;
         let elem = self.pack(repr)?;
         self.bind_for_pattern(&vars, elem);
         self.loop_targets.push((latch, exit));
@@ -910,27 +922,39 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// A loop binding reads its element out of the collection, which the body
-    /// can still write (`xs[0].f0 = 99`), so a boxed element is snapshot at
-    /// the binding, as `let v = xs[i]` is. A captured or otherwise unscalarized
-    /// binding would read the write through the shared box.
+    /// A loop binding reads its element out of the collection (a Vec element,
+    /// a Map value), which the body can still write (`xs[0].f0 = 99`), so a
+    /// boxed element of an ordinary value type `ty` is snapshot at the binding,
+    /// as `let v = xs[i]` is. A captured or otherwise unscalarized binding
+    /// would read the write through the shared box. A leaf repr is already
+    /// its own copy.
     fn loop_element_snapshot(
         &mut self,
-        vars: &BindingPattern,
+        ty: Option<Rc<MonoTy>>,
         repr: ValueRepr,
     ) -> Result<ValueRepr, CompilerError> {
-        if let (ValueRepr::Scalar(v), BindingPattern::Leaf(b)) = (&repr, vars)
-            && !self.scx.values_first_class
-            && self.binding_is_nonnull_value_struct(*b)
-            && let Some(name) = self
-                .binding_ty(*b)
-                .and_then(|ty| self.concrete_ty_id(ty))
-                .and_then(|ty| ty.nominal())
-            && !self.is_nobox_struct(name)
-        {
-            return self.boxed_value_copy_repr(*v, name);
+        match (repr, ty) {
+            (ValueRepr::Scalar(v), Some(ty)) => self.copied_value_repr(&ty, v),
+            (repr, _) => Ok(repr),
         }
-        Ok(repr)
+    }
+
+    /// The type a loop pattern binds an element as: a plain binder's own type,
+    /// or part `component` of a single binder's tuple (`for pair in
+    /// xs.enumerate()`). A destructuring pattern or a `ref` binder has none.
+    fn loop_binder_ty(&self, vars: &BindingPattern, component: Option<usize>) -> Option<Rc<MonoTy>> {
+        let BindingPattern::Leaf(b) = vars else { return None };
+        if self.binding_is_ref(*b) {
+            return None;
+        }
+        let ty = self.binding_ty(*b).and_then(|ty| self.concrete_ty_id(ty))?;
+        match component {
+            None => Some(ty),
+            Some(i) => match ty.as_ref() {
+                MonoTy::Tuple(parts) => parts.get(i).cloned().map(Rc::new),
+                _ => None,
+            },
+        }
     }
 
     /// [`Self::bind_for_pattern`] for an element that arrived as a repr: a

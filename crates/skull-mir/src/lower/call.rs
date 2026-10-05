@@ -2473,21 +2473,33 @@ impl Builder<'_> {
         ty: &MonoTy,
         v: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        match self.copied_value_repr(ty, v)? {
+            ValueRepr::Scalar(v) => Ok(v),
+            copy => self.pack(copy),
+        }
+    }
+
+    /// [`Self::copied_value_box`] before packing: a non-null copy stays a
+    /// `Group`, so a leaf consumer reads its parts and nothing is built.
+    pub(crate) fn copied_value_repr(
+        &mut self,
+        ty: &MonoTy,
+        v: Idx<Inst>,
+    ) -> Result<ValueRepr, CompilerError> {
         let (payload, nullable) = ty.peel_nullable();
         let Some(name) = payload
             .nominal()
             .filter(|name| self.is_value_struct(*name) && !self.is_nobox_struct(*name))
         else {
-            return Ok(v);
+            return Ok(ValueRepr::Scalar(v));
         };
         if self.scx.values_first_class {
-            return Ok(v);
+            return Ok(ValueRepr::Scalar(v));
         }
         if nullable {
-            return self.nullable_boxed_value_copy(v, name);
+            return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(v, name)?));
         }
-        let copy = self.boxed_value_copy_repr(v, name)?;
-        self.pack(copy)
+        self.boxed_value_copy_repr(v, name)
     }
 
     /// One element of an indexable collection, for the loop lowerings that bind a

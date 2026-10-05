@@ -263,6 +263,12 @@ impl Builder<'_> {
                     && en.is_some_and(|e| {
                         EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
                     });
+                // A struct destructure reads fields out of an owner the arm can
+                // still write (`src.w.f0 = 99`), so a bound value field is a
+                // snapshot, as `let w = src.w` is. Enum payloads are immutable.
+                let struct_destructure = name.is_some_and(|n| self.ws.struct_by_name.contains_key(&n))
+                    && enum_name.is_none()
+                    && !(top && name.is_some_and(|n| variants.contains(&n)));
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
                     // An embed/nobox field has NO slot under its own name, so a
@@ -294,6 +300,15 @@ impl Builder<'_> {
                             }
                         }
                         _ => self.scrut_named(scrut, rpf.name, cdata),
+                    };
+                    let fv = match self.body.pattern_arena[rpf.pat] {
+                        Pattern::Bind(b) if struct_destructure && !self.binding_is_ref(b) => {
+                            match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
+                                Some(ty) => self.copied_value_box(&ty, fv)?,
+                                None => fv,
+                            }
+                        }
+                        _ => fv,
                     };
                     self.match_pattern(&Scrut::Val(fv), rpf.pat, fail, variants, false, None)?;
                 }
