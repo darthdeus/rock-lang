@@ -1296,6 +1296,12 @@ fn do_run_sim_opts_recorded(
         summary.print(sim_name, true);
     }
 
+    sim_outcome(&summary, sim_name)
+}
+
+/// The single-run result: the same predicate as [`entry_passed`], with the
+/// reason as the error.
+fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
     if summary.excluded.is_some() {
         return Ok(());
     }
@@ -1329,6 +1335,10 @@ fn do_run_sim_opts_recorded(
         return Err(anyhow!(
             "sim `{sim_name}` aborted before stop_sim() -- incomplete run (likely a swallowed runtime error)"
         ));
+    }
+    // A fixture that returned before its checks still reaches stop_sim().
+    if summary.checks_ran() == 0 {
+        return Err(anyhow!("sim `{sim_name}` reached stop_sim() without running a check"));
     }
     Ok(())
 }
@@ -1515,13 +1525,14 @@ fn entry_excluded(summary: &SimSummary) -> bool {
 }
 
 /// Whether an entry's summary is a clean pass (no fail, no timeout, no
-/// process error, reached `stop_sim()`).
+/// process error, reached `stop_sim()`, ran at least one check).
 fn entry_passed(summary: &SimSummary) -> bool {
     !entry_excluded(summary)
         && !summary.timed_out
         && summary.process_failure_code.is_none()
         && summary.saw_stop
         && !summary.has_failures()
+        && summary.checks_ran() > 0
 }
 
 /// The word printed in a sim's verdict line. Derived from [`entry_passed`] so the
@@ -7035,6 +7046,16 @@ impl SimSummary {
         !self.expects_fail.is_empty() || !self.errors.is_empty()
     }
 
+    /// Every check the entry reported, passing or failing.
+    fn checks_ran(&self) -> usize {
+        self.expects_pass.len()
+            + self.expects_fail.len()
+            + self.snapshots.len()
+            + self.image_snapshots.len()
+            + self.video_assertions.len()
+            + self.video_match_assertions.len()
+    }
+
     /// `streamed` = the live per-op stream already printed sited
     /// failures/errors (the normal single-run path). When false (concise
     /// multi-run), nothing was streamed, so sited entries must be reprinted
@@ -7085,6 +7106,8 @@ impl SimSummary {
         }
         let stop_note = if !self.saw_stop {
             " (no stop_sim() observed -- sim aborted early)"
+        } else if self.checks_ran() == 0 {
+            " (no check ran)"
         } else {
             ""
         };
@@ -8789,9 +8812,23 @@ mod tests {
         let mut s = SimSummary::default();
         assert!(!entry_passed(&s));
         s.saw_stop = true;
+        s.expects_pass.push(SiteMessage { message: "ok".into(), site: "f:0".into() });
         assert!(entry_passed(&s));
         s.expects_fail.push(SiteMessage { message: "x".into(), site: "f:1".into() });
         assert!(!entry_passed(&s));
+    }
+
+    #[test]
+    fn a_stopped_sim_whose_checks_never_ran_fails() {
+        // A fixture that returns before its checks (`STATE ?? return`) still
+        // reaches stop_sim() and fails nothing; its coverage is gone.
+        let mut empty = SimSummary { saw_stop: true, ..SimSummary::default() };
+        assert!(!entry_passed(&empty));
+        assert_eq!(verdict_word(&empty), "FAIL");
+        assert!(sim_outcome(&empty, "s").is_err());
+
+        empty.snapshots.push(SnapshotOp { name: "n".into(), value_json: "{}".into(), site: String::new() });
+        assert!(entry_passed(&empty), "a snapshot is a check");
     }
 
     #[test]
@@ -8804,6 +8841,7 @@ mod tests {
         assert_eq!(verdict_word(&aborted), "FAIL");
 
         aborted.saw_stop = true;
+        aborted.expects_pass.push(SiteMessage { message: "ok".into(), site: "f:0".into() });
         assert_eq!(verdict_word(&aborted), "PASS");
 
         let mut timed_out = SimSummary { saw_stop: true, ..SimSummary::default() };
