@@ -12,6 +12,60 @@
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
 use crate::common::{emit_module, function_body, run_luajit};
 
+const NULLABLE_ASSET_READ: &str = r#"
+value Handle { id: int, tags: [int] }
+value Asset { image: Handle?, shadow: Handle?, width: int }
+global ART: Asset? = null
+global KEPT: Asset? = null
+fn sample(a: Asset) -> int { return (a.image?.id ?? 0) + (a.shadow?.id ?? 0) + a.width }
+fn draw_asset() -> int {
+    let art = ART ?? return -1
+    return sample(art) + sample(art)
+}
+fn keep_asset() { let art = ART ?? return; KEPT = art }
+fn mutate(a: ref Asset) { if a.image != null { a.image.id = 99 } }
+fn borrow_asset() { let art = ART ?? return; mutate(art) }
+fn main() {
+    print(draw_asset())
+    ART = Asset { image: Handle { id: 2, tags: [] }, shadow: Handle { id: 3, tags: [] }, width: 7 }
+    print(draw_asset())
+    keep_asset()
+    borrow_asset()
+    print("{ART?.image?.id ?? 0} {KEPT?.image?.id ?? 0}")
+    if ART != null && ART.image != null { ART.image.id = 11 }
+    print(KEPT?.image?.id ?? 0)
+}
+"#;
+
+#[test]
+fn a_coalesced_nullable_asset_keeps_owned_copies() {
+    let lua = emit_module(NULLABLE_ASSET_READ);
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_asset_copy"), "-1\n24\n2 2\n2");
+}
+
+#[test]
+fn coalesced_nullable_children_snapshot_before_source_writes() {
+    let probes = [
+        ("source-write", include_str!("fixtures/coalesce_snapshot/source-write.rock")),
+        ("closure-read", include_str!("fixtures/coalesce_snapshot/closure-read.rock")),
+        ("cdata-source-write", include_str!("fixtures/coalesce_snapshot/cdata-source-write.rock")),
+        ("cdata-closure-read", include_str!("fixtures/coalesce_snapshot/cdata-closure-read.rock")),
+        ("generic-source-write", include_str!("fixtures/coalesce_snapshot/generic-source-write.rock")),
+        ("global-source-write", include_str!("fixtures/coalesce_snapshot/global-source-write.rock")),
+        ("array-source-write", include_str!("fixtures/coalesce_snapshot/array-source-write.rock")),
+        ("source-write-then-escape", include_str!("fixtures/coalesce_snapshot/source-write-then-escape.rock")),
+    ];
+    let mut failures = Vec::new();
+    for (name, source) in probes {
+        let lua = emit_module(source);
+        let output = run_luajit(&format!("{lua}\nprobe()\n"), name);
+        if output != "1" {
+            failures.push(format!("{name}: expected 1, got {output}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const VALUE_FIELD_LOOP: &str = r#"
 value FixVec2 { x: float, y: float }
 value IVec2 { x: int, y: int }

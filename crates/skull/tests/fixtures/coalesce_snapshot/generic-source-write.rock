@@ -1,0 +1,8 @@
+value Child { id: int, tags: [int] }
+value Wrap<T> { child: T?, width: int }
+struct Source { value: Wrap<Child>? }
+struct Kept { value: Wrap<Child> }
+fn write_source(s: Source) { if s.value != null && s.value.child != null { s.value.child.id = 99 } }
+fn retain<T>(v: Wrap<T>?) -> Wrap<T> { v ?? return Wrap { child: null, width: 0 } }
+@test(output = "1")
+fn probe() { let s = Source { value: Wrap { child: Child { id: 1, tags: [] }, width: 7 } }; let a = s.value ?? return; write_source(s); print(a.child?.id ?? -1) }

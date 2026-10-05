@@ -1,0 +1,14 @@
+value Child { id: int, tags: [int] }
+value Asset { child: Child?, width: int }
+struct Source { asset: Asset? }
+struct Kept { asset: Asset }
+fn source() -> Source { Source { asset: Asset { child: Child { id: 1, tags: [] }, width: 7 } } }
+fn id(a: Asset) -> int { a.child?.id ?? -1 }
+fn mutate(a: ref Asset) { if a.child != null { a.child.id = 99 } }
+fn mutate_source(s: Source) { if s.asset != null && s.asset.child != null { s.asset.child.id = 99 } }
+fn returned(s: Source) -> Asset { let a = s.asset ?? return Asset { child: null, width: 0 }; return a }
+fn reader(s: Source) -> fn() -> int { let a = s.asset ?? return () => -1; return () => id(a) }
+fn writer(s: Source) -> fn() { let a = s.asset ?? return () => {}; return () => mutate(a) }
+fn by_value_mutate(a: Asset) { mutate(a) }
+@test(output = "1")
+fn probe() { let s = source(); let slots: [Asset?] = [s.asset]; let a = slots[0] ?? return; slots[0]?.child?.id = 99; print(id(a)) }
