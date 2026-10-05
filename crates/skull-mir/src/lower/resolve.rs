@@ -725,7 +725,8 @@ impl Builder<'_> {
         // projects its parts directly (no cdata); a boxed base reads fields off
         // the packed cdata (the normal value-field read). Inference guarantees
         // at most one base of this struct's type.
-        let base_repr: Option<ValueRepr> = match bases.into_iter().next() {
+        let base = bases.into_iter().next();
+        let base_repr: Option<ValueRepr> = match base {
             Some(b) => Some(self.lower_expr_repr_inner(b)?),
             None => None,
         };
@@ -741,10 +742,12 @@ impl Builder<'_> {
             let r = match by_value.get(&key) {
                 // A later field of a group: one evaluation, but each value field
                 // owns its own box.
-                Some(ValueRepr::Scalar(v)) => match self.struct_field_mono(name, lf.name) {
-                    Some(ty) => self.copied_value_repr(&ty, *v)?,
-                    None => ValueRepr::Scalar(*v),
-                },
+                Some(ValueRepr::Scalar(v)) => {
+                    let ty = self.concrete_expr_ty(lf.value).ok_or_else(|| {
+                        self.gap_here(format!("grouped field `{name}.{}` has no concrete type", lf.name))
+                    })?;
+                    self.copied_value_repr(&ty, *v)?
+                }
                 Some(r) => r.clone(),
                 None => {
                     let r = self.lower_expr_repr_inner(lf.value)?;
@@ -761,7 +764,7 @@ impl Builder<'_> {
                 for fname in decl {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
-                        None => fs.push(self.spread_base_field_repr(&base_repr, base_boxed, name, fname)?),
+                        None => fs.push(self.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)?),
                     }
                 }
                 fs

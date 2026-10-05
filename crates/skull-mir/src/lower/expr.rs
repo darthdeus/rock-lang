@@ -2182,10 +2182,8 @@ impl Builder<'_> {
                         .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
                     for field in fields {
                         let value = self.emit_cur(Inst::Field { base: v, field });
-                        let value = match self.struct_field_mono(*name, field) {
-                            Some(fty) => self.copied_value_repr(&fty, value)?,
-                            None => ValueRepr::Scalar(value),
-                        };
+                        let fty = self.struct_field_mono_ty(*name, field, Some(inner))?;
+                        let value = self.copied_value_repr(&fty, value)?;
                         self.append_spread_value(arr, value, dest)?;
                     }
                     Ok(())

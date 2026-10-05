@@ -348,7 +348,8 @@ impl Builder<'_> {
                 }
             }
             if !has_flat {
-                let base_bundle = match bases.into_iter().next() {
+                let base = bases.into_iter().next();
+                let base_bundle = match base {
                     Some(b) => Some(self.lower_expr_repr(b)?),
                     None => None,
                 };
@@ -377,7 +378,7 @@ impl Builder<'_> {
                     let r = if let Some((_, r)) = explicit.iter().find(|(n, _)| *n == fname) {
                         r.clone()
                     } else {
-                        let raw = self.spread_base_field_repr(&base_repr, base_boxed, name, fname)?;
+                        let raw = self.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)?;
                         self.bundle_struct_field(name, fname, raw, Some(op))?
                     };
                     out.push((fname, r));
@@ -401,7 +402,7 @@ impl Builder<'_> {
         let origin = Some(op);
         let mut out = Vec::new();
         for fname in fields {
-            let r = self.spread_base_field_repr(&Some(base_repr.clone()), base_boxed, name, fname)?;
+            let r = self.spread_base_field_repr(&Some(base_repr.clone()), base_boxed, name, fname, origin)?;
             out.push((fname, self.bundle_struct_field(name, fname, r, origin)?));
         }
         Ok(out)
@@ -523,13 +524,15 @@ impl Builder<'_> {
 
     /// Read field `fname` from an already-lowered spread base: project a Group
     /// part, or read the field off the packed cdata; a missing base falls back
-    /// to the struct default.
+    /// to the struct default. `origin` is the base expression, which types a
+    /// generic field.
     pub(crate) fn spread_base_field_repr(
         &mut self,
         base_repr: &Option<ValueRepr>,
         base_boxed: Option<Idx<Inst>>,
         name: Ustr,
         fname: Ustr,
+        origin: Option<Idx<Expr>>,
     ) -> Result<ValueRepr, CompilerError> {
         if let Some(ValueRepr::Group { name: bn, parts, .. }) = base_repr {
             let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
@@ -556,10 +559,8 @@ impl Builder<'_> {
             // The base keeps its own value fields.
             (Some(_), Some(bi)) => {
                 let v = self.emit_cur(Inst::Field { base: bi, field: fname });
-                match self.struct_field_mono(name, fname) {
-                    Some(ty) => self.copied_value_repr(&ty, v)?,
-                    None => ValueRepr::Scalar(v),
-                }
+                let ty = self.struct_field_mono_ty(name, fname, origin)?;
+                self.copied_value_repr(&ty, v)?
             }
             (None, None) => ValueRepr::Scalar(self.lower_struct_default(name, fname)?),
             _ => return Err(gap("spread field has no physical base representation")),
