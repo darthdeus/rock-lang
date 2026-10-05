@@ -71,6 +71,8 @@ pub struct OutlivesConstraint {
     pub span: Span,
     /// Construction may use the destination; retention only checks existing owners.
     pub contextual: bool,
+    /// One direction of an ABI obligation that parameters name the same owner.
+    pub owner_equivalence: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -209,6 +211,7 @@ impl FunctionPlacement {
         self.constraints.sort_by(|left, right| {
             let key = |constraint: &OutlivesConstraint| (
                 constraint.value, constraint.destination, constraint.contextual,
+                constraint.owner_equivalence,
                 constraint.span.file.as_str(), constraint.span.line_range,
                 constraint.span.col_range, constraint.span.offset_range,
             );
@@ -221,6 +224,7 @@ impl FunctionPlacement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlacementViolationKind {
     DoesNotOutlive,
+    MultipleOwners,
     UnknownProvenance,
     OpaqueRetention,
 }
@@ -1335,6 +1339,7 @@ fn add_constraint(analysis: &mut PlacementAnalysis, value: Place, destination: P
             destination,
             span,
             contextual: true,
+            owner_equivalence: false,
         },
     );
 }
@@ -1345,6 +1350,7 @@ fn add_outlives_constraint(analysis: &mut PlacementAnalysis, constraint: Outlive
         destination,
         span,
         contextual,
+        owner_equivalence,
     } = constraint;
     match known_outlives(value, destination) {
         Some(true) => {}
@@ -1353,7 +1359,8 @@ fn add_outlives_constraint(analysis: &mut PlacementAnalysis, constraint: Outlive
             value,
             destination,
             span,
-            kind: PlacementViolationKind::DoesNotOutlive,
+            kind: if owner_equivalence { PlacementViolationKind::MultipleOwners }
+                else { PlacementViolationKind::DoesNotOutlive },
         }),
         None if matches!(value, Place::Param(_) | Place::Destination)
             || matches!(destination, Place::Param(_) | Place::Destination) =>
@@ -1366,7 +1373,9 @@ fn add_outlives_constraint(analysis: &mut PlacementAnalysis, constraint: Outlive
             value,
             destination,
             span,
-            kind: if contextual {
+            kind: if owner_equivalence {
+                PlacementViolationKind::MultipleOwners
+            } else if contextual {
                 PlacementViolationKind::UnknownProvenance
             } else {
                 PlacementViolationKind::OpaqueRetention
@@ -2255,7 +2264,7 @@ mod tests {
     #[test]
     fn summary_accumulation_preserves_obligations_and_ignores_their_order() {
         let left = OutlivesConstraint { value: Place::Param(0), destination: Place::Destination,
-            span: Span::default(), contextual: false };
+            span: Span::default(), contextual: false, owner_equivalence: false };
         let right = OutlivesConstraint { value: Place::Param(1), ..left };
         let mut summary = FunctionPlacement::default();
         assert!(summary.accumulate(FunctionPlacement {
