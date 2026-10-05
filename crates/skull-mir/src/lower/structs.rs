@@ -358,28 +358,6 @@ impl Builder<'_> {
         self.inf?.fn_field_calls.get(&e).copied()
     }
 
-    pub(crate) fn struct_field_fn_rep_plan(
-        &self,
-        recv: Idx<Expr>,
-        field: Ustr,
-    ) -> Result<Option<FunctionRepPlan>, CompilerError> {
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(recv) else {
-            return Ok(None);
-        };
-        let Some(sid) = self.ws.struct_by_name.get(&sname) else {
-            return Ok(None);
-        };
-        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        let Some(fdef) = sd.fields.iter().find(|f| f.name == field) else {
-            return Ok(None);
-        };
-        if !matches!(self.resolve_ty(fdef.ty), Some(TypeExpr::Function { .. })) {
-            return Ok(None);
-        }
-        let ty = self.struct_field_mono_ty(sname, field, Some(recv))?;
-        self.fn_value_rep_plan_for_mono(&ty)
-    }
-
     /// Whether `name` is a module-level global of fn type — recovers `g(args)`
     /// where `g` is a fn-valued global (not a declared function).
     pub(crate) fn is_fn_global(&self, name: Ustr) -> bool {

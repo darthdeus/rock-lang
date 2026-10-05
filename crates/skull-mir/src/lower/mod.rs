@@ -3076,18 +3076,6 @@ impl Builder<'_> {
             .is_some_and(|args| args.contains(&arg))
     }
 
-    pub(crate) fn lower_call_arg(
-        &mut self,
-        call: Idx<Expr>,
-        arg: Idx<Expr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        if self.is_ref_call_arg(call, arg) {
-            self.lower_ref_borrow(arg)
-        } else {
-            self.lower_expr(arg)
-        }
-    }
-
     pub(crate) fn arg_values_for_call_slot(
         &mut self,
         call: Idx<Expr>,

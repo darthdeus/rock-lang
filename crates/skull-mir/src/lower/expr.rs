@@ -1507,7 +1507,6 @@ impl Builder<'_> {
     pub(crate) fn safe_nav_call_value_repr(
         &mut self,
         e: Idx<Expr>,
-        receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
@@ -1551,19 +1550,18 @@ impl Builder<'_> {
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
         self.safe_nav_repr(receiver, shape, move |s, recv| {
-            s.safe_nav_call_value_repr(e, receiver, method, args, recv)
+            s.safe_nav_call_value_repr(e, method, args, recv)
         })
     }
 
     fn pack_safe_nav_call_value(
         &mut self,
         e: Idx<Expr>,
-        receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
         recv: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let r = self.safe_nav_call_value_repr(e, receiver, method, args, recv)?;
+        let r = self.safe_nav_call_value_repr(e, method, args, recv)?;
         self.pack_maybe_absent(r.into_value())
     }
 
@@ -1643,7 +1641,7 @@ impl Builder<'_> {
 
         self.cur = call_bb;
         let recv_v = self.safe_nav_present_value(recv)?;
-        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv_v)?;
+        let cv = self.pack_safe_nav_call_value(e, method, args, recv_v)?;
         self.store_and_join(result, cv, join);
 
         self.cur = join;
