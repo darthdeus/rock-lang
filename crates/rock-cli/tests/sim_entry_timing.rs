@@ -4,7 +4,9 @@
 //! The runner reports `frame_count` from the frame counter and `frame_timing`
 //! from per-frame samples; the parent rejects an entry whose two disagree.
 //! A caught frame error used to be counted by the first and skipped by the
-//! second, which failed the whole worker lane instead of that one sim.
+//! second, which aborted the whole worker lane. `raises_a_frame` reproduces
+//! that regression; the other entries control early completion and continuation.
+//! Caught errors remain logged for the sim gate to reject the run.
 //!
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
@@ -70,8 +72,13 @@ co fn passes_after() -> Coroutine<Wait> {
         .env("ROCK_SIM_LOG_DIR", fixture.path().join("history"))
         .output().expect("run timing fixture");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    eprintln!("{text}");
 
+    assert!(text.contains("Error in frame"), "{text}");
+    assert!(text.contains("fixture raised frame"), "{text}");
     assert!(!text.contains("entry frame timing"), "{text}");
+    assert!(out.status.success(), "{text}");
+    assert_eq!(text.matches("[STONE] Initialized successfully").count(), 1, "{text}");
     for name in ["raises_a_frame", "stops_on_first_resume", "passes_after"] {
         let prefix = format!("[sim] timing_fixture::{name}: ");
         let alt = format!("[sim] {name}: ");
