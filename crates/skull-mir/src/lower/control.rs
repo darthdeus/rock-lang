@@ -742,8 +742,13 @@ fn matching_scalar_leaves(
     }
 }
 
-/// Whether every flat enum anywhere in `shape` compares leaf for leaf.
+/// Whether every flat enum anywhere in `shape` compares leaf for leaf, and no
+/// child is nullable: an absent child's presence leaf is `nil` read out of a
+/// box but `false` on a literal, so raw leaf `==` calls them different.
 fn shape_equality_is_leafwise(ws: &Workspace, shape: &ValueShape) -> bool {
+    if shape.nullable {
+        return false;
+    }
     if EnumPlan::for_name(ws, shape.name).is_some_and(|plan| plan.flat().is_some())
         && !flat_enum_equality_is_leafwise(ws, shape.name)
     {
