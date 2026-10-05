@@ -1625,6 +1625,7 @@ fn lower_body(
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: Some(subject.clone()),
         group_binds: HashMap::new(),
+        owned_value_binds: HashSet::new(),
         f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -2154,6 +2155,11 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// Plain-cell `value` bindings whose every store is a freshly built box (a
+    /// `let` of a ctor or pack). SROA rebuilds their escaping uses, so they need
+    /// no copy; any other plain-cell value binding is
+    /// [`Self::boxed_value_local`].
+    owned_value_binds: HashSet<u32>,
     /// Right-hand sides of assignments into an `f32` field. Every assignment
     /// path lowers its value through one of the expression entries, which
     /// round these, so no store path needs its own rounding.
@@ -2236,6 +2242,7 @@ impl<'a> Builder<'a> {
             cur_op: crate::site::SiteOp::DirectCall,
             site_owner: None,
             group_binds: HashMap::new(),
+            owned_value_binds: HashSet::new(),
             f32_round_exprs: HashSet::new(),
             tuple_binds: HashMap::new(),
             static_cells: HashMap::new(),

@@ -535,29 +535,31 @@ fn main() {{
     );
 }
 
-/// A callee that just forwards a boxed value forwards the BOX -- no unpack and
-/// repack. The emitted body is a one-line forward, so it contains no leaf
-/// constructor for the value.
+/// A callee that returns its boxed parameter returns a COPY. The parameter box
+/// is the caller's (borrowed, never written), and a caller may store the result
+/// into a place and write through it, which must not reach the argument. So the
+/// body takes the one box and builds exactly one fresh box from its leaves. A
+/// TAIL CALL that passes the parameter on (`tail_forward` above) still forwards
+/// the box itself.
 #[test]
-fn a_forwarding_callee_forwards_the_box() {
+fn a_forwarding_callee_returns_a_copy_of_the_box() {
     let src = format!(
-        "{}fn forward(w: W) -> W {{ return w }}\nfn main() {{ print(\"{{forward(mkw(3.0)).a0}}\") }}\n",
+        "{}struct HoldW {{ w: W }}
+fn forward(w: W) -> W {{ return w }}
+fn main() {{
+    let w = mkw(3.0)
+    let h = HoldW {{ w: forward(w) }}
+    h.w.a0 = 9.0
+    print(\"{{w.a0}} {{h.w.a0}}\")
+}}
+",
         over_cut_value()
     );
     let lua = try_emit_module(&src).expect("emits");
-    assert_eq!(
-        emitted_params(&lua, "forward").len(),
-        1,
-        "the forwarder must take the box:\n{}",
-        function_body(&lua, "forward")
-    );
     let body = function_body(&lua, "forward");
-    let last_leaf = format!("a{}", WIDE_VALUE_PAYLOAD_LEAF_CUT);
-    assert!(
-        !body.contains(&last_leaf) && !body.contains("_ct("),
-        "the forwarder unpacked and repacked the box:\n{body}"
-    );
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"), "3");
+    assert_eq!(emitted_params(&lua, "forward").len(), 1, "the forwarder must take the box:\n{body}");
+    assert_eq!(body.matches("_ct(").count(), 1, "the forwarder must return one fresh box:\n{body}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"), "3 9");
 }
 
 /// The boxed wire is a property of the type alone, so a body whose CALLEE's

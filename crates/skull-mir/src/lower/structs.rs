@@ -319,6 +319,24 @@ impl Builder<'_> {
         None
     }
 
+    /// The value-struct type of `e`, a read of plain binding `b`, when that
+    /// binding's cell holds a box it does not own: a parameter or a `let` of a
+    /// value that crossed a call as ONE box (wider than the ABI cut, or an
+    /// opaque fn-value call). That box may be shared with the caller, callee or
+    /// closure it came from, so a whole-value use must copy it
+    /// (tests/value_boxed_whole_use_copies.rock).
+    pub(crate) fn boxed_value_local(&self, b: Idx<BindingInfo>, e: Idx<Expr>) -> Option<Ustr> {
+        if self.scx.values_first_class
+            || !self.binds.contains_key(&raw(b))
+            || self.static_cells.contains_key(&raw(b))
+            || self.binding_is_ref(b)
+            || self.owned_value_binds.contains(&raw(b))
+        {
+            return None;
+        }
+        self.value_struct_of(e).filter(|name| !self.is_nobox_struct(*name))
+    }
+
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
     /// license for SROA to rematerialize an escaping load of its cell (item 8).
     /// Only a bare value-struct `App` qualifies; unsolved inference / non-value

@@ -195,6 +195,15 @@ impl Builder<'_> {
                 let r = self.lower_expr_repr(e)?.into_value();
                 self.pack_maybe_absent(r)
             }
+            // A value local held as ONE box, used whole in a boxed context: copy
+            // it, like a read out of a place. A place store keeps the box it is
+            // handed, so sharing this one would alias the local and every place
+            // it reached. The unboxed route (`lower_expr_repr`) only reads leaves.
+            Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
+                let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
+                let copy = self.boxed_value_copy_repr(boxed, name)?;
+                self.pack(copy)
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -873,6 +882,9 @@ impl Builder<'_> {
                 ))
             }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            Expr::Var(b) if self.boxed_value_local(b, e).is_some() => {
+                Ok(self.emit_cur(Inst::Load(self.binds[&raw(b)])))
+            }
             // A leaf of a column-stored or strided element has no slot to name;
             // read it. A leaf that can be a place base holds a reference
             // (`xs[i].o` in `xs[i].o.hp = v`), so the read is that object.
@@ -1040,6 +1052,17 @@ impl Builder<'_> {
                 let expected = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
                 let v = self.lower_expr_with_expected(value, expected.as_deref())?;
                 let v = self.coerced_to_binding(v, value, b);
+                // An owned binding stays owned: a box it did not build is copied.
+                let v = match self.value_struct_of(value) {
+                    Some(name)
+                        if self.owned_value_binds.contains(&raw(b))
+                            && !matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) =>
+                    {
+                        let copy = self.boxed_value_copy_repr(v, name)?;
+                        self.pack(copy)?
+                    }
+                    _ => v,
+                };
                 self.emit_cur(Inst::Store { cell, value: v });
             }
             // A leaf of a `nobox` global (`SPOT.x = v`, `SPOT.a.b = v`): the

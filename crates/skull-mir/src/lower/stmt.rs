@@ -198,6 +198,7 @@ impl Builder<'_> {
             cur_op: crate::site::SiteOp::DirectCall,
             site_owner: self.site_owner.clone(),
             group_binds: HashMap::new(),
+            owned_value_binds: HashSet::new(),
             f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
@@ -360,6 +361,9 @@ impl Builder<'_> {
                         );
                         if self.binding_is_nonnull_value_struct(name) {
                             self.f.mark_nonnull_value_struct(cell);
+                        }
+                        if matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) {
+                            self.owned_value_binds.insert(raw(name));
                         }
                         self.emit_cur(Inst::Store { cell, value: v });
                         self.binds.insert(raw(name), cell);

@@ -287,6 +287,11 @@ impl Builder<'_> {
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
+            // The unboxed route reads a borrowed box's leaves in place; only a
+            // boxed whole-value use (`lower_expr`) copies it.
+            Expr::Var(b) if self.boxed_value_local(b, e).is_some() => {
+                Ok(ValueRepr::Scalar(self.emit_cur(Inst::Load(self.binds[&raw(b)]))))
+            }
             // `base.field`: project a Group part directly (no cdata); else a
             // boxed field read off the packed base.
             Expr::FieldAccess { base, field } => {
