@@ -81,6 +81,8 @@ pub struct CallEffect {
     pub owner: Option<Place>,
     pub stores: Vec<StoreEffect>,
     pub constraints: Vec<OutlivesConstraint>,
+    /// Payload construction has an independent owner, rather than the call result owner.
+    pub constructions: Vec<(u16, Place)>,
     pub opaque_retains: Vec<u16>,
     pub omitted_args: Vec<(u16, Place)>,
 }
@@ -243,6 +245,8 @@ pub struct PlacementAnalysis {
     pub cells: ArenaMap<Idx<Cell>, Place>,
     cell_origins: ArenaMap<Idx<Cell>, Vec<Place>>,
     pub call_owners: ArenaMap<Idx<Inst>, Place>,
+    /// Inputs retained by a result constructed through the result-owner ABI.
+    pub contextual_call_arguments: ArenaMap<Idx<Inst>, SmallVec<[u16; 2]>>,
     pub summary: FunctionPlacement,
     pub violations: Vec<PlacementViolation>,
 }
@@ -1553,6 +1557,55 @@ fn provenance_places(
     places
 }
 
+fn construction_inputs(
+    mir: &MirFunc,
+    analysis: &PlacementAnalysis,
+    oracle: &impl PlacementOracle,
+    value: Idx<Inst>,
+    active: &mut HashSet<Idx<Inst>>,
+) -> Vec<Place> {
+    if !oracle.carries_placement(mir, value) { return Vec::new(); }
+    if !active.insert(value) { return vec![Place::Unknown]; }
+    let inputs = match &mir.insts[value] {
+        Inst::StringConcat(..) | Inst::Format { .. } | Inst::FormatDyn { .. } => Vec::new(),
+        instruction if is_composite_constructor(instruction) => {
+            let mut inputs = Vec::new();
+            instruction.uses_each(&mut |operand| inputs.extend(
+                construction_inputs(mir, analysis, oracle, operand, active)));
+            inputs
+        }
+        Inst::Call { args, .. } | Inst::CallMulti { args, .. }
+        | Inst::CallValue { args, .. } | Inst::CallValueMulti { args, .. } => {
+            let effect = match mir.insts[value] {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } =>
+                    oracle.call_effect(mir, value, func, Place::Destination),
+                Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } =>
+                    oracle.call_value_effect(mir, value, callee, Place::Destination),
+                _ => unreachable!("construction inputs requested for a non-call"),
+            };
+            if effect.result == Some(Place::Destination) {
+                effect.constraints.iter().filter_map(|constraint| {
+                    match (constraint.value, constraint.destination) {
+                        (Place::Param(index), Place::Destination) => args.get(usize::from(index)),
+                        _ => None,
+                    }
+                }).flat_map(|arg| construction_inputs(mir, analysis, oracle, *arg, active))
+                    .collect()
+            } else if let Some(Place::Param(index)) = effect.result
+                && let Some(&arg) = args.get(usize::from(index))
+                && oracle.carries_placement(mir, arg)
+            {
+                construction_inputs(mir, analysis, oracle, arg, active)
+            } else {
+                provenance_places(mir, analysis, value)
+            }
+        }
+        _ => provenance_places(mir, analysis, value),
+    };
+    active.remove(&value);
+    inputs
+}
+
 fn value_place(
     mir: &MirFunc,
     analysis: &mut PlacementAnalysis,
@@ -1707,6 +1760,16 @@ fn value_place(
                     _ => unreachable!("call placement requested for a non-call"),
                 }
             });
+            if effect.result == Some(Place::Destination) {
+                let mut retained: SmallVec<[u16; 2]> = effect.constraints.iter()
+                    .filter_map(|constraint| match (constraint.value, constraint.destination) {
+                        (Place::Param(index), Place::Destination) => Some(index),
+                        _ => None,
+                    }).collect();
+                retained.sort_unstable();
+                retained.dedup();
+                analysis.contextual_call_arguments.insert(id, retained);
+            }
             let mut args: SmallVec<[Place; 8]> = raw_args
                 .iter()
                 .map(|arg| {
@@ -1732,6 +1795,15 @@ fn value_place(
                     argument_origins.resize(index + 1, vec![Place::Unknown]);
                 }
                 argument_origins[index] = vec![place];
+            }
+            for &(index, destination) in &effect.constructions {
+                if let Some(&payload) = raw_args.get(usize::from(index)) {
+                    for value in construction_inputs(mir, analysis, oracle, payload, &mut HashSet::new()) {
+                        add_outlives_constraint(analysis, OutlivesConstraint {
+                            value, destination, span, contextual: false,
+                        });
+                    }
+                }
             }
             for store in &effect.stores {
                 if raw_args
