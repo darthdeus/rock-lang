@@ -3333,7 +3333,7 @@ fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {
 /// asset resolution. cimgui is initialized by stone's global initializer.
 /// Factored so `skull_run_project` and the stone two-file path build it
 /// identically.
-fn skull_game_preamble(dir: &str) -> Result<String> {
+pub(crate) fn skull_game_preamble(dir: &str) -> Result<String> {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
@@ -3742,6 +3742,11 @@ impl SkullStone {
             .map(|path| std::path::PathBuf::from(path.as_str()))
             .collect();
         (sources, comptime_files)
+    }
+
+    /// The `[build.vars]` selection this build stamped into its workspace.
+    pub(crate) fn comptime_inputs(&self) -> &bone_semantic::inference::ComptimeInputs {
+        &self.project.workspace().comptime_inputs
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
