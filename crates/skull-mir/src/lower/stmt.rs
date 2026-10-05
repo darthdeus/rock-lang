@@ -199,6 +199,7 @@ impl Builder<'_> {
             site_owner: self.site_owner.clone(),
             group_binds: HashMap::new(),
             owned_value_binds: HashSet::new(),
+            ref_borrowed_binds: std::cell::OnceCell::new(),
             f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
@@ -240,6 +241,8 @@ impl Builder<'_> {
             let slot = child.param_slot(i)?;
             child.bind_param_slot(pb, pname, &slot)?;
         }
+        let child_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
+        child.copy_ref_borrowed_params(&child_params)?;
 
         child.defers.push(Vec::new());
         if let Expr::Block { statements, tail } = child.body.expr_arena[body] {

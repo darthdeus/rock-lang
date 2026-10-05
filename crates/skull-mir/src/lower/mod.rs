@@ -1626,6 +1626,7 @@ fn lower_body(
         site_owner: Some(subject.clone()),
         group_binds: HashMap::new(),
         owned_value_binds: HashSet::new(),
+        ref_borrowed_binds: std::cell::OnceCell::new(),
         f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1648,6 +1649,8 @@ fn lower_body(
     };
     b.lower_params()?;
     b.fill_param_defaults()?;
+    let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
+    b.copy_ref_borrowed_params(&params)?;
     b.lower_root()?;
     let stats = b.lower_attribution.into_inner();
     Ok(finish_lower_attribution(b.f, stats))
@@ -2052,6 +2055,8 @@ fn lower_decorator_inner(
     b.binds.insert(raw(target), tcell);
     b.lower_params()?;
     b.fill_param_defaults()?;
+    let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
+    b.copy_ref_borrowed_params(&params)?;
     b.lower_root()?;
     let stats = b.lower_attribution.into_inner();
     Ok(finish_lower_attribution(b.f, stats))
@@ -2161,6 +2166,9 @@ struct Builder<'a> {
     /// still copy ([`Self::boxed_value_local`]): SROA may decline the cell (a
     /// closure touches it), and then its loads are the one shared box.
     owned_value_binds: HashSet<u32>,
+    /// Bindings some `ref` borrow in this body is rooted at
+    /// ([`Self::binding_ref_borrowed`]), collected on first use.
+    ref_borrowed_binds: std::cell::OnceCell<HashSet<u32>>,
     /// Right-hand sides of assignments into an `f32` field. Every assignment
     /// path lowers its value through one of the expression entries, which
     /// round these, so no store path needs its own rounding.
@@ -2244,6 +2252,7 @@ impl<'a> Builder<'a> {
             site_owner: None,
             group_binds: HashMap::new(),
             owned_value_binds: HashSet::new(),
+            ref_borrowed_binds: std::cell::OnceCell::new(),
             f32_round_exprs: HashSet::new(),
             tuple_binds: HashMap::new(),
             static_cells: HashMap::new(),
@@ -2531,6 +2540,36 @@ impl Builder<'_> {
             let name = self.body.binding_arena[*pb].name;
             let slot = self.param_slot(i)?;
             self.bind_param_slot(*pb, name, &slot)?;
+        }
+        Ok(())
+    }
+
+    /// Give each boxed value parameter that this body `ref`-borrows its own
+    /// copy on entry: the caller may have lent it the caller's box
+    /// ([`Self::arg_values_for_slot`]), and the borrow writes in place.
+    pub(crate) fn copy_ref_borrowed_params(
+        &mut self,
+        params: &[Idx<BindingInfo>],
+    ) -> Result<(), CompilerError> {
+        for &pb in params {
+            let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
+            if self.scx.values_first_class || self.binding_is_ref(pb) || !self.binding_ref_borrowed(pb) {
+                continue;
+            }
+            let Some(ty) = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty)) else {
+                continue;
+            };
+            if !ty
+                .peel_nullable()
+                .0
+                .nominal()
+                .is_some_and(|name| self.is_value_struct(name) && !self.is_nobox_struct(name))
+            {
+                continue;
+            }
+            let v = self.emit_cur(Inst::Load(cell));
+            let copy = self.copied_value_box(&ty, v)?;
+            self.emit_cur(Inst::Store { cell, value: copy });
         }
         Ok(())
     }
@@ -3074,9 +3113,11 @@ impl Builder<'_> {
         if !slot.splats()
             && let Expr::Var(b) = self.body.expr_arena[a]
             && self.boxed_value_local(b, a).is_some()
+            && !self.binding_ref_borrowed(b)
         {
             // An opaque slot lends the borrowed box: the callee copies its
-            // parameter wherever the parameter escapes whole.
+            // parameter wherever the parameter escapes whole. Nothing writes a
+            // box no `ref` reaches, so a callee may keep it past the call.
             return Ok(vec![self.emit_cur(Inst::Load(self.binds[&raw(b)]))]);
         }
         let r = self.lower_expr_repr(a)?;

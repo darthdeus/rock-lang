@@ -575,6 +575,8 @@ impl Builder<'_> {
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;
+                let lambda_params: Vec<Idx<BindingInfo>> = params.clone().into_iter().collect();
+                self.copy_ref_borrowed_params(&lambda_params)?;
                 // The lambda body returns via the LAMBDA's ABI, not the enclosing
                 // fn's: a bone-desugared `() => e` body is a block with a `return e`
                 // statement, so the return machinery (`return_leaves`) must see the

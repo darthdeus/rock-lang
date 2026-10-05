@@ -349,6 +349,34 @@ impl Builder<'_> {
         self.value_struct_of(e).filter(|name| !self.is_nobox_struct(*name))
     }
 
+    /// Whether some `ref` borrow in this body (a `ref` argument or a `ref`
+    /// local, lambdas included) is rooted at binding `b`. A write through it
+    /// lands in `b`'s box, so that box is never lent to an argument slot, and
+    /// a parameter's lent box is copied before the body can borrow it.
+    pub(crate) fn binding_ref_borrowed(&self, b: Idx<BindingInfo>) -> bool {
+        self.ref_borrowed_binds
+            .get_or_init(|| {
+                let root = |mut e: Idx<Expr>| loop {
+                    match &self.body.expr_arena[e] {
+                        Expr::Var(b) => return Some(raw(*b)),
+                        Expr::FieldAccess { base, .. } => e = *base,
+                        Expr::TupleIndex { tuple, .. } => e = *tuple,
+                        _ => return None,
+                    }
+                };
+                let args = self
+                    .inf
+                    .into_iter()
+                    .flat_map(|inf| inf.ref_call_args.values().flatten().copied());
+                let ref_lets = self.body.statement_arena.iter().filter_map(|(_, st)| match st {
+                    Statement::Let { name, value } if self.binding_is_ref(*name) => Some(*value),
+                    _ => None,
+                });
+                args.chain(ref_lets).filter_map(root).collect()
+            })
+            .contains(&raw(b))
+    }
+
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
     /// license for SROA to rematerialize an escaping load of its cell (item 8).
     /// Only a bare value-struct `App` qualifies; unsolved inference / non-value
