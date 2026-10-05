@@ -1153,3 +1153,16 @@ fn nullable_nobox_presence_conditions_skip_normalization() {
     assert!(!dump.contains(" = not "), "{dump}");
     assert!(dump.contains("branch "), "{dump}");
 }
+
+#[test]
+fn narrowed_nullable_handle_value_can_enter_a_nonnullable_map() {
+    mir_std(r#"
+        struct Resource { id: int }
+        value Handle { handle: Entity<Resource> }
+        global CACHE: Map<string, Handle> = map_new()
+        fn retain(value: Handle?) {
+            if value == null { return }
+            CACHE["active"] = value
+        }
+    "#, "retain");
+}

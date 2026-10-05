@@ -1989,16 +1989,16 @@ impl Builder<'_> {
                     self.f.name
                 ))
             })?;
-        if actual.name != expected.name
-            || actual.fields != expected.fields
-            || (actual.nullable && !expected.nullable)
-        {
+        if actual.name != expected.name || actual.fields != expected.fields {
             return Err(self.gap_here(format!(
                 "representation {:?} shape {:?} does not match destination value shape {:?}",
                 bundle.representation(),
                 actual,
                 expected
             )));
+        }
+        if actual.nullable && !expected.nullable {
+            return self.repr_to_leaves_bundle_after_presence(bundle, expected);
         }
         if actual == *expected {
             self.repr_to_leaves_bundle(bundle)

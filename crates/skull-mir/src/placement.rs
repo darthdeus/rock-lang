@@ -850,6 +850,18 @@ fn infer_call_requirements(
 
     for constraint in &effect.constraints {
         if !constraint.contextual {
+            if constraint.destination == Place::Session
+                && let Place::Param(index) = constraint.value
+                && let Some(arg) = explicit_call_argument(mir, raw_args, index, &effect.omitted_args)
+                && !matches!(mir.insts[arg], Inst::Load(_))
+                && oracle.carries_placement(mir, arg)
+                && let Some(analysis) = analysis
+                && construction_inputs(mir, analysis, oracle, arg, &mut HashSet::new())
+                    .iter().all(|place| matches!(place, Place::Static | Place::Session))
+            {
+                // A fresh argument may construct there without strengthening borrowed inputs.
+                changed |= merge_requirement(&mut requirements.values, arg, Place::Session);
+            }
             continue;
         }
         let destination = match constraint.destination {
