@@ -287,10 +287,13 @@ impl Builder<'_> {
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
-            // The unboxed route reads a borrowed box's leaves in place; only a
-            // boxed whole-value use (`lower_expr`) copies it.
-            Expr::Var(b) if self.boxed_value_local(b, e).is_some() => {
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::Load(self.binds[&raw(b)]))))
+            // A borrowed box splits to a Group, as a place read does: a leaf
+            // consumer projects a part and the unread leaves die in DCE, while
+            // any consumer that packs it (a join, tuple, block tail or value
+            // child) builds a fresh box instead of escaping the borrowed one.
+            Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
+                let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
+                self.boxed_value_copy_repr(boxed, name)
             }
             // `base.field`: project a Group part directly (no cdata); else a
             // boxed field read off the packed base.
@@ -459,6 +462,21 @@ impl Builder<'_> {
                 let name = self.value_struct_of(e).unwrap();
                 let gv = self.emit_cur(Inst::Global(g));
                 self.boxed_value_copy_repr(gv, name)
+            }
+            // A static is a private global and copies the same way.
+            Expr::Var(b)
+                if !self.scx.values_first_class
+                    && self.static_cells.contains_key(&raw(b))
+                    && (self.value_struct_of(e).is_some() || nullable_place_value.is_some()) =>
+            {
+                let gv = self.emit_cur(Inst::Global(self.static_cells[&raw(b)]));
+                match self.value_struct_of(e) {
+                    Some(name) => self.boxed_value_copy_repr(gv, name),
+                    None => {
+                        let name = nullable_place_value.expect("guard matched");
+                        Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name)?))
+                    }
+                }
             }
             // A `V?` global copies the same way, gated on presence.
             Expr::Global(g) if nullable_place_value.is_some() => {

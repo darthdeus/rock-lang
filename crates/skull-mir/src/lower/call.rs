@@ -2418,6 +2418,31 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
+    /// A fresh box for a whole value of type `ty` that is already held by one
+    /// owner and is about to be stored into another. Anything other than an
+    /// ordinary (possibly nullable) value struct passes through unchanged.
+    pub(crate) fn copied_value_box(
+        &mut self,
+        ty: &MonoTy,
+        v: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let (payload, nullable) = ty.peel_nullable();
+        let Some(name) = payload
+            .nominal()
+            .filter(|name| self.is_value_struct(*name) && !self.is_nobox_struct(*name))
+        else {
+            return Ok(v);
+        };
+        if self.scx.values_first_class {
+            return Ok(v);
+        }
+        if nullable {
+            return self.nullable_boxed_value_copy(v, name);
+        }
+        let copy = self.boxed_value_copy_repr(v, name)?;
+        self.pack(copy)
+    }
+
     /// One element of an indexable collection, for the loop lowerings that bind a
     /// whole element per iteration (`for x in coll`, `for (i, x) in enumerate`).
     ///
@@ -2448,16 +2473,6 @@ impl Builder<'_> {
                 kind,
             }))),
         }
-    }
-
-    pub(crate) fn loop_element_at(
-        &mut self,
-        arr: Idx<Inst>,
-        index: Idx<Inst>,
-        kind: ContainerKind,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let repr = self.loop_element_repr_at(arr, index, kind)?;
-        Ok(self.pack(repr)?)
     }
 
     /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse

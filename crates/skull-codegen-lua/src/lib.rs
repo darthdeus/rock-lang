@@ -3206,6 +3206,18 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>])
             }
         }
     }
+    // A folded operand renders parenthesized, and a statement opening with `(`
+    // is ambiguous Lua after a line that ends in an expression. A store base
+    // other than a plain local therefore keeps its own register.
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            if let Inst::StoreField { base, .. } | Inst::StoreIndex { base, .. } = func.insts[id]
+                && !matches!(func.insts[base], Inst::Load(_))
+            {
+                inl[raw(base) as usize] = false;
+            }
+        }
+    }
     inl
 }
 

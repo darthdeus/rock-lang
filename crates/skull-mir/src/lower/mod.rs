@@ -2155,10 +2155,11 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
-    /// Plain-cell `value` bindings whose every store is a freshly built box (a
-    /// `let` of a ctor or pack). SROA rebuilds their escaping uses, so they need
-    /// no copy; any other plain-cell value binding is
-    /// [`Self::boxed_value_local`].
+    /// Plain-cell `value` bindings first stored a freshly built box (a `let` of
+    /// a ctor or pack). A reassignment copies a box it did not build, so every
+    /// store stays a ctor and SROA can scalarize the binding. Whole-value uses
+    /// still copy ([`Self::boxed_value_local`]): SROA may decline the cell (a
+    /// closure touches it), and then its loads are the one shared box.
     owned_value_binds: HashSet<u32>,
     /// Right-hand sides of assignments into an `f32` field. Every assignment
     /// path lowers its value through one of the expression entries, which
@@ -3070,6 +3071,14 @@ impl Builder<'_> {
         slot: &RetSlot,
         a: Idx<Expr>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        if !slot.splats()
+            && let Expr::Var(b) = self.body.expr_arena[a]
+            && self.boxed_value_local(b, a).is_some()
+        {
+            // An opaque slot lends the borrowed box: the callee copies its
+            // parameter wherever the parameter escapes whole.
+            return Ok(vec![self.emit_cur(Inst::Load(self.binds[&raw(b)]))]);
+        }
         let r = self.lower_expr_repr(a)?;
         if !slot.splats() {
             return Ok(vec![self.pack_bundle(&r)?]);

@@ -69,10 +69,15 @@ impl Builder<'_> {
                 };
                 lit_embed.push((lf.name, Self::embed_field_slots(lf.name, leaves)));
             } else {
+                let expected = self.concrete_struct_field_ty(e, lf.name);
                 let v = match by_value.get(&key) {
-                    Some(&v) => v,
+                    // A later field of a group: one evaluation, but each value
+                    // field owns its own box.
+                    Some(&v) => match expected.as_deref() {
+                        Some(ty) => self.copied_value_box(ty, v)?,
+                        None => v,
+                    },
                     None => {
-                        let expected = self.concrete_struct_field_ty(e, lf.name);
                         let v = self.lower_expr_with_expected(lf.value, expected.as_deref())?;
                         by_value.insert(key, v);
                         v
@@ -133,7 +138,14 @@ impl Builder<'_> {
                         fs.extend(self.flat_literal_slots(fname, cells));
                     } else {
                         let v = match base_inst {
-                            Some(bi) => self.emit_cur(Inst::Field { base: bi, field: fname }),
+                            // The base keeps its own value fields.
+                            Some(bi) => {
+                                let v = self.emit_cur(Inst::Field { base: bi, field: fname });
+                                match self.concrete_struct_field_ty(e, fname) {
+                                    Some(ty) => self.copied_value_box(&ty, v)?,
+                                    None => v,
+                                }
+                            }
                             None => self.lower_struct_default(name, fname)?,
                         };
                         fs.push((fname, v));
@@ -292,6 +304,7 @@ impl Builder<'_> {
         }
         let is_place = match &self.body.expr_arena[e] {
             Expr::Global(_) => self.nobox_global_place(e)?.is_none(),
+            Expr::Var(b) => self.static_cells.contains_key(&raw(*b)),
             Expr::Index { .. } => true,
             Expr::FieldAccess { base, .. } | Expr::TupleIndex { tuple: base, .. } => {
                 self.is_mutable_place(*base)?
@@ -319,18 +332,17 @@ impl Builder<'_> {
         None
     }
 
-    /// The value-struct type of `e`, a read of plain binding `b`, when that
-    /// binding's cell holds a box it does not own: a parameter or a `let` of a
-    /// value that crossed a call as ONE box (wider than the ABI cut, or an
-    /// opaque fn-value call). That box may be shared with the caller, callee or
-    /// closure it came from, so a whole-value use must copy it
-    /// (tests/value_boxed_whole_use_copies.rock).
+    /// The value-struct type of `e`, a read of plain binding `b` whose cell holds
+    /// one box: a parameter, a `let` of a value that crossed a call as ONE box
+    /// (wider than the ABI cut, or an opaque fn-value call), or a `let` of a
+    /// ctor that SROA did not scalarize. That box may be shared with the caller,
+    /// callee or closure it came from, so a whole-value use must copy it
+    /// (tests/value_boxed_whole_use_copies.rock, tests/value_alias_escape_paths.rock).
     pub(crate) fn boxed_value_local(&self, b: Idx<BindingInfo>, e: Idx<Expr>) -> Option<Ustr> {
         if self.scx.values_first_class
             || !self.binds.contains_key(&raw(b))
             || self.static_cells.contains_key(&raw(b))
             || self.binding_is_ref(b)
-            || self.owned_value_binds.contains(&raw(b))
         {
             return None;
         }

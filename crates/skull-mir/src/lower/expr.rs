@@ -174,7 +174,14 @@ impl Builder<'_> {
                 let r = self.lower_expr_repr(e)?.into_value();
                 self.pack_maybe_absent(r)
             }
+            // A static is a private global: a whole value read out of it copies.
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                if !self.scx.values_first_class
+                    && (self.value_struct_of(e).is_some() || self.nullable_place_value_of(e)?.is_some())
+                {
+                    let r = self.lower_expr_repr(e)?.into_value();
+                    return self.pack_maybe_absent(r);
+                }
                 Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
             }
             // A nested fn used as a value: reference the hoisted top-level fn by
@@ -882,6 +889,9 @@ impl Builder<'_> {
                 ))
             }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
+            }
             Expr::Var(b) if self.boxed_value_local(b, e).is_some() => {
                 Ok(self.emit_cur(Inst::Load(self.binds[&raw(b)])))
             }

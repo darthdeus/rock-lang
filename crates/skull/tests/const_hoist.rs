@@ -16,7 +16,7 @@
 //!
 //! Emitted in the function's OWN chunk (not shared scaffolding), so an incremental
 //! body-edit overlay carries the def with the function it serves.
-use crate::common::{emit_module, function_body};
+use crate::common::{emit_module, emit_v1_package, function_body, run_luajit, V1Fragment};
 
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
@@ -73,4 +73,56 @@ fn const_value_struct_ctor_is_hoisted_to_module_scope() {
         body.contains("__skull_kc_"),
         "fill must reference the hoisted const global:\n{body}"
     );
+}
+
+// A package value's DefKey is qualified (`pkg::a::Id`); the hoist def must name
+// its ctor by the emitted type symbol, as an inline ctor does, or LuaJIT reads
+// the `::` as a label and rejects the chunk.
+// The constant `a::Pt` is a nested field of a boxed `Seg` element, the
+// read-only consumer `TWO_CONST_NESTED` hoists (`==` compares leaves and builds
+// no box).
+const PACKAGE_MAIN: &str = r#"
+value Seg { a: a::Pt, b: a::Pt, c: float }
+fn main() {
+    let out: [Seg] = []
+    for i in 0..2 {
+        out.push(Seg { a: a::Pt { x: 3.0, y: 7.0 }, b: a::make(i as float), c: 1.0 })
+    }
+    print("{a::label(out[1].a)} {a::label(out[1].b)}")
+}
+"#;
+
+const PACKAGE_MOD_A: &str = r#"
+mod a;
+
+pub value Pt {
+    x: float,
+    y: float,
+}
+
+pub fn make(x: float) -> Pt {
+    return Pt { x, y: x }
+}
+
+pub fn label(p: Pt) -> string {
+    return "{p.x}/{p.y}"
+}
+"#;
+
+#[test]
+fn hoisted_package_value_ctor_uses_the_emitted_type_symbol() {
+    let emitted = emit_v1_package(
+        "kcpkg",
+        &[
+            V1Fragment { file: "main.rock", src: PACKAGE_MAIN },
+            V1Fragment { file: "a.rock", src: PACKAGE_MOD_A },
+        ],
+    );
+    assert!(
+        emitted.lua.contains("__skull_kc_"),
+        "the all-constant package value literal must be hoisted:\n{}",
+        emitted.lua
+    );
+    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "const_hoist_package_value");
+    assert_eq!(out, "3/7 1/1");
 }

@@ -539,8 +539,8 @@ fn main() {{
 /// is the caller's (borrowed, never written), and a caller may store the result
 /// into a place and write through it, which must not reach the argument. So the
 /// body takes the one box and builds exactly one fresh box from its leaves. A
-/// TAIL CALL that passes the parameter on (`tail_forward` above) still forwards
-/// the box itself.
+/// tail call that passes the parameter on (`tail_forward` above) copies it as
+/// any direct boxed argument does.
 #[test]
 fn a_forwarding_callee_returns_a_copy_of_the_box() {
     let src = format!(

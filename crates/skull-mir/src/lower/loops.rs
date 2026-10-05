@@ -799,6 +799,10 @@ impl Builder<'_> {
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
         let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
+        let repr = match &split {
+            Some((_, xpat)) => self.loop_element_snapshot(xpat, repr)?,
+            None => repr,
+        };
         match &split {
             // split: index already bound to i_cell; bind the element pattern.
             Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr)?,
@@ -881,7 +885,9 @@ impl Builder<'_> {
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.loop_element_at(arr_v, i_now, kind)?;
+        let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
+        let repr = self.loop_element_snapshot(&vars, repr)?;
+        let elem = self.pack(repr)?;
         self.bind_for_pattern(&vars, elem);
         self.loop_targets.push((latch, exit));
         self.lower_stmt_expr(body)?;
@@ -902,6 +908,29 @@ impl Builder<'_> {
 
         self.cur = exit;
         Ok(())
+    }
+
+    /// A loop binding reads its element out of the collection, which the body
+    /// can still write (`xs[0].f0 = 99`), so a boxed element is snapshot at
+    /// the binding, as `let v = xs[i]` is. A captured or otherwise unscalarized
+    /// binding would read the write through the shared box.
+    fn loop_element_snapshot(
+        &mut self,
+        vars: &BindingPattern,
+        repr: ValueRepr,
+    ) -> Result<ValueRepr, CompilerError> {
+        if let (ValueRepr::Scalar(v), BindingPattern::Leaf(b)) = (&repr, vars)
+            && !self.scx.values_first_class
+            && self.binding_is_nonnull_value_struct(*b)
+            && let Some(name) = self
+                .binding_ty(*b)
+                .and_then(|ty| self.concrete_ty_id(ty))
+                .and_then(|ty| ty.nominal())
+            && !self.is_nobox_struct(name)
+        {
+            return self.boxed_value_copy_repr(*v, name);
+        }
+        Ok(repr)
     }
 
     /// [`Self::bind_for_pattern`] for an element that arrived as a repr: a

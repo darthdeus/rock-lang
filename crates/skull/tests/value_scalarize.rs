@@ -45,8 +45,8 @@ fn main() {
 }
 "#;
 
-/// A value struct used BOTH by field reads AND as a whole struct (e.g. `==`)
-/// must keep its cdata: the whole-struct use escapes, so SROA must not split the
+/// A value struct used BOTH by field reads AND as a whole struct (a boxed
+/// argument) must keep its cdata: the whole-struct use escapes, so SROA must not split the
 /// cell. The hazard is a half-rewrite -- forwarding the field reads to per-field
 /// cells while the escaping use blocks the store expansion, leaving the field
 /// cells unstored (uninitialized reads). Pins the `is_cand` re-check in
@@ -54,10 +54,11 @@ fn main() {
 const VALUE_FIELD_AND_WHOLE_USE: &str = r#"
 value Color { r: float, g: float, b: float, a: float }
 value FixVec3 { x: float, y: float, z: float }
+@nomangle inline(lua) fn __same(a: Color, b: Color) -> bool = "return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a"
 
 // `c` is field-read into a local (`let r = c.r`) AND used as a whole struct
-// (`c == c2`). The whole-struct use escapes, so the cell must NOT be split and the
-// `Color_ct` cdata must be KEPT for the `==`. The field read `c.r` itself folds to
+// (`__same(c, c2)`; `==` compares leaves). The whole-struct use escapes, so the
+// cell must NOT be split and the `Color_ct` cdata must be KEPT for the call. The field read `c.r` itself folds to
 // its construction operand `k` (a `value` struct is IMMUTABLE, so `Field(Color_ct,
 // r)` == the `r` operand -- the copy-prop forwarding), independent of the kept
 // cdata. The half-rewrite hazard this pins: forwarding the read to a never-stored
@@ -73,13 +74,13 @@ fn coexist(k: float) -> float {
     let r = c.r
     let z = v.z
     let c2 = Color { r: k, g: 0.5, b: 0.0, a: 1.0 }
-    let eq = if c == c2 { 1.0 } else { 0.0 }
+    let eq = if __same(c, c2) { 1.0 } else { 0.0 }
     return (r + z) + eq
 }
 
 @nomangle inline(lua) fn __out(x: float) = "io.write(tostring(x))"
 fn main() {
-    __out(coexist(2.0))   // 2.0 (c.r) + 30.0 (v.z) + 1.0 (c == c2) = 33
+    __out(coexist(2.0))   // 2.0 (c.r) + 30.0 (v.z) + 1.0 (same c c2) = 33
 }
 "#;
 
@@ -87,10 +88,10 @@ fn main() {
 fn value_struct_with_whole_use_keeps_cdata() {
     let lua = emit_module(VALUE_FIELD_AND_WHOLE_USE);
     let body = function_body(&lua, "coexist");
-    // The whole-struct `==` use escapes, so the cdata must be KEPT (not SROA'd).
+    // The whole-struct argument escapes, so the cdata must be KEPT (not SROA'd).
     assert!(
         body.contains("Color_ct("),
-        "a value struct used as a whole (==) must keep its cdata:\n{body}"
+        "a value struct used as a whole (boxed argument) must keep its cdata:\n{body}"
     );
     // The separate field read `c.r` folds to its construction operand (no `.r`
     // projection needed), since the value struct is immutable.
