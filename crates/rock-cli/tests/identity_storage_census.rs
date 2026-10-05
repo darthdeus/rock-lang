@@ -43,7 +43,7 @@ const PINNED: &str = "\
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | stone | exempt | 30 | 47 | 6 | 0 | 171 | 5 | 0 | 0 | 2 | 261 |
 | survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
-| testbed | exempt | 5 | 3 | 0 | 0 | 111 | 2 | 2 | 64 | 56 | 243 |
+| testbed | exempt | 12 | 4 | 0 | 0 | 112 | 2 | 2 | 64 | 67 | 263 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
 | unpackaged programs | exempt | 111 | 14 | 8 | 0 | 137 | 50 | 1 | 0 | 47 | 368 |
 | void | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
