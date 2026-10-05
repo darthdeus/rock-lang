@@ -134,3 +134,47 @@ fn prepared_sim_receipt_rejects_changed_project_sources() {
         "wrong rejection for a source-stale receipt:\n{stderr}"
     );
 }
+
+#[test]
+fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let timing_log = dir.path().join("compile.jsonl");
+    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["sim", "testbed", "testbed::co_join2_tuple"])
+        .current_dir(&workspace)
+        .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
+        .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
+        .env("ROCK_SIM_COMPILE_TIMING", &timing_log)
+        .env("ROCK_SIM_LOG_DIR", dir.path().join("history"))
+        .env("ROCK_SIM_TIMEOUT_SECS", "180")
+        .output()
+        .expect("run testbed sim");
+    assert!(
+        output.status.success(),
+        "testbed sim failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = std::fs::read_to_string(&timing_log).expect("read compile timing log");
+    let phase_pids = |phase: &str| {
+        records
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("timing record"))
+            .filter(|record| record["phase"] == phase)
+            .map(|record| record["pid"].as_u64().expect("timing pid"))
+            .collect::<Vec<_>>()
+    };
+    let compiled = phase_pids("skull_compile_emit");
+    let materialized = phase_pids("receipt_materialize");
+    assert_eq!(compiled.len(), 1, "one run compiles once; timing log:\n{records}");
+    assert_eq!(materialized.len(), 1, "the runner loads the compile's receipt; timing log:\n{records}");
+    assert_ne!(
+        compiled[0], materialized[0],
+        "the compiler must run in its own process so the runner never holds its memory"
+    );
+}

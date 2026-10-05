@@ -845,17 +845,30 @@ fn load_sim_receipt(
     }
 
     let main_path = receipt_dir.join(rock_host::project::MAIN_LUA_FILENAME);
-    let main_bytes = std::fs::read(&main_path)
-        .with_context(|| format!("read sim compile receipt artifact {}", main_path.display()))?;
     let expected_main_hash = manifest
         .get("main_sha256")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow!("sim compile receipt has no main artifact hash"))?;
-    if sha256_bytes(&main_bytes) != expected_main_hash {
+    // Copy, then hash the copy that will run: mag's chunk is about 160 MB, and
+    // reading it into the runner would keep that much resident beside its sims.
+    let materialized = output.join(rock_host::project::MAIN_LUA_FILENAME);
+    std::fs::copy(&main_path, &materialized).with_context(|| {
+        format!(
+            "materialize sim compile receipt {} into {}",
+            main_path.display(),
+            output.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    std::io::copy(
+        &mut std::fs::File::open(&materialized)
+            .with_context(|| format!("open materialized sim artifact {}", materialized.display()))?,
+        &mut hasher,
+    )
+    .with_context(|| format!("hash materialized sim artifact {}", materialized.display()))?;
+    if format!("{:x}", hasher.finalize()) != expected_main_hash {
         return Err(anyhow!("sim compile receipt main.lua hash does not match its manifest"));
     }
-    std::fs::write(output.join(rock_host::project::MAIN_LUA_FILENAME), main_bytes)
-        .with_context(|| format!("materialize sim compile receipt into {}", output.display()))?;
     let incremental = output.join("incremental.lua");
     if incremental.exists() {
         std::fs::remove_file(&incremental)
@@ -886,21 +899,7 @@ fn prepare_sims(
     })?;
     let receipt_dir = sim_receipt_project_dir(&root, &project_path);
     if receipt_dir.is_dir() {
-        timed_sim_compile_phase(
-            "compile_sims",
-            "sound_bank",
-            &project_path,
-            Some(&output_path),
-            || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
-        )?;
-        let (wire_names, env_by_wire, source_files) = timed_sim_compile_phase(
-            "compile_sims",
-            "receipt_materialize",
-            &project_path,
-            Some(&output_path),
-            || load_sim_receipt(&receipt_dir, &project_path, &output_path),
-        )?;
-        return Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: None });
+        return consume_sim_receipt(&receipt_dir, &project_path, &output_path);
     }
     if std::env::var_os(SIM_COMPILE_RECEIPT_PREPARE_ENV).as_deref()
         != Some(std::ffi::OsStr::new("1"))
@@ -932,6 +931,80 @@ fn prepare_sims(
         },
     )?;
     Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: Some(stone) })
+}
+
+fn consume_sim_receipt(
+    receipt_dir: &Path,
+    project_path: &Path,
+    output_path: &Path,
+) -> Result<PreparedSims> {
+    timed_sim_compile_phase(
+        "compile_sims",
+        "sound_bank",
+        project_path,
+        Some(output_path),
+        || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
+    )?;
+    let (wire_names, env_by_wire, source_files) = timed_sim_compile_phase(
+        "compile_sims",
+        "receipt_materialize",
+        project_path,
+        Some(output_path),
+        || load_sim_receipt(receipt_dir, project_path, output_path),
+    )?;
+    Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: None })
+}
+
+/// `prepare_sims` for a `rock sim` run: the compile happens in a child `rock`
+/// that publishes a one-run receipt, so the runner never holds the compiler's
+/// memory while sims run. Compiling mag with every sim peaks at about 4.4 GB,
+/// which an in-process compile kept resident beside every sim child; a child's
+/// exit returns all of it, whatever the allocator does with freed pages. A
+/// reload entry still compiles its live session in-process, as it does under
+/// any receipt.
+///
+/// An explicit receipt lane (`ROCK_SIM_COMPILE_RECEIPT_DIR`) keeps its own
+/// rules. This spawns `current_exe`, so only the CLI entry points use it.
+fn prepare_sims_out_of_process(
+    backend: crate::Backend,
+    project_path: PathBuf,
+    output_path: PathBuf,
+) -> Result<PreparedSims> {
+    if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
+        return prepare_sims(backend, project_path, output_path);
+    }
+    let project_path = project_path.canonicalize().with_context(|| {
+        format!("canonicalize sim project {}", project_path.display())
+    })?;
+    fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
+    let root = tempfile::Builder::new()
+        .prefix("sim-receipt-")
+        .tempdir_in("tmp")
+        .context("creating sim compile receipt directory")?;
+    let exe = std::env::current_exe().context("locating the rock binary for the sim compile")?;
+    let status = std::process::Command::new(&exe)
+        .arg("sim")
+        .arg("--list")
+        .arg("--backend")
+        .arg(backend.name())
+        .arg(&project_path)
+        .env(SIM_COMPILE_RECEIPT_DIR_ENV, root.path())
+        .env(SIM_COMPILE_RECEIPT_PREPARE_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .with_context(|| format!("spawning the sim compile `{} sim --list`", exe.display()))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "cannot compile project {}: the sim compile process exited with {status}",
+            project_path.display()
+        ));
+    }
+    consume_sim_receipt(
+        &sim_receipt_project_dir(root.path(), &project_path),
+        &project_path,
+        &output_path,
+    )
 }
 
 fn compile_sims_with_allocation(
@@ -1148,7 +1221,7 @@ fn do_run_sim_opts_recorded(
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `MATCH3_PRESET`.
     let mut prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims(backend, project_path.clone(), output_path.clone())
+        prepare_sims_out_of_process(backend, project_path.clone(), output_path.clone())
     })?;
     let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
     let sim_name = sim_name.as_str();
@@ -1522,7 +1595,7 @@ fn do_run_named_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims(backend, project_path.clone(), PathBuf::from(&output))
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output))
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
@@ -2000,7 +2073,7 @@ fn do_run_all_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims(backend, project_path.clone(), PathBuf::from(&output))
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output))
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;

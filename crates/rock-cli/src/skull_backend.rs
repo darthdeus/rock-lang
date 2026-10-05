@@ -1018,6 +1018,11 @@ fn skull_build_package_with_limit(
     }).collect::<Vec<_>>();
     let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
     let lua = prepend_package_preamble(lua, dir, &ws)?;
+    // The compiler state is dead once the program is emitted. Free it before
+    // the test process runs: mag's peaks near 5 GB, and keeping it resident
+    // doubled the memory a `rock test` needed while its luajit child ran.
+    drop((ws, modules, sources));
+    crate::allocator::release_freed_memory();
     run_emitted_tests(&lua, &tests, &files, limit)
 }
 
