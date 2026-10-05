@@ -257,7 +257,7 @@ impl Builder<'_> {
                     let rhs_repr = self.lower_expr_repr(rhs)?.into_value();
                     let (mut lhs_leaves, mut rhs_leaves) = (Vec::new(), Vec::new());
                     if matches!(lhs_repr, ValueRepr::Group { .. })
-                        && matching_scalar_leaves(&lhs_repr, &rhs_repr, &mut lhs_leaves, &mut rhs_leaves)
+                        && matching_scalar_leaves(self.ws, &lhs_repr, &rhs_repr, &mut lhs_leaves, &mut rhs_leaves)
                     {
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
@@ -671,19 +671,28 @@ impl Builder<'_> {
 /// Pair the leaves of two unpacked operands of one value type, or answer false
 /// when either side is packed or carries a presence leaf.
 fn matching_scalar_leaves(
+    ws: &Workspace,
     lhs: &ValueRepr,
     rhs: &ValueRepr,
     lhs_out: &mut Vec<Idx<Inst>>,
     rhs_out: &mut Vec<Idx<Inst>>,
 ) -> bool {
     match (lhs, rhs) {
+        // A flat enum whose payload compares structurally (a struct payload)
+        // is not equal leaf for leaf; the packed `__eq` decides it.
+        (ValueRepr::Group { name, .. }, _)
+            if EnumPlan::for_name(ws, *name).is_some_and(|plan| plan.flat().is_some())
+                && !flat_enum_equality_is_leafwise(ws, *name) =>
+        {
+            false
+        }
         (
             ValueRepr::Group { name: ln, parts: lp, present: None },
             ValueRepr::Group { name: rn, parts: rp, present: None },
         ) if ln == rn && lp.len() == rp.len() => lp
             .iter()
             .zip(rp)
-            .all(|(l, r)| matching_scalar_leaves(l, r, lhs_out, rhs_out)),
+            .all(|(l, r)| matching_scalar_leaves(ws, l, r, lhs_out, rhs_out)),
         (ValueRepr::Scalar(l), ValueRepr::Scalar(r)) => {
             lhs_out.push(*l);
             rhs_out.push(*r);
