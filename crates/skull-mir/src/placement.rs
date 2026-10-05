@@ -1812,7 +1812,7 @@ fn value_place(
                 if let Some(&payload) = raw_args.get(usize::from(index)) {
                     for value in construction_inputs(mir, analysis, oracle, payload, &mut HashSet::new()) {
                         add_outlives_constraint(analysis, OutlivesConstraint {
-                            value, destination, span, contextual: false,
+                            value, destination, span, contextual: false, owner_equivalence: false,
                         });
                     }
                 }
