@@ -496,8 +496,42 @@ fn main() {
 fn a_value_copy_shares_its_enum_children() {
     let lua = emit_module(ENUM_CHILD_OF_A_COPIED_VALUE);
     let body = function_body(&lua, "set_count");
-    // One `kind` box per arm of `item` (the scalar-ABI param packs) and one
-    // for `ident`'s multi-return; the copies of `item` add none.
-    assert_eq!(body.matches("__ty = \"QKind\"").count(), 3, "set_count rebuilds a QKind box:\n{body}");
+    // `let item` keeps its join as leaves, so the one `kind` box is the
+    // stored item's; the copies of `item` add none.
+    assert_eq!(body.matches("__ty = \"QKind\"").count(), 1, "set_count rebuilds a QKind box:\n{body}");
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_enum_child_copy"), "8 8 0 0 gold");
+}
+
+/// `W` is wide enough (50 leaves) to cross every boundary as one box.
+fn nullable_child_snapshot_source() -> String {
+    let fields: Vec<String> = (0..50).map(|i| format!("f{i}: int")).collect();
+    let inits: Vec<String> = (0..50).map(|i| format!("f{i}: 1")).collect();
+    format!(
+        r#"
+value W {{ {} }}
+value Outer {{ w: W?, xs: [int] }}
+struct Holder {{ o: Outer }}
+fn mkw() -> W {{ return W {{ {} }} }}
+fn main() {{
+    let src = Holder {{ o: Outer {{ w: mkw(), xs: [] }} }}
+    let o = src.o
+    if src.o.w != null {{ src.o.w.f0 = 99 }}
+    print(o.w?.f0 ?? -1)
+}}
+"#,
+        fields.join(", "),
+        inits.join(", ")
+    )
+}
+
+/// SENTINEL (inverted): the correct output is `1`, as the C backend prints. A
+/// Lua copy keeps its `V?` value child as the source's box until the copy
+/// escapes (a store, a return), so a write through the source's child before
+/// the copy's last read shows through. Copying the child at the snapshot fixes
+/// it but allocates on read-only draw paths. When this fails with `1`, flip it
+/// and move the case to tests/value_alias_escape_paths.rock.
+#[test]
+fn a_copy_reads_a_later_write_through_its_sources_nullable_child() {
+    let lua = emit_module(&nullable_child_snapshot_source());
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_nullable_child_snapshot"), "99");
 }

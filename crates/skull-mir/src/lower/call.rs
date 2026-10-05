@@ -1470,6 +1470,10 @@ impl Builder<'_> {
         r: ValueRepr,
         kind: BoxKind,
     ) -> Result<Idx<Inst>, CompilerError> {
+        let r = match r {
+            r @ ValueRepr::Group { .. } => self.owned_value_children(r)?,
+            r => r,
+        };
         match r {
             ValueRepr::Scalar(v) => Ok(v),
             // A splatting tuple's box. Its `nobox` elements pack too, which is
@@ -2387,9 +2391,9 @@ impl Builder<'_> {
     }
 
     /// The ordinary value type of `owner.field` when it is declared `V?`. Its
-    /// shape plans it as one opaque slot, but it is a value, so a copy of the
-    /// owner copies it too. A recursive child (`next: Node?` inside `Node`)
-    /// cannot be unrolled into its own copy and stays shared.
+    /// shape plans it as one opaque slot, but it is a value. A recursive child
+    /// (`next: Node?` inside `Node`) cannot be unrolled into its own copy and
+    /// stays shared.
     fn nullable_value_child(&self, owner: Ustr, field: Ustr) -> Option<Ustr> {
         let ty = self.struct_field_ty(owner, field)?;
         let (child, true) = super::shape::nominal_name_from_ty(self.ws, ty)? else {
@@ -2401,26 +2405,97 @@ impl Builder<'_> {
         .then_some(child)
     }
 
-    /// Copy every `V?` value child in a copy rebuilt from leaves, where it is
-    /// still the source's box in a primitive slot.
-    fn copy_nullable_value_children(
-        &mut self,
-        shape: &ValueShape,
-        repr: ValueRepr,
-    ) -> Result<ValueRepr, CompilerError> {
-        let ValueRepr::Group { name, parts, present } = repr else { return Ok(repr) };
-        let mut out = Vec::with_capacity(parts.len());
+    /// A copy rebuilt from leaves keeps each `V?` value child as the source's
+    /// box: a read through it needs nothing more, and the copy happens where
+    /// the value escapes ([`Self::owned_value_children`]).
+    fn mark_borrowed_value_children(&mut self, shape: &ValueShape, repr: &ValueRepr) {
+        let ValueRepr::Group { parts, .. } = repr else { return };
         for ((fname, fs), part) in shape.fields.iter().zip(parts) {
-            out.push(match (fs, part) {
-                (FieldShape::Prim, ValueRepr::Scalar(v)) => match self.nullable_value_child(shape.name, *fname) {
-                    Some(child) => ValueRepr::Scalar(self.nullable_boxed_value_copy(v, child)?),
-                    None => ValueRepr::Scalar(v),
-                },
-                (FieldShape::Nested(sub), part) => self.copy_nullable_value_children(sub, part)?,
-                (_, part) => part,
-            });
+            match (fs, part) {
+                (FieldShape::Prim, ValueRepr::Scalar(v)) => {
+                    if self.nullable_value_child(shape.name, *fname).is_some() {
+                        self.borrowed_value_children.insert(*v);
+                    }
+                }
+                (FieldShape::Nested(sub), part) => self.mark_borrowed_value_children(sub, part),
+                _ => {}
+            }
         }
-        Ok(ValueRepr::Group { name, parts: out, present })
+    }
+
+    /// `r` with each borrowed `V?` value child copied, at an escape: a box
+    /// ([`Self::pack_boxed`]) or a return. A child is borrowed when a copy left
+    /// it as its source's box, or when it is a scalarized parameter's or
+    /// binding's leaf, which the caller or the storage still holds.
+    pub(crate) fn owned_value_children(&mut self, r: ValueRepr) -> Result<ValueRepr, CompilerError> {
+        if self.scx.values_first_class || self.lending_pack {
+            return Ok(r);
+        }
+        match r {
+            ValueRepr::Group { name, parts, present } if self.is_value_struct(name) => {
+                let names = struct_field_names(self.ws, name);
+                if names.len() != parts.len() {
+                    return Ok(ValueRepr::Group { name, parts, present });
+                }
+                self.value_copy_stack.push(name);
+                let mut out = Vec::with_capacity(parts.len());
+                let mut failed = None;
+                for (fname, part) in names.into_iter().zip(parts) {
+                    let part = match part {
+                        ValueRepr::Scalar(v) => match self.nullable_value_child(name, fname) {
+                            Some(child) if self.is_borrowed_value_child(v) => {
+                                match self.nullable_boxed_value_copy(v, child) {
+                                    Ok(copy) => ValueRepr::Scalar(copy),
+                                    Err(e) => {
+                                        failed = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => ValueRepr::Scalar(v),
+                        },
+                        part @ ValueRepr::Group { .. } => match self.owned_value_children(part) {
+                            Ok(part) => part,
+                            Err(e) => {
+                                failed = Some(e);
+                                break;
+                            }
+                        },
+                        part => part,
+                    };
+                    out.push(part);
+                }
+                self.value_copy_stack.pop();
+                match failed {
+                    Some(e) => Err(e),
+                    None => Ok(ValueRepr::Group { name, parts: out, present }),
+                }
+            }
+            ValueRepr::Tuple { parts, present } => {
+                let parts = parts
+                    .into_iter()
+                    .map(|p| self.owned_value_children(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(ValueRepr::Tuple { parts, present })
+            }
+            r => Ok(r),
+        }
+    }
+
+    /// [`Self::pack`] for a `let` binding's own cell: its `V?` value children
+    /// stay borrowed, since only the binding holds the box and each whole use
+    /// of it copies ([`Self::boxed_value_local`]).
+    pub(crate) fn pack_lent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
+        let outer = std::mem::replace(&mut self.lending_pack, true);
+        let packed = self.pack(r);
+        self.lending_pack = outer;
+        packed
+    }
+
+    fn is_borrowed_value_child(&self, v: Idx<Inst>) -> bool {
+        self.borrowed_value_children.contains(&v)
+            || matches!(self.f.insts[v], Inst::Load(cell)
+                if self.group_binds.values().any(|(cells, _)| cells.contains(&cell)))
     }
 
     /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
@@ -2440,7 +2515,8 @@ impl Builder<'_> {
         if !gc_table {
             let leaves = self.cdata_leaves(v, shape)?;
             let copy = self.rebuild_from_leaves(shape, &leaves, &mut 0);
-            return self.copy_nullable_value_children(shape, copy);
+            self.mark_borrowed_value_children(shape, &copy);
+            return Ok(copy);
         }
         let inline = self.gc_table_inline_layout(shape.name)?;
         let mut parts = Vec::with_capacity(shape.fields.len());
@@ -2459,10 +2535,12 @@ impl Builder<'_> {
             }
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             parts.push(match fs {
-                FieldShape::Prim => match self.nullable_value_child(shape.name, *fname) {
-                    Some(child) => ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, child)?),
-                    None => ValueRepr::Scalar(fv),
-                },
+                FieldShape::Prim => {
+                    if self.nullable_value_child(shape.name, *fname).is_some() {
+                        self.borrowed_value_children.insert(fv);
+                    }
+                    ValueRepr::Scalar(fv)
+                }
                 FieldShape::Nested(sub)
                     if EnumPlan::for_name(self.ws, sub.name).is_some_and(|plan| plan.flat().is_some()) =>
                 {

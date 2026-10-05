@@ -1628,6 +1628,8 @@ fn lower_body(
         owned_value_binds: HashSet::new(),
         ref_borrowed_binds: std::cell::OnceCell::new(),
         value_copy_stack: Vec::new(),
+        borrowed_value_children: HashSet::new(),
+        lending_pack: false,
         f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -2173,6 +2175,12 @@ struct Builder<'a> {
     /// Value types whose copy is being emitted, outermost first: a recursive
     /// `V?` child is not unrolled into its own copy ([`Self::boxed_value_copy_repr`]).
     value_copy_stack: Vec<Ustr>,
+    /// `V?` value children a copy left as its source's box
+    /// ([`Self::owned_value_children`]).
+    borrowed_value_children: HashSet<Idx<Inst>>,
+    /// Set while a `let` packs a place read into its own cell
+    /// ([`Self::pack_lent`]).
+    lending_pack: bool,
     /// Right-hand sides of assignments into an `f32` field. Every assignment
     /// path lowers its value through one of the expression entries, which
     /// round these, so no store path needs its own rounding.
@@ -2258,6 +2266,8 @@ impl<'a> Builder<'a> {
             owned_value_binds: HashSet::new(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
             value_copy_stack: Vec::new(),
+            borrowed_value_children: HashSet::new(),
+            lending_pack: false,
             f32_round_exprs: HashSet::new(),
             tuple_binds: HashMap::new(),
             static_cells: HashMap::new(),
@@ -2924,6 +2934,7 @@ impl Builder<'_> {
             if self.scx.rep_arena().value_shape(r.representation()).is_none() {
                 return self.opaque_boundary_leaves(&r, &shape, "return boundary");
             }
+            let r = ValueBundle::new(r.representation(), self.owned_value_children(r.into_value())?);
             return self.repr_to_leaves_bundle_after_presence(&r, &shape);
         }
         if let Some(shape) = self.result_tuple() {
@@ -2932,6 +2943,7 @@ impl Builder<'_> {
             }
             if shape.splats() {
                 let r = self.lower_expr_repr(e)?.into_value();
+                let r = self.owned_value_children(r)?;
                 return self.tuple_repr_to_slots(r, &shape);
             }
             let v = self.lower_expr(e)?;
