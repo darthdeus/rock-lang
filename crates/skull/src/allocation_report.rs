@@ -360,6 +360,7 @@ impl AllocationReport {
             .collect::<Vec<_>>();
         self.lifecycle_routes = vec![
             self.trace_from_emitted_names("frame.update", roots_for(&["update", "late_update"])),
+            self.trace_from_emitted_names("frame.prepare", roots_for(&["prepare"])),
             self.trace_from_emitted_names(
                 "frame.draw",
                 roots_for(&["draw", "late_draw", "post_imgui_draw"]),

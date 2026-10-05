@@ -134,22 +134,27 @@ impl LifecycleQualification {
     }
 }
 
+pub const LIFECYCLE_PHASES: [&str; 13] = [
+    "early_init",
+    "init",
+    "late_init",
+    "wire",
+    "update",
+    "late_update",
+    "prepare",
+    "draw",
+    "late_draw",
+    "post_imgui_draw",
+    "reset",
+    "shutdown",
+    "window_resized",
+];
+
 fn phase_rank(phase: Ustr) -> Option<u8> {
-    Some(match phase.as_str() {
-        "early_init" => 0,
-        "init" => 1,
-        "late_init" => 2,
-        "wire" => 3,
-        "update" => 4,
-        "late_update" => 5,
-        "draw" => 6,
-        "late_draw" => 7,
-        "post_imgui_draw" => 8,
-        "reset" => 9,
-        "shutdown" => 10,
-        "window_resized" => 11,
-        _ => return None,
-    })
+    LIFECYCLE_PHASES
+        .iter()
+        .position(|candidate| *candidate == phase.as_str())
+        .map(|rank| rank as u8)
 }
 
 pub fn sim_wire_name(function: &bone_semantic::hir::Function) -> Option<Ustr> {
@@ -177,7 +182,7 @@ fn is_sim_fixture_module(file: &str) -> bool {
 fn is_frame_phase(phase: Ustr) -> bool {
     matches!(
         phase.as_str(),
-        "update" | "late_update" | "draw" | "late_draw" | "post_imgui_draw"
+        "update" | "late_update" | "prepare" | "draw" | "late_draw" | "post_imgui_draw"
     )
 }
 
@@ -1226,6 +1231,39 @@ mod tests {
                 ("post_imgui_draw", "later", 20),
             ]
         );
+    }
+
+    #[test]
+    fn prepare_is_a_compiler_owned_frame_phase_between_update_and_draw() {
+        let ws = workspace(&[(
+            "prepare.rock",
+            r#"
+            @lifecycle(phase="draw", owner="session", stage_param="stage")
+            deco init draw(stage: int = 100) {}
+            @lifecycle(phase="prepare", owner="session", stage_param="stage")
+            deco init prepare(stage: int = 100) {}
+            @lifecycle(phase="late_update", owner="session", stage_param="stage")
+            deco init late_update(stage: int = 100) {}
+            @draw(stage=-1000) fn paint() {}
+            @prepare(stage=20) fn later() {}
+            @prepare(stage=10) fn first() {}
+            @late_update(stage=900) fn settle() {}
+        "#,
+        )]);
+        let plan = collect(&ws).expect("prepare must be collected");
+        assert_eq!(
+            plan.entries
+                .iter()
+                .map(|entry| (entry.phase.as_str(), entry.diagnostic_name.as_str(), entry.stage))
+                .collect::<Vec<_>>(),
+            vec![
+                ("late_update", "settle", 900),
+                ("prepare", "first", 10),
+                ("prepare", "later", 20),
+                ("draw", "paint", -1000),
+            ]
+        );
+        assert!(is_frame_phase(Ustr::from("prepare")));
     }
 
     #[test]
