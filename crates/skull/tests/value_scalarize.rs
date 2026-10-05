@@ -459,3 +459,45 @@ fn leaf_form_value_copy_in_a_closure_builds_one_box() {
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_leaf_form_saved"), "true 1");
 }
 
+// Enums are immutable, so a copy of a value that holds an enum box can share
+// that box: only the value's own fields need fresh storage. The two arms of
+// `identified` copy `item` into a second owner; neither rebuilds its `kind`.
+const ENUM_CHILD_OF_A_COPIED_VALUE: &str = r#"
+enum QKind { Gold, Key(string), Bandage }
+enum QProp { Bound }
+value QBook { pages: [int] = [] }
+value QItem {
+    id: int = 0,
+    kind: QKind,
+    amount: int = 1,
+    property: QProp? = null,
+    book: QBook? = null,
+}
+value QIdent { item: QItem, next: int }
+value QInv { stacks: [QItem] = [] }
+fn ident(item: QItem, next: int) -> QIdent { return QIdent { item: QItem { ..item, id: next }, next: next + 1 } }
+fn set_count(inv: QInv, kind: QKind, amount: int, next: int) -> int {
+    let old = inv.stacks[0]
+    let item = if amount > 0 { QItem { ..old, kind, amount } } else { QItem { kind, amount: 0 } }
+    let identified = if amount > 0 { ident(item, next) } else { QIdent { item, next } }
+    inv.stacks[0] = identified.item
+    return identified.next
+}
+fn main() {
+    let inv = QInv { stacks: [QItem { kind: QKind::Key("a"), amount: 1 }] }
+    let n = set_count(inv, QKind::Key("b"), 3, 7)
+    let m = set_count(inv, QKind::Gold, 0, n)
+    let k = match inv.stacks[0].kind { QKind::Gold => "gold", QKind::Key(s) => s, QKind::Bandage => "b" }
+    print("{n} {m} {inv.stacks[0].amount} {inv.stacks[0].id} {k}")
+}
+"#;
+
+#[test]
+fn a_value_copy_shares_its_enum_children() {
+    let lua = emit_module(ENUM_CHILD_OF_A_COPIED_VALUE);
+    let body = function_body(&lua, "set_count");
+    // One `kind` box per arm of `item` (the scalar-ABI param packs) and one
+    // for `ident`'s multi-return; the copies of `item` add none.
+    assert_eq!(body.matches("__ty = \"QKind\"").count(), 3, "set_count rebuilds a QKind box:\n{body}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "value_scalarize_enum_child_copy"), "8 8 0 0 gold");
+}

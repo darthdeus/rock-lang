@@ -255,10 +255,27 @@ impl Builder<'_> {
                     }
                     let lhs_repr = self.lower_expr_repr(lhs)?.into_value();
                     let rhs_repr = self.lower_expr_repr(rhs)?.into_value();
-                    let (mut lhs_leaves, mut rhs_leaves) = (Vec::new(), Vec::new());
-                    if matches!(lhs_repr, ValueRepr::Group { .. })
-                        && matching_scalar_leaves(self.ws, &lhs_repr, &rhs_repr, &mut lhs_leaves, &mut rhs_leaves)
+                    let mut pairs = Vec::new();
+                    let shape = match &lhs_repr {
+                        ValueRepr::Group { name, .. } => self.nominal_rep_shape(*name, false)?,
+                        _ => None,
+                    };
+                    if let Some(shape) = shape
+                        && matching_scalar_leaves(self.ws, self.scx.values_first_class, &lhs_repr, &rhs_repr, &shape, &mut pairs)
                     {
+                        let (mut lhs_leaves, mut rhs_leaves) = (Vec::new(), Vec::new());
+                        for pair in pairs {
+                            match pair {
+                                LeafPair::Leaf(l, r) => {
+                                    lhs_leaves.push(l);
+                                    rhs_leaves.push(r);
+                                }
+                                LeafPair::Split(l, r, sub) => {
+                                    lhs_leaves.extend(self.repr_to_leaves_shape(&l, &sub)?);
+                                    rhs_leaves.extend(self.repr_to_leaves_shape(&r, &sub)?);
+                                }
+                            }
+                        }
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal
@@ -668,14 +685,23 @@ impl Builder<'_> {
     }
 }
 
-/// Pair the leaves of two unpacked operands of one value type, or answer false
-/// when either side is packed or carries a presence leaf.
+/// One compared pair of a leafwise equality: two scalar leaves, or two
+/// operands of a nested child that one side holds boxed, split by its shape.
+enum LeafPair {
+    Leaf(Idx<Inst>, Idx<Inst>),
+    Split(ValueRepr, ValueRepr, ValueShape),
+}
+
+/// Pair the leaves of two unpacked operands of value type `shape`, or answer
+/// false when either side is packed or carries a presence leaf. A first-class
+/// target compares a boxed child whole.
 fn matching_scalar_leaves(
     ws: &Workspace,
+    first_class: bool,
     lhs: &ValueRepr,
     rhs: &ValueRepr,
-    lhs_out: &mut Vec<Idx<Inst>>,
-    rhs_out: &mut Vec<Idx<Inst>>,
+    shape: &ValueShape,
+    out: &mut Vec<LeafPair>,
 ) -> bool {
     match (lhs, rhs) {
         // A flat enum whose payload compares structurally (a struct payload)
@@ -689,15 +715,42 @@ fn matching_scalar_leaves(
         (
             ValueRepr::Group { name: ln, parts: lp, present: None },
             ValueRepr::Group { name: rn, parts: rp, present: None },
-        ) if ln == rn && lp.len() == rp.len() => lp
-            .iter()
-            .zip(rp)
-            .all(|(l, r)| matching_scalar_leaves(ws, l, r, lhs_out, rhs_out)),
-        (ValueRepr::Scalar(l), ValueRepr::Scalar(r)) => {
-            lhs_out.push(*l);
-            rhs_out.push(*r);
-            true
+        ) if ln == rn && lp.len() == rp.len() && lp.len() == shape.fields.len() => {
+            shape.fields.iter().zip(lp.iter().zip(rp)).all(|((_, fs), (l, r))| match (fs, l, r) {
+                (FieldShape::Prim, ValueRepr::Scalar(l), ValueRepr::Scalar(r)) => {
+                    out.push(LeafPair::Leaf(*l, *r));
+                    true
+                }
+                (FieldShape::Prim, ..) => false,
+                (FieldShape::Nested(sub), ValueRepr::Group { .. }, ValueRepr::Group { .. }) => {
+                    matching_scalar_leaves(ws, first_class, l, r, sub, out)
+                }
+                (FieldShape::Nested(_), ValueRepr::Scalar(l), ValueRepr::Scalar(r)) if first_class => {
+                    out.push(LeafPair::Leaf(*l, *r));
+                    true
+                }
+                // A boxed child (a copy shares an enum child's box) is not one
+                // leaf: raw `==` on two enum tables compares identity.
+                (FieldShape::Nested(sub), ..) if shape_equality_is_leafwise(ws, sub) => {
+                    out.push(LeafPair::Split(l.clone(), r.clone(), sub.clone()));
+                    true
+                }
+                (FieldShape::Nested(_), ..) => false,
+            })
         }
         _ => false,
     }
+}
+
+/// Whether every flat enum anywhere in `shape` compares leaf for leaf.
+fn shape_equality_is_leafwise(ws: &Workspace, shape: &ValueShape) -> bool {
+    if EnumPlan::for_name(ws, shape.name).is_some_and(|plan| plan.flat().is_some())
+        && !flat_enum_equality_is_leafwise(ws, shape.name)
+    {
+        return false;
+    }
+    shape.fields.iter().all(|(_, fs)| match fs {
+        FieldShape::Prim => true,
+        FieldShape::Nested(sub) => shape_equality_is_leafwise(ws, sub),
+    })
 }

@@ -2251,51 +2251,49 @@ impl Builder<'_> {
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             match fs {
                 FieldShape::Prim => out.push(fv),
-                // A NULLABLE nested child: the stored box may be absent, so split
-                // it presence-aware rather than field-reading straight off a
-                // possible nil. Mirrors `repr_to_leaves`' `Scalar(v) if
-                // shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0,
-                // then the child's own leaves, nils on the absent arm -- because
-                // the two must agree leaf-for-leaf or `rebuild_from_leaves`
-                // indexes past the end. This function had NO nullable handling:
-                // its one caller stripped `.nullable` first, which was safe only
-                // while no shape carried it below the outermost level.
-                FieldShape::Nested(sub) if sub.nullable => {
-                    let field_count = sub.leaf_count() - 1;
-                    let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                    let present = self.emit_cur(Inst::NotEq(fv, nil));
-                    let cells: Vec<Idx<Cell>> =
-                        (0..field_count).map(|_| self.f.new_cell(None)).collect();
-                    let nil_bb = self.f.new_block();
-                    let value_bb = self.f.new_block();
-                    let join = self.f.new_block();
-                    self.f.set_term(
-                        self.cur,
-                        Term::Branch { cond: present, then_bb: value_bb, else_bb: nil_bb },
-                    );
-                    self.cur = nil_bb;
-                    for c in &cells {
-                        let z = self.emit_cur(Inst::Const(Lit::Nil));
-                        self.emit_cur(Inst::Store { cell: *c, value: z });
-                    }
-                    self.f.set_term(self.cur, Term::Goto(join));
-                    self.cur = value_bb;
-                    let mut inner = sub.clone();
-                    inner.nullable = false;
-                    let leaves = self.cdata_leaves(fv, &inner)?;
-                    for (c, lv) in cells.iter().zip(leaves) {
-                        self.emit_cur(Inst::Store { cell: *c, value: lv });
-                    }
-                    self.f.set_term(self.cur, Term::Goto(join));
-                    self.cur = join;
-                    out.push(present);
-                    out.extend(
-                        cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect::<Vec<_>>(),
-                    );
-                }
+                FieldShape::Nested(sub) if sub.nullable => out.extend(self.nullable_child_leaves(fv, sub)?),
                 FieldShape::Nested(sub) => out.extend(self.cdata_leaves(fv, sub)?),
             }
         }
+        Ok(out)
+    }
+
+    /// The leaves of a NULLABLE nested child `fv`: the stored box may be
+    /// absent, so split it presence-aware rather than field-reading straight
+    /// off a possible nil. Mirrors `repr_to_leaves`' `Scalar(v) if
+    /// shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0, then
+    /// the child's own leaves, nils on the absent arm -- because the two must
+    /// agree leaf-for-leaf or `rebuild_from_leaves` indexes past the end.
+    fn nullable_child_leaves(
+        &mut self,
+        fv: Idx<Inst>,
+        sub: &ValueShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let field_count = sub.leaf_count() - 1;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let present = self.emit_cur(Inst::NotEq(fv, nil));
+        let cells: Vec<Idx<Cell>> = (0..field_count).map(|_| self.f.new_cell(None)).collect();
+        let nil_bb = self.f.new_block();
+        let value_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb: value_bb, else_bb: nil_bb });
+        self.cur = nil_bb;
+        for c in &cells {
+            let z = self.emit_cur(Inst::Const(Lit::Nil));
+            self.emit_cur(Inst::Store { cell: *c, value: z });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = value_bb;
+        let mut inner = sub.clone();
+        inner.nullable = false;
+        let leaves = self.cdata_leaves(fv, &inner)?;
+        for (c, lv) in cells.iter().zip(leaves) {
+            self.emit_cur(Inst::Store { cell: *c, value: lv });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        let mut out = vec![present];
+        out.extend(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))));
         Ok(out)
     }
 
@@ -2382,9 +2380,58 @@ impl Builder<'_> {
         name: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.nominal_rep_shape_required(name, false)?;
-        let leaves = self.cdata_leaves(boxed, &shape)?;
-        let mut idx = 0;
-        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+        self.boxed_copy_repr_of(boxed, &shape)
+    }
+
+    /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
+    /// box's whole enum child is shared rather than split and rebuilt: only the
+    /// value's own storage has to be fresh. Every other box splits to leaves.
+    fn boxed_copy_repr_of(&mut self, v: Idx<Inst>, shape: &ValueShape) -> Result<ValueRepr, CompilerError> {
+        let gc_table = !self.scx.values_first_class
+            && !shape.nullable
+            && EnumPlan::for_name(self.ws, shape.name).is_none()
+            && !self.shape_is_plain_keys(shape)
+            && self
+                .scx
+                .rep_arena()
+                .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
+                .map_err(|e| self.gap_here(e.message))?
+                == ValueStorage::GcTable;
+        if !gc_table {
+            let leaves = self.cdata_leaves(v, shape)?;
+            return Ok(self.rebuild_from_leaves(shape, &leaves, &mut 0));
+        }
+        let inline = self.gc_table_inline_layout(shape.name)?;
+        let mut parts = Vec::with_capacity(shape.fields.len());
+        for (i, (fname, fs)) in shape.fields.iter().enumerate() {
+            if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
+                let leaves: Vec<Idx<Inst>> = field
+                    .keys()
+                    .into_iter()
+                    .map(|(key, _)| self.emit_cur(Inst::Field { base: v, field: key }))
+                    .collect();
+                parts.push(match fs {
+                    FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
+                    FieldShape::Nested(sub) => self.rebuild_from_leaves(sub, &leaves, &mut 0),
+                });
+                continue;
+            }
+            let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
+            parts.push(match fs {
+                FieldShape::Prim => ValueRepr::Scalar(fv),
+                FieldShape::Nested(sub)
+                    if EnumPlan::for_name(self.ws, sub.name).is_some_and(|plan| plan.flat().is_some()) =>
+                {
+                    ValueRepr::Scalar(fv)
+                }
+                FieldShape::Nested(sub) if sub.nullable => {
+                    let leaves = self.nullable_child_leaves(fv, sub)?;
+                    self.rebuild_from_leaves(sub, &leaves, &mut 0)
+                }
+                FieldShape::Nested(sub) => self.boxed_copy_repr_of(fv, sub)?,
+            });
+        }
+        Ok(ValueRepr::Group { name: shape.name, parts, present: None })
     }
 
     /// The `V?` twin of [`Self::boxed_value_copy_repr`]: an absent value has no
