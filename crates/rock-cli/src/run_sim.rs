@@ -3451,11 +3451,7 @@ fn entry_is_reload_lane(
         .any(|part| env_by_wire.get(*part).is_some_and(|e| is_reload_lane(e)))
 }
 
-/// Upper bound on concurrency for sim children: the machine's core count.
-/// The default is lower wherever GPU memory is readable (`sim_job_budget`):
-/// on the 32-core Linux workstation the core count exhausted the card and ran
-/// the mag suite slower than ten lanes (`docs/sim-author-decisions.md`,
-/// 2026-09-22).
+/// CPU bound on sim concurrency. Memory bounds are applied by `sim_job_budget`.
 fn default_sim_jobs() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -3496,12 +3492,12 @@ fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
     if requested.is_some() && !update_snapshots && jobs > sim_job_budget() {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| log::warn!(target: "SIM",
-            "--jobs {jobs} exceeds the GPU memory budget of {} lanes", sim_job_budget()));
+            "--jobs {jobs} exceeds the default memory budget of {} lanes", sim_job_budget()));
     }
     jobs
 }
 
-/// Without a request the GPU budget decides; a request is still bounded by
+/// Without a request the memory budget decides; a request is still bounded by
 /// the cores, so the author can override the budget but not oversubscribe.
 fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: usize) -> usize {
     if update_snapshots {
@@ -3539,26 +3535,49 @@ fn vram_budgeted_jobs(cores: usize, free_vram_mib: Option<u64>) -> usize {
     }
 }
 
+/// Total-RAM planning bound: the Studio's 36 GiB / 10 lanes avoided swap
+/// and beat 14 and 7 lanes at full-asset cap 2 in the same-SHA registry sweep
+/// (`docs/gate-speed-plan.md`). Keep the ratio exact rather than rounding MiB.
+fn memory_budgeted_jobs(cores: usize, total_ram_mib: Option<u64>, free_vram_mib: Option<u64>) -> usize {
+    let gpu_jobs = vram_budgeted_jobs(cores, free_vram_mib);
+    let ram_jobs = total_ram_mib.map(|ram| {
+        usize::try_from(ram.saturating_mul(10) / (36 * 1024))
+            .unwrap_or(cores).clamp(1, cores.max(1))
+    }).unwrap_or(cores.max(1));
+    gpu_jobs.min(ram_jobs)
+}
+
+fn total_system_memory_mib() -> Option<u64> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    let mib = system.total_memory() / (1024 * 1024);
+    if mib == 0 {
+        log::warn!(target: "SIM", "no total RAM reading; default jobs use CPU/GPU bounds only");
+        None
+    } else {
+        Some(mib)
+    }
+}
+
 /// The default job count for this process, read once so every resolution in
 /// one invocation agrees and the decision is logged once.
 fn sim_job_budget() -> usize {
     static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *BUDGET.get_or_init(|| {
         let cores = default_sim_jobs();
-        match free_gpu_memory_mib() {
-            Ok(free) => {
-                let jobs = vram_budgeted_jobs(cores, Some(free));
-                log::info!(target: "SIM",
-                    "default jobs {jobs}: {free} MiB free GPU memory less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane, {cores} cores");
-                jobs
-            }
+        let total_ram = total_system_memory_mib();
+        let free_vram = match free_gpu_memory_mib() {
+            Ok(free) => Some(free),
             Err(reason) => {
-                // Unified-memory Macs have no nvidia-smi; the core count was
-                // measured safe there (`DEFAULT_FULL_ASSET_JOBS`).
-                log::info!(target: "SIM", "default jobs {cores} (core count): no GPU memory reading: {reason}");
-                cores
+                // Without NVIDIA tooling, the CPU and total-RAM bounds still apply.
+                log::info!(target: "SIM", "no GPU memory reading: {reason}");
+                None
             }
-        }
+        };
+        let jobs = memory_budgeted_jobs(cores, total_ram, free_vram);
+        log::info!(target: "SIM",
+            "default jobs {jobs}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane, free GPU {free_vram:?} MiB less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane");
+        jobs
     })
 }
 
@@ -7615,7 +7634,7 @@ mod tests {
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         let (cores, budget) = (32, 4);
 
-        assert_eq!(resolve_jobs_with(None, false, cores, budget), budget, "no request takes the GPU budget");
+        assert_eq!(resolve_jobs_with(None, false, cores, budget), budget, "no request takes the memory budget");
         assert_eq!(resolve_jobs_with(Some(1), false, cores, budget), 1);
         // An explicit request may exceed the budget, never the cores.
         assert_eq!(resolve_jobs_with(Some(10), false, cores, budget), 10);
@@ -7638,6 +7657,21 @@ mod tests {
         assert_eq!(vram_budgeted_jobs(32, Some(SIM_LANE_VRAM_MIB / 4)), 1);
         // Without a reading (no NVIDIA tooling, e.g. macOS) the cores decide.
         assert_eq!(vram_budgeted_jobs(14, None), 14);
+    }
+
+    #[test]
+    fn default_jobs_fit_ram_and_gpu_budgets() {
+        let studio = memory_budgeted_jobs(14, Some(36 * 1024), None);
+        assert_eq!(studio, 10);
+        assert_eq!(resolve_jobs_with(None, false, 14, studio), 10);
+        assert_eq!(resolve_jobs_with(Some(14), false, 14, studio), 14);
+        assert_eq!(resolve_jobs_with(Some(14), true, 14, studio), 1);
+        assert_eq!(memory_budgeted_jobs(32, Some(62 * 1024), Some(17851)), 5);
+        assert_eq!(memory_budgeted_jobs(32, Some(62 * 1024), None), 17);
+        assert_eq!(memory_budgeted_jobs(2, Some(36 * 1024), None), 2);
+        assert_eq!(memory_budgeted_jobs(14, Some(0), None), 1);
+        assert_eq!(memory_budgeted_jobs(0, Some(36 * 1024), None), 1);
+        assert_eq!(memory_budgeted_jobs(14, None, None), 14);
     }
 
     #[test]
