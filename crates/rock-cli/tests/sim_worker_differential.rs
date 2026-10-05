@@ -1519,7 +1519,7 @@ fn an_entry_that_runs_the_games_shutdown_systems_keeps_its_worker() {
         "mag",
         &[
             "mag::telemetry_ordinary_session_survives_shutdown".to_string(),
-            "mag::a_dry_caster_recovers".to_string(),
+            "mag::paralyze".to_string(),
         ],
     )
     .expect("the suite call itself must not error: ineligibility is a scheduling fact");
