@@ -36,7 +36,7 @@ fn rock_bin() -> PathBuf {
 fn renderer_excluded_entry_prints_one_verdict_beside_a_passing_sim() {
     let run = run_project_workers(
         "mag",
-        &["wgpu_water_packets", "a_mob_will_not_stand_on_a_pad"],
+        &["wgpu_water_packets", "teleport_pad_arrival_phases"],
         "1",
     );
     let combined = run.combined();
@@ -48,7 +48,7 @@ fn renderer_excluded_entry_prints_one_verdict_beside_a_passing_sim() {
     assert_eq!(exclusions[0],
         "[sim] mag::wgpu_water_packets: EXCLUDED (requires wgpu renderer (active is gl))");
     assert_eq!(combined.lines()
-        .filter(|line| line.starts_with("[sim] mag::a_mob_will_not_stand_on_a_pad: PASS"))
+        .filter(|line| line.starts_with("[sim] mag::teleport_pad_arrival_phases: PASS"))
         .count(), 1, "{combined}");
     assert!(combined.contains("1/1 sims passed (selected 2, 1 excluded)"), "{combined}");
 }
