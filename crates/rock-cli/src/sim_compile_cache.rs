@@ -247,20 +247,20 @@ pub(super) fn prepare(
         match loaded {
             Ok(prepared) => {
                 if let Err(error) = mark_used(&entry) {
-                    eprintln!("[sim] compile cache: cannot mark {short} used: {error:#}");
+                    ::log::warn!(target: "SIM", "compile cache: cannot mark {short} used: {error:#}");
                 }
-                eprintln!("[sim] compile cache hit {short}");
+                ::log::info!(target: "SIM", "compile cache hit {short}");
                 return Ok(prepared);
             }
             Err(error) => {
-                eprintln!("[sim] compile cache entry {short} is unusable, recompiling: {error:#}");
+                ::log::warn!(target: "SIM", "compile cache entry {short} is unusable, recompiling: {error:#}");
                 if let Err(error) = evict(root, &entry) {
-                    eprintln!("[sim] compile cache: cannot evict {short}: {error:#}");
+                    ::log::warn!(target: "SIM", "compile cache: cannot evict {short}: {error:#}");
                 }
             }
         }
     } else {
-        eprintln!("[sim] compile cache miss {short}");
+        ::log::info!(target: "SIM", "compile cache miss {short}");
     }
 
     let staging = tempfile::Builder::new()
@@ -273,10 +273,10 @@ pub(super) fn prepare(
     match publish(&receipt, &entry, &lookup) {
         Ok(()) => {
             if let Err(error) = evict_to_budget(root, budget, &entry) {
-                eprintln!("[sim] compile cache: eviction failed: {error:#}");
+                ::log::warn!(target: "SIM", "compile cache: eviction failed: {error:#}");
             }
         }
-        Err(error) => eprintln!("[sim] compile cache: not storing {short}: {error:#}"),
+        Err(error) => ::log::info!(target: "SIM", "compile cache: not storing {short}: {error:#}"),
     }
     Ok(prepared)
 }
