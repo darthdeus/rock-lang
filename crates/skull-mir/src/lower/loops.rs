@@ -517,7 +517,19 @@ impl Builder<'_> {
                 let repr = self.column_element_repr(data, idx, elem)?;
                 self.pack(repr.into_value())?
             }
-            None => self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec }),
+            None => {
+                // The stored element stays the entry's; the binder gets its own
+                // copy, as `ArenaPairIter.next` gives the plain loop.
+                let stored = self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec });
+                let ty = match &pat {
+                    BindingPattern::Tuple(subs) if subs.len() == 2 => self.loop_binder_ty(&subs[1], None),
+                    _ => self.loop_binder_ty(&pat, Some(1)),
+                };
+                match ty {
+                    Some(ty) => self.copied_value_box(&ty, stored)?,
+                    None => stored,
+                }
+            }
         };
         match &pat {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
