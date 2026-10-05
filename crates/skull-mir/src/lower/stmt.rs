@@ -356,13 +356,15 @@ impl Builder<'_> {
                             Some(r) => self.pack(r.into_value())?,
                             None if self.binding_is_ref(name) => self.lower_ref_borrow(value)?,
                             // The binding's own box is not an escape: every
-                            // whole use of the binding copies again.
+                            // whole use of the binding copies again. A `ref`
+                            // borrow writes the box in place, so a binding one
+                            // reaches owns its value children.
                             None if self
                                 .value_struct_of(value)
                                 .is_some_and(|n| !self.is_nobox_struct(n)) =>
                             {
                                 let r = self.lower_expr_repr(value)?.into_value();
-                                self.pack_lent(r)?
+                                if self.binding_ref_borrowed(name) { self.pack(r)? } else { self.pack_lent(r)? }
                             }
                             None => self.lower_expr_with_expected(value, expected.as_deref())?,
                         };
