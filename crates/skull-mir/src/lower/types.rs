@@ -553,8 +553,13 @@ impl Builder<'_> {
             return self.load_embed_repr(parent, fname, cname, nullable);
         }
         Ok(match (base_repr, base_boxed) {
+            // The base keeps its own value fields.
             (Some(_), Some(bi)) => {
-                ValueRepr::Scalar(self.emit_cur(Inst::Field { base: bi, field: fname }))
+                let v = self.emit_cur(Inst::Field { base: bi, field: fname });
+                match self.struct_field_mono(name, fname) {
+                    Some(ty) => self.copied_value_repr(&ty, v)?,
+                    None => ValueRepr::Scalar(v),
+                }
             }
             (None, None) => ValueRepr::Scalar(self.lower_struct_default(name, fname)?),
             _ => return Err(gap("spread field has no physical base representation")),

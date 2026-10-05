@@ -739,6 +739,12 @@ impl Builder<'_> {
             let lf = self.body.struct_lit_field_arena[fidx];
             let key: u32 = lf.value.into_raw().into();
             let r = match by_value.get(&key) {
+                // A later field of a group: one evaluation, but each value field
+                // owns its own box.
+                Some(ValueRepr::Scalar(v)) => match self.struct_field_mono(name, lf.name) {
+                    Some(ty) => self.copied_value_repr(&ty, *v)?,
+                    None => ValueRepr::Scalar(*v),
+                },
                 Some(r) => r.clone(),
                 None => {
                     let r = self.lower_expr_repr_inner(lf.value)?;

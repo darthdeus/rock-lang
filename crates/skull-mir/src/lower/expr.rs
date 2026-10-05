@@ -2161,10 +2161,12 @@ impl Builder<'_> {
         let v = self.lower_expr(inner)?;
         if let Some(ty) = self.concrete_expr_ty(inner) {
             return match ty.peel_nullable().0 {
+                // Each spliced value element is the destination's own copy.
                 crate::monoty::MonoTy::Tuple(elements) => {
-                    for (index, _) in elements.into_iter().enumerate() {
+                    for (index, ety) in elements.iter().enumerate() {
                         let value = self.emit_cur(Inst::TupleIndex { base: v, index });
-                        self.append_spread_value(arr, ValueRepr::Scalar(value), dest)?;
+                        let value = self.copied_value_repr(ety, value)?;
+                        self.append_spread_value(arr, value, dest)?;
                     }
                     Ok(())
                 }
@@ -2180,7 +2182,11 @@ impl Builder<'_> {
                         .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
                     for field in fields {
                         let value = self.emit_cur(Inst::Field { base: v, field });
-                        self.append_spread_value(arr, ValueRepr::Scalar(value), dest)?;
+                        let value = match self.struct_field_mono(*name, field) {
+                            Some(fty) => self.copied_value_repr(&fty, value)?,
+                            None => ValueRepr::Scalar(value),
+                        };
+                        self.append_spread_value(arr, value, dest)?;
                     }
                     Ok(())
                 }

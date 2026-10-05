@@ -433,6 +433,17 @@ impl Builder<'_> {
         sd.fields.iter().find(|f| f.name == field).map(|f| f.ty)
     }
 
+    /// [`Self::struct_field_ty`] as a concrete type, when it has one without a
+    /// substitution (a non-generic field).
+    pub(crate) fn struct_field_mono(&self, name: Ustr, field: Ustr) -> Option<Rc<MonoTy>> {
+        let ty = self.struct_field_ty(name, field)?;
+        self.concrete_ty_id(ty).or_else(|| {
+            crate::monoty::convert_decl(self.ws, ty, &crate::monoty::MonoSubst::default())
+                .ok()
+                .map(Rc::new)
+        })
+    }
+
     /// Round `value` when it is written into an `f32` field of struct `name`.
     /// Every write path calls this, so the field's number never depends on
     /// whether it lands in cdata, a table or scalarized leaves.
