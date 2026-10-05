@@ -1803,7 +1803,8 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
 /// RENDERED sims, because that is the only corpus that can show it: entries
 /// declaring different `SIM_SKIP_RENDER` values have different BOOT SIGNATURES
 /// and get separate workers whatever the rendered rule says, so a mixed corpus
-/// boots twice both before and after the flip and discriminates nothing.
+/// boots twice both before and after the flip and discriminates nothing. The
+/// same holds for `SIM_DRAW`: both sims here draw on demand.
 ///
 /// `-j 1` because a signature group splits into at most `--jobs` CONTIGUOUS
 /// lanes and each lane's head starts its own worker (B5) -- at -j 4 these two
@@ -1816,7 +1817,7 @@ fn the_default_mode_admits_rendered_sims_into_one_worker() {
         "-j",
         "1",
         "testbed::canvas_create_preserves_color_mask",
-        "testbed::b3_readback_control",
+        "testbed::b3_blend_control",
     ]);
     let all = format!("{stdout}{stderr}");
     assert!(ok, "the default mode must run both green:\n{all}");
