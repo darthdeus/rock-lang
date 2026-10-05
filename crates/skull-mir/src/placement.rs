@@ -162,6 +162,8 @@ pub struct FunctionPlacement {
     pub entity_result: Option<Place>,
     pub entity_content: Option<Place>,
     pub owner: Option<Place>,
+    /// Preserve symbolic requirements so a backend can prove they name one owner.
+    pub owner_requirements: Vec<Place>,
     pub constraints: Vec<OutlivesConstraint>,
     pub default_params: Vec<Option<Place>>,
 }
@@ -183,6 +185,12 @@ impl FunctionPlacement {
         changed |= widen(&mut self.entity_result, next.entity_result);
         changed |= widen(&mut self.entity_content, next.entity_content);
         changed |= widen(&mut self.owner, next.owner);
+        for owner in next.owner_requirements {
+            if !self.owner_requirements.contains(&owner) {
+                self.owner_requirements.push(owner);
+                changed = true;
+            }
+        }
         if self.default_params.len() < next.default_params.len() {
             self.default_params.resize(next.default_params.len(), None);
             changed = true;
@@ -2174,6 +2182,9 @@ pub fn analyze(
                     &mut HashSet::new(),
                 );
             if requires_owner && matches!(required, Place::Param(_) | Place::Destination) {
+                if !analysis.summary.owner_requirements.contains(required) {
+                    analysis.summary.owner_requirements.push(*required);
+                }
                 analysis.summary.owner = Some(
                     analysis
                         .summary
