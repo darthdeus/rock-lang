@@ -984,6 +984,7 @@ fn c_native_test_command(
     let mut command = c_native_command(binary);
     // Match Lua @tests: explicit GL setup is hidden and may use offscreen SDL.
     command.env("STONE_HEADLESS", "1");
+    crate::common::apply_test_rock_dir(&mut command);
     // Match Lua's preamble priority without mutating the concurrent runner's environment.
     if std::env::var_os("STONE_SOURCE_DIR").is_none() {
         if let Some(stone_dir) = stone_dir {

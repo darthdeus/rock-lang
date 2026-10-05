@@ -860,7 +860,9 @@ fn run_test_program(program: &str, limit: std::time::Duration) -> Result<crate::
     // A file avoids blocking on stdin before the startup watchdog is running.
     let mut script = tempfile::NamedTempFile::new()?;
     script.write_all(program.as_bytes())?;
-    let mut child = rock_host::project::build_luajit_command(script.path(), &[])
+    let mut command = rock_host::project::build_luajit_command(script.path(), &[]);
+    crate::common::apply_test_rock_dir(&mut command);
+    let mut child = command
         .env("STONE_HEADLESS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
