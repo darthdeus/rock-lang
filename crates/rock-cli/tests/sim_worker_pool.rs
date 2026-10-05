@@ -53,18 +53,24 @@ fn renderer_excluded_entry_prints_one_verdict_beside_a_passing_sim() {
     assert!(combined.contains("1/1 sims passed (selected 2, 1 excluded)"), "{combined}");
 }
 
+/// A minimal stone project named `name` with an empty `tests/sims` directory.
+fn sim_fixture_project(root: &Path, name: &str) -> PathBuf {
+    let project = root.join(name);
+    std::fs::create_dir_all(project.join("tests/sims")).unwrap();
+    std::fs::write(project.join("stick.toml"), format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"fixture\"\n",
+        workspace_root().join("stone")
+    )).unwrap();
+    std::fs::write(project.join("main.rock"), format!(
+        "fn main() {{ stone_run_game(GameConfig {{ title: \"{name}\", width: 64, height: 64 }}) }}\n"
+    )).unwrap();
+    project
+}
+
 #[test]
 fn renderer_exclusions_print_once_in_named_runs_and_implicit_suites() {
     let fixture = tempfile::tempdir().expect("renderer exclusion fixture");
-    let project = fixture.path().join("renderer_fixture");
-    std::fs::create_dir_all(project.join("tests/sims")).unwrap();
-    std::fs::write(project.join("stick.toml"), format!(
-        "[package]\nname = \"renderer_fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"fixture\"\n",
-        workspace_root().join("stone")
-    )).unwrap();
-    std::fs::write(project.join("main.rock"),
-        "fn main() { stone_run_game(GameConfig { title: \"renderer_fixture\", width: 64, height: 64 }) }\n"
-    ).unwrap();
+    let project = sim_fixture_project(fixture.path(), "renderer_fixture");
     std::fs::write(project.join("tests/sims/exclusions.rock"), r#"
 @sim
 co fn routine() -> Coroutine<Wait> {
@@ -309,13 +315,23 @@ fn small_signature_groups_do_not_buy_singleton_boots() {
 
 #[test]
 fn omitted_skip_render_shares_with_explicit_default() {
-    let specs = [
-        "spell_damages",
-        "target_cycle_sim",
-        "cure_base_removes_one_poison_level",
-        "cure_unpumped_still_uses_entity_targeting",
-    ];
-    let run = run_project_workers("mag", &specs, "4");
+    // A fixture project, not game sims: the property is the worker pool's boot
+    // signature, and game sims come and go with their rules.
+    let fixture = tempfile::tempdir().expect("skip-render fixture");
+    let project = sim_fixture_project(fixture.path(), "skip_render_fixture");
+    let mut source = String::new();
+    let specs = ["omitted_a", "omitted_b", "explicit_a", "explicit_b"];
+    for name in specs {
+        if name.starts_with("explicit") {
+            source.push_str("@sim_env(\"SIM_SKIP_RENDER\", \"1\")\n");
+        }
+        source.push_str(&format!(
+            "@sim\nco fn {name}() -> Coroutine<Wait> {{\n    start_game \"skip_render_fixture\"\n    sim_expect(true, \"{name} ran\")\n    stop_sim()\n}}\n"
+        ));
+    }
+    std::fs::write(project.join("tests/sims/skip_render.rock"), source).unwrap();
+
+    let run = run_project_workers(project.to_str().unwrap(), &specs, "4");
     assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
     assert!(
         run.stdout.contains("[sim] 4/4 sims passed"),
