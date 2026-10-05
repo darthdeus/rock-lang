@@ -222,6 +222,7 @@
 // prelude: __stone_log_now
 // prelude: __stone_log_wall_clock
 // prelude: __unm
+// prelude: __vec_cache_key
 // prelude: __vec_checked_get
 // prelude: __vec_checked_index
 // prelude: __vec_checked_set
