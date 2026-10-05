@@ -35,9 +35,11 @@ const EVICTING_PREFIX: &str = ".evicting-";
 const STALE_STAGING: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Environment the compile can read: the prefixes cover every variable the
-/// compiler crates, the game preamble and Stone's build read. Unknown names
-/// under them are keyed, so a new compile setting cannot produce a wrong hit.
-const KEYED_ENV_PREFIXES: &[&str] = &["ROCK_", "SKULL_", "BONE_", "STONE_"];
+/// compiler crates and the game preamble read. Unknown names under them are
+/// keyed, so a new compile setting cannot produce a wrong hit. `STONE_` is the
+/// engine's runtime namespace (`--jv`, `STONE_LOG`, `STONE_HEADLESS`); the
+/// compile reads only `STONE_LOG`, to time its own passes.
+const KEYED_ENV_PREFIXES: &[&str] = &["ROCK_", "SKULL_", "BONE_"];
 const KEYED_ENV_NAMES: &[&str] = &["GAME_ART_VAULT", "GAME_SOURCE_DIR", "CARGO_TARGET_DIR", "HOME"];
 /// Variables under those prefixes that only the sim runner, its reports or
 /// job tooling read; never the compile.
@@ -48,7 +50,6 @@ const UNKEYED_ENV: &[&str] = &[
     SIM_COMPILE_RECEIPT_DIR_ENV,
     SIM_COMPILE_RECEIPT_PREPARE_ENV,
     "ROCK_JOB_ID",
-    "ROCK_JOBS_BY",
     // rock_log's per-invocation clock origin, inherited by children.
     "ROCK_LOG_EPOCH_MS",
     "ROCK_SIM_COMPILE_TIMING",
@@ -61,7 +62,7 @@ const UNKEYED_ENV: &[&str] = &[
     "ROCK_SIM_SPAWN_BARRIER",
     "ROCK_SIM_TIMEOUT_SECS",
 ];
-const UNKEYED_ENV_PREFIXES: &[&str] = &["ROCK_SIM_WARN_"];
+const UNKEYED_ENV_PREFIXES: &[&str] = &["ROCK_JOBS_", "ROCK_SIM_WARN_"];
 
 /// The cache root, or `None` when `ROCK_SIM_COMPILE_CACHE=0` turns it off.
 /// Defaults to `~/tmp/rock-sim-compile-cache` so worktrees share one bounded
@@ -442,7 +443,7 @@ mod tests {
 
     #[test]
     fn runner_only_environment_is_unkeyed_and_compile_settings_are_keyed() {
-        for name in ["ROCK_SIM_TIMEOUT_SECS", "ROCK_JOB_ID", "ROCK_SIM_WARN_FACTOR", CACHE_DIR_ENV] {
+        for name in ["ROCK_SIM_TIMEOUT_SECS", "ROCK_JOB_ID", "ROCK_JOBS_SELF", "ROCK_SIM_WARN_FACTOR", "STONE_JV", CACHE_DIR_ENV] {
             assert!(!environment_is_keyed(name), "{name}");
         }
         for name in ["ROCK_SKULL_TAIL_CALLS", "SKULL_INLINE_OFF", "ROCK_STDLIB_DIR", "GAME_ART_VAULT", "ROCK_SIM_NEW"] {
