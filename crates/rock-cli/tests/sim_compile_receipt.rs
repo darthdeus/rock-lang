@@ -178,3 +178,30 @@ fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
         "the compiler must run in its own process so the runner never holds its memory"
     );
 }
+
+#[test]
+fn sim_run_compile_child_keeps_the_invocations_selection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    for (flag, value, rejection) in [
+        ("--var", "UNDECLARED_SIM_VAR=1", "--var UNDECLARED_SIM_VAR is not declared"),
+        ("--channel", "undeclared-channel", "channel \"undeclared-channel\" is not declared"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(["sim", "testbed", "testbed::co_join2_tuple", flag, value])
+            .current_dir(&workspace)
+            .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
+            .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
+            .env("ROCK_SIM_LOG_DIR", dir.path().join("history"))
+            .env("ROCK_SIM_TIMEOUT_SECS", "180")
+            .output()
+            .expect("run testbed sim");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "`{flag} {value}` must reject the run:\n{stderr}");
+        assert!(stderr.contains(rejection), "wrong rejection for `{flag} {value}`:\n{stderr}");
+    }
+}

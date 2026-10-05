@@ -983,6 +983,7 @@ fn prepare_sims_out_of_process(
         .context("creating sim compile receipt directory")?;
     let exe = std::env::current_exe().context("locating the rock binary for the sim compile")?;
     let status = std::process::Command::new(&exe)
+        .args(compile_child_invocation_args())
         .arg("sim")
         .arg("--list")
         .arg("--backend")
@@ -1005,6 +1006,26 @@ fn prepare_sims_out_of_process(
         &project_path,
         &output_path,
     )
+}
+
+/// This invocation's flags that change what the sim compile builds or reports:
+/// the `[build.vars]` selection, the renderer and the build lint policy. The
+/// compile child must see them, or it compiles something the run did not ask for.
+fn compile_child_invocation_args() -> Vec<String> {
+    let mut args = crate::comptime::invocation_selection_args();
+    if let Some(renderer) = rock_host::stick::renderer_override() {
+        let name = match renderer {
+            rock_host::stick::RendererBackend::Gl => "gl",
+            rock_host::stick::RendererBackend::Wgpu => "wgpu",
+        };
+        args.extend(["--renderer".to_string(), name.to_string()]);
+    }
+    match crate::lint_pass::policy() {
+        crate::lint_pass::LintReport::Full => {}
+        crate::lint_pass::LintReport::Summary => args.push("--lint-summary".to_string()),
+        crate::lint_pass::LintReport::Off => args.push("--no-lints".to_string()),
+    }
+    args
 }
 
 fn compile_sims_with_allocation(

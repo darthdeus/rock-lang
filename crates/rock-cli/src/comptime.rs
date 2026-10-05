@@ -56,6 +56,28 @@ pub fn set_invocation_selection(
     Ok(())
 }
 
+/// The invocation's explicit selection as `rock` arguments, for a child
+/// `rock` that compiles on this invocation's behalf. The implied channel is
+/// not forwarded: the child's own command implies its own.
+pub fn invocation_selection_args() -> Vec<String> {
+    let Some(selection) = SELECTION.get() else {
+        return Vec::new();
+    };
+    let mut args = Vec::new();
+    if let Some(channel) = &selection.channel {
+        args.extend(["--channel".to_string(), channel.clone()]);
+    }
+    if let Some(target_os) = &selection.target_os {
+        args.extend(["--target-os".to_string(), target_os.clone()]);
+    }
+    let mut overrides = selection.overrides.iter().collect::<Vec<_>>();
+    overrides.sort();
+    for (name, value) in overrides {
+        args.extend(["--var".to_string(), format!("{name}={value}")]);
+    }
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::set_invocation_selection;

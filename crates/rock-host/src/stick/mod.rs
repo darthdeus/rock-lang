@@ -255,6 +255,11 @@ pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOv
     RendererOverrideGuard { previous }
 }
 
+/// The renderer the current invocation selected with `--renderer`, if any.
+pub fn renderer_override() -> Option<RendererBackend> {
+    *renderer_override_slot().lock().expect("renderer override lock")
+}
+
 /// The invocation's channel selection, recorded once by the CLI before
 /// dispatch. rock-host consumers of the channel (dependency resolution, source
 /// loading) cannot read rock-cli's comptime selection, so the CLI mirrors the
