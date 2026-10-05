@@ -73,6 +73,8 @@ mod sim_world_entry;
 mod headless_scope;
 #[path = "sim_reload_lane.rs"]
 mod sim_reload_lane;
+#[path = "sim_entry_timing.rs"]
+mod sim_entry_timing;
 #[path = "sim_worker_pool.rs"]
 mod sim_worker_pool;
 #[path = "sim_observability_heavy.rs"]
