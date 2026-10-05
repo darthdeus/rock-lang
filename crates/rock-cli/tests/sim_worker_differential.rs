@@ -838,6 +838,29 @@ fn the_arena_registry_survives_the_real_worker_boundary() {
     );
 }
 
+/// The boundary restores the Arena registry by patching the live rows back to
+/// the boot image. The seed changes scalars, adds and removes keys, replaces
+/// and aliases subtables and rewrites and reseats buffers inside boot rows;
+/// the probe asserts their boot values and that no table is shared. Provenance
+/// is asserted for the same reason as the registry fixture above.
+#[test]
+fn the_arena_registry_patch_returns_boot_rows() {
+    let (isolated, worker) = differential(&["testbed::b2_arena_patch_seed"], "testbed::b2_arena_patch_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("testbed::b2_arena_patch_probe", &c);
+    assert!(
+        worker.seq > 0,
+        "the probe ran first in its process, so it crossed no boundary and \
+         certifies nothing about the restore"
+    );
+    assert!(
+        !worker.diagnostics.contains("Initialized successfully"),
+        "the worker arm booted its own process rather than following the seed: {:?}",
+        worker.diagnostics
+    );
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+}
+
 /// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
 /// global outside replay's six-global predicate; the checkpoint's membership is
 /// the whole registry, so the probe sees real time -- in the scale field AND in
