@@ -98,7 +98,7 @@ pub trait PlacementOracle {
         None
     }
 
-    fn field_content_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
+    fn known_content_place(&self, _mir: &MirFunc, _inst: Idx<Inst>) -> Option<Place> {
         None
     }
 
@@ -968,7 +968,9 @@ fn infer_requirements(
                 }
             }
             Inst::Load(cell) => {
-                if let Some(required) = requirements.values.get(id).copied() {
+                if let Some(required) = requirements.values.get(id).copied()
+                    && oracle.known_content_place(mir, id) != Some(Place::Static)
+                {
                     worklist.merge_cell(&mut requirements, *cell, required);
                 }
             }
@@ -1004,6 +1006,7 @@ fn infer_requirements(
             | Inst::Index { base, .. } => {
                 if let Some(required) = requirements.values.get(id).copied()
                     && oracle.carries_placement(mir, *base)
+                    && oracle.known_content_place(mir, id) != Some(Place::Static)
                 {
                     worklist.merge_value(&mut requirements, *base, required);
                 }
@@ -1336,6 +1339,7 @@ fn composite_operand_needs_context(
 ) -> bool {
     let carries = oracle.carries_placement(mir, value);
     carries
+        && oracle.known_content_place(mir, value) != Some(Place::Static)
         && !value_has_contextual_source(
             mir,
             oracle,
@@ -1629,7 +1633,7 @@ fn value_place(
     id: Idx<Inst>,
 ) -> Place {
     let inst = &mir.insts[id];
-    if let Some(place) = oracle.field_content_place(mir, id) {
+    if let Some(place) = oracle.known_content_place(mir, id) {
         return place;
     }
     let is_call = matches!(
