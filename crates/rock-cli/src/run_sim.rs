@@ -1337,7 +1337,7 @@ fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
         ));
     }
     // A fixture that returned before its checks still reaches stop_sim().
-    if summary.checks_ran() == 0 {
+    if !summary.checks_accounted() {
         return Err(anyhow!("sim `{sim_name}` reached stop_sim() without running a check"));
     }
     Ok(())
@@ -1532,7 +1532,7 @@ fn entry_passed(summary: &SimSummary) -> bool {
         && summary.process_failure_code.is_none()
         && summary.saw_stop
         && !summary.has_failures()
-        && summary.checks_ran() > 0
+        && summary.checks_accounted()
 }
 
 /// The word printed in a sim's verdict line. Derived from [`entry_passed`] so the
@@ -6852,6 +6852,9 @@ struct SimSummary {
     /// Why this entry was excluded from execution by an admission check
     /// (e.g. requires a different renderer backend like WGPU on an active GL suite).
     excluded: Option<String>,
+    /// Why this entry runs no check (`sim_no_checks`): another test reads its
+    /// log or artifacts. Without it, an entry with no check fails.
+    no_checks: Option<String>,
 }
 
 impl SimSummary {
@@ -6896,6 +6899,9 @@ impl SimSummary {
         }
         if other.excluded.is_some() {
             self.excluded = other.excluded;
+        }
+        if other.no_checks.is_some() {
+            self.no_checks = other.no_checks;
         }
         if let Some(other) = other.reload_ledger {
             let current = self.reload_ledger.get_or_insert_default();
@@ -6970,6 +6976,9 @@ impl SimSummary {
                         .unwrap_or_else(|| "unspecified".to_string());
                     s.excluded = Some(reason);
                     s.saw_stop = true;
+                }
+                "no_checks" => {
+                    s.no_checks = Some(extract_str_field(rest, "reason").unwrap_or_default());
                 }
                 "allocation_census" => match AllocationCensus::from_json(rest) {
                     Ok(census) if s.allocation_census.is_none() => {
@@ -7046,6 +7055,11 @@ impl SimSummary {
         !self.expects_fail.is_empty() || !self.errors.is_empty()
     }
 
+    /// Whether the entry ran a check, or declared why it runs none.
+    fn checks_accounted(&self) -> bool {
+        self.checks_ran() > 0 || self.no_checks.is_some()
+    }
+
     /// Every check the entry reported, passing or failing.
     fn checks_ran(&self) -> usize {
         self.expects_pass.len()
@@ -7106,7 +7120,7 @@ impl SimSummary {
         }
         let stop_note = if !self.saw_stop {
             " (no stop_sim() observed -- sim aborted early)"
-        } else if self.checks_ran() == 0 {
+        } else if !self.checks_accounted() {
             " (no check ran)"
         } else {
             ""
@@ -8826,6 +8840,10 @@ mod tests {
         assert!(!entry_passed(&empty));
         assert_eq!(verdict_word(&empty), "FAIL");
         assert!(sim_outcome(&empty, "s").is_err());
+
+        let mut declared = SimSummary { saw_stop: true, ..SimSummary::default() };
+        declared.no_checks = Some("a seed; its probe checks".into());
+        assert!(entry_passed(&declared), "a declared check-free entry passes");
 
         empty.snapshots.push(SnapshotOp { name: "n".into(), value_json: "{}".into(), site: String::new() });
         assert!(entry_passed(&empty), "a snapshot is a check");
