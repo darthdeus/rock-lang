@@ -201,7 +201,7 @@ impl Builder<'_> {
             owned_value_binds: HashSet::new(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
             value_copy_stack: Vec::new(),
-            borrowed_value_children: HashSet::new(),
+            borrowed_value_children: HashMap::new(),
             lending_pack: false,
             f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),

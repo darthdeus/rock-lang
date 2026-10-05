@@ -2382,10 +2382,11 @@ impl Builder<'_> {
         &mut self,
         boxed: Idx<Inst>,
         name: Ustr,
+        owner_ty: Option<&MonoTy>,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.nominal_rep_shape_required(name, false)?;
         self.enter_value_copy(name)?;
-        let copy = self.boxed_copy_repr_of(boxed, &shape);
+        let copy = self.boxed_copy_repr_of(boxed, &shape, owner_ty);
         self.value_copy_stack.pop();
         copy
     }
@@ -2403,79 +2404,128 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// The ordinary value type of `owner.field` when it is declared `V?`. Its
-    /// shape plans it as one opaque slot, but it is a value.
-    fn nullable_value_child(&self, owner: Ustr, field: Ustr) -> Option<Ustr> {
-        let ty = self.struct_field_ty(owner, field)?;
-        let (child, true) = super::shape::nominal_name_from_ty(self.ws, ty)? else {
-            return None;
-        };
-        (self.is_value_struct(child) && !self.is_nobox_struct(child)).then_some(child)
+    /// The concrete type of `owner.field`. `owner_ty` substitutes a generic
+    /// owner's arguments; a generic owner without one has no field types.
+    fn value_field_ty(
+        &self,
+        owner: Ustr,
+        owner_ty: Option<&MonoTy>,
+        field: Ustr,
+    ) -> Result<Rc<MonoTy>, CompilerError> {
+        if !self.struct_is_generic(owner) {
+            let ty = self
+                .struct_field_ty(owner, field)
+                .ok_or_else(|| self.gap_here(format!("field `{owner}.{field}` is not declared")))?;
+            return crate::monoty::convert_decl(self.ws, ty, &crate::monoty::MonoSubst::default())
+                .map(Rc::new)
+                .map_err(|reason| self.gap_here(format!("field `{owner}.{field}` has no concrete type: {reason:?}")));
+        }
+        let owner_ty = owner_ty.ok_or_else(|| {
+            self.gap_here(format!("a copy of generic value `{owner}` has no concrete type for `{field}`"))
+        })?;
+        self.struct_field_ty_in(owner, field, owner_ty)
     }
 
-    /// A copy rebuilt from leaves keeps each `V?` value child as the source's
-    /// box: a read through it needs nothing more, and the copy happens where
-    /// the value escapes ([`Self::owned_value_children`]).
-    fn mark_borrowed_value_children(&mut self, shape: &ValueShape, repr: &ValueRepr) {
-        let ValueRepr::Group { parts, .. } = repr else { return };
+    fn struct_is_generic(&self, name: Ustr) -> bool {
+        self.ws
+            .struct_by_name
+            .get(&name)
+            .is_some_and(|sid| !self.ws.modules[sid.module.index()].structs[sid.def].generics.is_empty())
+    }
+
+    /// The type of `owner.field` when its plan holds an ordinary value as one
+    /// opaque slot: a declared `V?`, or a generic `T`/`T?` instantiated at a
+    /// value.
+    fn opaque_value_child(
+        &self,
+        owner: Ustr,
+        owner_ty: Option<&MonoTy>,
+        field: Ustr,
+    ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
+        if !self.struct_is_generic(owner) {
+            let Some(ty) = self.struct_field_ty(owner, field) else { return Ok(None) };
+            let Some((child, true)) = super::shape::nominal_name_from_ty(self.ws, ty) else {
+                return Ok(None);
+            };
+            if !self.is_value_struct(child) || self.is_nobox_struct(child) {
+                return Ok(None);
+            }
+        }
+        let ty = self.value_field_ty(owner, owner_ty, field)?;
+        let ordinary = ty
+            .peel_nullable()
+            .0
+            .nominal()
+            .is_some_and(|child| self.is_value_struct(child) && !self.is_nobox_struct(child));
+        Ok(ordinary.then_some(ty))
+    }
+
+    /// The owner type a nested field's copy needs: only a generic child
+    /// substitutes anything.
+    fn nested_owner_ty(
+        &self,
+        owner: Ustr,
+        owner_ty: Option<&MonoTy>,
+        field: Ustr,
+        child: Ustr,
+    ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
+        if !self.struct_is_generic(child) {
+            return Ok(None);
+        }
+        self.value_field_ty(owner, owner_ty, field).map(Some)
+    }
+
+    /// A repr built from a source's leaves keeps each opaque value child as
+    /// the source's box: a read through it needs nothing more, and the copy
+    /// happens where the value escapes ([`Self::owned_value_children`]).
+    pub(crate) fn mark_borrowed_value_children(
+        &mut self,
+        shape: &ValueShape,
+        repr: &ValueRepr,
+        owner_ty: Option<&MonoTy>,
+    ) -> Result<(), CompilerError> {
+        let ValueRepr::Group { parts, .. } = repr else { return Ok(()) };
+        if EnumPlan::for_name(self.ws, shape.name).is_some() {
+            return Ok(());
+        }
         for ((fname, fs), part) in shape.fields.iter().zip(parts) {
             match (fs, part) {
                 (FieldShape::Prim, ValueRepr::Scalar(v)) => {
-                    if self.nullable_value_child(shape.name, *fname).is_some() {
-                        self.borrowed_value_children.insert(*v);
+                    if let Some(ty) = self.opaque_value_child(shape.name, owner_ty, *fname)? {
+                        self.borrowed_value_children.insert(*v, ty);
                     }
                 }
-                (FieldShape::Nested(sub), part) => self.mark_borrowed_value_children(sub, part),
+                (FieldShape::Nested(sub), part) => {
+                    let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
+                    self.mark_borrowed_value_children(sub, part, sub_ty.as_deref())?;
+                }
                 _ => {}
             }
         }
+        Ok(())
     }
 
-    /// `r` with each borrowed `V?` value child copied, at an escape: a box
-    /// ([`Self::pack_boxed`]) or a return. A child is borrowed when a copy left
-    /// it as its source's box, or when it is a scalarized parameter's or
-    /// binding's leaf, which the caller or the storage still holds.
+    /// `r` with each borrowed opaque value child copied, at an escape: a box
+    /// ([`Self::pack_boxed`]), a return, or an enum payload. A child is
+    /// borrowed when a copy, a scalarized parameter or a binding read it from
+    /// a source that still holds it.
     pub(crate) fn owned_value_children(&mut self, r: ValueRepr) -> Result<ValueRepr, CompilerError> {
         if self.scx.values_first_class || self.lending_pack {
             return Ok(r);
         }
         match r {
-            ValueRepr::Group { name, parts, present } if self.is_value_struct(name) => {
-                let names = struct_field_names(self.ws, name);
-                if names.len() != parts.len() {
-                    return Ok(ValueRepr::Group { name, parts, present });
-                }
-                let mut out = Vec::with_capacity(parts.len());
-                let mut failed = None;
-                for (fname, part) in names.into_iter().zip(parts) {
-                    let part = match part {
-                        ValueRepr::Scalar(v) => match self.nullable_value_child(name, fname) {
-                            Some(child) if self.is_borrowed_value_child(v) => {
-                                match self.nullable_boxed_value_copy(v, child) {
-                                    Ok(copy) => ValueRepr::Scalar(copy),
-                                    Err(e) => {
-                                        failed = Some(e);
-                                        break;
-                                    }
-                                }
-                            }
-                            _ => ValueRepr::Scalar(v),
+            ValueRepr::Group { name, parts, present } => {
+                let parts = parts
+                    .into_iter()
+                    .map(|part| match part {
+                        ValueRepr::Scalar(v) => match self.borrowed_value_children.get(&v).cloned() {
+                            Some(ty) => self.copied_value_box(&ty, v).map(ValueRepr::Scalar),
+                            None => Ok(ValueRepr::Scalar(v)),
                         },
-                        part @ ValueRepr::Group { .. } => match self.owned_value_children(part) {
-                            Ok(part) => part,
-                            Err(e) => {
-                                failed = Some(e);
-                                break;
-                            }
-                        },
-                        part => part,
-                    };
-                    out.push(part);
-                }
-                match failed {
-                    Some(e) => Err(e),
-                    None => Ok(ValueRepr::Group { name, parts: out, present }),
-                }
+                        part => self.owned_value_children(part),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(ValueRepr::Group { name, parts, present })
             }
             ValueRepr::Tuple { parts, present } => {
                 let parts = parts
@@ -2488,9 +2538,9 @@ impl Builder<'_> {
         }
     }
 
-    /// [`Self::pack`] for a `let` binding's own cell: its `V?` value children
-    /// stay borrowed, since only the binding holds the box and each whole use
-    /// of it copies ([`Self::boxed_value_local`]).
+    /// [`Self::pack`] for a `let` binding's own cell: its value children stay
+    /// borrowed, since only the binding holds the box and each whole use of
+    /// it copies ([`Self::boxed_value_local`]).
     pub(crate) fn pack_lent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         let outer = std::mem::replace(&mut self.lending_pack, true);
         let packed = self.pack(r);
@@ -2498,16 +2548,15 @@ impl Builder<'_> {
         packed
     }
 
-    fn is_borrowed_value_child(&self, v: Idx<Inst>) -> bool {
-        self.borrowed_value_children.contains(&v)
-            || matches!(self.f.insts[v], Inst::Load(cell)
-                if self.group_binds.values().any(|(cells, _)| cells.contains(&cell)))
-    }
-
     /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
     /// box's whole enum child is shared rather than split and rebuilt: only the
     /// value's own storage has to be fresh. Every other box splits to leaves.
-    fn boxed_copy_repr_of(&mut self, v: Idx<Inst>, shape: &ValueShape) -> Result<ValueRepr, CompilerError> {
+    fn boxed_copy_repr_of(
+        &mut self,
+        v: Idx<Inst>,
+        shape: &ValueShape,
+        owner_ty: Option<&MonoTy>,
+    ) -> Result<ValueRepr, CompilerError> {
         let gc_table = !self.scx.values_first_class
             && !shape.nullable
             && EnumPlan::for_name(self.ws, shape.name).is_none()
@@ -2521,7 +2570,7 @@ impl Builder<'_> {
         if !gc_table {
             let leaves = self.cdata_leaves(v, shape)?;
             let copy = self.rebuild_from_leaves(shape, &leaves, &mut 0);
-            self.mark_borrowed_value_children(shape, &copy);
+            self.mark_borrowed_value_children(shape, &copy, owner_ty)?;
             return Ok(copy);
         }
         let inline = self.gc_table_inline_layout(shape.name)?;
@@ -2542,8 +2591,8 @@ impl Builder<'_> {
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             parts.push(match fs {
                 FieldShape::Prim => {
-                    if self.nullable_value_child(shape.name, *fname).is_some() {
-                        self.borrowed_value_children.insert(fv);
+                    if let Some(ty) = self.opaque_value_child(shape.name, owner_ty, *fname)? {
+                        self.borrowed_value_children.insert(fv, ty);
                     }
                     ValueRepr::Scalar(fv)
                 }
@@ -2554,9 +2603,15 @@ impl Builder<'_> {
                 }
                 FieldShape::Nested(sub) if sub.nullable => {
                     let leaves = self.nullable_child_leaves(fv, sub)?;
-                    self.rebuild_from_leaves(sub, &leaves, &mut 0)
+                    let copy = self.rebuild_from_leaves(sub, &leaves, &mut 0);
+                    let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
+                    self.mark_borrowed_value_children(sub, &copy, sub_ty.as_deref())?;
+                    copy
                 }
-                FieldShape::Nested(sub) => self.boxed_copy_repr_of(fv, sub)?,
+                FieldShape::Nested(sub) => {
+                    let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
+                    self.boxed_copy_repr_of(fv, sub, sub_ty.as_deref())?
+                }
             });
         }
         Ok(ValueRepr::Group { name: shape.name, parts, present: None })
@@ -2571,6 +2626,7 @@ impl Builder<'_> {
         &mut self,
         boxed: Idx<Inst>,
         name: Ustr,
+        owner_ty: Option<&MonoTy>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let is_nil = self.emit_cur(Inst::Eq(boxed, nil));
@@ -2588,7 +2644,7 @@ impl Builder<'_> {
         self.cur = val_bb;
         let shape = self.nominal_rep_shape_required(name, false)?;
         self.enter_value_copy(name)?;
-        let packed = self.boxed_copy_repr_of(boxed, &shape).and_then(|copy| self.pack(copy));
+        let packed = self.boxed_copy_repr_of(boxed, &shape, owner_ty).and_then(|copy| self.pack(copy));
         self.value_copy_stack.pop();
         self.store_and_join(result, packed?, join);
 
@@ -2628,9 +2684,9 @@ impl Builder<'_> {
             return Ok(ValueRepr::Scalar(v));
         }
         if nullable {
-            return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(v, name)?));
+            return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(v, name, Some(payload))?));
         }
-        self.boxed_value_copy_repr(v, name)
+        self.boxed_value_copy_repr(v, name, Some(payload))
     }
 
     /// One element of an indexable collection, for the loop lowerings that bind a

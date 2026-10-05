@@ -1628,7 +1628,7 @@ fn lower_body(
         owned_value_binds: HashSet::new(),
         ref_borrowed_binds: std::cell::OnceCell::new(),
         value_copy_stack: Vec::new(),
-        borrowed_value_children: HashSet::new(),
+        borrowed_value_children: HashMap::new(),
         lending_pack: false,
         f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
@@ -2175,9 +2175,9 @@ struct Builder<'a> {
     /// Value types whose copy is being emitted, outermost first: a recursive
     /// `V?` child cannot be unrolled into its own copy ([`Self::enter_value_copy`]).
     value_copy_stack: Vec<Ustr>,
-    /// `V?` value children a copy left as its source's box
-    /// ([`Self::owned_value_children`]).
-    borrowed_value_children: HashSet<Idx<Inst>>,
+    /// Opaque value children a copy or a binding read left as its source's
+    /// box, with their types ([`Self::owned_value_children`]).
+    borrowed_value_children: HashMap<Idx<Inst>, Rc<MonoTy>>,
     /// Set while a `let` packs a place read into its own cell
     /// ([`Self::pack_lent`]).
     lending_pack: bool,
@@ -2266,7 +2266,7 @@ impl<'a> Builder<'a> {
             owned_value_binds: HashSet::new(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
             value_copy_stack: Vec::new(),
-            borrowed_value_children: HashSet::new(),
+            borrowed_value_children: HashMap::new(),
             lending_pack: false,
             f32_round_exprs: HashSet::new(),
             tuple_binds: HashMap::new(),

@@ -208,12 +208,12 @@ impl Builder<'_> {
             // it reached. The unboxed route (`lower_expr_repr`) only reads leaves.
             Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
-                let copy = self.boxed_value_copy_repr(boxed, name)?;
+                let copy = self.boxed_value_copy_repr(boxed, name, self.concrete_expr_ty(e).as_deref())?;
                 self.pack(copy)
             }
             Expr::Var(b) if let Some(name) = self.nullable_boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
-                self.nullable_boxed_value_copy(boxed, name)
+                self.nullable_boxed_value_copy(boxed, name, self.concrete_expr_ty(e).as_deref())
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -1077,7 +1077,7 @@ impl Builder<'_> {
                         if self.owned_value_binds.contains(&raw(b))
                             && !matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) =>
                     {
-                        let copy = self.boxed_value_copy_repr(v, name)?;
+                        let copy = self.boxed_value_copy_repr(v, name, self.concrete_expr_ty(value).as_deref())?;
                         self.pack(copy)?
                     }
                     _ => v,
@@ -1803,10 +1803,10 @@ impl Builder<'_> {
                     };
                     match copy_name {
                         Some(name) if self.embed_read_is_nullable(base, field)? => {
-                            self.nullable_boxed_value_copy(fv, name)?
+                            self.nullable_boxed_value_copy(fv, name, self.concrete_expr_ty(e).as_deref())?
                         }
                         Some(name) => {
-                            let copy = self.boxed_value_copy_repr(fv, name)?;
+                            let copy = self.boxed_value_copy_repr(fv, name, self.concrete_expr_ty(e).as_deref())?;
                             self.pack(copy)?
                         }
                         None => fv,

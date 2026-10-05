@@ -445,47 +445,7 @@ impl Builder<'_> {
         let ty = match ty {
             Some(ty) => Some(ty),
             None => match origin.and_then(|subject| self.concrete_expr_ty(subject)) {
-                Some(ty)
-                    if matches!(
-                        ty.peel_nullable().0,
-                        MonoTy::App {
-                            ctor: crate::monoty::MonoCtor::Nominal(base),
-                            ..
-                        } if *base == sname
-                    ) => {
-                        let MonoTy::App { params, .. } = ty.peel_nullable().0 else {
-                            unreachable!()
-                        };
-                        let def = &self.ws.modules[sid.module.index()].structs[sid.def];
-                        if def.generics.len() != params.len() {
-                            return Err(gap(format!(
-                                "spread struct `{sname}` has {} generic arguments for {} parameters",
-                                params.len(),
-                                def.generics.len()
-                            )));
-                        }
-                        let mut subst = crate::monoty::MonoSubst::default();
-                        for (generic, param) in def.generics.iter().zip(params) {
-                            let TypeExpr::Generic(var, _) = self.dispatch().raw_ty_node(*generic)
-                                .ok_or_else(|| gap("spread struct generic parameter has no type node"))?
-                            else {
-                                return Err(gap(format!(
-                                    "spread struct `{sname}` has a non-generic parameter slot"
-                                )));
-                            };
-                            subst.insert(var, param.clone());
-                        }
-                        Some(Rc::new(crate::monoty::convert_decl(self.ws, fdef.ty, &subst).map_err(|reason| {
-                            gap(format!(
-                                "spread field `{sname}.{field}` has no concrete type plan: {reason:?}"
-                            ))
-                        })?))
-                    }
-                Some(other) => {
-                    return Err(gap(format!(
-                        "spread operand for `{sname}.{field}` has type `{other:?}`"
-                    )));
-                }
+                Some(owner) => Some(self.struct_field_ty_in(sname, field, &owner)?),
                 None => self.concrete_ty_id(fdef.ty),
             },
         };
@@ -503,6 +463,55 @@ impl Builder<'_> {
                     ))
                 })?,
             ),
+        })
+    }
+
+    /// The type of `sname.field` in a value of concrete type `owner`
+    /// (`sname<..>`, possibly nullable): the declaration with the owner's
+    /// generic arguments substituted.
+    pub(crate) fn struct_field_ty_in(
+        &self,
+        sname: Ustr,
+        field: Ustr,
+        owner: &MonoTy,
+    ) -> Result<Rc<MonoTy>, CompilerError> {
+        let sid = *self
+            .ws
+            .struct_by_name
+            .get(&sname)
+            .ok_or_else(|| gap(format!("struct `{sname}` is not declared")))?;
+        let def = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let fdef = def
+            .fields
+            .iter()
+            .find(|f| f.name == field)
+            .ok_or_else(|| gap(format!("field `{sname}.{field}` is not declared")))?;
+        let MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(base), params } = owner.peel_nullable().0 else {
+            return Err(gap(format!("a `{sname}` value has type `{owner:?}`")));
+        };
+        if *base != sname {
+            return Err(gap(format!("a `{sname}` value has type `{owner:?}`")));
+        }
+        if def.generics.len() != params.len() {
+            return Err(gap(format!(
+                "struct `{sname}` has {} generic arguments for {} parameters",
+                params.len(),
+                def.generics.len()
+            )));
+        }
+        let mut subst = crate::monoty::MonoSubst::default();
+        for (generic, param) in def.generics.iter().zip(params) {
+            let TypeExpr::Generic(var, _) = self
+                .dispatch()
+                .raw_ty_node(*generic)
+                .ok_or_else(|| gap("struct generic parameter has no type node"))?
+            else {
+                return Err(gap(format!("struct `{sname}` has a non-generic parameter slot")));
+            };
+            subst.insert(var, param.clone());
+        }
+        crate::monoty::convert_decl(self.ws, fdef.ty, &subst).map(Rc::new).map_err(|reason| {
+            gap(format!("field `{sname}.{field}` has no concrete type plan: {reason:?}"))
         })
     }
 

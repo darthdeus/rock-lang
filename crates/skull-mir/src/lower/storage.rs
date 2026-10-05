@@ -7,6 +7,38 @@
 use super::*;
 
 impl Builder<'_> {
+    pub(crate) fn clone_column_data(
+        &mut self,
+        vec: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let paths = column_leaf_paths(&shape);
+
+        // Built as a `Vec`-tagged struct: `write_table_key` brackets a
+        // dotted leaf path, so the emitted table is the same shape
+        // `MakeVecColumns` writes for a literal.
+        let mut fields = Vec::with_capacity(paths.len() + 2);
+        let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+        for path in paths {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            let copied = self.call_spine("__rock_col_copy", vec![col, len])?;
+            fields.push((path, copied));
+        }
+        fields.push((Ustr::from("len"), len));
+        let old_header = self.column_header(vec);
+        let capacity = self.emit_cur(Inst::Field {
+            base: old_header,
+            field: Ustr::from("cap"),
+        });
+        let header = self.make_column_header(elem, capacity);
+        fields.push((Ustr::from(VEC_COLUMN_HEADER_FIELD), header));
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+            ty: Some(Ustr::from("Vec")),
+            fields,
+        })))
+    }
+
     pub(crate) fn strided_element_repr(
         &mut self,
         vec: Idx<Inst>,
@@ -594,17 +626,7 @@ impl Builder<'_> {
                 params: Vec::new(),
             }],
         };
-        ContainerPlan::for_type(
-            self.ws,
-            self.scx.target,
-            &self.scx.rep_arena(),
-            ContainerFamily::NativeBuffer,
-            &ty,
-        )
-        .map_err(|error| match error.span.or(self.cur_span) {
-            Some(span) => CompilerError::new_with_label(span, error.message),
-            None => CompilerError::new_no_location(error.message),
-        })
+        self.container_plan_for_type(&ty, ContainerFamily::NativeBuffer)
     }
 
     pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> Result<bool, CompilerError> {
@@ -1046,32 +1068,8 @@ impl Builder<'_> {
             // both.
             ("__vec_data_clone", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
-                let shape = self.column_shape(elem)?;
-                let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
-
-                // Built as a `Vec`-tagged struct: `write_table_key` brackets a
-                // dotted leaf path, so the emitted table is the same shape
-                // `MakeVecColumns` writes for a literal.
-                let mut fields = Vec::with_capacity(paths.len() + 2);
-                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
-                for path in paths {
-                    let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    let copied = self.call_spine("__rock_col_copy", vec![col, len])?;
-                    fields.push((path, copied));
-                }
-                fields.push((Ustr::from("len"), len));
-                let old_header = self.column_header(vec);
-                let capacity = self.emit_cur(Inst::Field {
-                    base: old_header,
-                    field: Ustr::from("cap"),
-                });
-                let header = self.make_column_header(elem, capacity);
-                fields.push((Ustr::from(VEC_COLUMN_HEADER_FIELD), header));
-                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
-                    ty: Some(Ustr::from("Vec")),
-                    fields,
-                }))))
+                self.clone_column_data(vec, elem).map(Some)
             }
             // The two ops that need the LOGICAL elements, not the physical
             // columns: a sort key is a function of the whole element, and
@@ -1379,6 +1377,21 @@ impl Builder<'_> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<Option<(Idx<Expr>, Ustr)>, CompilerError> {
+        Ok(self
+            .flat_field_path(base, field)?
+            .and_then(|(root, path, nested)| nested.is_none().then_some((root, path))))
+    }
+
+    /// [`Self::flat_leaf_path`], also admitting a chain that ends at a whole
+    /// nested value field (`xs[i].at`), whose shape is returned. Resolved by
+    /// walking the shape rather than matching a leaf key: a nullable nested
+    /// field's presence column is keyed by the field's own name, so a key match
+    /// would mistake the whole field for that one presence leaf.
+    pub(crate) fn flat_field_path(
+        &self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<(Idx<Expr>, Ustr, Option<ValueShape>)>, CompilerError> {
         let mut segs = vec![field];
         let mut cur = base;
         while let Expr::FieldAccess { base: b, field: f } = self.body.expr_arena[cur] {
@@ -1400,8 +1413,15 @@ impl Builder<'_> {
         };
         segs.reverse();
         let path = Ustr::from(&segs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("."));
-        let shape = self.column_shape(elem)?;
-        Ok(value_leaf_paths(&shape).contains(&path).then_some((cur, path)))
+        let mut shape = self.column_shape(elem)?;
+        for (i, seg) in segs.iter().enumerate() {
+            match shape.fields.iter().find(|(name, _)| name == seg).map(|(_, fs)| fs) {
+                Some(FieldShape::Prim) if i + 1 == segs.len() => return Ok(Some((cur, path, None))),
+                Some(FieldShape::Nested(sub)) => shape = sub.clone(),
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some((cur, path, Some(shape))))
     }
 
     /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a
@@ -1465,52 +1485,80 @@ impl Builder<'_> {
         })
     }
 
-    /// `xs[i].<path> = v` on a strided Vec: store into that leaf's slot of the
-    /// row. As with columns, `path` must name one primitive leaf (`at.x`); a
-    /// whole nested value field (`at`) spans several slots and is rejected.
+    /// The element-relative leaf keys under nested value field `field` (shape
+    /// `sub`), paired with `value`'s leaves in that order, `value` lowered once.
+    fn nested_field_leaves(
+        &mut self,
+        field: Ustr,
+        sub: &ValueShape,
+        value: Idx<Expr>,
+    ) -> Result<(Vec<Ustr>, Vec<Idx<Inst>>), CompilerError> {
+        let bundle = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_storage_leaves(&bundle, sub, "nested field store")?;
+        let paths: Vec<Ustr> =
+            leaf_names(sub, &field, ".").iter().map(|p| Ustr::from(p)).collect();
+        if leaves.len() != paths.len() {
+            return Err(gap(format!(
+                "nested field store arity mismatch for `{field}`: {} leaves vs {} keys",
+                leaves.len(),
+                paths.len()
+            )));
+        }
+        Ok((paths, leaves))
+    }
+
+    /// `xs[i].<path> = v` on a strided Vec: store into the slots of the row
+    /// under `path`. A primitive leaf (`at.x`) is one slot; a whole nested
+    /// value field (`at`, given as `nested`) is its leaves' slots, from `v`
+    /// lowered once.
     pub(crate) fn strided_leaf_store(
         &mut self,
         vec: Idx<Inst>,
         slot: Idx<Inst>,
         elem: ColumnElem,
         field: Ustr,
+        nested: Option<&ValueShape>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let shape = self.column_shape(elem)?;
-        let Some(offset) = value_leaf_paths(&shape).iter().position(|p| *p == field) else {
-            return Err(gap(format!(
-                "`{field}` is not a scalar leaf of strided `[{}]`; a nested value \
-                 field spans several slots and needs a whole-element store",
-                elem.name
-            )));
+        let row = value_leaf_paths(&shape);
+        let (paths, leaves) = match nested {
+            Some(sub) => self.nested_field_leaves(field, sub, value)?,
+            None => (vec![field], vec![self.lower_expr(value)?]),
         };
-        let v = self.lower_expr(value)?;
-        let v = if self.strided_stores_raw(elem) {
-            v
-        } else {
-            self.emit_cur(Inst::VecStrideNilToFalse(v))
-        };
+        let offsets = paths
+            .iter()
+            .map(|path| row.iter().position(|p| p == path))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                gap(format!("`{field}` does not name slots of strided `[{}]`", elem.name))
+            })?;
+        let raw = self.strided_stores_raw(elem);
         let data = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("_data") });
-        let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
-        self.emit_cur(Inst::StoreIndex {
-            base: data,
-            index: at,
-            value: v,
-            kind: ContainerKind::VecStrideSlot,
-        });
+        for (offset, v) in offsets.into_iter().zip(leaves) {
+            let v = if raw { v } else { self.emit_cur(Inst::VecStrideNilToFalse(v)) };
+            let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
+            self.emit_cur(Inst::StoreIndex {
+                base: data,
+                index: at,
+                value: v,
+                kind: ContainerKind::VecStrideSlot,
+            });
+        }
         Ok(())
     }
 
-    /// `xs[i].<path> = v` on a column-stored Vec: store into the column that
-    /// holds that leaf. `path` must name a PRIMITIVE leaf (`inner.a`) -- a whole
-    /// nested value field (`xs[i].inner = ..`) spans several columns and is
-    /// rejected rather than silently writing one.
+    /// `xs[i].<path> = v` on a column-stored Vec: store into the columns under
+    /// `path`. A primitive leaf (`inner.a`) is one column; a whole nested value
+    /// field (`inner`, given as `nested`) is every leaf column under it, keyed
+    /// as [`column_leaf_paths`] keys them, from `v` lowered once.
     pub(crate) fn column_leaf_store(
         &mut self,
         vec: Idx<Inst>,
         slot: Idx<Inst>,
         elem: ColumnElem,
         field: Ustr,
+        nested: Option<&ValueShape>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         // A NULLABLE element has no field place at all: bone rejects `.field` on
@@ -1523,22 +1571,28 @@ impl Builder<'_> {
                 elem.name
             )));
         }
-        let shape = self.column_shape(elem)?;
-        if !value_leaf_paths(&shape).iter().any(|p| *p == field) {
-            return Err(gap(format!(
-                "`{field}` is not a scalar leaf of column-stored `[{}]`; a \
-                 nested value field spans several columns and needs a whole-element store",
-                elem.name
-            )));
+        let (paths, leaves) = match nested {
+            Some(sub) => self.nested_field_leaves(field, sub, value)?,
+            None => {
+                let shape = self.column_shape(elem)?;
+                if !value_leaf_paths(&shape).iter().any(|p| *p == field) {
+                    return Err(gap(format!(
+                        "`{field}` is not a field of column-stored `[{}]`",
+                        elem.name
+                    )));
+                }
+                (vec![field], vec![self.lower_expr(value)?])
+            }
+        };
+        for (path, leaf) in paths.into_iter().zip(leaves) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col,
+                index: slot,
+                value: leaf,
+                kind: ContainerKind::VecColumn,
+            });
         }
-        let v = self.lower_expr(value)?;
-        let col = self.emit_cur(Inst::Field { base: vec, field });
-        self.emit_cur(Inst::StoreIndex {
-            base: col,
-            index: slot,
-            value: v,
-            kind: ContainerKind::VecColumn,
-        });
         Ok(())
     }
 
@@ -1593,9 +1647,15 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let func = super::dispatch::dispatched_callee_decl(self.ws, name)
             .ok_or_else(|| gap(format!("dispatch helper `{name}` is missing or ambiguous")))?;
-        Ok(self.with_site_op(crate::site::SiteOp::Dispatched { name, path }, |b| {
-            b.emit_cur(Inst::Call { func, args })
-        }))
+        let expr = self
+            .cur_expr
+            .ok_or_else(|| gap(format!("dispatch helper `{name}` has no source expression")))?;
+        self.with_site_op(crate::site::SiteOp::Dispatched { name, path }, |b| {
+            let direct = b.plan_direct_call(expr, func)?;
+            let call = b.emit_cur(Inst::Call { func, args });
+            b.record_call(call, func, &direct)?;
+            Ok(call)
+        })
     }
 
     /// `m[k] = v` into a column-stored Map: take (or allocate) the key's slot,
@@ -1644,7 +1704,7 @@ impl Builder<'_> {
         let stored = match boxed {
             Some(s) => ValueBundle::new(
                 elem.representation(),
-                self.boxed_value_copy_repr(s, elem.name)?,
+                self.boxed_value_copy_repr(s, elem.name, None)?,
             ),
             None => bundle.clone(),
         };

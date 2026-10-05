@@ -261,10 +261,10 @@ impl Builder<'_> {
                     if let Some(name) = self.value_struct_of(e)
                         && (self.is_mutable_place(tuple)? || self.is_nobox_struct(name))
                     {
-                        return self.boxed_value_copy_repr(*slot, name);
+                        return self.boxed_value_copy_repr(*slot, name, self.concrete_expr_ty(e).as_deref());
                     }
                     if let Some(name) = nullable_place_value {
-                        return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(*slot, name)?));
+                        return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(*slot, name, self.concrete_expr_ty(e).as_deref())?));
                     }
                 }
                 Ok(projected)
@@ -280,12 +280,18 @@ impl Builder<'_> {
                 Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
             }
             // A scalarized value param: rebuild the unboxed Group from leaf cells.
+            // Its value children are still the caller's or the storage's.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
                 let leaves: Vec<Idx<Inst>> =
                     cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
-                Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+                let repr = self.rebuild_from_leaves(&shape, &leaves, &mut idx);
+                if !self.scx.values_first_class {
+                    let owner = self.concrete_expr_ty(e);
+                    self.mark_borrowed_value_children(&shape, &repr, owner.as_deref())?;
+                }
+                Ok(repr)
             }
             // A borrowed box splits to a Group, as a place read does: a leaf
             // consumer projects a part and the unread leaves die in DCE, while
@@ -293,7 +299,7 @@ impl Builder<'_> {
             // child) builds a fresh box instead of escaping the borrowed one.
             Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
-                self.boxed_value_copy_repr(boxed, name)
+                self.boxed_value_copy_repr(boxed, name, self.concrete_expr_ty(e).as_deref())
             }
             // `base.field`: project a Group part directly (no cdata); else a
             // boxed field read off the packed base.
@@ -362,7 +368,7 @@ impl Builder<'_> {
                     if let ValueRepr::Scalar(v) = repr {
                         repr = match self.value_struct_name_of(pbase) {
                             Some(sname) if self.gc_table_inline_layout(sname)?.is_some() => {
-                                self.boxed_value_copy_repr(v, sname)?
+                                self.boxed_value_copy_repr(v, sname, self.concrete_expr_ty(pbase).as_deref())?
                             }
                             _ => ValueRepr::Scalar(v),
                         };
@@ -410,7 +416,7 @@ impl Builder<'_> {
                 // leaves nothing reads die in DCE.
                 if let ValueRepr::Scalar(v) = br {
                     br = match self.leaf_table_base(base)? {
-                        Some(sname) => self.boxed_value_copy_repr(v, sname)?,
+                        Some(sname) => self.boxed_value_copy_repr(v, sname, self.concrete_expr_ty(base).as_deref())?,
                         None => ValueRepr::Scalar(v),
                     };
                 }
@@ -432,11 +438,11 @@ impl Builder<'_> {
                 // runtime, and that test pins the cell feeding it against SROA.
                 if let Some(name) = self.value_struct_of(e) {
                     if self.is_mutable_place(base)? || self.is_nobox_struct(name) {
-                        return self.boxed_value_copy_repr(fv, name);
+                        return self.boxed_value_copy_repr(fv, name, self.concrete_expr_ty(e).as_deref());
                     }
                 }
                 match nullable_place_value {
-                    Some(name) => Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, name)?)),
+                    Some(name) => Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, name, self.concrete_expr_ty(e).as_deref())?)),
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
             }
@@ -461,7 +467,7 @@ impl Builder<'_> {
             Expr::Global(g) if self.value_struct_of(e).is_some() => {
                 let name = self.value_struct_of(e).unwrap();
                 let gv = self.emit_cur(Inst::Global(g));
-                self.boxed_value_copy_repr(gv, name)
+                self.boxed_value_copy_repr(gv, name, self.concrete_expr_ty(e).as_deref())
             }
             // A static is a private global and copies the same way.
             Expr::Var(b)
@@ -471,10 +477,10 @@ impl Builder<'_> {
             {
                 let gv = self.emit_cur(Inst::Global(self.static_cells[&raw(b)]));
                 match self.value_struct_of(e) {
-                    Some(name) => self.boxed_value_copy_repr(gv, name),
+                    Some(name) => self.boxed_value_copy_repr(gv, name, self.concrete_expr_ty(e).as_deref()),
                     None => {
                         let name = nullable_place_value.expect("guard matched");
-                        Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name)?))
+                        Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name, self.concrete_expr_ty(e).as_deref())?))
                     }
                 }
             }
@@ -482,7 +488,7 @@ impl Builder<'_> {
             Expr::Global(g) if nullable_place_value.is_some() => {
                 let name = nullable_place_value.expect("guard matched");
                 let gv = self.emit_cur(Inst::Global(g));
-                Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name)?))
+                Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name, self.concrete_expr_ty(e).as_deref())?))
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
@@ -569,9 +575,9 @@ impl Builder<'_> {
                 }
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 if nullable {
-                    return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(slot, name)?));
+                    return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(slot, name, self.concrete_expr_ty(e).as_deref())?));
                 }
-                self.boxed_value_copy_repr(slot, name)
+                self.boxed_value_copy_repr(slot, name, self.concrete_expr_ty(e).as_deref())
             }
             Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs }
                 if self.nobox_value_name(e).is_some() =>
