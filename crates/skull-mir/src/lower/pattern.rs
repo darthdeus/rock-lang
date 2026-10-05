@@ -143,7 +143,15 @@ impl Builder<'_> {
                         return Ok(());
                     }
                 }
-                let val = self.scrut_value(scrut);
+                let mut val = self.scrut_value(scrut);
+                // The scrutinee's storage still holds the bound box; a binder a
+                // ref borrow can write through gets its own copy.
+                if !self.binding_is_ref(b)
+                    && self.binding_ref_borrowed(b)
+                    && let Some(ty) = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty))
+                {
+                    val = self.copied_value_box(&ty, val)?;
+                }
                 let cell = self.new_binding_cell(
                     b,
                     name,
@@ -265,7 +273,10 @@ impl Builder<'_> {
                     });
                 // A struct destructure reads fields out of an owner the arm can
                 // still write (`src.w.f0 = 99`), so a bound value field is a
-                // snapshot, as `let w = src.w` is. Enum payloads are immutable.
+                // snapshot, as `let w = src.w` is. An enum payload cannot be
+                // written through its owner; its binder copies where a ref
+                // borrow could write it, and its `V?` descendants where it
+                // escapes ([`Self::owned_value_children`]).
                 let struct_destructure = name.is_some_and(|n| self.ws.struct_by_name.contains_key(&n))
                     && enum_name.is_none()
                     && !(top && name.is_some_and(|n| variants.contains(&n)));
@@ -302,7 +313,9 @@ impl Builder<'_> {
                         _ => self.scrut_named(scrut, rpf.name, cdata),
                     };
                     let fv = match self.body.pattern_arena[rpf.pat] {
-                        Pattern::Bind(b) if struct_destructure && !self.binding_is_ref(b) => {
+                        Pattern::Bind(b)
+                            if struct_destructure && !self.binding_is_ref(b) && !self.binding_ref_borrowed(b) =>
+                        {
                             match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
                                 Some(ty) => self.copied_value_box(&ty, fv)?,
                                 None => fv,
