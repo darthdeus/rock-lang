@@ -349,6 +349,21 @@ impl Builder<'_> {
         self.value_struct_of(e).filter(|name| !self.is_nobox_struct(*name))
     }
 
+    /// The `V?` twin of [`Self::boxed_value_local`]: a plain binding whose cell
+    /// holds a box or `nil`. A read for presence only is not a whole use.
+    pub(crate) fn nullable_boxed_value_local(&self, b: Idx<BindingInfo>, e: Idx<Expr>) -> Option<Ustr> {
+        if self.scx.values_first_class
+            || self.presence_only == Some(e)
+            || !self.binds.contains_key(&raw(b))
+            || self.static_cells.contains_key(&raw(b))
+            || self.binding_is_ref(b)
+            || !self.expr_is_nullable(e)
+        {
+            return None;
+        }
+        self.value_struct_name_of(e).filter(|name| !self.is_nobox_struct(*name))
+    }
+
     /// Whether some `ref` borrow in this body (a `ref` argument or a `ref`
     /// local, lambdas included) is rooted at binding `b`. A write through it
     /// lands in `b`'s box, so that box is never lent to an argument slot, and

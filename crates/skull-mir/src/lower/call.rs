@@ -2380,7 +2380,47 @@ impl Builder<'_> {
         name: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.nominal_rep_shape_required(name, false)?;
-        self.boxed_copy_repr_of(boxed, &shape)
+        self.value_copy_stack.push(name);
+        let copy = self.boxed_copy_repr_of(boxed, &shape);
+        self.value_copy_stack.pop();
+        copy
+    }
+
+    /// The ordinary value type of `owner.field` when it is declared `V?`. Its
+    /// shape plans it as one opaque slot, but it is a value, so a copy of the
+    /// owner copies it too. A recursive child (`next: Node?` inside `Node`)
+    /// cannot be unrolled into its own copy and stays shared.
+    fn nullable_value_child(&self, owner: Ustr, field: Ustr) -> Option<Ustr> {
+        let ty = self.struct_field_ty(owner, field)?;
+        let (child, true) = super::shape::nominal_name_from_ty(self.ws, ty)? else {
+            return None;
+        };
+        (self.is_value_struct(child)
+            && !self.is_nobox_struct(child)
+            && !self.value_copy_stack.contains(&child))
+        .then_some(child)
+    }
+
+    /// Copy every `V?` value child in a copy rebuilt from leaves, where it is
+    /// still the source's box in a primitive slot.
+    fn copy_nullable_value_children(
+        &mut self,
+        shape: &ValueShape,
+        repr: ValueRepr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let ValueRepr::Group { name, parts, present } = repr else { return Ok(repr) };
+        let mut out = Vec::with_capacity(parts.len());
+        for ((fname, fs), part) in shape.fields.iter().zip(parts) {
+            out.push(match (fs, part) {
+                (FieldShape::Prim, ValueRepr::Scalar(v)) => match self.nullable_value_child(shape.name, *fname) {
+                    Some(child) => ValueRepr::Scalar(self.nullable_boxed_value_copy(v, child)?),
+                    None => ValueRepr::Scalar(v),
+                },
+                (FieldShape::Nested(sub), part) => self.copy_nullable_value_children(sub, part)?,
+                (_, part) => part,
+            });
+        }
+        Ok(ValueRepr::Group { name, parts: out, present })
     }
 
     /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
@@ -2399,7 +2439,8 @@ impl Builder<'_> {
                 == ValueStorage::GcTable;
         if !gc_table {
             let leaves = self.cdata_leaves(v, shape)?;
-            return Ok(self.rebuild_from_leaves(shape, &leaves, &mut 0));
+            let copy = self.rebuild_from_leaves(shape, &leaves, &mut 0);
+            return self.copy_nullable_value_children(shape, copy);
         }
         let inline = self.gc_table_inline_layout(shape.name)?;
         let mut parts = Vec::with_capacity(shape.fields.len());
@@ -2418,7 +2459,10 @@ impl Builder<'_> {
             }
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             parts.push(match fs {
-                FieldShape::Prim => ValueRepr::Scalar(fv),
+                FieldShape::Prim => match self.nullable_value_child(shape.name, *fname) {
+                    Some(child) => ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, child)?),
+                    None => ValueRepr::Scalar(fv),
+                },
                 FieldShape::Nested(sub)
                     if EnumPlan::for_name(self.ws, sub.name).is_some_and(|plan| plan.flat().is_some()) =>
                 {

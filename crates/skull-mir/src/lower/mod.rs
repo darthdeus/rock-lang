@@ -1627,6 +1627,7 @@ fn lower_body(
         group_binds: HashMap::new(),
         owned_value_binds: HashSet::new(),
         ref_borrowed_binds: std::cell::OnceCell::new(),
+        value_copy_stack: Vec::new(),
         f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -2169,6 +2170,9 @@ struct Builder<'a> {
     /// Bindings some `ref` borrow in this body is rooted at
     /// ([`Self::binding_ref_borrowed`]), collected on first use.
     ref_borrowed_binds: std::cell::OnceCell<HashSet<u32>>,
+    /// Value types whose copy is being emitted, outermost first: a recursive
+    /// `V?` child is not unrolled into its own copy ([`Self::boxed_value_copy_repr`]).
+    value_copy_stack: Vec<Ustr>,
     /// Right-hand sides of assignments into an `f32` field. Every assignment
     /// path lowers its value through one of the expression entries, which
     /// round these, so no store path needs its own rounding.
@@ -2253,6 +2257,7 @@ impl<'a> Builder<'a> {
             group_binds: HashMap::new(),
             owned_value_binds: HashSet::new(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
+            value_copy_stack: Vec::new(),
             f32_round_exprs: HashSet::new(),
             tuple_binds: HashMap::new(),
             static_cells: HashMap::new(),

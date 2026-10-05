@@ -211,6 +211,10 @@ impl Builder<'_> {
                 let copy = self.boxed_value_copy_repr(boxed, name)?;
                 self.pack(copy)
             }
+            Expr::Var(b) if let Some(name) = self.nullable_boxed_value_local(b, e) => {
+                let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
+                self.nullable_boxed_value_copy(boxed, name)
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -894,7 +898,10 @@ impl Builder<'_> {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
             }
-            Expr::Var(b) if self.boxed_value_local(b, e).is_some() => {
+            Expr::Var(b)
+                if self.boxed_value_local(b, e).is_some()
+                    || self.nullable_boxed_value_local(b, e).is_some() =>
+            {
                 Ok(self.emit_cur(Inst::Load(self.binds[&raw(b)])))
             }
             // A leaf of a column-stored or strided element has no slot to name;

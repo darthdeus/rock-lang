@@ -128,9 +128,11 @@ impl Builder<'_> {
                     // A `V?` place read here is read for its PRESENCE: the copy
                     // such a read otherwise takes would allocate a cdata per nil
                     // test (`mouse_screen`'s `sim_mouse_override`, every frame).
+                    let boxed_local = matches!(self.body.expr_arena[v], Expr::Var(b)
+                        if self.nullable_boxed_value_local(b, v).is_some());
                     if self.nobox_value_name(v).is_none()
                         && !self.expr_is_flat_enum(v)
-                        && self.nullable_place_value_of(v)?.is_some()
+                        && (boxed_local || self.nullable_place_value_of(v)?.is_some())
                     {
                         let outer = self.presence_only.replace(v);
                         let value = self.lower_expr(v);

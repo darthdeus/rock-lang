@@ -200,6 +200,7 @@ impl Builder<'_> {
             group_binds: HashMap::new(),
             owned_value_binds: HashSet::new(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
+            value_copy_stack: Vec::new(),
             f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the

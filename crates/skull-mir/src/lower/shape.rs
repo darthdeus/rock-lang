@@ -623,7 +623,7 @@ fn planned_shape(
     Some(ValueShape { name, fields: out, nullable: false })
 }
 
-fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bool)> {
+pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bool)> {
     let mut node = static_ty(ws, ty)?;
     let mut nullable = false;
     if let TypeExpr::Nullable(inner) = node {
