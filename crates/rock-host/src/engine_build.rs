@@ -574,13 +574,16 @@ fn cargo_build_and_stage_lib(
 /// "No such file or directory". Pattern observed at `serializer_branch_
 /// coverage` failure on 2026-05-04 under `-P full`.
 ///
-/// Fix: stage to a unique per-process path, codesign there (in
+/// Fix: stage to a unique per-call path, codesign there (in
 /// isolation), then atomically `rename` to the final name. `rename(2)`
 /// is atomic on macOS and Linux; concurrent dlopens see either the old
 /// or the new fully-signed file but never a torn or mid-resign one.
-/// The path a `stage_cdylib` call copies and signs into before its rename.
+/// The path a `stage_cdylib` call copies and signs into before its rename:
+/// unique per call, since threads of one process stage concurrently too.
 fn staging_path(dst: &Path) -> String {
-    format!("{}.{}", dst.display(), std::process::id())
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}.{}.{n}", dst.display(), std::process::id())
 }
 
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
@@ -640,7 +643,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     // linker-signed) through a stricter path than plain adhoc and may
     // SIGKILL dlopen with no userspace error for fresh cdhashes — see
     // XProtect data update pushed 2026-04-24. Plain `--sign -` is the
-    // standard adhoc resign. Done in isolation on the per-pid staging
+    // standard adhoc resign. Done in isolation on the per-call staging
     // path so concurrent stagers can't read a mid-resign file.
     #[cfg(target_os = "macos")]
     {
