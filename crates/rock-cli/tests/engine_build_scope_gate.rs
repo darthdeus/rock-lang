@@ -14,6 +14,22 @@
 //!   cargo test -p rock-cli --test rock_cli_heavy -- --ignored --nocapture engine_build_scope
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn isolated_test(name: &str) -> bool {
+    if std::env::var("ROCK_ENGINE_GATE_CHILD").as_deref() == Ok(name) {
+        return false;
+    }
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = GATE.lock().expect("engine gate lock");
+    let result = Command::new(std::env::current_exe().expect("test executable"))
+        .args([&format!("engine_build_scope_gate::{name}"), "--exact", "--ignored", "--nocapture"])
+        .env("ROCK_ENGINE_GATE_CHILD", name)
+        .output().expect("isolated engine gate");
+    assert!(result.status.success(), "{}{}",
+        String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    true
+}
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -36,7 +52,9 @@ fn workspace_root() -> PathBuf {
 pub(crate) fn private_engine_root(label: &str) -> PathBuf {
     let real = workspace_root();
     let home = std::env::var_os("HOME").expect("HOME");
-    let private = PathBuf::from(home).join("tmp").join(format!("rock-engine-gate-root-{label}"));
+    let private = PathBuf::from(home).join("tmp").join(format!(
+        "rock-engine-gate-root-{label}-{}", std::process::id()
+    ));
     if private.exists() {
         fs_err::remove_dir_all(&private).expect("clear previous private root");
     }
@@ -71,13 +89,17 @@ fn cdylib_name(stem: &str) -> String {
 #[test]
 #[ignore = "deletes shared workspace artifacts and rebuilds a crate; run deliberately"]
 fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
+    if isolated_test("core_engine_build_does_not_compile_unrelated_workspace_crates") { return; }
     let root = private_engine_root("scope");
 
     // The unrelated crate artifact that stone-rs does NOT depend on.
     // When cargo build --lib runs with no -p, rock-cli's lib target is compiled
     // and produces target/debug/librock_cli.rlib. When scoped with -p stone-rs,
     // cargo only builds stone-rs and its dependencies, leaving this artifact absent.
-    let unrelated_artifact = root.join("target/debug/librock_cli.rlib");
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from).map(|path| root.join(path))
+        .unwrap_or_else(|| root.join("target"));
+    let unrelated_artifact = target.join("debug/librock_cli.rlib");
     if unrelated_artifact.exists() {
         fs_err::remove_file(&unrelated_artifact).expect("remove unrelated artifact before test");
     }
@@ -121,11 +143,13 @@ fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
         "build_libstone built unrelated crate artifact {}, proving cargo was not package-scoped",
         unrelated_artifact.display()
     );
+    fs_err::remove_dir_all(&root).expect("remove private engine root");
 }
 
 #[test]
 #[ignore = "builds stone-rs without default features; run deliberately"]
 fn c_libstone_stages_under_its_own_name_and_leaves_the_engine_library() {
+    if isolated_test("c_libstone_stages_under_its_own_name_and_leaves_the_engine_library") { return; }
     let root = private_engine_root("c-libstone");
     let engine_lib = root.join("tmp").join(cdylib_name("stone"));
     let sentinel = b"engine libstone sentinel: the C build must not touch this";
@@ -142,4 +166,118 @@ fn c_libstone_stages_under_its_own_name_and_leaves_the_engine_library() {
     );
     let c_lib = root.join("tmp").join(cdylib_name("stone_c"));
     assert!(c_lib.is_file(), "C libstone not staged at {}", c_lib.display());
+    fs_err::remove_dir_all(&root).expect("remove private engine root");
+}
+
+#[test]
+#[ignore = "builds and stages real Stone providers; run deliberately"]
+fn receipt_bound_c_consumers_preserve_and_validate_the_engine_library() {
+    if isolated_test("receipt_bound_c_consumers_preserve_and_validate_the_engine_library") { return; }
+    let root = private_engine_root("receipt-c-consumers");
+    let fixture = tempfile::tempdir_in(root.join("tmp")).expect("C fixture directory");
+    let receipt = fixture.path().join("receipt.json");
+    let prepared = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["engine-build-receipt", "--output"])
+        .arg(&receipt)
+        .current_dir(&root)
+        .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
+        .output().expect("prepare engine receipt");
+    assert!(prepared.status.success(), "{}{}",
+        String::from_utf8_lossy(&prepared.stdout), String::from_utf8_lossy(&prepared.stderr));
+
+    let source = fixture.path().join("stone/engine/ui/imgui.rock");
+    fs_err::create_dir_all(source.parent().unwrap()).expect("ImGui fixture parent");
+    fs_err::write(&source, r#"
+@inline inline(lua) fn imgui_set_tooltip(text: string) = "imgui.SetTooltip(text)"
+fn main() {
+    imgui_set_tooltip("receipt % 100")
+    print("receipt-imgui-ok")
+}
+"#).expect("ImGui fixture");
+    let binary = fixture.path().join("imgui-consumer");
+    let project = fixture.path().join("project");
+    fs_err::create_dir_all(project.join("tests")).expect("asset fixture parent");
+    let stone = workspace_root().join("stone");
+    fs_err::write(project.join("stick.toml"), format!(
+        "[package]\nname = \"receipt-assets\"\ntype = \"lib\"\n\
+         [language]\nmodules = \"v1\"\n[dependencies]\nstone = {{ path = \"{}\" }}\n\
+         [build.vars]\nGIT_SHA = \"test\"\n", stone.display()
+    )).expect("asset fixture manifest");
+    fs_err::write(project.join("tests/assets.rock"), format!(
+        "use stone::project_asset_path;\n@test fn engine_asset_root() {{\n\
+         assert_eq(project_asset_path(\"@engine/compat/assets.rock\"), \"{}\")\n}}\n",
+        stone.join("engine/compat/assets.rock").display()
+    )).expect("asset fixture source");
+
+    let engine = root.join("tmp").join(cdylib_name("stone"));
+    let bytes = fs_err::read(&engine).expect("staged engine bytes");
+    let mtime = fs_err::metadata(&engine).unwrap().modified().unwrap();
+    let commands = [
+        vec!["compile".into(), source.into_os_string(), "--backend".into(), "c".into(),
+            "--output".into(), binary.clone().into_os_string()],
+        vec!["test".into(), project.join("tests").into_os_string(), "--backend".into(), "skull".into()],
+        vec!["test".into(), project.join("tests").into_os_string(), "--backend".into(), "c".into()],
+    ];
+    for args in &commands {
+        let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(args).current_dir(&root)
+            .env("ROCK_ENGINE_BUILD_RECEIPT", &receipt)
+            .env_remove("ROCK_SKIP_ENGINE_BUILD")
+            .env_remove("STONE_SOURCE_DIR").env_remove("__ROCK_STONE_DIR")
+            .env_remove("GAME_SOURCE_DIR")
+            .output().expect("receipt-bound consumer");
+        assert!(result.status.success(), "{args:?}: {}{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        if args[0] == "test" {
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1/1 @tests passed"));
+        }
+        assert!(fs_err::read(&engine).unwrap() == bytes, "{args:?} changed engine bytes");
+        assert_eq!(fs_err::metadata(&engine).unwrap().modified().unwrap(), mtime,
+            "{args:?} restaged engine libstone");
+    }
+    let run = Command::new(&binary).output().expect("run C ImGui consumer");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(run.stdout, b"receipt-imgui-ok\n");
+    assert!(root.join("tmp").join(cdylib_name("stone_c")).is_file());
+
+    // A receipt is also an integrity boundary for consumers that link stone_c.
+    fs_err::write(&engine, b"replaced staged engine").expect("invalidate engine receipt");
+    for args in &commands {
+        let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(args).current_dir(&root)
+            .env("ROCK_ENGINE_BUILD_RECEIPT", &receipt)
+            .env_remove("ROCK_SKIP_ENGINE_BUILD")
+            .output().expect("consumer with invalid receipt");
+        let text = format!("{}{}", String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr));
+        assert!(!result.status.success() && text.contains("its staged library changed"),
+            "{args:?} accepted a replaced receipt-bound engine library: {text}");
+        assert_eq!(fs_err::read(&engine).unwrap(), b"replaced staged engine");
+    }
+    fs_err::remove_dir_all(&root).expect("remove private engine root");
+}
+
+#[test]
+#[ignore = "builds and stages the real engine library; run deliberately"]
+fn receipt_bound_raw_staging_preserves_the_engine_library() {
+    if isolated_test("receipt_bound_raw_staging_preserves_the_engine_library") { return; }
+    let root = private_engine_root("receipt-raw-stage");
+    let receipt = root.join("tmp/receipt.json");
+    unsafe { std::env::remove_var("ROCK_ENGINE_BUILD_RECEIPT") };
+    rock_host::engine_build::prepare_engine_build_receipt(&[], &receipt)
+        .expect("prepare engine receipt");
+    let engine = root.join("tmp").join(cdylib_name("stone"));
+    let bytes = fs_err::read(&engine).expect("staged engine bytes");
+    let mtime = fs_err::metadata(&engine).unwrap().modified().unwrap();
+    unsafe { std::env::set_var("ROCK_ENGINE_BUILD_RECEIPT", &receipt) };
+    rock_host::engine_build::stage_cdylib("stone_rs", "stone").expect("validate staged engine");
+    assert!(fs_err::read(&engine).unwrap() == bytes, "stage_cdylib changed engine bytes");
+    assert_eq!(fs_err::metadata(&engine).unwrap().modified().unwrap(), mtime,
+        "stage_cdylib restaged receipt-bound engine libstone");
+    fs_err::write(&engine, b"replaced staged engine").expect("invalidate receipt");
+    let error = rock_host::engine_build::stage_cdylib("stone_rs", "stone")
+        .expect_err("raw staging must reject a changed receipt-bound library");
+    assert!(error.to_string().contains("its staged library changed"), "{error:#}");
+    assert_eq!(fs_err::read(&engine).unwrap(), b"replaced staged engine");
+    fs_err::remove_dir_all(&root).expect("remove private engine root");
 }
