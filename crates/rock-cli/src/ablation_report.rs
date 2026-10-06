@@ -40,7 +40,7 @@ pub fn census_exit_code(requested: i32, had_fatals: bool) -> i32 {
 /// its category read zero everywhere.
 pub fn exit_with_census(code: i32) -> ! {
     let had_fatals = report("whole run");
-    std::process::exit(census_exit_code(code, had_fatals))
+    crate::invocation_log::exit(census_exit_code(code, had_fatals))
 }
 
 /// Print the census. Returns `true` when at least one fatal was recorded, which

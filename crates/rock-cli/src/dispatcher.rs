@@ -754,7 +754,7 @@ impl CommandContext {
                 _ => anyhow::bail!("{usage}"),
             };
             if code != 0 {
-                std::process::exit(code);
+                crate::invocation_log::exit(code);
             }
             return Ok(());
         }
@@ -766,7 +766,7 @@ impl CommandContext {
                 }
                 let code = crate::across_yield_fix::run(&self.args.files, self.args.apply)?;
                 if code != 0 {
-                    std::process::exit(code);
+                    crate::invocation_log::exit(code);
                 }
                 return Ok(());
             }
@@ -782,7 +782,7 @@ impl CommandContext {
             let mode = if self.args.apply { crate::modules_migrate::Mode::Apply } else { crate::modules_migrate::Mode::Check };
             let code = crate::modules_fix::run(std::path::Path::new(target), mode, format)?;
             if code != 0 {
-                std::process::exit(code);
+                crate::invocation_log::exit(code);
             }
             return Ok(());
         }

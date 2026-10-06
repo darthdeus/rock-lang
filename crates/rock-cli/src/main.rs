@@ -42,6 +42,13 @@ fn main() {
 
     let args = Args::parse();
 
+    // Before any child or thread: begin() exports the parent marker for
+    // nested `rock` runs and starts the background git probe.
+    rock_cli::invocation_log::begin(
+        args.command.cli_name(),
+        &format!("{:?}", args.backend).to_lowercase(),
+    );
+
     // Sims force telemetry offline and must not read a production secret merely
     // to compile; build-var commands use this to distinguish the invocation.
     unsafe { std::env::set_var("ROCK_BUILD_COMMAND", args.command.cli_name()) };
@@ -57,7 +64,7 @@ fn main() {
         &args.build_var_overrides,
     ) {
         eprintln!("Error: {e}");
-        std::process::exit(1);
+        rock_cli::invocation_log::exit(1);
     }
 
     // `--verbose` raises the unified logger to debug. (Pre-unification
@@ -74,7 +81,7 @@ fn main() {
     // rather than silently ignore so a profiling invocation fails loudly.
     if args.trace {
         eprintln!("Error: --trace is not supported (the perfetto tracing path lived in the removed rock pipeline)");
-        std::process::exit(1);
+        rock_cli::invocation_log::exit(1);
     }
 
     // `--jv` is sugar for STONE_JV=1: build_luajit_command reads that env to
@@ -144,11 +151,12 @@ fn main() {
     let had_fatals = rock_cli::ablation_report::report("whole run");
     if let Err(e) = outcome {
         log::error!(target: "CLI", "{}", e);
-        std::process::exit(1);
+        rock_cli::invocation_log::exit(1);
     }
     if had_fatals {
-        std::process::exit(1);
+        rock_cli::invocation_log::exit(1);
     }
 
     cleanup_all_children();
+    rock_cli::invocation_log::finish(Some(0), "return");
 }

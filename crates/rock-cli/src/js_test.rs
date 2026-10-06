@@ -105,7 +105,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
 
     if summary.tests_failed > 0 || summary.unit_failures > 0 || ablation_fatals {
         // Plain exit: the census above already drained the registry.
-        std::process::exit(1);
+        crate::invocation_log::exit(1);
     }
     Ok(())
 }

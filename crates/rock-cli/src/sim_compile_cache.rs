@@ -50,6 +50,10 @@ const UNKEYED_ENV: &[&str] = &[
     SIM_COMPILE_RECEIPT_DIR_ENV,
     SIM_COMPILE_RECEIPT_PREPARE_ENV,
     "ROCK_JOB_ID",
+    // Invocation-log settings and tags; never read by the compile.
+    "ROCK_INVOCATION_LOG",
+    crate::invocation_log::PARENT_ENV,
+    "ROCK_CHANGE_ID",
     // rock_log's per-invocation clock origin, inherited by children.
     "ROCK_LOG_EPOCH_MS",
     "ROCK_SIM_COMPILE_TIMING",

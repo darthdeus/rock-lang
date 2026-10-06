@@ -1863,7 +1863,7 @@ fn skull_emit_project_with_inputs(
         Ok(target) => target,
         Err(e) => {
             log::error!(target: "SKULL", "invalid renderer selection for {}: {}", dir, e);
-            std::process::exit(1);
+            crate::invocation_log::exit(1);
         }
     };
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
@@ -2767,6 +2767,19 @@ pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilt
             tests_skipped
         )
     });
+    crate::invocation_log::note_phase("units", start.elapsed().as_millis() as u64);
+    crate::invocation_log::note_phase(
+        "tests_run",
+        timings.iter().map(|(_, t)| t.ms).sum::<f64>() as u64,
+    );
+    crate::invocation_log::note_counts(&[
+        ("units_selected", total),
+        ("units_failed", failed),
+        ("units_test_failed", test_fails),
+        ("tests_total", tests_total),
+        ("tests_passed", tests_passed),
+        ("tests_failed", tests_failed),
+    ]);
     println!(
         "\nskull backend: {}/{} @tests passed ({} failed) across {} files ({:.2}s){}",
         tests_passed.to_string().green(),
@@ -2799,6 +2812,7 @@ pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilt
     // LSP fixtures run through the bone-backed LSP (skull's language server),
     // via the same dispatch helper rock's `test` uses. Failures count toward
     // the non-zero exit alongside @test failures.
+    let suites_start = Instant::now();
     let mut lsp_failed = 0usize;
     for path in paths {
         let (_t, _p, f, _i) = crate::lsp_test::run_lsp_suite(
@@ -2811,6 +2825,8 @@ pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilt
 
     // Error-test fixtures (`.rock.err`) verify rejection, which happens in the
     // shared bone front end before codegen -- so skull folds them in too.
+    crate::invocation_log::note_phase("lsp_suite", suites_start.elapsed().as_millis() as u64);
+    let err_start = Instant::now();
     let mut err_failed = 0usize;
     for path in paths {
         let (_t, _p, f, _i) = crate::error_test::run_error_suite(
@@ -2824,6 +2840,8 @@ pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilt
     // The Stage-0e census, before the exit below: this path leaves the process
     // with `process::exit`, which runs no destructor and never returns to
     // `main`, so a report installed only there would silently never print.
+    crate::invocation_log::note_phase("error_suite", err_start.elapsed().as_millis() as u64);
+    crate::invocation_log::note_counts(&[("lsp_failed", lsp_failed), ("error_failed", err_failed)]);
     let ablation_fatals = crate::ablation_report::report("rock test");
 
     if let Some(filter) = filter.filter(|_| tests_total == 0) {
@@ -2843,7 +2861,7 @@ pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilt
     {
         // Plain exit: the census above already drained the registry, so routing
         // this through `exit_with_census` would print an empty second one.
-        std::process::exit(1);
+        crate::invocation_log::exit(1);
     }
     Ok(())
 }

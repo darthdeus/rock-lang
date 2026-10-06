@@ -2,6 +2,8 @@
 
 mod stone_harness;
 
+#[path = "invocation_log.rs"]
+mod invocation_log;
 #[path = "ablation_census_survives_failure.rs"]
 mod ablation_census_survives_failure;
 #[path = "child_lifetime.rs"]

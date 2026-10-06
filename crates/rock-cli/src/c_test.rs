@@ -170,6 +170,15 @@ pub fn c_test(paths: &[String], required_tests: &[String], show_passing: bool) -
 
     let start = Instant::now();
     let summary = c_test_run_with_required_tests(paths, true, required_tests, show_passing)?;
+    crate::invocation_log::note_phase("units", start.elapsed().as_millis() as u64);
+    crate::invocation_log::note_counts(&[
+        ("units_selected", summary.files),
+        ("units_failed", summary.unit_failures),
+        ("tests_total", summary.tests_passed + summary.tests_failed + summary.tests_skipped),
+        ("tests_passed", summary.tests_passed),
+        ("tests_failed", summary.tests_failed),
+        ("tests_skipped", summary.tests_skipped),
+    ]);
     println!(
         "\nc backend: {}/{} @tests passed ({} failed, {} skipped) across {} files ({:.2}s)",
         summary.tests_passed.to_string().green(),
@@ -208,7 +217,7 @@ pub fn c_test(paths: &[String], required_tests: &[String], show_passing: bool) -
         || !summary.required_failures.is_empty()
         || ablation_fatals
     {
-        std::process::exit(1);
+        crate::invocation_log::exit(1);
     }
     Ok(())
 }

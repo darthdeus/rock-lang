@@ -33,6 +33,8 @@ struct State {
     next_worker_id: u64,
     planned: usize,
     completed: BTreeSet<u64>,
+    /// Entries whose latest result passed (a recovery may re-report one).
+    passed: BTreeSet<u64>,
     finished: bool,
     warning_emitted: bool,
     timings: timing::Timings,
@@ -90,6 +92,7 @@ impl SimRunRecorder {
             ),
         };
         let timing_host = timing::host_context();
+        crate::invocation_log::note("filtered", json!(selection != "<all>"));
         let recorder = Self {
             inner: Arc::new(Mutex::new(State {
                 run_id,
@@ -100,6 +103,7 @@ impl SimRunRecorder {
                 next_worker_id: 1,
                 planned: 0,
                 completed: BTreeSet::new(),
+                passed: BTreeSet::new(),
                 finished: false,
                 warning_emitted: false,
                 timings: timing::Timings::new(root, timing::TimingPolicy::from_env(), timing_host.clone()),
@@ -206,7 +210,10 @@ impl SimRunRecorder {
 
     pub fn phase<T>(&self, name: &str, operation: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
         self.phase_start(name);
-        match operation() {
+        let started = Instant::now();
+        let result = operation();
+        crate::invocation_log::note_phase(name, started.elapsed().as_millis() as u64);
+        match result {
             Ok(value) => {
                 self.phase_end(name, true);
                 Ok(value)
@@ -354,6 +361,11 @@ impl SimRunRecorder {
     ) {
         if let Ok(mut state) = self.inner.lock() {
             state.completed.insert(occurrence_id);
+            if verdict == "PASS" {
+                state.passed.insert(occurrence_id);
+            } else {
+                state.passed.remove(&occurrence_id);
+            }
         } else {
             self.warn_once("sim history lock was poisoned while recording an entry result".into());
         }
@@ -429,11 +441,11 @@ impl SimRunRecorder {
     /// meaningful: it identifies a process that stopped before the runner
     /// could account for it.
     pub fn finish(&self, success: bool, error: Option<&str>) {
-        let (planned, finalized, already_finished) = match self.inner.lock() {
+        let (planned, finalized, passed, run_id, already_finished) = match self.inner.lock() {
             Ok(mut state) => {
                 let already_finished = state.finished;
                 state.finished = true;
-                (state.planned, state.completed.len(), already_finished)
+                (state.planned, state.completed.len(), state.passed.len(), state.run_id.clone(), already_finished)
             }
             Err(_) => {
                 self.warn_once("sim history lock was poisoned while finishing the run".into());
@@ -443,6 +455,14 @@ impl SimRunRecorder {
         if already_finished {
             return;
         }
+        crate::invocation_log::note_counts(&[
+            ("sims_selected", planned),
+            ("sims_passed", passed),
+            ("sims_failed", finalized - passed),
+            ("sims_unreported", planned - finalized),
+        ]);
+        crate::invocation_log::note("sim_run_id", json!(run_id));
+        crate::invocation_log::note("sim_events", json!(self.events_path()));
         self.event(
             "run_end",
             json!({
