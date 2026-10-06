@@ -1164,7 +1164,8 @@ fn skull_build_package_with_limit(
 }
 
 /// LuaJIT processes per package test run: `ROCK_TEST_SHARDS`, else half the
-/// cores (capped at 8), leaving room for the other half's emit and builds.
+/// cores capped at 4. Each mag shard holds about 1.4 GB, and many concurrent
+/// `rock test` runs share a host; a gate that owns the machine raises it.
 fn test_shard_count() -> Result<usize> {
     match std::env::var("ROCK_TEST_SHARDS") {
         Ok(value) => match value.trim().parse::<usize>() {
@@ -1172,7 +1173,7 @@ fn test_shard_count() -> Result<usize> {
             _ => anyhow::bail!("ROCK_TEST_SHARDS must be a positive integer, got `{value}`"),
         },
         Err(std::env::VarError::NotPresent) => Ok(std::thread::available_parallelism()
-            .map_or(1, |cores| (cores.get() / 2).clamp(1, 8))),
+            .map_or(1, |cores| (cores.get() / 2).clamp(1, 4))),
         Err(error) => anyhow::bail!("ROCK_TEST_SHARDS: {error}"),
     }
 }
