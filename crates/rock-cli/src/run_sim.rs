@@ -3978,6 +3978,19 @@ fn per_entry_env_keys(env_pairs: &[(String, String)]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The declared per-entry key set in canonical form: sorted, so the same set
+/// shares a signature however the fixture ordered its declaration. Parsed the
+/// same way `per_entry_env_keys` reads it (comma-separated, trimmed, empty
+/// names dropped), then sorted and de-duplicated, so spelling variants that
+/// publish the identical key set compare equal. A different SET still reads
+/// differently and refuses to share.
+fn canonical_per_entry_decl(value: &str) -> String {
+    let mut keys: Vec<&str> = value.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys.join(",")
+}
+
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
 ///
@@ -4001,6 +4014,8 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
         .map(|(k, v)| {
             if per_entry.iter().any(|p| *p == k) {
                 (k, PER_ENTRY_ENV_MARK.to_string())
+            } else if k == PER_ENTRY_ENV_DECL {
+                (k, canonical_per_entry_decl(&v))
             } else {
                 (k, v)
             }
@@ -8135,6 +8150,49 @@ mod tests {
         let dup_a = env(&[("K", "1"), ("K", "2")]);
         let dup_b = env(&[("K", "2"), ("K", "1")]);
         assert_ne!(boot_signature(&dup_a), boot_signature(&dup_b));
+    }
+
+    #[test]
+    fn the_boot_signature_ignores_per_entry_declaration_order() {
+        // keyboard_spell_drag boots alone while its compact/summary siblings
+        // share a boot: same per-entry key set, declared in a different order.
+        let drag = env(&[
+            (
+                "SIM_WORKER_PER_ENTRY_ENV",
+                "MAG_BINDINGS_PATH_OVERRIDE,MAG_BINDINGS_HISTORY_PATH_OVERRIDE,MAG_SETTINGS_PATH_OVERRIDE",
+            ),
+            ("MAG_BINDINGS_PATH_OVERRIDE", "$OUT/keyboard-drag-bindings.json"),
+            ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", "$OUT/keyboard-drag-history.jsonl"),
+            ("MAG_SETTINGS_PATH_OVERRIDE", "$OUT/keyboard-drag-settings.json"),
+        ]);
+        let compact = env(&[
+            (
+                "SIM_WORKER_PER_ENTRY_ENV",
+                "MAG_SETTINGS_PATH_OVERRIDE,MAG_BINDINGS_PATH_OVERRIDE,MAG_BINDINGS_HISTORY_PATH_OVERRIDE",
+            ),
+            ("MAG_SETTINGS_PATH_OVERRIDE", "$OUT/keyboard-compact-settings.json"),
+            ("MAG_BINDINGS_PATH_OVERRIDE", "$OUT/keyboard-compact-bindings.json"),
+            ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", "$OUT/keyboard-compact-history.jsonl"),
+        ]);
+        assert_eq!(
+            boot_signature(&drag),
+            boot_signature(&compact),
+            "the same per-entry key set shares a boot however it is spelled"
+        );
+
+        let subset = env(&[
+            (
+                "SIM_WORKER_PER_ENTRY_ENV",
+                "MAG_BINDINGS_PATH_OVERRIDE,MAG_SETTINGS_PATH_OVERRIDE",
+            ),
+            ("MAG_BINDINGS_PATH_OVERRIDE", "$OUT/other-bindings.json"),
+            ("MAG_SETTINGS_PATH_OVERRIDE", "$OUT/other-settings.json"),
+        ]);
+        assert_ne!(
+            boot_signature(&drag),
+            boot_signature(&subset),
+            "a different per-entry key set still refuses to share"
+        );
     }
 
     fn wires(entries: &[(&str, &[(&str, &str)])]) -> HashMap<String, Vec<(String, String)>> {
