@@ -646,9 +646,9 @@ struct SkullFailure {
 enum SkullOutcome {
     /// All `@test`s passed (or the file had none). `tests` = number that ran
     /// green (0 for a load-only file with no `@test`s).
-    Pass { tests: usize, timings: Vec<TestTiming> },
+    Pass { tests: usize, skipped: usize, timings: Vec<TestTiming> },
     /// Some `@test`s failed. `passed` ran green; `fails` holds the rest's detail.
-    TestFail { passed: usize, fails: Vec<String>, timings: Vec<TestTiming> },
+    TestFail { passed: usize, fails: Vec<String>, skipped: usize, timings: Vec<TestTiming> },
 }
 
 /// Wall time of one `@test` that finished, for the slowest-tests report and
@@ -663,8 +663,12 @@ struct TestTiming {
 /// Run a source string through the full skull pipeline (bone type-check + skull
 /// codegen), confirm the emitted Lua loads, and execute its `@test` functions
 /// against the real (emitted) stdlib. `Err` = emit/load failure; `Ok` carries
-/// the pass/test-fail outcome.
-fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, SkullFailure> {
+/// the pass/test-fail outcome. `filter` selects which `@test`s run.
+fn skull_build(
+    file: &str,
+    src: &str,
+    filter: Option<&crate::test::TestFilter>,
+) -> std::result::Result<SkullOutcome, SkullFailure> {
     // bone type-check + skull emit. Errors here are bone's (most files) or a
     // skull codegen gap; both carry a `CompilerError`.
     let (lua, tests, _emits_main) = match skull_emit_full(file, src) {
@@ -674,7 +678,25 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
             if let Some(tests) = all_tests_expect_compile_failure(file, src) {
-                return Ok(SkullOutcome::Pass { tests, timings: Vec::new() });
+                let selected = if let Some(filter) = filter {
+                    let mut sources = SourceFiles::empty();
+                    sources.add_or_update_file(source_file_from_path_and_contents(
+                        file.to_string(),
+                        file.to_string(),
+                        src.to_string(),
+                    ));
+                    crate::test::find_test_functions_from_sources(&sources)
+                        .iter()
+                        .filter(|test| filter.matches(&test.name, file))
+                        .count()
+                } else {
+                    tests
+                };
+                return Ok(SkullOutcome::Pass {
+                    tests: selected,
+                    skipped: tests - selected,
+                    timings: Vec::new(),
+                });
             }
             return Err(SkullFailure {
                 reason: categorize(&errs[0].message),
@@ -703,7 +725,8 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             })
         }
     };
-    run_emitted_tests(lua, &tests, &vec![file.to_owned(); tests.len()], std::time::Duration::from_secs(15), 1)
+    let files = vec![file.to_owned(); tests.len()];
+    run_emitted_tests(lua, &tests, &files, std::time::Duration::from_secs(15), 1, filter)
 }
 
 /// `Some(count)` when `file` declares `@test` fns and EVERY one carries
@@ -728,16 +751,28 @@ pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<
 /// Given emitted workspace Lua and the `@test` fns discovered in it, run them
 /// via the harness (or the load-only validity gate when there are none) and
 /// classify the outcome. Shared by the per-file path ([`skull_build`]) and the
-/// whole-package path ([`skull_build_package`]). `shards` LuaJIT processes
-/// split the tests; their results merge into one outcome.
+/// whole-package path ([`skull_build_package`]). `filter` selects the tests
+/// that run; `shards` LuaJIT processes split the selected tests and their
+/// results merge into one outcome.
 fn run_emitted_tests(
     lua: String,
     tests: &[skull::SkullTest],
     files: &[String],
     limit: std::time::Duration,
     shards: usize,
+    filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     assert_eq!(tests.len(), files.len());
+
+    let mut selected_tests = Vec::with_capacity(tests.len());
+    let mut selected_files = Vec::with_capacity(files.len());
+    for (test, file) in tests.iter().zip(files) {
+        if filter.map_or(true, |filter| filter.matches(&test.name, file)) {
+            selected_tests.push(test.clone());
+            selected_files.push(file.clone());
+        }
+    }
+    let skipped = tests.len() - selected_tests.len();
 
     // Failure reports quote the program's head; the whole text is not kept
     // while the test process runs (mag's is about 170 MB).
@@ -762,8 +797,14 @@ fn run_emitted_tests(
                 },
             });
         }
-        return Ok(SkullOutcome::Pass { tests: 0, timings: Vec::new() });
+        return Ok(SkullOutcome::Pass { tests: 0, skipped: 0, timings: Vec::new() });
     }
+    if selected_tests.is_empty() {
+        return Ok(SkullOutcome::Pass { tests: 0, skipped, timings: Vec::new() });
+    }
+    // Only the selected tests exist from here on: the harness, the shard
+    // indices and the never-reported accounting all count them alone.
+    let (tests, files) = (selected_tests.as_slice(), selected_files.as_slice());
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
     // Shards are separate processes over one program file; test `i` goes to
@@ -895,9 +936,9 @@ fn run_emitted_tests(
     let timings = timings.into_iter().map(|(_, timing)| timing).collect();
 
     if fails.is_empty() {
-        Ok(SkullOutcome::Pass { tests: passed, timings })
+        Ok(SkullOutcome::Pass { tests: passed, skipped, timings })
     } else {
-        Ok(SkullOutcome::TestFail { passed, fails, timings })
+        Ok(SkullOutcome::TestFail { passed, fails, skipped, timings })
     }
 }
 
@@ -1055,14 +1096,19 @@ fn walk_test_units(
 /// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
 /// `@test`s. The package analogue of [`skull_build`]. Cross-file references
 /// resolve because every file is in one workspace.
-fn skull_build_package(dir: &str, shards: usize) -> std::result::Result<SkullOutcome, SkullFailure> {
-    skull_build_package_with_limit(dir, std::time::Duration::from_secs(15), shards)
+fn skull_build_package(
+    dir: &str,
+    shards: usize,
+    filter: Option<&crate::test::TestFilter>,
+) -> std::result::Result<SkullOutcome, SkullFailure> {
+    skull_build_package_with_limit(dir, std::time::Duration::from_secs(15), shards, filter)
 }
 
 fn skull_build_package_with_limit(
     dir: &str,
     limit: std::time::Duration,
     shards: usize,
+    filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| SkullFailure {
@@ -1114,7 +1160,7 @@ fn skull_build_package_with_limit(
     drop((ws, sources));
     crate::allocator::release_freed_memory();
     let lua = prepend_package_preamble(lua, dir, needs_libstone)?;
-    run_emitted_tests(lua, &tests, &files, limit, shards)
+    run_emitted_tests(lua, &tests, &files, limit, shards, filter)
 }
 
 /// LuaJIT processes per package test run: `ROCK_TEST_SHARDS`, else half the
@@ -2563,7 +2609,7 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     Ok((files, package_dirs))
 }
 
-pub fn skull_test(paths: &[String]) -> Result<()> {
+pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) -> Result<()> {
     crate::lint_pass::set_corpus_mode();
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let timings_path = std::env::var_os("ROCK_TEST_TIMINGS");
@@ -2577,6 +2623,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     let mut failed = 0usize; // units: emit/load failure
     let mut tests_total = 0usize; // individual @test functions executed
     let mut tests_passed = 0usize; // individual @test functions that passed
+    let mut tests_skipped = 0usize;
     let mut reason_counts: HashMap<String, usize> = HashMap::new();
     let mut details: Vec<(String, String)> = Vec::new();
     let mut timings: Vec<(String, TestTiming)> = Vec::new();
@@ -2595,7 +2642,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     for file in &files {
         let outcome: UnitResult = match fs_err::read_to_string(file) {
             Ok(src) => {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build(file, &src)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build(file, &src, filter)))
             }
             Err(e) => Ok(Err(SkullFailure { reason: e.to_string(), rendered: e.to_string() })),
         };
@@ -2603,27 +2650,29 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     }
     for dir in &package_dirs {
         let outcome: UnitResult =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build_package(dir, shards)));
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build_package(dir, shards, filter)));
         outcomes.push((short_path(dir).to_string(), outcome));
     }
 
     for (label, outcome) in outcomes {
         match outcome {
-            Ok(Ok(SkullOutcome::Pass { tests, timings: unit_timings })) => {
+            Ok(Ok(SkullOutcome::Pass { tests, skipped, timings: unit_timings })) => {
                 timings.extend(unit_timings.into_iter().map(|t| (label.clone(), t)));
                 emit_ok += 1;
                 exec_pass += 1;
                 tests_total += tests;
                 tests_passed += tests;
+                tests_skipped += skipped;
                 if verbose {
                     println!("{:.<60} {}", label, "PASS".green());
                 }
             }
-            Ok(Ok(SkullOutcome::TestFail { passed, fails, timings: unit_timings })) => {
+            Ok(Ok(SkullOutcome::TestFail { passed, fails, skipped, timings: unit_timings })) => {
                 timings.extend(unit_timings.into_iter().map(|t| (label.clone(), t)));
                 emit_ok += 1;
                 tests_total += passed + fails.len();
                 tests_passed += passed;
+                tests_skipped += skipped;
                 println!(
                     "{:.<60} {}  {}",
                     label,
@@ -2697,8 +2746,16 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     let total = emit_ok + failed;
     let test_fails = emit_ok - exec_pass;
     let tests_failed = tests_total - tests_passed;
+    let filter_summary = filter.map_or_else(String::new, |filter| {
+        format!(
+            "; filter '{}': {} selected, {} skipped",
+            filter.display(),
+            tests_total,
+            tests_skipped
+        )
+    });
     println!(
-        "\nskull backend: {}/{} @tests passed ({} failed) across {} files ({:.2}s)",
+        "\nskull backend: {}/{} @tests passed ({} failed) across {} files ({:.2}s){}",
         tests_passed.to_string().green(),
         tests_total,
         if tests_failed == 0 {
@@ -2708,6 +2765,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         },
         total,
         start.elapsed().as_secs_f64(),
+        filter_summary,
     );
     println!(
         "  files: {} all-pass, {} emit valid Lua ({} with test failures), {} emit-fail, {} total",
@@ -2754,6 +2812,14 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     // with `process::exit`, which runs no destructor and never returns to
     // `main`, so a report installed only there would silently never print.
     let ablation_fatals = crate::ablation_report::report("rock test");
+
+    if let Some(filter) = filter.filter(|_| tests_total == 0) {
+        anyhow::bail!(
+            "rock test filter '{}' matched no @tests (0 selected, {} skipped)",
+            filter.display(),
+            tests_skipped
+        );
+    }
 
     if tests_failed > 0
         || test_fails > 0

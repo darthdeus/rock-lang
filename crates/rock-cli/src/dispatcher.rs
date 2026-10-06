@@ -25,6 +25,7 @@ impl CommandContext {
     /// Run the command directly without server
     pub fn run(&self) -> Result<()> {
         self.require_required_test_support()?;
+        self.require_test_filter_support()?;
         if self.args.all_rejections
             && (self.args.command != CliCommand::Compile || self.args.backend != Backend::C)
         {
@@ -523,7 +524,8 @@ impl CommandContext {
             // LSP + error suites).
             CliCommand::Test => {
                 let files = self.get_test_files()?;
-                crate::skull_backend::skull_test(&files)
+                let filter = self.test_filter()?;
+                crate::skull_backend::skull_test(&files, filter.as_ref())
             }
             CliCommand::Compile | CliCommand::CompileSingle | CliCommand::TestCompile => {
                 let file = self.get_required_file("compile")?;
@@ -654,7 +656,8 @@ impl CommandContext {
         match self.args.command {
             CliCommand::Test => {
                 let files = self.get_test_files()?;
-                skull_backend::skull_test(&files)
+                let filter = self.test_filter()?;
+                skull_backend::skull_test(&files, filter.as_ref())
             }
             CliCommand::Compile | CliCommand::CompileSingle | CliCommand::TestCompile => {
                 let file = self.get_required_file("compile")?;
@@ -1087,6 +1090,33 @@ impl CommandContext {
             && (self.args.command != CliCommand::Test || self.args.backend != Backend::C)
         {
             anyhow::bail!("`--require-test` is supported only by `rock test --backend c`");
+        }
+        Ok(())
+    }
+
+    fn test_filter(&self) -> Result<Option<crate::test::TestFilter>> {
+        crate::test::TestFilter::parse(self.args.test_filter.as_deref())
+    }
+
+    fn require_test_filter_support(&self) -> Result<()> {
+        if self.args.command != CliCommand::Test {
+            if self.args.test_filter_explicit {
+                anyhow::bail!("`--filter` applies only to `rock test`");
+            }
+            return Ok(());
+        }
+        let Some(_) = self.test_filter()? else {
+            return Ok(());
+        };
+        if self.args.backend == Backend::C {
+            anyhow::bail!(
+                "`rock test --backend c` does not support `--filter` or ROCK_TEST_FILTER; use the default skull backend"
+            );
+        }
+        if !matches!(self.args.backend, Backend::Skull | Backend::Bone) {
+            anyhow::bail!(
+                "`rock test` filtering is supported only by the skull/bone test runner"
+            );
         }
         Ok(())
     }

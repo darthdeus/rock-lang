@@ -46,16 +46,24 @@ struct Run {
 }
 
 fn run(project: &Path, shards: &str) -> Run {
+    run_filtered(project, shards, None)
+}
+
+fn run_filtered(project: &Path, shards: &str, filter: Option<&str>) -> Run {
     let log = project.join("shard.log");
     let timings = project.join("timings.jsonl");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .arg("test").arg(project.join("tests"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command.arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")
         .env("ROCK_TEST_SHARDS", shards)
         .env("ROCK_TEST_TIMINGS", &timings)
         .env("SHARD_LOG", &log)
-        .output().expect("run shard fixture package test");
+        .env_remove("ROCK_TEST_FILTER");
+    if let Some(filter) = filter {
+        command.env("ROCK_TEST_FILTER", filter);
+    }
+    let output = command.output().expect("run shard fixture package test");
     Run {
         success: output.status.success(),
         text: format!("{}{}", String::from_utf8_lossy(&output.stdout),
@@ -149,5 +157,52 @@ fn a_dying_shard_names_its_unfinished_tests() {
         }
         assert!(text.contains("d_1: never reported"), "shards={shards}: the dying test is named:\n{text}");
         assert_eq!(passed, finished.len(), "shards={shards}: finished tests passed:\n{text}");
+    }
+}
+
+/// The filter selects first and the shards split only the selection: each
+/// selected test runs once, no skipped test runs, and the summary counts the
+/// selection.
+#[test]
+fn shards_split_only_the_filtered_selection() {
+    let (_dir, project) = package(&[("alpha.rock", ALPHA), ("beta.rock", BETA), ("gamma.rock", GAMMA)]);
+    let run = run_filtered(&project, "2", Some("alpha_,gamma.rock"));
+    let text = &run.text;
+    let mut runs: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut pids = BTreeSet::new();
+    for line in run.log.lines() {
+        let (name, pid) = line.split_once(' ').unwrap();
+        *runs.entry(name).or_default() += 1;
+        pids.insert(pid);
+    }
+    let expected = ["alpha_1", "alpha_2", "alpha_3", "gamma_1", "gamma_2"];
+    assert_eq!(runs.keys().copied().collect::<Vec<_>>(), expected, "only selected tests ran:\n{text}");
+    assert!(runs.values().all(|&n| n == 1), "every selected test ran once: {runs:?}\n{text}");
+    assert_eq!(pids.len(), 2, "two LuaJIT processes split the selection: {pids:?}\n{text}");
+    assert_eq!(summary(text), (5, 5, 0), "the summary counts the selection:\n{text}");
+    assert!(text.contains("5 selected, 3 skipped"), "skips are reported:\n{text}");
+    assert!(run.success, "the selection passes:\n{text}");
+}
+
+/// A dying shard under a filter names only selected tests as unfinished;
+/// skipped tests are neither run nor reported as never-reported.
+#[test]
+fn a_dying_filtered_shard_names_only_selected_tests() {
+    for shards in ["1", "2"] {
+        let (_dir, project) = package(&[("dying.rock", DYING)]);
+        let run = run_filtered(&project, shards, Some("d_1,d_2,d_3"));
+        let text = &run.text;
+        let (passed, total, failed) = summary(text);
+        assert_eq!(total, 3, "shards={shards}: the total is the selection:\n{text}");
+        assert_eq!(passed + failed, 3, "shards={shards}:\n{text}");
+        assert!(!run.success, "shards={shards}: a truncated run fails:\n{text}");
+        assert!(text.contains("d_1: never reported"), "shards={shards}: the dying test is named:\n{text}");
+        for skipped in ["d_0", "d_4", "d_5"] {
+            assert!(!text.contains(&format!("{skipped}: never reported")),
+                "shards={shards}: skipped `{skipped}` is not unfinished:\n{text}");
+            assert!(!run.log.lines().any(|l| l.starts_with(&format!("{skipped} "))),
+                "shards={shards}: skipped `{skipped}` ran:\n{}", run.log);
+        }
+        assert!(text.contains("3 selected, 3 skipped"), "shards={shards}: skips are reported:\n{text}");
     }
 }

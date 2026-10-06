@@ -4645,7 +4645,7 @@ mod value_test_exec {
     #[test]
     fn value_mismatch_fails_with_detail() {
         let src = "@test(returns = 43)\nfn r() -> int { return 42 }\n";
-        match skull_build("val.rock", src).expect("build ok") {
+        match skull_build("val.rock", src, None).expect("build ok") {
             SkullOutcome::TestFail { passed, fails, .. } => {
                 assert_eq!(passed, 0);
                 assert_eq!(fails, vec!["r: value mismatch: expected <43> got <42>".to_string()]);
@@ -4660,7 +4660,7 @@ mod value_test_exec {
                    @test(returns = -1.5)\nfn b() -> float { return -1.5 }\n\
                    @test(returns = true)\nfn c() -> bool { return true }\n\
                    @test(returns = 6, output = \"hi\")\nfn d() -> int { print(\"hi\")\n return 6 }\n";
-        match skull_build("val.rock", src).expect("build ok") {
+        match skull_build("val.rock", src, None).expect("build ok") {
             SkullOutcome::Pass { tests, .. } => assert_eq!(tests, 4),
             SkullOutcome::TestFail { fails, .. } => panic!("expected all pass, got {fails:?}"),
         }
@@ -4669,7 +4669,7 @@ mod value_test_exec {
     #[test]
     fn value_test_error_still_fails() {
         let src = "@test(returns = 1)\nfn e() -> int { error(\"boom\")\n return 1 }\n";
-        match skull_build("val.rock", src).expect("build ok") {
+        match skull_build("val.rock", src, None).expect("build ok") {
             SkullOutcome::TestFail { fails, .. } => {
                 assert!(fails[0].contains("error:"), "got {fails:?}");
             }
@@ -4680,7 +4680,7 @@ mod value_test_exec {
     #[test]
     fn returns_plus_expect_failure_is_a_unit_failure_not_expected_pass() {
         let src = "@test(expect_failure = true, returns = 42)\nfn contra() -> int { return 42 }\n";
-        let err = skull_build("val.rock", src).expect_err("contradiction must reject the unit");
+        let err = skull_build("val.rock", src, None).expect_err("contradiction must reject the unit");
         assert!(
             err.reason.contains("contradictory"),
             "unexpected reason: {}",
@@ -4765,7 +4765,7 @@ fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
 #[test]
 fn test_limit_allows_two_files_over_total_budget() {
     let dir = file_limit_package("os.execute('sleep 0.6')", Some("os.execute('sleep 0.6')"));
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 2, .. })), "{result:?}");
 }
 
@@ -4773,7 +4773,7 @@ fn test_limit_allows_two_files_over_total_budget() {
 fn test_limit_kills_and_names_stuck_file() {
     let dir = file_limit_package("while true do end", None);
     let start = std::time::Instant::now();
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     assert!(start.elapsed() < Duration::from_secs(5), "stuck file was not bounded");
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
@@ -4786,7 +4786,7 @@ fn test_limit_kills_and_names_stuck_file() {
 #[test]
 fn test_limit_keeps_completed_file_results() {
     let dir = file_limit_package("print('done')", Some("while true do end"));
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 1, fails, .. }) => {
             assert!(fails.iter().any(|f| f.contains("second.rock") && f.contains("timed out")), "{fails:?}");
@@ -4799,7 +4799,7 @@ fn test_limit_keeps_completed_file_results() {
 #[test]
 fn test_limit_bounds_program_loading() {
     let start = std::time::Instant::now();
-    let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100), 1);
+    let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100), 1, None);
     assert!(start.elapsed() < Duration::from_secs(2));
     let error = result.expect_err("loading must time out");
     assert!(error.rendered.contains("loading emitted program: timed out"), "{error:?}");
@@ -4816,7 +4816,7 @@ fn test_limit_resets_for_each_test() {
         source.push_str(&format!("@test inline(lua) fn {name}() = \"os.execute('sleep 0.3')\"\n"));
     }
     std::fs::write(file, source).unwrap();
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })), "{result:?}");
 }
 
@@ -4829,7 +4829,7 @@ fn test_limit_names_hung_test_after_healthy_ones() {
     source.push_str("@test inline(lua) fn hung_test() = \"while true do end\"\n");
     std::fs::write(file, source).unwrap();
     let start = std::time::Instant::now();
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     assert!(start.elapsed() < Duration::from_secs(5), "hung test was not bounded");
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 2, fails, .. }) => {
@@ -4870,7 +4870,7 @@ fn test_limit_ignores_forged_start_markers() {
     );
     let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
     let start = std::time::Instant::now();
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     assert!(start.elapsed() < Duration::from_secs(5), "forged future must not extend the limit");
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
@@ -4889,7 +4889,7 @@ fn test_limit_names_real_test_after_forged_marker() {
     let body = format!("{} forge('', '1') while true do end", forge_marker_lua());
     let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
     let start = std::time::Instant::now();
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     assert!(start.elapsed() < Duration::from_secs(5), "forged future must not extend the limit");
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {

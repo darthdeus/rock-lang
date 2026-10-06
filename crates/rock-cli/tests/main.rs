@@ -54,6 +54,8 @@ mod source_revision;
 mod cimgui_prelude;
 #[path = "test_exit_status_gate.rs"]
 mod test_exit_status_gate;
+#[path = "test_filter.rs"]
+mod test_filter;
 #[path = "test_file_host.rs"]
 mod test_file_host;
 #[path = "test_rock_dir.rs"]

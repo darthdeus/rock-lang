@@ -622,6 +622,10 @@ pub struct Args {
     pub files: Vec<String>,
     /// Named tests that must be discovered and pass under `rock test --backend c`.
     pub required_tests: Vec<String>,
+    /// Comma-separated test-name or source-path substrings from `--filter` or
+    /// `ROCK_TEST_FILTER`; the skull test runner applies the parsed selection.
+    pub test_filter: Option<String>,
+    pub test_filter_explicit: bool,
     pub show_passing: bool,
     pub all_rejections: bool,
     pub rejections_out: Option<String>,
@@ -847,6 +851,8 @@ impl Args {
                     .action(ArgAction::Append)
                     .help("For `rock test --backend c`: require this named @test to be discovered and pass (repeatable)."),
             )
+            .arg(Arg::new("filter").long("filter").value_name("PAT")
+                .help("For `rock test`: run @tests whose function name or source path contains a comma-separated substring."))
             .arg(Arg::new("show-passing").long("show-passing").action(ArgAction::SetTrue)
                 .help("For `rock test --backend c`: list passing and skipped test names in declaration order."))
             .arg(Arg::new("output").long("output").alias("out"))
@@ -1036,10 +1042,13 @@ impl Args {
             m.get_many::<String>(name).map(|vs| vs.cloned().collect()).unwrap_or_default()
         };
         let command = *m.get_one::<CliCommand>("command").expect("command required");
+        let test_filter = m.get_one::<String>("filter").cloned();
         Args {
             command,
             files: many_str("files"),
             required_tests: many_str("require-test"),
+            test_filter: test_filter.clone().or_else(|| std::env::var("ROCK_TEST_FILTER").ok()),
+            test_filter_explicit: test_filter.is_some(),
             show_passing: m.get_flag("show-passing"),
             all_rejections: m.get_flag("all-rejections"),
             rejections_out: m.get_one::<String>("rejections-out").cloned(),

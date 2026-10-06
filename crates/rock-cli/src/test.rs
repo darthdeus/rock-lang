@@ -8,6 +8,44 @@
 
 use crate::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TestFilter {
+    patterns: Vec<String>,
+    display: String,
+}
+
+impl TestFilter {
+    pub(crate) fn parse(raw: Option<&str>) -> Result<Option<Self>> {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        if raw.trim().is_empty() {
+            return Ok(None);
+        }
+        let patterns = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|pattern| !pattern.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if patterns.is_empty() {
+            anyhow::bail!("rock test filter must contain at least one nonempty substring");
+        }
+        let display = patterns.join(",");
+        Ok(Some(Self { patterns, display }))
+    }
+
+    pub(crate) fn matches(&self, name: &str, path: &str) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| name.contains(pattern) || path.contains(pattern))
+    }
+
+    pub(crate) fn display(&self) -> &str {
+        &self.display
+    }
+}
+
 /// A `@test` fn found by the front-end-only fallback parse. The name and
 /// compile-failure flags support reporting; output and value expectations
 /// are verified on the typechecked path (`skull::SkullTest`).
@@ -71,6 +109,23 @@ pub(crate) fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<Tes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_matches_test_names_and_source_paths() {
+        let filter = TestFilter::parse(Some("combat_text,tests/target.rock"))
+            .unwrap()
+            .unwrap();
+        assert!(filter.matches("combat_text_pipeline", "/pkg/tests/other.rock"));
+        assert!(filter.matches("unrelated", "/pkg/tests/target.rock"));
+        assert!(!filter.matches("unrelated", "/pkg/tests/other.rock"));
+    }
+
+    #[test]
+    fn empty_filter_has_no_selection_policy() {
+        assert!(TestFilter::parse(None).unwrap().is_none());
+        assert!(TestFilter::parse(Some("  ")).unwrap().is_none());
+        assert!(TestFilter::parse(Some(", ,")).is_err());
+    }
 
     fn discover(src: &str) -> Vec<TestMetadata> {
         let mut sf = SourceFiles::empty();
