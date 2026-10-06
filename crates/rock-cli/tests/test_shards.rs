@@ -22,6 +22,16 @@ f:write(name, " ", tostring(ffi.C.getpid()), "\n")
 f:close()
 """
 pub inline(lua) fn quit() = """ os.exit(0) """
+pub inline(lua) fn record_scratch(name: string) = """
+local ffi = require("ffi")
+pcall(ffi.cdef, "int getpid(void);")
+local tmp = os.getenv("ROCK_TEST_TMP") or ""
+local probe = io.open(tmp .. "/probe", "w")
+if probe then probe:close() end
+local f = assert(io.open(os.getenv("SHARD_LOG"), "a"))
+f:write(name, " ", tostring(ffi.C.getpid()), " ", tmp, " ", tostring(probe ~= nil), "\n")
+f:close()
+"""
 "#;
 
 fn package(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
@@ -204,5 +214,36 @@ fn a_dying_filtered_shard_names_only_selected_tests() {
                 "shards={shards}: skipped `{skipped}` ran:\n{}", run.log);
         }
         assert!(text.contains("3 selected, 3 skipped"), "shards={shards}: skips are reported:\n{text}");
+    }
+}
+
+const SCRATCH: &str = r#"
+@test fn s_0() { record_scratch("s_0") }
+@test fn s_1() { record_scratch("s_1") }
+@test fn s_2() { record_scratch("s_2") }
+@test fn s_3() { record_scratch("s_3") }
+"#;
+
+/// Shards share one worktree, so each test process gets its own writable
+/// `ROCK_TEST_TMP`, removed after the run.
+#[test]
+fn each_shard_process_gets_its_own_scratch_dir() {
+    let (_dir, project) = package(&[("scratch.rock", SCRATCH)]);
+    let run = run(&project, "2");
+    let text = &run.text;
+    assert!(run.success, "scratch fixture passes:\n{text}");
+    let mut by_pid: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for line in run.log.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields.len(), 4, "row: {line}");
+        assert_eq!(fields[3], "true", "the scratch dir is writable during the run: {line}");
+        by_pid.entry(fields[1].to_owned()).or_default().insert(fields[2].to_owned());
+    }
+    assert_eq!(by_pid.len(), 2, "two processes ran:\n{}", run.log);
+    let dirs: BTreeSet<&String> = by_pid.values().flatten().collect();
+    assert!(by_pid.values().all(|d| d.len() == 1), "one scratch dir per process:\n{}", run.log);
+    assert_eq!(dirs.len(), 2, "processes do not share a scratch dir:\n{}", run.log);
+    for dir in dirs {
+        assert!(!Path::new(dir).exists(), "`{dir}` is removed after the run");
     }
 }
