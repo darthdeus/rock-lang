@@ -941,9 +941,11 @@ fn run_test_program(
 
     let mut command = rock_host::project::build_luajit_command(script, &[]);
     crate::common::apply_test_rock_dir(&mut command);
-    if let Some(selection) = selection {
-        command.env("ROCK_TEST_SHARD_TESTS", selection);
-    }
+    // An inherited selection would silently narrow an unsharded run.
+    match selection {
+        Some(selection) => command.env("ROCK_TEST_SHARD_TESTS", selection),
+        None => command.env_remove("ROCK_TEST_SHARD_TESTS"),
+    };
     let mut child = command
         .env("STONE_HEADLESS", "1")
         .stdin(Stdio::null())
