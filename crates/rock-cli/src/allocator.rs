@@ -16,8 +16,10 @@ unsafe extern "C" {
 pub fn release_freed_memory() {
     // mimalloc pages belong to the thread that allocated them, and a collect
     // only reclaims the calling thread's heap. The compiler's parallel passes
-    // allocate on the rayon workers, so each worker collects its own.
+    // allocate on the rayon workers, so each worker collects its own. A
+    // `sequential` build has no pool, so only the caller collects there.
     // SAFETY: mi_collect takes no pointers and is safe to call at any time.
+    #[cfg(not(feature = "sequential"))]
     rayon::broadcast(|_| unsafe { mi_collect(true) });
     // SAFETY: as above.
     unsafe { mi_collect(true) }
@@ -53,6 +55,8 @@ mod tests {
     /// The compiler allocates on rayon workers and the host frees the result
     /// on its own thread before it waits on a child. Those pages belong to the
     /// workers' heaps, so a collect on the calling thread alone keeps them.
+    /// A `sequential` build has no pool-owned allocations to collect.
+    #[cfg(not(feature = "sequential"))]
     #[test]
     fn release_returns_pages_freed_into_pool_thread_heaps() {
         // The unit-test binary keeps the system global allocator, so this
@@ -88,6 +92,43 @@ mod tests {
             before >> 20,
             after >> 20,
             allocated >> 20,
+        );
+    }
+
+    /// A `sequential` build never constructs a rayon pool (see main.rs), so
+    /// releasing freed memory must not create one either. The child below
+    /// runs in a fresh process: a test-runner process may already own a
+    /// pool, which would hide the initialization this guards against.
+    #[cfg(feature = "sequential")]
+    #[test]
+    fn sequential_release_does_not_create_rayon_pool() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg("allocator::tests::sequential_release_child")
+            .arg("--nocapture")
+            .env("ROCK_ALLOC_SEQ_CHILD", "1")
+            .output()
+            .expect("spawn fresh test process");
+        assert!(
+            out.status.success(),
+            "release_freed_memory initialized a rayon pool in a fresh sequential process: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    /// Subprocess body for the parent above: a no-op unless spawned as the
+    /// fresh process, so ordinary suite runs stay green either way.
+    #[cfg(feature = "sequential")]
+    #[test]
+    fn sequential_release_child() {
+        if std::env::var_os("ROCK_ALLOC_SEQ_CHILD").is_none() {
+            return;
+        }
+        crate::allocator::release_freed_memory();
+        assert!(
+            rayon::ThreadPoolBuilder::new().build_global().is_ok(),
+            "release_freed_memory initialized the rayon global pool under `sequential`",
         );
     }
 }
