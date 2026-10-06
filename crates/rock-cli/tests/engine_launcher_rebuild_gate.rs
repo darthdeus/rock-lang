@@ -22,10 +22,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
-}
-
 fn cdylib_name(stem: &str) -> String {
     #[cfg(target_os = "windows")]
     {
@@ -71,7 +67,7 @@ fn mtimes(paths: &[PathBuf]) -> Vec<SystemTime> {
 #[test]
 #[ignore = "runs real cargo builds against shared workspace artifacts; run deliberately"]
 fn a_no_change_game_command_does_not_relink_the_engine_cdylibs() {
-    let root = workspace_root();
+    let root = crate::engine_build_scope_gate::private_engine_root("launcher");
     let manifest = fs_err::read_to_string(root.join("mag/stick.toml")).expect("mag stick.toml");
     assert!(
         manifest.contains("\"agent\""),

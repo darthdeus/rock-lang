@@ -24,6 +24,35 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// A project root whose `tmp/` is private and whose every other top-level
+/// entry links to the real workspace. `build_libstone` stages into
+/// `<ROCK_DIR>/tmp`, and `tools/test-desktop.sh full` pins the sha1 of the
+/// real `<root>/tmp/libstone.*` in an engine build receipt for the whole run,
+/// so a test that deletes or restages that file fails every later heavy test.
+/// Cargo still builds the real sources into the real `target/`.
+///
+/// Sets `ROCK_DIR`, which `rock_dir()` caches on first use: call it before any
+/// production call, once per test process (nextest runs one test per process).
+pub(crate) fn private_engine_root(label: &str) -> PathBuf {
+    let real = workspace_root();
+    let home = std::env::var_os("HOME").expect("HOME");
+    let private = PathBuf::from(home).join("tmp").join(format!("rock-engine-gate-root-{label}"));
+    if private.exists() {
+        fs_err::remove_dir_all(&private).expect("clear previous private root");
+    }
+    fs_err::create_dir_all(private.join("tmp")).expect("create private root");
+    for entry in fs_err::read_dir(&real).expect("list workspace root") {
+        let name = entry.expect("workspace entry").file_name();
+        if matches!(name.to_str(), Some("tmp" | ".git")) {
+            continue;
+        }
+        std::os::unix::fs::symlink(real.join(&name), private.join(&name))
+            .expect("link workspace entry into private root");
+    }
+    unsafe { std::env::set_var("ROCK_DIR", &private) };
+    private
+}
+
 fn cdylib_name(stem: &str) -> String {
     #[cfg(target_os = "windows")]
     {
@@ -42,7 +71,7 @@ fn cdylib_name(stem: &str) -> String {
 #[test]
 #[ignore = "deletes shared workspace artifacts and rebuilds a crate; run deliberately"]
 fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
-    let root = workspace_root();
+    let root = private_engine_root("scope");
 
     // The unrelated crate artifact that stone-rs does NOT depend on.
     // When cargo build --lib runs with no -p, rock-cli's lib target is compiled

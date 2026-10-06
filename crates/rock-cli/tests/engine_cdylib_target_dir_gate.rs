@@ -18,23 +18,14 @@
 //! hash is not used because `stage_cdylib` rewrites the macOS install name
 //! and re-signs the copy, so the bytes differ even when the copy is correct.
 //!
-//! `#[ignore]`d: it rebuilds `stone-rs`, replaces the shared staged
-//! `tmp/libstone`, and removes the worktree `target/debug` core cdylib. Run
+//! `#[ignore]`d: it rebuilds `stone-rs`, stages into a private root's
+//! `tmp/`, and removes the worktree `target/debug` core cdylib. Run
 //! deliberately:
 //!
 //!   cargo test -p rock-cli --test rock_cli_heavy -- --ignored --nocapture \
 //!     engine_cdylib_target_dir
 
-use std::path::{Path, PathBuf};
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
+use std::path::PathBuf;
 
 fn cdylib_name(stem: &str) -> String {
     #[cfg(target_os = "windows")]
@@ -54,7 +45,7 @@ fn cdylib_name(stem: &str) -> String {
 #[test]
 #[ignore = "rebuilds stone-rs and replaces shared target/tmp artifacts; run deliberately"]
 fn the_staged_core_cdylib_comes_from_the_cargo_target_directory_cargo_used() {
-    let root = workspace_root();
+    let root = crate::engine_build_scope_gate::private_engine_root("cdylib-target-dir");
     let home = std::env::var_os("HOME").expect("HOME");
     let scratch = PathBuf::from(home).join("tmp/rock-engine-cargo-target-dir-gate");
     let scratch_lib = scratch.join("debug").join(cdylib_name("stone_rs"));
