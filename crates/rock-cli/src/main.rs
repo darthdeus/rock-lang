@@ -42,13 +42,6 @@ fn main() {
 
     let args = Args::parse();
 
-    // Before any child or thread: begin() exports the parent marker for
-    // nested `rock` runs and starts the background git probe.
-    rock_cli::invocation_log::begin(
-        args.command.cli_name(),
-        &format!("{:?}", args.backend).to_lowercase(),
-    );
-
     // Sims force telemetry offline and must not read a production secret merely
     // to compile; build-var commands use this to distinguish the invocation.
     unsafe { std::env::set_var("ROCK_BUILD_COMMAND", args.command.cli_name()) };
@@ -108,6 +101,13 @@ fn main() {
             unsafe { std::env::set_var("ROCK_AGENT_DAEMON_BIN", daemon) };
         }
     }
+
+    // After the env setup above and before rayon: begin() exports the parent
+    // marker for nested `rock` runs and starts the delayed status-probe thread.
+    rock_cli::invocation_log::begin(
+        args.command.cli_name(),
+        &format!("{:?}", args.backend).to_lowercase(),
+    );
 
     // Cap rayon's global thread pool. Default rayon uses
     // available_parallelism (== logical core count), but on hybrid

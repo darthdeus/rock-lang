@@ -4,9 +4,10 @@
 //!
 //! The record is written once, at exit: `finish` from `main` or `exit`, and an
 //! `atexit` fallback for paths that leave through `std::process::exit` outside
-//! this crate or unwind out of `main` (exit code `null`). Git state comes from
-//! one background `git status` started at `begin`, so it overlaps the command
-//! instead of adding to it. Recording never changes the command's outcome:
+//! this crate or unwind out of `main` (exit code `null`). HEAD and branch are
+//! read from the repository files; dirty state comes from one background
+//! `git status` started only once the command has run for `GIT_DELAY`, so it
+//! overlaps a long command and never contends with a short one. Recording never changes the command's outcome:
 //! write errors are logged and dropped.
 
 use serde_json::{Map, Value, json};
@@ -30,9 +31,22 @@ const CONTEXT_ENV: &[&str] = &[
     "ROCK_TEST_FILTER",
     "ROCK_TEST_SHARDS",
 ];
-/// Upper bound on waiting for the background git probe after the command is
-/// done; a slower probe is killed and its fields recorded as null.
-const GIT_WAIT: Duration = Duration::from_millis(1500);
+/// `git status` takes 30-100 ms of stat-heavy work on the Rock tree; run
+/// alongside a 100 ms command it slowed that command by about 60 ms. Starting
+/// it after this delay keeps short commands free of it (`git_status:
+/// "skipped"`) while every command long enough to be a loop step gets it.
+const GIT_DELAY: Duration = Duration::from_millis(300);
+/// How long the record waits for a started probe once the command is done;
+/// a slower one is killed (`git_status: "late"`).
+const GIT_GRACE: Duration = Duration::from_millis(3);
+
+/// The delayed probe: `None` until started; `finished` stops a probe thread
+/// that wakes after the record is written.
+struct GitProbe {
+    child: Option<Child>,
+    finished: bool,
+}
+static GIT_PROBE: Mutex<GitProbe> = Mutex::new(GitProbe { child: None, finished: false });
 /// Dirty paths stat'ed for the newest edit time; a larger dirty set records
 /// the newest among the first this many.
 const MTIME_STAT_CAP: usize = 4000;
@@ -43,7 +57,6 @@ struct Pending {
     start: SystemTime,
     started: Instant,
     repo_root: Option<PathBuf>,
-    git: Option<Child>,
     record: Map<String, Value>,
     counts: Map<String, Value>,
     phases: Map<String, Value>,
@@ -75,7 +88,7 @@ pub fn log_path() -> Option<PathBuf> {
 }
 
 /// Start recording this invocation if it is a loop command and the log is on.
-/// Call once from `main`, single-threaded, before any child process spawns.
+/// Call once from `main`, single-threaded, after its environment setup.
 pub fn begin(command: &'static str, backend: &str) {
     if !is_loop_command(command) {
         return;
@@ -85,7 +98,7 @@ pub fn begin(command: &'static str, backend: &str) {
     let started = Instant::now();
     let cwd = std::env::current_dir().ok();
     let repo_root = cwd.as_deref().and_then(find_repo_root);
-    let git = repo_root.as_deref().and_then(spawn_git_status);
+    let (head, branch) = repo_root.as_deref().map(read_head).unwrap_or((None, None));
     let parent = std::env::var(PARENT_ENV).ok().and_then(|v| v.parse::<u64>().ok());
     let pid = std::process::id();
     // SAFETY: called from `main` before any thread or child is spawned.
@@ -105,25 +118,37 @@ pub fn begin(command: &'static str, backend: &str) {
     record.insert("nested_in".into(), json!(parent));
     record.insert("cwd".into(), json!(cwd));
     record.insert("repo_root".into(), json!(repo_root));
+    record.insert("head".into(), json!(head));
+    record.insert("branch".into(), json!(branch));
     let env: Map<String, Value> = CONTEXT_ENV
         .iter()
         .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), json!(v))))
         .collect();
     record.insert("env".into(), Value::Object(env));
 
+    let repo_root_for_probe = repo_root.clone();
     let pending = Pending {
         pid,
         path,
         start,
         started,
         repo_root,
-        git,
         record,
         counts: Map::new(),
         phases: Map::new(),
     };
     if let Ok(mut state) = STATE.lock() {
         *state = Some(pending);
+    }
+    if let Some(root) = repo_root_for_probe {
+        std::thread::spawn(move || {
+            std::thread::sleep(GIT_DELAY);
+            if let Ok(mut probe) = GIT_PROBE.lock() {
+                if !probe.finished {
+                    probe.child = spawn_git_status(&root);
+                }
+            }
+        });
     }
     // SAFETY: registering a plain `extern "C" fn` with no captured state.
     if unsafe { libc::atexit(finish_at_exit) } != 0 {
@@ -197,7 +222,18 @@ extern "C" fn finish_at_exit() {
 fn render(mut p: Pending, exit_code: Option<i32>, exit_path: &str) -> (PathBuf, String) {
     let wall_ms = p.started.elapsed().as_millis() as u64;
     let end = SystemTime::now();
-    let git = p.git.take().and_then(|child| collect_git(child, p.repo_root.as_deref()));
+    let child = match GIT_PROBE.try_lock() {
+        Ok(mut probe) => {
+            probe.finished = true;
+            probe.child.take()
+        }
+        Err(_) => None,
+    };
+    let (git_status, git) = match (child, &p.repo_root) {
+        (Some(child), root) => collect_git(child, root.as_deref()),
+        (None, Some(_)) => ("skipped", None),
+        (None, None) => ("no_repo", None),
+    };
     let r = &mut p.record;
     r.insert("start_utc".into(), json!(utc(p.start)));
     r.insert("end_utc".into(), json!(utc(end)));
@@ -206,12 +242,11 @@ fn render(mut p: Pending, exit_code: Option<i32>, exit_path: &str) -> (PathBuf, 
     r.insert("wall_ms".into(), json!(wall_ms));
     r.insert("exit_code".into(), json!(exit_code));
     r.insert("exit_path".into(), json!(exit_path));
-    let (head, branch, dirty, dirty_paths, dirty_mtime_ms) = match git {
-        Some(g) => (json!(g.head), json!(g.branch), json!(g.dirty_paths > 0), json!(g.dirty_paths), json!(g.dirty_mtime_ms)),
-        None => (Value::Null, Value::Null, Value::Null, Value::Null, Value::Null),
+    let (dirty, dirty_paths, dirty_mtime_ms) = match git {
+        Some(g) => (json!(g.dirty_paths > 0), json!(g.dirty_paths), json!(g.dirty_mtime_ms)),
+        None => (Value::Null, Value::Null, Value::Null),
     };
-    r.insert("head".into(), head);
-    r.insert("branch".into(), branch);
+    r.insert("git_status".into(), json!(git_status));
     r.insert("dirty".into(), dirty);
     r.insert("dirty_paths".into(), dirty_paths);
     r.insert("dirty_mtime_ms".into(), dirty_mtime_ms);
@@ -244,7 +279,7 @@ fn spawn_git_status(root: &Path) -> Option<Child> {
     // `--no-optional-locks`: a background status must never take index.lock
     // and fail the author's concurrent `git commit`.
     let spawned = Command::new("git")
-        .args(["--no-optional-locks", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal"])
+        .args(["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=normal"])
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -260,46 +295,73 @@ fn spawn_git_status(root: &Path) -> Option<Child> {
 }
 
 struct GitState {
-    head: Option<String>,
-    branch: Option<String>,
     dirty_paths: usize,
     dirty_mtime_ms: Option<u64>,
 }
 
-fn collect_git(mut child: Child, root: Option<&Path>) -> Option<GitState> {
-    let deadline = Instant::now() + GIT_WAIT;
+/// `("done", state)`, or `("late" | "failed", None)`.
+fn collect_git(mut child: Child, root: Option<&Path>) -> (&'static str, Option<GitState>) {
+    let deadline = Instant::now() + GIT_GRACE;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) => return None,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-            Ok(None) | Err(_) => {
-                log::debug!(target: "CLI", "invocation log: git status exceeded {GIT_WAIT:?}; recording no git state");
+            Ok(Some(_)) | Err(_) => return ("failed", None),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_micros(500)),
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return ("late", None);
             }
         }
     }
     let mut out = Vec::new();
-    std::io::Read::read_to_end(child.stdout.as_mut()?, &mut out).ok()?;
-    Some(parse_status(&out, root))
+    match child.stdout.as_mut().map(|s| std::io::Read::read_to_end(s, &mut out)) {
+        Some(Ok(_)) => ("done", Some(parse_status(&out, root))),
+        _ => ("failed", None),
+    }
 }
 
-/// Parse `git status --porcelain=v2 --branch -z`.
+/// HEAD's commit and branch, read from the repository files (no git
+/// process): `.git` may be a worktree's `gitdir:` file, refs may be loose or
+/// packed in the common dir.
+fn read_head(root: &Path) -> (Option<String>, Option<String>) {
+    let dot_git = root.join(".git");
+    let git_dir = match std::fs::read_to_string(&dot_git) {
+        Ok(text) => match text.trim().strip_prefix("gitdir: ") {
+            Some(dir) => root.join(dir),
+            None => return (None, None),
+        },
+        Err(_) => dot_git,
+    };
+    let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+        .map(|rel| git_dir.join(rel.trim()))
+        .unwrap_or_else(|_| git_dir.clone());
+    let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD")) else { return (None, None) };
+    let head = head.trim();
+    let Some(refname) = head.strip_prefix("ref: ") else {
+        return (Some(head.to_string()), None);
+    };
+    let branch = refname.strip_prefix("refs/heads/").map(str::to_string);
+    let loose = [&git_dir, &common_dir]
+        .iter()
+        .find_map(|dir| std::fs::read_to_string(dir.join(refname)).ok())
+        .map(|sha| sha.trim().to_string());
+    let sha = loose.or_else(|| {
+        let packed = std::fs::read_to_string(common_dir.join("packed-refs")).ok()?;
+        packed.lines().find_map(|line| {
+            let (sha, name) = line.split_once(' ')?;
+            (name == refname).then(|| sha.to_string())
+        })
+    });
+    (sha, branch)
+}
+
+/// Parse `git status --porcelain=v2 -z`.
 fn parse_status(out: &[u8], root: Option<&Path>) -> GitState {
-    let mut state = GitState { head: None, branch: None, dirty_paths: 0, dirty_mtime_ms: None };
+    let mut state = GitState { dirty_paths: 0, dirty_mtime_ms: None };
     let mut fields = out.split(|b| *b == 0).map(String::from_utf8_lossy);
     let mut stat_budget = MTIME_STAT_CAP;
     while let Some(entry) = fields.next() {
-        if let Some(oid) = entry.strip_prefix("# branch.oid ") {
-            state.head = (oid != "(initial)").then(|| oid.to_string());
-            continue;
-        }
-        if let Some(head) = entry.strip_prefix("# branch.head ") {
-            state.branch = (head != "(detached)").then(|| head.to_string());
-            continue;
-        }
         let path = match entry.chars().next() {
             // ordinary: 8 space-separated fields then the path
             Some('1') => entry.splitn(9, ' ').nth(8).map(str::to_string),
@@ -407,21 +469,31 @@ mod tests {
 
     #[test]
     fn porcelain_v2_parse_counts_every_dirty_kind() {
-        let out = b"# branch.oid abc123\0# branch.head loop-telemetry\0\
-1 .M N... 100644 100644 100644 aaa bbb src/a b.rs\0\
+        let out = b"1 .M N... 100644 100644 100644 aaa bbb src/a b.rs\0\
 2 R. N... 100644 100644 100644 aaa bbb R100 new.rs\0old.rs\0\
 ? untracked.txt\0";
         let s = parse_status(out, None);
-        assert_eq!(s.head.as_deref(), Some("abc123"));
-        assert_eq!(s.branch.as_deref(), Some("loop-telemetry"));
         assert_eq!(s.dirty_paths, 3);
     }
 
     #[test]
-    fn porcelain_v2_detached_head_has_no_branch() {
-        let s = parse_status(b"# branch.oid abc\0# branch.head (detached)\0", None);
-        assert_eq!(s.branch, None);
-        assert_eq!(s.dirty_paths, 0);
+    fn head_reads_worktree_loose_and_packed_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let common = dir.path().join("main.git");
+        let wt_git = common.join("worktrees/wt");
+        std::fs::create_dir_all(&wt_git).unwrap();
+        std::fs::create_dir_all(common.join("refs/heads")).unwrap();
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+        std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+        std::fs::write(wt_git.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+        std::fs::write(common.join("packed-refs"), "# pack-refs\nabc refs/heads/feat\n").unwrap();
+        assert_eq!(read_head(&wt), (Some("abc".into()), Some("feat".into())));
+        std::fs::write(common.join("refs/heads/feat"), "def\n").unwrap();
+        assert_eq!(read_head(&wt), (Some("def".into()), Some("feat".into())));
+        std::fs::write(wt_git.join("HEAD"), "123\n").unwrap();
+        assert_eq!(read_head(&wt), (Some("123".into()), None));
     }
 
     #[test]
