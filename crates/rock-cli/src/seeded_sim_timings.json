@@ -1160,6 +1160,7 @@
     "harming_a_townsperson_makes_the_player_a_criminal": 552,
     "harming_an_adventure_hall_actor_keeps_the_scene_and_calls_a_guard": 404,
     "harvest_click_drops_reagent": 1590,
+    "harvest_cooldown_fx": 589,
     "harvest_out_of_reach_refuses": 924,
     "headless_sim_promotes_the_resolved_view": 476,
     "heal_potion_restores_health_and_spends_one_bottle": 248,
