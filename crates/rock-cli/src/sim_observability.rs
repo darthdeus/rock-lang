@@ -598,6 +598,26 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     Some(text)
 }
 
+/// The checked-in median entry duration for one sim (wire or bare spelling),
+/// the longest-processing-time-first prior for machines with no local timing
+/// history. `None` when the table never saw the sim: the lane keeps plan
+/// order and the run log counts it, never silently.
+pub(crate) fn seeded_median_ms(name: &str) -> Option<u64> {
+    timing::seeded_median_ms(name)
+}
+
+/// A clone of the embedded seeded table for dispatch tests: they anchor on
+/// the table's own extremes so a regen keeps them honest.
+#[cfg(test)]
+pub(crate) fn seeded_table_snapshot() -> Vec<(String, u64)> {
+    timing::seeded_table_snapshot()
+}
+
+/// `(entry count, provenance label)` for plan and run logging.
+pub(crate) fn seeded_table_summary() -> (usize, String) {
+    timing::seeded_table_summary()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

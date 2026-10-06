@@ -411,6 +411,93 @@ impl Timings {
     }
 }
 
+/// Entry names arrive in wire spelling (`mag::foo`) or bare (`foo`) depending
+/// on which revision recorded them. The canonical form strips one `scope::`
+/// prefix so both spellings share one prior; the regen tool merges them the
+/// same way when it builds the table.
+pub(super) fn canonical_sim_name(name: &str) -> &str {
+    name.split("::").last().unwrap_or(name)
+}
+
+/// The checked-in per-sim median entry durations (wall ms) that seed
+/// longest-processing-time-first dispatch on machines with no local history.
+/// A prior only orders lanes; it never changes what runs or its verdict, and
+/// any local history record supersedes it because it is this machine's own
+/// measurement. Regenerated with `tools/regen-seeded-sim-timings.py`.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SeededTimings {
+    entries: HashMap<String, u64>,
+    label: String,
+}
+
+impl SeededTimings {
+    pub(super) fn from_json(text: &str) -> Result<Self, String> {
+        let value: Value =
+            serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+        if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
+            return Err("unsupported or missing schema_version (want 1)".into());
+        }
+        let medians = value
+            .get("medians_ms")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "missing medians_ms object".to_string())?;
+        let mut entries = HashMap::with_capacity(medians.len());
+        for (name, ms) in medians {
+            let ms = ms.as_u64().ok_or_else(|| format!("median for {name:?} is not a nonnegative integer"))?;
+            entries.insert(canonical_sim_name(name).to_string(), ms);
+        }
+        let project = value.get("project").and_then(Value::as_str).unwrap_or("?");
+        let generated = value.get("generated_at").and_then(Value::as_str).unwrap_or("?");
+        let label = format!("seeded_sim_timings.json: {} medians, project {project}, generated {generated}",
+            entries.len());
+        Ok(Self { entries, label })
+    }
+
+    pub(super) fn median_ms(&self, name: &str) -> Option<u64> {
+        self.entries.get(canonical_sim_name(name)).copied()
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> Vec<(String, u64)> {
+        self.entries.iter().map(|(name, ms)| (name.clone(), *ms)).collect()
+    }
+}
+
+fn seeded_timings() -> &'static SeededTimings {
+    static SEEDED: std::sync::OnceLock<SeededTimings> = std::sync::OnceLock::new();
+    SEEDED.get_or_init(|| match SeededTimings::from_json(include_str!("../seeded_sim_timings.json")) {
+        Ok(table) => table,
+        Err(reason) => {
+            log::warn!(target: "SIM", "ignoring checked-in seeded sim timings: {reason}");
+            SeededTimings {
+                entries: HashMap::new(),
+                label: format!("unavailable: {reason}"),
+            }
+        }
+    })
+}
+
+/// The checked-in median for one sim (wire or bare spelling), or `None` when
+/// the table never saw it. A missing entry is not an error: the lane keeps
+/// plan order and the run log says so.
+pub(super) fn seeded_median_ms(name: &str) -> Option<u64> {
+    seeded_timings().median_ms(name)
+}
+
+/// A clone of the embedded table for dispatch tests: they anchor on the
+/// table's own extremes so a regen keeps them honest.
+#[cfg(test)]
+pub(super) fn seeded_table_snapshot() -> Vec<(String, u64)> {
+    seeded_timings().snapshot()
+}
+
+/// `(entry count, provenance label)` for plan and run logging: a fallback to
+/// plan order is always countable against this, never silent.
+pub(super) fn seeded_table_summary() -> (usize, String) {
+    let table = seeded_timings();
+    (table.entries.len(), table.label.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,6 +951,52 @@ mod tests {
         let warnings = timing.observe("phase_end", &json!({ "phase": "reload_restore:sim", "success": false }), 25_000);
         assert_eq!(warnings[0].duration_ms, 13_000);
         assert_eq!(warnings[0].label, "phase reload_restore:sim");
+    }
+
+    /// The checked-in LPT prior: history recorded `mag::foo` on some revisions
+    /// and `foo` on others, so both spellings merge under the bare name and
+    /// either spelling looks the median up.
+    #[test]
+    fn seeded_table_parses_and_canonicalizes_scope_prefix() {
+        let table = SeededTimings::from_json(
+            r#"{"schema_version": 1, "project": "mag", "generated_at": "t",
+                "medians_ms": {"mag::foo": 3000, "bar": 1000}}"#,
+        )
+        .expect("valid seeded table");
+        assert_eq!(table.median_ms("foo"), Some(3_000));
+        assert_eq!(table.median_ms("mag::foo"), Some(3_000));
+        assert_eq!(table.median_ms("bar"), Some(1_000));
+        assert_eq!(table.median_ms("missing"), None);
+    }
+
+    /// A corrupt or foreign table is never a silent empty prior: the parse
+    /// reports its reason and the caller logs it while dispatch falls back to
+    /// plan order.
+    #[test]
+    fn seeded_table_rejects_a_bad_schema() {
+        assert!(SeededTimings::from_json("{}").is_err());
+        assert!(SeededTimings::from_json(r#"{"schema_version": 2, "medians_ms": {}}"#).is_err());
+        assert!(SeededTimings::from_json("not json").is_err());
+        assert!(SeededTimings::from_json(
+            r#"{"schema_version": 1, "medians_ms": {"a": "slow"}}"#
+        )
+        .is_err());
+        assert!(SeededTimings::from_json(
+            r#"{"schema_version": 1, "medians_ms": {"a": -5}}"#
+        )
+        .is_err());
+    }
+
+    /// The table the binary embeds must actually ship medians: an empty table
+    /// would demote every fresh-machine run to plan order without a word.
+    #[test]
+    fn embedded_seeded_table_ships_medians() {
+        let snapshot = super::seeded_table_snapshot();
+        assert!(
+            snapshot.len() >= 1000,
+            "a regen that drops most of the table must trip here, not in the gate; got {}",
+            snapshot.len()
+        );
     }
 
 }

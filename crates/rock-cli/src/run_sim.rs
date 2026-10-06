@@ -1975,6 +1975,49 @@ fn longest_first(estimates: &[Option<u64>]) -> Vec<usize> {
     order
 }
 
+/// Where one chain part's scheduling estimate came from, for the dispatch log
+/// line: a lane with no estimate anywhere keeps plan order, and the log says
+/// how many did, so the seeded fallback is never silent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EstimateSource {
+    History,
+    Seeded,
+}
+
+/// One part's scheduling estimate: this machine's own most recent finished
+/// duration first, else the checked-in seeded median, else nothing. History
+/// always wins because it is fresher than any checked-in prior; a missing or
+/// stale seeded entry (the table never saw the sim, or it failed to load)
+/// falls back to today's behavior with the `None` the caller counts.
+fn entry_schedule_estimate(history_ms: Option<u64>, sim_name: &str) -> (Option<u64>, Option<EstimateSource>) {
+    if let Some(ms) = history_ms {
+        return (Some(ms), Some(EstimateSource::History));
+    }
+    if let Some(ms) = crate::sim_observability::seeded_median_ms(sim_name) {
+        return (Some(ms), Some(EstimateSource::Seeded));
+    }
+    (None, None)
+}
+
+/// Sum scheduling estimates across a lane's entries (or a chain's parts):
+/// the total is present when any estimate is, and the source is history when
+/// any contributor is history, else seeded when any contributor is seeded.
+fn sum_estimates(
+    estimates: impl Iterator<Item = (Option<u64>, Option<EstimateSource>)>,
+) -> (Option<u64>, Option<EstimateSource>) {
+    let mut total: Option<u64> = None;
+    let mut source: Option<EstimateSource> = None;
+    for (ms, part_source) in estimates {
+        if let Some(ms) = ms {
+            total = Some(total.unwrap_or(0) + ms);
+        }
+        if source != Some(EstimateSource::History) {
+            source = part_source.or(source);
+        }
+    }
+    (total, source)
+}
+
 /// Run the ordinary `pool` and the hot-reload `lane` at the same time.
 ///
 /// The lane boots a chunk of its own from a session of its own
@@ -3101,15 +3144,23 @@ fn run_specs_worker_mode(
                 .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
         });
 
-    let recorded_ms = |i: usize| -> Option<u64> {
-        let recorder = recorder?;
-        parse_sim_chain(&specs[i]).iter().filter_map(|p| recorder.recorded_duration_ms(p)).reduce(|a, b| a + b)
+    // One entry's scheduling estimate and where it came from: this machine's
+    // history first, else the checked-in seeded median, else nothing. A lane
+    // sums its entries; see `sum_estimates` for the source rule.
+    let estimate_ms = |i: usize| -> (Option<u64>, Option<EstimateSource>) {
+        sum_estimates(parse_sim_chain(&specs[i]).iter().map(|part| {
+            let history = recorder.and_then(|recorder| recorder.recorded_duration_ms(part));
+            entry_schedule_estimate(history, part)
+        }))
     };
-    let lane_estimates: Vec<Option<u64>> = lanes
+    let recorded_ms = |i: usize| -> Option<u64> { estimate_ms(i).0 };
+    let lane_estimates_sources: Vec<(Option<u64>, Option<EstimateSource>)> = lanes
         .iter()
-        .map(|lane| lane.iter().filter_map(|&i| recorded_ms(i)).reduce(|a, b| a + b))
-        .chain(poolable.iter().map(|(i, _)| recorded_ms(*i)))
+        .map(|lane| sum_estimates(lane.iter().map(|&i| estimate_ms(i))))
+        .chain(poolable.iter().map(|(i, _)| estimate_ms(*i)))
         .collect();
+    let lane_estimates: Vec<Option<u64>> =
+        lane_estimates_sources.iter().map(|(ms, _)| *ms).collect();
 
     if let Some(recorder) = recorder {
         for (lane_id, lane) in lanes.iter().enumerate() {
@@ -3188,8 +3239,22 @@ fn run_specs_worker_mode(
     // A serial run gains nothing from reordering, so it keeps the plan's order.
     let work: Vec<Lane> = if jobs > 1 {
         if !quiet {
-            let timed = lane_estimates.iter().filter(|e| e.is_some()).count();
-            println!("[sim] worker: lanes start longest-first by recorded duration ({timed} of {} lanes timed)", work.len());
+            // Every fallback is counted here: history-timed and seeded lanes
+            // dispatch longest-first, untimed lanes keep plan order after them.
+            let history = lane_estimates_sources
+                .iter()
+                .filter(|(_, source)| *source == Some(EstimateSource::History))
+                .count();
+            let seeded = lane_estimates_sources
+                .iter()
+                .filter(|(_, source)| *source == Some(EstimateSource::Seeded))
+                .count();
+            let untimed = work.len().saturating_sub(history + seeded);
+            println!(
+                "[sim] worker: lanes start longest-first \
+                ({history} history-timed, {seeded} seeded, {untimed} untimed keep plan order of {} lanes)",
+                work.len()
+            );
         }
         longest_first(&lane_estimates).into_iter().map(|w| work[w]).collect()
     } else {
@@ -4348,6 +4413,22 @@ fn worker_lane_plan(
     let (groups, isolated) = group_worker_specs(&active_specs, env_by_wire);
     let reload_entries = isolated.iter()
         .filter(|(i, _)| entry_is_reload_lane(&active_specs[*i], env_by_wire)).count();
+    // Fresh-machine dispatch view: seeded medians only, no local history, so
+    // `--plan` shows the lane order a fresh checkout gets. Local history
+    // still supersedes seeds at run time; lanes with no seed keep plan order.
+    let lanes = allocate_worker_lanes(&groups, jobs);
+    let lane_estimates: Vec<Option<u64>> = lanes
+        .iter()
+        .map(|lane| {
+            sum_estimates(lane.iter().flat_map(|&idx| {
+                parse_sim_chain(&active_specs[idx]).into_iter().map(|part| {
+                    entry_schedule_estimate(None, part)
+                })
+            }))
+            .0
+        })
+        .collect();
+    let (_, seed_label) = crate::sim_observability::seeded_table_summary();
     serde_json::json!({
         "selected_entries": specs.len(),
         "backend_excluded": specs.len() - active_specs.len(),
@@ -4355,9 +4436,13 @@ fn worker_lane_plan(
         "batch_quantum": SIM_BATCH_QUANTUM,
         "signature_entry_counts": groups.iter().map(Vec::len).collect::<Vec<_>>(),
         "ordinary_entries": groups.iter().map(Vec::len).sum::<usize>(),
-        "ordinary_lanes": allocate_worker_lanes(&groups, jobs).len(),
+        "ordinary_lanes": lanes.len(),
         "isolated_entries": isolated.len() - reload_entries,
         "reload_entries": reload_entries,
+        "seed_source": seed_label,
+        "seeded_lanes": lane_estimates.iter().filter(|estimate| estimate.is_some()).count(),
+        "lane_estimates_ms": lane_estimates,
+        "lane_dispatch_order": longest_first(&lane_estimates),
     })
 }
 
@@ -7810,6 +7895,41 @@ mod tests {
     }
 
     #[test]
+    fn fresh_run_dispatches_seeded_longest_lane_first() {
+        // A fresh machine has no local history for anything; the checked-in
+        // seeded medians still order the seeded-longest lane first. Anchored
+        // on the table's own extremes so a regen keeps this honest.
+        let mut table = crate::sim_observability::seeded_table_snapshot();
+        assert!(!table.is_empty(), "the checked-in seeded table must ship medians");
+        table.sort_by_key(|(_, ms)| *ms);
+        let (fast_name, fast_ms) = table.first().expect("seeded table").clone();
+        let (slow_name, slow_ms) = table.last().expect("seeded table").clone();
+        assert!(slow_ms > fast_ms, "a degenerate seeded table cannot order lanes");
+
+        assert_eq!(
+            entry_schedule_estimate(None, &slow_name),
+            (Some(slow_ms), Some(EstimateSource::Seeded))
+        );
+        assert_eq!(
+            entry_schedule_estimate(None, &fast_name),
+            (Some(fast_ms), Some(EstimateSource::Seeded))
+        );
+        // This machine's own measurement always wins over the checked-in prior.
+        assert_eq!(
+            entry_schedule_estimate(Some(5), &slow_name),
+            (Some(5), Some(EstimateSource::History))
+        );
+        // A sim the table never saw keeps today's behavior: no estimate, plan order.
+        assert_eq!(entry_schedule_estimate(None, "no_such_sim_in_the_table"), (None, None));
+
+        let estimates = [
+            entry_schedule_estimate(None, &fast_name).0,
+            entry_schedule_estimate(None, &slow_name).0,
+        ];
+        assert_eq!(longest_first(&estimates), vec![1, 0], "the seeded-longest lane dispatches first");
+    }
+
+    #[test]
     fn the_classed_pool_with_no_cap_is_the_plain_pool() {
         let renders = vec![true; 5];
         let results = run_bounded_classed(&PoolWidth::fixed(4), 4, &renders, |i| Ok::<usize, anyhow::Error>(i * 2));
@@ -7912,6 +8032,32 @@ mod tests {
         assert_eq!(plan["isolated_entries"], 1);
         assert_eq!(plan["reload_entries"], 1);
         assert_eq!(plan["batch_quantum"], SIM_BATCH_QUANTUM);
+    }
+
+    #[test]
+    fn plan_shows_seeded_lane_dispatch_order() {
+        // Two boot groups on a fresh machine: the seeded-slower lane plans
+        // first. Anchored on the checked-in table's own extremes so a regen
+        // keeps this honest.
+        let mut table = crate::sim_observability::seeded_table_snapshot();
+        assert!(!table.is_empty(), "the checked-in seeded table must ship medians");
+        table.sort_by_key(|(_, ms)| *ms);
+        let (fast_name, fast_ms) = table.first().expect("seeded table").clone();
+        let (slow_name, slow_ms) = table.last().expect("seeded table").clone();
+        assert!(slow_ms > fast_ms, "a degenerate seeded table cannot order lanes");
+
+        let mut env_by_wire: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        env_by_wire.insert(slow_name.clone(), env(&[("MAG_SCENE", "arena")]));
+        env_by_wire.insert(fast_name.clone(), env(&[("MAG_SCENE", "chapel")]));
+        let plan = worker_lane_plan(&[slow_name, fast_name], &env_by_wire, "gl", 14);
+        assert_eq!(plan["signature_entry_counts"], serde_json::json!([1, 1]));
+        assert_eq!(plan["ordinary_lanes"], 2);
+        assert_eq!(
+            plan["lane_dispatch_order"],
+            serde_json::json!([0, 1]),
+            "the seeded-slower lane (specs[0]) dispatches first on a fresh machine"
+        );
+        assert_eq!(plan["seeded_lanes"], 2);
     }
 
     #[test]
