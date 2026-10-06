@@ -139,7 +139,6 @@ impl CEngineBuilds {
 }
 
 struct CForeignProvider {
-    library: &'static str,
     header: &'static str,
     include_dir: &'static str,
     build: CForeignBuild,
@@ -153,7 +152,6 @@ enum CForeignBuild {
 fn c_foreign_provider(library: &str) -> Option<CForeignProvider> {
     match library {
         "stone" => Some(CForeignProvider {
-            library: "stone",
             header: "stone.h",
             include_dir: "stone-rs/include",
             build: CForeignBuild::Stone,
@@ -846,7 +844,9 @@ fn c_link_plan_with(
     }
     let mut link = CLinkPlan::default();
     for provider in &providers {
-        link.libraries.push(provider.library.to_string());
+        link.libraries.push(match provider.build {
+            CForeignBuild::Stone => rock_host::engine_build::c_libstone_link_name().to_string(),
+        });
     }
 
     let build_stone = providers
