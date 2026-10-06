@@ -4804,7 +4804,7 @@ fn test_file_limit_keeps_completed_file_results() {
 #[test]
 fn test_file_limit_bounds_program_loading() {
     let start = std::time::Instant::now();
-    let result = super::run_emitted_tests("while true do end", &[], &[], Duration::from_millis(100));
+    let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100));
     assert!(start.elapsed() < Duration::from_secs(2));
     let error = result.expect_err("loading must time out");
     assert!(error.rendered.contains("loading emitted program: timed out"), "{error:?}");
@@ -4824,4 +4824,12 @@ fn test_file_limit_does_not_reset_for_each_test() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn truncate_cuts_emitted_lua_on_a_char_boundary() {
+    let lua = format!("{}\u{e9}{}", "a".repeat(3999), "b".repeat(10));
+    let excerpt = super::truncate(&lua);
+    assert!(excerpt.starts_with(&"a".repeat(3999)), "{}", &excerpt[..40]);
+    assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
 }

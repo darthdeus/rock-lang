@@ -697,7 +697,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             })
         }
     };
-    run_emitted_tests(&lua, &tests, &vec![file.to_owned(); tests.len()], std::time::Duration::from_secs(15))
+    run_emitted_tests(lua, &tests, &vec![file.to_owned(); tests.len()], std::time::Duration::from_secs(15))
 }
 
 /// `Some(count)` when `file` declares `@test` fns and EVERY one carries
@@ -724,15 +724,18 @@ pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<
 /// classify the outcome. Shared by the per-file path ([`skull_build`]) and the
 /// whole-package path ([`skull_build_package`]).
 fn run_emitted_tests(
-    lua: &str,
+    lua: String,
     tests: &[skull::SkullTest],
     files: &[String],
     limit: std::time::Duration,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     assert_eq!(tests.len(), files.len());
 
+    // Failure reports quote the program's head; the whole text is not kept
+    // while the test process runs (mag's is about 170 MB).
     // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
+        let excerpt = truncate(&lua);
         let run = run_test_program(lua, limit).map_err(|e| SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: e.to_string(),
@@ -745,7 +748,7 @@ fn run_emitted_tests(
                 } else {
                     format!("{}\n\n--- emitted lua (truncated) ---\n{}",
                         format!("{}{}", String::from_utf8_lossy(&run.output.stdout),
-                            String::from_utf8_lossy(&run.output.stderr)), truncate(lua))
+                            String::from_utf8_lossy(&run.output.stderr)), excerpt)
                 },
             });
         }
@@ -753,13 +756,15 @@ fn run_emitted_tests(
     }
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
-    let program = format!("{lua}{}", build_test_harness(tests, files));
+    let mut program = lua;
+    program.push_str(&build_test_harness(tests, files));
+    let excerpt = truncate(&program);
     // The harness `pcall`s each test, so an ordinary assertion failure becomes a
     // FAIL marker and the process still exits 0. A non-zero status therefore
     // means the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
     // after that point never ran. Keep the output either way: a truncated run
     // still has to say what it managed to report.
-    let run = run_test_program(&program, limit).map_err(|e| SkullFailure {
+    let run = run_test_program(program, limit).map_err(|e| SkullFailure {
         reason: "test run errored (skull bug)".to_string(),
         rendered: e.to_string(),
     })?;
@@ -779,7 +784,7 @@ fn run_emitted_tests(
     if markers.is_none() && timeout_failure.is_none() {
         return Err(SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
-            rendered: format!("{stdout}\n\n--- emitted lua (truncated) ---\n{}", truncate(&program)),
+            rendered: format!("{stdout}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
         });
     }
     let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
@@ -852,7 +857,7 @@ fn run_emitted_tests(
     }
 }
 
-fn run_test_program(program: &str, limit: std::time::Duration) -> Result<crate::common::ProcessResult> {
+fn run_test_program(program: String, limit: std::time::Duration) -> Result<crate::common::ProcessResult> {
     use std::io::Write;
     use std::process::Stdio;
     use rock_host::process_management::{register_child_process, unregister_child_process};
@@ -860,6 +865,7 @@ fn run_test_program(program: &str, limit: std::time::Duration) -> Result<crate::
     // A file avoids blocking on stdin before the startup watchdog is running.
     let mut script = tempfile::NamedTempFile::new()?;
     script.write_all(program.as_bytes())?;
+    drop(program);
     let mut command = rock_host::project::build_luajit_command(script.path(), &[]);
     crate::common::apply_test_rock_dir(&mut command);
     let mut child = command
@@ -993,6 +999,9 @@ fn skull_build_package_with_limit(
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
     })?;
+    // The workspace owns everything emission reads; the parse trees (about
+    // 1 GB for mag) would otherwise stay live through the emit peak.
+    drop(modules);
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|e| {
         SkullFailure {
             reason: "build var resolution failed".to_string(),
@@ -1017,13 +1026,28 @@ fn skull_build_package_with_limit(
         ws.modules[func.module.index()].file.as_str().to_owned()
     }).collect::<Vec<_>>();
     let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
-    let lua = prepend_package_preamble(lua, dir, &ws)?;
+    let needs_libstone = needs_libstone(&ws);
     // The compiler state is dead once the program is emitted. Free it before
-    // the test process runs: mag's peaks near 5 GB, and keeping it resident
-    // doubled the memory a `rock test` needed while its luajit child ran.
-    drop((ws, modules, sources));
+    // the program text is copied and the test process runs: mag's peaks near
+    // 5 GB, and keeping it resident doubled the memory a `rock test` needed
+    // while its luajit child ran.
+    drop((ws, sources));
     crate::allocator::release_freed_memory();
-    run_emitted_tests(&lua, &tests, &files, limit)
+    let lua = prepend_package_preamble(lua, dir, needs_libstone)?;
+    run_emitted_tests(lua, &tests, &files, limit)
+}
+
+/// Whether the checked program declares a native binding into libstone. The
+/// resolved graph can supply native bindings without the full Stone host; this
+/// reads the checked FFI namespace, independent of package names and aliases.
+fn needs_libstone(ws: &bone_semantic::inference::Workspace) -> bool {
+    ws.modules.iter().any(|module| {
+        module.functions.iter().any(|(_, function)| {
+            function.is_extern
+                && function.backend != bone_semantic::hir::FnBackend::Js
+                && function.ffi_lib.is_some_and(|library| library.as_str() == "stone")
+        })
+    })
 }
 
 /// Package tests stage native Stone bindings and keep configured asset roots.
@@ -1032,7 +1056,7 @@ fn skull_build_package_with_limit(
 fn prepend_package_preamble(
     lua: String,
     dir: &str,
-    ws: &bone_semantic::inference::Workspace,
+    needs_libstone: bool,
 ) -> std::result::Result<String, SkullFailure> {
     let path = std::path::Path::new(dir);
     let stone_dir = configured_stone_dir(path).map_err(|error| SkullFailure {
@@ -1043,15 +1067,6 @@ fn prepend_package_preamble(
         reason: "test host resolution failed".to_string(),
         rendered: error.to_string(),
     })?;
-    // The resolved graph can supply native bindings without the full Stone host.
-    // Use the checked FFI namespace, independent of package names and aliases.
-    let needs_libstone = ws.modules.iter().any(|module| {
-        module.functions.iter().any(|(_, function)| {
-            function.is_extern
-                && function.backend != bone_semantic::hir::FnBackend::Js
-                && function.ffi_lib.is_some_and(|library| library.as_str() == "stone")
-        })
-    });
     if is_game || stone_dir.is_some() || needs_libstone {
         // Core libstone only: the CPU host does not use optional game cdylibs.
         rock_host::engine_build::build_libstone().map_err(|error| SkullFailure {
@@ -1117,7 +1132,8 @@ pub(crate) fn collect_package_test_fns(
 /// Keep emitted-Lua dumps in error reports manageable.
 fn truncate(s: &str) -> String {
     if s.len() > 4000 {
-        format!("{}\n... ({} more bytes)", &s[..4000], s.len() - 4000)
+        let end = s.floor_char_boundary(4000);
+        format!("{}\n... ({} more bytes)", &s[..end], s.len() - end)
     } else {
         s.to_string()
     }
