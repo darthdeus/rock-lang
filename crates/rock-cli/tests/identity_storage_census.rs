@@ -32,7 +32,7 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 239 | 192 | 7 | 0 | 1477 | 180 | 86 | 1825 | 7 | 4013 |
+| mag | exempt | 239 | 192 | 7 | 0 | 1481 | 198 | 86 | 1789 | 7 | 3999 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 1 |
 | mag_content | exempt | 4 | 4 | 2 | 0 | 49 | 0 | 0 | 0 | 0 | 59 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -66,7 +66,6 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/walker.rock:23 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
-- mag: 1 other semantic errors
 - tools/mag-encounter-lab: 1 semantic errors
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
 - tests/newtype_generic_unification_reject_wrong_shape.rock: 1 other semantic errors
