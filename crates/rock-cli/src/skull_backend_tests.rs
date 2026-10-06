@@ -799,32 +799,23 @@ mod overlay_runtime_tests {
         );
     }
 
-    /// Regression for the "stale main.lua / `IVec2_ct nil`" desync class
-    /// (TODO.md): a body edit's overlay references a value-struct ctor (e.g.
-    /// `P_ct`) emitted GLOBAL into main.lua by `value_struct_defs`. The frozen
-    /// baseline (v0) must already carry EVERY defined value struct's ctor -- even
-    /// `P`, which v0's bodies never construct -- so when the edited body in the
-    /// overlay first constructs `P`, its `P_ct` resolves against the baseline
-    /// rather than crashing on nil. Pins the two invariants that close the bug:
-    /// `value_struct_defs` emits ALL value structs (not use-gated), and the frozen
-    /// baseline is a real full build. If either regresses, the composed run errors
-    /// (nil ctor) while fresh succeeds, and `assert_runtime_eq` fails loudly.
+    // A body-only reload can first construct a previously unused value type;
+    // its constructor must already exist in the frozen full baseline.
     #[test]
     fn overlay_referencing_baseline_value_ctor_runtime_eq() {
-        // `P` is DEFINED in both versions but only CONSTRUCTED in v1's `compute`.
-        // Runtime-derived fields prevent constant folding, and the float field
-        // sends value equality through the cdata metatype, so v1 must call `P_ct`.
-        let decl = "value P { x: int, y: int, marker: float }\nglobal INPUT: int = 5\n";
+        // An opaque Lua parameter requires boxing; equality and field reads can
+        // compare scalar leaves without ever invoking the constructor.
+        let decl = "value P { x: int, y: int }\nglobal INPUT: int = 5\n\
+                    inline(lua) fn ctor_sum(p: P) -> int = \"return p.x + p.y\"\n";
         let v0 = format!("{decl}fn compute() -> int {{ 1 }}\nfn main() {{ print(\"{{compute()}}\") }}\n");
         let v1 = format!(
-            "{decl}fn compute() -> int {{ let p = P {{ x: INPUT, y: INPUT + 1, marker: INPUT as float }}\n let q = P {{ x: INPUT - 3, y: INPUT + 4, marker: (INPUT + 1) as float }}\n if p == q {{ 0 }} else {{ p.x + p.y }} }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
+            "{decl}fn compute() -> int {{ ctor_sum(P {{ x: INPUT, y: INPUT + 1 }}) }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
         );
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let stale_main = full0.lua;
-        // Sanity: the frozen baseline defines P's ctor even though nothing builds P.
         assert!(stale_main.contains("P_ct"), "baseline must emit every value-struct ctor, even unused ones");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
@@ -834,10 +825,14 @@ mod overlay_runtime_tests {
             result.tier
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        assert!(overlay.lua.contains("P_ct"), "overlay's edited body must reference P_ct");
+        assert!(overlay.lua.contains("P_ct("), "overlay's edited body must call P_ct");
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         assert_runtime_eq(&stale_main, &overlay.lua, &fresh.lua, "overlay refs baseline value ctor (P 5+6=11)");
+        match run_parts(&[&stale_main, stub_for(&stale_main), &overlay.lua, "main()"]) {
+            ExecOutcome::Output(output) => assert_eq!(output.trim(), "11"),
+            ExecOutcome::Errored(error) => panic!("overlay value constructor failed: {error}"),
+        }
     }
 
     /// One concrete edit, fully spelled out, so the mechanism is legible before
