@@ -21,11 +21,12 @@ fn isolated_test(name: &str) -> bool {
         return false;
     }
     static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = GATE.lock().expect("engine gate lock");
+    let guard = GATE.lock().expect("engine gate lock");
     let result = Command::new(std::env::current_exe().expect("test executable"))
         .args([&format!("engine_build_scope_gate::{name}"), "--exact", "--ignored", "--nocapture"])
         .env("ROCK_ENGINE_GATE_CHILD", name)
         .output().expect("isolated engine gate");
+    drop(guard);
     assert!(result.status.success(), "{}{}",
         String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     true
@@ -86,6 +87,12 @@ fn cdylib_name(stem: &str) -> String {
     }
 }
 
+fn cargo_target(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR").filter(|path| !path.is_empty())
+        .map(PathBuf::from).map(|path| root.join(path))
+        .unwrap_or_else(|| root.join("target"))
+}
+
 #[test]
 #[ignore = "deletes shared workspace artifacts and rebuilds a crate; run deliberately"]
 fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
@@ -96,9 +103,7 @@ fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
     // When cargo build --lib runs with no -p, rock-cli's lib target is compiled
     // and produces target/debug/librock_cli.rlib. When scoped with -p stone-rs,
     // cargo only builds stone-rs and its dependencies, leaving this artifact absent.
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from).map(|path| root.join(path))
-        .unwrap_or_else(|| root.join("target"));
+    let target = cargo_target(&root);
     let unrelated_artifact = target.join("debug/librock_cli.rlib");
     if unrelated_artifact.exists() {
         fs_err::remove_file(&unrelated_artifact).expect("remove unrelated artifact before test");
@@ -222,6 +227,7 @@ fn main() {
         let result = Command::new(env!("CARGO_BIN_EXE_rock"))
             .args(args).current_dir(&root)
             .env("ROCK_ENGINE_BUILD_RECEIPT", &receipt)
+            .env("ROCK_TEST_VERBOSE", "1")
             .env_remove("ROCK_SKIP_ENGINE_BUILD")
             .env_remove("STONE_SOURCE_DIR").env_remove("__ROCK_STONE_DIR")
             .env_remove("GAME_SOURCE_DIR")
@@ -246,6 +252,7 @@ fn main() {
         let result = Command::new(env!("CARGO_BIN_EXE_rock"))
             .args(args).current_dir(&root)
             .env("ROCK_ENGINE_BUILD_RECEIPT", &receipt)
+            .env("ROCK_TEST_VERBOSE", "1")
             .env_remove("ROCK_SKIP_ENGINE_BUILD")
             .output().expect("consumer with invalid receipt");
         let text = format!("{}{}", String::from_utf8_lossy(&result.stdout),
@@ -274,6 +281,26 @@ fn receipt_bound_raw_staging_preserves_the_engine_library() {
     assert!(fs_err::read(&engine).unwrap() == bytes, "stage_cdylib changed engine bytes");
     assert_eq!(fs_err::metadata(&engine).unwrap().modified().unwrap(), mtime,
         "stage_cdylib restaged receipt-bound engine libstone");
+
+    // A later C build's dep-info must not redefine the already owned engine.
+    let target = cargo_target(&root);
+    let dep_info = target.join("debug/libstone_rs.d");
+    let saved_dep_info = fs_err::read(&dep_info).expect("Cargo dep-info");
+    let foreign_input = root.join("tmp/foreign-provider-input");
+    fs_err::write(&foreign_input, b"foreign provider input").expect("foreign input");
+    fs_err::write(&dep_info, format!("provider: {}\n", foreign_input.display()))
+        .expect("replace dep-info with foreign provider inputs");
+    let reissued = root.join("tmp/reissued.json");
+    let result = rock_host::engine_build::prepare_engine_build_receipt(&[], &reissued);
+    fs_err::write(&dep_info, saved_dep_info).expect("restore exact Cargo dep-info");
+    result.expect("reissue bound receipt");
+    let original: serde_json::Value = serde_json::from_slice(&fs_err::read(&receipt).unwrap()).unwrap();
+    let current: serde_json::Value = serde_json::from_slice(&fs_err::read(&reissued).unwrap()).unwrap();
+    assert_eq!(current["libs"], original["libs"],
+        "receipt reissue replaced owned input provenance with foreign Cargo dep-info");
+    assert!(fs_err::read(&engine).unwrap() == bytes);
+    assert_eq!(fs_err::metadata(&engine).unwrap().modified().unwrap(), mtime);
+
     fs_err::write(&engine, b"replaced staged engine").expect("invalidate receipt");
     let error = rock_host::engine_build::stage_cdylib("stone_rs", "stone")
         .expect_err("raw staging must reject a changed receipt-bound library");

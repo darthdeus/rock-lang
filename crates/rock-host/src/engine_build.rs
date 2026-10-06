@@ -25,7 +25,7 @@ struct EngineBuildReceipt {
     libs: Vec<ReceiptLib>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ReceiptLib {
     src_stem: String,
     dst_stem: String,
@@ -544,6 +544,9 @@ fn cargo_build_and_stage_lib(
     if crate::project::is_release_layout() {
         return Ok(());
     }
+    if validate_receipted_lib(dst_stem)? {
+        return Ok(());
+    }
     run_cargo(cargo_args, &format!("Failed to build {}", display_name))?;
     stage_cdylib(src_stem, dst_stem)
 }
@@ -567,6 +570,10 @@ fn cargo_build_and_stage_lib(
 /// is atomic on macOS and Linux; concurrent dlopens see either the old
 /// or the new fully-signed file but never a torn or mid-resign one.
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
+    // A receipt owns the destination even for callers that bypass the builder.
+    if validate_receipted_lib(dst_stem)? {
+        return Ok(());
+    }
     let rock_root = PathBuf::from(crate::rock_dir());
     let target_debug = cargo_target_dir(&rock_root).join("debug");
     let dev_tmp = rock_root.join("tmp");
@@ -662,16 +669,6 @@ pub fn build_libstone() -> Result<()> {
     if crate::project::is_release_layout() {
         return Ok(());
     }
-    if let Some((root, receipt_path, receipt)) = engine_build_receipt_from_env()? {
-        let core = receipt_lib(&receipt, "stone").ok_or_else(|| {
-            anyhow::anyhow!(
-                "engine build receipt `{}` does not contain core libstone",
-                receipt_path.display()
-            )
-        })?;
-        validate_receipt_lib(&root, core)?;
-        return Ok(());
-    }
     cargo_build_and_stage_lib("stone-rs", &["build", "-p", "stone-rs"], "stone_rs", "stone")?;
     Ok(())
 }
@@ -692,6 +689,11 @@ pub fn c_libstone_link_name() -> &'static str {
 /// backend maps the tool bindings to their imgui-absent contract, so linking
 /// the default-featured cdylib would leave those provider symbols undefined.
 pub fn build_libstone_for_c() -> Result<()> {
+    if crate::project::is_release_layout() {
+        return Ok(());
+    }
+    // The separate C provider does not detach this consumer from its receipt.
+    validate_receipted_lib("stone")?;
     cargo_build_and_stage_lib(
         "stone-rs for the C backend",
         &["build", "-p", "stone-rs", "--lib", "--no-default-features"],
@@ -712,11 +714,8 @@ pub fn build_optional_engine_lib(lib: &EngineLib) -> Result<()> {
     if crate::project::is_release_layout() {
         return Ok(());
     }
-    if let Some((root, _, receipt)) = engine_build_receipt_from_env()? {
-        if let Some(prebuilt) = receipt_lib(&receipt, lib.dst_stem) {
-            validate_receipt_lib(&root, prebuilt)?;
-            return Ok(());
-        }
+    if validate_receipted_lib(lib.dst_stem)? {
+        return Ok(());
     }
     build_optional_engine_lib_fresh(lib)
 }
@@ -748,6 +747,7 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
         anyhow::bail!("engine build receipts are only meaningful in a source workspace");
     }
     let root = fs_err::canonicalize(crate::rock_dir())?;
+    let inherited = engine_build_receipt_from_env()?.map(|(_, _, receipt)| receipt);
     cargo_build_and_stage_lib("stone-rs", &["build", "-p", "stone-rs"], "stone_rs", "stone")?;
 
     let mut optional = BTreeSet::new();
@@ -761,14 +761,17 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
     }
 
     let target_dir = cargo_target_dir(&root);
-    let mut libs = vec![capture_receipt_lib(&root, &target_dir, "stone_rs", "stone")?];
+    let capture = |src_stem: &str, dst_stem: &str| -> Result<ReceiptLib> {
+        if let Some(lib) = inherited.as_ref().and_then(|receipt| receipt_lib(receipt, dst_stem)) {
+            // Cargo dep-info may describe a later C build, not this owned library.
+            validate_receipt_lib(&root, lib)?;
+            return Ok(lib.clone());
+        }
+        capture_receipt_lib(&root, &target_dir, src_stem, dst_stem)
+    };
+    let mut libs = vec![capture("stone_rs", "stone")?];
     for lib in OPTIONAL_ENGINE_LIBS.iter().filter(|lib| optional.contains(lib.need)) {
-        libs.push(capture_receipt_lib(
-            &root,
-            &target_dir,
-            lib.src_stem,
-            lib.dst_stem,
-        )?);
+        libs.push(capture(lib.src_stem, lib.dst_stem)?);
     }
     let receipt = EngineBuildReceipt {
         version: ENGINE_BUILD_RECEIPT_VERSION,
@@ -877,6 +880,24 @@ fn engine_build_receipt_from_env() -> Result<Option<(PathBuf, PathBuf, EngineBui
     let path = PathBuf::from(path);
     let receipt = load_engine_build_receipt(&root, &path)?;
     Ok(Some((root, path, receipt)))
+}
+
+fn validate_receipted_lib(dst_stem: &str) -> Result<bool> {
+    let Some((root, receipt_path, receipt)) = engine_build_receipt_from_env()? else {
+        return Ok(false);
+    };
+    let Some(lib) = receipt_lib(&receipt, dst_stem) else {
+        if dst_stem == "stone" {
+            anyhow::bail!(
+                "engine build receipt `{}` does not contain core libstone",
+                receipt_path.display()
+            );
+        }
+        // Uncaptured providers, including stone_c, still build on demand.
+        return Ok(false);
+    };
+    validate_receipt_lib(&root, lib)?;
+    Ok(true)
 }
 
 /// Build the engine cdylibs required for a specific game. Always builds
