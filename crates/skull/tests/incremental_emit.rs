@@ -1189,3 +1189,78 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
     let run = format!("{}\nprint(sample(1))\n{}\nprint(sample(3))\n", full.lua, overlay.lua);
     assert_eq!(crate::common::run_luajit(&run, "overlay_frame_nil_stores"), "true\ntrue");
 }
+
+/// A `co fn` with lambdas in both its step region and a detached defer region
+/// computes one lambda topology per region under a single owner. A body-only
+/// edit elsewhere must still overlay: the per-owner topology the compatibility
+/// gate compares has to be one value per owner, not one per region.
+#[test]
+fn body_only_edit_survives_multi_region_coroutine_topology() {
+    let v1 = r#"
+enum Ev { Tick(int) }
+global LOG: int = 0
+fn note(x: int) { LOG = x }
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+co fn worker(seed: int) -> Coroutine<Ev> {
+    defer {
+        note(apply((v) => v + seed, 1))
+    }
+    let base = apply((v) => v + 1, seed)
+    yield Ev::Tick(base)
+}
+fn probe() -> int { return 1 }
+fn main() {
+    let c = worker(0)
+    let _ = c.resume()
+    let _ = probe()
+}
+"#;
+    let v2 = v1.replace("fn probe() -> int { return 1 }", "fn probe() -> int { return 2 }");
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) = emit_full_global(&ws1, mid).expect("emit_full v1");
+    let ws2 = ws_with_stdlib(&v2);
+    emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "probe")]);
+}
+
+/// The union topology must still fail closed: adding a lambda to one region
+/// of a multi-region coroutine changes the union, so the overlay refuses.
+#[test]
+fn lambda_insertion_in_defer_region_still_refuses_overlay() {
+    let v1 = r#"
+enum Ev { Tick(int) }
+global LOG: int = 0
+fn note(x: int) { LOG = x }
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+co fn worker(seed: int) -> Coroutine<Ev> {
+    defer {
+        note(apply((v) => v + seed, 1))
+    }
+    let base = apply((v) => v + 1, seed)
+    yield Ev::Tick(base)
+}
+fn probe() -> int { return 1 }
+fn main() {
+    let c = worker(0)
+    let _ = c.resume()
+    let _ = probe()
+}
+"#;
+    let v2 = v1.replace(
+        "        note(apply((v) => v + seed, 1))",
+        "        note(apply((v) => v + seed, 1))\n        note(apply((v) => v - seed, 2))",
+    );
+    let ws1 = ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) = emit_full_global(&ws1, mid).expect("emit_full v1");
+    let ws2 = ws_with_stdlib(&v2);
+    let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "worker")]) {
+        Ok(_) => panic!("inserting a lambda into a region must refuse the overlay"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("safe restart"),
+        "the refusal must stay the compatibility restart: {}",
+        err.message
+    );
+}

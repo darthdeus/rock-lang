@@ -12,7 +12,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::FxHashSet;
 use skull_codegen_lua::{emit_named_framed, emit_named_framed_with_allocation_sites, CodegenCtx, FrameCtx, LuaEmission};
 use skull_mir::code_identity::{
-    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
+    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema, LambdaSiteId,
 };
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
@@ -30,6 +30,32 @@ fn collect_nested_code_identities(mf: &MirFunc, out: &mut HashSet<CodeIdentity>)
         }
         collect_nested_code_identities(nested, out);
     }
+}
+
+fn hook_registration_site(
+    source: &MirFunc,
+    kind: CoroHookKind,
+    entry: Idx<Block>,
+) -> Option<LambdaSiteId> {
+    source.insts.iter().find_map(|(_, inst)| {
+        let Inst::CoroHook { kind: registered, lambda } = inst else {
+            return None;
+        };
+        if *registered != kind {
+            return None;
+        }
+        let Inst::Lambda { entry: lambda_entry, .. } = &source.insts[*lambda] else {
+            return None;
+        };
+        if *lambda_entry != entry {
+            return None;
+        }
+        source
+            .inst_spans
+            .get(*lambda)
+            .copied()
+            .and_then(LambdaSiteId::from_span)
+    })
 }
 
 fn add_coroutine_code_values(
@@ -123,7 +149,7 @@ pub fn emit_coroutine_with_artifact(
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
     let channel = plan.channel.as_ref();
-    let mut lowered = skull_transform::transform_coroutine(func, channel);
+    let mut lowered = skull_transform::transform_coroutine(func, channel, plan.has_return_value());
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: lowered.frame_plan.fields().iter().copied().collect(),
@@ -159,10 +185,39 @@ pub fn emit_coroutine_with_artifact(
     let mut hook_funcs = Vec::with_capacity(hook_entries.len());
     for (kind, entry) in &hook_entries {
         let hname = ctx.mint_synthetic(plan.hook(kind.slot()));
-        hook_funcs.push((
-            *kind,
-            skull_transform::lower_detached_region(&lowered.step, *entry, &hname, &frame_info),
-        ));
+        let mut aux =
+            skull_transform::lower_detached_region(&lowered.step, *entry, &hname, &frame_info);
+        // A hook without a body site uses its registration lambda's source site.
+        if aux.code_identity.is_none() {
+            let enclosing = func
+                .code_identity
+                .as_ref()
+                .and_then(CodeIdentity::owner);
+            let site = hook_registration_site(func, *kind, *entry);
+            let (Some(enclosing), Some(site)) = (enclosing, site) else {
+                return Err(CompilerError::new_with_label(
+                    source_func.name_span,
+                    format!(
+                        "coroutine hook `{}` has no source identity at its registration lambda",
+                        kind.slot()
+                    ),
+                ));
+            };
+            aux.code_identity = Some(CodeIdentity::Nested {
+                enclosing,
+                site,
+                name: aux.name,
+            });
+            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
+            slots.sort_unstable();
+            aux.code_compatibility = Some(CodeCompatibility {
+                call_abi: format!("detached:{}", aux.name),
+                capture: CaptureSchema::empty(),
+                frame: Some(FrameSchema { slots }),
+                lambda_topology: Default::default(),
+            });
+        }
+        hook_funcs.push((*kind, aux));
     }
     skull_transform::erase_detached_lambdas(
         &mut lowered.step,
@@ -269,6 +324,11 @@ pub fn emit_coroutine_with_artifact(
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
+    // Step, defer and hook regions share this coroutine's owner but computed
+    // their lambda topologies from disjoint populations; present one value
+    // per owner before the generated entries inherit the root's. Must precede
+    // `add_coroutine_code_values`, which copies the root topology.
+    code_artifact.unify_owner_topologies();
     let (advance_key, resume_key, defer_keys, hook_keys) = add_coroutine_code_values(
         ws,
         interner,

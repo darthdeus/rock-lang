@@ -6,7 +6,7 @@
 //! deliberately absent from these values: they are realization details, not
 //! artifact identity.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bone_semantic::prelude::Span;
 use comfy_la_arena::Idx;
@@ -179,6 +179,26 @@ impl LambdaTopologyFingerprint {
             h.write_str(site.file.as_str());
             h.write_u64(site.offset);
             h.write_usize(*params);
+        }
+        Self(h.finish())
+    }
+
+    /// Combine one owner's distinct region topologies into the single value
+    /// the compatibility gate compares. Sorted, so region emission order
+    /// cannot move it; tagged, so it cannot collide with a site-derived
+    /// fingerprint. A single topology passes through unchanged.
+    pub fn unified(topologies: impl IntoIterator<Item = LambdaTopologyFingerprint>) -> Self {
+        let mut sorted: Vec<u64> = topologies.into_iter().map(|topology| topology.0).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() <= 1 {
+            return Self(sorted.first().copied().unwrap_or_default());
+        }
+        let mut h = Fnv64::new();
+        h.write_str("owner-union-v1");
+        h.write_usize(sorted.len());
+        for topology in sorted {
+            h.write_u64(topology);
         }
         Self(h.finish())
     }
@@ -374,7 +394,54 @@ impl CodeArtifact {
     ) -> Self {
         let mut out = Self::default();
         out.visit_mir(root, false, volatile_vars);
+        out.unify_owner_topologies();
         out
+    }
+
+    /// Present one lambda topology per owner.
+    ///
+    /// A coroutine's step, defer and hook regions (and any future sibling
+    /// bodies sharing an owner) each compute their topology from their own
+    /// lambda population, so one owner legitimately owns several distinct
+    /// non-default topologies. The compatibility gate compares topologies at
+    /// the owner boundary, so the artifact rewrites every non-default
+    /// topology of a multi-topology owner to the hash of the sorted distinct
+    /// set. Any insertion, removal, reorder or arity change in any region
+    /// still flips its region fingerprint and therefore the union, while an
+    /// unrelated body-only edit leaves every union untouched. Owners with a
+    /// single topology keep their site-derived fingerprint.
+    pub fn unify_owner_topologies(&mut self) {
+        let mut per_owner: BTreeMap<CodeOwner, BTreeSet<LambdaTopologyFingerprint>> =
+            BTreeMap::new();
+        for entry in self.entries.values() {
+            let Some(owner) = entry.identity.owner() else { continue };
+            let topology = entry.compatibility.lambda_topology;
+            if topology == LambdaTopologyFingerprint::default() {
+                continue;
+            }
+            per_owner.entry(owner).or_default().insert(topology);
+        }
+        let mut unions: BTreeMap<CodeOwner, LambdaTopologyFingerprint> = BTreeMap::new();
+        for (owner, topologies) in &per_owner {
+            if topologies.len() > 1 {
+                unions.insert(
+                    owner.clone(),
+                    LambdaTopologyFingerprint::unified(topologies.iter().copied()),
+                );
+            }
+        }
+        if unions.is_empty() {
+            return;
+        }
+        for entry in self.entries.values_mut() {
+            if entry.compatibility.lambda_topology == LambdaTopologyFingerprint::default() {
+                continue;
+            }
+            let Some(owner) = entry.identity.owner() else { continue };
+            if let Some(unified) = unions.get(&owner) {
+                entry.compatibility.lambda_topology = *unified;
+            }
+        }
     }
 
     fn visit_mir(&mut self, mf: &MirFunc, escaping: bool, volatile_vars: &FxHashSet<Ustr>) {
@@ -963,6 +1030,7 @@ impl BodyHasher {
             Inst::FloatToInt(value) => self.unary(36, *value),
             Inst::IntToFloat(value) => self.unary(37, *value),
             Inst::UintToFloat(value) => self.unary(38, *value),
+            Inst::FloatToF32(value) => self.unary(93, *value),
             Inst::IntToUint(value) => self.unary(39, *value),
             Inst::UintToInt(value) => self.unary(40, *value),
             Inst::FloatToUint(value) => self.unary(41, *value),
@@ -1113,6 +1181,11 @@ impl BodyHasher {
                     self.string(field.as_str());
                     self.inst_idx(*value);
                 }
+            }
+            Inst::MakeNullableValue { present, value } => {
+                self.tag(89);
+                self.inst_idx(*present);
+                self.inst_idx(*value);
             }
             Inst::MakeEnum { tag, ty, positional, named } => {
                 self.tag(71);

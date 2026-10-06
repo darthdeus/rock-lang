@@ -6771,6 +6771,11 @@ fn emit_coroutine_js(
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
+    // Step, defer and hook regions share this coroutine's owner but computed
+    // their lambda topologies from disjoint populations; present one value
+    // per owner before the generated entries inherit the root's. Must precede
+    // `add_coroutine_code_values`, which copies the root topology.
+    code_artifact.unify_owner_topologies();
     let (advance_key, resume_key, defer_keys, hook_keys) = add_coroutine_code_values(
         ws,
         interner,
