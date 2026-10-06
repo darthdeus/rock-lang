@@ -17,6 +17,30 @@ pub(crate) enum PendingDefer {
     Unwind,
 }
 
+/// How a body's `defer` statements reach a death of their scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeferMode {
+    /// Scope exit only: a global initializer or decorator, or a backend
+    /// without unwind support.
+    Inline,
+    /// An ordinary fn, nested fn or lambda body on the Lua target.
+    Unwind,
+    /// A `co fn` body (not a lambda inside it).
+    CoFlag,
+}
+
+impl DeferMode {
+    pub(crate) fn for_body(is_coroutine: bool, target: bone_semantic::hir::FnBackend) -> Self {
+        if is_coroutine {
+            DeferMode::CoFlag
+        } else if target == bone_semantic::hir::FnBackend::Lua {
+            DeferMode::Unwind
+        } else {
+            DeferMode::Inline
+        }
+    }
+}
+
 impl Builder<'_> {
     /// Lower a statement sequence into the current block. Returns `true` if a
     /// `return` terminated the block (the rest is dead).
@@ -195,7 +219,7 @@ impl Builder<'_> {
             loop_targets: Vec::new(),
             used_break_targets: HashSet::default(),
             defers: Vec::new(),
-            defer_unwind: self.call_scx.target == bone_semantic::hir::FnBackend::Lua,
+            defer_mode: DeferMode::for_body(false, self.call_scx.target),
             in_defer_body: false,
             resume_arg: None,
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
@@ -419,18 +443,20 @@ impl Builder<'_> {
                 // frame flag for its terminal cleanup (`MirFunc::coro_defers`),
                 // an ordinary fn pushes the copy as an unwind closure.
                 Statement::Defer(body) => {
-                    let pending = if self.resume_arg.is_some() {
-                        let flag = self.f.new_cell(Some(Ustr::from("__defer")));
-                        let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
-                        self.emit_cur(Inst::Store { cell: flag, value: on });
-                        let entry = self.lower_detached_defer(body, Some(flag))?;
-                        self.f.coro_defers.push((flag, entry));
-                        PendingDefer::CoFlag(flag)
-                    } else if self.defer_unwind {
-                        self.register_unwind_defer(body)?;
-                        PendingDefer::Unwind
-                    } else {
-                        PendingDefer::Inline
+                    let pending = match self.defer_mode {
+                        DeferMode::CoFlag => {
+                            let flag = self.f.new_cell(Some(Ustr::from("__defer")));
+                            let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
+                            self.emit_cur(Inst::Store { cell: flag, value: on });
+                            let entry = self.lower_detached_defer(body, Some(flag))?;
+                            self.f.coro_defers.push((flag, entry));
+                            PendingDefer::CoFlag(flag)
+                        }
+                        DeferMode::Unwind => {
+                            self.register_unwind_defer(body)?;
+                            PendingDefer::Unwind
+                        }
+                        DeferMode::Inline => PendingDefer::Inline,
                     };
                     if let Some(frame) = self.defers.last_mut() {
                         frame.push((body, pending));

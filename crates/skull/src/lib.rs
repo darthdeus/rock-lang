@@ -574,24 +574,43 @@ function __rock_defer_pop()
   __rock_defer_stack[n] = nil
   __rock_defer_top = n - 1
 end
--- The traceback of the error being unwound is taken at its raise site, before
--- the re-raise replaces the stack; __rock_traceback hands it to a reporter.
--- An outer trampoline's handler sees the inner re-raise and keeps the
--- inner raise site.
+-- Never raises: a cleanup error's __tostring may itself throw.
+local function __rock_defer_describe(e)
+  local ok, s = pcall(tostring, e)
+  if ok and type(s) == "string" then return s end
+  return "<unprintable " .. type(e) .. " error>"
+end
+local __rock_defer_finish
+-- Whether the error being handled is __rock_defer_finish re-raising one it
+-- unwound: `error` called directly by it, `level` frames above the caller.
+local function __rock_defer_reraised(level)
+  local raiser = debug.getinfo(level + 1, "f")
+  local site = debug.getinfo(level + 2, "f")
+  return raiser ~= nil and raiser.func == error and site ~= nil and site.func == __rock_defer_finish
+end
+-- The trampoline's handler records the raise-site traceback of a fresh error.
+-- The record is only read for a re-raise, and __rock_defer_finish sets it
+-- immediately before re-raising, so a record left by a caught error is never
+-- picked up.
 local function __rock_defer_mark(e)
-  if rawget(_G, "__rock_unwind_reraise") == e then
-    _G.__rock_unwind_reraise = nil
-  else
-    _G.__rock_unwind_error = e
+  if not __rock_defer_reraised(2) then
     _G.__rock_unwind_traceback = debug.traceback("", 2)
   end
   return e
 end
-local function __rock_defer_finish(base, ok, ...)
+local function __rock_defer_report(msg)
+  local sink = rawget(_G, "__rock_log_sink")
+  if not (sink and pcall(sink, 1, "DEFER", msg, false)) then
+    print("[DEFER] " .. msg)
+  end
+end
+__rock_defer_finish = function(base, ok, ...)
   if ok then return ... end
   -- An error raised before the re-entry consumed the flag must not leave it set.
   __rock_defer_entering = false
   local err = ...
+  -- A cleanup may raise through other trampolines, which record their own.
+  local traceback = _G.__rock_unwind_traceback
   local stack = __rock_defer_stack
   while __rock_defer_top > base do
     local n = __rock_defer_top
@@ -599,14 +618,19 @@ local function __rock_defer_finish(base, ok, ...)
     stack[n] = nil
     __rock_defer_top = n - 1
     local dok, derr = pcall(d)
-    -- The original error wins; a string error carries the cleanup's message.
-    if not dok and type(err) == "string" then
-      local unwound = _G.__rock_unwind_error == err
-      err = err .. "\n  (defer raised while unwinding: " .. tostring(derr) .. ")"
-      if unwound then _G.__rock_unwind_error = err end
+    -- The original error wins. A string error carries the cleanup's message;
+    -- any other value must stay identical, so the message goes to the log.
+    if not dok then
+      if type(err) == "string" then
+        err = err .. "\n  (defer raised while unwinding: " .. __rock_defer_describe(derr) .. ")"
+      else
+        __rock_defer_report("defer raised while unwinding a " .. type(err)
+          .. " error: " .. __rock_defer_describe(derr))
+      end
     end
   end
-  _G.__rock_unwind_reraise = err
+  _G.__rock_unwind_traceback = traceback
+  -- Not a tail call: __rock_defer_reraised finds this frame above `error`.
   error(err, 0)
 end
 function __rock_defer_call(f, ...)
@@ -617,10 +641,10 @@ end
 -- An xpcall message handler: the raise-site traceback of an error that was
 -- unwound through a defer, else the current one.
 function __rock_traceback(e)
-  if e ~= nil and rawget(_G, "__rock_unwind_error") == e then
-    return tostring(e) .. _G.__rock_unwind_traceback
+  if __rock_defer_reraised(2) then
+    return __rock_defer_describe(e) .. _G.__rock_unwind_traceback
   end
-  return debug.traceback(tostring(e), 2)
+  return debug.traceback(__rock_defer_describe(e), 2)
 end
 -- Compiler-minted NativeBuffer leaf views: field -> ffi.cast type. Generated
 -- from skull_mir::lower::LEAF_VIEWS. Views are DERIVED (pointers over the

@@ -606,10 +606,11 @@ impl Builder<'_> {
                 let saved_defers = std::mem::take(&mut self.defers);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
                 // A lambda body is emitted as its own hoisted fn, so its
-                // defers unwind on error wherever the lambda was created.
-                let saved_unwind = std::mem::replace(
-                    &mut self.defer_unwind,
-                    self.call_scx.target == bone_semantic::hir::FnBackend::Lua,
+                // defers unwind on error wherever the lambda was created,
+                // including inside a co fn.
+                let saved_mode = std::mem::replace(
+                    &mut self.defer_mode,
+                    super::stmt::DeferMode::for_body(false, self.call_scx.target),
                 );
                 // Box value args (see field docs). A lambda body IS spliced into
                 // now -- `convert_closures` splits it out and the inliner runs
@@ -623,7 +624,7 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
-                    self.defer_unwind = saved_unwind;
+                    self.defer_mode = saved_mode;
                     self.ret_rep = saved_ret_rep;
                     self.cur = saved;
                     let id = self.emit_cur(Inst::Lambda {
@@ -646,7 +647,7 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
-                    self.defer_unwind = saved_unwind;
+                    self.defer_mode = saved_mode;
                     self.ret_rep = saved_ret_rep;
                     self.cur = saved;
                     let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });
@@ -682,7 +683,7 @@ impl Builder<'_> {
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
-                self.defer_unwind = saved_unwind;
+                self.defer_mode = saved_mode;
                 self.ret_rep = saved_ret_rep;
                 self.cur = saved;
                 let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });

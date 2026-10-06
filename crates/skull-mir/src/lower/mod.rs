@@ -1611,7 +1611,7 @@ fn lower_body(
         loop_targets: Vec::new(),
         used_break_targets: HashSet::default(),
         defers: Vec::new(),
-        defer_unwind: !func.is_coroutine && scx.target == bone_semantic::hir::FnBackend::Lua,
+        defer_mode: stmt::DeferMode::for_body(func.is_coroutine, scx.target),
         in_defer_body: false,
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
@@ -2101,11 +2101,11 @@ struct Builder<'a> {
     /// Each entry records how dying (error, or a co fn kill) reaches it; see
     /// [`stmt::PendingDefer`].
     defers: Vec<Vec<(Idx<Expr>, stmt::PendingDefer)>>,
-    /// Whether an ordinary `defer` here registers an unwind cleanup
-    /// (`MirFunc::registers_defer_cleanup`): Lua-target fn, nested fn and
-    /// lambda bodies. Global initializers and decorators keep the inline-only
-    /// splice: their units are not emitted under the unwind trampoline.
-    defer_unwind: bool,
+    /// How a `defer` in the body being lowered registers (see
+    /// [`stmt::DeferMode`]). A lambda sets its own mode: inside a `co fn` it
+    /// is still an ordinary fn. Global initializers and decorators are
+    /// `Inline`: their units are not emitted under the unwind trampoline.
+    defer_mode: stmt::DeferMode,
     /// True while lowering a `defer` body (inline splice or terminal copy) --
     /// `yield`/`await` inside a defer body is a compile error.
     in_defer_body: bool,
@@ -2258,7 +2258,7 @@ impl<'a> Builder<'a> {
             loop_targets: Vec::new(),
             used_break_targets: HashSet::default(),
             defers: Vec::new(),
-            defer_unwind: false,
+            defer_mode: stmt::DeferMode::Inline,
             in_defer_body: false,
             resume_arg: None,
             // Generated/init bodies never run `inline_functions` -- box value args.
