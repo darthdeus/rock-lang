@@ -302,7 +302,7 @@ impl<'a> Printer<'a> {
         let decl_line = self.item_decl_line(item);
         let annos = &item.annotations;
         for (i, anno) in annos.iter().enumerate() {
-            parts.push(self.annotation(anno));
+            parts.push(self.with_trailing_comment(self.annotation(anno), anno.span, 'N'));
             // Keep the annotation inline iff source had it on the same line as
             // whatever follows (next annotation or the declaration).
             let next_line = annos
@@ -2033,10 +2033,13 @@ impl<'a> Printer<'a> {
     }
 
     /// An argument that "hugs" the call parens when it's the sole argument: a
-    /// collection or struct literal whose own delimiters provide the line breaks,
+    /// collection, struct literal or block lambda whose own delimiters provide line breaks,
     /// so `f(Foo {\n  ..\n})` / `f([\n  ..\n])` keep the opening brace on the call
     /// line rather than indenting the whole argument an extra level.
     fn is_huggable_arg(&self, e: Idx<ExprData>) -> bool {
+        if let ExprKind::Lambda { body, .. } = &self.ast.e(&e).kind {
+            return self.block_has_braces(*body);
+        }
         matches!(
             &self.ast.e(&e).kind,
             ExprKind::ArrayLiteral(_)
@@ -2443,6 +2446,8 @@ impl<'a> Printer<'a> {
             TypeExprKind::Int => Doc::text("int"),
             TypeExprKind::Uint => Doc::text("uint"),
             TypeExprKind::Float => Doc::text("float"),
+            TypeExprKind::F64 => Doc::text("f64"),
+            TypeExprKind::F32 => Doc::text("f32"),
             TypeExprKind::Bool => Doc::text("bool"),
             TypeExprKind::Ref(target) => {
                 let reference = Doc::concat([Doc::text("ref "), self.type_expr(*target)]);
@@ -2484,14 +2489,14 @@ impl<'a> Printer<'a> {
                         let inner = source[1..].trim_start();
                         inner[2..].trim_start().starts_with('(')
                     };
-                let prefix = if starts_parenthesized_fn {
+                let prefix = if starts_parenthesized_fn && !data.is_nullable {
                     "(fn("
-                } else if starts_fn {
+                } else if starts_fn || starts_parenthesized_fn {
                     "fn("
                 } else {
                     "("
                 };
-                let suffix = if starts_parenthesized_fn { ")" } else { "" };
+                let suffix = if starts_parenthesized_fn && !data.is_nullable { ")" } else { "" };
                 Doc::concat([
                     Doc::text(prefix),
                     Doc::join(Doc::text(", "), params.iter().map(|p| self.type_expr(*p))),
@@ -2504,7 +2509,11 @@ impl<'a> Printer<'a> {
             TypeExprKind::Hole(_, None) => Doc::text("?"),
         };
         if data.is_nullable {
-            Doc::concat([inner, Doc::text("?")])
+            if matches!(data.kind, TypeExprKind::Function { .. }) {
+                Doc::concat([Doc::text("("), inner, Doc::text(")?")])
+            } else {
+                Doc::concat([inner, Doc::text("?")])
+            }
         } else {
             inner
         }
