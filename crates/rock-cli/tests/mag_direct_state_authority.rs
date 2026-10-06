@@ -39,6 +39,31 @@ fn rock_function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     panic!("unterminated body for Rock function {signature}");
 }
 
+fn rock_struct_body<'a>(source: &'a str, name: &str) -> &'a str {
+    source
+        .split_once(&format!("pub struct {name} {{"))
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("missing Rock struct body {name}"))
+}
+
+#[test]
+fn quest_state_field_pins_ignore_function_parameters() {
+    let source = include_str!("../../../mag-simulation/quest.rock");
+    let scratch = format!("{source}\npub fn unrelated(bank_gold: int, pending_events: [string]) {{}}\n");
+    for (name, field) in [
+        ("ProgressState", "bank_gold: int"),
+        ("QuestRuntimeState", "pending_events: [string]"),
+    ] {
+        assert!(scratch.matches(field).count() > 1);
+        assert_eq!(rock_struct_body(&scratch, name).matches(field).count(), 1);
+        let declaration = format!("pub struct {name} {{");
+        let duplicate = scratch.replacen(
+            &declaration, &format!("{declaration}\n    {field},"), 1);
+        assert_eq!(rock_struct_body(&duplicate, name).matches(field).count(), 2);
+    }
+}
+
 #[test]
 fn mag_run_readiness_predicate_has_no_replay_or_upload_side_effects() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -785,6 +810,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         .expect("read MAG quest source");
     let quest_state = fs::read_to_string(repo.join("mag-simulation/quest.rock"))
         .expect("read simulation quest source");
+    let quest_runtime = rock_struct_body(&quest_state, "QuestRuntimeState");
     for field in [
         "pending_events: [string]",
         "event_subscribers: Map<string, [string]>",
@@ -794,7 +820,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "last_region_place: Place?",
     ] {
         assert_eq!(
-            quest_state.matches(field).count(),
+            quest_runtime.matches(field).count(),
             1,
             "QuestRuntimeState must contain `{field}` exactly once"
         );
@@ -819,7 +845,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "deferred Player feedback must re-resolve the Scene entity"
     );
 
-    let progress = &quest_state;
+    let progress = rock_struct_body(&quest_state, "ProgressState");
     for field in [
         "bank_gold: int",
         "events: Map<string, EventRecord>",
