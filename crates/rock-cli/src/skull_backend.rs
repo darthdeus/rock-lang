@@ -2605,8 +2605,16 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     files.sort();
     files.dedup();
     package_dirs.sort();
-    package_dirs.dedup();
-    Ok((files, package_dirs))
+    // `mag`, `mag/`, `./mag` and `mag/tests` all name one package: dedup by
+    // its canonical root, keeping the first spelling as the unit label.
+    let mut seen = HashSet::new();
+    let mut unique = Vec::with_capacity(package_dirs.len());
+    for dir in package_dirs {
+        if seen.insert(fs_err::canonicalize(&dir)?) {
+            unique.push(dir);
+        }
+    }
+    Ok((files, unique))
 }
 
 pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) -> Result<()> {

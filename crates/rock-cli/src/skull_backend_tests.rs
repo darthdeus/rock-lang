@@ -4746,6 +4746,39 @@ mod backend_stats_workspace_tests {
         std::fs::create_dir_all(&bare_tests).expect("create bare tests");
         assert_eq!(crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()), None);
     }
+
+    // Every spelling of a package path names the same unit, so naming it twice
+    // must not build and run the package twice and double its @test total.
+    #[test]
+    fn package_path_spellings_select_one_package_unit() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"spell-pkg\"\n")
+            .expect("stick.toml");
+        std::fs::write(dir.path().join("lib.rock"), "@test fn in_root() { assert(true) }\n")
+            .expect("lib.rock");
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).expect("tests dir");
+        std::fs::write(tests_dir.join("t_test.rock"), "@test fn in_tests() { assert(true) }\n")
+            .expect("t_test.rock");
+
+        let root = dir.path().to_string_lossy().to_string();
+        let spellings = [
+            root.clone(),
+            format!("{root}/"),
+            format!("{root}/."),
+            format!("{root}/tests"),
+            format!("{root}/tests/"),
+        ];
+        for spelling in &spellings {
+            let (files, packages) =
+                crate::skull_backend::collect_test_units(std::slice::from_ref(spelling)).unwrap();
+            assert!(files.is_empty(), "`{spelling}` selects no loose files: {files:?}");
+            assert_eq!(packages.len(), 1, "`{spelling}` selects the package: {packages:?}");
+        }
+        let (files, packages) = crate::skull_backend::collect_test_units(&spellings).unwrap();
+        assert!(files.is_empty(), "{files:?}");
+        assert_eq!(packages.len(), 1, "all spellings together are one package unit: {packages:?}");
+    }
 }
 
 
