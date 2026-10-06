@@ -10,6 +10,29 @@ unsafe extern "C" {
     fn mi_collect(force: bool);
 }
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Test witness recording which rayon worker indices ran the collect
+/// broadcast. Tests reset it before `release_freed_memory` and read it
+/// after; extra bits from concurrent releasers are harmless.
+#[cfg(test)]
+static COLLECTED_WORKERS_MASK: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn note_worker_collected() {
+    if let Some(i) = rayon::current_thread_index() {
+        if i < 64 {
+            COLLECTED_WORKERS_MASK.fetch_or(1u64 << i, Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(test)]
+fn take_collected_workers_mask() -> u64 {
+    COLLECTED_WORKERS_MASK.swap(0, Ordering::SeqCst)
+}
+
 /// Return memory freed so far to the OS now instead of on mimalloc's lazy
 /// purge, which needs later allocator traffic to run. For a host that frees a
 /// large compile and then only waits on a child process.
@@ -20,7 +43,12 @@ pub fn release_freed_memory() {
     // `sequential` build has no pool, so only the caller collects there.
     // SAFETY: mi_collect takes no pointers and is safe to call at any time.
     #[cfg(not(feature = "sequential"))]
-    rayon::broadcast(|_| unsafe { mi_collect(true) });
+    rayon::broadcast(|_| {
+        #[cfg(test)]
+        note_worker_collected();
+        // SAFETY: as above.
+        unsafe { mi_collect(true) }
+    });
     // SAFETY: as above.
     unsafe { mi_collect(true) }
 }
@@ -82,6 +110,7 @@ mod tests {
             // SAFETY: each pointer came from mi_malloc above and is freed once.
             unsafe { mi_free(p as *mut c_void) };
         }
+        super::take_collected_workers_mask();
         let before = mimalloc_committed();
         super::release_freed_memory();
         let after = mimalloc_committed();
@@ -93,6 +122,16 @@ mod tests {
             after >> 20,
             allocated >> 20,
         );
+        // Independent of the aggregate above: the collect dispatch reached
+        // every worker index, so no worker's heap is silently skipped.
+        assert!(threads <= 64, "worker mask holds 64 indices, got {threads}");
+        let mask = super::take_collected_workers_mask();
+        for i in 0..threads {
+            assert!(
+                mask & (1u64 << i) != 0,
+                "worker {i} of {threads} never ran the release collect",
+            );
+        }
     }
 
     /// A `sequential` build never constructs a rayon pool (see main.rs), so
