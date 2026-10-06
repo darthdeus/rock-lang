@@ -493,7 +493,8 @@ pub(crate) fn skull_assemble_project(
 /// wall-time `TIME` line per test. Before each test it writes a
 /// `ROCK_TEST_START` marker with this run's `token` to stderr, which restarts
 /// the host's hung-test limit; the token only separates accidental test
-/// output from harness markers.
+/// output from harness markers. `ROCK_TEST_SHARD_TESTS` (1-based indices)
+/// restricts a process to one shard's tests; start ordinals count within it.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
 fn build_test_harness(tests: &[skull::SkullTest], token: &str) -> String {
@@ -553,8 +554,15 @@ do
   end
 end
 io.stdout:setvbuf("no")
-for i, t in ipairs(__skull_T) do
-  io.stderr:write("\nROCK_TEST_START\t", __skull_token, "\t", i - 1, "\n")
+local __skull_run = {}
+local __skull_shard = os.getenv("ROCK_TEST_SHARD_TESTS")
+if __skull_shard then
+  for i in __skull_shard:gmatch("%d+") do __skull_run[#__skull_run + 1] = __skull_T[tonumber(i)] end
+else
+  __skull_run = __skull_T
+end
+for n, t in ipairs(__skull_run) do
+  io.stderr:write("\nROCK_TEST_START\t", __skull_token, "\t", n - 1, "\n")
   io.stderr:flush()
   local buf = {}
   local rp = print
@@ -695,7 +703,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             })
         }
     };
-    run_emitted_tests(lua, &tests, &vec![file.to_owned(); tests.len()], std::time::Duration::from_secs(15))
+    run_emitted_tests(lua, &tests, &vec![file.to_owned(); tests.len()], std::time::Duration::from_secs(15), 1)
 }
 
 /// `Some(count)` when `file` declares `@test` fns and EVERY one carries
@@ -720,12 +728,14 @@ pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<
 /// Given emitted workspace Lua and the `@test` fns discovered in it, run them
 /// via the harness (or the load-only validity gate when there are none) and
 /// classify the outcome. Shared by the per-file path ([`skull_build`]) and the
-/// whole-package path ([`skull_build_package`]).
+/// whole-package path ([`skull_build_package`]). `shards` LuaJIT processes
+/// split the tests; their results merge into one outcome.
 fn run_emitted_tests(
     lua: String,
     tests: &[skull::SkullTest],
     files: &[String],
     limit: std::time::Duration,
+    shards: usize,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     assert_eq!(tests.len(), files.len());
 
@@ -734,7 +744,9 @@ fn run_emitted_tests(
     // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
         let excerpt = truncate(&lua);
-        let run = run_test_program(lua, limit, run_token(), 0).map_err(|e| SkullFailure {
+        let run = write_test_program(lua).and_then(|script| {
+            run_test_program(script.path(), limit, run_token(), 0, None)
+        }).map_err(|e| SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: e.to_string(),
         })?;
@@ -754,101 +766,133 @@ fn run_emitted_tests(
     }
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
+    // Shards are separate processes over one program file; test `i` goes to
+    // shard `i % shards`, which balances counts and spreads files' slow tests.
     let token = run_token();
     let mut program = lua;
     program.push_str(&build_test_harness(tests, &token));
     let excerpt = truncate(&program);
-    // The harness `pcall`s each test, so an ordinary assertion failure becomes a
-    // FAIL marker and the process still exits 0. A non-zero status therefore
-    // means the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
-    // after that point never ran. Keep the output either way: a truncated run
-    // still has to say what it managed to report.
-    let run = run_test_program(program, limit, token, tests.len()).map_err(|e| SkullFailure {
+    let script = write_test_program(program).map_err(|e| SkullFailure {
         reason: "test run errored (skull bug)".to_string(),
         rendered: e.to_string(),
     })?;
-    let stdout = format!("{}\n{}", String::from_utf8_lossy(&run.output.stdout),
-        String::from_utf8_lossy(&run.output.stderr));
-    let died = !run.output.status.success();
-    let timeout_failure = run.timed_out.then(|| {
-        match run.running_test {
-            Some(i) => format!("{}: `{}` timed out: no progress for {}s",
-                files[i], tests[i].name, limit.as_secs_f64()),
-            None => format!("loading emitted program: timed out after {}s", limit.as_secs_f64()),
-        }
+    let shards = shards.clamp(1, tests.len());
+    let assignment: Vec<Vec<usize>> =
+        (0..shards).map(|shard| (shard..tests.len()).step_by(shards).collect()).collect();
+    let runs: Vec<Result<crate::common::ProcessResult>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = assignment.iter().map(|indices| {
+            let selection = (shards > 1).then(|| {
+                indices.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(",")
+            });
+            let (script, token) = (script.path(), token.clone());
+            scope.spawn(move || run_test_program(script, limit, token, indices.len(), selection.as_deref()))
+        }).collect();
+        handles.into_iter()
+            .map(|handle| handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("test shard thread panicked"))))
+            .collect()
     });
+    drop(script);
 
-    // No result lines at all => the module didn't even load (a skull bug),
-    // not a test failure.
-    let markers = crate::test_protocol::parse_skull_markers(&stdout);
-    if markers.is_none() && timeout_failure.is_none() {
-        return Err(SkullFailure {
-            reason: "invalid lua emitted (skull bug)".to_string(),
-            rendered: format!("{stdout}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
-        });
-    }
-    let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
-        passed: 0, fails: Vec::new(), values: Vec::new(), times: Vec::new(),
-    });
-
-    // VALUE lines: compare the serialized return value HOST-side against the
-    // pinned `@test(returns = ...)` literal.
-    let mut passed = markers.passed;
-    let mut fails = markers.fails;
-    let mut value_fails = HashSet::new();
     let expects: HashMap<&str, &skull::ValueExpect> = tests
         .iter()
         .filter_map(|t| t.returns.as_ref().map(|v| (t.name.as_str(), v)))
         .collect();
-    for (name, val) in &markers.values {
-        let Some(expect) = expects.get(name.as_str()) else {
+    let mut passed = 0;
+    let mut fails = Vec::new();
+    let mut timings = Vec::new();
+    for (shard, (indices, run)) in assignment.iter().zip(runs).enumerate() {
+        // The harness `pcall`s each test, so an ordinary assertion failure is a
+        // FAIL marker and the process still exits 0. A non-zero status means
+        // the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
+        // after that point never ran. A truncated run still reports what it got.
+        let run = run.map_err(|e| SkullFailure {
+            reason: "test run errored (skull bug)".to_string(),
+            rendered: e.to_string(),
+        })?;
+        let stdout = format!("{}\n{}", String::from_utf8_lossy(&run.output.stdout),
+            String::from_utf8_lossy(&run.output.stderr));
+        let died = !run.output.status.success();
+        let label = if shards > 1 { format!("shard {}/{shards}: ", shard + 1) } else { String::new() };
+
+        // No result lines and no test started => the module didn't even load
+        // (a skull bug), not a test failure.
+        let markers = crate::test_protocol::parse_skull_markers(&stdout);
+        if markers.is_none() && !run.timed_out && run.running_test.is_none() {
             return Err(SkullFailure {
-                reason: "harness invariant breach (skull bug)".to_string(),
-                rendered: format!("VALUE line for `{name}` without a returns expectation"),
+                reason: "invalid lua emitted (skull bug)".to_string(),
+                rendered: format!("{label}{stdout}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
             });
-        };
-        match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
-        {
-            Ok(()) => passed += 1,
-            Err(detail) => {
-                value_fails.insert(name.as_str());
-                fails.push(format!("{name}: {detail}"));
+        }
+        let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
+            passed: 0, fails: Vec::new(), values: Vec::new(), times: Vec::new(),
+        });
+        let reported = markers.passed + markers.fails.len() + markers.values.len();
+        passed += markers.passed;
+        fails.extend(markers.fails);
+
+        // VALUE lines: compare the serialized return value HOST-side against
+        // the pinned `@test(returns = ...)` literal.
+        let mut value_fails = HashSet::new();
+        for (name, val) in &markers.values {
+            let Some(expect) = expects.get(name.as_str()) else {
+                return Err(SkullFailure {
+                    reason: "harness invariant breach (skull bug)".to_string(),
+                    rendered: format!("VALUE line for `{name}` without a returns expectation"),
+                });
+            };
+            match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
+            {
+                Ok(()) => passed += 1,
+                Err(detail) => {
+                    value_fails.insert(name.as_str());
+                    fails.push(format!("{name}: {detail}"));
+                }
             }
         }
-    }
-    let timings = markers.times.iter().map(|time| TestTiming {
-        name: time.name.clone(),
-        ms: time.ms,
-        status: match time.result.as_str() {
-            "pass" => "pass",
-            "value" if !value_fails.contains(time.name.as_str()) => "pass",
-            _ => "fail",
-        },
-    }).collect();
+        // A shard's TIME lines follow its run order, so the j-th is test
+        // `indices[j]`; keying by it restores declaration order after merging.
+        timings.extend(markers.times.iter().zip(indices).map(|(time, &index)| (index, TestTiming {
+            name: time.name.clone(),
+            ms: time.ms,
+            status: match time.result.as_str() {
+                "pass" => "pass",
+                "value" if !value_fails.contains(time.name.as_str()) => "pass",
+                _ => "fail",
+            },
+        })));
 
-    // Every declared test owes exactly one marker. Counting only the markers
-    // that ARRIVED makes a truncated run self-consistent -- three tests, one
-    // marker, `1/1 passed` -- so the tests that never ran leave the total
-    // instead of failing it. This is the only signal for a premature
-    // `os.exit(0)`, which exits success and emits no marker at all.
-    // A PASS marker carries no test name, so this counts rather than names them.
-    let reported = passed + fails.len();
-    if let Some(failure) = timeout_failure {
-        fails.push(format!("{failure}; {} of {} @tests never reported", tests.len() - reported, tests.len()));
-    } else if reported < tests.len() {
-        fails.push(format!(
-            "the run stopped early: {} of {} @tests never reported{}",
-            tests.len() - reported,
-            tests.len(),
-            if died { "; the process died" } else { "; the process exited 0" }
-        ));
-    } else if died {
-        fails.push(
-            "every @test reported, but the harness process exited non-zero -- \
-             something after the tests failed"
-                .to_string(),
-        );
+        // Every selected test owes exactly one marker. Counting only the
+        // markers that ARRIVED makes a truncated run self-consistent -- three
+        // tests, one marker, `1/1 passed` -- so each test that never reported
+        // is a named failure. This is the only signal for a premature
+        // `os.exit(0)`, which exits success and emits no marker at all.
+        let stop = if run.timed_out {
+            match run.running_test {
+                Some(_) => format!("timed out: no progress for {}s", limit.as_secs_f64()),
+                None => format!("loading emitted program: timed out after {}s", limit.as_secs_f64()),
+            }
+        } else if died {
+            "the process died".to_string()
+        } else {
+            "the process exited 0".to_string()
+        };
+        for (position, &index) in indices.iter().enumerate().skip(reported) {
+            let reason = if run.running_test == Some(position) || run.running_test.is_none() {
+                format!("{stop} while it ran")
+            } else {
+                "its process stopped before it ran".to_string()
+            };
+            fails.push(format!("{}: never reported ({}; {label}{reason})", tests[index].name, files[index]));
+        }
+        if reported >= indices.len() && died {
+            fails.push(format!(
+                "{label}every @test reported, but the harness process exited non-zero -- \
+                 something after the tests failed"
+            ));
+        }
     }
+    timings.sort_by_key(|(index, _)| *index);
+    let timings = timings.into_iter().map(|(_, timing)| timing).collect();
 
     if fails.is_empty() {
         Ok(SkullOutcome::Pass { tests: passed, timings })
@@ -874,22 +918,32 @@ fn run_token() -> String {
     format!("{:016x}{:016x}", half(), half())
 }
 
+/// A file avoids blocking on stdin before the startup watchdog is running, and
+/// lets every shard load the same program.
+fn write_test_program(program: String) -> Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut script = tempfile::NamedTempFile::new()?;
+    script.write_all(program.as_bytes())?;
+    Ok(script)
+}
+
+/// Run `script` under the per-test watchdog. `selection` restricts the run to
+/// one shard's tests (`ROCK_TEST_SHARD_TESTS`); `tests` counts the tests run.
 fn run_test_program(
-    program: String,
+    script: &std::path::Path,
     limit: std::time::Duration,
     token: String,
     tests: usize,
+    selection: Option<&str>,
 ) -> Result<crate::common::ProcessResult> {
-    use std::io::Write;
     use std::process::Stdio;
     use rock_host::process_management::{register_child_process, unregister_child_process};
 
-    // A file avoids blocking on stdin before the startup watchdog is running.
-    let mut script = tempfile::NamedTempFile::new()?;
-    script.write_all(program.as_bytes())?;
-    drop(program);
-    let mut command = rock_host::project::build_luajit_command(script.path(), &[]);
+    let mut command = rock_host::project::build_luajit_command(script, &[]);
     crate::common::apply_test_rock_dir(&mut command);
+    if let Some(selection) = selection {
+        command.env("ROCK_TEST_SHARD_TESTS", selection);
+    }
     let mut child = command
         .env("STONE_HEADLESS", "1")
         .stdin(Stdio::null())
@@ -999,13 +1053,14 @@ fn walk_test_units(
 /// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
 /// `@test`s. The package analogue of [`skull_build`]. Cross-file references
 /// resolve because every file is in one workspace.
-fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFailure> {
-    skull_build_package_with_limit(dir, std::time::Duration::from_secs(15))
+fn skull_build_package(dir: &str, shards: usize) -> std::result::Result<SkullOutcome, SkullFailure> {
+    skull_build_package_with_limit(dir, std::time::Duration::from_secs(15), shards)
 }
 
 fn skull_build_package_with_limit(
     dir: &str,
     limit: std::time::Duration,
+    shards: usize,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| SkullFailure {
@@ -1057,7 +1112,21 @@ fn skull_build_package_with_limit(
     drop((ws, sources));
     crate::allocator::release_freed_memory();
     let lua = prepend_package_preamble(lua, dir, needs_libstone)?;
-    run_emitted_tests(lua, &tests, &files, limit)
+    run_emitted_tests(lua, &tests, &files, limit, shards)
+}
+
+/// LuaJIT processes per package test run: `ROCK_TEST_SHARDS`, else half the
+/// cores (capped at 8), leaving room for the other half's emit and builds.
+fn test_shard_count() -> Result<usize> {
+    match std::env::var("ROCK_TEST_SHARDS") {
+        Ok(value) => match value.trim().parse::<usize>() {
+            Ok(shards) if shards > 0 => Ok(shards),
+            _ => anyhow::bail!("ROCK_TEST_SHARDS must be a positive integer, got `{value}`"),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(std::thread::available_parallelism()
+            .map_or(1, |cores| (cores.get() / 2).clamp(1, 8))),
+        Err(error) => anyhow::bail!("ROCK_TEST_SHARDS: {error}"),
+    }
 }
 
 /// Whether the checked program declares a native binding into libstone. The
@@ -2498,6 +2567,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     let timings_path = std::env::var_os("ROCK_TEST_TIMINGS");
 
     let (files, package_dirs) = collect_test_units(paths)?;
+    let shards = test_shard_count()?;
 
     let start = Instant::now();
     let mut emit_ok = 0usize; // units: emit valid Lua (passes or test-fails)
@@ -2531,7 +2601,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     }
     for dir in &package_dirs {
         let outcome: UnitResult =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build_package(dir)));
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build_package(dir, shards)));
         outcomes.push((short_path(dir).to_string(), outcome));
     }
 
@@ -2649,6 +2719,9 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         },
         total,
     );
+    if !package_dirs.is_empty() {
+        println!("  @test shards: {shards} LuaJIT processes per package (ROCK_TEST_SHARDS)");
+    }
 
     // LSP fixtures run through the bone-backed LSP (skull's language server),
     // via the same dispatch helper rock's `test` uses. Failures count toward

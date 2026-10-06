@@ -143,6 +143,8 @@ mod stone_test_decorator_cleanup;
 mod stone_full_reload_binding;
 #[path = "stone_test_endtoend.rs"]
 mod stone_test_endtoend;
+#[path = "test_shards.rs"]
+mod test_shards;
 #[path = "test_harness_truncation.rs"]
 mod test_harness_truncation;
 #[path = "watcher_tmp_project_path.rs"]
