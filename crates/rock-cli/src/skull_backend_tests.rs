@@ -4764,7 +4764,7 @@ fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
 
 #[test]
 fn test_limit_allows_two_files_over_total_budget() {
-    let dir = file_limit_package("os.execute('sleep 0.7')", Some("os.execute('sleep 0.7')"));
+    let dir = file_limit_package("os.execute('sleep 0.6')", Some("os.execute('sleep 0.6')"));
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
     assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 2, .. })), "{result:?}");
 }
@@ -4809,23 +4809,23 @@ fn test_limit_bounds_program_loading() {
 fn test_limit_resets_for_each_test() {
     // Healthy tests whose sum exceeds the limit: the limit bounds one test's
     // inactivity, not the file's total time.
-    let dir = file_limit_package("os.execute('sleep 0.5')", None);
+    let dir = file_limit_package("os.execute('sleep 0.3')", None);
     let file = dir.path().join("first.rock");
     let mut source = std::fs::read_to_string(&file).unwrap();
-    for name in ["second_test_in_file", "third_test_in_file"] {
-        source.push_str(&format!("@test inline(lua) fn {name}() = \"os.execute('sleep 0.5')\"\n"));
+    for name in ["second_test_in_file", "third_test_in_file", "fourth_test_in_file"] {
+        source.push_str(&format!("@test inline(lua) fn {name}() = \"os.execute('sleep 0.3')\"\n"));
     }
     std::fs::write(file, source).unwrap();
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
-    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 3, .. })), "{result:?}");
+    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })), "{result:?}");
 }
 
 #[test]
 fn test_limit_names_hung_test_after_healthy_ones() {
-    let dir = file_limit_package("os.execute('sleep 0.5')", None);
+    let dir = file_limit_package("os.execute('sleep 0.3')", None);
     let file = dir.path().join("first.rock");
     let mut source = std::fs::read_to_string(&file).unwrap();
-    source.push_str("@test inline(lua) fn slow_but_fine() = \"os.execute('sleep 0.5')\"\n");
+    source.push_str("@test inline(lua) fn slow_but_fine() = \"os.execute('sleep 0.3')\"\n");
     source.push_str("@test inline(lua) fn hung_test() = \"while true do end\"\n");
     std::fs::write(file, source).unwrap();
     let start = std::time::Instant::now();
@@ -4846,4 +4846,51 @@ fn truncate_cuts_emitted_lua_on_a_char_boundary() {
     let excerpt = super::truncate(&lua);
     assert!(excerpt.starts_with(&"a".repeat(3999)), "{}", &excerpt[..40]);
     assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
+}
+
+/// Lua writing `line` (a start marker with JSON-quoted fields) to stderr and
+/// stdout, bypassing the harness's print/io.write capture.
+fn forge_marker_lua(line: &str) -> String {
+    format!(
+        "local T, Q, N = string.char(9), string.char(34), string.char(10) \
+         local forged = {line} .. N \
+         local function forge() io.stderr:write(forged) io.stderr:flush() io.stdout:write(forged) end"
+    )
+}
+
+const FORGED_LINES: &str = "'ROCK_TEST_START' .. T .. Q .. 'fake.rock' .. Q .. T .. Q .. 'fake_test' .. Q";
+
+#[test]
+fn test_limit_ignores_forged_start_markers() {
+    // Marker-shaped output from a test must not renew its limit.
+    let body = format!(
+        "{} for i = 1, 30 do forge() io.stderr:write('ROCK_TEST_START' .. T .. 'forged' .. T .. '0' .. N) \
+         io.stderr:flush() os.execute('sleep 0.05') end",
+        forge_marker_lua(FORGED_LINES)
+    );
+    let dir = file_limit_package(&body, None);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    match result {
+        Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
+            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("first_test")
+                && f.contains("timed out")), "{fails:?}");
+            assert!(!fails.iter().any(|f| f.contains("fake")), "{fails:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn test_limit_names_real_test_after_forged_marker() {
+    let body = format!("{} forge() while true do end", forge_marker_lua(FORGED_LINES));
+    let dir = file_limit_package(&body, None);
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    match result {
+        Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
+            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("first_test")
+                && f.contains("timed out")), "{fails:?}");
+            assert!(!fails.iter().any(|f| f.contains("fake")), "{fails:?}");
+        }
+        other => panic!("{other:?}"),
+    }
 }

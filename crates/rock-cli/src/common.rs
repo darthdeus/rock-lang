@@ -151,11 +151,12 @@ impl ProcessManager {
         Self::wait_with_policy(child, WaitPolicy::FrameBudget { startup, budget }, false, false)
     }
 
-    /// Bound program loading and each test separately: every test-start
-    /// marker restarts the limit, so it catches a hung test, never a long file
-    /// of healthy ones. Other output does not reset it.
-    pub fn wait_with_test_watchdog(child: &mut Child, limit: Duration) -> Result<ProcessResult> {
-        Self::wait_with_policy(child, WaitPolicy::Test(limit), false, false)
+    /// Bound program loading and each test separately: the harness's start
+    /// marker for the next test restarts the limit, so it catches a hung test,
+    /// never a long file of healthy ones. Other output, markers without this
+    /// run's token, and repeated or out-of-order starts do not reset it.
+    pub fn wait_with_test_watchdog(child: &mut Child, limit: Duration, watch: TestWatch) -> Result<ProcessResult> {
+        Self::wait_with_policy_and_tests(child, WaitPolicy::Test(limit), false, false, Some(watch))
     }
 
     fn wait_with_policy(
@@ -163,6 +164,16 @@ impl ProcessManager {
         policy: WaitPolicy,
         forward_stdout: bool,
         forward_stderr: bool,
+    ) -> Result<ProcessResult> {
+        Self::wait_with_policy_and_tests(child, policy, forward_stdout, forward_stderr, None)
+    }
+
+    fn wait_with_policy_and_tests(
+        child: &mut Child,
+        policy: WaitPolicy,
+        forward_stdout: bool,
+        forward_stderr: bool,
+        test_watch: Option<TestWatch>,
     ) -> Result<ProcessResult> {
         use std::io::{self, BufRead, BufReader, Read, Write};
         use std::sync::mpsc;
@@ -205,6 +216,7 @@ impl ProcessManager {
                 buf
             })
         });
+        let test_token = test_watch.as_ref().map(|watch| watch.token.clone());
         let stderr_thread = child.stderr.take().map(|h| {
             let progress_tx = progress_tx.clone();
             thread::spawn(move || {
@@ -224,7 +236,8 @@ impl ProcessManager {
                             }
                             if let Some(tx) = &progress_tx {
                                 let progress = match policy {
-                                    WaitPolicy::Test(_) => parse_test_start(&line)
+                                    WaitPolicy::Test(_) => test_token.as_deref()
+                                        .and_then(|token| parse_test_start(&line, token))
                                         .map(ProcessProgress::Test),
                                     _ => parse_frame_progress(&line).map(ProcessProgress::Frame),
                                 };
@@ -248,7 +261,7 @@ impl ProcessManager {
         let mut last_progress_at = start_time;
         let mut first_progress_at = None;
         let mut latest_progress = None;
-        let mut running_test = None;
+        let mut tests = test_watch.map(|watch| TestSequence { count: watch.tests, next: 0, running: None });
         let mut saw_progress = false;
         let timed_out;
         let timeout_phase;
@@ -257,6 +270,11 @@ impl ProcessManager {
         loop {
             if let Some(rx) = &progress_rx {
                 for (at, progress) in rx.try_iter() {
+                    if let ProcessProgress::Test(ordinal) = progress {
+                        if !tests.as_mut().is_some_and(|tests| tests.start(ordinal)) {
+                            continue;
+                        }
+                    }
                     saw_progress = true;
                     last_progress_at = if matches!(policy, WaitPolicy::Test(_)) {
                         at
@@ -264,9 +282,8 @@ impl ProcessManager {
                         std::time::Instant::now()
                     };
                     first_progress_at.get_or_insert(last_progress_at);
-                    match progress {
-                        ProcessProgress::Frame(frame) => latest_progress = Some(frame),
-                        ProcessProgress::Test(test) => running_test = Some(test),
+                    if let ProcessProgress::Frame(frame) = progress {
+                        latest_progress = Some(frame);
                     }
                 }
             }
@@ -325,7 +342,11 @@ impl ProcessManager {
                 for (_, progress) in rx.try_iter() {
                     match progress {
                         ProcessProgress::Frame(frame) => latest_progress = Some(frame),
-                        ProcessProgress::Test(test) => running_test = Some(test),
+                        ProcessProgress::Test(ordinal) => {
+                            if let Some(tests) = tests.as_mut() {
+                                tests.start(ordinal);
+                            }
+                        }
                     }
                 }
             }
@@ -336,7 +357,7 @@ impl ProcessManager {
             timed_out,
             timeout_phase,
             frame_progress: latest_progress,
-            running_test,
+            running_test: tests.and_then(|tests| tests.running),
             progress_stopped: matches!(policy, WaitPolicy::Frame { .. }) && saw_progress && timed_out,
         })
     }
@@ -373,16 +394,44 @@ impl std::fmt::Display for TimeoutPhase {
 
 enum ProcessProgress {
     Frame(FrameProgress),
-    Test(RunningTest),
+    Test(usize),
 }
 
-/// `ROCK_TEST_START<TAB>"file"<TAB>"name"`: JSON strings escape tabs and
-/// newlines, so the separators are unambiguous.
-fn parse_test_start(line: &[u8]) -> Option<RunningTest> {
+/// A test harness's start events. The token is generated per run and known
+/// only to the harness, so marker-shaped output from a test is not an event.
+#[derive(Debug, Clone)]
+pub struct TestWatch {
+    pub token: String,
+    pub tests: usize,
+}
+
+/// Starts are accepted once each, in declaration order.
+struct TestSequence {
+    count: usize,
+    next: usize,
+    running: Option<usize>,
+}
+
+impl TestSequence {
+    fn start(&mut self, ordinal: usize) -> bool {
+        if ordinal != self.next || ordinal >= self.count {
+            return false;
+        }
+        self.next += 1;
+        self.running = Some(ordinal);
+        true
+    }
+}
+
+/// `ROCK_TEST_START<TAB>token<TAB>ordinal`, ordinal counting from 0.
+fn parse_test_start(line: &[u8], token: &str) -> Option<usize> {
     let line = std::str::from_utf8(line).ok()?;
     let fields = line.strip_prefix("ROCK_TEST_START\t")?.strip_suffix('\n')?;
-    let (file, name) = fields.split_once('\t')?;
-    Some(RunningTest { file: serde_json::from_str(file).ok()?, name: serde_json::from_str(name).ok()? })
+    let (got, ordinal) = fields.split_once('\t')?;
+    if got != token {
+        return None;
+    }
+    ordinal.parse().ok()
 }
 
 fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
@@ -417,15 +466,9 @@ pub struct ProcessResult {
     pub timed_out: bool,
     pub timeout_phase: Option<TimeoutPhase>,
     pub frame_progress: Option<FrameProgress>,
-    pub running_test: Option<RunningTest>,
+    /// Index of the last test a [`TestWatch`] run started.
+    pub running_test: Option<usize>,
     pub progress_stopped: bool,
-}
-
-/// The test a `WaitPolicy::Test` run last started.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunningTest {
-    pub file: String,
-    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,15 +480,29 @@ pub struct FrameProgress {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_frame_progress, parse_test_start, FrameProgress, RunningTest};
+    use super::{parse_frame_progress, parse_test_start, FrameProgress, TestSequence};
 
     #[test]
-    fn test_start_preserves_escaped_file_and_name() {
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\t\"a\\tb\\nc.rock\"\t\"pkg::t\\tx\"\n"),
-            Some(RunningTest { file: "a\tb\nc.rock".to_owned(), name: "pkg::t\tx".to_owned() }));
-        assert_eq!(parse_test_start(b"ordinary output\n"), None);
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\tinvalid\t\"t\"\n"), None);
-        assert_eq!(parse_test_start(b"ROCK_TEST_START\t\"a.rock\"\n"), None);
+    fn test_start_requires_the_run_token() {
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\t3\n", "abc"), Some(3));
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\tforged\t3\n", "abc"), None);
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\t3", "abc"), None);
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\tx\n", "abc"), None);
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\t\"a.rock\"\t\"t\"\n", "abc"), None);
+        assert_eq!(parse_test_start(b"ordinary output\n", "abc"), None);
+    }
+
+    #[test]
+    fn test_sequence_accepts_each_start_once_in_order() {
+        let mut tests = TestSequence { count: 3, next: 0, running: None };
+        assert!(!tests.start(1), "skipped ahead");
+        assert!(tests.start(0));
+        assert!(!tests.start(0), "repeated");
+        assert!(tests.start(1));
+        assert!(!tests.start(0), "stale");
+        assert!(tests.start(2));
+        assert!(!tests.start(3), "beyond the declared tests");
+        assert_eq!(tests.running, Some(2));
     }
 
     #[test]

@@ -491,10 +491,11 @@ pub(crate) fn skull_assemble_project(
 /// its `print` AND `io.write` captured (both restored before the markers are
 /// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line and one
 /// wall-time `TIME` line per test. Before each test it writes a
-/// `ROCK_TEST_START` marker to stderr, which restarts the host's hung-test limit.
+/// `ROCK_TEST_START` marker with this run's `token` to stderr, which restarts
+/// the host's hung-test limit; the token is a local the tests cannot see.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
-fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
+fn build_test_harness(tests: &[skull::SkullTest], token: &str) -> String {
     fn lua_str(s: &str) -> String {
         let mut o = String::from("\"");
         for c in s.chars() {
@@ -511,8 +512,8 @@ fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
         o
     }
 
-    let mut h = String::from("\nlocal __skull_T = {\n");
-    for (t, file) in tests.iter().zip(files) {
+    let mut h = format!("\nlocal __skull_token = {}\nlocal __skull_T = {{\n", lua_str(token));
+    for t in tests {
         let out = match &t.output {
             Some(s) => lua_str(s),
             None => "nil".to_string(),
@@ -523,18 +524,12 @@ fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
         // runs many tests together, and two modules may declare the same name).
         // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
         // line carrying the serialized return value; the HOST compares it.
-        let start = format!(
-            "{}\t{}",
-            serde_json::to_string(file).expect("serialize file path"),
-            serde_json::to_string(&t.name).expect("serialize test name")
-        );
         h.push_str(&format!(
-            "  {{ f = {}, out = {}, name = {}, val = {}, start = {} }},\n",
+            "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
             t.symbol,
             out,
             lua_str(&t.name),
-            t.returns.is_some(),
-            lua_str(&start)
+            t.returns.is_some()
         ));
     }
     h.push_str("}\n");
@@ -557,8 +552,8 @@ do
   end
 end
 io.stdout:setvbuf("no")
-for _, t in ipairs(__skull_T) do
-  io.stderr:write("\nROCK_TEST_START\t", t.start, "\n")
+for i, t in ipairs(__skull_T) do
+  io.stderr:write("\nROCK_TEST_START\t", __skull_token, "\t", i - 1, "\n")
   io.stderr:flush()
   local buf = {}
   local rp = print
@@ -738,7 +733,7 @@ fn run_emitted_tests(
     // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
         let excerpt = truncate(&lua);
-        let run = run_test_program(lua, limit).map_err(|e| SkullFailure {
+        let run = run_test_program(lua, limit, run_token(), 0).map_err(|e| SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: e.to_string(),
         })?;
@@ -758,15 +753,16 @@ fn run_emitted_tests(
     }
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
+    let token = run_token();
     let mut program = lua;
-    program.push_str(&build_test_harness(tests, files));
+    program.push_str(&build_test_harness(tests, &token));
     let excerpt = truncate(&program);
     // The harness `pcall`s each test, so an ordinary assertion failure becomes a
     // FAIL marker and the process still exits 0. A non-zero status therefore
     // means the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
     // after that point never ran. Keep the output either way: a truncated run
     // still has to say what it managed to report.
-    let run = run_test_program(program, limit).map_err(|e| SkullFailure {
+    let run = run_test_program(program, limit, token, tests.len()).map_err(|e| SkullFailure {
         reason: "test run errored (skull bug)".to_string(),
         rendered: e.to_string(),
     })?;
@@ -774,9 +770,9 @@ fn run_emitted_tests(
         String::from_utf8_lossy(&run.output.stderr));
     let died = !run.output.status.success();
     let timeout_failure = run.timed_out.then(|| {
-        match &run.running_test {
-            Some(test) => format!("{}: `{}` timed out: no progress for {}s",
-                test.file, test.name, limit.as_secs_f64()),
+        match run.running_test {
+            Some(i) => format!("{}: `{}` timed out: no progress for {}s",
+                files[i], tests[i].name, limit.as_secs_f64()),
             None => format!("loading emitted program: timed out after {}s", limit.as_secs_f64()),
         }
     });
@@ -860,7 +856,26 @@ fn run_emitted_tests(
     }
 }
 
-fn run_test_program(program: String, limit: std::time::Duration) -> Result<crate::common::ProcessResult> {
+/// A per-run secret for the harness's start markers; not cryptographic, only
+/// distinct from anything a test would print.
+fn run_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+        hasher.write_u32(std::process::id());
+        hasher.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
+}
+
+fn run_test_program(
+    program: String,
+    limit: std::time::Duration,
+    token: String,
+    tests: usize,
+) -> Result<crate::common::ProcessResult> {
     use std::io::Write;
     use std::process::Stdio;
     use rock_host::process_management::{register_child_process, unregister_child_process};
@@ -879,7 +894,8 @@ fn run_test_program(program: String, limit: std::time::Duration) -> Result<crate
         .spawn()?;
     let pid = child.id();
     register_child_process(pid);
-    let result = crate::common::ProcessManager::wait_with_test_watchdog(&mut child, limit);
+    let result = crate::common::ProcessManager::wait_with_test_watchdog(
+        &mut child, limit, crate::common::TestWatch { token, tests });
     if result.is_err() {
         if let Err(error) = child.kill() {
             log::error!(target: "CLI", "failed to kill Lua test process: {error}");
