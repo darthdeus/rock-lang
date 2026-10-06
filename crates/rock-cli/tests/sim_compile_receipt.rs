@@ -299,7 +299,8 @@ impl CacheRun<'_> {
         let output = command.output().expect("run fixture sim");
         assert!(
             output.status.success(),
-            "{label}: fixture sim failed:\n{}\n{}",
+            "{label}: fixture sim failed ({}):\n{}\n{}",
+            output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -391,9 +392,32 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
         !changed.compiled("compiler-copy", "cache_probe", &[], &[]),
         "a byte-identical compiler at another path reuses the compile"
     );
-    let mut bytes = std::fs::read(&compiler).expect("read rock copy");
-    bytes.push(0);
-    std::fs::write(&compiler, bytes).expect("change rock copy");
+    #[cfg(target_os = "macos")]
+    {
+        // Rewriting signed bytes can make macOS kill the executable before startup.
+        let before = std::fs::read(&compiler).expect("read rock copy");
+        let signed = Command::new("codesign")
+            .args(["--force", "--sign", "-", "--identifier", "rock-sim-cache-fixture"])
+            .arg(&compiler)
+            .output()
+            .expect("change rock copy's signed identity");
+        assert!(
+            signed.status.success(),
+            "codesign failed ({}):\n{}",
+            signed.status,
+            String::from_utf8_lossy(&signed.stderr)
+        );
+        assert!(
+            std::fs::read(&compiler).expect("read signed rock copy") != before,
+            "changing the signed identity must change the compiler bytes"
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut bytes = std::fs::read(&compiler).expect("read rock copy");
+        bytes.push(0);
+        std::fs::write(&compiler, bytes).expect("change rock copy");
+    }
     assert!(changed.compiled("compiler", "cache_probe", &[], &[]), "a changed compiler recompiles");
 
     let entries = cache_entries(&cache);
