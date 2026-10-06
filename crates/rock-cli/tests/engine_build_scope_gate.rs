@@ -122,3 +122,24 @@ fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
         unrelated_artifact.display()
     );
 }
+
+#[test]
+#[ignore = "builds stone-rs without default features; run deliberately"]
+fn c_libstone_stages_under_its_own_name_and_leaves_the_engine_library() {
+    let root = private_engine_root("c-libstone");
+    let engine_lib = root.join("tmp").join(cdylib_name("stone"));
+    let sentinel = b"engine libstone sentinel: the C build must not touch this";
+    fs_err::write(&engine_lib, sentinel).expect("write sentinel engine libstone");
+    unsafe { std::env::remove_var("ROCK_ENGINE_BUILD_RECEIPT") };
+
+    rock_host::engine_build::build_libstone_for_c().expect("build C libstone");
+
+    assert_eq!(
+        fs_err::read(&engine_lib).expect("read engine libstone"),
+        sentinel,
+        "build_libstone_for_c overwrote the Lua engine's {}",
+        engine_lib.display()
+    );
+    let c_lib = root.join("tmp").join(cdylib_name("stone_c"));
+    assert!(c_lib.is_file(), "C libstone not staged at {}", c_lib.display());
+}
