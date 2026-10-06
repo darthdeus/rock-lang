@@ -1167,9 +1167,9 @@ fn skull_build_package_with_limit(
     run_emitted_tests(lua, &tests, &files, limit, shards, filter)
 }
 
-/// LuaJIT processes per package test run: `ROCK_TEST_SHARDS`, else half the
-/// cores capped at 4. Each mag shard holds about 1.4 GB, and many concurrent
-/// `rock test` runs share a host; a gate that owns the machine raises it.
+/// LuaJIT processes per package test run: `ROCK_TEST_SHARDS`, else 2 (1 on a
+/// single-core host). On the Studio the mag lane takes 86/62/52/50 s at
+/// 1/2/4/8 shards; 2 keeps most of the gain while many runs share a host.
 fn test_shard_count() -> Result<usize> {
     match std::env::var("ROCK_TEST_SHARDS") {
         Ok(value) => match value.trim().parse::<usize>() {
@@ -1177,7 +1177,7 @@ fn test_shard_count() -> Result<usize> {
             _ => anyhow::bail!("ROCK_TEST_SHARDS must be a positive integer, got `{value}`"),
         },
         Err(std::env::VarError::NotPresent) => Ok(std::thread::available_parallelism()
-            .map_or(1, |cores| (cores.get() / 2).clamp(1, 4))),
+            .map_or(1, |cores| cores.get().min(2))),
         Err(error) => anyhow::bail!("ROCK_TEST_SHARDS: {error}"),
     }
 }
