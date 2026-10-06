@@ -490,7 +490,8 @@ pub(crate) fn skull_assemble_project(
 /// A Lua harness appended after the emitted module: it runs each `@test` fn with
 /// its `print` AND `io.write` captured (both restored before the markers are
 /// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line and one
-/// wall-time `TIME` line per test.
+/// wall-time `TIME` line per test. Before each test it writes a
+/// `ROCK_TEST_START` marker to stderr, which restarts the host's hung-test limit.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
 fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
@@ -522,19 +523,23 @@ fn build_test_harness(tests: &[skull::SkullTest], files: &[String]) -> String {
         // runs many tests together, and two modules may declare the same name).
         // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
         // line carrying the serialized return value; the HOST compares it.
+        let start = format!(
+            "{}\t{}",
+            serde_json::to_string(file).expect("serialize file path"),
+            serde_json::to_string(&t.name).expect("serialize test name")
+        );
         h.push_str(&format!(
-            "  {{ f = {}, out = {}, name = {}, val = {}, file = {} }},\n",
+            "  {{ f = {}, out = {}, name = {}, val = {}, start = {} }},\n",
             t.symbol,
             out,
             lua_str(&t.name),
             t.returns.is_some(),
-            lua_str(&serde_json::to_string(file).expect("serialize file path"))
+            lua_str(&start)
         ));
     }
     h.push_str("}\n");
     h.push_str(
         r#"local function __esc(s) return (s:gsub("\\", "\\\\"):gsub("\n", "\\n"):gsub("\t", "\\t")) end
-local __skull_file
 -- os.clock is CPU time on POSIX and misses sleeps and waits, so tests are timed
 -- with the monotonic clock; MSVC's clock() is already wall time.
 local __skull_now = function() return os.clock() * 1e3 end
@@ -553,11 +558,8 @@ do
 end
 io.stdout:setvbuf("no")
 for _, t in ipairs(__skull_T) do
-  if t.file ~= __skull_file then
-    __skull_file = t.file
-    io.stderr:write("\nROCK_TEST_FILE\t", t.file, "\n")
-    io.stderr:flush()
-  end
+  io.stderr:write("\nROCK_TEST_START\t", t.start, "\n")
+  io.stderr:flush()
   local buf = {}
   local rp = print
   local rw = io.write
@@ -772,8 +774,9 @@ fn run_emitted_tests(
         String::from_utf8_lossy(&run.output.stderr));
     let died = !run.output.status.success();
     let timeout_failure = run.timed_out.then(|| {
-        match &run.test_file {
-            Some(file) => format!("{file}: timed out after {}s", limit.as_secs_f64()),
+        match &run.running_test {
+            Some(test) => format!("{}: `{}` timed out: no progress for {}s",
+                test.file, test.name, limit.as_secs_f64()),
             None => format!("loading emitted program: timed out after {}s", limit.as_secs_f64()),
         }
     });
@@ -876,7 +879,7 @@ fn run_test_program(program: String, limit: std::time::Duration) -> Result<crate
         .spawn()?;
     let pid = child.id();
     register_child_process(pid);
-    let result = crate::common::ProcessManager::wait_with_test_file_budget(&mut child, limit);
+    let result = crate::common::ProcessManager::wait_with_test_watchdog(&mut child, limit);
     if result.is_err() {
         if let Err(error) = child.kill() {
             log::error!(target: "CLI", "failed to kill Lua test process: {error}");

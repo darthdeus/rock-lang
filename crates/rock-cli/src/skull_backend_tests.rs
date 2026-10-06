@@ -4763,14 +4763,14 @@ fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
 }
 
 #[test]
-fn test_file_limit_allows_two_files_over_total_budget() {
+fn test_limit_allows_two_files_over_total_budget() {
     let dir = file_limit_package("os.execute('sleep 0.7')", Some("os.execute('sleep 0.7')"));
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
     assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 2, .. })), "{result:?}");
 }
 
 #[test]
-fn test_file_limit_kills_and_names_stuck_file() {
+fn test_limit_kills_and_names_stuck_file() {
     let dir = file_limit_package("while true do end", None);
     let start = std::time::Instant::now();
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
@@ -4784,7 +4784,7 @@ fn test_file_limit_kills_and_names_stuck_file() {
 }
 
 #[test]
-fn test_file_limit_keeps_completed_file_results() {
+fn test_limit_keeps_completed_file_results() {
     let dir = file_limit_package("print('done')", Some("while true do end"));
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
     match result {
@@ -4797,7 +4797,7 @@ fn test_file_limit_keeps_completed_file_results() {
 
 
 #[test]
-fn test_file_limit_bounds_program_loading() {
+fn test_limit_bounds_program_loading() {
     let start = std::time::Instant::now();
     let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100));
     assert!(start.elapsed() < Duration::from_secs(2));
@@ -4806,16 +4806,35 @@ fn test_file_limit_bounds_program_loading() {
 }
 
 #[test]
-fn test_file_limit_does_not_reset_for_each_test() {
-    let dir = file_limit_package("os.execute('sleep 0.7')", None);
+fn test_limit_resets_for_each_test() {
+    // Healthy tests whose sum exceeds the limit: the limit bounds one test's
+    // inactivity, not the file's total time.
+    let dir = file_limit_package("os.execute('sleep 0.5')", None);
     let file = dir.path().join("first.rock");
     let mut source = std::fs::read_to_string(&file).unwrap();
-    source.push_str("@test inline(lua) fn another_test() = \"os.execute('sleep 0.7')\"\n");
+    for name in ["second_test_in_file", "third_test_in_file"] {
+        source.push_str(&format!("@test inline(lua) fn {name}() = \"os.execute('sleep 0.5')\"\n"));
+    }
     std::fs::write(file, source).unwrap();
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 3, .. })), "{result:?}");
+}
+
+#[test]
+fn test_limit_names_hung_test_after_healthy_ones() {
+    let dir = file_limit_package("os.execute('sleep 0.5')", None);
+    let file = dir.path().join("first.rock");
+    let mut source = std::fs::read_to_string(&file).unwrap();
+    source.push_str("@test inline(lua) fn slow_but_fine() = \"os.execute('sleep 0.5')\"\n");
+    source.push_str("@test inline(lua) fn hung_test() = \"while true do end\"\n");
+    std::fs::write(file, source).unwrap();
+    let start = std::time::Instant::now();
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(5), "hung test was not bounded");
     match result {
-        Ok(super::SkullOutcome::TestFail { passed: 1, fails, .. }) => {
-            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")), "{fails:?}");
+        Ok(super::SkullOutcome::TestFail { passed: 2, fails, .. }) => {
+            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("hung_test")
+                && f.contains("timed out")), "{fails:?}");
         }
         other => panic!("{other:?}"),
     }

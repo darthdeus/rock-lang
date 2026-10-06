@@ -151,10 +151,11 @@ impl ProcessManager {
         Self::wait_with_policy(child, WaitPolicy::FrameBudget { startup, budget }, false, false)
     }
 
-    /// Bound program loading and each test file separately; only a file
-    /// boundary resets the budget, never output or individual test results.
-    pub fn wait_with_test_file_budget(child: &mut Child, limit: Duration) -> Result<ProcessResult> {
-        Self::wait_with_policy(child, WaitPolicy::TestFile(limit), false, false)
+    /// Bound program loading and each test separately: every test-start
+    /// marker restarts the limit, so it catches a hung test, never a long file
+    /// of healthy ones. Other output does not reset it.
+    pub fn wait_with_test_watchdog(child: &mut Child, limit: Duration) -> Result<ProcessResult> {
+        Self::wait_with_policy(child, WaitPolicy::Test(limit), false, false)
     }
 
     fn wait_with_policy(
@@ -223,8 +224,8 @@ impl ProcessManager {
                             }
                             if let Some(tx) = &progress_tx {
                                 let progress = match policy {
-                                    WaitPolicy::TestFile(_) => parse_test_file_progress(&line)
-                                        .map(ProcessProgress::TestFile),
+                                    WaitPolicy::Test(_) => parse_test_start(&line)
+                                        .map(ProcessProgress::Test),
                                     _ => parse_frame_progress(&line).map(ProcessProgress::Frame),
                                 };
                                 if let Some(progress) = progress {
@@ -247,7 +248,7 @@ impl ProcessManager {
         let mut last_progress_at = start_time;
         let mut first_progress_at = None;
         let mut latest_progress = None;
-        let mut test_file = None;
+        let mut running_test = None;
         let mut saw_progress = false;
         let timed_out;
         let timeout_phase;
@@ -257,7 +258,7 @@ impl ProcessManager {
             if let Some(rx) = &progress_rx {
                 for (at, progress) in rx.try_iter() {
                     saw_progress = true;
-                    last_progress_at = if matches!(policy, WaitPolicy::TestFile(_)) {
+                    last_progress_at = if matches!(policy, WaitPolicy::Test(_)) {
                         at
                     } else {
                         std::time::Instant::now()
@@ -265,7 +266,7 @@ impl ProcessManager {
                     first_progress_at.get_or_insert(last_progress_at);
                     match progress {
                         ProcessProgress::Frame(frame) => latest_progress = Some(frame),
-                        ProcessProgress::TestFile(file) => test_file = Some(file),
+                        ProcessProgress::Test(test) => running_test = Some(test),
                     }
                 }
             }
@@ -288,9 +289,9 @@ impl ProcessManager {
                                 (start_time.elapsed(), startup, TimeoutPhase::Startup)
                             }
                         }
-                        WaitPolicy::TestFile(limit) => {
+                        WaitPolicy::Test(limit) => {
                             if saw_progress {
-                                (last_progress_at.elapsed(), limit, TimeoutPhase::TestFile)
+                                (last_progress_at.elapsed(), limit, TimeoutPhase::Test)
                             } else {
                                 (start_time.elapsed(), limit, TimeoutPhase::Startup)
                             }
@@ -318,13 +319,13 @@ impl ProcessManager {
         let stderr = stderr_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
 
         // Reader joins ensure the final markers have arrived. After a timeout
-        // retain the boundary that was active when the budget expired.
-        if !timed_out || !matches!(policy, WaitPolicy::TestFile(_)) {
+        // retain the test that was running when the limit expired.
+        if !timed_out || !matches!(policy, WaitPolicy::Test(_)) {
             if let Some(rx) = &progress_rx {
                 for (_, progress) in rx.try_iter() {
                     match progress {
                         ProcessProgress::Frame(frame) => latest_progress = Some(frame),
-                        ProcessProgress::TestFile(file) => test_file = Some(file),
+                        ProcessProgress::Test(test) => running_test = Some(test),
                     }
                 }
             }
@@ -335,7 +336,7 @@ impl ProcessManager {
             timed_out,
             timeout_phase,
             frame_progress: latest_progress,
-            test_file,
+            running_test,
             progress_stopped: matches!(policy, WaitPolicy::Frame { .. }) && saw_progress && timed_out,
         })
     }
@@ -346,7 +347,7 @@ enum WaitPolicy {
     Total(Duration),
     Frame { startup: Duration, inactivity: Duration },
     FrameBudget { startup: Duration, budget: Duration },
-    TestFile(Duration),
+    Test(Duration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,7 +356,7 @@ pub enum TimeoutPhase {
     Startup,
     FrameInactivity,
     FrameBudget,
-    TestFile,
+    Test,
 }
 
 impl std::fmt::Display for TimeoutPhase {
@@ -365,20 +366,23 @@ impl std::fmt::Display for TimeoutPhase {
             Self::Startup => "startup",
             Self::FrameInactivity => "frame inactivity",
             Self::FrameBudget => "frame budget",
-            Self::TestFile => "test file",
+            Self::Test => "test",
         })
     }
 }
 
 enum ProcessProgress {
     Frame(FrameProgress),
-    TestFile(String),
+    Test(RunningTest),
 }
 
-fn parse_test_file_progress(line: &[u8]) -> Option<String> {
+/// `ROCK_TEST_START<TAB>"file"<TAB>"name"`: JSON strings escape tabs and
+/// newlines, so the separators are unambiguous.
+fn parse_test_start(line: &[u8]) -> Option<RunningTest> {
     let line = std::str::from_utf8(line).ok()?;
-    let file = line.strip_prefix("ROCK_TEST_FILE\t")?.strip_suffix('\n')?;
-    serde_json::from_str(file).ok()
+    let fields = line.strip_prefix("ROCK_TEST_START\t")?.strip_suffix('\n')?;
+    let (file, name) = fields.split_once('\t')?;
+    Some(RunningTest { file: serde_json::from_str(file).ok()?, name: serde_json::from_str(name).ok()? })
 }
 
 fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
@@ -413,8 +417,15 @@ pub struct ProcessResult {
     pub timed_out: bool,
     pub timeout_phase: Option<TimeoutPhase>,
     pub frame_progress: Option<FrameProgress>,
-    pub test_file: Option<String>,
+    pub running_test: Option<RunningTest>,
     pub progress_stopped: bool,
+}
+
+/// The test a `WaitPolicy::Test` run last started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningTest {
+    pub file: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,14 +437,15 @@ pub struct FrameProgress {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_frame_progress, parse_test_file_progress, FrameProgress};
+    use super::{parse_frame_progress, parse_test_start, FrameProgress, RunningTest};
 
     #[test]
-    fn test_file_progress_preserves_escaped_paths() {
-        assert_eq!(parse_test_file_progress(b"ROCK_TEST_FILE\t\"a\\tb\\nc.rock\"\n"),
-            Some("a\tb\nc.rock".to_owned()));
-        assert_eq!(parse_test_file_progress(b"ordinary output\n"), None);
-        assert_eq!(parse_test_file_progress(b"ROCK_TEST_FILE\tinvalid\n"), None);
+    fn test_start_preserves_escaped_file_and_name() {
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\t\"a\\tb\\nc.rock\"\t\"pkg::t\\tx\"\n"),
+            Some(RunningTest { file: "a\tb\nc.rock".to_owned(), name: "pkg::t\tx".to_owned() }));
+        assert_eq!(parse_test_start(b"ordinary output\n"), None);
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\tinvalid\t\"t\"\n"), None);
+        assert_eq!(parse_test_start(b"ROCK_TEST_START\t\"a.rock\"\n"), None);
     }
 
     #[test]
