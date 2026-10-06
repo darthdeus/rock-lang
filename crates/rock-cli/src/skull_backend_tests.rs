@@ -4848,33 +4848,35 @@ fn truncate_cuts_emitted_lua_on_a_char_boundary() {
     assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
 }
 
-/// Lua writing `line` (a start marker with JSON-quoted fields) to stderr and
-/// stdout, bypassing the harness's print/io.write capture.
-fn forge_marker_lua(line: &str) -> String {
-    format!(
-        "local T, Q, N = string.char(9), string.char(34), string.char(10) \
-         local forged = {line} .. N \
-         local function forge() io.stderr:write(forged) io.stderr:flush() io.stdout:write(forged) end"
+/// Lua writing numeric-protocol start markers directly to stderr (plus a
+/// stdout lookalike), bypassing the harness's print/io.write capture.
+fn forge_marker_lua() -> String {
+    String::from(
+        "local T, N = string.char(9), string.char(10) \
+         local function forge(tok, ord) \
+         local line = 'ROCK_TEST_START' .. T .. tok .. T .. ord .. N \
+         io.stderr:write(line) io.stderr:flush() io.stdout:write(line) end"
     )
 }
 
-const FORGED_LINES: &str = "'ROCK_TEST_START' .. T .. Q .. 'fake.rock' .. Q .. T .. Q .. 'fake_test' .. Q";
-
 #[test]
 fn test_limit_ignores_forged_start_markers() {
-    // Marker-shaped output from a test must not renew its limit.
+    // A hanging first test forges the next ordinal with a wrong token, plus a
+    // replayed current ordinal: neither may renew its limit or rename it.
     let body = format!(
-        "{} for i = 1, 30 do forge() io.stderr:write('ROCK_TEST_START' .. T .. 'forged' .. T .. '0' .. N) \
-         io.stderr:flush() os.execute('sleep 0.05') end",
-        forge_marker_lua(FORGED_LINES)
+        "{} for i = 1, 20 do forge('wrong', '1') forge('wrong', '0') \
+         os.execute('sleep 0.05') end while true do end",
+        forge_marker_lua()
     );
-    let dir = file_limit_package(&body, None);
+    let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
+    let start = std::time::Instant::now();
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(5), "forged future must not extend the limit");
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
             assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("first_test")
                 && f.contains("timed out")), "{fails:?}");
-            assert!(!fails.iter().any(|f| f.contains("fake")), "{fails:?}");
+            assert!(!fails.iter().any(|f| f.contains("second_test")), "{fails:?}");
         }
         other => panic!("{other:?}"),
     }
@@ -4882,14 +4884,18 @@ fn test_limit_ignores_forged_start_markers() {
 
 #[test]
 fn test_limit_names_real_test_after_forged_marker() {
-    let body = format!("{} forge() while true do end", forge_marker_lua(FORGED_LINES));
-    let dir = file_limit_package(&body, None);
+    // Empty (absent) token for the next ordinal, then a hang: the timeout
+    // still names the runner's own first test.
+    let body = format!("{} forge('', '1') while true do end", forge_marker_lua());
+    let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
+    let start = std::time::Instant::now();
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(5), "forged future must not extend the limit");
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
             assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("first_test")
                 && f.contains("timed out")), "{fails:?}");
-            assert!(!fails.iter().any(|f| f.contains("fake")), "{fails:?}");
+            assert!(!fails.iter().any(|f| f.contains("second_test")), "{fails:?}");
         }
         other => panic!("{other:?}"),
     }

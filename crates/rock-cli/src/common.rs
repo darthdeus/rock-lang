@@ -397,8 +397,9 @@ enum ProcessProgress {
     Test(usize),
 }
 
-/// A test harness's start events. The token is generated per run and known
-/// only to the harness, so marker-shaped output from a test is not an event.
+/// A test harness's start events. The token is generated per run and distinct
+/// from accidental test output, so marker-shaped output without this run's
+/// token is not an event.
 #[derive(Debug, Clone)]
 pub struct TestWatch {
     pub token: String,

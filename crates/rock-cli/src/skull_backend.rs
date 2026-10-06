@@ -492,7 +492,8 @@ pub(crate) fn skull_assemble_project(
 /// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line and one
 /// wall-time `TIME` line per test. Before each test it writes a
 /// `ROCK_TEST_START` marker with this run's `token` to stderr, which restarts
-/// the host's hung-test limit; the token is a local the tests cannot see.
+/// the host's hung-test limit; the token only separates accidental test
+/// output from harness markers.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
 fn build_test_harness(tests: &[skull::SkullTest], token: &str) -> String {
@@ -856,8 +857,11 @@ fn run_emitted_tests(
     }
 }
 
-/// A per-run secret for the harness's start markers; not cryptographic, only
-/// distinct from anything a test would print.
+/// A per-run token for the harness's start markers, only distinct from
+/// accidental test output. Lead decision: the per-test limit is a hang guard
+/// for this repo's own tests, not a security boundary, so deliberate
+/// in-process forgery by Lua code (debug locals, readable harness source,
+/// intercepted harness writes) is out of scope.
 fn run_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let half = || {
