@@ -10,16 +10,16 @@ unsafe extern "C" {
     fn mi_collect(force: bool);
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "sequential")))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Test witness recording which rayon worker indices ran the collect
 /// broadcast. Tests reset it before `release_freed_memory` and read it
 /// after; extra bits from concurrent releasers are harmless.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "sequential")))]
 static COLLECTED_WORKERS_MASK: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "sequential")))]
 fn note_worker_collected() {
     if let Some(i) = rayon::current_thread_index() {
         if i < 64 {
@@ -28,7 +28,7 @@ fn note_worker_collected() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "sequential")))]
 fn take_collected_workers_mask() -> u64 {
     COLLECTED_WORKERS_MASK.swap(0, Ordering::SeqCst)
 }
@@ -55,8 +55,10 @@ pub fn release_freed_memory() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "sequential"))]
     use std::ffi::c_void;
 
+    #[cfg(not(feature = "sequential"))]
     unsafe extern "C" {
         fn mi_malloc(size: usize) -> *mut c_void;
         fn mi_free(p: *mut c_void);
@@ -72,6 +74,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "sequential"))]
     fn mimalloc_committed() -> usize {
         let mut v = [0usize; 8];
         let [a, b, c, d, e, f, g, h] = &mut v;
