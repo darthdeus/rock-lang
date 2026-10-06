@@ -704,7 +704,7 @@ fn assert_bank_writer_leaves_the_tracked_bank(name: &str, bank: &str) {
     let tracked = workspace_root().join(bank);
     let before = std::fs::read(&tracked).expect("read tracked bank");
     let before_mtime = std::fs::metadata(&tracked).and_then(|m| m.modified()).expect("bank mtime");
-    let run = run_project_workers("mag", &[name, "mob_attack_waits_for_arrival", "target_cycle_sim"], "2");
+    let run = run_project_workers("mag", &[name, "teleport_pad_arrival_phases", "target_cycle_sim"], "2");
     assert!(run.success, "{}", run.combined());
     assert_eq!(std::fs::read(&tracked).expect("reread tracked bank"), before,
         "`{name}` changed the tracked {bank}");
