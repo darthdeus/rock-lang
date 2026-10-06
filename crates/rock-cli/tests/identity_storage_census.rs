@@ -45,7 +45,7 @@ const PINNED: &str = "\
 | survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
 | testbed | exempt | 12 | 4 | 0 | 0 | 112 | 2 | 2 | 64 | 67 | 263 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
-| unpackaged programs | exempt | 111 | 14 | 8 | 0 | 137 | 50 | 1 | 0 | 47 | 368 |
+| unpackaged programs | exempt | 111 | 14 | 8 | 0 | 137 | 50 | 2 | 0 | 47 | 369 |
 | void | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 | 2 |
 | wgpu_renderer | exempt | 0 | 0 | 0 | 0 | 142 | 0 | 0 | 9 | 0 | 151 |
 
