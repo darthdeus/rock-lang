@@ -351,14 +351,16 @@ impl Builder<'_> {
             // `break`/`continue` in expression position: emit a placeholder value
             // (never read — the block diverges) then a goto to the loop target.
             Expr::Break => {
-                let (_, brk) = self.loop_target("break")?;
+                let (_, brk, depth) = self.loop_target("break")?;
                 self.used_break_targets.insert(brk);
+                self.run_defers_above(depth)?;
                 let v = self.emit_cur(Inst::Const(Lit::Nil));
                 self.f.set_term(self.cur, Term::Goto(brk));
                 Ok(v)
             }
             Expr::Continue => {
-                let (cont, _) = self.loop_target("continue")?;
+                let (cont, _, depth) = self.loop_target("continue")?;
+                self.run_defers_above(depth)?;
                 let v = self.emit_cur(Inst::Const(Lit::Nil));
                 self.f.set_term(self.cur, Term::Goto(cont));
                 Ok(v)
@@ -603,6 +605,12 @@ impl Builder<'_> {
                 // the reset unmasks no diagnostic -- it just makes the flag honest).
                 let saved_defers = std::mem::take(&mut self.defers);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
+                // A lambda body is emitted as its own hoisted fn, so its
+                // defers unwind on error wherever the lambda was created.
+                let saved_unwind = std::mem::replace(
+                    &mut self.defer_unwind,
+                    self.call_scx.target == bone_semantic::hir::FnBackend::Lua,
+                );
                 // Box value args (see field docs). A lambda body IS spliced into
                 // now -- `convert_closures` splits it out and the inliner runs
                 // over the standalone body -- but that happens after lowering, so
@@ -615,6 +623,7 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
+                    self.defer_unwind = saved_unwind;
                     self.ret_rep = saved_ret_rep;
                     self.cur = saved;
                     let id = self.emit_cur(Inst::Lambda {
@@ -637,6 +646,7 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
+                    self.defer_unwind = saved_unwind;
                     self.ret_rep = saved_ret_rep;
                     self.cur = saved;
                     let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });
@@ -672,6 +682,7 @@ impl Builder<'_> {
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
+                self.defer_unwind = saved_unwind;
                 self.ret_rep = saved_ret_rep;
                 self.cur = saved;
                 let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });

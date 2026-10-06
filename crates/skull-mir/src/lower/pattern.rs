@@ -1126,7 +1126,7 @@ impl Builder<'_> {
         }
         // Match: failure exits the loop; on success `self.cur` holds the bindings.
         self.match_pattern(&scrut, pattern, exit, &variants, true, scrut_enum)?;
-        self.loop_targets.push((header, exit));
+        self.loop_targets.push((header, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -1193,7 +1193,7 @@ impl Builder<'_> {
         );
 
         self.cur = body_bb;
-        self.loop_targets.push((latch, exit)); // continue -> latch (runs the step)
+        self.loop_targets.push((latch, exit, self.defers.len())); // continue -> latch (runs the step)
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {

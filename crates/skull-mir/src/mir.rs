@@ -357,6 +357,9 @@ pub enum Inst {
     /// wrap `float(...)`). See `docs/shaders.md`.
     IntToFloat(Idx<Inst>),
     UintToFloat(Idx<Inst>),
+    /// Round a float to the nearest `f32` and back: the write into an `f32`
+    /// field, so its value is the same in every storage.
+    FloatToF32(Idx<Inst>),
     IntToUint(Idx<Inst>),
     UintToInt(Idx<Inst>),
     FloatToUint(Idx<Inst>),
@@ -527,6 +530,13 @@ pub enum Inst {
         /// Lua emitter asserts.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
+    /// A first-class nullable value whose payload has already been built by
+    /// MakeValueStruct. The explicit presence operand is required when a
+    /// flattened Group crosses an opaque function-value parameter boundary.
+    MakeNullableValue {
+        present: Idx<Inst>,
+        value: Idx<Inst>,
+    },
     /// A value-struct box that is AUTHORIZED rather than implicit: requested by
     /// `materialize(value)`, or minted by the compiler at a `@gpu_only` call
     /// boundary (`authorize_gpu_boundary_boxes`), where the callee's boxed param
@@ -681,6 +691,160 @@ pub enum Inst {
 }
 
 impl Inst {
+    /// Call `push` for every variable cell this instruction reads or writes.
+    pub fn cells_each(&self, push: &mut impl FnMut(Idx<Cell>)) {
+        match self {
+            Inst::Load(cell) | Inst::Store { cell, .. } => push(*cell),
+            Inst::CallMulti { dests, .. }
+            | Inst::CallValueMulti { dests, .. }
+            | Inst::CallBoundMulti { dests, .. } => {
+                dests.iter().for_each(|cell| push(*cell));
+            }
+            Inst::Lambda { params, .. } => params.iter().for_each(|cell| push(*cell)),
+            Inst::MapNext { key_cell, val_cell, .. } => {
+                push(*key_cell);
+                push(*val_cell);
+            }
+            _ => {}
+        }
+    }
+
+    /// Call `push` for every value operand this instruction reads.
+    pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
+        match self {
+            Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
+            Inst::FfiViewCast { ptr, .. } => push(*ptr),
+            Inst::IntAdd(a, b)
+            | Inst::IntSub(a, b)
+            | Inst::IntMul(a, b)
+            | Inst::IntDiv(a, b)
+            | Inst::IntMod(a, b)
+            | Inst::UintAdd(a, b)
+            | Inst::UintSub(a, b)
+            | Inst::UintMul(a, b)
+            | Inst::UintDiv(a, b)
+            | Inst::UintMod(a, b)
+            | Inst::FloatAdd(a, b)
+            | Inst::FloatSub(a, b)
+            | Inst::FloatMul(a, b)
+            | Inst::FloatDiv(a, b)
+            | Inst::FloatMod(a, b)
+            | Inst::StringConcat(a, b)
+            | Inst::IntLt(a, b)
+            | Inst::IntLeq(a, b)
+            | Inst::IntGt(a, b)
+            | Inst::IntGeq(a, b)
+            | Inst::UintLt(a, b)
+            | Inst::UintLeq(a, b)
+            | Inst::UintGt(a, b)
+            | Inst::UintGeq(a, b)
+            | Inst::FloatLt(a, b)
+            | Inst::FloatLeq(a, b)
+            | Inst::FloatGt(a, b)
+            | Inst::FloatGeq(a, b)
+            | Inst::Eq(a, b)
+            | Inst::NotEq(a, b)
+            | Inst::BitAnd(a, b)
+            | Inst::BitOr(a, b)
+            | Inst::BitXor(a, b)
+            | Inst::Shl(a, b)
+            | Inst::Shr(a, b)
+            | Inst::UintBitAnd(a, b)
+            | Inst::UintBitOr(a, b)
+            | Inst::UintBitXor(a, b)
+            | Inst::UintShl(a, b)
+            | Inst::UintShr(a, b) => {
+                push(*a);
+                push(*b);
+            }
+            Inst::Format { value, .. } => push(*value),
+            Inst::FormatDyn { value, fmt } => {
+                push(*value);
+                push(*fmt);
+            }
+            Inst::Neg(value)
+            | Inst::Not(value)
+            | Inst::BitNot(value)
+            | Inst::UintBitNot(value)
+            | Inst::ToString(value)
+            | Inst::FloatToInt(value)
+            | Inst::IntToFloat(value)
+            | Inst::UintToFloat(value)
+            | Inst::FloatToF32(value)
+            | Inst::IntToUint(value)
+            | Inst::UintToInt(value)
+            | Inst::FloatToUint(value)
+            | Inst::UintBitcastInt(value)
+            | Inst::IntBitcastUint(value)
+            | Inst::VecStrideNilToFalse(value)
+            | Inst::VecStrideFalseToNil(value) => push(*value),
+            Inst::Call { args, .. }
+            | Inst::CallMulti { args, .. }
+            | Inst::CallBoundMulti { args, .. } => args.iter().for_each(|arg| push(*arg)),
+            Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
+                push(*callee);
+                args.iter().for_each(|arg| push(*arg));
+            }
+            Inst::Lambda { .. } => {}
+            Inst::MakeVecColumns { columns, capacity, .. } => {
+                push(*capacity);
+                columns.iter().flat_map(|(_, values)| values).for_each(|&value| push(value));
+            }
+            Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
+            Inst::MakeVecStrided { values, capacity, .. } => {
+                push(*capacity);
+                values.iter().for_each(|&value| push(value));
+            }
+            Inst::MakeVecStridedHeader { capacity, .. } => push(*capacity),
+            Inst::MakeTuple(values) | Inst::MakeVec(values) => {
+                values.iter().for_each(|value| push(*value));
+            }
+            Inst::MakeStruct { fields, .. }
+            | Inst::MakeValueStruct { fields, .. }
+            | Inst::MaterializeValueStruct { fields, .. }
+            | Inst::MakeEnv { fields, .. } => {
+                fields.iter().for_each(|(_, value)| push(*value));
+            }
+            Inst::MakeNullableValue { present, value } => {
+                push(*present);
+                push(*value);
+            }
+            Inst::MakeEnum { positional, named, .. } => {
+                positional.iter().for_each(|value| push(*value));
+                named.iter().for_each(|(_, value)| push(*value));
+            }
+            Inst::MakeEnumDyn { tag, positional, named, .. } => {
+                push(*tag);
+                positional.iter().for_each(|value| push(*value));
+                named.iter().for_each(|(_, value)| push(*value));
+            }
+            Inst::FfiNewArray { count, .. } => push(*count),
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => push(*base),
+            Inst::Index { base, index, .. } | Inst::VecCheckedIndex { vec: base, index } => {
+                push(*base);
+                push(*index);
+            }
+            Inst::Len { base, .. } => push(*base),
+            Inst::Store { value, .. } | Inst::StoreGlobal { value, .. } => push(*value),
+            Inst::StoreField { base, value, .. } => {
+                push(*base);
+                push(*value);
+            }
+            Inst::StoreIndex { base, index, value, .. } => {
+                push(*base);
+                push(*index);
+                push(*value);
+            }
+            Inst::ArrayPush { arr, value, .. } => {
+                push(*arr);
+                push(*value);
+            }
+            Inst::MapNext { table, .. } => push(*table),
+            Inst::CoroSetInner(value) => push(*value),
+            Inst::CoroHook { .. } => {}
+        }
+    }
+
     /// Whether this instruction binds a value (gets a `vN` in the dump and a
     /// target local). Effects like [`Inst::Store`] do not.
     pub fn produces_value(&self) -> bool {
@@ -734,6 +898,30 @@ pub struct Cell {
     /// emission; only a wrongly-set flag can miscompile, so all conservatism
     /// lands here (`docs/value-two-tier-plan.md` item 8).
     pub nonnull_value_struct: bool,
+    /// A source parameter has a compiler-generated default-fill store. Closure
+    /// ownership treats that store as initialization, not mutation.
+    pub default_param: bool,
+    /// Set ONLY at lowering, on the root cell of a place that a `ref` borrows.
+    /// A write through that alias can reach a `value` object in this cell, and
+    /// the transforms cannot see it, so the object must stay the one this cell
+    /// holds: SROA does not split the cell (nor rematerialize it at a use), and
+    /// copy-prop does not forward its loads (the `Field`-of-ctor fold assumes
+    /// value immutability).
+    pub borrowed: bool,
+    /// Build-owned concrete type for a scalarized value leaf when its HIR
+    /// `TyId` cannot name the physical leaf. Native backends consume this
+    /// alongside the shared mono interner; source-level backends ignore it.
+    pub native_ty: Option<crate::monoty::MonoTyId>,
+    /// Compiler-owned flat-enum slot identity for a scalarized local. The
+    /// physical slot may carry several logical members, so a single
+    /// `MonoTyId` is not enough to describe its native representation.
+    pub native_flat_slot: Option<NativeFlatSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeFlatSlot {
+    pub owner: crate::monoty::MonoTyId,
+    pub field: ustr::Ustr,
 }
 
 /// How a block ends. Control flow lives ONLY here.
@@ -772,6 +960,20 @@ pub enum Term {
     },
 }
 
+impl Term {
+    /// Call `push` for every value operand this terminator reads.
+    pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
+        match self {
+            Term::Return(values) | Term::Yield { values, .. } => {
+                values.iter().for_each(|value| push(*value));
+            }
+            Term::Branch { cond, .. } => push(*cond),
+            Term::Switch { discr, .. } => push(*discr),
+            Term::Unreachable | Term::Goto(_) => {}
+        }
+    }
+}
+
 /// A basic block: its instructions in order, then one terminator. **No params**
 /// — the cell model routes every cross-block value through a cell, so the phi
 /// mechanism is unused here (it would be introduced by a future `mem2reg`).
@@ -804,6 +1006,9 @@ impl Default for Block {
 pub struct StaticCell {
     pub cell: Ustr,
     pub done_flag: Ustr,
+    /// Declared/inferred source type, resolved through the owning concrete
+    /// body's type table by typed native backends.
+    pub ty: Option<bone_semantic::prelude::TyId>,
     /// Source binding name and declaration ordinal are the logical identity
     /// within the owning callable; synthesized cell names are realization only.
     pub logical_name: Ustr,
@@ -883,6 +1088,8 @@ pub struct MirFunc {
     /// Function-value ABI witnesses keyed by the pre-conversion lambda inst.
     pub lambda_abi_fingerprints:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
+    pub lambda_abi_representations:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     /// Concrete logical target for each named function-value mint.
     pub code_value_identities:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
@@ -896,6 +1103,15 @@ pub struct MirFunc {
     /// constructor in this function and its nested functions.
     pub rep_arena: Option<Arc<crate::lower::RepArena>>,
     pub params: Vec<Idx<Cell>>,
+    /// Callee-entry comparisons that ask whether a declared parameter was
+    /// omitted. Backends with typed parameters cannot use the Lua/JS nil
+    /// sentinel and consume this provenance through their own call ABI.
+    pub param_default_guards:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
+    /// Default expression roots keyed by source parameter index. Placement
+    /// callers need the callee-owned value when a wire slot is omitted.
+    pub param_default_values:
+        bone_semantic::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
@@ -907,6 +1123,10 @@ pub struct MirFunc {
     /// it just has no graph-owned top-level instance to wrap in
     /// `BackendFnAbiPlan`.
     pub abi_representation: Option<crate::lower::FunctionRepPlan>,
+    /// The logical function type paired with `abi_representation` for a
+    /// hoisted nested function, which has no declaration `FuncRef` to recover
+    /// it from later.
+    pub abi_logical_type: Option<crate::monoty::MonoTy>,
     /// The owned result representation of an always-emitted global initializer.
     pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
@@ -1024,6 +1244,12 @@ pub struct MirFunc {
     /// those. Keys are remapped on splice, like [`Self::spec_bindings`];
     /// transform-synthesized instructions simply have no entry.
     pub inst_spans: bone_semantic::prelude::ArenaMap<Idx<Inst>, bone_semantic::prelude::Span>,
+    /// Concrete logical types for source-produced value constructors.
+    /// Representation plans intentionally erase nominal generic arguments, so
+    /// native backends consume this build-owned identity instead of guessing
+    /// them from a constructor's field shape.
+    pub inst_logical_types:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
     /// **Which callee obligation of the source body each call instruction is**
     /// (plan S 9, Stage 3). The join key between a lowered call and the callee
     /// `skull::concrete_body::ConcreteBody` already resolved for that site, so
@@ -1062,7 +1288,31 @@ pub struct MirFunc {
     pub site_owners: Vec<crate::instance::Instance>,
 }
 
+/// Lua runtime entry points of ordinary-fn `defer` unwinding (defined in the
+/// program prelude, `skull::PRELUDE_TEMPLATE`). Registering a `defer` pushes
+/// its detached cleanup closure; every scope-exit splice pops it. A body that
+/// pushes is emitted with a prologue that re-enters it under `DEFER_CALL`,
+/// which runs the still-registered cleanups when an error escapes and
+/// re-raises the error.
+pub const DEFER_PUSH: &str = "__rock_defer_push";
+pub const DEFER_POP: &str = "__rock_defer_pop";
+pub const DEFER_CALL: &str = "__rock_defer_call";
+
 impl MirFunc {
+    /// Whether any of `blocks` registers an ordinary-fn `defer` cleanup, i.e.
+    /// whether this body must run under the unwind trampoline. Read off the
+    /// final MIR, so an inlined callee's registrations protect its caller.
+    pub fn registers_defer_cleanup(&self, blocks: &[Idx<Block>]) -> bool {
+        blocks.iter().any(|&b| {
+            self.blocks[b].insts.iter().any(|&i| match &self.insts[i] {
+                Inst::CallValue { callee, .. } => {
+                    matches!(&self.insts[*callee], Inst::Global(n) if n.as_str() == DEFER_PUSH)
+                }
+                _ => false,
+            })
+        })
+    }
+
     pub fn new(name: Ustr) -> Self {
         let mut blocks = Arena::default();
         let entry = blocks.alloc(Block::new());
@@ -1071,15 +1321,19 @@ impl MirFunc {
             code_identity: None,
             code_abi_fingerprint: None,
             lambda_abi_fingerprints: Default::default(),
+            lambda_abi_representations: Default::default(),
             code_value_identities: Default::default(),
             nested_fn_identities: Default::default(),
             code_compatibility: None,
             rep_arena: None,
             params: Vec::new(),
+            param_default_guards: Default::default(),
+            param_default_values: Default::default(),
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),
             abi_plan: None,
             abi_representation: None,
+            abi_logical_type: None,
             global_plan: None,
             statics: Vec::new(),
             comptime_reads: Vec::new(),
@@ -1100,6 +1354,7 @@ impl MirFunc {
             bound_next_split: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
+            inst_logical_types: Default::default(),
             call_sites: Default::default(),
             callee_instances: Default::default(),
             call_abi_plans: Default::default(),
@@ -1127,6 +1382,10 @@ impl MirFunc {
             loop_binding: false,
             ty: None,
             nonnull_value_struct: false,
+            default_param: false,
+            borrowed: false,
+            native_ty: None,
+            native_flat_slot: None,
         });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
@@ -1147,6 +1406,10 @@ impl MirFunc {
             loop_binding: false,
             ty,
             nonnull_value_struct: false,
+            default_param: false,
+            borrowed: false,
+            native_ty: None,
+            native_flat_slot: None,
         });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
@@ -1157,16 +1420,52 @@ impl MirFunc {
         id
     }
 
+    /// Allocate a cell whose physical native type is known but whose source
+    /// type arena has no concrete leaf node to reference.
+    pub fn new_cell_native_typed(
+        &mut self,
+        name: Option<Ustr>,
+        ty: Option<TyId>,
+        native_ty: Option<crate::monoty::MonoTyId>,
+    ) -> Idx<Cell> {
+        let id = self.new_cell_typed(name, ty);
+        self.cells[id].native_ty = native_ty;
+        id
+    }
+
+    pub fn new_cell_native_flat_slot(
+        &mut self,
+        name: Option<Ustr>,
+        owner: crate::monoty::MonoTyId,
+        field: Ustr,
+    ) -> Idx<Cell> {
+        let id = self.new_cell(name);
+        self.cells[id].native_flat_slot = Some(NativeFlatSlot { owner, field });
+        id
+    }
+
     /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
     /// [`Cell::loop_binding`]).
     pub fn mark_loop_binding(&mut self, cell: Idx<Cell>) {
         self.cells[cell].loop_binding = true;
     }
 
+    /// Mark a parameter cell whose default expression is filled in the callee
+    /// prologue, so closure capture does not mistake that initialization for a
+    /// later mutation.
+    pub fn mark_default_param(&mut self, cell: Idx<Cell>) {
+        self.cells[cell].default_param = true;
+    }
+
     /// Tag a source-binding cell as holding a non-nullable value struct (licenses
     /// SROA escape-rematerialization; see [`Cell::nonnull_value_struct`]).
     pub fn mark_nonnull_value_struct(&mut self, cell: Idx<Cell>) {
         self.cells[cell].nonnull_value_struct = true;
+    }
+
+    /// Tag the root cell of a `ref`-borrowed place (see [`Cell::borrowed`]).
+    pub fn mark_borrowed(&mut self, cell: Idx<Cell>) {
+        self.cells[cell].borrowed = true;
     }
 
     /// Allocate a fresh (empty, `Unreachable`-terminated) block.

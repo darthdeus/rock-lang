@@ -58,6 +58,8 @@ mod test_exit_status_gate;
 mod test_file_host;
 #[path = "test_rock_dir.rs"]
 mod test_rock_dir;
+#[path = "defer_on_error_package.rs"]
+mod defer_on_error_package;
 #[path = "test_timings.rs"]
 mod test_timings;
 #[path = "js_test_harness_globals_lua.rs"]

@@ -3354,6 +3354,23 @@ fn render_scope(
     }
     out.push_str(")\n");
 
+    // A body that registers a `defer` cleanup re-enters itself under the
+    // unwind trampoline, which runs the cleanups still registered when an
+    // error escapes and re-raises it. The flag is consumed by that re-entry,
+    // so a recursive or nested call is protected again.
+    if is_top && func.registers_defer_cleanup(rpo) {
+        assert!(frame.is_none(), "coroutine step `{lua_name}` registers an unwind defer");
+        out.push_str("  if not __rock_defer_entering then return ");
+        out.push_str(skull_mir::mir::DEFER_CALL);
+        out.push('(');
+        out.push_str(lua_name);
+        for &c in params.iter() {
+            out.push_str(", ");
+            write_cell_local(out, func, cell_colors, c);
+        }
+        out.push_str(") end\n  __rock_defer_entering = false\n");
+    }
+
     for &c in params {
         if cell_is_uint(ws, func.cells[c].ty) {
             out.push_str("  ");

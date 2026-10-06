@@ -47,6 +47,8 @@ mod const_hoist;
 mod const_hot_reload;
 #[path = "coroutine_hook_hoist.rs"]
 mod coroutine_hook_hoist;
+#[path = "defer_unwind.rs"]
+mod defer_unwind;
 #[path = "dead_lambda_scope.rs"]
 mod dead_lambda_scope;
 #[path = "descriptor_value_repr.rs"]

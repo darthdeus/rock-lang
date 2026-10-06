@@ -554,6 +554,74 @@ local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
+-- Ordinary-fn `defer` unwinding (skull_mir::mir::DEFER_PUSH). Registering a
+-- defer pushes its cleanup closure and every scope-exit splice pops it, so the
+-- stack holds exactly the cleanups of scopes still open. A body that pushes
+-- re-enters itself through __rock_defer_call; when an error escapes, the
+-- cleanups above that call's base run LIFO and the error is re-raised.
+if not _G.__rock_defer_stack then
+  _G.__rock_defer_stack = {}
+  _G.__rock_defer_top = 0
+end
+_G.__rock_defer_entering = false
+function __rock_defer_push(d)
+  local n = __rock_defer_top + 1
+  __rock_defer_stack[n] = d
+  __rock_defer_top = n
+end
+function __rock_defer_pop()
+  local n = __rock_defer_top
+  __rock_defer_stack[n] = nil
+  __rock_defer_top = n - 1
+end
+-- The traceback of the error being unwound is taken at its raise site, before
+-- the re-raise replaces the stack; __rock_traceback hands it to a reporter.
+-- An outer trampoline's handler sees the inner re-raise and keeps the
+-- inner raise site.
+local function __rock_defer_mark(e)
+  if rawget(_G, "__rock_unwind_reraise") == e then
+    _G.__rock_unwind_reraise = nil
+  else
+    _G.__rock_unwind_error = e
+    _G.__rock_unwind_traceback = debug.traceback("", 2)
+  end
+  return e
+end
+local function __rock_defer_finish(base, ok, ...)
+  if ok then return ... end
+  -- An error raised before the re-entry consumed the flag must not leave it set.
+  __rock_defer_entering = false
+  local err = ...
+  local stack = __rock_defer_stack
+  while __rock_defer_top > base do
+    local n = __rock_defer_top
+    local d = stack[n]
+    stack[n] = nil
+    __rock_defer_top = n - 1
+    local dok, derr = pcall(d)
+    -- The original error wins; a string error carries the cleanup's message.
+    if not dok and type(err) == "string" then
+      local unwound = _G.__rock_unwind_error == err
+      err = err .. "\n  (defer raised while unwinding: " .. tostring(derr) .. ")"
+      if unwound then _G.__rock_unwind_error = err end
+    end
+  end
+  _G.__rock_unwind_reraise = err
+  error(err, 0)
+end
+function __rock_defer_call(f, ...)
+  local base = __rock_defer_top
+  __rock_defer_entering = true
+  return __rock_defer_finish(base, xpcall(f, __rock_defer_mark, ...))
+end
+-- An xpcall message handler: the raise-site traceback of an error that was
+-- unwound through a defer, else the current one.
+function __rock_traceback(e)
+  if e ~= nil and rawget(_G, "__rock_unwind_error") == e then
+    return tostring(e) .. _G.__rock_unwind_traceback
+  end
+  return debug.traceback(tostring(e), 2)
+end
 -- Compiler-minted NativeBuffer leaf views: field -> ffi.cast type. Generated
 -- from skull_mir::lower::LEAF_VIEWS. Views are DERIVED (pointers over the
 -- buffer's own `ptr`), so refresh reseats them and serialize/inspect skip them.

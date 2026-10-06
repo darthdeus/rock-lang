@@ -4,7 +4,8 @@
 use super::*;
 
 impl Builder<'_> {
-    pub(crate) fn loop_target(&self, what: &str) -> Result<(Idx<Block>, Idx<Block>), CompilerError> {
+    /// The innermost `(continue_target, break_target, defer depth)`.
+    pub(crate) fn loop_target(&self, what: &str) -> Result<(Idx<Block>, Idx<Block>, usize), CompilerError> {
         self.loop_targets
             .last()
             .copied()
@@ -42,7 +43,7 @@ impl Builder<'_> {
         }
 
         self.cur = body_bb;
-        self.loop_targets.push((header, exit));
+        self.loop_targets.push((header, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -335,7 +336,7 @@ impl Builder<'_> {
         };
         let mut idx = 0;
         self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx)?;
-        self.loop_targets.push((header, exit));
+        self.loop_targets.push((header, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -557,7 +558,7 @@ impl Builder<'_> {
             let inc = self.emit_cur(Inst::IntAdd(cur, one));
             self.emit_cur(Inst::Store { cell: ec, value: inc });
         }
-        self.loop_targets.push((latch, exit));
+        self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -637,7 +638,7 @@ impl Builder<'_> {
             None => None,
         };
         self.bind_map_entry(vars, key_cell, val_cell, vv)?;
-        self.loop_targets.push((header, exit)); // continue -> header (re-runs next)
+        self.loop_targets.push((header, exit, self.defers.len())); // continue -> header (re-runs next)
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -691,7 +692,7 @@ impl Builder<'_> {
 
         self.cur = body_bb;
         self.bind_map_entry(xpat, key_cell, val_cell, None)?;
-        self.loop_targets.push((latch, exit)); // continue -> latch (steps counter)
+        self.loop_targets.push((latch, exit, self.defers.len())); // continue -> latch (steps counter)
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -836,7 +837,7 @@ impl Builder<'_> {
                 self.bind_for_pattern(vars, pair);
             }
         }
-        self.loop_targets.push((latch, exit));
+        self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {
@@ -913,7 +914,7 @@ impl Builder<'_> {
         let repr = self.loop_element_snapshot(ty, repr)?;
         let elem = self.pack(repr)?;
         self.bind_for_pattern(&vars, elem);
-        self.loop_targets.push((latch, exit));
+        self.loop_targets.push((latch, exit, self.defers.len()));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
         if self.is_open() {

@@ -1611,6 +1611,7 @@ fn lower_body(
         loop_targets: Vec::new(),
         used_break_targets: HashSet::default(),
         defers: Vec::new(),
+        defer_unwind: !func.is_coroutine && scx.target == bone_semantic::hir::FnBackend::Lua,
         in_defer_body: false,
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
@@ -2086,18 +2087,25 @@ struct Builder<'a> {
     cur: Idx<Block>,
     /// raw binding index -> the variable cell it maps to.
     binds: HashMap<u32, Idx<Cell>>,
-    /// Innermost-last stack of `(continue_target, break_target)` blocks.
-    loop_targets: Vec<(Idx<Block>, Idx<Block>)>,
+    /// Innermost-last stack of `(continue_target, break_target, defer depth)`:
+    /// the depth is `defers.len()` at loop entry, so `break`/`continue` splice
+    /// the defers of every scope they leave.
+    loop_targets: Vec<(Idx<Block>, Idx<Block>, usize)>,
     /// Break targets some `break` actually jumped to. A `while true` whose exit
     /// was never targeted terminates the statement list (its fall-through is
     /// unreachable), which is what lets a `while true { ... return ... }` co fn
     /// body pass the non-unit fall-off rejection.
     used_break_targets: HashSet<Idx<Block>>,
     /// Innermost-last stack of pending `defer` bodies per block scope; spliced
-    /// (LIFO) at block exit and before every `return`. In a co fn each entry
-    /// also carries its terminal-cleanup flag cell (see `MirFunc::coro_defers`);
-    /// the splice clears it so kill/error never double-run a completed defer.
-    defers: Vec<Vec<(Idx<Expr>, Option<Idx<Cell>>)>>,
+    /// (LIFO) at block exit, before every `return` and at `break`/`continue`.
+    /// Each entry records how dying (error, or a co fn kill) reaches it; see
+    /// [`stmt::PendingDefer`].
+    defers: Vec<Vec<(Idx<Expr>, stmt::PendingDefer)>>,
+    /// Whether an ordinary `defer` here registers an unwind cleanup
+    /// (`MirFunc::registers_defer_cleanup`): Lua-target fn, nested fn and
+    /// lambda bodies. Global initializers and decorators keep the inline-only
+    /// splice: their units are not emitted under the unwind trampoline.
+    defer_unwind: bool,
     /// True while lowering a `defer` body (inline splice or terminal copy) --
     /// `yield`/`await` inside a defer body is a compile error.
     in_defer_body: bool,
@@ -2250,6 +2258,7 @@ impl<'a> Builder<'a> {
             loop_targets: Vec::new(),
             used_break_targets: HashSet::default(),
             defers: Vec::new(),
+            defer_unwind: false,
             in_defer_body: false,
             resume_arg: None,
             // Generated/init bodies never run `inline_functions` -- box value args.

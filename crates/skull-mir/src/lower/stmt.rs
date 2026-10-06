@@ -3,6 +3,20 @@
 //! run at block exit and before every `return`, and the coroutine copy).
 use super::*;
 
+/// How a pending `defer` is reached when its scope dies instead of exiting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingDefer {
+    /// Spliced at scope exit only: a global initializer or decorator, or a
+    /// backend without unwind support.
+    Inline,
+    /// A co fn defer: its frame flag guards the splice and the terminal
+    /// cleanup copy (`MirFunc::coro_defers`).
+    CoFlag(Idx<Cell>),
+    /// An ordinary fn defer whose cleanup closure is on the runtime unwind
+    /// stack; the splice pops it.
+    Unwind,
+}
+
 impl Builder<'_> {
     /// Lower a statement sequence into the current block. Returns `true` if a
     /// `return` terminated the block (the rest is dead).
@@ -181,6 +195,7 @@ impl Builder<'_> {
             loop_targets: Vec::new(),
             used_break_targets: HashSet::default(),
             defers: Vec::new(),
+            defer_unwind: self.call_scx.target == bone_semantic::hir::FnBackend::Lua,
             in_defer_body: false,
             resume_arg: None,
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
@@ -398,22 +413,27 @@ impl Builder<'_> {
                     self.f.set_term(self.cur, Term::Return(leaves));
                     return Ok(true);
                 }
-                // Collected, not run inline; spliced at block exit / before return.
-                // In a co fn, dying (kill/error) counts as exiting every open
-                // scope: registration also sets a frame flag + builds a detached
-                // terminal-cleanup copy (see `MirFunc::coro_defers`).
+                // Collected, not run inline; spliced at every scope exit. Dying
+                // (an error, or a co fn kill) also exits every open scope, so
+                // registration builds a detached cleanup copy: a co fn sets a
+                // frame flag for its terminal cleanup (`MirFunc::coro_defers`),
+                // an ordinary fn pushes the copy as an unwind closure.
                 Statement::Defer(body) => {
-                    let flag = if self.resume_arg.is_some() {
+                    let pending = if self.resume_arg.is_some() {
                         let flag = self.f.new_cell(Some(Ustr::from("__defer")));
                         let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
                         self.emit_cur(Inst::Store { cell: flag, value: on });
-                        self.build_coro_defer_copy(body, flag)?;
-                        Some(flag)
+                        let entry = self.lower_detached_defer(body, Some(flag))?;
+                        self.f.coro_defers.push((flag, entry));
+                        PendingDefer::CoFlag(flag)
+                    } else if self.defer_unwind {
+                        self.register_unwind_defer(body)?;
+                        PendingDefer::Unwind
                     } else {
-                        None
+                        PendingDefer::Inline
                     };
                     if let Some(frame) = self.defers.last_mut() {
-                        frame.push((body, flag));
+                        frame.push((body, pending));
                     }
                 }
                 // `let (a, b) = e` — destructure via TupleIndex into a cell per
@@ -466,13 +486,15 @@ impl Builder<'_> {
                     self.lower_while_let(pattern, value, body)?;
                 }
                 Statement::Break => {
-                    let (_, brk) = self.loop_target("break")?;
+                    let (_, brk, depth) = self.loop_target("break")?;
                     self.used_break_targets.insert(brk);
+                    self.run_defers_above(depth)?;
                     self.f.set_term(self.cur, Term::Goto(brk));
                     return Ok(true);
                 }
                 Statement::Continue => {
-                    let (cont, _) = self.loop_target("continue")?;
+                    let (cont, _, depth) = self.loop_target("continue")?;
+                    self.run_defers_above(depth)?;
                     self.f.set_term(self.cur, Term::Goto(cont));
                     return Ok(true);
                 }
@@ -485,8 +507,8 @@ impl Builder<'_> {
     /// LIFO order into the current block — the normal block-exit path.
     pub(crate) fn run_top_frame(&mut self) -> Result<(), CompilerError> {
         if let Some(frame) = self.defers.last() {
-            for (body, flag) in frame.clone().into_iter().rev() {
-                self.lower_defer_splice(body, flag)?;
+            for (body, pending) in frame.clone().into_iter().rev() {
+                self.lower_defer_splice(body, pending)?;
             }
         }
         Ok(())
@@ -495,10 +517,18 @@ impl Builder<'_> {
     /// Splice EVERY pending defer (all enclosing block scopes, innermost first,
     /// each LIFO) — before a `return` that abandons those scopes.
     pub(crate) fn run_all_defers(&mut self) -> Result<(), CompilerError> {
-        let frames: Vec<Vec<(Idx<Expr>, Option<Idx<Cell>>)>> = self.defers.iter().rev().cloned().collect();
+        self.run_defers_above(0)
+    }
+
+    /// Splice the pending defers of every block scope at index `depth` or
+    /// deeper (innermost first, each LIFO) — the scopes a `return` (depth 0)
+    /// or a `break`/`continue` (the loop's entry depth) leaves.
+    pub(crate) fn run_defers_above(&mut self, depth: usize) -> Result<(), CompilerError> {
+        let frames: Vec<Vec<(Idx<Expr>, PendingDefer)>> =
+            self.defers.get(depth..).unwrap_or_default().iter().rev().cloned().collect();
         for frame in frames {
-            for (body, flag) in frame.into_iter().rev() {
-                self.lower_defer_splice(body, flag)?;
+            for (body, pending) in frame.into_iter().rev() {
+                self.lower_defer_splice(body, pending)?;
             }
         }
         Ok(())
@@ -508,70 +538,115 @@ impl Builder<'_> {
     /// `if flag { flag = false; <body> }` — the SAME guarded shape as the
     /// detached kill copy, so kill-then-splice and splice-then-kill both run
     /// the defer exactly once (a body that kills its own handle mid-run
-    /// otherwise double-fires on the trailing scope exit). Flagless (plain fn)
-    /// defers splice unguarded.
-    pub(crate) fn lower_defer_splice(&mut self, body: Idx<Expr>, flag: Option<Idx<Cell>>) -> Result<(), CompilerError> {
-        if let Some(f) = flag {
-            let b_body = self.f.new_block();
-            let b_done = self.f.new_block();
-            let fv = self.emit_cur(Inst::Load(f));
-            self.f.set_term(self.cur, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
-            self.cur = b_body;
-            let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-            self.emit_cur(Inst::Store { cell: f, value: off });
-            let was = std::mem::replace(&mut self.in_defer_body, true);
-            let res = self.lower_stmt_expr(body);
-            self.in_defer_body = was;
-            res?;
-            self.f.set_term(self.cur, Term::Goto(b_done));
-            self.cur = b_done;
-        } else {
-            let was = std::mem::replace(&mut self.in_defer_body, true);
-            let res = self.lower_stmt_expr(body);
-            self.in_defer_body = was;
-            res?;
+    /// otherwise double-fires on the trailing scope exit). An unwind defer
+    /// pops its cleanup closure first, so an error raised by the body itself
+    /// does not run it again.
+    pub(crate) fn lower_defer_splice(&mut self, body: Idx<Expr>, pending: PendingDefer) -> Result<(), CompilerError> {
+        match pending {
+            PendingDefer::CoFlag(f) => {
+                let b_body = self.f.new_block();
+                let b_done = self.f.new_block();
+                let fv = self.emit_cur(Inst::Load(f));
+                self.f.set_term(self.cur, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
+                self.cur = b_body;
+                let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
+                self.emit_cur(Inst::Store { cell: f, value: off });
+                let was = std::mem::replace(&mut self.in_defer_body, true);
+                let res = self.lower_stmt_expr(body);
+                self.in_defer_body = was;
+                res?;
+                self.f.set_term(self.cur, Term::Goto(b_done));
+                self.cur = b_done;
+            }
+            PendingDefer::Unwind | PendingDefer::Inline => {
+                if pending == PendingDefer::Unwind {
+                    let pop = self.emit_cur(Inst::Global(Ustr::from(crate::mir::DEFER_POP)));
+                    self.emit_cur(Inst::CallValue { callee: pop, args: Vec::new() });
+                }
+                let was = std::mem::replace(&mut self.in_defer_body, true);
+                let res = self.lower_stmt_expr(body);
+                self.in_defer_body = was;
+                res?;
+            }
         }
         Ok(())
     }
 
-    /// Build the detached terminal-cleanup copy of a co fn `defer` body:
-    /// `if flag { flag = false; <body> }` ending in a bare return, in blocks
-    /// UNREACHABLE from the fn entry (like closure bodies — the coroutine
-    /// transform and DCE leave them alone). `emit_coroutine` compiles each as a
-    /// standalone `<name>__defer<k>(s)` fn; the ctor stores them BY VALUE on
-    /// the frame so a stale (stamp-killed) coroutine runs ITS OWN layout's
-    /// cleanup. Lowered at the registration site with the same binds; the
-    /// resolution maps are snapshotted so `let`s inside the copy can't leak
-    /// into main-body lowering, and loop targets are cleared so a stray
-    /// `break` can't jump into the main CFG.
-    pub(crate) fn build_coro_defer_copy(&mut self, body: Idx<Expr>, flag: Idx<Cell>) -> Result<(), CompilerError> {
+    /// Register an ordinary fn's `defer` for unwinding: its detached copy
+    /// becomes a capture-converted `fn()` closure pushed on the runtime cleanup
+    /// stack (`MirFunc::registers_defer_cleanup`). A binding the body reassigns
+    /// after this point is shared with the closure, so the cleanup reads its
+    /// current value exactly as the inline splice does.
+    fn register_unwind_defer(&mut self, body: Idx<Expr>) -> Result<(), CompilerError> {
+        let span = self.cur_span;
+        let plan = self
+            .fn_value_rep_plan_for_mono(&crate::monoty::MonoTy::Function {
+                params: Vec::new(),
+                ret: Box::new(crate::monoty::MonoTy::Unit),
+            })?
+            .ok_or_else(|| self.gap_here("defer cleanup has no function representation"))?;
+        let entry = self.lower_detached_defer(body, None)?;
+        // The closure's CodeRef site is the defer body: the statement span is
+        // not recorded inside a lambda body, where it would alias the lambda.
+        self.cur_span = self.body.expr_spans.get(body).copied();
+        let lambda = self.emit_cur(Inst::Lambda { params: Vec::new(), entry });
+        self.cur_span = span;
+        self.f
+            .lambda_abi_fingerprints
+            .insert(lambda, plan.logical_fingerprint(&self.scx.rep_arena()));
+        self.f.lambda_abi_representations.insert(lambda, plan);
+        let push = self.emit_cur(Inst::Global(Ustr::from(crate::mir::DEFER_PUSH)));
+        self.emit_cur(Inst::CallValue { callee: push, args: vec![lambda] });
+        Ok(())
+    }
+
+    /// Lower the detached cleanup copy of a `defer` body, ending in a bare
+    /// return, in blocks UNREACHABLE from the fn entry (like closure bodies —
+    /// the coroutine transform and DCE leave them alone), and return its entry.
+    /// A co fn copy (`flag` set) is guarded `if flag { flag = false; <body> }`
+    /// and compiles to a standalone `<name>__defer<k>(s)` fn: the ctor stores
+    /// them BY VALUE on the frame so a stale (stamp-killed) coroutine runs ITS
+    /// OWN layout's cleanup. An ordinary fn copy is a closure body
+    /// (`register_unwind_defer`). Lowered at the registration site with the
+    /// same binds; the resolution maps are snapshotted so `let`s inside the
+    /// copy can't leak into main-body lowering, loop targets are cleared so a
+    /// stray `break` can't jump into the main CFG, and the pending-defer stack
+    /// is isolated so the copy never splices enclosing defers.
+    pub(crate) fn lower_detached_defer(
+        &mut self,
+        body: Idx<Expr>,
+        flag: Option<Idx<Cell>>,
+    ) -> Result<Idx<Block>, CompilerError> {
         let saved_cur = self.cur;
         let saved_binds = self.binds.clone();
         let saved_group = self.group_binds.clone();
         let saved_loops = std::mem::take(&mut self.loop_targets);
+        let saved_defers = std::mem::take(&mut self.defers);
 
-        let g_entry = self.f.new_block();
-        let b_body = self.f.new_block();
+        let entry = self.f.new_block();
+        let b_body = flag.map(|_| self.f.new_block());
         let b_done = self.f.new_block();
-        self.cur = g_entry;
-        let fv = self.emit_cur(Inst::Load(flag));
-        self.f.set_term(g_entry, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
-        self.cur = b_body;
-        let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
-        self.emit_cur(Inst::Store { cell: flag, value: off });
+        self.cur = entry;
+        if let (Some(flag), Some(b_body)) = (flag, b_body) {
+            let fv = self.emit_cur(Inst::Load(flag));
+            self.f.set_term(entry, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
+            self.cur = b_body;
+            let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
+            self.emit_cur(Inst::Store { cell: flag, value: off });
+        }
         let was = std::mem::replace(&mut self.in_defer_body, true);
         let res = self.lower_stmt_expr(body);
         self.in_defer_body = was;
         res?;
         self.f.set_term(self.cur, Term::Goto(b_done));
         self.f.set_term(b_done, Term::Return(Vec::new()));
-        self.f.coro_defers.push((flag, g_entry));
 
         self.cur = saved_cur;
         self.binds = saved_binds;
         self.group_binds = saved_group;
         self.loop_targets = saved_loops;
-        Ok(())
+        self.defers = saved_defers;
+        Ok(entry)
     }
 
     pub(crate) fn lower_block_repr(
