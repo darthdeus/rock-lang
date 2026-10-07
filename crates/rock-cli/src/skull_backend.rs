@@ -726,7 +726,7 @@ fn skull_build(
         }
     };
     let files = vec![file.to_owned(); tests.len()];
-    run_emitted_tests(lua, &tests, &files, std::time::Duration::from_secs(15), 1, filter)
+    run_emitted_tests(lua, &tests, &files, std::time::Duration::from_secs(15), 1, filter, false)
 }
 
 /// `Some(count)` when `file` declares `@test` fns and EVERY one carries
@@ -753,7 +753,8 @@ pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<
 /// classify the outcome. Shared by the per-file path ([`skull_build`]) and the
 /// whole-package path ([`skull_build_package`]). `filter` selects the tests
 /// that run; `shards` LuaJIT processes split the selected tests and their
-/// results merge into one outcome.
+/// results merge into one outcome. `release_memory` returns the freed program
+/// text to the OS before the tests start, for a host that then only waits.
 fn run_emitted_tests(
     lua: String,
     tests: &[skull::SkullTest],
@@ -761,6 +762,7 @@ fn run_emitted_tests(
     limit: std::time::Duration,
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
+    release_memory: bool,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     assert_eq!(tests.len(), files.len());
 
@@ -817,6 +819,12 @@ fn run_emitted_tests(
         reason: "test run errored (skull bug)".to_string(),
         rendered: e.to_string(),
     })?;
+    // mimalloc keeps the freed program and harness pages (mag's program has
+    // 330 MB of capacity) until later allocator traffic purges them. Per-file
+    // runs skip this: the next file's compile would refault the pages.
+    if release_memory {
+        crate::allocator::release_freed_memory();
+    }
     let shards = shards.clamp(1, tests.len());
     let assignment: Vec<Vec<usize>> =
         (0..shards).map(|shard| (shard..tests.len()).step_by(shards).collect()).collect();
@@ -1169,7 +1177,7 @@ fn skull_build_package_with_limit(
     crate::allocator::release_freed_memory();
     drop(slot);
     let lua = prepend_package_preamble(lua, dir, needs_libstone)?;
-    run_emitted_tests(lua, &tests, &files, limit, shards, filter)
+    run_emitted_tests(lua, &tests, &files, limit, shards, filter, true)
 }
 
 /// LuaJIT processes per package test run: `ROCK_TEST_SHARDS`, else 2 (1 on a
