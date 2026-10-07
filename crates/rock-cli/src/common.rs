@@ -45,6 +45,13 @@ pub fn compile_game_for_run(
     }
 }
 
+/// Total RAM in MiB; `None` when the platform gives no reading.
+pub(crate) fn total_system_memory_mib() -> Option<u64> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+    Some(system.total_memory() / (1024 * 1024)).filter(|&mib| mib > 0)
+}
+
 /// Trivial path -> SourceSpec mapping for callers that don't need
 /// stick.toml walk-up: directory becomes `Directory`, single file
 /// becomes `Files`. `do_run_timeout` keeps its own variant because

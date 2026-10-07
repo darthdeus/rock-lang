@@ -3764,15 +3764,11 @@ fn memory_budgeted_jobs(cores: usize, total_ram_mib: Option<u64>, free_vram_mib:
 }
 
 fn total_system_memory_mib() -> Option<u64> {
-    let mut system = sysinfo::System::new();
-    system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-    let mib = system.total_memory() / (1024 * 1024);
-    if mib == 0 {
+    let mib = crate::common::total_system_memory_mib();
+    if mib.is_none() {
         log::warn!(target: "SIM", "no total RAM reading; default jobs use CPU/GPU bounds only");
-        None
-    } else {
-        Some(mib)
     }
+    mib
 }
 
 /// The default job count for this process, read once so every resolution in

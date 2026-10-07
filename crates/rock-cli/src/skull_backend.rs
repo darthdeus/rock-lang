@@ -1114,6 +1114,10 @@ fn skull_build_package_with_limit(
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
+    let slot = crate::compile_slots::acquire(dir).map_err(|e| SkullFailure {
+        reason: "no compile slot".to_string(),
+        rendered: format!("{e:#}"),
+    })?;
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| SkullFailure {
         reason: "cannot load project".to_string(),
@@ -1163,6 +1167,7 @@ fn skull_build_package_with_limit(
     // while its luajit child ran.
     drop((ws, sources));
     crate::allocator::release_freed_memory();
+    drop(slot);
     let lua = prepend_package_preamble(lua, dir, needs_libstone)?;
     run_emitted_tests(lua, &tests, &files, limit, shards, filter)
 }
@@ -1859,6 +1864,7 @@ fn skull_emit_project_with_inputs(
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<(String, bool)> {
     use std::path::PathBuf;
+    let _slot = crate::compile_slots::acquire(dir)?;
     let renderer_target = match skull_renderer_target(dir) {
         Ok(target) => target,
         Err(e) => {
@@ -3853,6 +3859,7 @@ impl SkullStone {
         include_tests: bool,
         explicit_allocation_report: Option<&std::path::Path>,
     ) -> Result<SkullStone> {
+        let _slot = crate::compile_slots::acquire(dir)?;
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
         let (lua, cache, artifact_fingerprint, emits_main) = {

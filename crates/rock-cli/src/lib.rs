@@ -36,6 +36,7 @@ pub mod docs_index;
 pub mod sdk_check;
 pub mod common;
 mod compile_cmd;
+mod compile_slots;
 pub mod comptime;
 mod dispatcher;
 mod error_test;
