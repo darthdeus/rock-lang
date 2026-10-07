@@ -166,6 +166,7 @@
 // prelude: __rock_create_struct
 // prelude: __rock_deepcopy_value
 // prelude: __rock_embed_view
+// prelude: __rock_enum_unit
 // prelude: __rock_field_declaration
 // prelude: __rock_field_keys
 // prelude: __rock_field_pairs
