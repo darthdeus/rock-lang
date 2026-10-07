@@ -442,12 +442,11 @@
 // prelude: json_reader_field_offset
 // prelude: json_reader_float
 // prelude: json_reader_index
-// prelude: json_reader_index_with
+// prelude: json_reader_index_at
 // prelude: json_reader_int
 // prelude: json_reader_null
 // prelude: json_reader_number
 // prelude: json_reader_number_at
-// prelude: json_reader_parser
 // prelude: json_reader_read_int
 // prelude: json_reader_read_int_at
 // prelude: json_reader_skip
@@ -551,9 +550,12 @@
 // prelude: parse_keyword
 // prelude: parse_number
 // prelude: parse_number_scan
+// prelude: parse_number_scan_at
 // prelude: parse_object_value
 // prelude: parse_skip_ws
+// prelude: parse_skip_ws_at
 // prelude: parse_string_raw
+// prelude: parse_string_raw_at
 // prelude: parse_string_value
 // prelude: parse_value
 // prelude: phantom
