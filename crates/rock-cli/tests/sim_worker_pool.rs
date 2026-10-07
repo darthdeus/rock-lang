@@ -750,7 +750,7 @@ fn a_sound_bank_writer_leaves_the_tracked_bank() {
     });
     match original {
         Some((bytes, metadata)) => {
-            std::fs::write(&bank, bytes).expect("restore original sound bank");
+            rock_host::project::write_atomic(&bank, &bytes).expect("restore original sound bank");
             std::fs::set_permissions(&bank, metadata.permissions()).expect("restore bank permissions");
             std::fs::File::options().write(true).open(&bank).expect("open restored bank")
                 .set_times(std::fs::FileTimes::new().set_modified(metadata.modified().expect("original bank mtime")))
