@@ -251,3 +251,37 @@ print("ok")
 "#), "mixed_enum_layout_dispatch");
     assert_eq!(out, "ok");
 }
+
+#[test]
+fn snapshot_and_image_reconstruction_canonicalize_mixed_units() {
+    let source = include_str!("../../../stone/engine/snapshot.rock");
+    let installer = source.split("fn __stone_install_deep_copy() = \"\"\"")
+        .nth(1).expect("snapshot installer").split("\"\"\"")
+        .next().expect("snapshot installer body");
+    let lua = emit_module(SRC);
+    let out = run_luajit(&format!(r#"{lua}
+do
+{installer}
+end
+local unit = constant_unit()
+local reconstructed = {{__ty = unit.__ty, __variant = unit.__variant}}
+assert(rawequal(__stone_deep_copy(reconstructed, {{}}), unit))
+local capture = {{image_mode = "capture", image_live = {{}}, storage = {{}}}}
+local image = __stone_deep_copy({{unit, reconstructed}}, {{}}, capture)
+assert(not rawequal(image[1], unit))
+for _, mode in ipairs({{"materialize", "host_materialize"}}) do
+    local live = __stone_deep_copy(image, {{}}, {{image_mode = mode}})
+    assert(rawequal(live[1], unit) and rawequal(live[2], unit))
+end
+local patch = __stone_patch_prepare(image, capture)
+local live = __stone_patch_restore(patch, {{}}, {{image_mode = "materialize"}})
+assert(rawequal(live[1], unit) and rawequal(live[2], unit))
+local payload = through_field(1)
+local a = __stone_deep_copy(payload, {{}})
+local b = __stone_deep_copy(payload, {{}})
+a[1] = "changed"
+assert(b[1] == "payload")
+print("ok")
+"#), "mixed_enum_images");
+    assert_eq!(out, "ok");
+}
