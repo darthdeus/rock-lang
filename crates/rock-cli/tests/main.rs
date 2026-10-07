@@ -149,6 +149,8 @@ mod stone_full_reload_binding;
 mod stone_test_endtoend;
 #[path = "test_shards.rs"]
 mod test_shards;
+#[path = "package_test_program_shape.rs"]
+mod package_test_program_shape;
 #[path = "test_harness_truncation.rs"]
 mod test_harness_truncation;
 #[path = "watcher_tmp_project_path.rs"]

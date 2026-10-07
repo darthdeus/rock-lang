@@ -1178,7 +1178,7 @@ fn skull_build_package_with_limit(
         }
     })?;
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let lua = match skull::mir_emit::emit_workspace_mir(&ws, entry_mid) {
+    let lua = match skull::mir_emit::emit_workspace_mir_for_package_test(&ws, entry_mid) {
         Ok(e) => {
             crate::compile_measurements::emission(&e);
             e.lua

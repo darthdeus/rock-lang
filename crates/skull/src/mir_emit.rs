@@ -2473,6 +2473,25 @@ pub fn emit_workspace_mir_in_for_renderer(
         .map(|(emit, _cache)| emit)
 }
 
+/// [`emit_workspace_mir`] for a package's `rock test` program. See
+/// [`BuildKind::PackageTest`].
+pub fn emit_workspace_mir_for_package_test(
+    ws: &Workspace,
+    user_mid: ModuleId,
+) -> Result<MirEmit, CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
+    emit_full_in_with_mutation(
+        ws,
+        user_mid,
+        None,
+        BodyMutation::None,
+        RendererTarget::Gl,
+        BuildKind::PackageTest,
+        ShapeOverrides::default(),
+    )
+    .map(|(emit, _cache)| emit)
+}
+
 /// One emitted ordinary/coroutine function definition plus the facts incremental
 /// emit needs. The cheap definitions (prelude, decorators, externs, inline(lua),
 /// global inits, init ordering, deco applications) are NOT cached — they are
@@ -2594,11 +2613,11 @@ fn callee_binding_pass_lua(plans: &mut [skull_codegen_lua::CalleeBindingPlan]) -
     out
 }
 
-#[derive(Default)]
 struct LuaDefinitionBuffer {
     lua: String,
     units: Vec<(usize, usize, usize)>,
     definition_count: usize,
+    bind_state_cells: bool,
 }
 
 /// The global a top-level definition assigns, in either emitted shape.
@@ -2612,12 +2631,22 @@ fn definition_global(line: &str) -> Option<&str> {
 }
 
 impl LuaDefinitionBuffer {
+    fn new(bind_state_cells: bool) -> Self {
+        Self { lua: String::new(), units: Vec::new(), definition_count: 0, bind_state_cells }
+    }
+
+    /// The buffer for a full assembly: a package-test program is never
+    /// reloaded, so its definitions have no distinct cells to join.
+    fn for_assembly(build_kind: BuildKind) -> Self {
+        Self::new(build_kind == BuildKind::Program)
+    }
+
     fn push_str(&mut self, lua: &str) {
         let start = self.lua.len();
         let names: Vec<_> = lua.lines().filter_map(definition_global).collect();
         let count = names.len();
         self.lua.push_str(lua);
-        if lua.contains(skull_codegen_lua::STATE_CELL) {
+        if self.bind_state_cells && lua.contains(skull_codegen_lua::STATE_CELL) {
             for name in names {
                 writeln!(self.lua, "__rock_bind_state_cells({name})")
                     .expect("writing a String cannot fail");
@@ -2982,6 +3011,7 @@ pub struct SkullEmitCache {
     /// every `assemble` (full and incremental reassembly re-lower all units).
     unit_comptime_reads: UnitComptimeReads,
     renderer_target: RendererTarget,
+    build_kind: BuildKind,
     repair_stats: IncrementalRepairStats,
     body_edit_rollback: Option<BodyEditRollback>,
 }
@@ -3055,6 +3085,17 @@ pub struct IncrementalRepairStats {
 pub enum RendererTarget {
     Gl,
     Wgpu,
+}
+
+/// What an emitted program is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildKind {
+    /// A game, tool or single-file program; it may be reloaded in place.
+    Program,
+    /// A package's `rock test` program. Each test child loads it once and never
+    /// reloads it, so it omits what only a reload reads: the Artifact binding
+    /// plan and the Session-cell joins of full-assembly definitions.
+    PackageTest,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -5577,7 +5618,7 @@ fn assemble(
         &mut attribution,
         &mut times,
     );
-    let mut decorator_definitions = LuaDefinitionBuffer::default();
+    let mut decorator_definitions = LuaDefinitionBuffer::for_assembly(cache.build_kind);
     decorator_definitions.push_str(&decorator_lua);
     decorator_definitions.append_to(&mut out);
 
@@ -5676,7 +5717,7 @@ fn assemble(
     for c in spec_chunks.values() {
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
-    let mut definitions = LuaDefinitionBuffer::default();
+    let mut definitions = LuaDefinitionBuffer::for_assembly(cache.build_kind);
     // Second pass of the callee binding (`docs/backends.md`): every factory's
     // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
     // definition and in ascending call-graph component rank, so each captured
@@ -5930,7 +5971,10 @@ fn assemble(
         &foreign_bindings,
     )?;
     code_artifact.binding_plan = binding_plan;
-    let has_artifact_plans = !code_artifact.binding_plan.entries.is_empty();
+    // A package-test program is never reloaded, and only a reload reads the
+    // published plan; it is still built above so both kinds reject alike.
+    let has_artifact_plans = cache.build_kind == BuildKind::Program
+        && !code_artifact.binding_plan.entries.is_empty();
     let has_code_slot_publication = code_artifact.entries.values().any(|entry| entry.escaping)
         || !definition_plan.catalogs.is_empty()
         || lifecycle_plan.census.declarations > 0;
@@ -5956,7 +6000,7 @@ fn assemble(
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
-    let mut global_definitions = LuaDefinitionBuffer::default();
+    let mut global_definitions = LuaDefinitionBuffer::for_assembly(cache.build_kind);
     global_definitions.push_str(&globals_lua);
     global_definitions.append_to(&mut out);
     skipped.extend(global_skipped);
@@ -6656,7 +6700,7 @@ pub fn emit_full_with_shapes(
     shapes: ShapeOverrides,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(ws, user_mid, None, BodyMutation::None, RendererTarget::Gl, shapes)
+    emit_full_in_with_mutation(ws, user_mid, None, BodyMutation::None, RendererTarget::Gl, BuildKind::Program, shapes)
 }
 
 /// [`emit_full`] under an explicit emitted value-ctor shape, overriding
@@ -6674,6 +6718,7 @@ pub fn emit_full_with_value_ctor(
         None,
         BodyMutation::None,
         RendererTarget::Gl,
+        BuildKind::Program,
         ShapeOverrides { value_ctor: Some(shape), ..ShapeOverrides::default() },
     )
 }
@@ -6695,6 +6740,7 @@ pub fn emit_full_with_callee_binding(
         None,
         BodyMutation::None,
         RendererTarget::Gl,
+        BuildKind::Program,
         ShapeOverrides { callee_binding: Some(binding), ..ShapeOverrides::default() },
     )
 }
@@ -6768,6 +6814,7 @@ pub fn emit_full_in_for_renderer_with_callee_binding(
         project_root,
         BodyMutation::None,
         renderer_target,
+        BuildKind::Program,
         ShapeOverrides { callee_binding, ..ShapeOverrides::default() },
     )
 }
@@ -6778,7 +6825,7 @@ fn emit_full_in_with_test_mutation(
     user_mid: ModuleId,
     mutation: BodyMutation,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, ShapeOverrides::default())
+    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, BuildKind::Program, ShapeOverrides::default())
 }
 
 fn emit_full_in_with_mutation(
@@ -6787,6 +6834,7 @@ fn emit_full_in_with_mutation(
     project_root: Option<&str>,
     mutation: BodyMutation,
     renderer_target: RendererTarget,
+    build_kind: BuildKind,
     shapes: ShapeOverrides,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let mut setup_phases = Vec::new();
@@ -7283,6 +7331,7 @@ fn emit_full_in_with_mutation(
         artifact_fingerprint: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
+        build_kind,
         repair_stats: IncrementalRepairStats::default(),
         body_edit_rollback: None,
     };
@@ -8445,7 +8494,7 @@ fn assemble_overlay(
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
-    let mut definitions = LuaDefinitionBuffer::default();
+    let mut definitions = LuaDefinitionBuffer::new(true);
     for body in &order {
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => {
@@ -8591,7 +8640,7 @@ fn assemble_overlay(
         // Emit each affected const's ginit fn (changed only) now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<GlobalInit> = Vec::new();
-        let mut definitions = LuaDefinitionBuffer::default();
+        let mut definitions = LuaDefinitionBuffer::new(true);
         for a in &affected {
             let line = if a.changed {
                 let unit = emit_global_unit(
@@ -9016,7 +9065,7 @@ mod lua_definition_scope_tests {
     #[test]
     fn definition_scopes_cross_the_luajit_main_constant_limit() {
         let mut raw = String::new();
-        let mut definitions = LuaDefinitionBuffer::default();
+        let mut definitions = LuaDefinitionBuffer::new(true);
         for i in 0..32_769 {
             let function = format!("function generated_{i}() return {i} end\n");
             raw.push_str(&function);
@@ -9041,7 +9090,7 @@ mod lua_definition_scope_tests {
     #[test]
     fn small_definition_population_keeps_its_exact_text() {
         let source = "function one() return 1 end\nfunction two() return one() + 1 end\n";
-        let mut definitions = LuaDefinitionBuffer::default();
+        let mut definitions = LuaDefinitionBuffer::new(true);
         definitions.push_str(source);
         let mut out = String::new();
         definitions.append_to(&mut out);

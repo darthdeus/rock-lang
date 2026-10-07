@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{emit_mir, run_luajit};
+use common::{emit_mir, emit_mir_package_test, run_luajit};
 use skull_mir::artifact_plan::{ArtifactBinding, ArtifactBindingKind, ArtifactBindingPlan};
 
 fn plan_snapshot(lua: &str, label: &str) -> String {
@@ -168,4 +168,60 @@ print(ordinary)
         "artifact_binding_publication",
     );
     assert!(!out.is_empty(), "publication equality produced an empty result");
+}
+
+/// Global state read by a definition, so a full assembly emits both the
+/// Artifact binding plan and Session-cell joins.
+const STATEFUL_SOURCE: &str = r#"
+global counter: int = 0
+fn bump() -> int {
+    counter = counter + 1
+    return counter
+}
+fn main() { print(bump()) }
+"#;
+
+const PLAN_STAGE: &str = "__rock_artifact_binding_plan_stage(";
+const CELL_JOIN: &str = "\n__rock_bind_state_cells(";
+
+#[test]
+fn package_test_program_omits_reload_only_plan_and_cell_joins() {
+    let program = emit_mir(STATEFUL_SOURCE).lua;
+    assert!(program.contains(PLAN_STAGE), "program build lost its Artifact binding plan");
+    assert!(program.contains(CELL_JOIN), "program build lost its Session-cell joins");
+
+    let package_test = emit_mir_package_test(STATEFUL_SOURCE).lua;
+    assert!(!package_test.contains(PLAN_STAGE), "package-test program stages a binding plan");
+    assert!(
+        !package_test.contains("__rock_artifact_plan_"),
+        "package-test program begins or publishes a binding plan"
+    );
+    assert!(!package_test.contains(CELL_JOIN), "package-test program joins Session cells");
+}
+
+#[test]
+fn state_transaction_round_trips_without_a_binding_plan() {
+    let lua = emit_mir_package_test(STATEFUL_SOURCE).lua;
+    let out = run_luajit(
+        &format!(
+            r#"
+{lua}
+assert(rawget(_G, "__ROCK_ARTIFACT_BINDING_PLAN") == nil, "package test published a plan")
+assert(rawget(_G, "__rock_state_transaction") == nil, "load left a transaction open")
+__rock_state_transaction_begin()
+assert(rawget(_G, "__rock_state_transaction") ~= nil, "begin opened no transaction")
+__rock_state_transaction_abort()
+assert(rawget(_G, "__rock_state_transaction") == nil, "abort left a transaction open")
+assert(rawget(_G, "__ROCK_ARTIFACT_BINDING_PLAN") == nil, "abort restored a plan")
+__rock_state_transaction_begin()
+__rock_state_transaction_commit()
+assert(rawget(_G, "__rock_state_transaction") == nil, "commit left a transaction open")
+assert(rawget(_G, "__ROCK_ARTIFACT_BINDING_PLAN") == nil, "commit published a plan")
+print("round-trip ok")
+"#,
+            lua = lua
+        ),
+        "artifact_plan_nil_round_trip",
+    );
+    assert!(out.ends_with("round-trip ok"), "unexpected output: {out}");
 }

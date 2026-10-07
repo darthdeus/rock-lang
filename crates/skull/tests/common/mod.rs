@@ -43,6 +43,11 @@ fn assert_no_bone_errors(ws: &Workspace) {
 /// malformed fixture), so a test whose subject IS a bone-level rejection --
 /// annotation-registry violations, for one -- cannot use it.
 pub fn bone_rejections(src: &str) -> Vec<String> {
+    bone_rejection_errors(src).into_iter().map(|e| e.message).collect()
+}
+
+/// [`bone_rejections`] with each error's location and labels.
+pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     // BOTH channels. `semantic_pass` returns `Err` for a violation it treats as
@@ -51,7 +56,7 @@ pub fn bone_rejections(src: &str) -> Vec<String> {
     // panic inside the helper rather than a rejection the caller can assert.
     let ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
         Ok(ws) => ws,
-        Err(e) => return vec![e.message],
+        Err(e) => return vec![e],
     };
     ws.inferences
         .iter()
@@ -59,7 +64,7 @@ pub fn bone_rejections(src: &str) -> Vec<String> {
         .flat_map(|inf| inf.errors.values().flatten())
         .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
-        .map(|e| e.message.clone())
+        .cloned()
         .collect()
 }
 
@@ -74,6 +79,16 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+}
+
+/// [`emit_mir`] as a package's `rock test` program.
+pub fn emit_mir_package_test(src: &str) -> skull::mir_emit::MirEmit {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir_for_package_test(&ws, mid).expect("emit")
 }
 
 pub fn emit_mir_with_inputs(
@@ -197,6 +212,18 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
+/// [`try_emit_module`] with identity storage enforced on the unpackaged
+/// `<test>` module, as bone fixtures do: the program's package is not exempt.
+pub fn try_emit_module_enforcing_identity_storage(src: &str) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
+        .expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
