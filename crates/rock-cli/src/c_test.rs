@@ -14,6 +14,35 @@ mod batch;
 
 const C_NATIVE_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 const C_NATIVE_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+const C_TEST_DEFAULT_THREAD_CAP: usize = 16;
+
+/// Thread count requested by `ROCK_NUM_THREADS`, else `RAYON_NUM_THREADS`.
+/// It sizes both the compiler's global rayon pool and the C test pool.
+pub fn requested_thread_count() -> Option<usize> {
+    std::env::var("ROCK_NUM_THREADS")
+        .ok()
+        .or_else(|| std::env::var("RAYON_NUM_THREADS").ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+}
+
+// C test units are independent clang and test-process jobs that keep scaling
+// past the compiler's global pool cap, so they run on their own wider pool.
+fn test_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = requested_thread_count().unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(C_TEST_DEFAULT_THREAD_CAP)
+        });
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("the C test thread pool must start")
+    })
+}
 
 enum CUnitOutcome {
     Ran {
@@ -252,7 +281,7 @@ fn c_test_run_with_required_tests(
     let (file_units, package_units) = units.split_at(files.len());
     std::thread::scope(|scope| {
         let file_sender = sender.clone();
-        scope.spawn(|| {
+        scope.spawn(|| test_pool().install(|| {
             file_units
                 .par_iter()
                 .enumerate()
@@ -264,7 +293,7 @@ fn c_test_run_with_required_tests(
                         .send((index, outcome, required))
                         .expect("the C test reporter outlives its workers");
                 });
-        });
+        }));
         // Packages build one at a time off the rayon pool: each holds a
         // compile slot while its tests run on rayon workers, and a worker
         // waiting for that slot would be one the tests cannot use.
@@ -583,18 +612,21 @@ fn run_tests(
             rendered: error.to_string(),
         },
     };
+    let ablation = skull_mir::ablation::current_context();
     #[cfg(unix)]
-    let runs = batch::run(path, ws, tests, engine_builds, stone_dir.as_deref());
+    let runs = test_pool().install(|| {
+        let _ablation = skull_mir::ablation::enter_context(ablation);
+        batch::run(path, ws, tests, engine_builds, stone_dir.as_deref())
+    });
     // The fork supervisor requires Unix. Other native hosts retain fresh
     // processes for test isolation until they have a native supervisor.
     #[cfg(not(unix))]
-    let runs = {
-        let ablation = skull_mir::ablation::current_context();
+    let runs = test_pool().install(|| {
         tests.par_iter().map_init(
             || skull_mir::ablation::enter_context(ablation.clone()),
             |_, (func, test)| run_test(path, ws, *func, test, engine_builds, stone_dir.as_deref()),
         ).collect::<Vec<_>>()
-    };
+    });
 
     let mut passed = 0;
     let mut fails = Vec::new();

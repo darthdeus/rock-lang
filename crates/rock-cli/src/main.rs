@@ -110,15 +110,15 @@ fn main() {
     );
 
     // Cap rayon's global thread pool. Default rayon uses
-    // available_parallelism (== logical core count), but on hybrid
-    // CPUs (Alder Lake / Raptor Lake) and high-core-count machines
-    // the per-stage parallel jobs in the compiler are too small to
-    // amortize work-stealing overhead beyond ~16 threads. On a
-    // 14900KF (32 logical), bitgun's total_semantic drops from 61 ms
-    // to 56 ms when capped at 16.
+    // available_parallelism (== logical core count), but on hybrid and
+    // many-core hosts the compiler's per-stage parallel jobs mostly add
+    // contention past ~6 threads: on a loaded 32-thread host `rock compile
+    // mag` took 6.2 s at 6 threads, 6.6 s at 8 and 9.2 s at 16, with system
+    // time rising from 6 s to 19 s. The C test lane keeps a wider pool of
+    // its own (c_test.rs).
     //
     // Honor RAYON_NUM_THREADS / ROCK_NUM_THREADS if set; otherwise
-    // cap at 16. Ignore errors - if rayon's pool was already
+    // cap at 6. Ignore errors - if rayon's pool was already
     // initialized somewhere else we just keep going.
     //
     // Under `--features sequential` we skip building the pool entirely:
@@ -127,17 +127,12 @@ fn main() {
     // front end carries no rayon pool/teardown frames.
     #[cfg(not(feature = "sequential"))]
     {
-        let cap_threads = std::env::var("ROCK_NUM_THREADS")
-            .ok()
-            .or_else(|| std::env::var("RAYON_NUM_THREADS").ok())
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4)
-                    .min(16)
-            });
+        let cap_threads = rock_cli::c_test::requested_thread_count().unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(6)
+        });
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(cap_threads)
             .build_global();
