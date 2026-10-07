@@ -251,14 +251,13 @@ impl Drop for SupervisorProcess {
     }
 }
 
-fn run_supervisor(
+fn spawn_supervisor(
     binary: &std::path::Path,
     output_dir: &std::path::Path,
     slot: Option<usize>,
-    timeout: Duration,
     stone_dir: Option<&std::path::Path>,
-) -> std::result::Result<(), String> {
-    let (mut command, _scratch) = c_native_test_command(binary, stone_dir)?;
+) -> std::result::Result<(SupervisorProcess, tempfile::TempDir), String> {
+    let (mut command, scratch) = c_native_test_command(binary, stone_dir)?;
     command.process_group(0);
     command.arg(output_dir);
     if let Some(slot) = slot {
@@ -276,7 +275,18 @@ fn run_supervisor(
         .stderr(Stdio::from(stderr.into_parts().0))
         .spawn()
         .map_err(|error| format!("native test supervisor could not start: {error}"))?;
-    let mut child = SupervisorProcess(child);
+    Ok((SupervisorProcess(child), scratch))
+}
+
+fn run_supervisor(
+    binary: &std::path::Path,
+    output_dir: &std::path::Path,
+    slot: Option<usize>,
+    timeout: Duration,
+    stone_dir: Option<&std::path::Path>,
+) -> std::result::Result<(), String> {
+    let (mut child, _scratch) = spawn_supervisor(binary, output_dir, slot, stone_dir)?;
+    let stderr_path = output_dir.join("supervisor.err");
     let run = crate::common::ProcessManager::wait_with_timeout(&mut child.0, timeout);
     drop(child);
     let run = run
@@ -342,11 +352,32 @@ mod tests {
         compile_source(&source).unwrap_or_else(|error| panic!("{error}"))
     }
 
-    fn child_is_gone(dir: &std::path::Path) -> bool {
-        let pid: i32 = fs_err::read_to_string(dir.join("0.out")).unwrap().trim().parse().unwrap();
-        for _ in 0..100 {
+    fn child_pid(dir: &std::path::Path) -> libc::pid_t {
+        let start = Instant::now();
+        loop {
+            match fs_err::read_to_string(dir.join("0.out")) {
+                Ok(output) => {
+                    if let Some((line, _)) = output.split_once('\n') {
+                        return line.parse().expect("native child pid");
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("native child output: {error}"),
+            }
+            assert!(start.elapsed() < Duration::from_secs(30), "native child did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn child_is_gone(pid: libc::pid_t) -> bool {
+        let start = Instant::now();
+        loop {
             if unsafe { libc::kill(pid, 0) } < 0 {
+                assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
                 return true;
+            }
+            if start.elapsed() >= Duration::from_secs(30) {
+                break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -360,11 +391,12 @@ mod tests {
         let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}", 1);
         let dir = compiled._dir.path();
         let start = Instant::now();
-        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3), None);
-        let gone = child_is_gone(dir);
+        // This is a hang guard; scheduling delay is not deadline behavior.
+        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(60), None);
+        let gone = child_is_gone(child_pid(dir));
         assert!(run.is_ok(), "{run:?}");
         assert!(gone, "timed-out child survived");
-        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(start.elapsed() >= Duration::from_secs(1), "child was killed before its deadline");
         assert!(read_result(dir, 0).unwrap_err().contains("timed out"));
         assert_eq!(read_result(dir, 1).unwrap().trim(), "finished");
     }
@@ -374,19 +406,31 @@ mod tests {
         let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); kill(getppid(), SIGKILL); for (;;) {}", 1);
         let dir = compiled._dir.path();
         let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3), None);
-        let gone = child_is_gone(dir);
+        let gone = child_is_gone(child_pid(dir));
         assert!(run.unwrap_err().contains("supervisor exited"));
         assert!(gone, "child outlived dead supervisor");
     }
 
     #[test]
-    fn supervisor_watchdog_cleans_up_running_child() {
-        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}", 1);
+    fn supervisor_watchdog_reports_timeout() {
+        // Keep the internal deadline beyond the watchdog despite scheduling delay.
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}", 60);
         let dir = compiled._dir.path();
         let run = run_supervisor(&compiled.binary, dir, None, Duration::from_millis(200), None);
-        let gone = child_is_gone(dir);
         assert!(run.unwrap_err().contains("supervisor timed out"));
-        assert!(gone, "child outlived supervisor watchdog");
+    }
+
+    #[test]
+    fn supervisor_drop_reaps_running_child() {
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}", 60);
+        let dir = compiled._dir.path();
+        let (mut supervisor, _scratch) = spawn_supervisor(&compiled.binary, dir, None, None).unwrap();
+        let pid = child_pid(dir);
+        supervisor.0.kill().unwrap();
+        supervisor.0.wait().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "child must still be running before Drop");
+        drop(supervisor);
+        assert!(child_is_gone(pid), "child outlived supervisor Drop");
     }
 
     #[test]

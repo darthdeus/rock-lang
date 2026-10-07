@@ -4811,9 +4811,16 @@ fn assert_test_run_bounded(dir: &tempfile::TempDir, message: &str) {
 
 #[test]
 fn test_limit_allows_two_files_over_total_budget() {
-    let dir = file_limit_package("os.execute('sleep 0.6')", Some("os.execute('sleep 0.6')"));
-    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
-    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 2, .. })), "{result:?}");
+    let dir = file_limit_package("os.execute('sleep 1')", Some("os.execute('sleep 1')"));
+    for (file, name) in [("first.rock", "another_first_test"), ("second.rock", "another_second_test")] {
+        let path = dir.path().join(file);
+        let mut source = std::fs::read_to_string(&path).unwrap();
+        source.push_str(&format!("@test inline(lua) fn {name}() = \"os.execute('sleep 1')\"\n"));
+        std::fs::write(path, source).unwrap();
+    }
+    // Four one-second tests exceed the total budget, with room between markers.
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(3), 1, None);
+    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })), "{result:?}");
 }
 
 #[test]
