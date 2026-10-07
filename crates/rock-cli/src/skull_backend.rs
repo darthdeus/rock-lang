@@ -734,8 +734,12 @@ fn skull_build(
             .parent()
             .unwrap_or_else(|| std::path::Path::new(".")),
     ) {
-        Ok(Some(stone_dir)) => prepend_stone_root(lua, &stone_dir),
-        Ok(None) => lua,
+        Ok(Some(stone_dir)) => TestProgram {
+            preamble: prepend_stone_root(String::new(), &stone_dir),
+            lua,
+            setup: "",
+        },
+        Ok(None) => lua.into(),
         Err(error) => {
             return Err(SkullFailure {
                 reason: "Stone root resolution failed".to_string(),
@@ -774,7 +778,7 @@ pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<
 /// results merge into one outcome. `release_memory` returns the freed program
 /// text to the OS before the tests start, for a host that then only waits.
 fn run_emitted_tests(
-    lua: String,
+    lua: impl Into<TestProgram>,
     tests: &[skull::SkullTest],
     files: &[String],
     limit: std::time::Duration,
@@ -782,6 +786,7 @@ fn run_emitted_tests(
     filter: Option<&crate::test::TestFilter>,
     release_memory: bool,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
+    let lua = lua.into();
     assert_eq!(tests.len(), files.len());
 
     let mut selected_tests = Vec::with_capacity(tests.len());
@@ -798,10 +803,11 @@ fn run_emitted_tests(
     // while the test process runs (mag's is about 170 MB).
     // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
-        let excerpt = truncate(&lua);
-        let run = write_test_program(lua).and_then(|script| {
-            run_test_program(script.path(), limit, run_token(), 0, None)
-        }).map_err(|e| SkullFailure {
+        let (script, excerpt) = write_test_program(lua, "").map_err(|e| SkullFailure {
+            reason: "invalid lua emitted (skull bug)".to_string(),
+            rendered: e.to_string(),
+        })?;
+        let run = run_test_program(script.path(), limit, run_token(), 0, None).map_err(|e| SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: e.to_string(),
         })?;
@@ -831,16 +837,13 @@ fn run_emitted_tests(
     // Shards are separate processes over one program file; test `i` goes to
     // shard `i % shards`, which balances counts and spreads files' slow tests.
     let token = run_token();
-    let mut program = lua;
-    program.push_str(&build_test_harness(tests, &token));
-    let excerpt = truncate(&program);
-    let script = write_test_program(program).map_err(|e| SkullFailure {
+    let harness = build_test_harness(tests, &token);
+    let (script, excerpt) = write_test_program(lua, &harness).map_err(|e| SkullFailure {
         reason: "test run errored (skull bug)".to_string(),
         rendered: e.to_string(),
     })?;
-    // mimalloc keeps the freed program and harness pages (mag's program has
-    // 330 MB of capacity) until later allocator traffic purges them. Per-file
-    // runs skip this: the next file's compile would refault the pages.
+    drop(harness);
+    // Per-file runs keep freed pages for the next compile; package runs only wait.
     if release_memory {
         crate::allocator::release_freed_memory();
     }
@@ -986,15 +989,47 @@ fn run_token() -> String {
     format!("{:016x}{:016x}", half(), half())
 }
 
+struct TestProgram {
+    preamble: String,
+    lua: String,
+    setup: &'static str,
+}
+
+impl From<String> for TestProgram {
+    fn from(lua: String) -> Self {
+        Self { preamble: String::new(), lua, setup: "" }
+    }
+}
+
+fn program_excerpt(parts: &[&str]) -> String {
+    let bytes: usize = parts.iter().map(|part| part.len()).sum();
+    let mut head = String::with_capacity(bytes.min(4000));
+    for part in parts {
+        let end = part.floor_char_boundary(4000 - head.len());
+        head.push_str(&part[..end]);
+        if end < part.len() {
+            break;
+        }
+    }
+    if bytes > 4000 {
+        head.push_str(&format!("\n... ({} more bytes)", bytes - head.len()));
+    }
+    head
+}
+
 /// A file avoids blocking on stdin before the startup watchdog is running, and
 /// lets every shard load the same program.
-fn write_test_program(program: String) -> Result<tempfile::NamedTempFile> {
+fn write_test_program(program: TestProgram, harness: &str) -> Result<(tempfile::NamedTempFile, String)> {
     use std::io::Write;
+    let parts = [&*program.preamble, &*program.lua, program.setup, harness];
+    let excerpt = program_excerpt(&parts);
     let mut script = tempfile::NamedTempFile::new()?;
-    script.write_all(program.as_bytes())?;
+    for part in parts {
+        script.write_all(part.as_bytes())?;
+    }
     crate::compile_measurements::phase("write");
     crate::compile_measurements::finish("ok");
-    Ok(script)
+    Ok((script, excerpt))
 }
 
 /// Run `script` under the per-test watchdog. `selection` restricts the run to
@@ -1250,7 +1285,7 @@ fn prepend_package_preamble(
     lua: String,
     dir: &str,
     needs_libstone: bool,
-) -> std::result::Result<String, SkullFailure> {
+) -> std::result::Result<TestProgram, SkullFailure> {
     let path = std::path::Path::new(dir);
     let stone_dir = configured_stone_dir(path).map_err(|error| SkullFailure {
         reason: "Stone root resolution failed".to_string(),
@@ -1269,24 +1304,19 @@ fn prepend_package_preamble(
             ),
         })?;
     }
-    let lua = if is_game {
-        let preamble = skull_game_preamble(dir).map_err(|error| SkullFailure {
+    let preamble = if is_game {
+        skull_game_preamble(dir).map_err(|error| SkullFailure {
             reason: "game preamble resolution failed".to_string(),
             rendered: error.to_string(),
-        })?;
-        format!("{preamble}{lua}")
+        })?
     } else if let Some(stone_dir) = &stone_dir {
-        prepend_stone_root(lua, stone_dir)
+        prepend_stone_root(String::new(), stone_dir)
     } else {
-        lua
+        String::new()
     };
-    if stone_dir.is_some() {
-        // setup_stone is a published Stone binding, shared with the sim runner.
-        // Definitions must load first; the host is ready before any @test runs.
-        Ok(format!("{lua}\nsetup_stone()\n"))
-    } else {
-        Ok(lua)
-    }
+    // The CPU host starts after definitions and before the harness.
+    let setup = if stone_dir.is_some() { "\nsetup_stone()\n" } else { "" };
+    Ok(TestProgram { preamble, lua, setup })
 }
 
 /// The `@test` fns defined in the package rooted at `dir` -- its own source
@@ -4506,3 +4536,7 @@ impl SkullStone {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/stream_write/mod.rs"]
+mod stream_write_tests;
