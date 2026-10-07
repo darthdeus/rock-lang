@@ -803,8 +803,12 @@ nobox value JsonReader {
     src: string? = null,
     at: int = -1,
     value: JsonValue? = null,
+    offsets: Map<int, JsonReaderOffsets>? = null,
+}
+
+nobox value JsonReaderOffsets {
     fields: Map<string, int>? = null,
-    container_ends: Map<int, int>? = null,
+    end: int = -1,
 }
 
 value JsonReaderArray {
@@ -826,7 +830,7 @@ struct JsonReaderValidation {
     root_fields: Map<string, int> = map_new(),
     track_path: bool = false,
     index_min_bytes: int = 0,
-    container_ends: Map<int, int>? = null,
+    offsets: Map<int, JsonReaderOffsets> = map_new(),
 }
 
 @inline fn json_reader_value(value: JsonValue) -> JsonReader { return JsonReader { value } }
@@ -849,7 +853,7 @@ fn json_reader_close_container(p: JsonParser, validation: JsonReaderValidation, 
     p.pos += 1
     p.depth -= 1
     if validation.index_min_bytes > 0 && p.pos - start >= validation.index_min_bytes {
-        validation.container_ends.unwrap()[start] = p.pos
+        validation.offsets[start] = JsonReaderOffsets { end: p.pos }
     }
 }
 
@@ -916,8 +920,7 @@ fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
 
 fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, index_min_bytes: int = 0) -> JsonReader? {
     let p = JsonParser { src, pos: 0, len: src.len(), ok: true, depth: 0 }
-    let validation = JsonReaderValidation { track_path: rejected != null, index_min_bytes,
-        container_ends: if index_min_bytes > 0 { map_new() } else { null } }
+    let validation = JsonReaderValidation { track_path: rejected != null, index_min_bytes }
     parse_skip_ws(p)
     let at = p.pos
     json_reader_validate(p, validation)
@@ -926,14 +929,19 @@ fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, in
         if let report = rejected { report(json_reader_error_path(validation), p.pos, validation.problem) }
         return null
     }
-    return JsonReader { src, at, container_ends: validation.container_ends, fields: if p.src.unit_at(at) == 123 { validation.root_fields } else { null } }
+    if p.src.unit_at(at) == 123 {
+        let root_offsets = validation.offsets.get(at) ?? JsonReaderOffsets {}
+        root_offsets.fields = validation.root_fields
+        validation.offsets[at] = root_offsets
+    }
+    return JsonReader { src, at, offsets: validation.offsets }
 }
 
 // Source positions are created only after validation. This scan needs no
 // scalar conversion, field map or container tree, including skipped fields.
-fn json_reader_skip(src: string, at: int, container_ends: Map<int, int>? = null) -> int {
-    if let ends = container_ends {
-        if let end = ends.get(at) { return end }
+fn json_reader_skip(src: string, at: int, offsets: Map<int, JsonReaderOffsets>? = null) -> int {
+    if let index = offsets {
+        if let entry = index.get(at) { if entry.end >= 0 { return entry.end } }
     }
     let pos = at
     let len = src.len()
@@ -962,11 +970,17 @@ fn json_reader_skip(src: string, at: int, container_ends: Map<int, int>? = null)
 }
 
 @inline fn json_reader_at(reader: JsonReader, at: int) -> JsonReader {
-    return JsonReader { src: reader.src, at, container_ends: reader.container_ends }
+    return JsonReader { src: reader.src, at, offsets: reader.offsets }
+}
+
+@inline fn json_reader_fields(reader: JsonReader) -> Map<string, int>? {
+    let offsets = reader.offsets ?? return null
+    let entry = offsets.get(reader.at) ?? return null
+    return entry.fields
 }
 
 fn json_reader_index(reader: JsonReader) -> JsonReader {
-    if reader.fields != null { return reader }
+    if json_reader_fields(reader) != null { return reader }
     if reader.src == null || reader.at < 0 { return reader }
     let (indexed, _) = json_reader_index_at(reader)
     return indexed
@@ -983,15 +997,17 @@ fn json_reader_index_at(reader: JsonReader) -> (JsonReader, int) {
         pos = parse_skip_ws_at(src, end)
         pos = parse_skip_ws_at(src, pos + 1)
         fields[key.unwrap()] = pos
-        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.container_ends))
+        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.offsets))
         if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
     }
-    return (JsonReader { src: reader.src, at: reader.at, fields, container_ends: reader.container_ends }, pos)
+    let offsets = reader.offsets.unwrap()
+    offsets[reader.at] = JsonReaderOffsets { fields, end: pos + 1 }
+    return (reader, pos)
 }
 
 fn json_reader_field_offset(reader: JsonReader, key: string) -> int {
     if reader.at < 0 { return -1 }
-    if let fields = reader.fields {
+    if let fields = json_reader_fields(reader) {
         let at = fields.get(key) ?? return -1
         return at
     }
@@ -1004,7 +1020,7 @@ fn json_reader_field_offset(reader: JsonReader, key: string) -> int {
         pos = parse_skip_ws_at(src, end)
         pos = parse_skip_ws_at(src, pos + 1)
         if name.unwrap() == key { at = pos }
-        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.container_ends))
+        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.offsets))
         if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
     }
     return at
@@ -1123,7 +1139,7 @@ fn json_reader_as_array(reader: JsonReader) -> JsonReaderArray? {
         entry = indexed
         pos = end + 1
     } else {
-        pos = json_reader_skip(src, at, array.reader.container_ends)
+        pos = json_reader_skip(src, at, array.reader.offsets)
     }
     pos = parse_skip_ws_at(src, pos)
     if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
@@ -1139,7 +1155,7 @@ fn JsonReaderArray.len(array) -> int {
     let pos = array.first
     let size = 0
     while src.unit_at(pos) != 93 {
-        pos = json_reader_skip(src, pos, array.reader.container_ends)
+        pos = json_reader_skip(src, pos, array.reader.offsets)
         size += 1
         pos = parse_skip_ws_at(src, pos)
         if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
@@ -1163,7 +1179,7 @@ fn json_reader_as_object(reader: JsonReader) -> Map<string, JsonReader>? {
     }
     if reader.at < 0 { return null }
     let indexed = json_reader_index(reader)
-    let offsets = indexed.fields ?? return null
+    let offsets = json_reader_fields(indexed) ?? return null
     for (key, at) in offsets { fields[key] = json_reader_at(reader, at) }
     return fields
 }
@@ -1241,7 +1257,7 @@ fn json_reader_float_components(reader: JsonReader, size: int) -> (bool, float?,
         if index == 0 { x = number }
         else if index == 1 { y = number }
         else { z = number }
-        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.container_ends))
+        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.offsets))
         if index + 1 < size {
             if src.unit_at(pos) != 44 { return (false, null, null, null) }
             pos = parse_skip_ws_at(src, pos + 1)
