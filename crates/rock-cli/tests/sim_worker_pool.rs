@@ -68,6 +68,92 @@ fn sim_fixture_project(root: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
+fn duration_allocated_workers_preserve_isolated_results_in_three_orders() {
+    use serde_json::{json, Value};
+    let fixture = tempfile::tempdir().expect("duration fixture");
+    let project = sim_fixture_project(fixture.path(), "duration_fixture");
+    std::fs::write(project.join("tests/sims/durations.rock"), r#"
+@sim
+co fn fast() -> Coroutine<Wait> {
+    start_game "duration_fixture"
+    sim_expect(true, "fast body reached")
+    stop_sim()
+}
+@sim
+co fn slow() -> Coroutine<Wait> {
+    start_game "duration_fixture"
+    sim_expect(true, "slow body reached")
+    stop_sim()
+}
+"#).unwrap();
+    let machine = Command::new("uname").arg("-srmn").output().unwrap();
+    assert!(machine.status.success());
+    let machine = String::from_utf8(machine.stdout).unwrap();
+    let costs = [("fast", 100u64), ("slow", 20_000)];
+    let run = |label: &str, mode: &str, specs: &[&str]| -> Vec<Value> {
+        let history = fixture.path().join(label);
+        let previous = history.join("00");
+        std::fs::create_dir_all(&previous).unwrap();
+        std::fs::write(previous.join("timings.json"), serde_json::to_vec(&json!({
+            "schema_version": 1, "host": {"machine": machine}, "project": project,
+            "entries": costs.iter().map(|(name, duration)| json!({
+                "name": name, "duration_ms": duration, "completed": true
+            })).collect::<Vec<_>>()
+        })).unwrap()).unwrap();
+        let out = Command::new(rock_bin()).arg("sim").arg(&project).args(specs)
+            .args([mode, "-j", "4"]).current_dir(workspace_root())
+            .env("ROCK_SIM_LOG_DIR", &history).env("ROCK_SIM_TIMEOUT_SECS", "60")
+            .output().unwrap();
+        assert!(out.status.success(), "{label}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let event_paths: Vec<_> = std::fs::read_dir(&history).unwrap().map(|entry| entry.unwrap().path().join("events.jsonl"))
+            .filter(|path| path.is_file()).collect();
+        assert_eq!(event_paths.len(), 1);
+        std::fs::read_to_string(&event_paths[0]).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    };
+    let original: Vec<&str> = (0..100).map(|i| if (53..57).contains(&i) { "slow" } else { "fast" }).collect();
+    let results = |events: &[Value]| {
+        let mut result: Vec<_> = events.iter().filter(|event| event["event"] == "entry_result")
+            .map(|event| (event["occurrence_id"].as_u64().unwrap(), event["verdict"].clone(),
+                event["expects_pass"].clone(), event["frame_count"].clone())).collect();
+        result.sort_by_key(|row| row.0);
+        result.into_iter().map(|(_, verdict, checks, frames)| (verdict, checks, frames)).collect::<Vec<_>>()
+    };
+    let reference = results(&run("reference", "--isolated", &original));
+    assert_eq!(reference.len(), original.len());
+    assert!(reference.iter().all(|(verdict, checks, _)| verdict == "PASS" && checks.as_u64().unwrap() > 0));
+    let reverse: Vec<_> = original.iter().copied().rev().collect();
+    let mut shuffle = original.clone();
+    for i in (1..shuffle.len()).rev() {
+        shuffle.swap(i, (i * 7919 + 104729) % (i + 1));
+    }
+    for (label, specs) in [("registry", original), ("reverse", reverse), ("shuffle", shuffle)] {
+        let events = run(label, "--workers", &specs);
+        let actual = results(&events);
+        assert_eq!(actual, reference, "{label}: every result/check/frame agrees with a fresh process");
+        let lanes: Vec<_> = events.iter().filter(|event| event["event"] == "lane_planned" && event["kind"] == "shared").collect();
+        assert!(lanes.len() <= 4);
+        let mut members = Vec::new();
+        for lane in &lanes {
+            let ids: Vec<_> = lane["entries"].as_array().unwrap().iter().map(|entry| entry["occurrence_id"].as_u64().unwrap()).collect();
+            assert!(ids.windows(2).all(|pair| pair[1] == pair[0] + 1), "{label}: lane order");
+            members.extend(ids);
+        }
+        members.sort_unstable();
+        let planned_entries: Vec<_> = events.iter().filter(|event| event["event"] == "entry_planned").collect();
+        let selected_names: Vec<_> = planned_entries.iter().map(|event| event["spec"].as_str().unwrap()).collect();
+        let expected_names = specs.clone();
+        assert_eq!(selected_names, expected_names, "{label}: selection order and repeated names");
+        let planned: Vec<_> = planned_entries.iter().map(|event| event["occurrence_id"].as_u64().unwrap()).collect();
+        assert_eq!(members, planned, "{label}: every selected occurrence exactly once");
+        if label == "registry" {
+            let feasible = [&specs[..54], &specs[54..55], &specs[55..56], &specs[56..]];
+            let feasible_peak = feasible.iter().map(|part| part.iter().map(|name| costs.iter().find(|(key, _)| key == name).unwrap().1).sum::<u64>()).max().unwrap();
+            assert!(lanes.iter().all(|lane| lane["estimated_ms"].as_u64().unwrap_or_else(|| panic!("missing live estimate: {lanes:?}; config {:?}", events.iter().find(|event| event["event"] == "run_config"))) <= feasible_peak), "production execution must use duration blocks: {lanes:?}");
+        }
+    }
+}
+
+#[test]
 fn renderer_exclusions_print_once_in_named_runs_and_implicit_suites() {
     let fixture = tempfile::tempdir().expect("renderer exclusion fixture");
     let project = sim_fixture_project(fixture.path(), "renderer_fixture");

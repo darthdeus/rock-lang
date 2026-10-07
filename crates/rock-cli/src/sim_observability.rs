@@ -226,7 +226,7 @@ impl SimRunRecorder {
     }
 
     /// The most recent finished duration of the entry `name` in this run's
-    /// project, from any earlier record under the history root. `None` until
+    /// project on this host, from earlier records under the history root. `None` until
     /// `configure` names the project.
     pub fn recorded_duration_ms(&self, name: &str) -> Option<u64> {
         self.inner.lock().ok()?.timings.latest_duration_ms(name)

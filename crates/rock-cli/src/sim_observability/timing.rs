@@ -190,7 +190,7 @@ pub(super) struct Timings {
     policy: TimingPolicy,
     history: HistoricalTimings,
     /// The most recent finished duration of each (project, entry name),
-    /// under any identity or verdict. Scheduling input, never a baseline.
+    /// on this host, under any workload or verdict. Scheduling input, never a baseline.
     latest: HashMap<(String, String), u64>,
     host: Value,
     config: Value,
@@ -229,7 +229,8 @@ impl Timings {
                         Err(e) => { log::warn!(target: "SIM", "invalid timing history {}: {e}", path.display()); continue; }
                     };
                     if value["schema_version"] != 1 { continue; }
-                    if let Some(project) = value["project"].as_str() {
+                    if let Some(project) = value["project"].as_str().filter(|_|
+                        host["machine"].as_str().is_some() && value["host"]["machine"] == host["machine"]) {
                         for row in value["entries"].as_array().into_iter().flatten() {
                             if row["completed"] != true { continue; }
                             if let (Some(name), Some(ms)) = (row["name"].as_str(), row["duration_ms"].as_u64()) {
@@ -501,6 +502,38 @@ pub(super) fn seeded_table_summary() -> (usize, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduling_history_ignores_foreign_hosts_stale_schemas_and_unfinished_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let mut previous = recorder(root.path());
+        enter(&mut previous, true, 1280);
+        end(&mut previous, 7_321, true);
+        let retained = root.path().join("01");
+        std::fs::create_dir(&retained).unwrap();
+        previous.save(&retained.join("timings.json"), &json!({"complete": true, "status": "PASS"})).unwrap();
+        let original: Value = serde_json::from_slice(&std::fs::read(retained.join("timings.json")).unwrap()).unwrap();
+        let lookup = |host: Value| {
+            let mut next = Timings::new(root.path(), policy(), host);
+            enter(&mut next, true, 1280);
+            next.latest_duration_ms("sim")
+        };
+        let host = original["host"].clone();
+        assert_eq!(lookup(host.clone()), original["entries"][0]["duration_ms"].as_u64());
+        assert_eq!(lookup(json!({"machine": "foreign host"})), None);
+        for invalid in ["schema_version", "completed"] {
+            let mut stale = original.clone();
+            if invalid == "schema_version" {
+                stale["schema_version"] = json!(0);
+            } else {
+                stale["entries"][0]["completed"] = json!(false);
+            }
+            std::fs::write(retained.join("timings.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+            assert_eq!(lookup(host.clone()), None, "{invalid}");
+        }
+        std::fs::remove_file(retained.join("timings.json")).unwrap();
+        assert_eq!(lookup(host), None);
+    }
 
     /// Dispatch order reads what an entry cost most recently in this project,
     /// whatever the tree or verdict was: a failing or dirty run still spent

@@ -2009,6 +2009,16 @@ fn entry_schedule_estimate(history_ms: Option<u64>, sim_name: &str) -> (Option<u
     (None, None)
 }
 
+fn spec_schedule_estimate(spec: &str, recorder: Option<&SimRunRecorder>) -> (Option<u64>, Option<EstimateSource>) {
+    let parts: Vec<_> = parse_sim_chain(spec).iter().map(|part| {
+        entry_schedule_estimate(recorder.and_then(|recorder| recorder.recorded_duration_ms(part)), part)
+    }).collect();
+    if parts.iter().any(|(ms, _)| ms.is_none()) {
+        return (None, None);
+    }
+    sum_estimates(parts.into_iter())
+}
+
 /// Sum scheduling estimates across a lane's entries (or a chain's parts):
 /// the total is present when any estimate is, and the source is history when
 /// any contributor is history, else seeded when any contributor is seeded.
@@ -2019,7 +2029,7 @@ fn sum_estimates(
     let mut source: Option<EstimateSource> = None;
     for (ms, part_source) in estimates {
         if let Some(ms) = ms {
-            total = Some(total.unwrap_or(0) + ms);
+            total = Some(total.unwrap_or(0).saturating_add(ms));
         }
         if source != Some(EstimateSource::History) {
             source = part_source.or(source);
@@ -3130,12 +3140,9 @@ fn run_specs_worker_mode(
 
     let (groups, isolated) = group_worker_specs(&active_specs, env_by_wire);
 
-    // A group splits into contiguous blocks so the entries a worker serves stay
-    // in their requested order; splitting round-robin would reshuffle every
-    // predecessor for no gain. Keep one boot for a group that fits in one
-    // scheduling quantum. A larger group gets the fewest lanes that keep each
-    // lane within that quantum, capped by the global pool size.
-    let lanes: Vec<Vec<usize>> = allocate_worker_lanes(&groups, jobs)
+    let entry_estimates: Vec<_> = specs.iter().map(|spec| spec_schedule_estimate(spec, recorder)).collect();
+    let active_costs: Vec<_> = active_indices.iter().map(|&i| entry_estimates[i].0).collect();
+    let lanes: Vec<Vec<usize>> = allocate_worker_lanes(&groups, jobs, &active_costs)
         .into_iter()
         .map(|lane| lane.into_iter().map(|idx| active_indices[idx]).collect())
         .collect();
@@ -3153,12 +3160,7 @@ fn run_specs_worker_mode(
     // One entry's scheduling estimate and where it came from: this machine's
     // history first, else the checked-in seeded median, else nothing. A lane
     // sums its entries; see `sum_estimates` for the source rule.
-    let estimate_ms = |i: usize| -> (Option<u64>, Option<EstimateSource>) {
-        sum_estimates(parse_sim_chain(&specs[i]).iter().map(|part| {
-            let history = recorder.and_then(|recorder| recorder.recorded_duration_ms(part));
-            entry_schedule_estimate(history, part)
-        }))
-    };
+    let estimate_ms = |i: usize| entry_estimates[i];
     let recorded_ms = |i: usize| -> Option<u64> { estimate_ms(i).0 };
     let lane_estimates_sources: Vec<(Option<u64>, Option<EstimateSource>)> = lanes
         .iter()
@@ -4448,17 +4450,11 @@ fn worker_lane_plan(
     // Fresh-machine dispatch view: seeded medians only, no local history, so
     // `--plan` shows the lane order a fresh checkout gets. Local history
     // still supersedes seeds at run time; lanes with no seed keep plan order.
-    let lanes = allocate_worker_lanes(&groups, jobs);
-    let lane_estimates: Vec<Option<u64>> = lanes
-        .iter()
-        .map(|lane| {
-            sum_estimates(lane.iter().flat_map(|&idx| {
-                parse_sim_chain(&active_specs[idx]).into_iter().map(|part| {
-                    entry_schedule_estimate(None, part)
-                })
-            }))
-            .0
-        })
+    let estimates: Vec<_> = active_specs.iter().map(|spec| spec_schedule_estimate(spec, None)).collect();
+    let costs: Vec<_> = estimates.iter().map(|estimate| estimate.0).collect();
+    let lanes = allocate_worker_lanes(&groups, jobs, &costs);
+    let lane_estimates: Vec<Option<u64>> = lanes.iter()
+        .map(|lane| sum_estimates(lane.iter().map(|&idx| estimates[idx])).0)
         .collect();
     let (_, seed_label) = crate::sim_observability::seeded_table_summary();
     serde_json::json!({
@@ -4466,6 +4462,9 @@ fn worker_lane_plan(
         "backend_excluded": specs.len() - active_specs.len(),
         "jobs": jobs,
         "batch_quantum": SIM_BATCH_QUANTUM,
+        "block_target_ms": SIM_BLOCK_TARGET_MS,
+        "block_boot_tax_ms": SIM_BLOCK_BOOT_TAX_MS,
+        "count_fallback_groups": groups.iter().filter(|group| group.iter().any(|&i| costs[i].is_none())).count(),
         "signature_entry_counts": groups.iter().map(Vec::len).collect::<Vec<_>>(),
         "ordinary_entries": groups.iter().map(Vec::len).sum::<usize>(),
         "ordinary_lanes": lanes.len(),
@@ -4478,7 +4477,7 @@ fn worker_lane_plan(
     })
 }
 
-/// Entries one shared worker serves before another lane pays for its own boot.
+/// Count fallback when a signature has incomplete duration estimates.
 /// Measured at 56 on the full MAG registry (`docs/gate-speed-plan.md` step 0).
 const SIM_BATCH_QUANTUM: usize = 56;
 
@@ -4493,19 +4492,85 @@ fn worker_lane_count(group_len: usize, jobs: usize) -> usize {
     (full_lanes + partial_lane).min(jobs).max(1)
 }
 
-fn allocate_worker_lanes(groups: &[Vec<usize>], jobs: usize) -> Vec<Vec<usize>> {
+// Small signatures do not amortize another boot. The warm ordinary MAG boots
+// in the gate-time investigation span 3-10s; charge 5s for EVERY extra boot,
+// even though the pool overlaps them. Measurement must justify these priors.
+const SIM_BLOCK_TINY_ENTRIES: usize = 20;
+const SIM_BLOCK_TARGET_MS: u64 = 20_000;
+const SIM_BLOCK_BOOT_TAX_MS: u64 = 5_000;
+
+fn allocate_worker_lanes(groups: &[Vec<usize>], jobs: usize, estimates: &[Option<u64>]) -> Vec<Vec<usize>> {
     let mut lanes = Vec::new();
     for group in groups {
-        let blocks = worker_lane_count(group.len(), jobs);
-        for block in 0..blocks {
-            let lo = group.len() * block / blocks;
-            let hi = group.len() * (block + 1) / blocks;
-            if lo < hi {
+        if group.is_empty() {
+            continue;
+        }
+        let costs: Option<Vec<u64>> = group.iter()
+            .map(|&i| estimates.get(i).copied().flatten()).collect();
+        if let Some(costs) = costs {
+            lanes.extend(duration_worker_blocks(group, &costs, jobs.max(1)));
+        } else {
+            // A partial sum can hide an expensive untimed entry. Keep the
+            // established count policy for the whole signature, deterministically.
+            log::info!(target: "SIM", "worker block count fallback: incomplete timings for {} entries; quantum {}", group.len(), SIM_BATCH_QUANTUM);
+            let blocks = worker_lane_count(group.len(), jobs);
+            for block in 0..blocks {
+                let lo = group.len() * block / blocks;
+                let hi = group.len() * (block + 1) / blocks;
                 lanes.push(group[lo..hi].to_vec());
             }
         }
     }
     lanes
+}
+
+fn duration_worker_blocks(group: &[usize], costs: &[u64], jobs: usize) -> Vec<Vec<usize>> {
+    let total: u128 = costs.iter().map(|&cost| cost as u128).sum();
+    let useful = total.div_ceil(SIM_BLOCK_TARGET_MS as u128)
+        .min(jobs as u128).min(group.len() as u128) as usize;
+    let mut best = vec![group.to_vec()];
+    let mut best_cost = total;
+    if group.len() <= SIM_BLOCK_TINY_ENTRIES {
+        return best;
+    }
+    for blocks in 2..=useful {
+        let mut lo = costs.iter().copied().max().unwrap_or(0) as u128;
+        let mut hi = total;
+        // Find the smallest feasible contiguous block capacity. Greedy packing
+        // minimizes block count at a fixed capacity, so the predicate is monotone.
+        while lo < hi {
+            let cap = lo + (hi - lo) / 2;
+            if contiguous_cost_ranges(costs, cap).len() <= blocks {
+                hi = cap;
+            } else {
+                lo = cap + 1;
+            }
+        }
+        let ranges = contiguous_cost_ranges(costs, lo);
+        let score = lo + (ranges.len() - 1) as u128 * SIM_BLOCK_BOOT_TAX_MS as u128;
+        if score < best_cost {
+            best_cost = score;
+            best = ranges.into_iter().map(|range| group[range].to_vec()).collect();
+        }
+    }
+    best
+}
+
+fn contiguous_cost_ranges(costs: &[u64], cap: u128) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let (mut start, mut sum) = (0, 0u128);
+    for (i, &cost) in costs.iter().enumerate() {
+        if i > start && sum + cost as u128 > cap {
+            ranges.push(start..i);
+            start = i;
+            sum = 0;
+        }
+        sum += cost as u128;
+    }
+    if start < costs.len() {
+        ranges.push(start..costs.len());
+    }
+    ranges
 }
 
 /// One queued sim body. A worker child runs these in order in ONE process;
@@ -8055,18 +8120,118 @@ mod tests {
     }
 
     #[test]
+    fn duration_blocks_reduce_a_slow_tail_without_changing_predecessor_order() {
+        let group: Vec<usize> = (0..100).collect();
+        let costs: Vec<u64> = group.iter().map(|i| if [53, 54, 55, 56].contains(i) { 20_000 } else { 100 }).collect();
+        let lanes = allocate_worker_lanes(&[group.clone()], 4, &costs.iter().copied().map(Some).collect::<Vec<_>>());
+        let peak = lanes.iter().map(|lane| lane.iter().map(|&i| costs[i]).sum::<u64>()).max().unwrap();
+        // A feasible independent partition isolates the four adjacent slow entries.
+        let oracle = [&group[..54], &group[54..55], &group[55..56], &group[56..]];
+        let feasible_peak = oracle.iter().map(|lane| lane.iter().map(|&i| costs[i]).sum::<u64>()).max().unwrap();
+        assert!(peak <= feasible_peak, "idle workers leave a {peak}ms tail; feasible peak {feasible_peak}ms");
+        assert_eq!(lanes.concat(), group);
+    }
+
+    #[test]
+    fn duration_blocks_match_an_independent_partition_oracle() {
+        fn optimal_peak(costs: &[u64], blocks: usize) -> u128 {
+            let n = costs.len();
+            let mut dp = vec![vec![u128::MAX; n + 1]; blocks + 1];
+            dp[0][0] = 0;
+            for b in 1..=blocks {
+                for end in b..=n {
+                    let mut tail = 0;
+                    for cut in (b - 1..end).rev() {
+                        tail += costs[cut] as u128;
+                        dp[b][end] = dp[b][end].min(dp[b - 1][cut].max(tail));
+                    }
+                }
+            }
+            dp[blocks][n]
+        }
+        for seed in 0..12 {
+            let group: Vec<_> = (0..31).collect();
+            let costs: Vec<_> = (0..31).map(|i| 1_000 + ((i * 7919 + seed * 104729) % 10_000) as u64).collect();
+            let estimates: Vec<_> = costs.iter().copied().map(Some).collect();
+            for jobs in [1, 2, 3, 4] {
+                let lanes = allocate_worker_lanes(&[group.clone()], jobs, &estimates);
+                let peak = lanes.iter().map(|lane| lane.iter().map(|&i| costs[i] as u128).sum::<u128>()).max().unwrap();
+                let score = peak + (lanes.len() - 1) as u128 * SIM_BLOCK_BOOT_TAX_MS as u128;
+                let oracle = (1..=jobs).map(|blocks| optimal_peak(&costs, blocks)
+                    + (blocks - 1) as u128 * SIM_BLOCK_BOOT_TAX_MS as u128).min().unwrap();
+                assert_eq!(score, oracle, "seed {seed}, jobs {jobs}");
+                assert_eq!(lanes.concat(), group);
+                assert!(lanes.len() <= jobs);
+            }
+        }
+    }
+
+    #[test]
+    fn duration_blocks_keep_tiny_and_boot_dominated_groups_whole() {
+        let tiny: Vec<_> = (0..SIM_BLOCK_TINY_ENTRIES).collect();
+        assert_eq!(allocate_worker_lanes(&[tiny.clone()], 4, &vec![Some(60_000); tiny.len()]), vec![tiny]);
+        let group: Vec<_> = (0..80).collect();
+        for costs in [vec![Some(0); group.len()], vec![Some(1); group.len()]] {
+            assert_eq!(allocate_worker_lanes(&[group.clone()], 4, &costs), vec![group.clone()]);
+        }
+        let mut huge = vec![Some(1); group.len()];
+        huge[35] = Some(u64::MAX);
+        assert_eq!(allocate_worker_lanes(&[group.clone()], 4, &huge), vec![group.clone()], "no split can shorten the indivisible entry");
+        assert_eq!(allocate_worker_lanes(&[group.clone()], 0, &huge), vec![group]);
+        assert!(allocate_worker_lanes(&[vec![]], 0, &[]).is_empty());
+    }
+
+    #[test]
+    fn duration_blocks_bound_useful_workers_by_the_time_target() {
+        let group: Vec<_> = (0..21).collect();
+        let costs = vec![Some(900); group.len()];
+        // Total work fits below the advertised production target, although
+        // halving it would beat the boot tax. More workers are not useful here.
+        assert!(costs.iter().flatten().sum::<u64>() < SIM_BLOCK_TARGET_MS);
+        assert_eq!(allocate_worker_lanes(&[group.clone()], 4, &costs), vec![group]);
+    }
+
+    #[test]
+    fn duration_blocks_use_deterministic_count_fallback_for_incomplete_costs() {
+        let groups = vec![(0..90).collect(), (90..180).collect()];
+        let missing = allocate_worker_lanes(&groups, 4, &[]);
+        let mut partial = vec![Some(30_000); 180];
+        partial[0] = None;
+        partial[179] = None;
+        let actual = allocate_worker_lanes(&groups, 4, &partial);
+        assert_eq!(actual, missing);
+        assert_eq!(actual, allocate_worker_lanes(&groups, 4, &partial));
+        assert_eq!(actual.concat(), groups.concat());
+        assert!(actual.iter().all(|lane| groups.iter().any(|group| group.windows(lane.len()).any(|window| window == lane))));
+    }
+
+    #[test]
+    fn duration_estimates_require_every_chain_part_and_count_repeated_names() {
+        let table = crate::sim_observability::seeded_table_snapshot();
+        let (name, ms) = table.into_iter().find(|(_, ms)| *ms > 0).expect("seeded timings");
+        assert_eq!(spec_schedule_estimate(&format!("{name},{name}"), None).0, ms.checked_mul(2));
+        assert_eq!(spec_schedule_estimate(&format!("{name},no_such_sim_in_the_table"), None), (None, None));
+        assert_eq!(spec_schedule_estimate("no_such_sim_in_the_table", None), (None, None));
+        let specs = vec![name; 100];
+        let plan = worker_lane_plan(&specs, &HashMap::new(), "gl", 4);
+        assert_eq!(plan["ordinary_entries"], specs.len());
+        assert_eq!(plan["count_fallback_groups"], 0);
+        assert!(plan["ordinary_lanes"].as_u64().unwrap() <= 4);
+    }
+
+    #[test]
     fn worker_lane_allocation_keeps_small_groups_intact() {
         let groups = vec![vec![0, 1], vec![2, 3]];
-        assert_eq!(allocate_worker_lanes(&groups, 4), groups);
+        assert_eq!(allocate_worker_lanes(&groups, 4, &[]), groups);
     }
 
     #[test]
     fn worker_lane_allocation_splits_a_group_into_contiguous_quantum_blocks() {
         let fits: Vec<usize> = (0..SIM_BATCH_QUANTUM).collect();
-        assert_eq!(allocate_worker_lanes(&[fits.clone()], 4), vec![fits]);
+        assert_eq!(allocate_worker_lanes(&[fits.clone()], 4, &[]), vec![fits]);
 
         let group: Vec<usize> = (0..2 * SIM_BATCH_QUANTUM + 1).collect();
-        let lanes = allocate_worker_lanes(&[group.clone()], 4);
+        let lanes = allocate_worker_lanes(&[group.clone()], 4, &[]);
         assert_eq!(lanes.len(), 3);
         assert_eq!(lanes.concat(), group);
         assert_eq!(worker_lane_count(0, 4), 0);
@@ -8186,7 +8351,7 @@ mod tests {
     fn worker_lane_partition_covers_every_entry_once_in_group_order() {
         let groups = vec![(0..15).collect(), (15..1675).collect(), vec![], vec![1675]];
         for jobs in [1, 4, 14, 64] {
-            let lanes = allocate_worker_lanes(&groups, jobs);
+            let lanes = allocate_worker_lanes(&groups, jobs, &[]);
             assert_eq!(lanes.concat(), (0..1676).collect::<Vec<_>>());
             assert!(lanes.iter().all(|lane| !lane.is_empty()));
             for lane in lanes {
