@@ -52,6 +52,11 @@ const UNKEYED_ENV: &[&str] = &[
     "ROCK_JOB_ID",
     // Compile records describe the compile; they never change its output.
     "ROCK_COMPILE_STATS",
+    // Slot settings only decide when the compile starts, not what it emits;
+    // keying them made interactive and batch runs miss each other's entries.
+    crate::compile_slots::SLOTS_ENV,
+    crate::compile_slots::CLASS_ENV,
+    crate::compile_slots::SLOT_DIR_ENV,
     // Invocation-log settings and tags; never read by the compile.
     "ROCK_INVOCATION_LOG",
     crate::invocation_log::PARENT_ENV,
@@ -454,7 +459,7 @@ mod tests {
 
     #[test]
     fn runner_only_environment_is_unkeyed_and_compile_settings_are_keyed() {
-        for name in ["ROCK_SIM_TIMEOUT_SECS", "ROCK_JOB_ID", "ROCK_COMPILE_STATS", "ROCK_JOBS_SELF", "ROCK_SIM_WARN_FACTOR", "STONE_JV", CACHE_DIR_ENV] {
+        for name in ["ROCK_SIM_TIMEOUT_SECS", "ROCK_JOB_ID", "ROCK_COMPILE_STATS", "ROCK_COMPILE_SLOTS", "ROCK_COMPILE_CLASS", "ROCK_COMPILE_SLOT_DIR", "ROCK_JOBS_SELF", "ROCK_SIM_WARN_FACTOR", "STONE_JV", CACHE_DIR_ENV] {
             assert!(!environment_is_keyed(name), "{name}");
         }
         for name in ["ROCK_SKULL_TAIL_CALLS", "SKULL_INLINE_OFF", "ROCK_STDLIB_DIR", "GAME_ART_VAULT", "ROCK_SIM_NEW"] {
