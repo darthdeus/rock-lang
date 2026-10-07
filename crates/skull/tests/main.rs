@@ -4,6 +4,8 @@
 
 mod common;
 
+mod compile_release;
+
 #[path = "allocation_report.rs"]
 mod allocation_report;
 

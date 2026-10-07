@@ -764,7 +764,6 @@ fn parse_registry(
 }
 
 fn publish_sim_receipt(
-    backend: crate::Backend,
     root: &Path,
     receipt_dir: &Path,
     project: &Path,
@@ -772,7 +771,8 @@ fn publish_sim_receipt(
     wire_names: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     source_files: &HashMap<String, String>,
-    stone: &crate::skull_backend::SkullStone,
+    inputs: &[SimReceiptInput],
+    cache_identity: &serde_json::Value,
 ) -> Result<()> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("create sim compile receipt root {}", root.display()))?;
@@ -785,13 +785,12 @@ fn publish_sim_receipt(
         .with_context(|| format!("read compiled sim artifact {}", main_source.display()))?;
     std::fs::write(staged.path().join(rock_host::project::MAIN_LUA_FILENAME), &main_bytes)
         .context("write staged sim compile artifact")?;
-    let inputs = receipt_inputs_from_stone(project, stone)?;
     let manifest = serde_json::json!({
         "schema_version": SIM_COMPILE_RECEIPT_VERSION,
         "context": sim_receipt_context(project)?,
-        "cache_identity": sim_compile_cache::identity(project, backend, stone.comptime_inputs())?,
+        "cache_identity": cache_identity,
         "main_sha256": sha256_bytes(&main_bytes),
-        "inputs": receipt_inputs_json(&inputs),
+        "inputs": receipt_inputs_json(inputs),
         "registry": registry_json(wire_names, env_by_wire, source_files)?,
     });
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
@@ -938,6 +937,9 @@ fn prepare_sims(
     }
     let (wire_names, env_by_wire, source_files, stone) =
         compile_sims(backend, project_path.clone(), output_path.clone())?;
+    let inputs = receipt_inputs_from_stone(&project_path, &stone)?;
+    let cache_identity = sim_compile_cache::identity(&project_path, backend, stone.comptime_inputs())?;
+    drop(stone);
     timed_sim_compile_phase(
         "compile_sims",
         "receipt_publish",
@@ -945,7 +947,6 @@ fn prepare_sims(
         Some(&output_path),
         || {
             publish_sim_receipt(
-                backend,
                 &root,
                 &receipt_dir,
                 &project_path,
@@ -953,11 +954,12 @@ fn prepare_sims(
                 &wire_names,
                 &env_by_wire,
                 &source_files,
-                &stone,
+                &inputs,
+                &cache_identity,
             )
         },
     )?;
-    Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: Some(stone) })
+    Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: None })
 }
 
 fn consume_sim_receipt(
@@ -7374,6 +7376,29 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sim_receipt_prepare_releases_session() {
+        const HELPER: &str = "ROCK_TEST_RECEIPT_RELEASE_HELPER";
+        if let Some(root) = std::env::var_os(HELPER) {
+            let root = PathBuf::from(root);
+            let prepared = prepare_sims(crate::Backend::Skull, root.join("project"), root.join("output"))
+                .expect("prepare receipt");
+            assert!(prepared.stone.is_none(), "receipt preparation retained its compiler session");
+            return;
+        }
+        let root = tempfile::tempdir().expect("receipt fixture");
+        std::fs::create_dir(root.path().join("project")).unwrap();
+        std::fs::create_dir(root.path().join("output")).unwrap();
+        std::fs::write(root.path().join("project/main.rock"), "@nomangle fn answer() -> int { 41 }\n").unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "run_sim::tests::sim_receipt_prepare_releases_session", "--nocapture"])
+            .env(HELPER, root.path())
+            .env(SIM_COMPILE_RECEIPT_DIR_ENV, root.path().join("receipts"))
+            .env(SIM_COMPILE_RECEIPT_PREPARE_ENV, "1")
+            .output().expect("receipt test child");
+        assert!(child.status.success(), "{}{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+    }
 
     #[test]
     fn sim_receipt_registry_requires_source_files() {

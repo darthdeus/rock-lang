@@ -538,8 +538,19 @@ pub struct CompileCounts {
     pub dependency_edges: Option<usize>,
 }
 
+/// Containers released before one-shot assembly finishes. Live builds retain them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompileReleaseStats {
+    pub graph_instances: usize,
+    pub chunks: usize,
+    pub concrete_plans: usize,
+    pub retained_dependency_edges: usize,
+    pub retained_static_keys: usize,
+}
+
 /// The assembled new-path program plus the parity gap.
 pub struct MirEmit {
+    pub release_stats: CompileReleaseStats,
     pub compile_counts: CompileCounts,
     pub lua: String,
     /// Allocation-capable operations registered by final Lua emission, with
@@ -2479,8 +2490,11 @@ pub fn emit_workspace_mir_in_for_renderer(
     project_root: Option<&str>,
     renderer_target: RendererTarget,
 ) -> Result<MirEmit, CompilerError> {
-    emit_full_in_for_renderer(ws, user_mid, project_root, renderer_target)
-        .map(|(emit, _cache)| emit)
+    let _allocation_environment = crate::allocation_report::environment_scope();
+    emit_full_in_with_mutation(
+        ws, user_mid, project_root, BodyMutation::None, renderer_target,
+        FullBuild::OneShotProgram, ShapeOverrides::default(),
+    ).map(|(emit, _cache)| emit)
 }
 
 /// [`emit_workspace_mir`] for a package's `rock test` program, rooted at its
@@ -3112,17 +3126,31 @@ pub enum BuildKind {
     PackageTest,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CacheLifetime {
+    Retained,
+    OneShot,
+}
+
 /// A full build's kind with the roots it is taken over.
 #[derive(Clone, Copy)]
 enum FullBuild<'a> {
     Program,
+    OneShotProgram,
     PackageTest(&'a [FuncRef]),
 }
 
 impl FullBuild<'_> {
+    fn lifetime(self) -> CacheLifetime {
+        match self {
+            Self::Program => CacheLifetime::Retained,
+            Self::OneShotProgram | Self::PackageTest(_) => CacheLifetime::OneShot,
+        }
+    }
+
     fn kind(self) -> BuildKind {
         match self {
-            FullBuild::Program => BuildKind::Program,
+            FullBuild::Program | FullBuild::OneShotProgram => BuildKind::Program,
             FullBuild::PackageTest(_) => BuildKind::PackageTest,
         }
     }
@@ -5541,11 +5569,22 @@ fn artifact_fingerprint(
 
 fn assemble(
     ws: &Workspace,
-    cg: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
-    cache: &SkullEmitCache,
+    cache: &mut SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
+    lifetime: CacheLifetime,
 ) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
+    let cg = &cache.cg;
+    let scx = &cache.scx;
+    let mut release_stats = CompileReleaseStats {
+        retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
+        retained_static_keys: cache.static_key_baseline.len(),
+        ..CompileReleaseStats::default()
+    };
+    let mut compile_counts = CompileCounts {
+        concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
+        chunks: cache.chunks.len(),
+        dependency_edges: None,
+    };
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -5727,6 +5766,11 @@ fn assemble(
     // [`all_roots`] -- so there is no second population source here.
     let (spec_chunks, spec_rejected) =
         view_driven_specialized_chunks(ws, cg, scx, cache, &needed_specs);
+    if lifetime == CacheLifetime::OneShot {
+        let instances = cache.graph.instances.len();
+        cache.graph.release_records();
+        release_stats.graph_instances = instances - cache.graph.instances.len();
+    }
 
     // **Foreign-body (`inline(lua)`/`extern`) DELIVERY, separate from
     // RETENTION.** `lua_view` (and `should_emit_via_view`'s call-serving half)
@@ -5973,6 +6017,24 @@ fn assemble(
     for (_, chunk) in built_specs.iter() {
         code_artifact.merge_ref(&chunk.code_artifact);
     }
+    let specialized_instances: Vec<_> = spec_chunks.keys().cloned().collect();
+    let one_shot_reads = if lifetime == CacheLifetime::OneShot {
+        let reads = artifact_comptime_reads(cache, built_specs, &unit_reads, true);
+        compile_counts.chunks += built_specs.iter()
+            .filter(|(key, _)| !cache.chunks.contains_key(key)).count();
+        compile_counts.dependency_edges = Some(
+            cache.chunks.values().flatten().map(|chunk| chunk.deps.len()).sum::<usize>()
+                + built_specs.iter().map(|(_, chunk)| chunk.deps.len()).sum::<usize>(),
+        );
+        let chunks = cache.chunks.len() + built_specs.len();
+        drop(std::mem::take(&mut cache.chunks));
+        drop(std::mem::take(built_specs));
+        release_stats.chunks = chunks - cache.chunks.len() - built_specs.len();
+        Some(reads)
+    } else {
+        None
+    };
+    drop(spec_chunks);
 
     // Every emitted definition has now been visited, so this is the earliest
     // point where the whole rejection list exists. Anything past here is
@@ -6222,8 +6284,9 @@ fn assemble(
             }
         }
     }
-    emitted_bodies.extend(spec_chunks.keys().cloned());
-    let artifact_reads = artifact_comptime_reads(cache, built_specs, &unit_reads, true);
+    emitted_bodies.extend(specialized_instances);
+    let artifact_reads = one_shot_reads.unwrap_or_else(||
+        artifact_comptime_reads(cache, built_specs, &unit_reads, true));
     let artifact_fingerprint = artifact_fingerprint(
         ws,
         scx,
@@ -6236,11 +6299,8 @@ fn assemble(
     )?;
     Ok((
         MirEmit {
-            compile_counts: CompileCounts {
-                concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
-                chunks: cache.chunks.len(),
-                dependency_edges: None,
-            },
+            release_stats,
+            compile_counts,
             lua: out,
             allocation_report,
             code_artifact: std::sync::Arc::new(code_artifact),
@@ -6958,7 +7018,7 @@ fn emit_full_in_with_mutation(
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
     let (interface_roots, sim_roots) = match build {
-        FullBuild::Program => (emission_roots(ws, project_root), sim_glue_roots(ws)),
+        FullBuild::Program | FullBuild::OneShotProgram => (emission_roots(ws, project_root), sim_glue_roots(ws)),
         FullBuild::PackageTest(tests) => (package_test_roots(ws, tests), Vec::new()),
     };
     let emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
@@ -7351,17 +7411,21 @@ fn emit_full_in_with_mutation(
     for (body, chunk) in &chunks {
         if let Ok(c) = chunk {
             dependency_edges += c.deps.len();
-            for d in &c.deps {
-                dependents.entry(*d).or_default().insert(body.clone());
+            if build.lifetime() == CacheLifetime::Retained {
+                for d in &c.deps {
+                    dependents.entry(*d).or_default().insert(body.clone());
+                }
             }
         }
     }
     // Baseline every `static` cell's reload key so the overlay can detect an
     // initializer edit (changed key) vs an unrelated body edit (unchanged key).
     let mut static_key_baseline: FxHashMap<Ustr, String> = FxHashMap::default();
-    for chunk in chunks.values().flatten() {
-        for sc in &chunk.statics {
-            static_key_baseline.insert(sc.cell, static_cell_key(sc));
+    if build.lifetime() == CacheLifetime::Retained {
+        for chunk in chunks.values().flatten() {
+            for sc in &chunk.statics {
+                static_key_baseline.insert(sc.cell, static_cell_key(sc));
+            }
         }
     }
     let concrete_stats = if concrete_stats_requested() {
@@ -7369,7 +7433,7 @@ fn emit_full_in_with_mutation(
     } else {
         crate::concrete_body::ConcreteBuildStats::default()
     };
-    let cache = SkullEmitCache {
+    let mut cache = SkullEmitCache {
         chunks,
         concrete,
         graph,
@@ -7404,7 +7468,8 @@ fn emit_full_in_with_mutation(
         body_edit_rollback: None,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    let graph_census = cache.graph.run_stats;
+    let (mut emit, emitted, unit_reads) = assemble(ws, &mut cache, &mut built_specs, build.lifetime())?;
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases;
@@ -7416,7 +7481,10 @@ fn emit_full_in_with_mutation(
         mono_setup: setup_traffic.1,
         mono_final: cache.scx.interner().stats(),
     };
-    let mut cache = cache;
+    if build.lifetime() == CacheLifetime::OneShot {
+        emit.graph_census = graph_census;
+        return Ok((emit, cache));
+    }
     cache.emitted = emitted;
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
@@ -7430,7 +7498,9 @@ fn emit_full_in_with_mutation(
     dependency_edges += cache.absorb_spec_chunks(built_specs);
     emit.compile_counts.chunks = cache.chunks.len();
     emit.compile_counts.dependency_edges = Some(dependency_edges);
-    emit.graph_census = cache.graph.run_stats;
+    emit.graph_census = graph_census;
+    emit.release_stats.retained_dependency_edges = cache.dependents.values().map(|keys| keys.len()).sum();
+    emit.release_stats.retained_static_keys = cache.static_key_baseline.len();
     Ok((emit, cache))
 }
 
@@ -8487,7 +8557,7 @@ pub fn emit_incremental(
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
+    let (mut emit, emitted, unit_reads) = assemble(ws, cache, &mut built_specs, CacheLifetime::Retained)?;
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
@@ -8849,6 +8919,7 @@ fn assemble_overlay(
 
     Ok((
         MirEmit {
+            release_stats: CompileReleaseStats::default(),
             compile_counts: CompileCounts {
                 concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
                 chunks: cache.chunks.len(),

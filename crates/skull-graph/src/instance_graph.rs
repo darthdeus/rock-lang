@@ -268,6 +268,10 @@ pub enum RejectionKind {
     /// instantiate at. Distinct from a declared generic read inside a shared
     /// body, which is [`Unresolved`] data.
     UnconstrainedTypeVar,
+    /// An identity struct in an ordinary storage position that only the
+    /// instance's substitution shows (docs/identity-storage-plan.md S0c).
+    /// Fatal for the package whose call site instantiated it.
+    IdentityInOrdinaryStorage,
 }
 
 impl RejectionKind {
@@ -277,6 +281,7 @@ impl RejectionKind {
             Self::GenericFnValue => "generic-fn-value",
             Self::UnconstrainedTypeVar => "unconstrained-type-var",
             Self::ConcreteTypeUnavailable => "concrete-type-unavailable",
+            Self::IdentityInOrdinaryStorage => "identity-in-ordinary-storage",
         }
     }
 }
@@ -891,6 +896,7 @@ pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
     ("__vec_data_capacity", StorageCond::VecColumn, &["__rock_col_capacity"]),
     ("__vec_data_insert", StorageCond::VecColumn, &["__rock_col_insert"]),
     ("__vec_data_clone", StorageCond::VecColumn, &["__rock_col_copy"]),
+    ("clone_into", StorageCond::VecColumn, &["__rock_col_copy"]),
     ("__vec_data_sort", StorageCond::VecColumn, &["__rock_col_sort", "__rock_col_sort_leaves"]),
     ("__rock_vec_to_lua_array", StorageCond::VecColumn, &["__rock_vec_column_elements"]),
     ("__vec_data_capacity", StorageCond::VecStrided, &["table_len", "__rock_stride_capacity"]),
@@ -1731,6 +1737,13 @@ impl InstanceGraph {
         &self.interner
     }
 
+    /// Release one-shot build records while keeping the shared type arena alive.
+    pub fn release_records(&mut self) {
+        let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
+        empty.run_stats = self.run_stats;
+        *self = empty;
+    }
+
     fn empty_in(interner: std::sync::Arc<MonoInterner>) -> Self {
         InstanceGraph {
         interner,
@@ -2223,6 +2236,20 @@ impl InstanceGraph {
                     &mut w, ws, inf, Some(body), Some(inst), &subst, &SiteDomain::Own, None,
                 );
                 add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
+                for site in crate::identity_storage::substitution_only_sites(
+                    ws,
+                    f,
+                    body,
+                    inf,
+                    &subst,
+                ) {
+                    w.push_rejection(Rejection {
+                        kind: RejectionKind::IdentityInOrdinaryStorage,
+                        at: inst.clone(),
+                        span: site.span,
+                        message: format!("in this instantiation of `{}`, {}", f.name, site.message),
+                    });
+                }
                 let defaults_start = w.timer();
                 walk_struct_default_edges(
                     &mut w,
@@ -5611,6 +5638,18 @@ fn dispatched_sites(
         logical_subst: Some(subst),
         values_first_class: false,
     };
+    // The shared graph serves both scalarized Lua bodies and native C bodies.
+    // A `nobox value` interpolates as leaves in the former but as one aggregate
+    // in the latter, so retain the union of the same oracle under both ABI
+    // modes. The site key keeps the two forms distinct; each lowerer consumes
+    // only the obligation its own mode emits.
+    let dispatches = [
+        dcx,
+        skull_mir::lower::DispatchCtx {
+            values_first_class: true,
+            ..dcx
+        },
+    ];
     let mut out: Vec<(Site, &'static str)> = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         match expr {
@@ -5619,9 +5658,22 @@ fn dispatched_sites(
                     let InterpPart::Value { expr: hole, spec } = &body.interp_part_arena[p] else {
                         continue;
                     };
-                    for (path, name) in dcx.hole_plan(*hole, spec.as_ref()).obligations() {
+                    for dispatch in &dispatches {
+                        for (path, name) in dispatch.hole_plan(*hole, spec.as_ref()).obligations() {
+                            out.push((
+                                Site { domain: domain.clone(), expr: *hole, op: SiteOp::Dispatched { name, path } },
+                                name,
+                            ));
+                        }
+                    }
+                }
+            }
+            E::Call { .. } => {
+                for dispatch in &dispatches {
+                    let Some((arg, route)) = dispatch.tostring_route(e) else { continue };
+                    for (path, name) in route.obligations() {
                         out.push((
-                            Site { domain: domain.clone(), expr: *hole, op: SiteOp::Dispatched { name, path } },
+                            Site { domain: domain.clone(), expr: arg, op: SiteOp::Dispatched { name, path } },
                             name,
                         ));
                     }
@@ -5639,6 +5691,7 @@ fn dispatched_sites(
         }
     }
     out.sort();
+    out.dedup();
     out
 }
 

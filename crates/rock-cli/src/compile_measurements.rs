@@ -177,6 +177,13 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
     PENDING.with(|state| {
         let mut state = state.borrow_mut();
         let Some(pending) = state.as_mut() else { return };
+        pending.record["released"] = json!({
+            "graph_instances": emit.release_stats.graph_instances,
+            "chunks": emit.release_stats.chunks,
+            "concrete_plans": emit.release_stats.concrete_plans,
+            "retained_dependency_edges": emit.release_stats.retained_dependency_edges,
+            "retained_static_keys": emit.release_stats.retained_static_keys,
+        });
         pending.totals["concrete_plans"] = json!(emit.compile_counts.concrete_plans);
         pending.totals["chunks"] = json!(emit.compile_counts.chunks);
         pending.totals["dependency_edges"] = json!(emit.compile_counts.dependency_edges);
