@@ -352,14 +352,10 @@ fn json_decode(s: string) -> JsonValue? {
     return v
 }
 
-// Behind this call boundary the loop is an inner loop in whatever root trace
-// luajit is recording, and it resolves as a `loop` trace (fast) or a `return`
-// trace (slow, whitespace then skipped in the interpreter) per process. That
-// is the twitter/citm bimodality. Do NOT "fix" it with `@inline`: that wins on
-// an isolated single payload and costs 3-4x in a process that decodes several
-// documents, which is the shape production has. Two other rewrites are also
-// measured losses. See docs/json-parser-benchmarking-plan.md before touching.
-fn parse_skip_ws_at(src: string, at: int) -> int {
+// Typed readers expose this loop at their call sites to avoid whitespace
+// function-entry blacklisting. The graph parser retains its call boundary:
+// global inlining regresses mixed-document workloads (see the benchmark plan).
+@inline fn parse_skip_ws_inline_at(src: string, at: int) -> int {
     let pos = at
     let len = src.len()
     while pos < len {
@@ -371,6 +367,10 @@ fn parse_skip_ws_at(src: string, at: int) -> int {
         }
     }
     return pos
+}
+
+fn parse_skip_ws_at(src: string, at: int) -> int {
+    return parse_skip_ws_inline_at(src, at)
 }
 
 @inline fn parse_skip_ws(p: JsonParser) {
@@ -868,7 +868,7 @@ fn json_reader_validate_string(p: JsonParser) {
 
 fn json_reader_validate_array(p: JsonParser, validation: JsonReaderValidation, start: int) {
     p.pos += 1
-    parse_skip_ws(p)
+    p.pos = parse_skip_ws_inline_at(p.src, p.pos)
     if p.pos < p.len && p.src.unit_at(p.pos) == 93 { json_reader_close_container(p, validation, start); return }
     let index = 0
     while p.pos < p.len {
@@ -882,7 +882,7 @@ fn json_reader_validate_array(p: JsonParser, validation: JsonReaderValidation, s
             let _ = validation.keys.pop()
             let _ = validation.indices.pop()
         }
-        parse_skip_ws(p)
+        p.pos = parse_skip_ws_inline_at(p.src, p.pos)
         if p.pos >= p.len { p.ok = false; return }
         let next = p.src.unit_at(p.pos)
         if next == 93 { json_reader_close_container(p, validation, start); return }
@@ -895,18 +895,18 @@ fn json_reader_validate_array(p: JsonParser, validation: JsonReaderValidation, s
 
 fn json_reader_validate_object(p: JsonParser, validation: JsonReaderValidation, start: int) {
     p.pos += 1
-    parse_skip_ws(p)
+    p.pos = parse_skip_ws_inline_at(p.src, p.pos)
     if p.pos < p.len && p.src.unit_at(p.pos) == 125 { json_reader_close_container(p, validation, start); return }
     while p.pos < p.len {
-        parse_skip_ws(p)
+        p.pos = parse_skip_ws_inline_at(p.src, p.pos)
         let key = ""
         if p.depth == 1 || validation.track_path { key = parse_string_raw(p) ?? return }
         else { json_reader_validate_string(p); if !p.ok { return } }
-        parse_skip_ws(p)
+        p.pos = parse_skip_ws_inline_at(p.src, p.pos)
         if p.pos >= p.len || p.src.unit_at(p.pos) != 58 { p.ok = false; return }
         p.pos += 1
         if p.depth == 1 {
-            parse_skip_ws(p)
+            p.pos = parse_skip_ws_inline_at(p.src, p.pos)
             validation.root_fields[key] = p.pos
         }
         if validation.track_path {
@@ -919,7 +919,7 @@ fn json_reader_validate_object(p: JsonParser, validation: JsonReaderValidation, 
             let _ = validation.keys.pop()
             let _ = validation.indices.pop()
         }
-        parse_skip_ws(p)
+        p.pos = parse_skip_ws_inline_at(p.src, p.pos)
         if p.pos >= p.len { p.ok = false; return }
         let next = p.src.unit_at(p.pos)
         if next == 125 { json_reader_close_container(p, validation, start); return }
@@ -930,7 +930,7 @@ fn json_reader_validate_object(p: JsonParser, validation: JsonReaderValidation, 
 }
 
 fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
-    parse_skip_ws(p)
+    p.pos = parse_skip_ws_inline_at(p.src, p.pos)
     if p.pos >= p.len { p.ok = false; return }
     let b = p.src.unit_at(p.pos)
     if b == 34 { json_reader_validate_string(p); return }
@@ -962,10 +962,10 @@ fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
 fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, index_min_bytes: int = 0) -> JsonReader? {
     let p = JsonParser { src, pos: 0, len: src.len(), ok: true, depth: 0 }
     let validation = JsonReaderValidation { track_path: rejected != null, index_min_bytes }
-    parse_skip_ws(p)
+    p.pos = parse_skip_ws_inline_at(p.src, p.pos)
     let at = p.pos
     json_reader_validate(p, validation)
-    parse_skip_ws(p)
+    p.pos = parse_skip_ws_inline_at(p.src, p.pos)
     if !p.ok || p.pos != p.len {
         if let report = rejected { report(json_reader_error_path(validation), p.pos, validation.problem) }
         return null
@@ -1034,14 +1034,14 @@ fn json_reader_index_at(reader: JsonReader) -> (JsonReader, int) {
     let src = reader.src.unwrap()
     if src.unit_at(reader.at) != 123 { return (reader, reader.at) }
     let fields: Map<string, int> = map_new()
-    let pos = parse_skip_ws_at(src, reader.at + 1)
+    let pos = parse_skip_ws_inline_at(src, reader.at + 1)
     while src.unit_at(pos) != 125 {
         let (key, end) = parse_string_raw_at(src, pos)
-        pos = parse_skip_ws_at(src, end)
-        pos = parse_skip_ws_at(src, pos + 1)
+        pos = parse_skip_ws_inline_at(src, end)
+        pos = parse_skip_ws_inline_at(src, pos + 1)
         fields[key.unwrap()] = pos
-        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.offsets))
-        if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
+        pos = parse_skip_ws_inline_at(src, json_reader_skip(src, pos, reader.offsets))
+        if src.unit_at(pos) == 44 { pos = parse_skip_ws_inline_at(src, pos + 1) }
     }
     let offsets = reader.offsets.unwrap()
     offsets[reader.at] = JsonReaderOffsets { fields, end: pos + 1 }
@@ -1152,7 +1152,7 @@ fn json_reader_as_array(reader: JsonReader) -> JsonReaderArray? {
     if reader.at < 0 { return null }
     let src = reader.src.unwrap()
     if src.unit_at(reader.at) != 91 { return null }
-    return JsonReaderArray { reader, first: parse_skip_ws_at(src, reader.at + 1) }
+    return JsonReaderArray { reader, first: parse_skip_ws_inline_at(src, reader.at + 1) }
 }
 
 @inline fn JsonReaderArray.iter(array) -> JsonReaderArrayIter {
@@ -1188,8 +1188,8 @@ fn json_reader_array_next(it: JsonReaderArrayIter, index_objects: bool) -> (bool
     } else {
         pos = json_reader_skip(src, at, array.reader.offsets)
     }
-    pos = parse_skip_ws_at(src, pos)
-    if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
+    pos = parse_skip_ws_inline_at(src, pos)
+    if src.unit_at(pos) == 44 { pos = parse_skip_ws_inline_at(src, pos + 1) }
     it.pos = pos
     it.index += 1
     return (true, entry)
@@ -1204,8 +1204,8 @@ fn JsonReaderArray.len(array) -> int {
     while src.unit_at(pos) != 93 {
         pos = json_reader_skip(src, pos, array.reader.offsets)
         size += 1
-        pos = parse_skip_ws_at(src, pos)
-        if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
+        pos = parse_skip_ws_inline_at(src, pos)
+        if src.unit_at(pos) == 44 { pos = parse_skip_ws_inline_at(src, pos + 1) }
     }
     return size
 }
@@ -1232,7 +1232,7 @@ fn json_reader_each_field(reader: JsonReader) -> JsonReaderFieldIter? {
         return JsonReaderFieldIter { reader, pos: -1, keys: object.keys() }
     }
     if reader.at < 0 || reader.src.unwrap().unit_at(reader.at) != 123 { return null }
-    return JsonReaderFieldIter { reader, pos: parse_skip_ws_at(reader.src.unwrap(), reader.at + 1) }
+    return JsonReaderFieldIter { reader, pos: parse_skip_ws_inline_at(reader.src.unwrap(), reader.at + 1) }
 }
 
 fn JsonReaderFieldIter.iter(it) -> JsonReaderFieldIter { return it }
@@ -1247,9 +1247,9 @@ fn JsonReaderFieldIter.next(it) -> (bool, (string, JsonReader)) {
     let src = it.reader.src.unwrap()
     if src.unit_at(it.pos) == 125 { return (false, ("", json_reader_null())) }
     let (key, end) = parse_string_raw_at(src, it.pos)
-    let at = parse_skip_ws_at(src, parse_skip_ws_at(src, end) + 1)
-    let pos = parse_skip_ws_at(src, json_reader_skip(src, at, it.reader.offsets))
-    if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
+    let at = parse_skip_ws_inline_at(src, parse_skip_ws_inline_at(src, end) + 1)
+    let pos = parse_skip_ws_inline_at(src, json_reader_skip(src, at, it.reader.offsets))
+    if src.unit_at(pos) == 44 { pos = parse_skip_ws_inline_at(src, pos + 1) }
     it.pos = pos
     return (true, (key.unwrap(), json_reader_at(it.reader, at)))
 }
@@ -1336,7 +1336,7 @@ fn json_reader_float_components_end(reader: JsonReader, size: int) -> (bool, flo
     if reader.at < 0 { return (false, null, null, null, reader.at) }
     let src = reader.src.unwrap()
     if src.unit_at(reader.at) != 91 { return (false, null, null, null, reader.at) }
-    let pos = parse_skip_ws_at(src, reader.at + 1)
+    let pos = parse_skip_ws_inline_at(src, reader.at + 1)
     let x: float? = null
     let y: float? = null
     let z: float? = null
@@ -1346,10 +1346,10 @@ fn json_reader_float_components_end(reader: JsonReader, size: int) -> (bool, flo
         if index == 0 { x = number }
         else if index == 1 { y = number }
         else { z = number }
-        pos = parse_skip_ws_at(src, if end > pos { end } else { json_reader_skip(src, pos, reader.offsets) })
+        pos = parse_skip_ws_inline_at(src, if end > pos { end } else { json_reader_skip(src, pos, reader.offsets) })
         if index + 1 < size {
             if src.unit_at(pos) != 44 { return (false, null, null, null, reader.at) }
-            pos = parse_skip_ws_at(src, pos + 1)
+            pos = parse_skip_ws_inline_at(src, pos + 1)
         }
     }
     return (src.unit_at(pos) == 93, x, y, z, pos + 1)
@@ -1368,8 +1368,8 @@ fn JsonReaderArrayIter.next_float_components(it, size: int) -> (bool, bool, floa
     if src.unit_at(it.pos) == 93 { return (false, false, null, null, null) }
     let (shape, x, y, z, end) = json_reader_float_components_end(json_reader_at(array.reader, it.pos), size)
     if shape {
-        let pos = parse_skip_ws_at(src, end)
-        if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
+        let pos = parse_skip_ws_inline_at(src, end)
+        if src.unit_at(pos) == 44 { pos = parse_skip_ws_inline_at(src, pos + 1) }
         it.pos = pos
         it.index += 1
     } else {

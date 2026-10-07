@@ -573,6 +573,7 @@
 // prelude: parse_object_value
 // prelude: parse_skip_ws
 // prelude: parse_skip_ws_at
+// prelude: parse_skip_ws_inline_at
 // prelude: parse_string_raw
 // prelude: parse_string_raw_at
 // prelude: parse_string_value
