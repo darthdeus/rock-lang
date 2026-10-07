@@ -448,3 +448,42 @@ fn c_tests_log_supervisor_failure_after_last_status_and_keep_results() {
     assert!(stderr.contains("exit status: 9"), "{stderr}");
     assert_eq!(compiles, 3);
 }
+
+/// More C packages than rayon workers under one compile slot: the packages
+/// waiting for the slot must not hold every worker the slot holder's parallel
+/// test run needs.
+#[test]
+fn c_packages_beyond_the_pool_size_finish_under_one_compile_slot() {
+    let root = tempfile::tempdir().expect("package root");
+    for name in ["alpha", "beta", "gamma"] {
+        let package = root.path().join(name);
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("stick.toml"),
+            format!("[package]\nname = \"{name}\"\ntype = \"lib\"\n")).unwrap();
+        std::fs::write(package.join("probe.rock"), "@test fn probe() { assert(1 + 1 == 2) }\n").unwrap();
+    }
+    let slots = tempfile::tempdir().expect("slot dir");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["test", "--backend", "c", root.path().to_str().unwrap()])
+        .env("ROCK_NUM_THREADS", "2")
+        .env("ROCK_COMPILE_SLOTS", "1")
+        .env("ROCK_COMPILE_CLASS", "batch")
+        .env("ROCK_COMPILE_SLOT_DIR", slots.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!("the C suite hung under one compile slot:\n{}", String::from_utf8_lossy(&output.stderr));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("3/3 @tests passed"), "{stdout}");
+}

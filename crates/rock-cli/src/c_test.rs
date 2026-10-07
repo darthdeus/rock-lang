@@ -243,45 +243,41 @@ fn c_test_run_with_required_tests(
     let mut all_skip_reasons = Vec::new();
     let mut required_gate = RequiredTestGate::new(required_tests);
     let engine_builds = std::sync::Mutex::new(CEngineBuilds::default());
-    let units = files
-        .iter()
-        .map(|file| (file, true))
-        .chain(package_dirs.iter().map(|dir| (dir, false)))
-        .collect::<Vec<_>>();
+    let units = files.iter().chain(&package_dirs).collect::<Vec<_>>();
 
-    // Units check, emit and run concurrently; the reporter prints and records
-    // them in unit order as soon as each prefix is complete.
+    // Files check, emit and run concurrently; the reporter prints and records
+    // units in order as soon as each prefix is complete.
     let ablation = skull_mir::ablation::current_context();
     let (sender, receiver) = std::sync::mpsc::channel();
+    let (file_units, package_units) = units.split_at(files.len());
     std::thread::scope(|scope| {
+        let file_sender = sender.clone();
         scope.spawn(|| {
-            units
+            file_units
                 .par_iter()
                 .enumerate()
-                .for_each_with(sender, |sender, (index, (path, is_file))| {
+                .for_each_with(file_sender, |sender, (index, path)| {
                     let _ablation = skull_mir::ablation::enter_context(ablation.clone());
                     let mut required = Vec::new();
-                    let outcome = if *is_file {
-                        build_file(path, &mut required, &engine_builds)
-                    } else {
-                        // A rayon worker waiting on a package's parallel test
-                        // run may pick up another package unit, nesting a
-                        // second compile slot on one thread. A plain thread
-                        // blocks without taking rayon work.
-                        std::thread::scope(|package_scope| {
-                            package_scope
-                                .spawn(|| {
-                                    let _ablation = skull_mir::ablation::enter_context(ablation.clone());
-                                    build_package(path, &mut required, &engine_builds)
-                                })
-                                .join()
-                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                        })
-                    };
+                    let outcome = build_file(path, &mut required, &engine_builds);
                     sender
                         .send((index, outcome, required))
                         .expect("the C test reporter outlives its workers");
                 });
+        });
+        // Packages build one at a time off the rayon pool: each holds a
+        // compile slot while its tests run on rayon workers, and a worker
+        // waiting for that slot would be one the tests cannot use.
+        let (ablation, engine_builds) = (&ablation, &engine_builds);
+        scope.spawn(move || {
+            let _ablation = skull_mir::ablation::enter_context(ablation.clone());
+            for (offset, path) in package_units.iter().enumerate() {
+                let mut required = Vec::new();
+                let outcome = build_package(path, &mut required, &engine_builds);
+                sender
+                    .send((file_units.len() + offset, outcome, required))
+                    .expect("the C test reporter outlives its workers");
+            }
         });
         let mut finished = std::collections::BTreeMap::new();
         let mut next = 0;
@@ -291,7 +287,7 @@ fn c_test_run_with_required_tests(
                 record_unit(
                     &mut summary,
                     &mut all_skip_reasons,
-                    short_path(units[next].0),
+                    short_path(units[next]),
                     outcome,
                     print,
                     show_passing,
