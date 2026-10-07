@@ -4983,3 +4983,22 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
     assert_eq!(acquisition.slot.as_deref(), Some("batch-0"));
     assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
 }
+
+#[test]
+fn package_tests_run_against_the_current_sound_bank() {
+    let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir_in(workspace).expect("sound package");
+    std::fs::write(dir.path().join("stick.toml"),
+        "[package]\nname = \"sound-tests\"\ntype = \"lib\"\n[sound]\nproject = \"sound_project.json\"\n").unwrap();
+    std::fs::write(dir.path().join("sound_project.json"),
+        r#"{"version":1,"events":[{"id":"fixture.current","steps":[{"layers":[{"sources":["assets/missing.ogg"]}]}]}]}"#).unwrap();
+    std::fs::create_dir(dir.path().join("assets")).unwrap();
+    let bank = dir.path().join("assets/sound_bank.json");
+    std::fs::write(&bank, r#"{"version":1,"events":[{"id":"fixture.stale","steps":[]}]}"#).unwrap();
+    std::fs::write(dir.path().join("first.rock"), "@test inline(lua) fn first_test() = \"print('ok')\"\n").unwrap();
+    let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(10), 1, None);
+    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })), "{result:?}");
+    let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&bank).unwrap()).unwrap();
+    assert_eq!(written["events"][0]["id"], "fixture.current",
+        "a package test run reads the bank its sound project compiles to, not one an earlier tree left");
+}

@@ -1179,6 +1179,11 @@ fn skull_build_package_with_limit(
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let _stats = crate::compile_measurements::Scope::begin(dir);
+    // Like a game run, so tests never read a bank an earlier tree compiled.
+    crate::package::prepare_sound_bank(dir).map_err(|e| SkullFailure {
+        reason: "sound bank preparation failed".to_string(),
+        rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
+    })?;
     let slot = crate::compile_slots::acquire(dir).map_err(|e| SkullFailure {
         reason: "no compile slot".to_string(),
         rendered: format!("{e:#}"),
