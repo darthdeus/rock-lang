@@ -324,7 +324,9 @@ impl CacheRun<'_> {
 fn cache_entries(cache: &std::path::Path) -> Vec<String> {
     let mut names = std::fs::read_dir(cache)
         .expect("read cache dir")
-        .map(|entry| entry.expect("cache entry").file_name().to_string_lossy().into_owned())
+        .map(|entry| entry.expect("cache entry"))
+        .filter(|entry| entry.file_type().expect("cache entry type").is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     names.sort();
     names
@@ -443,6 +445,75 @@ fn concurrent_sim_runs_share_one_compile_cache_entry() {
     });
     assert_eq!(cache_entries(&cache).len(), 1, "both runs publish one key: {:?}", cache_entries(&cache));
     assert!(!run.compiled("after", "cache_probe", &[], &[]), "the published entry serves later runs");
+}
+
+#[test]
+fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    let cache = dir.path().join("cache");
+    let slots = dir.path().join("slots");
+    write_cache_fixture(&project);
+    std::fs::create_dir(&slots).unwrap();
+    let mut slot = std::fs::File::options().create(true).truncate(false)
+        .read(true).write(true).open(slots.join("batch-0")).unwrap();
+    slot.lock().unwrap();
+    writeln!(slot, "{} test barrier", std::process::id()).unwrap();
+    let spawn = |label: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rock"))
+            .arg("sim").arg(&project).arg("cache_probe")
+            .current_dir(workspace_root())
+            .env("ROCK_DIR", workspace_root())
+            .env("ROCK_SIM_COMPILE_CACHE_DIR", &cache)
+            .env_remove("ROCK_SIM_COMPILE_CACHE")
+            .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
+            .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
+            .env("ROCK_SIM_COMPILE_TIMING", dir.path().join(format!("{label}.jsonl")))
+            .env("ROCK_SIM_LOG_DIR", dir.path().join("history"))
+            .env("ROCK_COMPILE_SLOT_DIR", &slots)
+            .env("ROCK_COMPILE_SLOTS", "1")
+            .env("ROCK_COMPILE_CLASS", "batch")
+            .stdout(Stdio::from(std::fs::File::create(dir.path().join(format!("{label}.out"))).unwrap()))
+            .stderr(Stdio::from(std::fs::File::create(dir.path().join(format!("{label}.err"))).unwrap()))
+            .spawn().expect("spawn cold request")
+    };
+    let mut a = spawn("a");
+    let mut b = spawn("b");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let both_missed = loop {
+        if ["a", "b"].iter().all(|label| {
+            std::fs::read_to_string(dir.path().join(format!("{label}.err")))
+                .unwrap().contains("compile cache miss")
+        }) {
+            break true;
+        }
+        if Instant::now() >= deadline { break false; }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    slot.unlock().unwrap();
+    if !both_missed {
+        a.kill().expect("stop first request");
+        b.kill().expect("stop second request");
+    }
+    let statuses = [a.wait().unwrap(), b.wait().unwrap()];
+    let logs = ["a", "b"].map(|label| {
+        std::fs::read_to_string(dir.path().join(format!("{label}.err"))).unwrap()
+    });
+    assert!(both_missed, "both requests must reach the cold key: {logs:?}");
+    assert!(statuses.iter().all(|status| status.success()), "{statuses:?}: {logs:?}");
+    let records = ["a", "b"].map(|label| {
+        std::fs::read_to_string(dir.path().join(format!("{label}.jsonl"))).unwrap()
+    }).join("\n");
+    let count = |phase: &str| records.lines().filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|record| record["phase"] == phase).count();
+    assert_eq!(count("receipt_materialize"), 2, "both requests consume a receipt");
+    assert_eq!(count("skull_compile_emit"), 1, "same cold key compiled twice: {records}");
+    assert!(logs.iter().any(|log| log.contains("compiling the same sim program")), "{logs:?}");
 }
 
 #[test]

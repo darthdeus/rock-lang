@@ -16,13 +16,15 @@
 //! their own contract: they may vary without changing the artifact's identity,
 //! so a hit keeps the clock of the compile that produced it.
 //!
-//! Concurrency: a miss compiles into a private staging dir under the cache
-//! root and publishes with one directory rename, which fails when another run
-//! already published the key; readers only see complete entries. Eviction
+//! Concurrency: a miss locks its key before taking a compile slot, rechecks
+//! the cache, then compiles into a private staging dir and publishes with one
+//! directory rename; readers only see complete entries. Eviction
 //! renames an entry away before deleting it, and a reader that loses its entry
 //! mid-load falls back to compiling.
 
 use super::*;
+use std::fs::{File, TryLockError};
+use std::io::{Seek, Write};
 
 const CACHE_ENV: &str = "ROCK_SIM_COMPILE_CACHE";
 const CACHE_DIR_ENV: &str = "ROCK_SIM_COMPILE_CACHE_DIR";
@@ -248,30 +250,22 @@ pub(super) fn prepare(
     })?;
     let short = &lookup.key[..16];
     let entry = root.join(&lookup.key);
-    if entry.is_dir() {
-        let loaded = manifest_key(&entry).and_then(|(stored, _)| {
-            if stored != lookup.key {
-                return Err(anyhow!("its manifest keys to {stored}"));
-            }
-            consume_sim_receipt(&entry, project, output, Some(&lookup.current))
-        });
-        match loaded {
-            Ok(prepared) => {
-                if let Err(error) = mark_used(&entry) {
-                    ::log::warn!(target: "SIM", "compile cache: cannot mark {short} used: {error:#}");
-                }
-                ::log::info!(target: "SIM", "compile cache hit {short}");
-                return Ok(prepared);
-            }
-            Err(error) => {
-                ::log::warn!(target: "SIM", "compile cache entry {short} is unusable, recompiling: {error:#}");
-                if let Err(error) = evict(root, &entry) {
-                    ::log::warn!(target: "SIM", "compile cache: cannot evict {short}: {error:#}");
-                }
-            }
+    match load_cached(&entry, &lookup, project, output) {
+        Ok(Some(prepared)) => return Ok(prepared),
+        Ok(None) => ::log::info!(target: "SIM", "compile cache miss {short}"),
+        Err(error) => ::log::warn!(target: "SIM", "compile cache entry {short} is unusable, recompiling: {error:#}"),
+    }
+
+    // The child takes its compile slot only after this lock; same-key waiters
+    // must never occupy slots needed by the holder.
+    let _key_lock = lock_key(root, &lookup.key)?;
+    match load_cached(&entry, &lookup, project, output) {
+        Ok(Some(prepared)) => return Ok(prepared),
+        Ok(None) => {}
+        Err(error) => {
+            ::log::warn!(target: "SIM", "compile cache entry {short} is unusable, recompiling: {error:#}");
+            evict(root, &entry).with_context(|| format!("evict unusable sim compile {short}"))?;
         }
-    } else {
-        ::log::info!(target: "SIM", "compile cache miss {short}");
     }
 
     let staging = tempfile::Builder::new()
@@ -290,6 +284,48 @@ pub(super) fn prepare(
         Err(error) => ::log::info!(target: "SIM", "compile cache: not storing {short}: {error:#}"),
     }
     Ok(prepared)
+}
+
+fn load_cached(entry: &Path, lookup: &Lookup, project: &Path, output: &Path) -> Result<Option<PreparedSims>> {
+    if !entry.is_dir() {
+        return Ok(None);
+    }
+    let (stored, _) = manifest_key(entry)?;
+    if stored != lookup.key {
+        return Err(anyhow!("its manifest keys to {stored}"));
+    }
+    let prepared = consume_sim_receipt(entry, project, output, Some(&lookup.current))?;
+    let short = &lookup.key[..16];
+    if let Err(error) = mark_used(entry) {
+        ::log::warn!(target: "SIM", "compile cache: cannot mark {short} used: {error:#}");
+    }
+    ::log::info!(target: "SIM", "compile cache hit {short}");
+    Ok(Some(prepared))
+}
+
+fn lock_key(root: &Path, key: &str) -> Result<File> {
+    let path = root.join(format!("{key}.lock"));
+    let mut file = File::options().read(true).write(true).create(true).truncate(false)
+        .open(&path).with_context(|| format!("open sim compile lock {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            let holder = std::fs::read_to_string(&path)
+                .with_context(|| format!("read sim compile lock {}", path.display()))?;
+            let pid = holder.trim();
+            ::log::info!(target: "SIM", "waiting for {pid} compiling the same sim program");
+            file.lock().with_context(|| format!("wait for sim compile lock {}", path.display()))?;
+        }
+        Err(TryLockError::Error(error)) => {
+            return Err(error).with_context(|| format!("lock sim compile key {key}"));
+        }
+    }
+    // Keep the inode: unlinking even an unlocked file can strand an existing
+    // waiter on it. Kernel locks die with the holder; replace its stale PID.
+    file.set_len(0).context("clear sim compile lock holder")?;
+    file.rewind().context("rewind sim compile lock holder")?;
+    writeln!(file, "{}", std::process::id()).context("record sim compile lock holder")?;
+    Ok(file)
 }
 
 /// Store a freshly compiled receipt under `key` only if what it records
@@ -315,7 +351,7 @@ fn publish(receipt: &Path, entry: &Path, lookup: &Lookup) -> Result<()> {
     }
     match std::fs::rename(receipt, entry) {
         Ok(()) => Ok(()),
-        // Another run published the same key first; both compiled the same inputs.
+        // A publisher outside this lock may already have stored the same key.
         Err(_) if entry.join("receipt.json").is_file() => Ok(()),
         Err(error) => {
             Err(error).with_context(|| format!("publish {} -> {}", receipt.display(), entry.display()))
@@ -418,6 +454,44 @@ fn evict_to_budget(root: &Path, budget: u64, keep: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_lock_holder_process() {
+        let Some(root) = std::env::var_os("SIM_KEY_LOCK_TEST_ROOT") else { return };
+        let _held = lock_key(Path::new(&root), "test-key").unwrap();
+        println!("locked");
+        std::io::stdout().flush().unwrap();
+        loop { std::thread::park(); }
+    }
+
+    #[test]
+    fn key_lock_recovers_after_holder_dies_without_unlinking_waiters() {
+        use std::io::BufRead;
+        let root = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["run_sim::sim_compile_cache::tests::key_lock_holder_process", "--exact", "--nocapture"])
+            .env("SIM_KEY_LOCK_TEST_ROOT", root.path())
+            .stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        while !line.contains("locked") {
+            line.clear();
+            assert!(stdout.read_line(&mut line).unwrap() > 0, "holder exited before locking");
+        }
+        let path = root.path().join("test-key.lock");
+        let waiter = File::options().read(true).write(true).open(&path).unwrap();
+        assert!(matches!(waiter.try_lock(), Err(TryLockError::WouldBlock)));
+        let other_key = lock_key(root.path(), "other-key").unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        waiter.try_lock().expect("death releases the kernel lock");
+        waiter.unlock().unwrap();
+        let recovered = lock_key(root.path(), "test-key").unwrap();
+        assert!(matches!(waiter.try_lock(), Err(TryLockError::WouldBlock)), "the existing waiter sees the same inode");
+        assert_eq!(std::fs::read_to_string(path).unwrap().trim(), std::process::id().to_string());
+        drop(recovered);
+        drop(other_key);
+    }
 
     fn entry(root: &Path, name: &str, bytes: usize, age_secs: u64) -> PathBuf {
         let path = root.join(name);
