@@ -53,6 +53,7 @@ co fn raises_a_frame() -> Coroutine<Wait> {
 @sim
 co fn stops_on_first_resume() -> Coroutine<Wait> {
     start_game "timing_fixture"
+    sim_expect(sim_mode_active(), "early completion entry resumed in sim mode")
     stop_sim()
 }
 @sim
