@@ -3016,6 +3016,7 @@ pub struct SkullEmitCache {
     definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
     /// Exact identity of the Artifact currently staged by this cache.
     artifact_fingerprint: Option<String>,
+    fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
     /// Comptime reads of the always-emitted units (global initializers,
     /// decorator defs), which have no Chunk. Feeds the watch set
     /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
@@ -3090,6 +3091,7 @@ pub struct IncrementalRepairStats {
     pub dynamic_state_full_scans: usize,
     pub dynamic_state_static_rows_scanned: usize,
     pub code_artifact_assembly_reused: bool,
+    pub fingerprint_code_rows_derived: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3216,6 +3218,7 @@ struct BodyEditRollback {
     state_schema: Option<std::sync::Arc<skull_mir::state_schema::StateSchema>>,
     definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
     artifact_fingerprint: Option<String>,
+    fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
     unit_comptime_reads: UnitComptimeReads,
     repair_stats: IncrementalRepairStats,
 }
@@ -7393,6 +7396,7 @@ fn emit_full_in_with_mutation(
         state_schema: None,
         definition_plan: None,
         artifact_fingerprint: None,
+        fingerprint_code_rows: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         build_kind: build.kind(),
@@ -7419,6 +7423,9 @@ fn emit_full_in_with_mutation(
     cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
+    cache.fingerprint_code_rows = Some(crate::artifact_fingerprint::CodeRows::collect(
+        ws, cache.scx.interner(), &emit.code_artifact,
+    ).map_err(|error| CompilerError::new_no_location(error.to_string()))?);
     cache.unit_comptime_reads = unit_reads;
     dependency_edges += cache.absorb_spec_chunks(built_specs);
     emit.compile_counts.chunks = cache.chunks.len();
@@ -7505,6 +7512,7 @@ impl SkullEmitCache {
             state_schema: self.state_schema.clone(),
             definition_plan: self.definition_plan.clone(),
             artifact_fingerprint: self.artifact_fingerprint.clone(),
+            fingerprint_code_rows: self.fingerprint_code_rows.clone(),
             unit_comptime_reads: self.unit_comptime_reads.clone(),
             repair_stats: self.repair_stats,
         });
@@ -7530,6 +7538,7 @@ impl SkullEmitCache {
             state_schema,
             definition_plan,
             artifact_fingerprint,
+            fingerprint_code_rows,
             unit_comptime_reads,
             repair_stats,
         } = snapshot;
@@ -7544,7 +7553,7 @@ impl SkullEmitCache {
             .collect();
         let result = (|| {
             let shader_changed = self.update_shader_registrations(ws, &reinferred)?;
-            let (_affected, update, added_errors) =
+            let (_affected, update, added_errors, _fingerprint_identities) =
                 self.update_chunk_cache(ws, &reinferred, &inverse_edits)?;
             if let Some(error) = Self::combine_errors(added_errors) {
                 return Err(error);
@@ -7563,6 +7572,7 @@ impl SkullEmitCache {
         self.state_schema = state_schema;
         self.definition_plan = definition_plan;
         self.artifact_fingerprint = artifact_fingerprint;
+        self.fingerprint_code_rows = fingerprint_code_rows;
         self.unit_comptime_reads = unit_comptime_reads;
         self.repair_stats = repair_stats;
         result
@@ -7962,7 +7972,8 @@ fn build_graph_added_chunks(
     cache: &mut SkullEmitCache,
     ws: &Workspace,
     added: &std::collections::BTreeSet<Instance>,
-) -> Vec<CompilerError> {
+) -> (Vec<CompilerError>, FxHashSet<skull_mir::code_identity::CodeIdentity>) {
+    let mut fingerprint_identities = FxHashSet::default();
     let mut pending: Vec<Instance> = added.iter().cloned().collect();
     let mut seen: FxHashSet<Instance> = FxHashSet::default();
     let mut built: Vec<(Instance, Chunk)> = Vec::new();
@@ -7976,9 +7987,10 @@ fn build_graph_added_chunks(
         if !is_cached_emitted_body(f, &body) {
             continue;
         }
-        if cache.chunks.get(&body).is_some_and(|chunk| chunk.is_ok()) {
+        if let Some(Ok(chunk)) = cache.chunks.get(&body) {
             if !cache.emitted.contains(&body) {
                 cache.changed_since_full.insert(body.clone());
+                fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
             }
             continue;
         }
@@ -8042,13 +8054,14 @@ fn build_graph_added_chunks(
     }
 
     for (body, chunk) in built {
+        fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
         for dep in &chunk.deps {
             cache.dependents.entry(*dep).or_default().insert(body.clone());
         }
         cache.chunks.insert(body.clone(), Ok(chunk));
         cache.changed_since_full.insert(body);
     }
-    errs
+    (errs, fingerprint_identities)
 }
 
 fn combine_errors(mut errors: Vec<CompilerError>) -> Option<CompilerError> {
@@ -8066,8 +8079,10 @@ fn update_chunk_cache(
     FxHashSet<Instance>,
     crate::instance_graph::UpdateStats,
     Vec<CompilerError>,
+    FxHashSet<skull_mir::code_identity::CodeIdentity>,
 ), CompilerError> {
     let cache = self;
+    let mut fingerprint_identities = FxHashSet::default();
     let shader_delta_requests = cache.repair_stats.shader_delta_requests;
     let shader_roots_examined = cache.repair_stats.shader_roots_examined;
     let shader_roots_derived = cache.repair_stats.shader_roots_derived;
@@ -8414,6 +8429,7 @@ fn update_chunk_cache(
                 _ => dynamic_state_facts_changed = true,
             }
             if let Ok(c) = &chunk {
+                fingerprint_identities.extend(c.code_artifact.entries.keys().cloned());
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                 for d in new_deps {
                     cache.dependents.entry(d).or_default().insert(body.clone());
@@ -8427,7 +8443,9 @@ fn update_chunk_cache(
     }
     cache.repair_stats.dynamic_state_facts_changed = dynamic_state_facts_changed;
     cache.repair_stats.chunks_rebuilt = chunks_rebuilt;
-    let added_errors = Self::build_graph_added_chunks(cache, ws, &update.added);
+    let (added_errors, added_fingerprint_identities) =
+        Self::build_graph_added_chunks(cache, ws, &update.added);
+    fingerprint_identities.extend(added_fingerprint_identities);
     cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
     if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
         eprintln!(
@@ -8441,7 +8459,7 @@ fn update_chunk_cache(
             affected.len(),
         );
     }
-    Ok((affected, update, added_errors))
+    Ok((affected, update, added_errors, fingerprint_identities))
 }
 }
 
@@ -8455,7 +8473,7 @@ pub fn emit_incremental(
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, &[])?;
+    let (_affected, update, added_errors, _fingerprint_identities) = cache.update_chunk_cache(ws, reinferred, &[])?;
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
@@ -8479,6 +8497,9 @@ pub fn emit_incremental(
     cache.state_schema = Some(std::sync::Arc::new(emit.state_schema.clone()));
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
+    cache.fingerprint_code_rows = Some(crate::artifact_fingerprint::CodeRows::collect(
+        ws, cache.scx.interner(), &emit.code_artifact,
+    ).map_err(|error| CompilerError::new_no_location(error.to_string()))?);
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     emit.compile_counts.chunks = cache.chunks.len();
@@ -8542,7 +8563,8 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
+    mut fingerprint_identities: FxHashSet<skull_mir::code_identity::CodeIdentity>,
+) -> Result<(MirEmit, UnitComptimeReads, crate::artifact_fingerprint::CodeRows, usize), CompilerError> {
     let t_clone_artifact = Instant::now();
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -8715,6 +8737,7 @@ fn assemble_overlay(
                     a.mid,
                     a.gid,
                 );
+                fingerprint_identities.extend(unit.code_artifact.entries.keys().cloned());
                 candidate_code_artifact = std::sync::Arc::new(
                     candidate_code_artifact.with_replacements(&[&unit.code_artifact]),
                 );
@@ -8801,16 +8824,26 @@ fn assemble_overlay(
     let artifact_reads = artifact_comptime_reads(cache, &[], &unit_reads, false);
     let d_metadata = t_metadata.elapsed();
     let t_fingerprint = Instant::now();
-    let artifact_fingerprint = artifact_fingerprint(
-        ws,
-        &cache.scx,
-        &candidate_code_artifact,
-        &lifecycle_plan,
-        &definition_plan,
-        &state_schema,
-        &artifact_reads,
-        cache.renderer_target,
-    )?;
+    let mut fingerprint_code_rows = cache.fingerprint_code_rows.clone().ok_or_else(|| {
+        CompilerError::new_no_location("overlay requires a complete code fingerprint inventory".to_string())
+    })?;
+    let t_fingerprint_rows = Instant::now();
+    let fingerprint_rows_derived = fingerprint_code_rows.replace(
+        ws, cache.scx.interner(), &candidate_code_artifact, &fingerprint_identities,
+    ).map_err(|error| CompilerError::new_no_location(error.to_string()))?;
+    let d_fingerprint_rows = t_fingerprint_rows.elapsed();
+    let artifact_fingerprint = crate::artifact_fingerprint::compute_cached(
+        ws, cache.scx.interner(), &candidate_code_artifact, &lifecycle_plan,
+        &definition_plan, &state_schema, &artifact_reads, &ws.comptime_inputs.volatile_vars,
+        renderer_fingerprint_tag(cache.renderer_target), &fingerprint_code_rows,
+    ).map_err(|error| CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}")))?;
+    if std::env::var_os("SKULL_FORCE_FINGERPRINT_SCAN").is_some() {
+        let fresh = self::artifact_fingerprint(ws, &cache.scx, &candidate_code_artifact, &lifecycle_plan,
+            &definition_plan, &state_schema, &artifact_reads, cache.renderer_target)?;
+        if artifact_fingerprint != fresh {
+            return Err(CompilerError::new_no_location("cached code fingerprint differs from fresh inventory".to_string()));
+        }
+    }
     let d_fingerprint = t_fingerprint.elapsed();
     out.push_str("end\n");
 
@@ -8843,6 +8876,7 @@ fn assemble_overlay(
                 ("  overlay publication", d_publication),
                 ("  overlay metadata", d_metadata),
                 ("  overlay fingerprint", d_fingerprint),
+                ("  overlay fingerprint code rows", d_fingerprint_rows),
             ],
             abi_plan_stats: cache.scx.abi_plan_stats(),
             attribution: EmitAttribution::default(),
@@ -8855,6 +8889,8 @@ fn assemble_overlay(
             emits_main: false,
         },
         unit_reads,
+        fingerprint_code_rows,
+        fingerprint_rows_derived,
     ))
 }
 
@@ -8894,7 +8930,7 @@ pub fn emit_overlay_with_span_edits(
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let d_shader = t_shader.elapsed();
     let t_chunk = Instant::now();
-    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits)?;
+    let (affected, update, added_errors, fingerprint_identities) = cache.update_chunk_cache(ws, reinferred, edits)?;
     let d_chunk = t_chunk.elapsed();
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
@@ -9041,8 +9077,10 @@ pub fn emit_overlay_with_span_edits(
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let published_code_artifact = cache.code_artifact.clone();
-    let (mut emit, overlay_unit_reads) =
-        assemble_overlay(ws, cache, shader_changed)?;
+    let (mut emit, overlay_unit_reads, fingerprint_code_rows, fingerprint_rows_derived) =
+        assemble_overlay(ws, cache, shader_changed, fingerprint_identities)?;
+    cache.fingerprint_code_rows = Some(fingerprint_code_rows);
+    cache.repair_stats.fingerprint_code_rows_derived = fingerprint_rows_derived;
     cache.repair_stats.code_artifact_assembly_reused =
         std::sync::Arc::ptr_eq(&published_code_artifact, &emit.code_artifact);
     cache.code_artifact = emit.code_artifact.clone();

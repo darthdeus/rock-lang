@@ -11,7 +11,8 @@ use std::fmt;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use rustc_hash::FxHashSet;
-use skull_mir::code_identity::{CaptureMode, CodeArtifact};
+use skull_mir::code_identity::{CaptureMode, CodeArtifact, CodeEntry, CodeIdentity};
+use std::sync::Arc;
 use skull_mir::definition::DefinitionPlan;
 use skull_mir::lifecycle::LifecyclePlan;
 use skull_mir::mir::{comptime_value_hash, ComptimeInputId, ComptimeRead};
@@ -45,6 +46,38 @@ pub fn compute(
     comptime_reads: &[ComptimeRead],
     volatile_vars: &FxHashSet<Ustr>,
     renderer: &str,
+) -> Result<String, FingerprintError> {
+    compute_inner(ws, interner, artifact, lifecycle, definitions, state, comptime_reads,
+        volatile_vars, renderer, None)
+}
+
+pub(crate) fn compute_cached(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    artifact: &CodeArtifact,
+    lifecycle: &LifecyclePlan,
+    definitions: &DefinitionPlan,
+    state: &StateSchema,
+    comptime_reads: &[ComptimeRead],
+    volatile_vars: &FxHashSet<Ustr>,
+    renderer: &str,
+    code_rows: &CodeRows,
+) -> Result<String, FingerprintError> {
+    compute_inner(ws, interner, artifact, lifecycle, definitions, state, comptime_reads,
+        volatile_vars, renderer, Some(code_rows))
+}
+
+fn compute_inner(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    artifact: &CodeArtifact,
+    lifecycle: &LifecyclePlan,
+    definitions: &DefinitionPlan,
+    state: &StateSchema,
+    comptime_reads: &[ComptimeRead],
+    volatile_vars: &FxHashSet<Ustr>,
+    renderer: &str,
+    code_rows: Option<&CodeRows>,
 ) -> Result<String, FingerprintError> {
     validate_inputs(
         ws,
@@ -88,57 +121,21 @@ pub fn compute(
             artifact.census.capture_free_lambdas as u64,
         ],
     );
-    let mut code = artifact
-        .entries
-        .values()
-        .map(|entry| (entry.identity.logical_key(ws, interner), entry))
-        .collect::<Vec<_>>();
-    code.sort_by(|left, right| left.0.cmp(&right.0));
-    h.len(code.len());
-    for (key, entry) in code {
-        h.string(&key);
-        h.string(&entry.compatibility.call_abi);
-        h.boolean(entry.compatibility.capture.complete);
-        h.len(entry.compatibility.capture.fields.len());
-        for field in &entry.compatibility.capture.fields {
-            match &field.identity {
-                skull_mir::code_identity::CaptureIdentity::Binding { site, projection } => {
-                    h.string("binding");
-                    h.string(site.file.as_str());
-                    h.u64(site.offset);
-                    h.string(projection.as_str());
-                }
-                skull_mir::code_identity::CaptureIdentity::Generated { role } => {
-                    h.string("generated");
-                    h.string(role.as_str());
-                }
-            }
-            h.string(match field.mode {
-                CaptureMode::ByValue => "by-value",
-                CaptureMode::Shared => "shared",
-                CaptureMode::Frame => "frame",
-            });
+    if let Some(rows) = code_rows {
+        if rows.len() != artifact.entries.len() {
+            return Err(FingerprintError("cached code fingerprint inventory is incomplete".to_string()));
         }
-        match &entry.compatibility.frame {
-            Some(frame) => {
-                h.boolean(true);
-                h.len(frame.slots.len());
-                for slot in &frame.slots {
-                    h.u64(u64::from(*slot));
-                }
-            }
-            None => h.boolean(false),
+        h.len(rows.len());
+        rows.append_to(&mut h.bytes);
+    } else {
+        let mut code = artifact.entries.values()
+            .map(|entry| (entry.identity.logical_key(ws, interner), entry))
+            .collect::<Vec<_>>();
+        code.sort_by(|left, right| left.0.cmp(&right.0));
+        h.len(code.len());
+        for (key, entry) in code {
+            write_code_row(&mut h, &key, entry)?;
         }
-        h.u64(entry.compatibility.lambda_topology.0);
-        h.u64(entry.body_fingerprint);
-        h.string(entry.body_name.as_deref().ok_or_else(|| {
-            FingerprintError(format!(
-                "incomplete CodeArtifact body realization for {:?}",
-                entry.identity
-            ))
-        })?);
-        h.boolean(entry.escaping);
-        h.boolean(entry.capture_free);
     }
 
     h.census(
@@ -290,6 +287,209 @@ pub fn compute(
     }
 
     Ok(format!("{:016x}", h.finish()))
+}
+
+fn write_code_row(h: &mut CanonicalHasher, key: &str, entry: &CodeEntry) -> Result<(), FingerprintError> {
+    h.string(key);
+    h.string(&entry.compatibility.call_abi);
+    h.boolean(entry.compatibility.capture.complete);
+    h.len(entry.compatibility.capture.fields.len());
+    for field in &entry.compatibility.capture.fields {
+        match &field.identity {
+            skull_mir::code_identity::CaptureIdentity::Binding { site, projection } => {
+                h.string("binding");
+                h.string(site.file.as_str());
+                h.u64(site.offset);
+                h.string(projection.as_str());
+            }
+            skull_mir::code_identity::CaptureIdentity::Generated { role } => {
+                h.string("generated");
+                h.string(role.as_str());
+            }
+        }
+        h.string(match field.mode {
+            CaptureMode::ByValue => "by-value",
+            CaptureMode::Shared => "shared",
+            CaptureMode::Frame => "frame",
+        });
+    }
+    match &entry.compatibility.frame {
+        Some(frame) => {
+            h.boolean(true);
+            h.len(frame.slots.len());
+            for slot in &frame.slots {
+                h.u64(u64::from(*slot));
+            }
+        }
+        None => h.boolean(false),
+    }
+    h.u64(entry.compatibility.lambda_topology.0);
+    h.u64(entry.body_fingerprint);
+    h.string(entry.body_name.as_deref().ok_or_else(|| {
+        FingerprintError(format!(
+            "incomplete CodeArtifact body realization for {:?}",
+            entry.identity
+        ))
+    })?);
+    h.boolean(entry.escaping);
+    h.boolean(entry.capture_free);
+    Ok(())
+}
+
+// Both indexes share persistent search paths so transaction snapshots retain
+// their rows without copying the canonical inventory.
+#[derive(Clone, Default)]
+pub(crate) struct CodeRows {
+    root: Option<Arc<RowNode<(String, CodeIdentity), Vec<u8>>>>,
+    identities: Option<Arc<RowNode<CodeIdentity, (String, CodeIdentity)>>>,
+}
+
+struct RowNode<K, V> {
+    key: Arc<K>,
+    value: Arc<V>,
+    priority: u64,
+    weight: usize,
+    left: Option<Arc<Self>>,
+    right: Option<Arc<Self>>,
+    len: usize,
+    bytes: usize,
+}
+
+impl<K: Ord, V> RowNode<K, V> {
+    fn new(key: Arc<K>, value: Arc<V>, priority: u64, weight: usize,
+        left: Option<Arc<Self>>, right: Option<Arc<Self>>) -> Arc<Self>
+    {
+        let len = 1 + left.as_ref().map_or(0, |node| node.len)
+            + right.as_ref().map_or(0, |node| node.len);
+        let bytes = weight + left.as_ref().map_or(0, |node| node.bytes)
+            + right.as_ref().map_or(0, |node| node.bytes);
+        Arc::new(Self { key, value, priority, weight, left, right, len, bytes })
+    }
+
+    fn with_children(&self, left: Option<Arc<Self>>, right: Option<Arc<Self>>) -> Arc<Self> {
+        Self::new(self.key.clone(), self.value.clone(), self.priority, self.weight, left, right)
+    }
+
+    fn before(&self, other: &Self) -> bool {
+        (self.priority, &self.key) < (other.priority, &other.key)
+    }
+
+    fn insert(root: &Option<Arc<Self>>, key: Arc<K>, value: Arc<V>, priority: u64, weight: usize) -> Arc<Self> {
+        let Some(old) = root else { return Self::new(key, value, priority, weight, None, None) };
+        match key.cmp(&old.key) {
+            std::cmp::Ordering::Equal => Self::new(key, value, priority, weight, old.left.clone(), old.right.clone()),
+            std::cmp::Ordering::Less => {
+                let left = Self::insert(&old.left, key, value, priority, weight);
+                if left.before(old) {
+                    let right = old.with_children(left.right.clone(), old.right.clone());
+                    left.with_children(left.left.clone(), Some(right))
+                } else {
+                    old.with_children(Some(left), old.right.clone())
+                }
+            }
+            std::cmp::Ordering::Greater => {
+                let right = Self::insert(&old.right, key, value, priority, weight);
+                if right.before(old) {
+                    let left = old.with_children(old.left.clone(), right.left.clone());
+                    right.with_children(Some(left), right.right.clone())
+                } else {
+                    old.with_children(old.left.clone(), Some(right))
+                }
+            }
+        }
+    }
+
+    fn get<'a>(root: &'a Option<Arc<Self>>, key: &K) -> Option<&'a Arc<V>> {
+        let mut node = root.as_ref()?;
+        loop {
+            match key.cmp(node.key.as_ref()) {
+                std::cmp::Ordering::Equal => return Some(&node.value),
+                std::cmp::Ordering::Less => node = node.left.as_ref()?,
+                std::cmp::Ordering::Greater => node = node.right.as_ref()?,
+            }
+        }
+    }
+
+    fn join(left: &Option<Arc<Self>>, right: &Option<Arc<Self>>) -> Option<Arc<Self>> {
+        match (left, right) {
+            (None, _) => right.clone(),
+            (_, None) => left.clone(),
+            (Some(a), Some(b)) if a.before(b) => {
+                Some(a.with_children(a.left.clone(), Self::join(&a.right, right)))
+            }
+            (Some(_), Some(b)) => {
+                Some(b.with_children(Self::join(left, &b.left), b.right.clone()))
+            }
+        }
+    }
+
+    fn remove(root: &Option<Arc<Self>>, key: &K) -> Option<Arc<Self>> {
+        let node = root.as_ref()?;
+        match key.cmp(node.key.as_ref()) {
+            std::cmp::Ordering::Equal => Self::join(&node.left, &node.right),
+            std::cmp::Ordering::Less => Some(node.with_children(Self::remove(&node.left, key), node.right.clone())),
+            std::cmp::Ordering::Greater => Some(node.with_children(node.left.clone(), Self::remove(&node.right, key))),
+        }
+    }
+
+    fn visit(&self, visit: &mut impl FnMut(&V)) {
+        if let Some(left) = &self.left { left.visit(visit); }
+        visit(&self.value);
+        if let Some(right) = &self.right { right.visit(visit); }
+    }
+}
+
+impl CodeRows {
+    pub(crate) fn collect(ws: &Workspace, interner: &MonoInterner, artifact: &CodeArtifact)
+        -> Result<Self, FingerprintError>
+    {
+        let mut rows = Self::default();
+        rows.replace(ws, interner, artifact, artifact.entries.keys())?;
+        Ok(rows)
+    }
+
+    pub(crate) fn replace<'a>(
+        &mut self,
+        ws: &Workspace,
+        interner: &MonoInterner,
+        artifact: &CodeArtifact,
+        identities: impl IntoIterator<Item = &'a CodeIdentity>,
+    ) -> Result<usize, FingerprintError> {
+        use std::hash::{Hash, Hasher};
+        let mut derived = 0;
+        for identity in identities {
+            let entry = artifact.entries.get(identity).ok_or_else(|| {
+                FingerprintError(format!("missing edited code fingerprint row for {identity:?}"))
+            })?;
+            let key = Arc::new((entry.identity.logical_key(ws, interner), identity.clone()));
+            let mut encoded = CanonicalHasher::default();
+            write_code_row(&mut encoded, &key.0, entry)?;
+            if let Some(old) = RowNode::get(&self.identities, identity) {
+                if old != &key {
+                    self.root = RowNode::remove(&self.root, old);
+                }
+            }
+            let priority = xxhash64(key.0.as_bytes());
+            let weight = encoded.bytes.len();
+            self.root = Some(RowNode::insert(&self.root, key.clone(), Arc::new(encoded.bytes), priority, weight));
+            let mut hasher = rustc_hash::FxHasher::default();
+            identity.hash(&mut hasher);
+            self.identities = Some(RowNode::insert(&self.identities, Arc::new(identity.clone()), key, hasher.finish(), 0));
+            derived += 1;
+        }
+        Ok(derived)
+    }
+
+    fn len(&self) -> usize {
+        self.root.as_ref().map_or(0, |node| node.len)
+    }
+
+    fn append_to(&self, bytes: &mut Vec<u8>) {
+        if let Some(root) = &self.root {
+            bytes.reserve(root.bytes);
+            root.visit(&mut |row| bytes.extend_from_slice(row));
+        }
+    }
 }
 
 fn validate_inputs(
@@ -483,6 +683,59 @@ mod tests {
     #[test]
     fn canonical_comptime_value_is_an_identity_input() {
         assert_ne!(read_fingerprint("A"), read_fingerprint("B"));
+    }
+
+    #[test]
+    fn cached_code_rows_preserve_canonical_order_and_snapshots() {
+        use skull_mir::code_identity::{CodeCompatibility, CodeOwner, CodeOwnerKind, CaptureSchema};
+        let ws = Workspace::new();
+        let interner = MonoInterner::new();
+        let mut artifact = CodeArtifact::default();
+        for index in 0..256 {
+            let identity = CodeIdentity::Artifact(CodeOwner::Artifact {
+                kind: CodeOwnerKind::Global, module: Ustr::from("<rows>"),
+                name: Ustr::from(&format!("row{index}")),
+            });
+            artifact.add_generated_value(identity, CodeCompatibility {
+                call_abi: "() -> unit".to_string(),
+                capture: CaptureSchema { complete: true, ..Default::default() },
+                frame: None, lambda_topology: Default::default(),
+            }, "body");
+        }
+        let canonical = |artifact: &CodeArtifact| {
+            let mut entries: Vec<_> = artifact.entries.iter()
+                .map(|(identity, entry)| (entry.identity.logical_key(&ws, &interner), identity, entry))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut encoded = CanonicalHasher::default();
+            for (key, _, entry) in entries {
+                write_code_row(&mut encoded, &key, entry).unwrap();
+            }
+            encoded.bytes
+        };
+        let mut rows = CodeRows::collect(&ws, &interner, &artifact).unwrap();
+        let before = canonical(&artifact);
+        let snapshot = rows.clone();
+        let identity = artifact.entries.keys().nth(37).unwrap().clone();
+        let entry = artifact.entries.get_mut(&identity).unwrap();
+        entry.body_fingerprint += 1;
+        entry.body_name = Some(Ustr::from("a_different_length_body"));
+        rows.replace(&ws, &interner, &artifact, [&identity]).unwrap();
+        let addition = CodeIdentity::Generated {
+            enclosing: CodeOwner::Artifact {
+                kind: CodeOwnerKind::Global, module: Ustr::from("<rows>"), name: Ustr::from("middle"),
+            }, role: Ustr::from("late"),
+        };
+        artifact.add_generated_value(addition.clone(), artifact.entries[&identity].compatibility.clone(), "new");
+        rows.replace(&ws, &interner, &artifact, [&addition]).unwrap();
+        let mut cached = Vec::new();
+        rows.append_to(&mut cached);
+        assert_eq!(cached, canonical(&artifact));
+        assert_eq!(rows.len(), artifact.entries.len());
+        let mut old = Vec::new();
+        snapshot.append_to(&mut old);
+        assert_eq!(old, before);
+        assert_ne!(cached, old);
     }
 
     #[test]

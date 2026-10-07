@@ -1337,3 +1337,54 @@ print(before)
         assert!(out.lines().any(|row| row.ends_with(&abi)), "no slot carries ABI {abi}:\n{out}");
     }
 }
+
+#[test]
+fn body_overlay_derives_only_edited_fingerprint_code_rows() {
+    let mut source = String::from("fn helper() -> int { return 1 }\nfn main() { let _ = helper() }\n");
+    for index in 0..40 {
+        source.push_str(&format!("fn unrelated{index}() -> int {{ return {index} }}\n"));
+    }
+    let original = ws_of(&source);
+    let (_, mut cache) = emit_full_global(&original, skull::user_module_id(&original).unwrap()).unwrap();
+    for value in [2, 3, 4] {
+        let changed = ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
+        let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
+        let stats = cache.repair_stats();
+        assert!(overlay.code_artifact.entries.len() > 40);
+        assert!(stats.fingerprint_code_rows_derived > 0, "the edit must update its fingerprint row");
+        assert!(stats.fingerprint_code_rows_derived < 4,
+            "the fingerprint rederived unrelated code rows: {stats:?}");
+        let fresh = emit_full_global(&changed, skull::user_module_id(&changed).unwrap()).unwrap().0;
+        assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
+    }
+}
+
+#[test]
+fn fingerprint_code_rows_include_new_body_specializations() {
+    let original = "fn identity<T>(value: T) -> T { return value }\nfn main() { let _ = identity(1) }";
+    let changed = original.replace("let _ = identity(1)", "let _ = identity(1)\nlet _ = identity(true)");
+    let ws1 = ws_of(original);
+    let (baseline, mut cache) = emit_full_global(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let ws2 = ws_of(&changed);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "main")]);
+    assert!(overlay.code_artifact.entries.len() > baseline.code_artifact.entries.len());
+    assert_ne!(overlay.artifact_fingerprint, baseline.artifact_fingerprint);
+}
+
+#[test]
+fn fingerprint_code_rows_survive_rollback() {
+    let original = "fn helper() -> int { return 1 }\nfn main() { let _ = helper() }";
+    let ws1 = ws_of(original);
+    let (_, mut cache) = emit_full_global(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let ws2 = ws_of(&original.replace("return 1", "return 2"));
+    let edited = [body_id(&ws2, "helper")];
+    cache.begin_body_edit_transaction(&edited, &[]);
+    let _ = emit_overlay(&ws2, &mut cache, &edited);
+    cache.rollback_body_edit(&ws1).expect("rollback");
+    for value in [3, 4] {
+        let changed = ws_of(&original.replace("return 1", &format!("return {value}")));
+        let overlay = emit_overlay(&changed, &mut cache, &[body_id(&changed, "helper")]);
+        let fresh = emit_full_global(&changed, skull::user_module_id(&changed).unwrap()).unwrap().0;
+        assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
+    }
+}
