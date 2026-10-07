@@ -54,7 +54,7 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/areas.rock:43 field mag_simulation::nav::areas::NavWorkCounters
 - mag_simulation::nav: mag-simulation/nav/areas.rock:46 container mag_simulation::nav::areas::NavArea
 - mag_simulation::nav: mag-simulation/nav/areas.rock:50 container mag_simulation::nav::areas::NavAreaPair
-- mag_simulation::nav: mag-simulation/nav/graph.rock:285 field mag_simulation::nav::query::NavQuery
+- mag_simulation::nav: mag-simulation/nav/graph.rock:300 field mag_simulation::nav::query::NavQuery
 - mag_simulation::nav: mag-simulation/nav/query.rock:142 field FlatVec
 - mag_simulation::nav: mag-simulation/nav/query.rock:160 container mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/query.rock:163 container mag_simulation::nav::query::NavPlan
