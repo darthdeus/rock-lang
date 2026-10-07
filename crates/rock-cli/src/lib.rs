@@ -29,6 +29,7 @@ pub use std::time::Duration;
 pub use log::{debug, error, info, trace, warn};
 
 mod allocator;
+mod compile_measurements;
 pub mod backend_stats;
 pub mod bone_backend;
 pub mod skull_backend;

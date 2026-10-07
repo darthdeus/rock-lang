@@ -8,6 +8,49 @@ extern crate mimalloc as _;
 unsafe extern "C" {
     // mimalloc's C API; the `mimalloc` crate does not re-export it.
     fn mi_collect(force: bool);
+    fn mi_process_info(
+        elapsed_msecs: *mut usize, user_msecs: *mut usize, system_msecs: *mut usize,
+        current_rss: *mut usize, peak_rss: *mut usize,
+        current_commit: *mut usize, peak_commit: *mut usize, page_faults: *mut usize,
+    );
+}
+
+pub(crate) fn process_memory() -> serde_json::Value {
+    let mut values = [0usize; 8];
+    let [a, b, c, d, e, f, g, h] = &mut values;
+    // SAFETY: all output pointers are valid, distinct usize values.
+    unsafe { mi_process_info(a, b, c, d, e, f, g, h) };
+    #[cfg(target_os = "linux")]
+    let rss = match linux_current_rss() {
+        Ok(rss) => Some(rss),
+        Err(error) => {
+            log::warn!(target: "COMPILE_STATS", "cannot sample current RSS: {error}");
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let rss = Some(values[3] as u64);
+    serde_json::json!({
+        "rss_bytes": rss, "peak_rss_bytes": values[4],
+        "commit_bytes": values[5], "peak_commit_bytes": values[6],
+    })
+}
+
+// Bundled mimalloc leaves current_rss equal to allocator commit on Linux;
+// its getrusage path only overwrites peak_rss. macOS uses task_info for both.
+#[cfg(target_os = "linux")]
+fn linux_current_rss() -> std::io::Result<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm")?;
+    let pages = statm.split_whitespace().nth(1)
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid resident page count"))?;
+    // SAFETY: sysconf takes no pointers; a non-positive result is rejected.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid OS page size"));
+    }
+    pages.checked_mul(page_size as u64)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "RSS byte count overflow"))
 }
 
 #[cfg(all(test, not(feature = "sequential")))]
@@ -62,25 +105,29 @@ mod tests {
     unsafe extern "C" {
         fn mi_malloc(size: usize) -> *mut c_void;
         fn mi_free(p: *mut c_void);
-        fn mi_process_info(
-            elapsed_msecs: *mut usize,
-            user_msecs: *mut usize,
-            system_msecs: *mut usize,
-            current_rss: *mut usize,
-            peak_rss: *mut usize,
-            current_commit: *mut usize,
-            peak_commit: *mut usize,
-            page_faults: *mut usize,
-        );
     }
 
     #[cfg(not(feature = "sequential"))]
     fn mimalloc_committed() -> usize {
+        use super::mi_process_info;
         let mut v = [0usize; 8];
         let [a, b, c, d, e, f, g, h] = &mut v;
         // SAFETY: every out-pointer is a valid, distinct usize.
         unsafe { mi_process_info(a, b, c, d, e, f, g, h) };
         v[5]
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_memory_reports_os_rss_not_mimalloc_commit() {
+        // This test binary uses the system allocator. Its resident allocation
+        // must appear in RSS even though mimalloc did not commit its pages.
+        let data = vec![1u8; 16 << 20];
+        std::hint::black_box(&data);
+        let memory = super::process_memory();
+        assert!(memory["rss_bytes"].as_u64().unwrap() >= data.len() as u64,
+            "RSS omitted a resident system allocation: {memory}");
+        assert!(memory["peak_rss_bytes"].as_u64().unwrap() > 0);
     }
 
     /// The compiler allocates on rayon workers and the host frees the result

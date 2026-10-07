@@ -169,3 +169,5 @@ mod state_memory_class;
 mod state_globals_none;
 #[path = "identity_storage_census.rs"]
 mod identity_storage_census;
+#[path = "compile_stats.rs"]
+mod compile_stats;

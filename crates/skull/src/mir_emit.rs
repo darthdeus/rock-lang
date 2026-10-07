@@ -529,8 +529,18 @@ fn extern_ret(
     Err(unrealizable("an alias chain that does not bottom out"))
 }
 
+/// O(1) container lengths and a dependency total folded by the existing
+/// production dependency-index loop. No diagnostic graph walk is needed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompileCounts {
+    pub concrete_plans: usize,
+    pub chunks: usize,
+    pub dependency_edges: Option<usize>,
+}
+
 /// The assembled new-path program plus the parity gap.
 pub struct MirEmit {
+    pub compile_counts: CompileCounts,
     pub lua: String,
     /// Allocation-capable operations registered by final Lua emission, with
     /// residual call edges and compiler-owned per-frame lifecycle routes.
@@ -6133,6 +6143,11 @@ fn assemble(
     )?;
     Ok((
         MirEmit {
+            compile_counts: CompileCounts {
+                concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
+                chunks: cache.chunks.len(),
+                dependency_edges: None,
+            },
             lua: out,
             allocation_report,
             code_artifact: std::sync::Arc::new(code_artifact),
@@ -7217,8 +7232,10 @@ fn emit_full_in_with_mutation(
     let chunks: FxHashMap<Instance, Result<Chunk, CompilerError>> = chunks.into_iter().collect();
     // Seed the reverse dependency index from every chunk's codegen deps.
     let mut dependents: FxHashMap<FuncRef, FxHashSet<Instance>> = FxHashMap::default();
+    let mut dependency_edges = 0;
     for (body, chunk) in &chunks {
         if let Ok(c) = chunk {
+            dependency_edges += c.deps.len();
             for d in &c.deps {
                 dependents.entry(*d).or_default().insert(body.clone());
             }
@@ -7290,7 +7307,9 @@ fn emit_full_in_with_mutation(
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
-    cache.absorb_spec_chunks(built_specs);
+    dependency_edges += cache.absorb_spec_chunks(built_specs);
+    emit.compile_counts.chunks = cache.chunks.len();
+    emit.compile_counts.dependency_edges = Some(dependency_edges);
     emit.graph_census = cache.graph.run_stats;
     Ok((emit, cache))
 }
@@ -7791,13 +7810,16 @@ fn update_shader_registrations(
 /// Take the specialized chunks an assembly BUILT into the cache, with their
 /// reverse-dependency edges, so the next build reuses them and an edit to any
 /// declaration they depend on -- their own included -- invalidates them.
-fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) {
+fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
+    let mut dependency_edges = 0;
     for (body, chunk) in built {
+        dependency_edges += chunk.deps.len();
         for d in &chunk.deps {
             self.dependents.entry(*d).or_default().insert(body.clone());
         }
         self.chunks.insert(body, Ok(chunk));
     }
+    dependency_edges
 }
 
 /// Drop every trace of an instance the graph pruned: its chunk, its
@@ -8346,6 +8368,7 @@ pub fn emit_incremental(
     cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
     cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
+    emit.compile_counts.chunks = cache.chunks.len();
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
     emit.phases.push(("incr: reassemble full output", reassemble));
@@ -8680,6 +8703,11 @@ fn assemble_overlay(
 
     Ok((
         MirEmit {
+            compile_counts: CompileCounts {
+                concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
+                chunks: cache.chunks.len(),
+                dependency_edges: None,
+            },
             lua: out,
             allocation_report: crate::allocation_report::AllocationReport::default(),
             code_artifact: candidate_code_artifact,
