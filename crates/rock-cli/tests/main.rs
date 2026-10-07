@@ -70,6 +70,8 @@ mod test_rock_dir;
 mod defer_on_error_package;
 #[path = "test_timings.rs"]
 mod test_timings;
+#[path = "test_harness_gc.rs"]
+mod test_harness_gc;
 #[path = "js_test_harness_globals_lua.rs"]
 mod js_test_harness_globals_lua;
 #[path = "js_backend_externs_lua.rs"]

@@ -571,6 +571,10 @@ do
   end
 end
 io.stdout:setvbuf("no")
+local __skull_gc_mb = tonumber(os.getenv("ROCK_TEST_GC_COLLECT_MB") or "512")
+assert(__skull_gc_mb and __skull_gc_mb >= 0 and __skull_gc_mb < math.huge,
+  "ROCK_TEST_GC_COLLECT_MB must be a finite non-negative number (0 disables)")
+local __skull_gc_limit_kb = __skull_gc_mb * 1024
 local __skull_run = {}
 local __skull_shard = os.getenv("ROCK_TEST_SHARD_TESTS")
 if __skull_shard then
@@ -620,6 +624,10 @@ for n, t in ipairs(__skull_run) do
     io.write("\n__SKULL__\tPASS\t\n")
   end
   io.write("\n__SKULL__\tTIME\t", t.name, "\t", string.format("%.3f", ms), "\t", result, "\n")
+  -- Reclaim floating test garbage without changing the collector's pacing.
+  if __skull_gc_limit_kb > 0 and collectgarbage("count") > __skull_gc_limit_kb then
+    collectgarbage("collect")
+  end
 end
 "#,
     );
