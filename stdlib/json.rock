@@ -825,18 +825,8 @@ struct JsonReaderValidation {
 @inline fn json_reader_int(value: int) -> JsonReader { return json_reader_value(json_int(value)) }
 @inline fn json_reader_float(value: float) -> JsonReader { return json_reader_value(json_float(value)) }
 @inline fn json_reader_str(value: string) -> JsonReader { return json_reader_value(json_str(value)) }
-// Every reader read reseeds this one parser: reads are leaf scans, and a parser
-// allocated per read costs more than the source reader saves.
-global __json_reader_scratch: JsonParser = JsonParser { src: "", pos: 0, len: 0, ok: true, depth: 0 }
-
 @inline fn json_reader_parser(src: string, at: int) -> JsonParser {
-    let p = __json_reader_scratch
-    p.src = src
-    p.pos = at
-    p.len = src.len()
-    p.ok = true
-    p.depth = 0
-    return p
+    return JsonParser { src, pos: at, len: src.len(), ok: true, depth: 0 }
 }
 @inline fn json_reader_empty_array() -> JsonReaderArray { return JsonReaderArray { reader: json_reader_null() } }
 

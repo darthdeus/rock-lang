@@ -109,7 +109,6 @@
 // prelude: __entity_arena
 // prelude: __ffi_new_float_1
 // prelude: __ffi_new_int_1
-// prelude: __json_reader_scratch
 // prelude: __lua_pattern_to_regex
 // prelude: __map_col_clear
 // prelude: __map_col_contains
