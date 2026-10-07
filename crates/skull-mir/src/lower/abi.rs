@@ -158,6 +158,29 @@ pub enum RepLayout {
     Foreign { reason: Ustr },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RepPlanLayout {
+    Inline(RepLayout),
+    Shared(Arc<RepLayout>),
+}
+
+impl RepPlanLayout {
+    fn new(layout: RepLayout) -> Self {
+        match layout {
+            RepLayout::Leaves(_) | RepLayout::Tuple { .. } => Self::Shared(Arc::new(layout)),
+            // Scalar plans have no allocation to share or refcount to update.
+            RepLayout::Opaque | RepLayout::Foreign { .. } => Self::Inline(layout),
+        }
+    }
+
+    fn as_layout(&self) -> &RepLayout {
+        match self {
+            Self::Inline(layout) => layout,
+            Self::Shared(layout) => layout,
+        }
+    }
+}
+
 /// One concrete physical answer in the target/use context supplied by the
 /// planner.  Backends may inspect it, but they do not derive another answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,7 +188,7 @@ pub struct RepPlan {
     id: RepId,
     target: FnBackend,
     use_context: RepUse,
-    layout: RepLayout,
+    layout: RepPlanLayout,
     storage: Option<ValueStorage>,
     column_eligible: bool,
     nobox: bool,
@@ -185,7 +208,7 @@ impl RepPlan {
     }
 
     pub fn layout(&self) -> &RepLayout {
-        &self.layout
+        self.layout.as_layout()
     }
 
     pub fn value_storage(&self) -> Option<ValueStorage> {
@@ -201,21 +224,21 @@ impl RepPlan {
     }
 
     pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
-        match &self.layout {
+        match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_paths(shape)),
             RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
         }
     }
 
     pub fn presence_flags(&self) -> Option<Vec<bool>> {
-        match &self.layout {
+        match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_presence_flags(shape)),
             RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
         }
     }
 
     pub fn lanes(&self, arena: &RepArena) -> usize {
-        match &self.layout {
+        match self.layout() {
             RepLayout::Opaque | RepLayout::Foreign { .. } => 1,
             RepLayout::Leaves(shape) => shape.leaf_count(),
             RepLayout::Tuple { slots, nullable } => {
@@ -226,7 +249,7 @@ impl RepPlan {
     }
 
     pub(crate) fn splats(&self, arena: &RepArena) -> bool {
-        match &self.layout {
+        match self.layout() {
             RepLayout::Leaves(_) => true,
             RepLayout::Tuple { slots, .. } => slots.iter().any(|slot| arena.get(*slot).splats(arena)),
             RepLayout::Opaque | RepLayout::Foreign { .. } => false,
@@ -853,7 +876,9 @@ struct RepArenaInner {
 /// (plans push-only, `by_key` insert-only, nothing published ever changes), so
 /// a thread may keep private copies of the `(RepId -> RepPlan)` and
 /// `(key -> RepId)` facts it has already paid the mutex for; a cold id or key
-/// reads through to the lock. `arena_gen` is a process-unique id keying that
+/// reads through to the lock. Aggregate layout payloads are immutable handles,
+/// so plan reads do not recursively copy their fields or tuple slots.
+/// `arena_gen` is a process-unique id keying that
 /// cache, so two live arenas (the Lua and shader contexts) or an arena
 /// allocated at a reused address can never serve each other's plans.
 #[derive(Debug)]
@@ -916,8 +941,7 @@ thread_local! {
 
 /// Lifetime traffic counters for one [`RepArena`]. `local_*_hits` are the
 /// reads the worker-local cache served without touching the mutex; the
-/// remainder paid a lock acquisition (gets also a deep [`RepPlan`] clone from
-/// shared memory).
+/// remainder paid a lock acquisition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RepArenaStats {
     pub get_calls: u64,
@@ -1158,7 +1182,7 @@ impl RepArena {
                             id,
                             target,
                             use_context,
-                            layout,
+                            layout: RepPlanLayout::new(layout),
                             storage,
                             column_eligible,
                             nobox,
@@ -1281,7 +1305,7 @@ impl RepArena {
         inner
             .plans
             .iter()
-            .filter_map(|plan| match &plan.layout {
+            .filter_map(|plan| match plan.layout() {
                 RepLayout::Leaves(shape) => Some((shape.name, plan.id)),
                 RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
             })
@@ -2632,5 +2656,46 @@ mod rep_read_cache_tests {
         assert_ne!(first, second);
         assert_eq!(a.get(second).use_context(), RepUse::Parameter);
         assert_eq!(a.get(second).id(), second);
+    }
+
+    #[test]
+    fn repeated_shape_reads_share_immutable_fields() {
+        let arena = RepArena::default();
+        let id = arena.intern(
+            FnBackend::Lua,
+            RepUse::Value,
+            RepLayout::Leaves(ValueShape {
+                name: Ustr::from("Pair"),
+                fields: vec![(Ustr::from("x"), FieldShape::Prim), (Ustr::from("y"), FieldShape::Prim)],
+                nullable: false,
+            }),
+        );
+        let first = arena.get(id);
+        let second = arena.get(id);
+        let (RepLayout::Leaves(left), RepLayout::Leaves(right)) = (first.layout(), second.layout()) else {
+            panic!("shape representation expected");
+        };
+        assert_eq!(left, right);
+        assert_eq!(left.fields.as_ptr(), right.fields.as_ptr(), "immutable shape reads must not copy fields");
+    }
+
+    #[test]
+    fn repeated_tuple_reads_share_immutable_slots() {
+        let arena = RepArena::default();
+        let scalar = arena.intern(FnBackend::Lua, RepUse::Value, RepLayout::Opaque);
+        let id = arena.intern(
+            FnBackend::Lua,
+            RepUse::Return,
+            RepLayout::Tuple { slots: vec![scalar, scalar], nullable: false },
+        );
+        let first = arena.get(id);
+        let second = arena.get(id);
+        let (RepLayout::Tuple { slots: left, .. }, RepLayout::Tuple { slots: right, .. }) =
+            (first.layout(), second.layout())
+        else {
+            panic!("tuple representation expected");
+        };
+        assert_eq!(left, right);
+        assert_eq!(left.as_ptr(), right.as_ptr(), "immutable tuple reads must not copy slots");
     }
 }
