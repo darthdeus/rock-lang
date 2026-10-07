@@ -432,7 +432,7 @@ fn parse_string_value(p: JsonParser) -> JsonValue {
 }
 
 // Returns the decoded string and the offset reached, including on rejection.
-fn parse_string_raw_at(src: string, at: int) -> (string?, int) {
+fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (string?, int) {
     let pos = at
     let len = src.len()
     if src.unit_at(pos) != 34 {
@@ -449,6 +449,7 @@ fn parse_string_raw_at(src: string, at: int) -> (string?, int) {
     while pos < len {
         let b = src.unit_at(pos)
         if b == 34 {
+            if !materialize { return ("", pos + 1) }
             if parts == null {
                 let plain = src.substring(body_start, pos)
                 pos = pos + 1
@@ -458,33 +459,31 @@ fn parse_string_raw_at(src: string, at: int) -> (string?, int) {
             return (join(parts.unwrap(), ""), pos)
         }
         if b == 92 {
-            if parts == null {
+            if materialize && parts == null {
                 let fresh: [string] = []
                 if pos > body_start { fresh.push(src.substring(body_start, pos)) }
                 parts = fresh
             }
-            let acc = parts.unwrap()
             pos = pos + 1
             if pos >= len {
                 return (null, pos)
             }
             let esc = src.unit_at(pos)
             pos = pos + 1
-            if esc == 34 { acc.push("\"") }
-            else if esc == 92 { acc.push("\\") }
-            else if esc == 47 { acc.push("/") }
-            else if esc == 110 { acc.push("\n") }
-            else if esc == 114 { acc.push("\r") }
-            else if esc == 116 { acc.push("\t") }
-            else if esc == 98 { acc.push(string_char(8)) }
-            else if esc == 102 { acc.push(string_char(12)) }
+            if esc == 34 { if materialize { parts.unwrap().push("\"") } }
+            else if esc == 92 { if materialize { parts.unwrap().push("\\") } }
+            else if esc == 47 { if materialize { parts.unwrap().push("/") } }
+            else if esc == 110 { if materialize { parts.unwrap().push("\n") } }
+            else if esc == 114 { if materialize { parts.unwrap().push("\r") } }
+            else if esc == 116 { if materialize { parts.unwrap().push("\t") } }
+            else if esc == 98 { if materialize { parts.unwrap().push(string_char(8)) } }
+            else if esc == 102 { if materialize { parts.unwrap().push(string_char(12)) } }
             else if esc == 117 {
                 if pos + 4 > len {
                     return (null, pos)
                 }
-                let hex = src.substring(pos, pos + 4)
+                let hi = parse_hex4_at(src, pos)
                 pos = pos + 4
-                let hi = parse_hex4(hex)
                 if hi == null {
                     return (null, pos)
                 }
@@ -493,7 +492,7 @@ fn parse_string_raw_at(src: string, at: int) -> (string?, int) {
                     if pos + 6 > len || src.unit_at(pos) != 92 || src.unit_at(pos + 1) != 117 {
                         return (null, pos)
                     }
-                    let lo = parse_hex4(src.substring(pos + 2, pos + 6))
+                    let lo = parse_hex4_at(src, pos + 2)
                     if lo == null || lo.unwrap() < 0xDC00 || lo.unwrap() > 0xDFFF {
                         return (null, pos)
                     }
@@ -504,7 +503,7 @@ fn parse_string_raw_at(src: string, at: int) -> (string?, int) {
                     // failure (malformed input is data, not a programmer error).
                     return (null, pos)
                 }
-                acc.push(from_codepoint(cp))
+                if materialize { parts.unwrap().push(from_codepoint(cp)) }
             } else {
                 return (null, pos)
             }
@@ -536,10 +535,14 @@ fn parse_string_raw_at(src: string, at: int) -> (string?, int) {
 
 fn parse_hex4(s: string) -> int? {
     if s.len() != 4 { return null }
+    return parse_hex4_at(s, 0)
+}
+
+fn parse_hex4_at(s: string, at: int) -> int? {
     let result = 0
     let i = 0
     while i < 4 {
-        let b = s.unit_at(i)
+        let b = s.unit_at(at + i)
         let d = 0
         if b >= 48 && b <= 57 {
             d = b - 48
@@ -857,49 +860,21 @@ fn json_reader_close_container(p: JsonParser, validation: JsonReaderValidation, 
     }
 }
 
-fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
-    parse_skip_ws(p)
-    if p.pos >= p.len { p.ok = false; return }
-    let b = p.src.unit_at(p.pos)
-    if b == 34 { let _ = parse_string_raw(p); return }
-    if b == 110 || b == 116 || b == 102 {
-        let keyword = if b == 110 { "null" } else if b == 116 { "true" } else { "false" }
-        if p.src.substring(p.pos, min(p.pos + keyword.len(), p.len)) != keyword { p.ok = false; return }
-        p.pos += keyword.len()
-        return
-    }
-    if b == 45 || (b >= 48 && b <= 57) {
-        let start = p.pos
-        let is_float = parse_number_scan(p) ?? return
-        if !is_float && p.src.substring(start, p.pos).parse_int() == null { p.ok = false }
-        return
-    }
-    if b != 91 && b != 123 { p.ok = false; return }
-    let container_start = p.pos
-    p.depth += 1
-    if p.depth > json_max_depth() { p.ok = false; validation.problem = "maximum JSON depth exceeded"; return }
-    let object = b == 123
-    let close = if object { 125 } else { 93 }
+fn json_reader_validate_string(p: JsonParser) {
+    let (value, end) = parse_string_raw_at(p.src, p.pos, false)
+    p.pos = end
+    if value == null { p.ok = false }
+}
+
+fn json_reader_validate_array(p: JsonParser, validation: JsonReaderValidation, start: int) {
     p.pos += 1
     parse_skip_ws(p)
-    if p.pos < p.len && p.src.unit_at(p.pos) == close { json_reader_close_container(p, validation, container_start); return }
+    if p.pos < p.len && p.src.unit_at(p.pos) == 93 { json_reader_close_container(p, validation, start); return }
     let index = 0
     while p.pos < p.len {
-        parse_skip_ws(p)
-        let key = ""
-        if object {
-            key = parse_string_raw(p) ?? return
-            parse_skip_ws(p)
-            if p.pos >= p.len || p.src.unit_at(p.pos) != 58 { p.ok = false; return }
-            p.pos += 1
-        }
-        if object && p.depth == 1 {
-            parse_skip_ws(p)
-            validation.root_fields[key] = p.pos
-        }
         if validation.track_path {
-            validation.keys.push(key)
-            validation.indices.push(if object { -1 } else { index })
+            validation.keys.push("")
+            validation.indices.push(index)
         }
         json_reader_validate(p, validation)
         if !p.ok { return }
@@ -910,12 +885,78 @@ fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
         parse_skip_ws(p)
         if p.pos >= p.len { p.ok = false; return }
         let next = p.src.unit_at(p.pos)
-        if next == close { json_reader_close_container(p, validation, container_start); return }
+        if next == 93 { json_reader_close_container(p, validation, start); return }
         if next != 44 { p.ok = false; return }
         p.pos += 1
         index += 1
     }
     p.ok = false
+}
+
+fn json_reader_validate_object(p: JsonParser, validation: JsonReaderValidation, start: int) {
+    p.pos += 1
+    parse_skip_ws(p)
+    if p.pos < p.len && p.src.unit_at(p.pos) == 125 { json_reader_close_container(p, validation, start); return }
+    while p.pos < p.len {
+        parse_skip_ws(p)
+        let key = ""
+        if p.depth == 1 || validation.track_path { key = parse_string_raw(p) ?? return }
+        else { json_reader_validate_string(p); if !p.ok { return } }
+        parse_skip_ws(p)
+        if p.pos >= p.len || p.src.unit_at(p.pos) != 58 { p.ok = false; return }
+        p.pos += 1
+        if p.depth == 1 {
+            parse_skip_ws(p)
+            validation.root_fields[key] = p.pos
+        }
+        if validation.track_path {
+            validation.keys.push(key)
+            validation.indices.push(-1)
+        }
+        json_reader_validate(p, validation)
+        if !p.ok { return }
+        if validation.track_path {
+            let _ = validation.keys.pop()
+            let _ = validation.indices.pop()
+        }
+        parse_skip_ws(p)
+        if p.pos >= p.len { p.ok = false; return }
+        let next = p.src.unit_at(p.pos)
+        if next == 125 { json_reader_close_container(p, validation, start); return }
+        if next != 44 { p.ok = false; return }
+        p.pos += 1
+    }
+    p.ok = false
+}
+
+fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
+    parse_skip_ws(p)
+    if p.pos >= p.len { p.ok = false; return }
+    let b = p.src.unit_at(p.pos)
+    if b == 34 { json_reader_validate_string(p); return }
+    if b == 110 || b == 116 || b == 102 {
+        let keyword = if b == 110 { "null" } else if b == 116 { "true" } else { "false" }
+        if p.pos + keyword.len() > p.len { p.ok = false; return }
+        for i in 0..keyword.len() {
+            if p.src.unit_at(p.pos + i) != keyword.unit_at(i) { p.ok = false; return }
+        }
+        p.pos += keyword.len()
+        return
+    }
+    if b == 45 || (b >= 48 && b <= 57) {
+        let start = p.pos
+        let is_float = parse_number_scan(p) ?? return
+        // Short grammar-valid integers cannot fail conversion. Keep the backend's
+        // overflow policy for long tokens rather than changing accepted input.
+        if !is_float && p.pos - start >= 19 && p.src.substring(start, p.pos).parse_int() == null { p.ok = false }
+        return
+    }
+    if b != 91 && b != 123 { p.ok = false; return }
+    let start = p.pos
+    p.depth += 1
+    if p.depth > json_max_depth() { p.ok = false; validation.problem = "maximum JSON depth exceeded"; return }
+    if b == 91 { json_reader_validate_array(p, validation, start) }
+    else { json_reader_validate_object(p, validation, start) }
 }
 
 fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, index_min_bytes: int = 0) -> JsonReader? {
@@ -939,8 +980,11 @@ fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, in
 // Source positions are created only after validation. This scan needs no
 // scalar conversion, field map or container tree, including skipped fields.
 fn json_reader_skip(src: string, at: int, offsets: Map<int, JsonReaderOffsets>? = null) -> int {
-    if let index = offsets {
-        if let entry = index.get(at) { if entry.end >= 0 { return entry.end } }
+    let first = src.unit_at(at)
+    if first == 91 || first == 123 {
+        if let index = offsets {
+            if let entry = index.get(at) { if entry.end >= 0 { return entry.end } }
+        }
     }
     let pos = at
     let len = src.len()
@@ -1012,17 +1056,8 @@ fn json_reader_field_offset(reader: JsonReader, key: string) -> int {
     }
     let src = reader.src.unwrap()
     if src.unit_at(reader.at) != 123 { return -1 }
-    let pos = parse_skip_ws_at(src, reader.at + 1)
-    let at = -1
-    while src.unit_at(pos) != 125 {
-        let (name, end) = parse_string_raw_at(src, pos)
-        pos = parse_skip_ws_at(src, end)
-        pos = parse_skip_ws_at(src, pos + 1)
-        if name.unwrap() == key { at = pos }
-        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.offsets))
-        if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
-    }
-    return at
+    let (indexed, _) = json_reader_index_at(reader)
+    return json_reader_fields(indexed).unwrap().get(key) ?? -1
 }
 
 fn json_reader_field(reader: JsonReader, key: string) -> JsonReader? {
@@ -1059,15 +1094,20 @@ fn json_reader_as_bool(reader: JsonReader) -> bool? {
     return json_reader_as_bool_at(reader.src.unwrap(), reader.at)
 }
 
-fn json_reader_number_at(src: string, at: int, strict: bool = false) -> float? {
-    if at < 0 { return null }
+fn json_reader_number_end_at(src: string, at: int, strict: bool = false) -> (float?, int) {
+    if at < 0 { return (null, at) }
     let b = src.unit_at(at)
-    if b != 45 && (b < 48 || b > 57) { return null }
+    if b != 45 && (b < 48 || b > 57) { return (null, at) }
     let (end, is_float, ok) = parse_number_scan_at(src, at)
     assert(ok, "validated JSON reader number must scan")
-    if strict && is_float { return null }
-    if is_float { return src.parse_float_at(at, end) }
-    return src.substring(at, end).parse_int().unwrap() as float
+    if strict && is_float { return (null, end) }
+    if is_float { return (src.parse_float_at(at, end), end) }
+    return (src.substring(at, end).parse_int().unwrap() as float, end)
+}
+
+fn json_reader_number_at(src: string, at: int, strict: bool = false) -> float? {
+    let (value, _) = json_reader_number_end_at(src, at, strict)
+    return value
 }
 
 fn json_reader_number(reader: JsonReader, strict: bool = false) -> float? {
@@ -1120,6 +1160,14 @@ fn json_reader_as_array(reader: JsonReader) -> JsonReaderArray? {
 }
 
 @inline fn JsonReaderArrayIter.next(it) -> (bool, JsonReader) {
+    return json_reader_array_next(it, true)
+}
+
+fn JsonReaderArrayIter.next_unindexed(it) -> (bool, JsonReader) {
+    return json_reader_array_next(it, false)
+}
+
+fn json_reader_array_next(it: JsonReaderArrayIter, index_objects: bool) -> (bool, JsonReader) {
     let array = it.array
     if let values = array.values {
         if it.index >= values.len() { return (false, json_reader_null()) }
@@ -1133,7 +1181,7 @@ fn json_reader_as_array(reader: JsonReader) -> JsonReaderArray? {
     if src.unit_at(at) == 93 { return (false, json_reader_null()) }
     let entry = json_reader_at(array.reader, at)
     let pos = at
-    if src.unit_at(at) == 123 {
+    if index_objects && src.unit_at(at) == 123 {
         let (indexed, end) = json_reader_index_at(entry)
         entry = indexed
         pos = end + 1
@@ -1167,6 +1215,43 @@ fn JsonReaderArray.get_at(array, index: int) -> JsonReader {
     for (i, entry) in enumerate(array) { if i == index { return entry } }
     error("JSON array index out of bounds: {index}")
     return json_reader_null()
+}
+
+struct JsonReaderFieldIter {
+    reader: JsonReader,
+    pos: int,
+    keys: [string]? = null,
+    index: int = 0,
+}
+
+// Source members stream in document order, including duplicates. Consumers
+// overwrite earlier fields to retain JSON's last-member-wins behavior.
+fn json_reader_each_field(reader: JsonReader) -> JsonReaderFieldIter? {
+    if let value = reader.value {
+        let object = json_as_object(value) ?? return null
+        return JsonReaderFieldIter { reader, pos: -1, keys: object.keys() }
+    }
+    if reader.at < 0 || reader.src.unwrap().unit_at(reader.at) != 123 { return null }
+    return JsonReaderFieldIter { reader, pos: parse_skip_ws_at(reader.src.unwrap(), reader.at + 1) }
+}
+
+fn JsonReaderFieldIter.iter(it) -> JsonReaderFieldIter { return it }
+
+fn JsonReaderFieldIter.next(it) -> (bool, (string, JsonReader)) {
+    if let keys = it.keys {
+        if it.index >= keys.len() { return (false, ("", json_reader_null())) }
+        let key = keys[it.index]
+        it.index += 1
+        return (true, (key, json_reader_field(it.reader, key).unwrap()))
+    }
+    let src = it.reader.src.unwrap()
+    if src.unit_at(it.pos) == 125 { return (false, ("", json_reader_null())) }
+    let (key, end) = parse_string_raw_at(src, it.pos)
+    let at = parse_skip_ws_at(src, parse_skip_ws_at(src, end) + 1)
+    let pos = parse_skip_ws_at(src, json_reader_skip(src, at, it.reader.offsets))
+    if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
+    it.pos = pos
+    return (true, (key.unwrap(), json_reader_at(it.reader, at)))
 }
 
 fn json_reader_as_object(reader: JsonReader) -> Map<string, JsonReader>? {
@@ -1235,34 +1320,62 @@ fn json_reader_materialize(reader: JsonReader) -> JsonValue {
 // Fixed coordinate tuples do not need array adapters or descendant readers.
 // Shape and numeric validity stay separate for consumer diagnostics.
 fn json_reader_float_components(reader: JsonReader, size: int) -> (bool, float?, float?, float?) {
+    let (shape, x, y, z, _) = json_reader_float_components_end(reader, size)
+    return (shape, x, y, z)
+}
+
+fn json_reader_float_components_end(reader: JsonReader, size: int) -> (bool, float?, float?, float?, int) {
     assert(size == 2 || size == 3, "JSON coordinate tuples contain two or three components")
     if let value = reader.value {
         let values = json_as_array(value)
-        if values == null || values.unwrap().len() != size { return (false, null, null, null) }
+        if values == null || values.unwrap().len() != size { return (false, null, null, null, reader.at) }
         let items = values.unwrap()
         return (true, json_as_float(items[0]), json_as_float(items[1]),
-            if size == 3 { json_as_float(items[2]) } else { null })
+            if size == 3 { json_as_float(items[2]) } else { null }, reader.at)
     }
-    if reader.at < 0 { return (false, null, null, null) }
+    if reader.at < 0 { return (false, null, null, null, reader.at) }
     let src = reader.src.unwrap()
-    if src.unit_at(reader.at) != 91 { return (false, null, null, null) }
+    if src.unit_at(reader.at) != 91 { return (false, null, null, null, reader.at) }
     let pos = parse_skip_ws_at(src, reader.at + 1)
     let x: float? = null
     let y: float? = null
     let z: float? = null
     for index in 0..size {
-        if src.unit_at(pos) == 93 { return (false, null, null, null) }
-        let number = json_reader_number_at(src, pos)
+        if src.unit_at(pos) == 93 { return (false, null, null, null, reader.at) }
+        let (number, end) = json_reader_number_end_at(src, pos)
         if index == 0 { x = number }
         else if index == 1 { y = number }
         else { z = number }
-        pos = parse_skip_ws_at(src, json_reader_skip(src, pos, reader.offsets))
+        pos = parse_skip_ws_at(src, if end > pos { end } else { json_reader_skip(src, pos, reader.offsets) })
         if index + 1 < size {
-            if src.unit_at(pos) != 44 { return (false, null, null, null) }
+            if src.unit_at(pos) != 44 { return (false, null, null, null, reader.at) }
             pos = parse_skip_ws_at(src, pos + 1)
         }
     }
-    return (src.unit_at(pos) == 93, x, y, z)
+    return (src.unit_at(pos) == 93, x, y, z, pos + 1)
+}
+
+fn JsonReaderArrayIter.next_float_components(it, size: int) -> (bool, bool, float?, float?, float?) {
+    let array = it.array
+    if array.values != null {
+        let (more, reader) = it.next()
+        if !more { return (false, false, null, null, null) }
+        let (shape, x, y, z) = json_reader_float_components(reader, size)
+        return (true, shape, x, y, z)
+    }
+    if it.pos < 0 { return (false, false, null, null, null) }
+    let src = array.reader.src.unwrap()
+    if src.unit_at(it.pos) == 93 { return (false, false, null, null, null) }
+    let (shape, x, y, z, end) = json_reader_float_components_end(json_reader_at(array.reader, it.pos), size)
+    if shape {
+        let pos = parse_skip_ws_at(src, end)
+        if src.unit_at(pos) == 44 { pos = parse_skip_ws_at(src, pos + 1) }
+        it.pos = pos
+        it.index += 1
+    } else {
+        let _ = it.next()
+    }
+    return (true, shape, x, y, z)
 }
 
 fn json_reader_is_object(reader: JsonReader) -> bool {
