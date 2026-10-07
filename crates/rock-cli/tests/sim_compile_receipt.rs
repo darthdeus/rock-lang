@@ -653,3 +653,21 @@ fn copy_stone_sources(source: &std::path::Path, target: &std::path::Path) {
         }
     }
 }
+
+#[test]
+fn sim_compile_receipt_v1_entry_point_and_short_name_selection_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    let cache = dir.path().join("cache");
+    write_cache_fixture(&project);
+    let manifest = project.join("stick.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text = text.replace("[build.vars]", &format!("stone-core = {{ path = {:?} }}\n\n[build.vars]", workspace_root().join("stone-core")));
+    text.push_str("\n[language]\nmodules = \"v1\"\n");
+    std::fs::write(project.join("imports.rock"),
+        "pub(package) use stone::*;\npub(package) use stone_core::*;\n").unwrap();
+    std::fs::write(manifest, text).unwrap();
+    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
+    let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
+    assert!(run.compiled("v1", "cache_probe", &[], &[]));
+}

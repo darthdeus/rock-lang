@@ -7121,7 +7121,8 @@ fn emit_full_in_with_mutation(
                 CompilerError::new_no_location(format!("unknown sim root: {name}"))))
                 .collect::<Result<Vec<_>, _>>()?;
             roots.extend(ws.modules.iter().flat_map(|m| m.functions.iter().filter_map(|(fid, f)|
-                (f.name.as_str() == "main").then_some(FuncRef { module: m.id, func: fid }))));
+                (skull_mir::mangle::declared_name(f.name.as_str()) == "main")
+                    .then_some(FuncRef { module: m.id, func: fid }))));
             (explicit_and_global_roots(ws, &roots), sim_glue_roots(ws))
         }
     };
