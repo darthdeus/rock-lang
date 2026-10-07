@@ -1178,7 +1178,12 @@ fn skull_build_package_with_limit(
         }
     })?;
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let lua = match skull::mir_emit::emit_workspace_mir_for_package_test(&ws, entry_mid) {
+    let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
+        reason: categorize(&e.message),
+        rendered: render_project_err(&sources, &e),
+    })?;
+    let roots = test_fns.iter().map(|(func, _)| *func).collect::<Vec<_>>();
+    let lua = match skull::mir_emit::emit_workspace_mir_for_package_test(&ws, entry_mid, &roots) {
         Ok(e) => {
             crate::compile_measurements::emission(&e);
             e.lua
@@ -1190,10 +1195,6 @@ fn skull_build_package_with_limit(
             });
         }
     };
-    let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
-        reason: categorize(&e.message),
-        rendered: render_project_err(&sources, &e),
-    })?;
     let files = test_fns.iter().map(|(func, _)| {
         ws.modules[func.module.index()].file.as_str().to_owned()
     }).collect::<Vec<_>>();

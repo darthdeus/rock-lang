@@ -2179,7 +2179,17 @@ pub(crate) fn is_emission_root(
         return true;
     }
     let has = |n: &str| f.annotations.iter().any(|a| a.is_builtin(n));
-    if has("nomangle") || has("sim") || has("test") {
+    if has("sim") || has("test") {
+        return true;
+    }
+    is_global_emission_root(f, deco_map)
+}
+
+fn is_global_emission_root(
+    f: &bone_semantic::hir::Function,
+    deco_map: &DecoMap,
+) -> bool {
+    if f.annotations.iter().any(|a| a.is_builtin("nomangle")) {
         return true;
     }
     // `extern` decls bind a bare name an inline(lua) body may call directly.
@@ -2473,11 +2483,12 @@ pub fn emit_workspace_mir_in_for_renderer(
         .map(|(emit, _cache)| emit)
 }
 
-/// [`emit_workspace_mir`] for a package's `rock test` program. See
-/// [`BuildKind::PackageTest`].
+/// [`emit_workspace_mir`] for a package's `rock test` program, rooted at its
+/// `tests`. See [`BuildKind::PackageTest`].
 pub fn emit_workspace_mir_for_package_test(
     ws: &Workspace,
     user_mid: ModuleId,
+    tests: &[FuncRef],
 ) -> Result<MirEmit, CompilerError> {
     let _allocation_environment = crate::allocation_report::environment_scope();
     emit_full_in_with_mutation(
@@ -2486,7 +2497,7 @@ pub fn emit_workspace_mir_for_package_test(
         None,
         BodyMutation::None,
         RendererTarget::Gl,
-        BuildKind::PackageTest,
+        FullBuild::PackageTest(tests),
         ShapeOverrides::default(),
     )
     .map(|(emit, _cache)| emit)
@@ -3094,8 +3105,25 @@ pub enum BuildKind {
     Program,
     /// A package's `rock test` program. Each test child loads it once and never
     /// reloads it, so it omits what only a reload reads: the Artifact binding
-    /// plan and the Session-cell joins of full-assembly definitions.
+    /// plan and the Session-cell joins of full-assembly definitions. It runs no
+    /// sims, so it registers none.
     PackageTest,
+}
+
+/// A full build's kind with the roots it is taken over.
+#[derive(Clone, Copy)]
+enum FullBuild<'a> {
+    Program,
+    PackageTest(&'a [FuncRef]),
+}
+
+impl FullBuild<'_> {
+    fn kind(self) -> BuildKind {
+        match self {
+            FullBuild::Program => BuildKind::Program,
+            FullBuild::PackageTest(_) => BuildKind::PackageTest,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -4675,6 +4703,22 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
     emission_roots_with_census(ws, project_root, None)
 }
 
+/// A package test program's roots: its `tests` plus the global roots every
+/// build keeps (initialization, decorators, external names). It has no public
+/// interface, and sims are not registered, so neither roots anything here.
+fn package_test_roots(ws: &Workspace, tests: &[FuncRef]) -> Vec<FuncRef> {
+    let (deco_map, _) = build_deco_map(ws);
+    let mut roots = tests.to_vec();
+    roots.extend(ws.modules.iter().filter(|m| m.id != ModuleId::builtin()).flat_map(|m| {
+        m.functions.iter().filter_map(|(fid, f)| {
+            is_global_emission_root(f, &deco_map).then_some(FuncRef { module: m.id, func: fid })
+        })
+    }));
+    roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+    roots.dedup();
+    roots
+}
+
 fn emission_roots_with_census(
     ws: &Workspace,
     project_root: Option<&str>,
@@ -5937,7 +5981,7 @@ fn assemble(
     }
     definitions.append_to(&mut out);
     out.push_str(&callee_binding_pass_lua(&mut callee_binds));
-    mark_generated_code_values(ws, &mut code_artifact);
+    mark_generated_code_values(ws, &mut code_artifact, cache.build_kind == BuildKind::Program);
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
         return Err(CompilerError::new_no_location(format!(
@@ -6106,7 +6150,9 @@ fn assemble(
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
     out.push_str(&decorator_application_lines(ws, &deco_map, scx, &mut skipped));
     // `@sim` registrations (after fn + global defs; same init slot as rock).
-    out.push_str(&sim_registration_lines(ws, scx)?);
+    if cache.build_kind == BuildKind::Program {
+        out.push_str(&sim_registration_lines(ws, scx)?);
+    }
     // `rock_shader` pipeline registrations (docs/shaders.md):
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
@@ -6411,6 +6457,7 @@ fn definition_plan_stage_lua(
 fn mark_generated_code_values(
     ws: &Workspace,
     artifact: &mut skull_mir::code_identity::CodeArtifact,
+    register_sims: bool,
 ) {
     let decorator_names: FxHashSet<Ustr> = ws
         .modules
@@ -6426,7 +6473,7 @@ fn mark_generated_code_values(
                 continue;
             }
             let generated_value = f.annotations.iter().any(|ann| {
-                ann.is_builtin("sim")
+                (register_sims && ann.is_builtin("sim"))
                     || decorator_names.contains(&ann.resolved_name.unwrap_or(ann.name.name))
             });
             if generated_value {
@@ -6713,7 +6760,7 @@ pub fn emit_full_with_shapes(
     shapes: ShapeOverrides,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(ws, user_mid, None, BodyMutation::None, RendererTarget::Gl, BuildKind::Program, shapes)
+    emit_full_in_with_mutation(ws, user_mid, None, BodyMutation::None, RendererTarget::Gl, FullBuild::Program, shapes)
 }
 
 /// [`emit_full`] under an explicit emitted value-ctor shape, overriding
@@ -6731,7 +6778,7 @@ pub fn emit_full_with_value_ctor(
         None,
         BodyMutation::None,
         RendererTarget::Gl,
-        BuildKind::Program,
+        FullBuild::Program,
         ShapeOverrides { value_ctor: Some(shape), ..ShapeOverrides::default() },
     )
 }
@@ -6753,7 +6800,7 @@ pub fn emit_full_with_callee_binding(
         None,
         BodyMutation::None,
         RendererTarget::Gl,
-        BuildKind::Program,
+        FullBuild::Program,
         ShapeOverrides { callee_binding: Some(binding), ..ShapeOverrides::default() },
     )
 }
@@ -6827,7 +6874,7 @@ pub fn emit_full_in_for_renderer_with_callee_binding(
         project_root,
         BodyMutation::None,
         renderer_target,
-        BuildKind::Program,
+        FullBuild::Program,
         ShapeOverrides { callee_binding, ..ShapeOverrides::default() },
     )
 }
@@ -6838,7 +6885,7 @@ fn emit_full_in_with_test_mutation(
     user_mid: ModuleId,
     mutation: BodyMutation,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, BuildKind::Program, ShapeOverrides::default())
+    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl, FullBuild::Program, ShapeOverrides::default())
 }
 
 fn emit_full_in_with_mutation(
@@ -6847,7 +6894,7 @@ fn emit_full_in_with_mutation(
     project_root: Option<&str>,
     mutation: BodyMutation,
     renderer_target: RendererTarget,
-    build_kind: BuildKind,
+    build: FullBuild<'_>,
     shapes: ShapeOverrides,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let mut setup_phases = Vec::new();
@@ -6907,15 +6954,19 @@ fn emit_full_in_with_mutation(
         .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
-    let interface_roots = emission_roots(ws, project_root);
-    let sim_roots = sim_glue_roots(ws);
+    let (interface_roots, sim_roots) = match build {
+        FullBuild::Program => (emission_roots(ws, project_root), sim_glue_roots(ws)),
+        FullBuild::PackageTest(tests) => (package_test_roots(ws, tests), Vec::new()),
+    };
     let emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
     #[cfg(test)]
-    assert_eq!(
-        emission_roots,
-        all_roots(ws, project_root, &shader_roots),
-        "cached full-build roots diverged from the wholesale root oracle"
-    );
+    if build.kind() == BuildKind::Program {
+        assert_eq!(
+            emission_roots,
+            all_roots(ws, project_root, &shader_roots),
+            "cached full-build roots diverged from the wholesale root oracle"
+        );
+    }
     setup_phases.push(("setup: root collection", t_setup.elapsed()));
 
     let t_setup = Instant::now();
@@ -7344,7 +7395,7 @@ fn emit_full_in_with_mutation(
         artifact_fingerprint: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
-        build_kind,
+        build_kind: build.kind(),
         repair_stats: IncrementalRepairStats::default(),
         body_edit_rollback: None,
     };

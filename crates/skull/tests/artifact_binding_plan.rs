@@ -179,6 +179,7 @@ fn bump() -> int {
     return counter
 }
 fn main() { print(bump()) }
+@test fn bump_counts() { assert(bump() == 1) }
 "#;
 
 const PLAN_STAGE: &str = "__rock_artifact_binding_plan_stage(";
@@ -191,6 +192,9 @@ fn package_test_program_omits_reload_only_plan_and_cell_joins() {
     assert!(program.contains(CELL_JOIN), "program build lost its Session-cell joins");
 
     let package_test = emit_mir_package_test(STATEFUL_SOURCE).lua;
+    let joined = program.split(CELL_JOIN).nth(1).and_then(|rest| rest.split(')').next())
+        .expect("program joins a definition");
+    assert!(package_test.contains(joined), "package-test program dropped the stateful {joined}");
     assert!(!package_test.contains(PLAN_STAGE), "package-test program stages a binding plan");
     assert!(
         !package_test.contains("__rock_artifact_plan_"),
