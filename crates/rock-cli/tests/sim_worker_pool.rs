@@ -219,30 +219,7 @@ impl Run {
 
 /// `rock sim <project> --workers <specs> -j <jobs>` with a lifecycle trace.
 fn run_project_workers(project: &str, specs: &[&str], jobs: &str) -> Run {
-    let dir = tempfile::tempdir().expect("trace tempdir");
-    let trace_path = dir.path().join("lifecycle.log");
-
-    let mut args = vec!["sim", project];
-    args.extend_from_slice(specs);
-    args.extend_from_slice(&["--workers", "-j", jobs]);
-
-    let out = Command::new(rock_bin())
-        .args(&args)
-        .current_dir(workspace_root())
-        .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
-        .env_remove("SIM_SKIP_RENDER")
-        .output()
-        .expect("run rock sim --workers");
-
-    let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
-    Run {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        success: out.status.success(),
-        trace,
-        _dir: dir,
-    }
+    run_project_workers_with_history(project, specs, jobs).0
 }
 
 fn run_project_workers_with_history(project: &str, specs: &[&str], jobs: &str) -> (Run, PathBuf) {
@@ -328,8 +305,8 @@ const EIGHT: [&str; 8] = [
     "testbed::b0_static_called_probe",
 ];
 
-/// The composition itself: more than one quantum of entries of one boot
-/// signature under `-j 4` must run in several booted processes AT ONCE.
+/// Missing timings retain the count fallback: more than one quantum of one
+/// boot signature under `-j 4` must run in several booted processes AT ONCE.
 ///
 /// Two facts, and both are needed. The peak says the lanes overlapped rather
 /// than ran back to back; the total says they are still WORKERS and not eight
@@ -337,9 +314,8 @@ const EIGHT: [&str; 8] = [
 /// also show a peak above one.
 #[test]
 fn several_booted_workers_run_at_once() {
-    // One lane per 56 entries of a boot signature, so overlap inside a single
-    // group needs more than one quantum of work: EIGHT repeated to 64 entries
-    // gives two lanes at -j 4.
+    // These testbed names have no seeded timings. An empty private history
+    // exercises the count fallback: 64 entries buy two blocks at -j 4.
     let specs: Vec<&str> = EIGHT.iter().copied().cycle().take(64).collect();
     let run = run_workers(&specs, "4");
     assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
