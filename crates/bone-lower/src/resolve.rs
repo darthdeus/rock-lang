@@ -35,6 +35,8 @@ std::thread_local! {
     /// one sequential call on one thread: the frame opens and closes around
     /// it, so no parallel work can interleave with it.
     static PROBES: std::cell::RefCell<Option<Vec<ScopeProbe>>> = const { std::cell::RefCell::new(None) };
+
+    static ROOT_KEY: Ustr = Ustr::from("");
 }
 
 /// Run `lookup` and return the namespace facts it read (plan 2.6): each
@@ -72,12 +74,37 @@ fn probe(fact: ScopeProbe) {
     });
 }
 
-fn probe_member(package: u32, path: &[Ustr], name: Ustr) {
-    probe(ScopeProbe::Member { package, node: NsPackage::path_key(path), name });
+pub(crate) fn namespace_key(ws: &Workspace, package: u32, path: &[Ustr]) -> Ustr {
+    match path {
+        [] => ROOT_KEY.with(|key| *key),
+        [key] => *key,
+        _ => {
+            let mut key = path[0];
+            if let Some(pkg) = ws.ns.package(package) {
+                for segment in &path[1..] {
+                    match pkg.node(key).and_then(|node| node.children.get(segment)) {
+                        Some(child) => key = *child,
+                        // Missing paths still need canonical keys for negative probes.
+                        None => return NsPackage::path_key(path),
+                    }
+                }
+                return key;
+            }
+            NsPackage::path_key(path)
+        }
+    }
 }
 
-fn probe_node(package: u32, path: &[Ustr]) {
-    probe(ScopeProbe::Node { package, node: NsPackage::path_key(path) });
+fn probe_member(ws: &Workspace, package: u32, path: &[Ustr], name: Ustr) -> Ustr {
+    let node = namespace_key(ws, package, path);
+    probe(ScopeProbe::Member { package, node, name });
+    node
+}
+
+fn probe_node(ws: &Workspace, package: u32, path: &[Ustr]) -> Ustr {
+    let node = namespace_key(ws, package, path);
+    probe(ScopeProbe::Node { package, node });
+    node
 }
 
 /// What a resolved name turned out to be.
@@ -714,9 +741,8 @@ fn explicit_members(
     name: Ustr,
     visiting: &mut Visiting,
 ) -> Result<Option<Members>, String> {
-    probe_member(pkg_id, path, name);
+    let node_key = probe_member(ws, pkg_id, path, name);
     let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(None) };
-    let node_key = pkg.key_of(path);
     let Some(node) = pkg.node(node_key) else { return Ok(None) };
     let mut out = Members::default();
     if let Some(kind) = owned_kind(node, name) {
@@ -777,10 +803,9 @@ fn glob_export_members(
     name: Ustr,
     visiting: &mut Visiting,
 ) -> Result<Members, String> {
-    probe_member(pkg_id, path, name);
+    let node_key = probe_member(ws, pkg_id, path, name);
     let mut out = Members::default();
     let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(out) };
-    let node_key = pkg.key_of(path);
     let Some(node) = pkg.node(node_key) else { return Ok(out) };
     if node.glob_exports.is_empty() {
         return Ok(out);
@@ -799,10 +824,10 @@ fn glob_export_members(
                 Landing::Module(target_pkg, target_path) => (target_pkg, target_path),
                 Landing::Def(_) => return Err("expected a module in use path".to_string()),
             };
-        let Some(target) = ws.ns.package(target_pkg) else { continue };
+        if ws.ns.package(target_pkg).is_none() { continue; }
         // A glob chain that comes back to a module it is already opening
         // adds nothing new; that module's members are being collected.
-        let visit = (target_pkg, target.key_of(&target_path), name, Guard::GlobOpen);
+        let visit = (target_pkg, namespace_key(ws, target_pkg, &target_path), name, Guard::GlobOpen);
         if visiting.contains(&visit) {
             continue;
         }
@@ -850,7 +875,7 @@ fn collect_member_names(
     seen: &mut Vec<(u32, Ustr)>,
 ) -> Result<(), String> {
     let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(()) };
-    let node_key = pkg.key_of(path);
+    let node_key = namespace_key(ws, pkg_id, path);
     if seen.contains(&(pkg_id, node_key)) {
         return Ok(());
     }
@@ -933,11 +958,11 @@ fn check_module_access(
     let Some((name, declaring)) = module_path.split_last() else {
         return Ok(());
     };
-    probe_node(pkg_id, module_path);
+    let node_key = probe_node(ws, pkg_id, module_path);
     let Some(pkg) = ws.ns.package(pkg_id) else {
         return Ok(());
     };
-    let Some(node) = pkg.node(pkg.key_of(module_path)) else {
+    let Some(node) = pkg.node(node_key) else {
         return Ok(());
     };
     let default_vis = NsVisibility::Private;
@@ -1063,7 +1088,7 @@ pub fn check_use_binding(ws: &Workspace, site: &FragmentScope, local: Ustr, path
     let pkg = ws.ns.package(site.package).ok_or("unknown package")?;
     let mut child = site.module_path.clone();
     child.push(local);
-    let child_module = pkg.node(pkg.key_of(&site.module_path)).is_some_and(|node| node.children.contains_key(&local));
+    let child_module = pkg.node(namespace_key(ws, site.package, &site.module_path)).is_some_and(|node| node.children.contains_key(&local));
     let clash = if child_module && landing != (site.package, child) {
         Some("a child module of this module")
     } else if pkg.aliases.get(&local).is_some_and(|&target| landing != (target, Vec::new())) {
@@ -1143,9 +1168,9 @@ pub fn resolve_member_path(
             continue;
         }
 
-        probe_node(pkg_id, &cur);
+        let node_key = probe_node(ws, pkg_id, &cur);
         let pkg = ws.ns.package(pkg_id).ok_or("unknown package")?;
-        if pkg.node(pkg.key_of(&cur)).is_none() {
+        if pkg.node(node_key).is_none() {
             return Err(format!("no module `{}` in path", seg));
         }
         // A module segment wins (it may shadow nothing: definitions and
@@ -1208,7 +1233,7 @@ fn unresolved_value_path(ws: &Workspace, frag: &FragmentScope, segments: &[Ustr]
 }
 
 /// Type names the parser reads as builtins rather than as paths.
-const BUILTIN_TYPE_NAMES: &[&str] = &["any", "bool", "float", "int", "string", "uint"];
+const BUILTIN_TYPE_NAMES: &[&str] = &["any", "bool", "f32", "f64", "float", "int", "string", "uint"];
 
 fn joined(segments: &[Ustr]) -> String {
     segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")
@@ -1280,8 +1305,8 @@ fn resolve_anchor(
         return Ok((target, Vec::new(), 1));
     }
     let relative = (frag.package, frag.module_path.clone(), 0);
-    probe_member(frag.package, &frag.module_path, first);
-    let own = pkg.node(pkg.key_of(&frag.module_path));
+    let node_key = probe_member(ws, frag.package, &frag.module_path, first);
+    let own = pkg.node(node_key);
     if own.is_some_and(|node| node.children.contains_key(&first) || node.exports.contains_key(&first)) {
         return Ok(relative);
     }
@@ -1303,7 +1328,7 @@ fn imported_module(
     visiting: &mut Visiting,
 ) -> Result<Option<(u32, Vec<Ustr>)>, String> {
     let Some(targets) = frag.named.get(&name) else { return Ok(None) };
-    let visit = (frag.package, NsPackage::path_key(&frag.module_path), name, Guard::Import);
+    let visit = (frag.package, namespace_key(ws, frag.package, &frag.module_path), name, Guard::Import);
     if visiting.contains(&visit) {
         return Ok(None);
     }
@@ -1351,15 +1376,14 @@ fn step_module(
     seg: Ustr,
     visiting: &mut Visiting,
 ) -> Result<Option<(u32, Vec<Ustr>)>, String> {
-    probe_member(pkg_id, cur, seg);
+    let node_key = probe_member(ws, pkg_id, cur, seg);
     let Some(pkg) = ws.ns.package(pkg_id) else { return Ok(None) };
-    let node_key = pkg.key_of(cur);
     let Some(node) = pkg.node(node_key) else { return Ok(None) };
     if node.children.contains_key(&seg) {
         let mut next = cur.to_vec();
         next.push(seg);
-        probe_node(pkg_id, &next);
-        if pkg.node(pkg.key_of(&next)).is_none() {
+        let next_key = probe_node(ws, pkg_id, &next);
+        if pkg.node(next_key).is_none() {
             return Err(format!("no module `{}` in path", seg));
         }
         check_module_access(ws, frag, pkg_id, &next)?;
@@ -1494,12 +1518,12 @@ fn walk_module_path(
             None => return Err(format!("no module `{}` in path", seg)),
         }
     }
-    probe_node(pkg_id, &cur);
+    let node_key = probe_node(ws, pkg_id, &cur);
     let pkg = ws
         .ns
         .package(pkg_id)
         .ok_or_else(|| "unknown package".to_string())?;
-    if pkg.node(pkg.key_of(&cur)).is_none() {
+    if pkg.node(node_key).is_none() {
         return Err(format!("no module `{}` in path", last_of(segments)));
     }
     Ok(Some((pkg_id, cur)))

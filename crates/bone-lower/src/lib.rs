@@ -200,7 +200,7 @@ impl<'a> LowerCtx<'a> {
             .ok()
             .map(|(package, path)| hir::SegmentTarget::Module {
                 package,
-                node: bone_core::modules::NsPackage::path_key(&path),
+                node: resolve::namespace_key(self.workspace, package, &path),
             })
     }
 

@@ -1,0 +1,28 @@
+//- repeated_nested_members_keep_alias_and_super_resolution
+//-- lib_outer_inner.rock @pkg=keys,1 @v1
+pub mod outer::inner;
+
+pub fn value() -> int { 7 }
+
+//-- lib_outer_sibling.rock @pkg=keys,1 @v1
+mod outer::sibling;
+use super::inner as renamed;
+
+fn repeated() -> int {
+    let a = renamed::value()
+            //^ int
+    let b = super::inner::value()
+            //^ int
+    let c = keys::outer::inner::value()
+            //^ int
+    a + b + c
+}
+
+//- nested_missing_member_still_rejects @fail=did not resolve
+//-- lib_outer_inner.rock @pkg=keys,1 @v1
+pub mod outer::inner;
+
+pub fn value() -> int { 7 }
+
+//-- lib.rock @pkg=keys,1 @v1
+fn missing() -> int { keys::outer::inner::missing() }
