@@ -7,11 +7,11 @@
 //! This proves real Cargo and filesystem behavior rather than asserting syntax or
 //! arguments by construction.
 //!
-//! `#[ignore]`d for the same reason `engine_cdylib_freshness_gate` is: it removes
-//! and rebuilds shared workspace artifacts in `target/debug/` and `tmp/`. Run
-//! deliberately:
+//! `#[ignore]`d because it rebuilds real engine artifacts in private Cargo
+//! targets. Run deliberately:
 //!
-//!   cargo test -p rock-cli --test rock_cli_heavy -- --ignored --nocapture engine_build_scope
+//!   cargo test -p rock-cli --test rock_cli_heavy engine_build_scope_gate:: \
+//!     -- --ignored --nocapture --test-threads=1
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,7 +51,6 @@ fn workspace_root() -> PathBuf {
 /// Sets `ROCK_DIR`, which `rock_dir()` caches on first use: call it before any
 /// production call, once per test process (nextest runs one test per process).
 pub(crate) fn private_engine_root(label: &str) -> PathBuf {
-    let real = workspace_root();
     let home = std::env::var_os("HOME").expect("HOME");
     let private = PathBuf::from(home).join("tmp").join(format!(
         "rock-engine-gate-root-{label}-{}", std::process::id()
@@ -59,6 +58,12 @@ pub(crate) fn private_engine_root(label: &str) -> PathBuf {
     if private.exists() {
         fs_err::remove_dir_all(&private).expect("clear previous private root");
     }
+    populate_private_engine_root(&private);
+    private
+}
+
+fn populate_private_engine_root(private: &Path) {
+    let real = workspace_root();
     fs_err::create_dir_all(private.join("tmp")).expect("create private root");
     for entry in fs_err::read_dir(&real).expect("list workspace root") {
         let name = entry.expect("workspace entry").file_name();
@@ -68,7 +73,18 @@ pub(crate) fn private_engine_root(label: &str) -> PathBuf {
         std::os::unix::fs::symlink(real.join(&name), private.join(&name))
             .expect("link workspace entry into private root");
     }
-    unsafe { std::env::set_var("ROCK_DIR", &private) };
+    unsafe { std::env::set_var("ROCK_DIR", private) };
+}
+
+fn private_cargo_engine_root(label: &str) -> tempfile::TempDir {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let private = tempfile::Builder::new()
+        .prefix(&format!("rock-engine-gate-{label}-"))
+        .tempdir_in(home.join("tmp"))
+        .expect("create private engine fixture");
+    populate_private_engine_root(private.path());
+    // Cargo caches native paths through this root, so its target must die with it.
+    unsafe { std::env::set_var("CARGO_TARGET_DIR", private.path().join("cargo-target")) };
     private
 }
 
@@ -94,10 +110,11 @@ fn cargo_target(root: &Path) -> PathBuf {
 }
 
 #[test]
-#[ignore = "deletes shared workspace artifacts and rebuilds a crate; run deliberately"]
+#[ignore = "rebuilds real engine artifacts in a private Cargo target; run deliberately"]
 fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
     if isolated_test("core_engine_build_does_not_compile_unrelated_workspace_crates") { return; }
-    let root = private_engine_root("scope");
+    let fixture_root = private_cargo_engine_root("scope");
+    let root = fixture_root.path().to_path_buf();
 
     // The unrelated crate artifact that stone-rs does NOT depend on.
     // When cargo build --lib runs with no -p, rock-cli's lib target is compiled
@@ -148,14 +165,15 @@ fn core_engine_build_does_not_compile_unrelated_workspace_crates() {
         "build_libstone built unrelated crate artifact {}, proving cargo was not package-scoped",
         unrelated_artifact.display()
     );
-    fs_err::remove_dir_all(&root).expect("remove private engine root");
+    fixture_root.close().expect("remove private engine root and Cargo target");
 }
 
 #[test]
 #[ignore = "builds stone-rs without default features; run deliberately"]
 fn c_libstone_stages_under_its_own_name_and_leaves_the_engine_library() {
     if isolated_test("c_libstone_stages_under_its_own_name_and_leaves_the_engine_library") { return; }
-    let root = private_engine_root("c-libstone");
+    let fixture_root = private_cargo_engine_root("c-libstone");
+    let root = fixture_root.path().to_path_buf();
     let engine_lib = root.join("tmp").join(cdylib_name("stone"));
     let sentinel = b"engine libstone sentinel: the C build must not touch this";
     fs_err::write(&engine_lib, sentinel).expect("write sentinel engine libstone");
@@ -171,14 +189,15 @@ fn c_libstone_stages_under_its_own_name_and_leaves_the_engine_library() {
     );
     let c_lib = root.join("tmp").join(cdylib_name("stone_c"));
     assert!(c_lib.is_file(), "C libstone not staged at {}", c_lib.display());
-    fs_err::remove_dir_all(&root).expect("remove private engine root");
+    fixture_root.close().expect("remove private engine root and Cargo target");
 }
 
 #[test]
 #[ignore = "builds and stages real Stone providers; run deliberately"]
 fn receipt_bound_c_consumers_preserve_and_validate_the_engine_library() {
     if isolated_test("receipt_bound_c_consumers_preserve_and_validate_the_engine_library") { return; }
-    let root = private_engine_root("receipt-c-consumers");
+    let fixture_root = private_cargo_engine_root("receipt-c-consumers");
+    let root = fixture_root.path().to_path_buf();
     let fixture = tempfile::tempdir_in(root.join("tmp")).expect("C fixture directory");
     let receipt = fixture.path().join("receipt.json");
     let prepared = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -261,14 +280,15 @@ fn main() {
             "{args:?} accepted a replaced receipt-bound engine library: {text}");
         assert_eq!(fs_err::read(&engine).unwrap(), b"replaced staged engine");
     }
-    fs_err::remove_dir_all(&root).expect("remove private engine root");
+    fixture_root.close().expect("remove private engine root and Cargo target");
 }
 
 #[test]
 #[ignore = "builds and stages the real engine library; run deliberately"]
 fn receipt_bound_raw_staging_preserves_the_engine_library() {
     if isolated_test("receipt_bound_raw_staging_preserves_the_engine_library") { return; }
-    let root = private_engine_root("receipt-raw-stage");
+    let fixture_root = private_cargo_engine_root("receipt-raw-stage");
+    let root = fixture_root.path().to_path_buf();
     let receipt = root.join("tmp/receipt.json");
     unsafe { std::env::remove_var("ROCK_ENGINE_BUILD_RECEIPT") };
     rock_host::engine_build::prepare_engine_build_receipt(&[], &receipt)
@@ -306,5 +326,5 @@ fn receipt_bound_raw_staging_preserves_the_engine_library() {
         .expect_err("raw staging must reject a changed receipt-bound library");
     assert!(error.to_string().contains("its staged library changed"), "{error:#}");
     assert_eq!(fs_err::read(&engine).unwrap(), b"replaced staged engine");
-    fs_err::remove_dir_all(&root).expect("remove private engine root");
+    fixture_root.close().expect("remove private engine root and Cargo target");
 }
