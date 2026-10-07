@@ -173,3 +173,7 @@ mod state_globals_none;
 mod identity_storage_census;
 #[path = "compile_stats.rs"]
 mod compile_stats;
+
+#[cfg(unix)]
+#[path = "run_sim_jobs_budget.rs"]
+mod run_sim_jobs_budget;

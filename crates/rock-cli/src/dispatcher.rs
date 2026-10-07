@@ -409,6 +409,12 @@ impl CommandContext {
         if self.args.allocation_census.is_some() && self.args.allocation_sites.is_some() {
             anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms");
         }
+        // Validate before compiling, including paths with only one sim and no pool.
+        if self.args.jobs.is_some_and(|j| j > 1) {
+            let updates = self.args.update_snapshots && !self.args.sim_plan
+                && self.args.allocation_census.is_none() && self.args.allocation_sites.is_none();
+            crate::run_sim::resolve_jobs(self.args.jobs, updates, self.args.jobs_force)?;
+        }
         if self.args.sim_plan {
             if self.args.files.is_empty() {
                 anyhow::bail!("sim --plan needs a project: rock sim --plan <project> [names]");
@@ -418,6 +424,7 @@ impl CommandContext {
                 &self.args.files[0],
                 &self.args.files[1..],
                 self.args.jobs,
+                self.args.jobs_force,
             );
         }
         if let Some(path) = self.args.allocation_sites.as_deref() {
@@ -433,6 +440,7 @@ impl CommandContext {
                 &self.args.files[1..],
                 path,
                 self.args.jobs,
+                self.args.jobs_force,
             )
         } else if let Some(path) = self.args.allocation_census.as_deref() {
             if self.args.list {
@@ -447,6 +455,7 @@ impl CommandContext {
                 &self.args.files[1..],
                 path,
                 self.args.jobs,
+                self.args.jobs_force,
             )
         } else if self.args.list {
             if self.args.files.is_empty() {
@@ -473,6 +482,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                self.args.jobs_force,
                 self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
@@ -489,6 +499,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                self.args.jobs_force,
                 self.args.full_asset_jobs,
                 crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )

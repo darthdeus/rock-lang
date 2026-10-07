@@ -1193,6 +1193,7 @@ pub fn do_plan_sims(
     project: &str,
     names: &[String],
     jobs: Option<usize>,
+    jobs_force: bool,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
     let project_path = rock_host::project::resolve_project_dir(project)?;
@@ -1214,7 +1215,7 @@ pub fn do_plan_sims(
     };
     let mut plan = worker_lane_plan(
         &specs, &prepared.env_by_wire, active_sim_renderer(&project_path),
-        resolve_jobs(jobs, false),
+        resolve_jobs(jobs, false, jobs_force)?,
     );
     plan["manual_excluded"] = serde_json::json!(manual_excluded);
     println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -1608,6 +1609,7 @@ pub fn do_run_named_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    jobs_force: bool,
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
@@ -1615,6 +1617,9 @@ pub fn do_run_named_sims(
     // is nothing to overlap, so `--jobs` does not apply -- nor `--workers`,
     // since a one-entry queue takes no checkpoint either way.
     if names.len() == 1 {
+        if jobs.is_some_and(|j| j > 1) {
+            resolve_jobs(jobs, update_snapshots, jobs_force)?;
+        }
         return do_run_sim_opts_with_request(
             backend,
             project,
@@ -1641,6 +1646,7 @@ pub fn do_run_named_sims(
         quiet,
         update_snapshots,
         jobs,
+        jobs_force,
         full_asset_jobs,
         mode,
         &recorder,
@@ -1657,6 +1663,7 @@ fn do_run_named_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    jobs_force: bool,
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
@@ -1696,7 +1703,7 @@ fn do_run_named_sims_recorded(
 
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
-    let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let effective_jobs = resolve_jobs(jobs, update_snapshots, jobs_force)?;
     let requested_full_asset_jobs = full_asset_jobs;
     let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
@@ -1728,6 +1735,7 @@ fn do_run_named_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
+            jobs_force,
             full_asset_jobs,
             reload_lane.as_mut(),
             Some(recorder),
@@ -1767,7 +1775,7 @@ fn do_run_named_sims_recorded(
         return Ok(());
     }
 
-    let jobs = resolve_jobs(jobs, update_snapshots);
+    let jobs = resolve_jobs(jobs, update_snapshots, jobs_force)?;
 
     // Same two lanes as the suite path. The unit of parallelism is the ENTRY,
     // not the part: a comma-chain's parts share one `$OUT` and run in order,
@@ -2145,6 +2153,7 @@ pub fn do_run_all_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    jobs_force: bool,
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
 ) -> Result<()> {
@@ -2163,6 +2172,7 @@ pub fn do_run_all_sims(
         quiet,
         update_snapshots,
         jobs,
+        jobs_force,
         full_asset_jobs,
         mode,
         &recorder,
@@ -2178,6 +2188,7 @@ fn do_run_all_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    jobs_force: bool,
     full_asset_jobs: Option<usize>,
     mode: SimExecMode,
     recorder: &SimRunRecorder,
@@ -2208,7 +2219,7 @@ fn do_run_all_sims_recorded(
     let entry_ids = recorder.plan_entries(&wire_names);
     let requested_mode = sim_exec_mode_name(mode);
     let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
-    let effective_jobs = resolve_jobs(jobs, update_snapshots);
+    let effective_jobs = resolve_jobs(jobs, update_snapshots, jobs_force)?;
     let requested_full_asset_jobs = full_asset_jobs;
     let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
@@ -2259,6 +2270,7 @@ fn do_run_all_sims_recorded(
             quiet,
             update_snapshots,
             jobs,
+            jobs_force,
             full_asset_jobs,
             reload_lane.as_mut(),
             Some(recorder),
@@ -2300,7 +2312,7 @@ fn do_run_all_sims_recorded(
         return Ok(());
     }
 
-    let jobs = resolve_jobs(jobs, update_snapshots);
+    let jobs = resolve_jobs(jobs, update_snapshots, jobs_force)?;
     let active_renderer = active_sim_renderer(&project_path);
     let mut summaries: HashMap<usize, Result<SimSummary>> = HashMap::new();
     let mut active_indices: Vec<usize> = Vec::new();
@@ -2573,6 +2585,7 @@ pub fn do_run_allocation_census(
     names: &[String],
     output_path: &str,
     jobs: Option<usize>,
+    jobs_force: bool,
 ) -> Result<()> {
     let path = PathBuf::from(output_path);
     if path.exists() {
@@ -2616,7 +2629,7 @@ pub fn do_run_allocation_census(
             ordinary_idx.push(i);
         }
     }
-    let jobs = resolve_jobs(jobs, false);
+    let jobs = resolve_jobs(jobs, false, jobs_force)?;
     // Reload entries own the Session and an isolated copy of the boot chunk.
     let mut reload_lane = reload_lane_session(
         backend,
@@ -2833,6 +2846,7 @@ pub fn do_run_allocation_sites(
     names: &[String],
     output_dir: &str,
     jobs: Option<usize>,
+    jobs_force: bool,
 ) -> Result<()> {
     let artifact_dir = PathBuf::from(output_dir);
     if artifact_dir.exists() {
@@ -2885,7 +2899,7 @@ pub fn do_run_allocation_sites(
         }
     }
 
-    let jobs = resolve_jobs(jobs, false);
+    let jobs = resolve_jobs(jobs, false, jobs_force)?;
     let run_at = |index: usize| -> Result<(String, SimSummary)> {
         let name = &selected[index];
         let stem = allocation_site_artifact_stem(index, name);
@@ -3092,13 +3106,14 @@ fn run_specs_worker_mode(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    jobs_force: bool,
     full_asset_jobs: usize,
     reload_lane: Option<&mut ReloadLaneSession>,
     recorder: Option<&SimRunRecorder>,
     entry_ids: Option<&[u64]>,
 ) -> Result<Vec<(String, SimSummary)>> {
 
-    let jobs = resolve_jobs(jobs, update_snapshots);
+    let jobs = resolve_jobs(jobs, update_snapshots, jobs_force)?;
     let active_renderer = active_sim_renderer(Path::new(project));
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
     let mut active_specs: Vec<String> = Vec::new();
@@ -3702,28 +3717,29 @@ const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 /// rewrites baseline files, and the runner does not yet prove every
 /// destination path is unique before spawning (several `@sim`s can share one
 /// source file, so its `.snap` directory is shared too).
-fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
-    let cores = default_sim_jobs();
-    let jobs = resolve_jobs_with(requested, update_snapshots, cores, sim_job_budget());
-    if requested.is_some() && !update_snapshots && jobs > sim_job_budget() {
+pub(crate) fn resolve_jobs(requested: Option<usize>, update_snapshots: bool, force: bool) -> Result<usize> {
+    let budget = sim_job_budget();
+    let jobs = resolve_jobs_with(requested, update_snapshots, default_sim_jobs(), budget, force)?;
+    if force && requested.is_some() && !update_snapshots && jobs > budget {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| log::warn!(target: "SIM",
-            "--jobs {jobs} exceeds the default memory budget of {} lanes", sim_job_budget()));
+            "--jobs {jobs} exceeds the default memory budget of {budget} lanes"));
     }
-    jobs
+    Ok(jobs)
 }
 
-/// Without a request the memory budget decides; a request is still bounded by
-/// the cores, so the author can override the budget but not oversubscribe.
-fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: usize) -> usize {
+fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: usize, force: bool) -> Result<usize> {
     if update_snapshots {
         if requested.is_some_and(|j| j > 1) {
             log::warn!(target: "SIM",
                 "--update-snapshots rewrites snapshot baselines; running serially");
         }
-        return 1;
+        return Ok(1);
     }
-    requested.unwrap_or(budget).clamp(1, cores.max(1))
+    if let Some(jobs) = requested.filter(|j| !force && *j > budget) {
+        anyhow::bail!("--jobs {jobs} exceeds the default memory budget of {budget} lanes; use --jobs-force to override");
+    }
+    Ok(requested.unwrap_or(budget).clamp(1, cores.max(1)))
 }
 
 /// GPU memory one sim child is planned at. Measured 2026-09-22 on the Linux
@@ -7942,16 +7958,21 @@ mod tests {
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         let (cores, budget) = (32, 4);
 
-        assert_eq!(resolve_jobs_with(None, false, cores, budget), budget, "no request takes the memory budget");
-        assert_eq!(resolve_jobs_with(Some(1), false, cores, budget), 1);
-        // An explicit request may exceed the budget, never the cores.
-        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget), 10);
-        assert_eq!(resolve_jobs_with(Some(usize::MAX), false, cores, budget), cores);
+        assert_eq!(resolve_jobs_with(None, false, cores, budget, false).unwrap(), budget, "no request takes the memory budget");
+        assert_eq!(resolve_jobs_with(Some(1), false, cores, budget, false).unwrap(), 1);
+        let error = resolve_jobs_with(Some(10), false, cores, budget, false).unwrap_err();
+        assert!(error.to_string().contains("memory budget of 4"));
+        assert!(error.to_string().contains("--jobs-force"));
+        assert_eq!(resolve_jobs_with(Some(4), false, cores, budget, false).unwrap(), 4);
+        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget, false).unwrap(), 1);
+        // A forced request may exceed the budget, never the cores.
+        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget, true).unwrap(), 10);
+        assert_eq!(resolve_jobs_with(Some(usize::MAX), false, cores, budget, true).unwrap(), cores);
         // 0 is meaningless; clamp up rather than deadlock on an empty pool.
-        assert_eq!(resolve_jobs_with(Some(0), false, cores, budget), 1);
+        assert_eq!(resolve_jobs_with(Some(0), false, cores, budget, false).unwrap(), 1);
         // --update-snapshots wins over ANY explicit request.
-        assert_eq!(resolve_jobs_with(None, true, cores, budget), 1);
-        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget), 1);
+        assert_eq!(resolve_jobs_with(None, true, cores, budget, true).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget, true).unwrap(), 1);
     }
 
     #[test]
@@ -7971,9 +7992,9 @@ mod tests {
     fn default_jobs_fit_ram_and_gpu_budgets() {
         let studio = memory_budgeted_jobs(14, Some(36 * 1024), None);
         assert_eq!(studio, 10);
-        assert_eq!(resolve_jobs_with(None, false, 14, studio), 10);
-        assert_eq!(resolve_jobs_with(Some(14), false, 14, studio), 14);
-        assert_eq!(resolve_jobs_with(Some(14), true, 14, studio), 1);
+        assert_eq!(resolve_jobs_with(None, false, 14, studio, false).unwrap(), 10);
+        assert_eq!(resolve_jobs_with(Some(14), false, 14, studio, true).unwrap(), 14);
+        assert_eq!(resolve_jobs_with(Some(14), true, 14, studio, true).unwrap(), 1);
         assert_eq!(memory_budgeted_jobs(32, Some(62 * 1024), Some(17851)), 5);
         assert_eq!(memory_budgeted_jobs(32, Some(62 * 1024), None), 17);
         assert_eq!(memory_budgeted_jobs(2, Some(36 * 1024), None), 2);
