@@ -113,6 +113,29 @@ class WindowCompilationTest(fixtures.RuntimePerfCompareTest):
         self.assertEqual(result.returncode, 2)
         self.assertIn("split", result.stderr)
 
+    def test_p99_refuses_short_frame_population(self):
+        report = self.report(self.split_arms())
+        for series in ["logic_cpu", "render_cpu", "effective_cpu", "rendered"]:
+            row = report["metrics"][f"frame_ms.{series}.p99"]
+            self.assertEqual(row["direction"], "unresolved-samples")
+            self.assertEqual(row["baseline_frames"], [120])
+            self.assertEqual(row["minimum_frames"], 1000)
+
+    def test_p99_compares_long_frame_population(self):
+        docs = self.split_arms()
+        for doc in docs:
+            doc["frames"] = 1000
+            for block in doc["frame_ms"].values():
+                block["n"] = 1000
+        report = self.report(docs)
+        self.assertEqual(report["metrics"]["frame_ms.effective_cpu.p99"]["direction"], "candidate-higher")
+
+    def test_p99_unknown_population_refuses_verdict(self):
+        docs = self.split_arms()
+        del docs[0]["frame_ms"]["effective_cpu"]["n"]
+        report = self.report(docs)
+        self.assertEqual(report["metrics"]["frame_ms.effective_cpu.p99"]["direction"], "unresolved-samples")
+
     def test_negative_counter_rejects_evidence(self):
         docs = self.arms()
         docs[1]["memory"]["gc_window"]["jit_trace"]["compiles"] = -1

@@ -210,7 +210,7 @@ fn perf_json_has_top_level_shape() {
 
 #[test]
 fn perf_json_frame_ms_is_uniform_series() {
-    let doc = run_perf_json("games/match3");
+    let doc = run_perf_json_window("games/match3", Some((120, 100)));
     let frame_ms = &doc["frame_ms"];
     assert!(
         frame_ms.is_object(),
@@ -225,6 +225,7 @@ fn perf_json_frame_ms_is_uniform_series() {
             .get(series)
             .unwrap_or_else(|| panic!("frame_ms.{series} missing: {frame_ms}"));
         assert_stat_block(block, &format!("frame_ms.{series}"), true);
+        assert_eq!(block["n"], doc["frames"], "{series} must cover every measured frame");
     }
     let gpu = frame_ms
         .get("gpu")
