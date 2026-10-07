@@ -366,6 +366,18 @@ fn perf_json_gc_window_has_trustworthy_reconciliation() {
     }
     let mem = &doc["memory"];
     let gc = &mem["gc_window"];
+    let split = &gc["allocation_split"];
+    assert_eq!(split["available"], Value::Bool(true), "native origin split required: {split}");
+    assert_eq!(split["basis"], "luajit-vmstate");
+    let mut bytes = 0u64;
+    let mut calls = 0u64;
+    for origin in ["mutator", "jit_internal", "gc"] {
+        bytes += split[origin]["request_bytes"].as_u64().expect("origin request bytes");
+        calls += split[origin]["allocator_calls"].as_u64().expect("origin allocator calls");
+        assert!(split[origin]["request_kb_per_frame"].as_f64().unwrap() >= 0.0);
+    }
+    assert_eq!(calls, gc["allocator_calls"].as_u64().unwrap());
+    assert!((bytes as f64 / 1024.0 / 4.0 - gc["gross_request_kb_per_frame"].as_f64().unwrap()).abs() < 0.00011);
     assert_eq!(gc["requested_frames"].as_i64(), Some(4));
     assert_eq!(gc["measured_frames"].as_i64(), Some(4));
     assert_eq!(gc["available"], Value::Bool(true));
