@@ -140,3 +140,81 @@ print("ok")
 "#), "mixed_enum_strided_reconstruction");
     assert_eq!(out, "ok");
 }
+
+#[test]
+fn dynamic_payload_boxes_reserve_only_the_variants_payload() {
+    let lua = emit_module(SRC);
+    let out = run_luajit(&format!(r#"{lua}
+jit.off(); jit.flush()
+local n = 20000
+local slots = require("table.new")(n, 0)
+for i = 1, n do slots[i] = false end
+local function measure(make)
+    collectgarbage("collect")
+    local before = collectgarbage("count") * 1024
+    for i = 1, n do slots[i] = make() end
+    collectgarbage("collect")
+    local bytes = collectgarbage("count") * 1024 - before
+    for i = 1, n do slots[i] = false end
+    collectgarbage("collect")
+    return bytes / n
+end
+local ty = constant_unit().__ty
+local control = measure(function() return {{__variant = "Text", __ty = ty, "payload"}} end)
+local dynamic = measure(function() return through_field(1) end)
+print("payload bytes", control, dynamic)
+assert(dynamic <= control + 1, "dynamic payload reserves union slots")
+print("ok")
+"#), "mixed_enum_payload_size");
+    assert!(out.ends_with("ok"), "{out}");
+}
+
+#[test]
+fn variant_sizing_preserves_widened_offsets_and_named_payloads() {
+    let src = r#"
+nobox value Wide { a: int, b: int, c: int }
+enum Packet {
+    None, Narrow(string), Wide(Wide), Pair(string, int),
+    Named { text: string }, NamedWide { text: string, code: int }
+}
+struct Holder { packet: Packet }
+fn make_packet(kind: int) -> Packet {
+    let p = if kind == 0 { Packet::None } else if kind == 1 { Packet::Narrow("one") }
+        else if kind == 2 { Packet::Wide(Wide { a: 2, b: 3, c: 5 }) }
+        else if kind == 3 { Packet::Pair("pair", 7) }
+        else if kind == 4 { Packet::Named { text: "named" } }
+        else { Packet::NamedWide { text: "wide", code: 11 } }
+    return p
+}
+@nomangle fn packet(kind: int) -> any {
+    let holder = Holder { packet: make_packet(kind) }
+    return holder.packet
+}
+@nomangle fn score(kind: int) -> int {
+    let p = make_packet(kind)
+    return match p {
+        Packet::None => 0,
+        Packet::Narrow(s) => s.len(),
+        Packet::Wide(w) => w.a + w.b + w.c,
+        Packet::Pair(s, n) => s.len() + n,
+        Packet::Named { text } => text.len(),
+        Packet::NamedWide { text, code } => text.len() + code,
+    }
+}
+"#;
+    let lua = emit_module(src);
+    let out = run_luajit(&format!(r#"{lua}
+local expected = {{0, 3, 10, 11, 5, 15}}
+for kind = 0, 5 do assert(score(kind) == expected[kind + 1]) end
+local narrow = packet(1)
+assert(narrow[1] == "one" and narrow[2] == nil and narrow[3] == nil)
+local pair = packet(3)
+assert(pair[1] == "pair" and pair[4] == 7)
+local named = packet(4)
+assert(named.text == "named" and named.code == nil and named[1] == nil)
+local named_wide = packet(5)
+assert(named_wide.text == "wide" and named_wide.code == 11)
+print("ok")
+"#), "mixed_enum_variant_layout");
+    assert_eq!(out, "ok");
+}
