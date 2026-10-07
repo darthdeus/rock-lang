@@ -115,6 +115,14 @@ pub trait PlacementOracle {
         None
     }
 
+    /// Sources of a local aggregate consumed exclusively by this construction.
+    fn consumed_local_sources(
+        &self, _mir: &MirFunc, _analysis: &PlacementAnalysis,
+        _load: Idx<Inst>, _destination: Idx<Inst>,
+    ) -> Option<Vec<Idx<Inst>>> {
+        None
+    }
+
     fn carries_placement(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
 
     fn is_allocation_site(&self, mir: &MirFunc, inst: Idx<Inst>) -> bool;
@@ -856,7 +864,7 @@ fn infer_call_requirements(
                 && !matches!(mir.insts[arg], Inst::Load(_))
                 && oracle.carries_placement(mir, arg)
                 && let Some(analysis) = analysis
-                && construction_inputs(mir, analysis, oracle, arg, &mut HashSet::new())
+                && construction_inputs(mir, analysis, oracle, arg, id, &mut HashSet::new())
                     .iter().all(|place| matches!(place, Place::Static | Place::Session))
             {
                 // A fresh argument may construct there without strengthening borrowed inputs.
@@ -1578,16 +1586,21 @@ fn construction_inputs(
     analysis: &PlacementAnalysis,
     oracle: &impl PlacementOracle,
     value: Idx<Inst>,
+    destination: Idx<Inst>,
     active: &mut HashSet<Idx<Inst>>,
 ) -> Vec<Place> {
     if !oracle.carries_placement(mir, value) { return Vec::new(); }
     if !active.insert(value) { return vec![Place::Unknown]; }
     let inputs = match &mir.insts[value] {
+        Inst::Load(_) if let Some(sources) = oracle.consumed_local_sources(mir, analysis, value, destination) => {
+            sources.into_iter().flat_map(|source|
+                construction_inputs(mir, analysis, oracle, source, destination, active)).collect()
+        }
         Inst::StringConcat(..) | Inst::Format { .. } | Inst::FormatDyn { .. } => Vec::new(),
         instruction if is_composite_constructor(instruction) => {
             let mut inputs = Vec::new();
             instruction.uses_each(&mut |operand| inputs.extend(
-                construction_inputs(mir, analysis, oracle, operand, active)));
+                construction_inputs(mir, analysis, oracle, operand, destination, active)));
             inputs
         }
         Inst::Call { args, .. } | Inst::CallMulti { args, .. }
@@ -1605,13 +1618,13 @@ fn construction_inputs(
                         (Place::Param(index), Place::Destination) => args.get(usize::from(index)),
                         _ => None,
                     }
-                }).flat_map(|arg| construction_inputs(mir, analysis, oracle, *arg, active))
+                }).flat_map(|arg| construction_inputs(mir, analysis, oracle, *arg, destination, active))
                     .collect()
             } else if let Some(Place::Param(index)) = effect.result
                 && let Some(&arg) = args.get(usize::from(index))
                 && oracle.carries_placement(mir, arg)
             {
-                construction_inputs(mir, analysis, oracle, arg, active)
+                construction_inputs(mir, analysis, oracle, arg, destination, active)
             } else {
                 provenance_places(mir, analysis, value)
             }
@@ -1814,7 +1827,7 @@ fn value_place(
             }
             for &(index, destination) in &effect.constructions {
                 if let Some(&payload) = raw_args.get(usize::from(index)) {
-                    for value in construction_inputs(mir, analysis, oracle, payload, &mut HashSet::new()) {
+                    for value in construction_inputs(mir, analysis, oracle, payload, id, &mut HashSet::new()) {
                         add_outlives_constraint(analysis, OutlivesConstraint {
                             value, destination, span, contextual: false, owner_equivalence: false,
                         });
