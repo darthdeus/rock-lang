@@ -12,7 +12,7 @@
 //! So a v1 package holding a value struct or an enum compiled clean and then
 //! died in LuaJIT. These controls execute the chunk.
 
-use crate::common::{emit_v1_package, run_luajit, V1Fragment};
+use crate::common::{emit_v1_package, run_luajit, InlineOffGuard, V1Fragment};
 
 const MAIN: &str = r#"
 fn main() {
@@ -215,6 +215,8 @@ pub fn total() -> int {
 /// Converting `libs/chess-core` hit this on the first `for m in moves`.
 #[test]
 fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
+    // Keep the specialized definition available for the identifier checks.
+    let _inline = InlineOffGuard::on();
     let emitted = emit_v1_package(
         "v1spec",
         &[
