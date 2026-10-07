@@ -849,6 +849,8 @@ fn run_emitted_tests(
     // Shards are separate processes over one program file; test `i` goes to
     // shard `i % shards`, which balances counts and spreads files' slow tests.
     let token = run_token();
+    let shards = resolve_test_shards(shards, tests.len(), lua.len(),
+        std::env::var_os("ROCK_TEST_SHARDS").is_some());
     let harness = build_test_harness(tests, &token);
     let (script, excerpt) = write_test_program(lua, &harness).map_err(|e| SkullFailure {
         reason: "test run errored (skull bug)".to_string(),
@@ -1005,6 +1007,12 @@ struct TestProgram {
     preamble: String,
     lua: String,
     setup: &'static str,
+}
+
+impl TestProgram {
+    fn len(&self) -> usize {
+        self.preamble.len() + self.lua.len() + self.setup.len()
+    }
 }
 
 impl From<String> for TestProgram {
@@ -1266,20 +1274,39 @@ fn skull_build_package_with_limit(
     run_emitted_tests(lua, &tests, &files, limit, shards, filter, true)
 }
 
-/// LuaJIT processes per package test run: `ROCK_TEST_SHARDS`, else 2 (1 on a
-/// single-core host). On the Studio the mag lane takes 86/62/52/50 s at
-/// 1/2/4/8 shards; 2 keeps most of the gain while many runs share a host.
+/// Package shard limit; the default resolves against the selected tests and
+/// program size in `run_emitted_tests`, before the program text is freed.
 fn test_shard_count() -> Result<usize> {
-    match std::env::var("ROCK_TEST_SHARDS") {
-        Ok(value) => match value.trim().parse::<usize>() {
+    let value = match std::env::var("ROCK_TEST_SHARDS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => anyhow::bail!("ROCK_TEST_SHARDS: {error}"),
+    };
+    test_shard_count_from(value.as_deref(),
+        std::thread::available_parallelism().map_or(1, |cores| cores.get()))
+}
+
+fn test_shard_count_from(value: Option<&str>, cores: usize) -> Result<usize> {
+    match value {
+        Some(value) => match value.trim().parse::<usize>() {
             Ok(shards) if shards > 0 => Ok(shards),
             _ => anyhow::bail!("ROCK_TEST_SHARDS must be a positive integer, got `{value}`"),
         },
-        Err(std::env::VarError::NotPresent) => Ok(std::thread::available_parallelism()
-            .map_or(1, |cores| cores.get().min(2))),
-        Err(error) => anyhow::bail!("ROCK_TEST_SHARDS: {error}"),
+        None => Ok(cores.clamp(1, 2)),
     }
 }
+
+fn resolve_test_shards(shards: usize, tests: usize, program_bytes: usize, overridden: bool) -> usize {
+    if !overridden && (tests < 60 || program_bytes < 8 * 1024 * 1024) {
+        1
+    } else {
+        shards
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/test_shards/policy.rs"]
+mod test_shard_policy;
 
 /// Whether the checked program declares a native binding into libstone. The
 /// resolved graph can supply native bindings without the full Stone host; this

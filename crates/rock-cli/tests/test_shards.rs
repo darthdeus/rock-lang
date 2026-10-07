@@ -56,20 +56,23 @@ struct Run {
 }
 
 fn run(project: &Path, shards: &str) -> Run {
-    run_filtered(project, shards, None)
+    run_filtered(project, Some(shards), None)
 }
 
-fn run_filtered(project: &Path, shards: &str, filter: Option<&str>) -> Run {
+fn run_filtered(project: &Path, shards: Option<&str>, filter: Option<&str>) -> Run {
     let log = project.join("shard.log");
     let timings = project.join("timings.jsonl");
     let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
     command.arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")
-        .env("ROCK_TEST_SHARDS", shards)
         .env("ROCK_TEST_TIMINGS", &timings)
         .env("SHARD_LOG", &log)
         .env_remove("ROCK_TEST_FILTER");
+    match shards {
+        Some(shards) => command.env("ROCK_TEST_SHARDS", shards),
+        None => command.env_remove("ROCK_TEST_SHARDS"),
+    };
     if let Some(filter) = filter {
         command.env("ROCK_TEST_FILTER", filter);
     }
@@ -176,7 +179,7 @@ fn a_dying_shard_names_its_unfinished_tests() {
 #[test]
 fn shards_split_only_the_filtered_selection() {
     let (_dir, project) = package(&[("alpha.rock", ALPHA), ("beta.rock", BETA), ("gamma.rock", GAMMA)]);
-    let run = run_filtered(&project, "2", Some("alpha_,gamma.rock"));
+    let run = run_filtered(&project, Some("2"), Some("alpha_,gamma.rock"));
     let text = &run.text;
     let mut runs: BTreeMap<&str, usize> = BTreeMap::new();
     let mut pids = BTreeSet::new();
@@ -200,7 +203,7 @@ fn shards_split_only_the_filtered_selection() {
 fn a_dying_filtered_shard_names_only_selected_tests() {
     for shards in ["1", "2"] {
         let (_dir, project) = package(&[("dying.rock", DYING)]);
-        let run = run_filtered(&project, shards, Some("d_1,d_2,d_3"));
+        let run = run_filtered(&project, Some(shards), Some("d_1,d_2,d_3"));
         let text = &run.text;
         let (passed, total, failed) = summary(text);
         assert_eq!(total, 3, "shards={shards}: the total is the selection:\n{text}");
@@ -245,5 +248,22 @@ fn each_shard_process_gets_its_own_scratch_dir() {
     assert_eq!(dirs.len(), 2, "processes do not share a scratch dir:\n{}", run.log);
     for dir in dirs {
         assert!(!Path::new(dir).exists(), "`{dir}` is removed after the run");
+    }
+}
+
+#[test]
+fn default_small_packages_use_one_child() {
+    for count in [3, 60] {
+        let source = (0..count).map(|i| format!(
+            "@test fn small_{i}() {{ record(\"small_{i}\") }}\n"
+        )).collect::<String>();
+        let (_dir, project) = package(&[("small.rock", &source)]);
+        let run = run_filtered(&project, None, None);
+        assert!(run.success, "{}", run.text);
+        let pids = run.log.lines().map(|line| line.split_once(' ').unwrap().1)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(pids.len(), 1, "count={count}: one child: {}", run.text);
+        assert_eq!(summary(&run.text), (count, count, 0));
+        assert_eq!(run.timings.lines().count(), count);
     }
 }
