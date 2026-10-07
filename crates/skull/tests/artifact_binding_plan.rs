@@ -79,7 +79,7 @@ fn main() {}
 }
 
 #[test]
-fn logical_identity_survives_a_backend_name_change() {
+fn logical_identity_and_physical_name_survive_a_return_type_edit() {
     let old = plan_snapshot(&emit_mir(
         r#"
 fn stable_binding(value: int) -> int { return value }
@@ -101,7 +101,7 @@ fn main() {}
         .find(|row| row.contains("stable_binding"))
         .expect("new stable binding plan row");
     assert_eq!(old_identity.split('=').next(), new_identity.split('=').next(), "logical identity changed with the backend realization: old={old} new={new}");
-    assert_ne!(old_identity, new_identity, "fixture did not change a physical binding realization");
+    assert_eq!(old_identity, new_identity, "return type changed a parameter-only physical binding: old={old} new={new}");
 }
 
 #[test]
