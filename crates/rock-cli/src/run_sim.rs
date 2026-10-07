@@ -8184,10 +8184,8 @@ mod tests {
     #[test]
     fn duration_blocks_bound_useful_workers_by_the_time_target() {
         let group: Vec<_> = (0..21).collect();
-        let costs = vec![Some(900); group.len()];
-        // Total work fits below the advertised production target, although
-        // halving it would beat the boot tax. More workers are not useful here.
-        assert!(costs.iter().flatten().sum::<u64>() < SIM_BLOCK_TARGET_MS);
+        let costs = vec![Some(SIM_BLOCK_TARGET_MS / (group.len() as u64 + 1)); group.len()];
+        // A feasible split beats the boot tax, but all work fits in one target.
         assert_eq!(allocate_worker_lanes(&[group.clone()], 4, &costs), vec![group]);
     }
 
