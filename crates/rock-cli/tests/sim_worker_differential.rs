@@ -2954,6 +2954,8 @@ fn a_lua_allocator_installation_belongs_to_the_live_native_provider() {
     assert_eq!(isolated.verdict(), "PASS", "{isolated:?}");
     assert_eq!(worker.verdict(), "PASS", "{worker:?}");
     assert!(worker.seq > 0, "the probe must cross a shared-worker boundary");
+    assert!(!worker.diagnostics.contains("Initialized successfully"),
+        "the allocator probe must not recover into a fresh process: {}", worker.diagnostics);
     assert_eq!(worker.expects_pass.len(), 4, "all allocator assertions must run");
 }
 
@@ -2965,6 +2967,8 @@ fn a_lua_allocator_window_is_closed_at_the_worker_boundary() {
     assert_eq!(isolated.verdict(), "PASS", "{isolated:?}");
     assert_eq!(worker.verdict(), "PASS", "{worker:?}");
     assert!(worker.seq > 0, "the probe must cross a shared-worker boundary");
+    assert!(!worker.diagnostics.contains("Initialized successfully"),
+        "the open-window probe must not recover into a fresh process: {}", worker.diagnostics);
 }
 
 #[test]
