@@ -396,30 +396,36 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = box_bb;
         let eid = self.ws.enums_by_name[&shape.name];
-        let variants: Vec<_> = self.ws.modules[eid.module.index()].enums[eid.def]
-            .variants.iter().map(|v| v.name).collect();
-        for (i, variant) in variants.iter().copied().enumerate() {
-            let next = if i + 1 < variants.len() {
-                let known_tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
-                let is_variant = self.emit_cur(Inst::Eq(tag, known_tag));
-                let variant_bb = self.f.new_block();
-                let next_bb = self.f.new_block();
-                self.f.set_term(self.cur, Term::Branch {
-                    cond: is_variant, then_bb: variant_bb, else_bb: next_bb,
-                });
-                self.cur = variant_bb;
-                Some(next_bb)
-            } else {
-                // A non-null typed enum tag must be one of its declared variants.
-                None
-            };
-            let boxed = self.box_flat_variant(shape, &cells, variant);
-            self.emit_cur(Inst::Store { cell: result, value: boxed });
+        let units: Vec<_> = self.ws.modules[eid.module.index()].enums[eid.def]
+            .variants.iter()
+            .filter(|v| matches!(v.payload, VariantPayload::Unit))
+            .map(|v| v.name)
+            .collect();
+        for variant in units {
+            let known_tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
+            let is_unit = self.emit_cur(Inst::Eq(tag, known_tag));
+            let unit_bb = self.f.new_block();
+            let next_bb = self.f.new_block();
+            self.f.set_term(self.cur, Term::Branch {
+                cond: is_unit, then_bb: unit_bb, else_bb: next_bb,
+            });
+            self.cur = unit_bb;
+            let global = Ustr::from(format!(
+                "__rock_enum_{}_{}", crate::mangle::type_symbol(self.ws, shape.name), variant,
+            ).as_str());
+            let singleton = self.emit_cur(Inst::Global(global));
+            self.emit_cur(Inst::Store { cell: result, value: singleton });
             self.f.set_term(self.cur, Term::Goto(join));
-            if let Some(next) = next {
-                self.cur = next;
-            }
+            self.cur = next_bb;
         }
+        let boxed = self.emit_cur(Inst::MakeEnumDyn {
+            tag,
+            ty: shape.name,
+            positional: cells.positional,
+            named: cells.named,
+        });
+        self.emit_cur(Inst::Store { cell: result, value: boxed });
+        self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         self.emit_cur(Inst::Load(result))
     }
@@ -436,27 +442,9 @@ impl Builder<'_> {
             ).as_str());
             return self.emit_cur(Inst::Global(global));
         }
-        let eid = self.ws.enums_by_name[&shape.name];
-        let payload = self.ws.modules[eid.module.index()].enums[eid.def]
-            .variants.iter().find(|v| v.name == variant)
-            .expect("flat enum tag belongs to its declaration").payload.clone();
-        let (width, named) = match payload {
-            VariantPayload::Tuple(types) => {
-                let width = types.len().checked_sub(1).map(|last| {
-                    shape.slot_offset(last) + self.flat_payload_leaf_shape(
-                        Some(shape.name), variant, last,
-                    ).map_or(1, |vs| vs.leaf_count())
-                }).unwrap_or(0);
-                (width, Vec::new())
-            }
-            VariantPayload::Record(fields) => {
-                let named = cells.named.iter().copied()
-                    .filter(|(name, _)| fields.iter().any(|f| f.name == *name))
-                    .collect();
-                (0, named)
-            }
-            VariantPayload::Unit => unreachable!("unit enum variant selected above"),
-        };
+        let (width, fields) = shape.box_layout(self.ws, variant);
+        let named = cells.named.iter().copied()
+            .filter(|(name, _)| fields.contains(name)).collect();
         self.emit_cur(Inst::MakeEnumDyn {
             tag: cells.tag,
             ty: shape.name,
@@ -464,6 +452,7 @@ impl Builder<'_> {
             named,
         })
     }
+
 
     /// Re-materialize a flattened enum field `parent.{prefix}` at a whole-value
     /// read boundary. A nil tag materializes to nil, never `{__variant = nil}`.
@@ -496,5 +485,34 @@ impl Builder<'_> {
             out.push((flat_named_slot(field, rf), v));
         }
         out
+    }
+}
+
+impl EnumFlatShape {
+    pub fn box_layout(&self, ws: &Workspace, variant: Ustr) -> (usize, Vec<Ustr>) {
+        let eid = ws.enums_by_name[&self.name];
+        let payload = &ws.modules[eid.module.index()].enums[eid.def]
+            .variants.iter().find(|v| v.name == variant)
+            .expect("flat enum tag belongs to its declaration").payload;
+        match payload {
+            VariantPayload::Tuple(types) => {
+                let width = types.len().checked_sub(1).map(|last| {
+                    let child = match static_ty(ws, types[last]) {
+                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
+                            self.position_shape(last, Some(name))
+                        }
+                        _ => None,
+                    };
+                    self.slot_offset(last) + child.map_or(1, |vs| vs.leaf_count())
+                }).unwrap_or(0);
+                (width, Vec::new())
+            }
+            VariantPayload::Record(fields) => {
+                let names = self.record_fields.iter().copied()
+                    .filter(|name| fields.iter().any(|field| field.name == *name)).collect();
+                (0, names)
+            }
+            VariantPayload::Unit => (0, Vec::new()),
+        }
     }
 }

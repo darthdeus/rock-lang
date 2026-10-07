@@ -3178,6 +3178,12 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>])
                 use_count[k] += 1;
                 use_block[k] = br;
             });
+            // Selected-layout emission may read the dynamic tag more than once.
+            if let Inst::MakeEnumDyn { tag, .. } = func.insts[id] {
+                if !matches!(func.insts[tag], Inst::Const(_)) {
+                    use_count[raw(tag) as usize] += 1;
+                }
+            }
         }
         regalloc::term_uses(&func.blocks[b].term, &mut |u| {
             let k = raw(u) as usize;
@@ -3474,6 +3480,7 @@ fn render_scope(
     // MIR, so codegen never sees a "boxed cell".)
 
     let mut em = Emitter {
+        enum_box_groups: RefCell::new(HashMap::default()),
         ws,
         ctx,
         interner,
@@ -3766,7 +3773,10 @@ fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: Idx<Inst>) 
     }
 }
 
+type EnumBoxGroups = Vec<(Vec<ustr::Ustr>, (usize, Vec<ustr::Ustr>))>;
+
 struct Emitter<'a> {
+    enum_box_groups: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxGroups>>>,
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,
     /// The build's one arena, so the symbol a call spells comes from the same
@@ -4782,19 +4792,7 @@ impl Emitter<'_> {
                 out.push('}');
             }
             Inst::MakeEnumDyn { tag, ty, positional, named } => {
-                out.push_str("{__variant = ");
-                self.write_opnd(out, *tag);
-                out.push_str(", __ty = ");
-                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *ty).as_str());
-                for id in positional {
-                    out.push_str(", ");
-                    self.write_opnd(out, *id);
-                }
-                for (n, id) in named {
-                    let _ = write!(out, ", {n} = ");
-                    self.write_opnd(out, *id);
-                }
-                out.push('}');
+                self.write_dynamic_enum(out, *tag, *ty, positional, named);
             }
 
             Inst::FfiNewArray { ctype, count, .. } => {
@@ -5466,6 +5464,89 @@ impl Emitter<'_> {
                 unreachable!("Yield must be removed by the coroutine transform before codegen")
             }
         }
+    }
+
+    fn write_dynamic_enum(
+        &self,
+        out: &mut String,
+        tag: Idx<Inst>,
+        ty: ustr::Ustr,
+        positional: &[Idx<Inst>],
+        named: &[(ustr::Ustr, Idx<Inst>)],
+    ) {
+        if matches!(self.func.insts[tag], Inst::Const(_)) {
+            self.write_enum_box(out, tag, ty, positional, named);
+            return;
+        }
+        let cached = self.enum_box_groups.borrow().get(&ty).cloned();
+        let groups = if let Some(groups) = cached {
+            groups
+        } else {
+            let plan = skull_mir::lower::EnumPlan::for_name(self.ws, ty)
+                .expect("dynamic enum has a representation plan");
+            let shape = plan.flat().expect("dynamic enum has a flat shape");
+            let eid = self.ws.enums_by_name[&ty];
+            let mut groups = EnumBoxGroups::new();
+            for variant in &self.ws.modules[eid.module.index()].enums[eid.def].variants {
+                if matches!(variant.payload, bone_semantic::hir::VariantPayload::Unit) {
+                    continue;
+                }
+                let layout = shape.box_layout(self.ws, variant.name);
+                if let Some((members, _)) = groups.iter_mut().find(|(_, key)| *key == layout) {
+                    members.push(variant.name);
+                } else {
+                    groups.push((vec![variant.name], layout));
+                }
+            }
+            let common = groups.iter().enumerate().max_by_key(|(_, (members, _))| members.len())
+                .map(|(i, _)| i).expect("flat enum has payload variants");
+            let last = groups.remove(common);
+            groups.push(last);
+            let groups = std::rc::Rc::new(groups);
+            self.enum_box_groups.borrow_mut().insert(ty, groups.clone());
+            groups
+        };
+        if groups.len() > 1 { out.push('('); }
+        for (i, (members, (width, fields))) in groups.iter().enumerate() {
+            if i + 1 < groups.len() {
+                out.push('(');
+                for (j, variant) in members.iter().enumerate() {
+                    if j > 0 { out.push_str(" or "); }
+                    self.write_opnd(out, tag);
+                    out.push_str(" == ");
+                    write_lua_string(out, variant.as_str());
+                }
+                out.push_str(") and ");
+            }
+            let selected: Vec<_> = named.iter().copied()
+                .filter(|(name, _)| fields.contains(name)).collect();
+            self.write_enum_box(out, tag, ty, &positional[..*width], &selected);
+            if i + 1 < groups.len() { out.push_str(" or "); }
+        }
+        if groups.len() > 1 { out.push(')'); }
+    }
+
+    fn write_enum_box(
+        &self,
+        out: &mut String,
+        tag: Idx<Inst>,
+        ty: ustr::Ustr,
+        positional: &[Idx<Inst>],
+        named: &[(ustr::Ustr, Idx<Inst>)],
+    ) {
+        out.push_str("{__variant = ");
+        self.write_opnd(out, tag);
+        out.push_str(", __ty = ");
+        write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, ty).as_str());
+        for id in positional {
+            out.push_str(", ");
+            self.write_opnd(out, *id);
+        }
+        for (name, id) in named {
+            let _ = write!(out, ", {name} = ");
+            self.write_opnd(out, *id);
+        }
+        out.push('}');
     }
 
     fn write_csv(&self, out: &mut String, ids: &[Idx<Inst>]) {

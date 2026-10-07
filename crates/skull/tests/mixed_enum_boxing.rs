@@ -218,3 +218,36 @@ print("ok")
 "#), "mixed_enum_variant_layout");
     assert_eq!(out, "ok");
 }
+
+#[test]
+fn dynamic_boxing_dispatches_by_payload_layout() {
+    let src = r#"
+enum Packet { None, A(string), B(string), C(string), D(string), E(string), F(string) }
+struct BoxHolder { packet: Packet? }
+@nomangle fn box_input(kind: int) -> any {
+    let h = BoxHolder { packet: if kind < 0 { null } else {
+        if kind == 0 { Packet::None } else if kind == 1 { Packet::A("payload") }
+        else if kind == 2 { Packet::B("payload") } else if kind == 3 { Packet::C("payload") }
+        else if kind == 4 { Packet::D("payload") } else if kind == 5 { Packet::E("payload") }
+        else { Packet::F("payload") }
+    } }
+    return h.packet
+}
+"#;
+    let lua = emit_module(src);
+    let body = lua.split("function box_input(").nth(1).expect("box_input body")
+        .split("\nend").next().expect("box_input end");
+    assert_eq!(body.matches("__variant =").count(), 1,
+        "identical payload layouts need one allocation site: {body}");
+    let out = run_luajit(&format!(r#"{lua}
+for kind, tag in ipairs({{"A", "B", "C", "D", "E", "F"}}) do
+    local a, b = box_input(kind), box_input(kind)
+    assert(a.__variant == tag and a[1] == "payload")
+    assert(not rawequal(a, b))
+end
+assert(rawequal(box_input(0), box_input(0)))
+assert(box_input(-1) == nil)
+print("ok")
+"#), "mixed_enum_layout_dispatch");
+    assert_eq!(out, "ok");
+}
