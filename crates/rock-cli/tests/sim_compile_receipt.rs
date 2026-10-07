@@ -71,7 +71,7 @@ fn prepared_sim_receipt_reuses_one_project_compile() {
         &std::fs::read(project_receipt.join("receipt.json")).expect("read receipt manifest"),
     )
     .expect("parse receipt manifest");
-    assert_eq!(manifest["schema_version"], 3, "the cache identity changes the receipt schema");
+    assert_eq!(manifest["schema_version"], 4, "the cache identity changes the receipt schema");
     let registry = manifest["registry"].as_array().expect("receipt registry");
     assert!(!registry.is_empty(), "testbed receipt should include simulations");
     for entry in registry {
@@ -344,8 +344,8 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
     assert!(run.compiled("cold", "cache_probe", &[], &[]), "an empty cache compiles");
     assert!(!run.compiled("warm", "cache_probe", &[], &[]), "identical inputs reuse the cached compile");
     assert!(
-        !run.compiled("other-sim", "other_probe", &[], &[]),
-        "one compile serves every sim the project defines"
+        run.compiled("other-sim", "other_probe", &[], &[]),
+        "a different narrow selection compiles its own receipt"
     );
 
     std::fs::write(project.join("clock.txt"), "2\n").expect("change volatile var");
@@ -525,4 +525,131 @@ fn sim_run_forwards_build_var_overrides_to_its_compile() {
     let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     assert!(run.compiled("forwarded", "forwarded_probe", &["--var", "PROBE=forwarded"], &[]));
+}
+
+#[test]
+fn sim_compile_receipt_narrow_selection_excludes_unselected_body() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    let cache = dir.path().join("cache");
+    write_cache_fixture(&project);
+    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
+    let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
+    assert!(run.compiled("narrow", "cache_probe", &[], &[]));
+    let entries = cache_entries(&cache);
+    assert_eq!(entries.len(), 1);
+    let lua = std::fs::read_to_string(cache.join(&entries[0]).join("main.lua")).unwrap();
+    assert!(!lua.contains("the compile sees the runner's --var"), "unselected sim body emitted");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(cache.join(&entries[0]).join("receipt.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(manifest["registry"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn sim_compile_receipt_cache_distinguishes_selection_and_prefers_full_entry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    let cache = dir.path().join("cache");
+    write_cache_fixture(&project);
+    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
+    let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
+    assert!(run.compiled("first", "cache_probe", &[], &[]));
+    assert!(run.compiled("second", "other_probe", &[], &[]), "another selection must compile");
+    assert_eq!(cache_entries(&cache).len(), 2);
+    assert!(run.compiled("pair", "cache_probe,other_probe", &[], &[]));
+    assert!(!run.compiled("pair-reordered", "other_probe,cache_probe", &[], &[]),
+        "order and chain grouping do not change compile roots");
+    let args = ["--var", "PROBE=forwarded"];
+    assert!(run.compiled("full", "cache_probe,other_probe,forwarded_probe", &args, &[]));
+    assert!(!run.compiled("full-reuse", "cache_probe", &args, &[]), "narrow run reuses full entry");
+}
+
+#[test]
+fn sim_compile_receipt_named_dependency_is_registered_and_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    let cache = dir.path().join("cache");
+    write_cache_fixture(&project);
+    let stone = dir.path().join("stone");
+    copy_stone_sources(&workspace_root().join("stone"), &stone);
+    let stone_manifest = stone.join("stick.toml");
+    let text = std::fs::read_to_string(&stone_manifest).unwrap()
+        .replace("../stone-core", workspace_root().join("stone-core").to_str().unwrap())
+        .replace("../stone-native", workspace_root().join("stone-native").to_str().unwrap());
+    std::fs::write(stone_manifest, text).unwrap();
+    let manifest = project.join("stick.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap()
+        .replace(workspace_root().join("stone").to_str().unwrap(), stone.to_str().unwrap());
+    std::fs::write(manifest, text).unwrap();
+    let engine_sim = stone.join("engine/sim.rock");
+    let text = std::fs::read_to_string(&engine_sim).unwrap();
+    std::fs::write(engine_sim, format!("{text}\npub fn receipt_dependency_body() -> (() -> Coroutine<Wait>)? {{ SIMS[\"dependency_probe\"] }}\npub fn receipt_leaf_body() -> (() -> Coroutine<Wait>)? {{ SIMS.get(\"leaf_probe\") }}\npub fn receipt_dynamic_body(name: string) -> (() -> Coroutine<Wait>)? {{ SIMS.get(name) }}\n")).unwrap();
+    let path = project.join("main.rock");
+    let mut source = std::fs::read_to_string(&path).unwrap();
+    source.push_str(r#"
+@sim
+co fn dependency_probe() -> Coroutine<Wait> {
+    sim_expect(true, "named dependency ran")
+    let leaf = receipt_leaf_body()
+    sim_expect(leaf != null, "transitive dependency is registered")
+    if leaf != null { await leaf() }
+}
+@sim
+co fn leaf_probe() -> Coroutine<Wait> {
+    sim_expect(true, "transitive dependency ran")
+    yield wait_frame()
+}
+@sim
+co fn lookup_probe() -> Coroutine<Wait> {
+    start_game "cache-fixture"
+    let body = receipt_dependency_body()
+    sim_expect(body != null, "dependency is registered")
+    if body != null { await body() }
+    stop_sim()
+}
+@sim
+co fn dynamic_probe() -> Coroutine<Wait> {
+    let body = receipt_dynamic_body("dependency_probe")
+    if body != null { await body() }
+    stop_sim()
+}
+"#);
+    std::fs::write(path, source).unwrap();
+    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
+    let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
+    assert!(run.compiled("lookup", "lookup_probe", &[], &[]));
+    let entries = cache_entries(&cache);
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(cache.join(&entries[0]).join("receipt.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(manifest["registry"].as_array().unwrap().len(), 3);
+    let receipt_root = dir.path().join("dynamic-receipts");
+    let rejected = Command::new(&rock).args(["sim", "--list"]).arg(&project)
+        .env("ROCK_SIM_COMPILE_RECEIPT_DIR", &receipt_root)
+        .env("ROCK_SIM_COMPILE_RECEIPT_PREPARE", "1")
+        .env("ROCK_SIM_COMPILE_SELECTION", "[\"dynamic_probe\"]")
+        .output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("cannot resolve dynamic SIMS access"));
+    let full = Command::new(&rock).args(["sim", "--list"]).arg(&project)
+        .env("ROCK_SIM_COMPILE_RECEIPT_DIR", &receipt_root)
+        .env("ROCK_SIM_COMPILE_RECEIPT_PREPARE", "1")
+        .env_remove("ROCK_SIM_COMPILE_SELECTION")
+        .output().unwrap();
+    assert!(full.status.success(), "{}", String::from_utf8_lossy(&full.stderr));
+}
+
+fn copy_stone_sources(source: &std::path::Path, target: &std::path::Path) {
+    std::fs::create_dir_all(target).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        let destination = target.join(entry.file_name());
+        if path.is_dir() {
+            copy_stone_sources(&path, &destination);
+        } else if path.extension().is_some_and(|ext| ext == "rock" || ext == "lua") || entry.file_name() == "stick.toml" {
+            std::fs::copy(path, destination).unwrap();
+        }
+    }
 }

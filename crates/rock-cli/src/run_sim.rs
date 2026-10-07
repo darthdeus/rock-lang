@@ -243,7 +243,7 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
 /// newline-joined names) splits the worker's entry-plan line. Every problem is
 /// reported at once, one `unknown sim: <name>` line per name, so a batch is
 /// fixed in one pass.
-fn resolve_sim_specs(wire_names: &[String], specs: &[String]) -> Result<Vec<String>> {
+pub(crate) fn resolve_sim_specs(wire_names: &[String], specs: &[String]) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     let mut resolved = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -491,12 +491,30 @@ fn compile_sims(
     HashMap<String, String>,
     crate::skull_backend::SkullStone,
 )> {
-    compile_sims_with_allocation(backend, project_path, output_path, None)
+    compile_sims_with_allocation(backend, project_path, output_path, None, &[])
 }
 
 const SIM_COMPILE_RECEIPT_DIR_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_DIR";
 const SIM_COMPILE_RECEIPT_PREPARE_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_PREPARE";
-const SIM_COMPILE_RECEIPT_VERSION: u64 = 3;
+const SIM_COMPILE_RECEIPT_VERSION: u64 = 4;
+const SIM_COMPILE_SELECTION_ENV: &str = "ROCK_SIM_COMPILE_SELECTION";
+
+fn normalized_sim_selection(specs: &[String]) -> Vec<String> {
+    let mut names = specs.iter().flat_map(|spec| parse_sim_chain(spec).into_iter().map(str::to_owned))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn child_sim_selection() -> Result<Vec<String>> {
+    match std::env::var(SIM_COMPILE_SELECTION_ENV) {
+        Ok(value) => serde_json::from_str::<Vec<String>>(&value)
+            .map(|names| normalized_sim_selection(&names)).context("parse sim compile selection"),
+        Err(std::env::VarError::NotPresent) => Ok(Vec::new()),
+        Err(error) => Err(error).context("read sim compile selection"),
+    }
+}
 
 #[path = "sim_compile_cache.rs"]
 mod sim_compile_cache;
@@ -613,6 +631,7 @@ fn current_receipt_source_inputs(project: &Path) -> Result<Vec<SimReceiptInput>>
 
 /// The receipt context and discovered inputs of a project as it is now: what
 /// a receipt must match before a run may load it.
+#[derive(Clone)]
 struct CurrentReceiptState {
     context: serde_json::Value,
     inputs: Vec<SimReceiptInput>,
@@ -773,6 +792,7 @@ fn publish_sim_receipt(
     source_files: &HashMap<String, String>,
     inputs: &[SimReceiptInput],
     cache_identity: &serde_json::Value,
+    selection: &[String],
 ) -> Result<()> {
     std::fs::create_dir_all(root)
         .with_context(|| format!("create sim compile receipt root {}", root.display()))?;
@@ -789,6 +809,7 @@ fn publish_sim_receipt(
         "schema_version": SIM_COMPILE_RECEIPT_VERSION,
         "context": sim_receipt_context(project)?,
         "cache_identity": cache_identity,
+        "selection": selection,
         "main_sha256": sha256_bytes(&main_bytes),
         "inputs": receipt_inputs_json(inputs),
         "registry": registry_json(wire_names, env_by_wire, source_files)?,
@@ -911,12 +932,13 @@ fn prepare_sims(
     project_path: PathBuf,
     output_path: PathBuf,
 ) -> Result<PreparedSims> {
+    let selection = child_sim_selection()?;
     let Some(root) = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
     else {
         let (wire_names, env_by_wire, source_files, stone) =
-            compile_sims(backend, project_path, output_path)?;
+            compile_sims_with_allocation(backend, project_path, output_path, None, &selection)?;
         return Ok(PreparedSims { wire_names, env_by_wire, source_files, stone: Some(stone) });
     };
     let project_path = project_path.canonicalize().with_context(|| {
@@ -936,9 +958,10 @@ fn prepare_sims(
         ));
     }
     let (wire_names, env_by_wire, source_files, stone) =
-        compile_sims(backend, project_path.clone(), output_path.clone())?;
+        compile_sims_with_allocation(backend, project_path.clone(), output_path.clone(), None, &selection)?;
     let inputs = receipt_inputs_from_stone(&project_path, &stone)?;
     let cache_identity = sim_compile_cache::identity(&project_path, backend, stone.comptime_inputs())?;
+    let receipt_selection = if stone.sim_selection_is_full() { Vec::new() } else { selection };
     drop(stone);
     timed_sim_compile_phase(
         "compile_sims",
@@ -956,6 +979,7 @@ fn prepare_sims(
                 &source_files,
                 &inputs,
                 &cache_identity,
+                &receipt_selection,
             )
         },
     )?;
@@ -1001,6 +1025,7 @@ fn prepare_sims_out_of_process(
     backend: crate::Backend,
     project_path: PathBuf,
     output_path: PathBuf,
+    selection: &[String],
 ) -> Result<PreparedSims> {
     if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
         return prepare_sims(backend, project_path, output_path);
@@ -1009,14 +1034,14 @@ fn prepare_sims_out_of_process(
         format!("canonicalize sim project {}", project_path.display())
     })?;
     if let Some(cache) = sim_compile_cache::root()? {
-        return sim_compile_cache::prepare(backend, &project_path, &output_path, &cache);
+        return sim_compile_cache::prepare(backend, &project_path, &output_path, &cache, selection);
     }
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
     let root = tempfile::Builder::new()
         .prefix("sim-receipt-")
         .tempdir_in("tmp")
         .context("creating sim compile receipt directory")?;
-    compile_receipt_in_child(backend, &project_path, root.path())?;
+    compile_receipt_in_child(backend, &project_path, root.path(), selection)?;
     consume_sim_receipt(
         &sim_receipt_project_dir(root.path(), &project_path),
         &project_path,
@@ -1032,6 +1057,7 @@ fn compile_receipt_in_child(
     backend: crate::Backend,
     project_path: &Path,
     receipt_root: &Path,
+    selection: &[String],
 ) -> Result<()> {
     let exe = std::env::current_exe().context("locating the rock binary for the sim compile")?;
     let status = std::process::Command::new(&exe)
@@ -1043,6 +1069,7 @@ fn compile_receipt_in_child(
         .arg(project_path)
         .env(SIM_COMPILE_RECEIPT_DIR_ENV, receipt_root)
         .env(SIM_COMPILE_RECEIPT_PREPARE_ENV, "1")
+        .env(SIM_COMPILE_SELECTION_ENV, serde_json::to_string(&normalized_sim_selection(selection))?)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .status()
@@ -1081,6 +1108,7 @@ fn compile_sims_with_allocation(
     project_path: PathBuf,
     output_path: PathBuf,
     allocation_manifest: Option<&Path>,
+    selection: &[String],
 ) -> Result<(
     Vec<String>,
     HashMap<String, Vec<(String, String)>>,
@@ -1112,6 +1140,7 @@ fn compile_sims_with_allocation(
                         &project_path.to_string_lossy(),
                         &main_path,
                         allocation_manifest,
+                        selection,
                     )
                 },
             )
@@ -1291,7 +1320,7 @@ fn do_run_sim_opts_recorded(
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `MATCH3_PRESET`.
     let mut prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), output_path.clone())
+        prepare_sims_out_of_process(backend, project_path.clone(), output_path.clone(), &[sim_name.to_string()])
     })?;
     let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
     let sim_name = sim_name.as_str();
@@ -1682,7 +1711,7 @@ fn do_run_named_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output))
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), names)
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
@@ -2217,7 +2246,7 @@ fn do_run_all_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output))
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &[])
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
@@ -2879,6 +2908,7 @@ pub fn do_run_allocation_sites(
         project_path,
         PathBuf::from(&output),
         Some(&manifest_path),
+        &[],
     )?;
     let artifact_fingerprint = stone.artifact_fingerprint().to_string();
     drop(stone);

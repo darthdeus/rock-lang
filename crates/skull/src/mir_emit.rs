@@ -2497,6 +2497,22 @@ pub fn emit_workspace_mir_in_for_renderer(
     ).map(|(emit, _cache)| emit)
 }
 
+/// Sim receipt emission keeps the shared workspace but roots only selected
+/// sims, their registry dependencies, main and the global roots.
+pub fn emit_full_for_selected_sims(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
+    sims: &[String],
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let _allocation_environment = crate::allocation_report::environment_scope();
+    emit_full_in_with_mutation(
+        ws, user_mid, project_root, BodyMutation::None, renderer_target,
+        FullBuild::SelectedSims(sims), ShapeOverrides::default(),
+    )
+}
+
 /// [`emit_workspace_mir`] for a package's `rock test` program, rooted at its
 /// `tests`. See [`BuildKind::PackageTest`].
 pub fn emit_workspace_mir_for_package_test(
@@ -3038,6 +3054,7 @@ pub struct SkullEmitCache {
     unit_comptime_reads: UnitComptimeReads,
     renderer_target: RendererTarget,
     build_kind: BuildKind,
+    selected_sim_functions: Option<FxHashSet<Ustr>>,
     repair_stats: IncrementalRepairStats,
     body_edit_rollback: Option<BodyEditRollback>,
 }
@@ -3138,19 +3155,20 @@ enum FullBuild<'a> {
     Program,
     OneShotProgram,
     PackageTest(&'a [FuncRef]),
+    SelectedSims(&'a [String]),
 }
 
 impl FullBuild<'_> {
     fn lifetime(self) -> CacheLifetime {
         match self {
-            Self::Program => CacheLifetime::Retained,
+            Self::Program | Self::SelectedSims(_) => CacheLifetime::Retained,
             Self::OneShotProgram | Self::PackageTest(_) => CacheLifetime::OneShot,
         }
     }
 
     fn kind(self) -> BuildKind {
         match self {
-            FullBuild::Program | FullBuild::OneShotProgram => BuildKind::Program,
+            FullBuild::Program | FullBuild::OneShotProgram | FullBuild::SelectedSims(_) => BuildKind::Program,
             FullBuild::PackageTest(_) => BuildKind::PackageTest,
         }
     }
@@ -4734,12 +4752,11 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
     emission_roots_with_census(ws, project_root, None)
 }
 
-/// A package test program's roots: its `tests` plus the global roots every
-/// build keeps (initialization, decorators, external names). It has no public
-/// interface, and sims are not registered, so neither roots anything here.
-fn package_test_roots(ws: &Workspace, tests: &[FuncRef]) -> Vec<FuncRef> {
+/// Harness roots plus the global roots every build keeps. Package tests and
+/// selected sim receipts have no public interface to root wholesale.
+fn explicit_and_global_roots(ws: &Workspace, explicit: &[FuncRef]) -> Vec<FuncRef> {
     let (deco_map, _) = build_deco_map(ws);
-    let mut roots = tests.to_vec();
+    let mut roots = explicit.to_vec();
     roots.extend(ws.modules.iter().filter(|m| m.id != ModuleId::builtin()).flat_map(|m| {
         m.functions.iter().filter_map(|(fid, f)| {
             is_global_emission_root(f, &deco_map).then_some(FuncRef { module: m.id, func: fid })
@@ -4748,6 +4765,58 @@ fn package_test_roots(ws: &Workspace, tests: &[FuncRef]) -> Vec<FuncRef> {
     roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.dedup();
     roots
+}
+
+fn sim_refs_by_wire(ws: &Workspace) -> FxHashMap<String, FuncRef> {
+    ws.modules.iter().flat_map(|m| m.functions.iter().filter_map(|(fid, f)| {
+        skull_mir::lifecycle::sim_wire_name(f).map(|wire|
+            (wire.as_str().to_owned(), FuncRef { module: m.id, func: fid }))
+    })).collect()
+}
+
+fn named_sim_dependencies(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+    body: &bone_semantic::hir::Body,
+    sims: &FxHashMap<String, FuncRef>,
+) -> Result<Vec<FuncRef>, CompilerError> {
+    use bone_semantic::hir::Expr;
+    let mut roots = Vec::new();
+    for (_, expr) in body.expr_arena.iter() {
+        if let Expr::String(name) = expr {
+            if let Some(func) = sims.get(name.as_str()) { roots.push(*func); }
+        }
+    }
+    // The engine dispatcher consumes the runner's resolved entry plan. Other
+    // registry reads must name their dependencies statically.
+    let engine_dispatch = match owner {
+        BodyOwner::Function(fid) => matches!(ws.module(mid).functions[fid].name.as_str(),
+            "stone::register_sim" | "stone::sim_start_entry" | "stone::clear_all_systems"),
+        _ => false,
+    };
+    if !engine_dispatch {
+        for (id, expr) in body.expr_arena.iter() {
+            let Expr::Global(name) = expr else { continue };
+            if name.as_str() != "stone::SIMS" { continue; }
+            let literal_lookup = body.expr_arena.iter().any(|(_, expr)| {
+                let key = match expr {
+                    Expr::Index { base, index } if *base == id => Some(*index),
+                    Expr::Call { args, family, .. } if skull_mir::mangle::declared_name(family.key().as_str()) == "get" => {
+                        let mut args = args.clone();
+                        if args.next() == Some(id) { args.next() } else { None }
+                    }
+                    _ => None,
+                };
+                key.is_some_and(|key| matches!(body.expr_arena[key], Expr::String(_)))
+            });
+            if !literal_lookup {
+                return Err(CompilerError::new_with_label(body.expr_spans[id],
+                    "scoped sim compile cannot resolve dynamic SIMS access; select the whole suite or use a literal sim name".to_string()));
+            }
+        }
+    }
+    Ok(roots)
 }
 
 fn emission_roots_with_census(
@@ -4843,8 +4912,10 @@ struct RootEnumerationCensus {
 fn sim_registration_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
+    selected: Option<&FxHashSet<Ustr>>,
 ) -> Result<String, CompilerError> {
-    let sims = collect_sim_fns(ws);
+    let sims = collect_sim_fns(ws).into_iter().filter(|(_, f, _)|
+        selected.is_none_or(|names| names.contains(&f.name))).collect::<Vec<_>>();
     if sims.is_empty() {
         return Ok(String::new());
     }
@@ -6059,7 +6130,7 @@ fn assemble(
     }
     definitions.append_to(&mut out);
     out.push_str(&callee_binding_pass_lua(&mut callee_binds));
-    mark_generated_code_values(ws, &mut code_artifact, cache.build_kind == BuildKind::Program);
+    mark_generated_code_values(ws, &mut code_artifact, cache.build_kind == BuildKind::Program, cache.selected_sim_functions.as_ref());
     let (definition_plan, early_stage) = match early_definition_stage {
         Some((plan, stage)) => (plan, Some(stage)),
         None => (collect_definition_plan(ws)?, None),
@@ -6229,7 +6300,7 @@ fn assemble(
     out.push_str(&decorator_application_lines(ws, &deco_map, scx, &mut skipped));
     // `@sim` registrations (after fn + global defs; same init slot as rock).
     if cache.build_kind == BuildKind::Program {
-        out.push_str(&sim_registration_lines(ws, scx)?);
+        out.push_str(&sim_registration_lines(ws, scx, cache.selected_sim_functions.as_ref())?);
     }
     // `rock_shader` pipeline registrations (docs/shaders.md):
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
@@ -6544,6 +6615,7 @@ fn mark_generated_code_values(
     ws: &Workspace,
     artifact: &mut skull_mir::code_identity::CodeArtifact,
     register_sims: bool,
+    selected: Option<&FxHashSet<Ustr>>,
 ) {
     let decorator_names: FxHashSet<Ustr> = ws
         .modules
@@ -6559,7 +6631,7 @@ fn mark_generated_code_values(
                 continue;
             }
             let generated_value = f.annotations.iter().any(|ann| {
-                (register_sims && ann.is_builtin("sim"))
+                (register_sims && ann.is_builtin("sim") && selected.is_none_or(|names| names.contains(&f.name)))
                     || decorator_names.contains(&ann.resolved_name.unwrap_or(ann.name.name))
             });
             if generated_value {
@@ -7040,13 +7112,22 @@ fn emit_full_in_with_mutation(
         .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
-    let (interface_roots, sim_roots) = match build {
+    let (mut interface_roots, sim_roots) = match build {
         FullBuild::Program | FullBuild::OneShotProgram => (emission_roots(ws, project_root), sim_glue_roots(ws)),
-        FullBuild::PackageTest(tests) => (package_test_roots(ws, tests), Vec::new()),
+        FullBuild::PackageTest(tests) => (explicit_and_global_roots(ws, tests), Vec::new()),
+        FullBuild::SelectedSims(names) => {
+            let sims = sim_refs_by_wire(ws);
+            let mut roots = names.iter().map(|name| sims.get(name.as_str()).copied().ok_or_else(||
+                CompilerError::new_no_location(format!("unknown sim root: {name}"))))
+                .collect::<Result<Vec<_>, _>>()?;
+            roots.extend(ws.modules.iter().flat_map(|m| m.functions.iter().filter_map(|(fid, f)|
+                (f.name.as_str() == "main").then_some(FuncRef { module: m.id, func: fid }))));
+            (explicit_and_global_roots(ws, &roots), sim_glue_roots(ws))
+        }
     };
-    let emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
+    let mut emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
     #[cfg(test)]
-    if build.kind() == BuildKind::Program {
+    if matches!(build, FullBuild::Program | FullBuild::OneShotProgram) {
         assert_eq!(
             emission_roots,
             all_roots(ws, project_root, &shader_roots),
@@ -7057,6 +7138,34 @@ fn emit_full_in_with_mutation(
 
     let t_setup = Instant::now();
     let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
+    let selected_sim_functions = if matches!(build, FullBuild::SelectedSims(_)) {
+        let sims = sim_refs_by_wire(ws);
+        let mut scanned = FxHashSet::default();
+        loop {
+            let reached = graph.instances.iter().map(|i| i.func).collect::<FxHashSet<_>>();
+            let mut added = Vec::new();
+            for module in &ws.modules {
+                for (owner, body) in &module.bodies {
+                    if let BodyOwner::Function(fid) = owner {
+                        let func = FuncRef { module: module.id, func: *fid };
+                        if !reached.contains(&func) { continue; }
+                    }
+                    if !scanned.insert((module.id, *owner)) { continue; }
+                    added.extend(named_sim_dependencies(ws, module.id, *owner, body, &sims)?);
+                }
+            }
+            added.retain(|func| !emission_roots.contains(func));
+            if added.is_empty() { break; }
+            interface_roots.extend(added);
+            interface_roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+            interface_roots.dedup();
+            emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
+            graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
+        }
+        let reached = graph.instances.iter().map(|i| i.func).collect::<FxHashSet<_>>();
+        Some(sims.values().filter(|func| reached.contains(func))
+            .map(|func| ws.module(func.module).functions[func.func].name).collect())
+    } else { None };
     if let Some(err) = graph_rejection_error(ws, &graph) {
         return Err(err);
     }
@@ -7487,6 +7596,7 @@ fn emit_full_in_with_mutation(
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         build_kind: build.kind(),
+        selected_sim_functions,
         repair_stats: IncrementalRepairStats::default(),
         body_edit_rollback: None,
     };
@@ -7571,6 +7681,12 @@ fn comptime_reads_stale(
 }
 
 impl SkullEmitCache {
+    pub fn registered_sim_names(&self, ws: &Workspace) -> std::collections::HashSet<String> {
+        collect_sim_fns(ws).into_iter().filter(|(_, f, _)|
+            self.selected_sim_functions.as_ref().is_none_or(|names| names.contains(&f.name)))
+            .map(|(_, _, wire)| wire).collect()
+    }
+
     pub fn repair_stats(&self) -> IncrementalRepairStats {
         self.repair_stats
     }

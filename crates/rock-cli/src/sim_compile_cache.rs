@@ -8,7 +8,7 @@
 //! revalidated like any receipt, and any doubt recompiles.
 //!
 //! Key: the compiler binary's hash, backend, receipt context (project, renderer,
-//! callee shape, codegen environment), stdlib dir and contents, the game
+//! callee shape, codegen environment), normalized sim selection, stdlib dir and contents, the game
 //! preamble, every non-volatile `[build.vars]` value, the environment the
 //! compile can read, and every discovered source and package manifest.
 //! `embed_string` files are known only after a compile, so a hit rehashes the
@@ -30,7 +30,7 @@ const CACHE_ENV: &str = "ROCK_SIM_COMPILE_CACHE";
 const CACHE_DIR_ENV: &str = "ROCK_SIM_COMPILE_CACHE_DIR";
 const CACHE_MAX_MB_ENV: &str = "ROCK_SIM_COMPILE_CACHE_MAX_MB";
 const DEFAULT_MAX_MB: u64 = 4096;
-const KEY_SCHEMA: u64 = 1;
+const KEY_SCHEMA: u64 = 2;
 const STAGING_PREFIX: &str = ".staging-";
 const EVICTING_PREFIX: &str = ".evicting-";
 /// A staging dir older than this belongs to a run that died mid-compile.
@@ -51,6 +51,7 @@ const UNKEYED_ENV: &[&str] = &[
     CACHE_MAX_MB_ENV,
     SIM_COMPILE_RECEIPT_DIR_ENV,
     SIM_COMPILE_RECEIPT_PREPARE_ENV,
+    SIM_COMPILE_SELECTION_ENV,
     "ROCK_JOB_ID",
     // Compile records describe the compile; they never change its output.
     "ROCK_COMPILE_STATS",
@@ -196,9 +197,10 @@ fn key(
     identity: &serde_json::Value,
     context: &serde_json::Value,
     inputs: &[SimReceiptInput],
+    selection: &[String],
 ) -> String {
     let keyed = inputs.iter().filter(|input| input.kind != "embedded").cloned().collect::<Vec<_>>();
-    let canonical = serde_json::json!([KEY_SCHEMA, identity, context, receipt_inputs_json(&keyed)]);
+    let canonical = serde_json::json!([KEY_SCHEMA, identity, context, receipt_inputs_json(&keyed), selection]);
     sha256_bytes(canonical.to_string().as_bytes())
 }
 
@@ -214,7 +216,9 @@ fn manifest_key(receipt_dir: &Path) -> Result<(String, serde_json::Value)> {
     };
     let inputs = parse_receipt_inputs(field("inputs")?)?;
     let identity = field("cache_identity")?;
-    Ok((key(identity, field("context")?, &inputs), identity.clone()))
+    let selection: Vec<String> = serde_json::from_value(field("selection")?.clone())
+        .context("sim compile receipt selection is malformed")?;
+    Ok((key(identity, field("context")?, &inputs, &selection), identity.clone()))
 }
 
 /// The current state's key, with the context and inputs a hit validates against.
@@ -225,11 +229,11 @@ struct Lookup {
 }
 
 impl Lookup {
-    fn current(backend: crate::Backend, project: &Path) -> Result<Self> {
+    fn current(backend: crate::Backend, project: &Path, selection: &[String]) -> Result<Self> {
         let comptime = crate::comptime::inputs_for_project_dir(project)?;
         let identity = identity(project, backend, &comptime)?;
         let current = CurrentReceiptState::of(project)?;
-        let key = key(&identity, &current.context, &current.inputs);
+        let key = key(&identity, &current.context, &current.inputs, selection);
         Ok(Self { key, identity, current })
     }
 }
@@ -241,13 +245,27 @@ pub(super) fn prepare(
     project: &Path,
     output: &Path,
     root: &Path,
+    selection: &[String],
 ) -> Result<PreparedSims> {
     let budget = budget_bytes()?;
     std::fs::create_dir_all(root)
         .with_context(|| format!("create sim compile cache {}", root.display()))?;
-    let lookup = timed_sim_compile_phase("compile_sims", "cache_lookup", project, Some(output), || {
-        Lookup::current(backend, project)
+    let selection = normalized_sim_selection(selection);
+    let full_lookup = timed_sim_compile_phase("compile_sims", "cache_lookup", project, Some(output), || {
+        Lookup::current(backend, project, &[])
     })?;
+    if !selection.is_empty() {
+        match load_cached(&root.join(&full_lookup.key), &full_lookup, project, output) {
+            Ok(Some(prepared)) => return Ok(prepared),
+            Ok(None) => {},
+            Err(error) => ::log::warn!(target: "SIM", "full sim compile cache entry is unusable: {error:#}"),
+        }
+    }
+    let lookup = Lookup {
+        key: key(&full_lookup.identity, &full_lookup.current.context, &full_lookup.current.inputs, &selection),
+        identity: full_lookup.identity.clone(),
+        current: full_lookup.current.clone(),
+    };
     let short = &lookup.key[..16];
     let entry = root.join(&lookup.key);
     match load_cached(&entry, &lookup, project, output) {
@@ -259,6 +277,13 @@ pub(super) fn prepare(
     // The child takes its compile slot only after this lock; same-key waiters
     // must never occupy slots needed by the holder.
     let _key_lock = lock_key(root, &lookup.key)?;
+    if !selection.is_empty() {
+        match load_cached(&root.join(&full_lookup.key), &full_lookup, project, output) {
+            Ok(Some(prepared)) => return Ok(prepared),
+            Ok(None) => {},
+            Err(error) => ::log::warn!(target: "SIM", "full sim compile cache entry is unusable: {error:#}"),
+        }
+    }
     match load_cached(&entry, &lookup, project, output) {
         Ok(Some(prepared)) => return Ok(prepared),
         Ok(None) => {}
@@ -272,10 +297,14 @@ pub(super) fn prepare(
         .prefix(STAGING_PREFIX)
         .tempdir_in(root)
         .with_context(|| format!("stage a sim compile under {}", root.display()))?;
-    compile_receipt_in_child(backend, project, staging.path())?;
+    compile_receipt_in_child(backend, project, staging.path(), &selection)?;
     let receipt = sim_receipt_project_dir(staging.path(), project);
     let prepared = consume_sim_receipt(&receipt, project, output, None)?;
-    match publish(&receipt, &entry, &lookup) {
+    let (compiled_key, _) = manifest_key(&receipt)?;
+    let (entry, publish_lookup) = if compiled_key == full_lookup.key {
+        (root.join(&full_lookup.key), &full_lookup)
+    } else { (entry, &lookup) };
+    match publish(&receipt, &entry, publish_lookup) {
         Ok(()) => {
             if let Err(error) = evict_to_budget(root, budget, &entry) {
                 ::log::warn!(target: "SIM", "compile cache: eviction failed: {error:#}");

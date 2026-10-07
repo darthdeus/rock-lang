@@ -2505,13 +2505,14 @@ pub fn skull_compile_game_and_collect_sims(
     dir: &str,
     main_path: &std::path::Path,
 ) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, HashMap<String, String>, SkullStone)> {
-    skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None)
+    skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None, &[])
 }
 
 pub fn skull_compile_game_and_collect_sims_with_allocation(
     dir: &str,
     main_path: &std::path::Path,
     allocation_manifest: Option<&std::path::Path>,
+    selection: &[String],
 ) -> Result<(
     Vec<String>,
     HashMap<String, Vec<(String, String)>>,
@@ -2523,22 +2524,20 @@ pub fn skull_compile_game_and_collect_sims_with_allocation(
     // runner can serve mid-sim `reload_edit` ops through the REAL incremental
     // path (`docs/sim-reload-harness-plan.md`).
     let incremental_path = main_path.with_file_name("incremental.lua");
-    let stone = match allocation_manifest {
-        Some(path) => SkullStone::init_with_tests_and_allocation_report(
-            dir,
-            main_path,
-            &incremental_path,
-            path,
-        ),
-        None => SkullStone::init_with_tests(dir, main_path, &incremental_path),
-    }
+    let _activation = allocation_manifest.map(|_| skull::allocation_report::activation_scope(true));
+    let stone = SkullStone::init_impl(
+        dir, main_path, &incremental_path, true, allocation_manifest, selection,
+    )
     .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
 
     let project_dir = std::path::Path::new(dir)
         .canonicalize()
         .with_context(|| format!("canonicalize sim project {dir}"))?;
     let workspace_root = source_root_for_sim_project(&project_dir)?;
-    let sims = collect_skull_sims(stone.project.workspace());
+    let mut sims = collect_skull_sims(stone.project.workspace());
+    if let Some(selected) = &stone.selected_sim_names {
+        sims.retain(|(wire, _, _)| selected.contains(wire));
+    }
     let mut wire_names = Vec::with_capacity(sims.len());
     let mut env_by_wire = HashMap::with_capacity(sims.len());
     let mut source_files = HashMap::with_capacity(sims.len());
@@ -3998,6 +3997,7 @@ fn emit_phase_ns(phases: &[(&'static str, Duration)], label: &str) -> u128 {
 /// running game light-reloads; an interface/structural edit rewrites `main.lua`
 /// (full) and wipes the overlay.
 pub struct SkullStone {
+    selected_sim_names: Option<std::collections::HashSet<String>>,
     project: crate::live_project::LiveProject,
     cache: skull::mir_emit::SkullEmitCache,
     preamble: String,
@@ -4020,14 +4020,14 @@ impl SkullStone {
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
     /// can't break the running game. See `docs/sim-layering.md`.
     pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, false, None)
+        Self::init_impl(dir, main_path, incremental_path, false, None, &[])
     }
 
     /// Sim-runner build: same as [`SkullStone::init`] but discovery KEEPS
     /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
     /// of the emitted program.
     pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, true, None)
+        Self::init_impl(dir, main_path, incremental_path, true, None, &[])
     }
 
     pub fn init_with_tests_and_allocation_report(
@@ -4043,6 +4043,7 @@ impl SkullStone {
             incremental_path,
             true,
             Some(allocation_manifest),
+            &[],
         )
     }
 
@@ -4052,24 +4053,32 @@ impl SkullStone {
         incremental_path: &std::path::Path,
         include_tests: bool,
         explicit_allocation_report: Option<&std::path::Path>,
+        selection: &[String],
     ) -> Result<SkullStone> {
         let stats = crate::compile_measurements::Scope::begin(dir);
         let slot = crate::compile_slots::acquire(dir)?;
         crate::compile_measurements::slot(slot.acquisition());
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
-        let (lua, cache, artifact_fingerprint, emits_main) = {
+        let (lua, cache, artifact_fingerprint, emits_main, selected_sim_names) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
-                ws,
-                mid,
-                Some(dir),
-                renderer_target,
-                None,
-            )
-                .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
+            let all_names = collect_skull_sims(ws).into_iter().map(|(name, _, _)| name).collect::<Vec<_>>();
+            let selected = crate::run_sim::resolve_sim_specs(&all_names, selection)?;
+            let selected = selected.into_iter().flat_map(|spec| spec.split(',').map(str::to_owned).collect::<Vec<_>>())
+                .collect::<std::collections::BTreeSet<_>>();
+            let narrow = !selection.is_empty() && selected.len() != all_names.len();
+            let (emit, c) = if narrow {
+                skull::mir_emit::emit_full_for_selected_sims(
+                    ws, mid, Some(dir), renderer_target, &selected.into_iter().collect::<Vec<_>>(),
+                )
+            } else {
+                skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
+                    ws, mid, Some(dir), renderer_target, None,
+                )
+            }.map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
+            let selected_sim_names = if narrow { Some(c.registered_sim_names(ws)) } else { None };
             crate::compile_measurements::emission(&emit);
             let allocation_report_path = allocation_report_path_from_env();
             write_allocation_report(
@@ -4086,7 +4095,7 @@ impl SkullStone {
             let emits_main = emit.emits_main;
             let lua = install_rock_state_metadata(emit.lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
-            (lua, c, artifact_fingerprint, emits_main)
+            (lua, c, artifact_fingerprint, emits_main, selected_sim_names)
         };
         // Full rebuilds retain the shape of the session's original artifact.
         let callee_binding = cache.callee_binding();
@@ -4107,8 +4116,11 @@ impl SkullStone {
             route_profile_enabled: std::env::var_os("ROCK_SKULL_ROUTE_PROFILE").is_some(),
             last_route_profile: None,
             artifact_fingerprint,
+            selected_sim_names,
         })
     }
+
+    pub(crate) fn sim_selection_is_full(&self) -> bool { self.selected_sim_names.is_none() }
 
     pub fn enable_route_profile(&mut self) {
         self.route_profile_enabled = true;
