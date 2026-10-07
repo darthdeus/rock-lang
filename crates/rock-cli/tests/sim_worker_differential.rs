@@ -39,6 +39,40 @@ fn differential(predecessors: &[&str], target: &str) -> (SimRecord, SimRecord) {
         .unwrap_or_else(|e| panic!("differential for `{target}` failed to run: {e:#}"))
 }
 
+#[test]
+fn a_mag_demand_draw_does_not_reuse_a_predecessors_frame_stamp() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "mag",
+        &[
+            "mag::paperdoll_interaction_image_and_figure".to_string(),
+            "mag::targeting_rings".to_string(),
+        ],
+    )
+    .expect("the MAG pair must run");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
+    assert!(records[1].1, "the targeting ring must follow the paperdoll in one worker");
+    assert_eq!(records[1].0.verdict(), "PASS", "{:?}", records[1].0);
+}
+
+#[test]
+fn a_mag_movement_fixture_does_not_leave_a_kind_speed_override() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "mag",
+        &[
+            "mag::flow_budget_and_occupancy".to_string(),
+            "mag::live_and_scenario_movement_match_schedule_and_occupied_refusal".to_string(),
+        ],
+    )
+    .expect("the MAG pair must run");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
+    assert!(records[1].1, "movement parity must follow the flow fixture in one worker");
+    assert_eq!(records[1].0.verdict(), "PASS", "{:?}", records[1].0);
+}
+
 fn assert_equivalent(what: &str, c: &Comparison) {
     assert!(
         c.is_equivalent(),
