@@ -1318,6 +1318,13 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let player_slot = rock_function_body(&run, "fn mag_tick_actor_pre_mob(");
     assert_eq!(player_slot.matches("world_player_actions_dispatch(").count(), 1,
         "MAG must dispatch its player queue exactly once");
+    let combat = fs::read_to_string(repo.join("mag/combat.rock"))
+        .expect("read MAG cast intent facade");
+    let cast_facade = rock_function_body(&combat, "fn PlayerActor.update_casting_in(");
+    assert!(cast_facade.contains("world_player_cast_intent_enqueue("),
+        "direct cast intents must enqueue on the shared FIFO");
+    assert_eq!(cast_facade.matches("world_player_actions_dispatch(").count(), 1,
+        "direct cast intents must use the shared dispatcher");
     for former in ["active.update_casting_in(", "player.apply_target_intent_in(", "player.update_movement_in("] {
         assert!(!player_slot.contains(former), "player input bypasses the shared queue: {former}");
     }
