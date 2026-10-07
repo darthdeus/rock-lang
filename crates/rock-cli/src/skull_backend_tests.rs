@@ -4984,8 +4984,7 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
     assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
 }
 
-#[test]
-fn package_tests_run_against_the_current_sound_bank() {
+fn sound_test_fixture() -> tempfile::TempDir {
     let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
     let dir = tempfile::tempdir_in(workspace).expect("sound package");
     std::fs::write(dir.path().join("stick.toml"),
@@ -4995,10 +4994,70 @@ fn package_tests_run_against_the_current_sound_bank() {
     std::fs::create_dir(dir.path().join("assets")).unwrap();
     let bank = dir.path().join("assets/sound_bank.json");
     std::fs::write(&bank, r#"{"version":1,"events":[{"id":"fixture.stale","steps":[]}]}"#).unwrap();
-    std::fs::write(dir.path().join("first.rock"), "@test inline(lua) fn first_test() = \"print('ok')\"\n").unwrap();
+    std::fs::write(dir.path().join("first.rock"), format!(
+        "@test inline(lua) fn first_test() = \"assert(io.open('{}'):read('*a'):find('fixture.current', 1, true))\"\n",
+        bank.display())).unwrap();
+    dir
+}
+
+#[test]
+fn package_tests_run_against_the_current_sound_bank() {
+    let dir = sound_test_fixture();
+    let bank = dir.path().join("assets/sound_bank.json");
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(10), 1, None);
     assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })), "{result:?}");
     let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&bank).unwrap()).unwrap();
     assert_eq!(written["events"][0]["id"], "fixture.current",
         "a package test run reads the bank its sound project compiles to, not one an earlier tree left");
+}
+
+#[test]
+fn file_tests_run_against_the_current_sound_bank() {
+    let dir = sound_test_fixture();
+    let path = dir.path().join("first.rock");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let result = super::skull_build(path.to_str().unwrap(), &source, None);
+    assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })), "{result:?}");
+}
+
+#[test]
+fn c_file_and_package_tests_regenerate_the_sound_bank() {
+    let dir = sound_test_fixture();
+    std::fs::write(dir.path().join("first.rock"), "@test(returns = 1) fn first_test() -> int { return 1 }\n").unwrap();
+    let bank = dir.path().join("assets/sound_bank.json");
+    for path in [dir.path().to_path_buf(), dir.path().join("first.rock")] {
+        std::fs::write(&bank, r#"{"version":1,"events":[{"id":"fixture.stale","steps":[]}]}"#).unwrap();
+        let summary = crate::c_test::c_test_run(&[path.to_string_lossy().into_owned()], false).unwrap();
+        assert_eq!((summary.tests_passed, summary.unit_failures), (1, 0));
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&bank).unwrap()).unwrap();
+        assert_eq!(written["events"][0]["id"], "fixture.current", "{}", path.display());
+    }
+}
+
+#[cfg(feature = "backend-js")]
+#[test]
+fn js_file_and_package_tests_regenerate_the_sound_bank() {
+    let dir = sound_test_fixture();
+    std::fs::write(dir.path().join("first.rock"), "@test(returns = 1) fn first_test() -> int { return 1 }\n").unwrap();
+    let bank = dir.path().join("assets/sound_bank.json");
+    for path in [dir.path().to_path_buf(), dir.path().join("first.rock")] {
+        std::fs::write(&bank, r#"{"version":1,"events":[{"id":"fixture.stale","steps":[]}]}"#).unwrap();
+        let summary = crate::js_test::js_test_run(&[path.to_string_lossy().into_owned()], false).unwrap();
+        assert_eq!((summary.tests_passed, summary.unit_failures), (1, 0));
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&bank).unwrap()).unwrap();
+        assert_eq!(written["events"][0]["id"], "fixture.current", "{}", path.display());
+    }
+}
+
+#[test]
+fn c_package_tests_prepare_the_current_sound_bank() {
+    let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
+    let dir = tempfile::tempdir_in(workspace).unwrap();
+    std::fs::write(dir.path().join("stick.toml"),
+        "[package]\nname = \"sound-c-tests\"\ntype = \"lib\"\n[sound]\nproject = \"sound_project.json\"\n").unwrap();
+    std::fs::write(dir.path().join("sound_project.json"), "invalid json").unwrap();
+    std::fs::write(dir.path().join("first.rock"), "@test(returns = 1) fn first_test() -> int { return 1 }\n").unwrap();
+    let summary = crate::c_test::c_test_run(&[dir.path().to_string_lossy().into_owned()], false).unwrap();
+    assert_eq!(summary.unit_failures, 1, "an invalid declared sound project must reject the package before testing");
+    assert_eq!(summary.tests_passed, 0);
 }

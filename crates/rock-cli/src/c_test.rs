@@ -411,6 +411,12 @@ fn build_file(
     required: &mut Vec<(String, RequiredTestOutcome)>,
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
+    if let Err(error) = crate::package::prepare_test_sound_bank(file) {
+        return CUnitOutcome::UnitFail {
+            reason: "sound bank preparation failed".to_string(),
+            rendered: format!("sound bank preparation failed for {file}: {error:#}"),
+        };
+    }
     let checked = match check_file(file) {
         Ok(checked) => checked,
         Err(error) => {
@@ -503,6 +509,12 @@ fn build_package(
     required: &mut Vec<(String, RequiredTestOutcome)>,
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
+    if let Err(error) = crate::package::prepare_test_sound_bank(dir) {
+        return CUnitOutcome::UnitFail {
+            reason: "sound bank preparation failed".to_string(),
+            rendered: format!("sound bank preparation failed for {dir}: {error:#}"),
+        };
+    }
     // Held through the tests: each test's program is emitted from the
     // checked workspace, which stays resident until the unit ends.
     let _slot = match crate::compile_slots::acquire(dir) {

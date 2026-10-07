@@ -212,6 +212,12 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
 /// One isolated test file: parse + bone type-check with the stdlib, discover
 /// `@test` fns, then run them via the per-test closure emission + node batch.
 fn js_build_file(file: &str) -> JsUnitOutcome {
+    if let Err(error) = crate::package::prepare_test_sound_bank(file) {
+        return JsUnitOutcome::UnitFail {
+            reason: "sound bank preparation failed".to_string(),
+            rendered: format!("sound bank preparation failed for {file}: {error:#}"),
+        };
+    }
     let src = match fs_err::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
@@ -256,6 +262,12 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
 /// A `stick.toml` package built as ONE workspace (tests included), mirroring
 /// `skull_build_package`; its `@test`s run through the same per-test path.
 fn js_build_package(dir: &str) -> JsUnitOutcome {
+    if let Err(error) = crate::package::prepare_test_sound_bank(dir) {
+        return JsUnitOutcome::UnitFail {
+            reason: "sound bank preparation failed".to_string(),
+            rendered: format!("sound bank preparation failed for {dir}: {error:#}"),
+        };
+    }
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,

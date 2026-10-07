@@ -107,6 +107,14 @@ pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
     Ok(Some(bank_path))
 }
 
+pub(crate) fn prepare_test_sound_bank(path: &str) -> Result<()> {
+    if let Some(project) = rock_host::project::find_project_root(Path::new(path)) {
+        let project = project.to_str().ok_or_else(|| anyhow::anyhow!("non-UTF-8 test project path"))?;
+        prepare_sound_bank(project)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_sound_inspection_target(project: &str) -> Result<SoundInspectionTarget> {
     let context = package_context(project)?;
     if prepare_sound_bank(project)?.is_none() {
