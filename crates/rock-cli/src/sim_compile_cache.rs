@@ -50,6 +50,8 @@ const UNKEYED_ENV: &[&str] = &[
     SIM_COMPILE_RECEIPT_DIR_ENV,
     SIM_COMPILE_RECEIPT_PREPARE_ENV,
     "ROCK_JOB_ID",
+    // Compile records describe the compile; they never change its output.
+    "ROCK_COMPILE_STATS",
     // Invocation-log settings and tags; never read by the compile.
     "ROCK_INVOCATION_LOG",
     crate::invocation_log::PARENT_ENV,
@@ -452,7 +454,7 @@ mod tests {
 
     #[test]
     fn runner_only_environment_is_unkeyed_and_compile_settings_are_keyed() {
-        for name in ["ROCK_SIM_TIMEOUT_SECS", "ROCK_JOB_ID", "ROCK_JOBS_SELF", "ROCK_SIM_WARN_FACTOR", "STONE_JV", CACHE_DIR_ENV] {
+        for name in ["ROCK_SIM_TIMEOUT_SECS", "ROCK_JOB_ID", "ROCK_COMPILE_STATS", "ROCK_JOBS_SELF", "ROCK_SIM_WARN_FACTOR", "STONE_JV", CACHE_DIR_ENV] {
             assert!(!environment_is_keyed(name), "{name}");
         }
         for name in ["ROCK_SKULL_TAIL_CALLS", "SKULL_INLINE_OFF", "ROCK_STDLIB_DIR", "GAME_ART_VAULT", "ROCK_SIM_NEW"] {
