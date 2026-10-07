@@ -71,6 +71,48 @@ class WindowCompilationTest(fixtures.RuntimePerfCompareTest):
             available=False, starts=None, compiles=None, aborts=None, flushes=None)
         self.assert_unresolved(docs)
 
+    def split_arms(self):
+        docs = self.arms((100, 80, 20, 0), (200, 100, 100, 1))
+        for doc, mutator, internal in zip(docs, [80, 60], [20, 60]):
+            gc = doc["memory"]["gc_window"]
+            n = gc["measured_frames"]
+            gc["allocation_split"] = {"available": True, "basis": "luajit-vmstate"}
+            for key, kb, calls in [("mutator", mutator, 200),
+                                   ("jit_internal", internal, 100), ("gc", 0, 0)]:
+                gc["allocation_split"][key] = dict(request_bytes=kb * 1024 * n,
+                    request_kb_per_frame=kb, allocator_calls=calls)
+            gc["allocator_calls"] = 300
+            gc["gross_request_kb_per_frame"] = mutator + internal
+        return docs
+
+    def test_mutator_split_compares_during_compilation_and_flush(self):
+        report = self.report(self.split_arms())
+        self.assertTrue(report["allocation_comparison"]["comparable"])
+        self.assertEqual(report["allocation_comparison"]["direction"], "candidate-lower")
+        self.assertEqual(report["metrics"]["memory.gc_window.allocation_split.mutator.request_kb_per_frame"]["direction"],
+                         "candidate-lower")
+        self.assertEqual(report["metrics"]["memory.gc_window.gross_request_kb_per_frame"]["direction"],
+                         "candidate-higher")
+
+    def test_one_missing_split_keeps_compiling_windows_unresolved(self):
+        docs = self.split_arms()
+        del docs[0]["memory"]["gc_window"]["allocation_split"]
+        self.assert_unresolved(docs)
+
+    def test_split_bytes_must_reconcile_with_gross(self):
+        docs = self.split_arms()
+        docs[0]["memory"]["gc_window"]["allocation_split"]["mutator"]["request_bytes"] += 1024
+        result = self.run_compare([docs[0]], [docs[1]])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("split", result.stderr)
+
+    def test_split_calls_must_reconcile_with_gross(self):
+        docs = self.split_arms()
+        docs[0]["memory"]["gc_window"]["allocation_split"]["mutator"]["allocator_calls"] += 1
+        result = self.run_compare([docs[0]], [docs[1]])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("split", result.stderr)
+
     def test_negative_counter_rejects_evidence(self):
         docs = self.arms()
         docs[1]["memory"]["gc_window"]["jit_trace"]["compiles"] = -1
