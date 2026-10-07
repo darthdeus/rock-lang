@@ -99,6 +99,14 @@ class WindowCompilationTest(fixtures.RuntimePerfCompareTest):
         del docs[0]["memory"]["gc_window"]["allocation_split"]
         self.assert_unresolved(docs)
 
+    def test_text_report_handles_an_origin_missing_from_the_legacy_arm(self):
+        docs = self.split_arms()
+        del docs[0]["memory"]["gc_window"]["allocation_split"]
+        result = self.run_compare([docs[0]], [docs[1]], output_format="text")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("COMPARABLE", result.stdout)
+        self.assertIn("memory.gc_window.allocation_split.mutator.request_kb_per_frame: unknown", result.stdout)
+
     def test_split_bytes_must_reconcile_with_gross(self):
         docs = self.split_arms()
         docs[0]["memory"]["gc_window"]["allocation_split"]["mutator"]["request_bytes"] += 1024
