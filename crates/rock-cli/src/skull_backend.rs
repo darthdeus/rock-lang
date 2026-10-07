@@ -1154,9 +1154,12 @@ fn skull_build_package_with_limit(
         reason: "cannot load project".to_string(),
         rendered: e.to_string(),
     })?;
+    let sources = crate::package_test_sources::select(&sources, std::path::Path::new(dir))
+        .map_err(|error| SkullFailure {
+            reason: "cannot select package test sources".to_string(),
+            rendered: format!("{error:#}"),
+        })?;
     crate::compile_measurements::phase("discovery");
-    // Tests INCLUDED (no `production_only`): the point is to compile the
-    // package's own tests/ WITH it, unlike the game-build compile path.
     let (mut modules, entry_file) = skull_assemble_project(&sources).map_err(|errs| SkullFailure {
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),

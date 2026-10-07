@@ -60,6 +60,8 @@ mod test_exit_status_gate;
 mod test_filter;
 #[path = "test_emission_roots.rs"]
 mod test_emission_roots;
+#[path = "test_sim_sources.rs"]
+mod test_sim_sources;
 #[path = "test_file_host.rs"]
 mod test_file_host;
 #[path = "test_rock_dir.rs"]
