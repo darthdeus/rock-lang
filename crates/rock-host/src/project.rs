@@ -485,9 +485,25 @@ pub fn write_atomic_durable(
     write_atomic_impl(path.as_ref(), contents.as_ref(), true)
 }
 
+/// Stream a generated artifact into a same-directory temporary file before
+/// atomically replacing the destination. Writer errors leave the destination intact.
+pub fn write_atomic_streamed(
+    path: impl AsRef<Path>,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    write_atomic_with(path.as_ref(), write, false)
+}
+
 fn write_atomic_impl(path: &Path, contents: &[u8], durable: bool) -> std::io::Result<()> {
     use std::io::Write;
+    write_atomic_with(path, |file| file.write_all(contents), durable)
+}
 
+fn write_atomic_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    durable: bool,
+) -> std::io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -500,7 +516,7 @@ fn write_atomic_impl(path: &Path, contents: &[u8], durable: bool) -> std::io::Re
     // removed on any early return, so a failed write leaves no `.tmp`
     // litter. Generated artifacts skip fsync; authored documents request it.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(contents)?;
+    write(tmp.as_file_mut())?;
     if durable {
         tmp.as_file().sync_all()?;
     }

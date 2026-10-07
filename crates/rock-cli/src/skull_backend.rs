@@ -735,7 +735,7 @@ fn skull_build(
             .unwrap_or_else(|| std::path::Path::new(".")),
     ) {
         Ok(Some(stone_dir)) => TestProgram {
-            preamble: prepend_stone_root(String::new(), &stone_dir),
+            preamble: stone_root_preamble(&stone_dir),
             lua,
             setup: "",
         },
@@ -1310,7 +1310,7 @@ fn prepend_package_preamble(
             rendered: error.to_string(),
         })?
     } else if let Some(stone_dir) = &stone_dir {
-        prepend_stone_root(String::new(), stone_dir)
+        stone_root_preamble(stone_dir)
     } else {
         String::new()
     };
@@ -1353,6 +1353,7 @@ pub(crate) fn collect_package_test_fns(
 }
 
 /// Keep emitted-Lua dumps in error reports manageable.
+#[cfg(test)]
 fn truncate(s: &str) -> String {
     if s.len() > 4000 {
         let end = s.floor_char_boundary(4000);
@@ -1932,7 +1933,7 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// Renders against the project sources and exits 1 on any discovery / type /
 /// emit failure. The `bool` is the emitter's own `emits_main`, which decides
 /// whether the caller appends the `__rock_main_wrapper(main)` entry.
-fn skull_emit_project(dir: &str) -> Result<(String, bool)> {
+fn skull_emit_project(dir: &str) -> Result<(GameProgram, bool)> {
     let inputs = match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
         Ok(inputs) => inputs,
         Err(e) => {
@@ -1946,7 +1947,7 @@ fn skull_emit_project(dir: &str) -> Result<(String, bool)> {
 fn skull_emit_project_with_inputs(
     dir: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
-) -> Result<(String, bool)> {
+) -> Result<(GameProgram, bool)> {
     use std::path::PathBuf;
     let stats = crate::compile_measurements::Scope::begin(dir);
     let slot = crate::compile_slots::acquire(dir)?;
@@ -2054,12 +2055,14 @@ fn skull_emit_project_with_inputs(
         }
     }
 
-    let mut lua = lua;
-    if let Err(error) = install_rock_state_metadata(&mut lua, &ws, &spec) {
-        eprintln!("{}", render_project_err(&sources, &error));
-        log::error!(target: "SKULL", "state metadata planning failed for {}", dir);
-        crate::ablation_report::exit_with_census(1);
-    }
+    let lua = match install_rock_state_metadata(lua, &ws, &spec) {
+        Ok(lua) => lua,
+        Err(error) => {
+            eprintln!("{}", render_project_err(&sources, &error));
+            log::error!(target: "SKULL", "state metadata planning failed for {}", dir);
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
     // The bone Workspace is dead once `lua` is built -- this is a terminal
     // compile path (`compile`/`run` of a project; never looped in tests or
     // backend-stats), so the only thing after this is the output write / a
@@ -2153,22 +2156,36 @@ fn build_rock_state_metadata(
     Ok(out)
 }
 
-fn install_rock_state_metadata(
-    lua: &mut String,
-    ws: &bone_semantic::inference::Workspace,
-    spec: &crate::unified_compile::SourceSpec,
-) -> std::result::Result<(), CompilerError> {
-    let marker = "__rock_state_install_global_bridge()\n";
-    let at = lua
-        .find(marker)
-        .ok_or_else(|| CompilerError::new_no_location(
+struct GameProgram {
+    lua: String,
+    metadata: String,
+    metadata_at: usize,
+}
+
+impl GameProgram {
+    fn with_metadata(lua: String, metadata: String) -> std::result::Result<Self, CompilerError> {
+        let marker = "__rock_state_install_global_bridge()\n";
+        let at = lua.find(marker).ok_or_else(|| CompilerError::new_no_location(
             "compiler-owned StateSchema is missing its global bridge".to_string(),
         ))?;
+        Ok(Self { lua, metadata, metadata_at: at + marker.len() })
+    }
+
+    fn parts(&self) -> [&str; 3] {
+        let (head, tail) = self.lua.split_at(self.metadata_at);
+        [head, &self.metadata, tail]
+    }
+}
+
+fn install_rock_state_metadata(
+    lua: String,
+    ws: &bone_semantic::inference::Workspace,
+    spec: &crate::unified_compile::SourceSpec,
+) -> std::result::Result<GameProgram, CompilerError> {
     let mut metadata = build_rock_state_metadata(ws, spec)?;
     let scx = skull_mir::lower::ScalarCtx::new(ws);
     metadata.push_str(&build_state_nobox_accessors(ws, &scx)?);
-    lua.insert_str(at + marker.len(), &metadata);
-    Ok(())
+    GameProgram::with_metadata(lua, metadata)
 }
 
 /// Build `_G.__ROCK_STATE_NOBOX`, the rebuild/take-apart pair per `nobox`
@@ -2580,19 +2597,20 @@ pub fn skull_compile_project_with_inputs(
     // write_full_main: preamble (game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble game asset paths are
     // wrong; without the wrapper it never starts.
-    let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
-        skull_game_main(&skull_game_preamble(dir)?, &emit, emits_main)
-    } else if emits_main {
-        format!("{emit}\n__rock_main_wrapper(main)\n")
+    let preamble = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
+        skull_game_preamble(dir)?
     } else {
-        emit
+        String::new()
     };
+    let parts = skull_game_main(&preamble, &emit, emits_main);
     match output {
         Some(out) => {
-            rock_host::project::write_atomic(&out, &lua)?;
+            rock_host::project::write_atomic_streamed(&out, |file| write_program_parts(file, &parts))?;
             log::info!(target: "SKULL", "{} -> {}", dir, out);
         }
-        None => print!("{}", lua),
+        None => {
+            write_program_parts(&mut std::io::stdout().lock(), &parts)?;
+        }
     }
     crate::compile_measurements::phase("write");
     stats.success();
@@ -2643,12 +2661,8 @@ fn skull_run_project(dir: &str) -> Result<()> {
         return crate::compile_cmd::exec_luajit_file(&lua_file, None, &[]);
     }
 
-    // Non-game: append the entry wrapper and pipe the captured output.
-    let program = if emits_main {
-        format!("{lua}\n__rock_main_wrapper(main)\n")
-    } else {
-        lua
-    };
+    // The captured stdin evaluator requires contiguous input.
+    let program = skull_game_main("", &lua, emits_main).concat();
     stats.success();
     match rock_host::lua_runner::run_lua_code(&program) {
         Ok(run) => {
@@ -3674,9 +3688,9 @@ pub(crate) fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std:
         .map(|package| package.root.clone()))
 }
 
-fn prepend_stone_root(lua: String, stone_dir: &std::path::Path) -> String {
+fn stone_root_preamble(stone_dir: &std::path::Path) -> String {
     let escaped = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    format!("__ROCK_STONE_DIR = \"{escaped}\"\n{lua}")
+    format!("__ROCK_STONE_DIR = \"{escaped}\"\n")
 }
 
 /// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
@@ -3761,13 +3775,17 @@ fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
 /// changed once (`ROCK_SKULL_CALLEE_BINDING=upvalue` moves every body into a
 /// factory, so `function main(` appears nowhere), which left a chunk that
 /// defined the whole game and then ran nothing.
-fn skull_game_main(preamble: &str, emit_lua: &str, emits_main: bool) -> String {
-    let mut full = String::from(preamble);
-    full.push_str(emit_lua);
-    if emits_main {
-        full.push_str("\n__rock_main_wrapper(main)\n");
+fn skull_game_main<'a>(preamble: &'a str, program: &'a GameProgram, emits_main: bool) -> [&'a str; 5] {
+    let [head, metadata, tail] = program.parts();
+    let entry = if emits_main { "\n__rock_main_wrapper(main)\n" } else { "" };
+    [preamble, head, metadata, tail, entry]
+}
+
+fn write_program_parts(writer: &mut impl std::io::Write, parts: &[&str]) -> std::io::Result<()> {
+    for part in parts {
+        writer.write_all(part.as_bytes())?;
     }
-    full
+    Ok(())
 }
 
 /// Remove the accumulated overlay. A missing file is the normal "no overlay yet"
@@ -3791,14 +3809,14 @@ pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
 /// reload reports).
 fn write_full_main(
     preamble: &str,
-    emit_lua: &str,
+    emit_lua: &GameProgram,
     emits_main: bool,
     main_path: &std::path::Path,
     incremental_path: &std::path::Path,
 ) -> Result<usize> {
     let main = skull_game_main(preamble, emit_lua, emits_main);
-    let bytes = main.len();
-    rock_host::project::write_atomic(main_path, &main)?;
+    let bytes = main.iter().map(|part| part.len()).sum();
+    rock_host::project::write_atomic_streamed(main_path, |file| write_program_parts(file, &main))?;
     wipe_overlay(incremental_path)?;
     Ok(bytes)
 }
@@ -4023,8 +4041,7 @@ impl SkullStone {
             );
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let emits_main = emit.emits_main;
-            let mut lua = emit.lua;
-            install_rock_state_metadata(&mut lua, ws, &spec)
+            let lua = install_rock_state_metadata(emit.lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
@@ -4375,8 +4392,7 @@ impl SkullStone {
                 let spec =
                     crate::unified_compile::SourceSpec::Directory(PathBuf::from(self.project.dir()));
                 let emits_main = emit.emits_main;
-                let mut lua = emit.lua;
-                install_rock_state_metadata(&mut lua, ws, &spec)
+                let lua = install_rock_state_metadata(emit.lua, ws, &spec)
                     .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
                 ((lua, emits_main), c)
             };
@@ -4516,8 +4532,7 @@ impl SkullStone {
             let spec = crate::unified_compile::SourceSpec::Directory(
                 std::path::PathBuf::from(self.project.dir()),
             );
-            let mut lua = emit.lua;
-            install_rock_state_metadata(&mut lua, ws, &spec)
+            let lua = install_rock_state_metadata(emit.lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
