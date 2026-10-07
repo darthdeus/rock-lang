@@ -1272,3 +1272,68 @@ fn main() {
         err.message
     );
 }
+
+const SHARED_ABI_SLOTS: &str = r#"
+@lifecycle(phase="update", owner="session")
+deco init tick {}
+@tick fn first() {}
+@tick fn second() {}
+@tick fn third() {}
+fn main() {}
+"#;
+
+#[test]
+fn code_slot_staging_names_each_distinct_call_abi_once() {
+    let ws = ws_of(SHARED_ABI_SLOTS);
+    let (full, _cache) = emit_full_global(&ws, skull::user_module_id(&ws).unwrap()).unwrap();
+    let abis: std::collections::BTreeSet<&str> = full
+        .code_artifact
+        .entries
+        .values()
+        .filter(|entry| entry.escaping)
+        .map(|entry| entry.compatibility.call_abi.as_str())
+        .collect();
+    let staged = full.lua.lines().filter(|line| line.contains("__rock_code_slot_stage(")).count();
+    assert!(
+        staged > abis.len(),
+        "fixture must share a call ABI across slots: {staged} slots, {} ABIs",
+        abis.len()
+    );
+    for abi in abis {
+        let literal = skull_codegen_lua::lua_string(abi);
+        assert_eq!(full.lua.matches(literal.as_str()).count(), 1, "ABI {literal} must be named once");
+    }
+}
+
+#[test]
+fn a_shared_call_abi_stays_compatible_across_an_overlay() {
+    let v2 = SHARED_ABI_SLOTS.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
+    let ws1 = ws_of(SHARED_ABI_SLOTS);
+    let (full, mut cache) = emit_full_global(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let escaping: Vec<_> = full.code_artifact.entries.values().filter(|entry| entry.escaping).collect();
+    let ws2 = ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
+    assert!(overlay.lua.contains("__rock_code_slot_stage("), "the overlay must restage `first`");
+    let run = format!(
+        r#"{full}
+local function snapshot()
+  local rows = {{}}
+  for key, slot in pairs(_G.__rock_code_slots) do rows[#rows + 1] = key .. "=" .. slot.abi end
+  table.sort(rows)
+  return table.concat(rows, "\n")
+end
+local before = snapshot()
+{overlay}
+assert(snapshot() == before, "the overlay changed a slot ABI")
+print(before)
+"#,
+        full = full.lua,
+        overlay = overlay.lua
+    );
+    let out = crate::common::run_luajit(&run, "shared_abi_overlay");
+    assert_eq!(out.lines().count(), escaping.len(), "every escaping CodeRef has a slot:\n{out}");
+    for entry in escaping {
+        let abi = format!("={}", entry.compatibility.call_abi);
+        assert!(out.lines().any(|row| row.ends_with(&abi)), "no slot carries ABI {abi}:\n{out}");
+    }
+}

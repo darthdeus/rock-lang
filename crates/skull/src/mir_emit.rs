@@ -6244,7 +6244,12 @@ fn code_slot_registration_lua_entries<'a>(
     }
     let mut entries = entries;
     entries.sort_by_key(|entry| entry.identity.logical_key(ws, scx.interner()));
-    let mut out = String::from("__rock_code_slot_begin()\n");
+    // Thousands of slots share a few hundred call ABIs, so each distinct ABI is
+    // spelled once in a table. `do ... end` keeps that local out of the
+    // enclosing function's local budget.
+    let mut abi_index: FxHashMap<&str, usize> = FxHashMap::default();
+    let mut abis = String::new();
+    let mut stages = String::new();
     for entry in entries {
         let Some(body) = entry.body_name else {
             return Err(CompilerError::new_no_location(format!(
@@ -6252,16 +6257,24 @@ fn code_slot_registration_lua_entries<'a>(
                 entry.identity.logical_key(ws, scx.interner())
             )));
         };
+        let abi = entry.compatibility.call_abi.as_str();
+        let next = abi_index.len() + 1;
+        let index = *abi_index.entry(abi).or_insert_with(|| {
+            writeln!(abis, "{},", skull_codegen_lua::lua_string(abi))
+                .expect("writing a String cannot fail");
+            next
+        });
         writeln!(
-            out,
-            "__rock_code_slot_stage({}, {}, {})",
+            stages,
+            "__rock_code_slot_stage({}, {}, __rock_code_slot_abis[{index}])",
             skull_codegen_lua::lua_string(&entry.identity.logical_key(ws, scx.interner())),
             body,
-            skull_codegen_lua::lua_string(&entry.compatibility.call_abi),
         )
         .expect("writing a String cannot fail");
     }
-    Ok(out)
+    Ok(format!(
+        "__rock_code_slot_begin()\ndo\nlocal __rock_code_slot_abis = {{\n{abis}}}\n{stages}end\n"
+    ))
 }
 
 fn overlay_code_artifact(
