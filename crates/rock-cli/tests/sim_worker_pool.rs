@@ -76,13 +76,15 @@ fn duration_allocated_workers_preserve_isolated_results_in_three_orders() {
 @sim
 co fn fast() -> Coroutine<Wait> {
     start_game "duration_fixture"
-    sim_expect(true, "fast body reached")
+    await frame()
+    sim_expect(frame_seq > 0, "fast body reached a host frame")
     stop_sim()
 }
 @sim
 co fn slow() -> Coroutine<Wait> {
     start_game "duration_fixture"
-    sim_expect(true, "slow body reached")
+    await frame()
+    sim_expect(frame_seq > 0, "slow body reached a host frame")
     stop_sim()
 }
 "#).unwrap();
