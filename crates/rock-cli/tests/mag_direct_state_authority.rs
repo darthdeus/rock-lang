@@ -1274,9 +1274,9 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         assert!(runner.contains(call), "package runner is missing authoritative stage `{call}`");
     }
     let phases = [
-        ("mag_tick_actor_pre_mob", &["active.update_casting_in(world, ctx.intents.cast)",
-            "player.apply_target_intent_in(world, ctx.intents.target)",
-            "player.update_movement_in(world, ctx.intents.movement, dt)"][..]),
+        ("mag_tick_actor_pre_mob", &["world_player_cast_intent_enqueue(queue, record, tick, ctx.intents.cast)",
+            "WorldPlayerActionKind::FrameTarget", "WorldPlayerActionKind::FrameMovement",
+            "world_player_actions_dispatch(world.root,"][..]),
         ("mag_tick_rows_pickup", &[][..]),
         ("mag_tick_ratcatcher_and_guards", &[][..]),
         ("mag_tick_spawners", &[][..]),
@@ -1315,6 +1315,17 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             assert!(body.contains(call), "phase `{phase}` is missing authoritative call `{call}`");
         }
     }
+    let player_slot = rock_function_body(&run, "fn mag_tick_actor_pre_mob(");
+    assert_eq!(player_slot.matches("world_player_actions_dispatch(").count(), 1,
+        "MAG must dispatch its player queue exactly once");
+    for former in ["active.update_casting_in(", "player.apply_target_intent_in(", "player.update_movement_in("] {
+        assert!(!player_slot.contains(former), "player input bypasses the shared queue: {former}");
+    }
+    let package_player = fs::read_to_string(repo.join("mag-world/expedition_player.rock"))
+        .expect("read package player command host");
+    let package_slot = rock_function_body(&package_player, "pub fn expedition_player_input(");
+    assert_eq!(package_slot.matches("world_player_actions_dispatch(").count(), 1,
+        "package steps must dispatch the same player queue exactly once");
     for presentation in [
         "update_projectiles()",
         "update_bolts()",
