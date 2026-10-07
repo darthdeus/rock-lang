@@ -185,8 +185,8 @@ impl LambdaTopologyFingerprint {
 
     /// Combine one owner's distinct region topologies into the single value
     /// the compatibility gate compares. Sorted, so region emission order
-    /// cannot move it; tagged, so it cannot collide with a site-derived
-    /// fingerprint. A single topology passes through unchanged.
+    /// cannot move it; tagged to separate the hash input from site-derived
+    /// fingerprints. A single topology passes through unchanged.
     pub fn unified(topologies: impl IntoIterator<Item = LambdaTopologyFingerprint>) -> Self {
         let mut sorted: Vec<u64> = topologies.into_iter().map(|topology| topology.0).collect();
         sorted.sort_unstable();
@@ -406,10 +406,11 @@ impl CodeArtifact {
     /// non-default topologies. The compatibility gate compares topologies at
     /// the owner boundary, so the artifact rewrites every non-default
     /// topology of a multi-topology owner to the hash of the sorted distinct
-    /// set. Any insertion, removal, reorder or arity change in any region
-    /// still flips its region fingerprint and therefore the union, while an
-    /// unrelated body-only edit leaves every union untouched. Owners with a
-    /// single topology keep their site-derived fingerprint.
+    /// set. The union tracks changes to that distinct set, not which region
+    /// owns each fingerprint or how many regions share it: swapping region
+    /// fingerprints or changing their multiplicity leaves the union unchanged.
+    /// An unrelated body-only edit leaves every union untouched. Owners with
+    /// a single topology keep their site-derived fingerprint.
     pub fn unify_owner_topologies(&mut self) {
         let mut per_owner: BTreeMap<CodeOwner, BTreeSet<LambdaTopologyFingerprint>> =
             BTreeMap::new();

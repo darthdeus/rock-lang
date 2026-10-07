@@ -1223,8 +1223,9 @@ fn main() {
     emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "probe")]);
 }
 
-/// The union topology must still fail closed: adding a lambda to one region
-/// of a multi-region coroutine changes the union, so the overlay refuses.
+/// A body-only edit in a defer region must overlay before adding a lambda to
+/// that region refuses. Otherwise a gate rejecting every multi-region
+/// coroutine would satisfy the negative check without comparing the edit.
 #[test]
 fn lambda_insertion_in_defer_region_still_refuses_overlay() {
     let v1 = r#"
@@ -1246,20 +1247,27 @@ fn main() {
     let _ = probe()
 }
 "#;
-    let v2 = v1.replace(
+    let compatible = v1.replace(
         "        note(apply((v) => v + seed, 1))",
-        "        note(apply((v) => v + seed, 1))\n        note(apply((v) => v - seed, 2))",
+        "        note(apply((v) => v + seed, 3))",
+    );
+    let v2 = compatible.replace(
+        "        note(apply((v) => v + seed, 3))",
+        "        note(apply((v) => v + seed, 3))\n        note(apply((v) => v - seed, 2))",
     );
     let ws1 = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws1).unwrap();
     let (_full, mut cache) = emit_full_global(&ws1, mid).expect("emit_full v1");
+    let ws_compatible = ws_with_stdlib(&compatible);
+    emit_overlay_result(&ws_compatible, &mut cache, &[body_id(&ws_compatible, "worker")])
+        .expect("a body-only defer edit must overlay before testing lambda insertion");
     let ws2 = ws_with_stdlib(&v2);
     let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "worker")]) {
         Ok(_) => panic!("inserting a lambda into a region must refuse the overlay"),
         Err(err) => err,
     };
     assert!(
-        err.message.contains("safe restart"),
+        err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"),
         "the refusal must stay the compatibility restart: {}",
         err.message
     );
