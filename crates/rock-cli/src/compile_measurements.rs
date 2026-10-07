@@ -116,10 +116,9 @@ pub(crate) fn source(path: &str, bytes: usize) {
                 pending.totals[category] = json!({"files": 0, "bytes": 0});
             }
         }
-        let category = if path.contains("/tests/sims/") || path.contains("\\tests\\sims\\") {
-            "sims"
-        } else if path.contains("/tests/") || path.contains("\\tests\\") {
-            "tests"
+        let mut components = path.split(['/', '\\']);
+        let category = if components.any(|component| component == "tests") {
+            if components.next() == Some("sims") { "sims" } else { "tests" }
         } else { "production" };
         for (key, count) in [("source_files", 1), ("source_bytes", bytes)] {
             pending.totals[key] = json!(pending.totals[key].as_u64().unwrap() + count as u64);

@@ -164,3 +164,28 @@ fn live_reload_child() {
     assert!(records[1]["totals"]["source_files"].as_u64().unwrap() > 0);
     assert!(records[1]["totals"]["source_bytes"].is_null());
 }
+
+#[test]
+fn relative_test_and_sim_paths_keep_source_categories() {
+    let dir = fixture();
+    std::fs::create_dir(dir.path().join("tests/sims")).unwrap();
+    let stats = dir.path().join("stats.jsonl");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap();
+    for path in ["tests/check.rock", "tests/sims/check.rock"] {
+        std::fs::write(dir.path().join(path), "@test\nfn check() { assert(true) }\n").unwrap();
+        let out = command().current_dir(dir.path()).env("ROCK_DIR", root)
+            .args(["compile-single", path, "--output"])
+            .arg(dir.path().join("out.lua")).env("ROCK_COMPILE_STATS", &stats)
+            .output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let records: Vec<Value> = std::fs::read_to_string(stats).unwrap().lines()
+        .map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(records.len(), 2);
+    for (record, category) in records.iter().zip(["tests", "sims"]) {
+        assert_eq!(record["totals"]["source_files"], 1);
+        assert_eq!(record["totals"][category]["files"], 1);
+        assert_eq!(record["totals"]["production"]["files"], 0);
+    }
+}
