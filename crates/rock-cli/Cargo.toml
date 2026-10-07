@@ -81,6 +81,7 @@ winapi = { version = "0.3", features = ["jobapi2", "winnt", "handleapi", "proces
 [dev-dependencies]
 insta = { workspace = true }
 regex-lite = { workspace = true }
+syn = { version = "2", features = ["full"] }
 tempfile = "3.0"
 # web_smoke_tests: decode the headless-Chrome screenshot for the non-blank check.
 image = { version = "0.25", default-features = false, features = ["png"] }

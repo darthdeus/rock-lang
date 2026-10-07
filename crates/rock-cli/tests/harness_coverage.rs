@@ -62,6 +62,50 @@ fn crates_dir() -> PathBuf {
         .to_path_buf()
 }
 
+fn declared_test_files(source: &str, directory: &Path) -> HashSet<String> {
+    syn::parse_file(source).expect("parse Rust harness").items.into_iter()
+        .filter_map(|item| {
+            let syn::Item::Mod(module) = item else { return None };
+            if module.content.is_some() {
+                return None;
+            }
+            let Some(attribute) = module.attrs.iter().find(|attr| attr.path().is_ident("path")) else {
+                let nested = format!("{}/mod.rs", module.ident);
+                if directory.join(&nested).is_file() {
+                    return Some(nested);
+                }
+                return Some(format!("{}.rs", module.ident));
+            };
+            let syn::Meta::NameValue(value) = &attribute.meta else { panic!("module path must have a value") };
+            let syn::Expr::Lit(value) = &value.value else { panic!("module path must be a literal") };
+            let syn::Lit::Str(path) = &value.lit else { panic!("module path must be a string") };
+            Some(path.value())
+        })
+        .collect()
+}
+
+#[test]
+fn harness_declarations_follow_rust_module_syntax() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(temp.path().join("helpers")).unwrap();
+    std::fs::write(temp.path().join("helpers/mod.rs"), "").unwrap();
+    let source = r##"
+        mod compile_release;
+        #[path="renamed.rs"] pub mod different_name;
+        mod helpers;
+        mod inline { fn helper() {} }
+        // mod commented_out;
+        const EXAMPLE: &str = r#"
+#[path = "string_only.rs"]
+mod string_only;
+"#;
+    "##;
+    assert_eq!(
+        declared_test_files(source, temp.path()),
+        HashSet::from(["compile_release.rs", "renamed.rs", "helpers/mod.rs"].map(str::to_string))
+    );
+}
+
 #[test]
 fn every_test_file_is_declared_in_a_harness() {
     let mut undeclared = Vec::new();
@@ -72,13 +116,7 @@ fn every_test_file_is_declared_in_a_harness() {
             .flat_map(|r| {
                 let src = std::fs::read_to_string(crates_dir().join(krate).join(r))
                     .unwrap_or_else(|e| panic!("{krate}/{r}: {e}"));
-                src.lines()
-                    .filter_map(|l| {
-                        let l = l.trim();
-                        let rest = l.strip_prefix("#[path = \"")?;
-                        Some(rest.strip_suffix("\"]")?.to_string())
-                    })
-                    .collect::<Vec<_>>()
+                declared_test_files(&src, &tests)
             })
             .collect();
 
@@ -134,14 +172,11 @@ fn optional_backend_harnesses_are_separate_from_desktop_harnesses() {
 
     for root in ["main.rs", "main_heavy.rs"] {
         let source = std::fs::read_to_string(tests.join(root)).expect("desktop harness");
-        for line in source.lines() {
-            let Some(path) = line.trim().strip_prefix("#[path = \"").and_then(|line| line.strip_suffix("\"]")) else {
-                continue;
-            };
-            if matches!(path, "backend_feature_gates.rs" | "harness_coverage.rs") {
+        for path in declared_test_files(&source, &tests) {
+            if matches!(path.as_str(), "backend_feature_gates.rs" | "harness_coverage.rs") {
                 continue;
             }
-            let module_source = std::fs::read_to_string(tests.join(path)).unwrap();
+            let module_source = std::fs::read_to_string(tests.join(&path)).unwrap();
             if path == "shape_oracle.rs" {
                 continue;
             }
