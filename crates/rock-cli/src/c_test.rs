@@ -264,7 +264,19 @@ fn c_test_run_with_required_tests(
                     let outcome = if *is_file {
                         build_file(path, &mut required, &engine_builds)
                     } else {
-                        build_package(path, &mut required, &engine_builds)
+                        // A rayon worker waiting on a package's parallel test
+                        // run may pick up another package unit, nesting a
+                        // second compile slot on one thread. A plain thread
+                        // blocks without taking rayon work.
+                        std::thread::scope(|package_scope| {
+                            package_scope
+                                .spawn(|| {
+                                    let _ablation = skull_mir::ablation::enter_context(ablation.clone());
+                                    build_package(path, &mut required, &engine_builds)
+                                })
+                                .join()
+                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                        })
                     };
                     sender
                         .send((index, outcome, required))
@@ -466,6 +478,17 @@ fn build_package(
     required: &mut Vec<(String, RequiredTestOutcome)>,
     engine_builds: &std::sync::Mutex<CEngineBuilds>,
 ) -> CUnitOutcome {
+    // Held through the tests: each test's program is emitted from the
+    // checked workspace, which stays resident until the unit ends.
+    let _slot = match crate::compile_slots::acquire(dir) {
+        Ok(slot) => slot,
+        Err(error) => {
+            return CUnitOutcome::UnitFail {
+                reason: "no compile slot".to_string(),
+                rendered: format!("{error:#}"),
+            };
+        }
+    };
     let checked = match check_project(dir, false) {
         Ok(checked) => checked,
         Err(error) => {
@@ -917,6 +940,7 @@ fn main_ref(
 
 fn emit_main_program(path: &str) -> Result<skull_codegen_c::CProgram> {
     if std::path::Path::new(path).is_dir() {
+        let _slot = crate::compile_slots::acquire(path)?;
         let checked = check_project(path, true).map_err(|error| anyhow::anyhow!(error.rendered))?;
         let main = main_ref(&checked.ws, checked.entry_mid)?;
         skull_codegen_c::emit_program(&checked.ws, main).map_err(|error| {
@@ -1086,6 +1110,7 @@ pub fn c_rejections(path: &str, output: &str) -> Result<()> {
     let out = std::path::Path::new(output);
     reject_input_alias(path, out)?;
     let report = if std::path::Path::new(path).is_dir() {
+        let _slot = crate::compile_slots::acquire(path)?;
         let checked = check_project(path, true).map_err(|error| anyhow::anyhow!(error.rendered))?;
         let main = main_ref(&checked.ws, checked.entry_mid)?;
         skull_codegen_c::diagnose_program(&checked.ws, main)
@@ -1215,6 +1240,34 @@ pub fn c_frame(
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
+
+    fn slot_probe_package(source: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("package");
+        std::fs::write(dir.path().join("stick.toml"),
+            "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n").unwrap();
+        std::fs::write(dir.path().join("probe.rock"), source).unwrap();
+        dir
+    }
+
+    #[test]
+    fn package_tests_wait_for_a_compile_slot() {
+        let package = slot_probe_package("@test fn probe() {}\n");
+        let dir = package.path().to_str().unwrap().to_owned();
+        crate::compile_slots::assert_compile_waits_for_slot(move || {
+            let engine_builds = std::sync::Mutex::new(super::CEngineBuilds::default());
+            super::build_package(&dir, &mut Vec::new(), &engine_builds);
+        });
+    }
+
+    #[test]
+    fn project_emission_waits_for_a_compile_slot() {
+        let package = slot_probe_package("fn main() {}\n");
+        let dir = package.path().to_str().unwrap().to_owned();
+        let emitted = crate::compile_slots::assert_compile_waits_for_slot(move || {
+            super::emit_main_program(&dir).map(|_| ()).map_err(|error| format!("{error:#}"))
+        });
+        emitted.unwrap();
+    }
 
     #[test]
     fn required_test_gate_rejects_missing_names() {

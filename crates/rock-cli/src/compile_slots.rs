@@ -53,6 +53,7 @@ pub(crate) struct SlotAcquisition {
 }
 
 thread_local! {
+    static HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LAST_ACQUISITION: RefCell<Option<SlotAcquisition>> = const { RefCell::new(None) };
     #[cfg(test)]
     static TEST_CONFIG: RefCell<Option<SlotConfig>> = const { RefCell::new(None) };
@@ -70,6 +71,8 @@ pub(crate) fn last_acquisition() -> Option<SlotAcquisition> {
 pub(crate) struct CompileSlot {
     file: Option<File>,
     acquisition: SlotAcquisition,
+    /// Set for guards from [`acquire`], which marks the thread as holding.
+    marks_thread: bool,
 }
 
 impl CompileSlot {
@@ -81,6 +84,9 @@ impl CompileSlot {
 
 impl Drop for CompileSlot {
     fn drop(&mut self) {
+        if self.marks_thread {
+            HOLDING.with(|holding| holding.set(false));
+        }
         let Some(file) = self.file.take() else { return };
         // Closing releases the lock too; unlocking first also covers a
         // descriptor that leaked into a child.
@@ -93,13 +99,21 @@ impl Drop for CompileSlot {
 /// Take a compile slot for `what` (named in the wait log), waiting while every
 /// candidate slot is busy.
 pub(crate) fn acquire(what: &str) -> Result<CompileSlot> {
-    let slot = match current_config()? {
+    if HOLDING.with(|holding| holding.get()) {
+        return Err(anyhow!(
+            "this thread already holds a compile slot; a nested acquire for {what} would wait on itself"
+        ));
+    }
+    let mut slot = match current_config()? {
         Some(config) => acquire_with(&config, what)?,
         None => CompileSlot {
             file: None,
             acquisition: SlotAcquisition { slot: None, waited: Duration::ZERO },
+            marks_thread: false,
         },
     };
+    slot.marks_thread = true;
+    HOLDING.with(|holding| holding.set(true));
     LAST_ACQUISITION.with(|last| *last.borrow_mut() = Some(slot.acquisition.clone()));
     Ok(slot)
 }
@@ -211,7 +225,7 @@ pub(crate) fn acquire_with(config: &SlotConfig, what: &str) -> Result<CompileSlo
                         log::debug!(target: "COMPILE", "took compile slot {} for {what} in {waited:?}", names[index]);
                     }
                     let acquisition = SlotAcquisition { slot: Some(names[index].clone()), waited };
-                    return Ok(CompileSlot { file: Some(file), acquisition });
+                    return Ok(CompileSlot { file: Some(file), acquisition, marks_thread: false });
                 }
                 Err(TryLockError::WouldBlock) => {}
                 Err(TryLockError::Error(error)) => {
@@ -256,6 +270,30 @@ fn describe_holders(dir: &Path, names: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Run `compile` on a thread whose only batch slot is held, and check it
+/// waits for the slot and takes it once freed. Returns the compile's result.
+#[cfg(test)]
+pub(crate) fn assert_compile_waits_for_slot<T: Send + 'static>(
+    compile: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let slots = tempfile::tempdir().unwrap();
+    let config = SlotConfig { dir: slots.path().to_path_buf(), batch_slots: 1, class: CompileClass::Batch };
+    let held = acquire_with(&config, "test holder").unwrap();
+    let worker = std::thread::spawn(move || {
+        set_thread_config(Some(config));
+        let result = compile();
+        (result, last_acquisition())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!worker.is_finished(), "the compile ran while the only batch slot was held");
+    drop(held);
+    let (result, acquisition) = worker.join().unwrap();
+    let acquisition = acquisition.expect("the compile took no slot");
+    assert_eq!(acquisition.slot.as_deref(), Some("batch-0"));
+    assert!(acquisition.waited >= Duration::from_millis(250), "{acquisition:?}");
+    result
 }
 
 #[cfg(test)]
@@ -340,6 +378,16 @@ mod tests {
         set_thread_config(None);
         let slot = acquire("unlimited").unwrap();
         assert_eq!(slot.acquisition().slot, None);
+    }
+
+    #[test]
+    fn a_thread_cannot_take_a_second_slot_while_holding_one() {
+        set_thread_config(None);
+        let outer = acquire("outer").unwrap();
+        let nested = acquire("inner").err().expect("a nested acquire would wait on itself");
+        assert!(format!("{nested:#}").contains("already holds"), "{nested:#}");
+        drop(outer);
+        let _after = acquire("after").unwrap();
     }
 
     #[test]

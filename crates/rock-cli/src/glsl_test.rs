@@ -310,6 +310,14 @@ fn build_file(file: &str, runner: &std::path::Path, gl_available: &[bool; 2]) ->
 /// A `stick.toml` package built as ONE workspace (tests included), mirroring
 /// the JS/luajit package path.
 fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) -> UnitOutcome {
+    // Held through the tests: their shaders are emitted from the checked
+    // workspace, which stays resident until the unit ends.
+    let _slot = match crate::compile_slots::acquire(dir) {
+        Ok(slot) => slot,
+        Err(error) => {
+            return UnitOutcome::UnitFail { reason: "no compile slot".to_string(), rendered: format!("{error:#}") };
+        }
+    };
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
@@ -534,7 +542,10 @@ fn spawn_runner(
 
     let mut cmd = Command::new(runner);
     cmd.arg("--profile").arg(profile);
-    cmd.env(rock_host::project::lib_path_var(), runner_lib_path());
+    cmd.env(
+        rock_host::project::lib_path_var(),
+        rock_host::project::lib_path_with_inherited(),
+    );
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
     child
@@ -549,20 +560,6 @@ fn spawn_runner(
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
-}
-
-/// The library search path the runner needs: the prebuilt gamelibs (SDL2) +
-/// inherited value + `$NIX_LD_LIBRARY_PATH` (where libGL lives on NixOS, the
-/// same path the game's nix-ld'd luajit resolves it through).
-fn runner_lib_path() -> String {
-    let mut value = rock_host::project::lib_path_with_inherited();
-    if let Some(nix_ld) = std::env::var_os("NIX_LD_LIBRARY_PATH") {
-        if !nix_ld.is_empty() {
-            value.push(':');
-            value.push_str(&nix_ld.to_string_lossy());
-        }
-    }
-    value
 }
 
 // --- A3: compile-validate registered render shaders on real GL contexts ---
@@ -660,6 +657,9 @@ pub fn shader_validate_run(dirs: &[String], print: bool) -> Result<ValidateSumma
     };
 
     for dir in dirs {
+        // Held while this project's shaders are emitted and linked from its
+        // resident workspace.
+        let _slot = crate::compile_slots::acquire(dir)?;
         let ws = validate_workspace(dir)?;
         let pairs = skull_mir::lower::collect_shader_pairs(&ws)
             .map_err(|e| anyhow::anyhow!("{dir}: collect_shader_pairs: {}", e.message))?;
@@ -879,4 +879,20 @@ fn locate_runner() -> Result<std::path::PathBuf> {
         "stone-glsl-runner not found next to {} -- build it (`cargo build -p stone-glsl-runner`) or set ROCK_GLSL_RUNNER",
         dir.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn package_tests_wait_for_a_compile_slot() {
+        let package = tempfile::tempdir().expect("package");
+        std::fs::write(package.path().join("stick.toml"),
+            "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n").unwrap();
+        std::fs::write(package.path().join("probe.rock"), "@test fn probe() -> Int = 1\n").unwrap();
+        let dir = package.path().to_str().unwrap().to_owned();
+        // No GL profile is available, so no runner is spawned.
+        crate::compile_slots::assert_compile_waits_for_slot(move || {
+            super::build_package(&dir, std::path::Path::new("stone-glsl-runner"), &[false, false]);
+        });
+    }
 }
