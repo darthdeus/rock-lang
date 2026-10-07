@@ -7,26 +7,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub use rock_cli::*;
 // use notify::{Config, RecommendedWatcher, Watcher};
 
-// mi_option_allow_thp in libmimalloc-sys 0.1.47's bundled v3 header.
-const MI_OPTION_ALLOW_THP: std::ffi::c_int = 43;
-
-#[cfg(target_os = "linux")]
-#[used]
-#[unsafe(link_section = ".init_array.00100")]
-// Precede mimalloc's constructor (priority 101 with clang) and its THP OS setup.
-static ALLOCATOR_INIT: extern "C" fn() = configure_allocator;
-
-extern "C" fn configure_allocator() {
-    unsafe extern "C" {
-        fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);
-    }
-    // SAFETY: the option is valid; startup calls take no pointers or allocations.
-    unsafe { mi_option_set_default(MI_OPTION_ALLOW_THP, 0) }
-}
-
 fn main() {
-    // Avoid direct THP compaction on compiler faults; explicit MIMALLOC_ALLOW_THP still wins.
-    configure_allocator();
     // `rock lsp <subcommand>` is the LSP server + one-shot CLI handlers (there
     // is no separate `rock-lsp` binary — folding it in keeps a single `rock`
     // artifact that can't go stale against the embedded stdlib). Intercepted
@@ -60,6 +41,13 @@ fn main() {
     skull_mir::ablation::init_from_env();
 
     let args = Args::parse();
+
+    if compiler_process(args.command, args.list) {
+        if let Err(error) = rock_host::compiler_thp::enter_compiler_process() {
+            eprintln!("Error: cannot start compiler with its THP default: {error}");
+            std::process::exit(1);
+        }
+    }
 
     // Sims force telemetry offline and must not read a production secret merely
     // to compile; build-var commands use this to distinguish the invocation.
@@ -175,6 +163,12 @@ fn main() {
     rock_cli::invocation_log::finish(Some(0), "return");
 }
 
+fn compiler_process(command: CliCommand, list: bool) -> bool {
+    matches!(command, CliCommand::Compile | CliCommand::CompileSingle
+        | CliCommand::Test | CliCommand::TestCompile)
+        || (command == CliCommand::Sim && list)
+}
+
 #[cfg(test)]
 mod allocator_tests {
     unsafe extern "C" {
@@ -182,48 +176,82 @@ mod allocator_tests {
     }
 
     #[test]
-    fn thp_defaults_off_and_environment_overrides() {
+    fn compiler_thp_default_does_not_reach_runtime_child() {
         let exe = std::env::current_exe().expect("test executable");
-        let default = if cfg!(target_os = "linux") { "0 0" } else { "1 0" };
-        for (value, expected) in [(None, default), (Some("1"), "1 1"),
-            (Some("0"), "0 0"), (Some("ON"), "1 1")] {
+        for (key, value, compiler, runtime) in [
+            ("MIMALLOC_ALLOW_THP", None, "0", "1"),
+            ("MIMALLOC_ALLOW_THP", Some("1"), "1", "1"),
+            ("MIMALLOC_ALLOW_THP", Some("0"), "0", "0"),
+            ("MIMALLOC_ALLOW_THP", Some("ON"), "1", "1"),
+            ("mimalloc_allow_thp", Some("1"), "1", "1"),
+            ("mimalloc_allow_thp", Some("0"), "0", "0"),
+        ] {
             let mut child = std::process::Command::new(&exe);
-            child.args(["--exact", "allocator_tests::thp_option_child", "--nocapture"])
-                .env("ROCK_THP_OPTION_CHILD", expected)
-                .env_remove("MIMALLOC_ALLOW_THP");
+            child.args(["--exact", "allocator_tests::thp_process_child", "--nocapture"])
+                .env("ROCK_THP_TEST_DEFAULT", if value.is_none() { "1" } else { "0" })
+                .env("ROCK_THP_TEST_ROLE", "compiler")
+                .env("ROCK_THP_TEST_EXPECT", compiler)
+                .env("ROCK_THP_TEST_RUNTIME_EXPECT", runtime)
+                .env_remove("ROCK_COMPILER_THP_DEFAULT")
+                .env_remove("MIMALLOC_ALLOW_THP")
+                .env_remove("mimalloc_allow_thp");
             if let Some(value) = value {
-                child.env("MIMALLOC_ALLOW_THP", value);
+                child.env(key, value);
             }
-            let out = child.output().expect("spawn allocator option witness");
-            assert!(out.status.success(), "MIMALLOC_ALLOW_THP={value:?}: {}{}",
+            let out = child.output().expect("spawn compiler witness");
+            assert!(out.status.success(), "{key}={value:?}: {}{}",
                 String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            print!("{key}={value:?}: {}", String::from_utf8_lossy(&out.stdout));
         }
     }
 
     #[test]
-    fn thp_option_child() {
-        let Some(expected) = std::env::var_os("ROCK_THP_OPTION_CHILD") else {
-            return;
-        };
-        // SAFETY: the option is valid and this fresh process owns its settings.
-        let before = unsafe { mi_option_get(super::MI_OPTION_ALLOW_THP) };
+    fn compiler_process_kinds() {
+        use super::CliCommand::*;
+        for command in [Compile, CompileSingle, Test, TestCompile] {
+            assert!(super::compiler_process(command, false));
+        }
+        assert!(super::compiler_process(Sim, true));
+        for command in [Sim, Run, Stone, Frame, Watch, Perf] {
+            assert!(!super::compiler_process(command, false));
+        }
+    }
+
+    #[test]
+    fn thp_process_child() {
+        let Ok(role) = std::env::var("ROCK_THP_TEST_ROLE") else { return; };
+        if role == "compiler" {
+            rock_host::compiler_thp::enter_compiler_process().expect("compiler restart");
+        }
+        let expected: i64 = std::env::var("ROCK_THP_TEST_EXPECT").unwrap().parse().unwrap();
+        let option = unsafe { mi_option_get(43) };
+        assert_eq!(option as i64, expected, "{role} allocator option");
+        if role == "runtime" && std::env::var("ROCK_THP_TEST_DEFAULT").as_deref() == Ok("1") {
+            assert!(std::env::var_os("MIMALLOC_ALLOW_THP").is_none());
+            assert!(std::env::var_os("ROCK_COMPILER_THP_DEFAULT").is_none());
+        }
+        println!("{role} THP option={option}");
         #[cfg(target_os = "linux")]
-        if before == 0 {
-            // SAFETY: this prctl query takes only scalar arguments.
+        {
             let disabled = unsafe {
                 libc::prctl(libc::PR_GET_THP_DISABLE, 0usize, 0usize, 0usize, 0usize)
             };
-            if disabled == -1 {
-                // Kernels without this THP control reject the query with EINVAL.
-                let error = std::io::Error::last_os_error();
-                assert_eq!(error.raw_os_error(), Some(libc::EINVAL), "{error}");
-            } else {
-                assert_ne!(disabled, 0, "THP default missed mimalloc's OS initialization");
-            }
+            assert_eq!(disabled, i32::from(expected == 0), "{role} kernel THP state");
+            println!("{role} THP disabled={disabled}");
         }
-        super::configure_allocator();
-        // SAFETY: as above.
-        let after = unsafe { mi_option_get(super::MI_OPTION_ALLOW_THP) };
-        assert_eq!(format!("{before} {after}"), expected.to_string_lossy());
+        if role == "compiler" {
+            // Exercise the shared production spawn recipe used by tests, sims and games.
+            unsafe { std::env::set_var("ROCK_LUAJIT", std::env::current_exe().unwrap()) };
+            let mut runtime = rock_host::project::build_luajit_command(
+                std::path::Path::new("--exact"),
+                &["allocator_tests::thp_process_child".into(), "--nocapture".into()],
+            );
+            runtime.env("ROCK_THP_TEST_ROLE", "runtime")
+                .env("ROCK_THP_TEST_EXPECT", std::env::var("ROCK_THP_TEST_RUNTIME_EXPECT").unwrap());
+            let out = runtime.output().expect("spawn runtime witness");
+            assert!(out.status.success(), "runtime child: {}{}",
+                String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+        }
     }
 }

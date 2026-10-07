@@ -8,6 +8,7 @@
 
 pub mod art_vault;
 pub mod compilation_units;
+pub mod compiler_thp;
 pub mod engine_build;
 pub mod js_runner;
 pub mod lua_runner;

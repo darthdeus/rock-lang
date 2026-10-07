@@ -537,6 +537,7 @@ fn write_atomic_with(
 pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
     let luajit_path = luajit_path();
     let mut cmd = std::process::Command::new(&luajit_path);
+    crate::compiler_thp::configure_runtime_command(&mut cmd);
     // STONE_JV=1 (set directly or via the `--jv` CLI flag) turns on LuaJIT's
     // verbose trace log. `-j*` flags are only honored BEFORE the script name --
     // anything after lua_file is passed to the game as arg[] -- so it leads.
