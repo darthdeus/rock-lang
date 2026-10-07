@@ -4832,7 +4832,7 @@ fn test_limit_keeps_completed_file_results() {
 #[test]
 fn test_limit_bounds_program_loading() {
     let start = std::time::Instant::now();
-    let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100), 1, None);
+    let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100), 1, None, false);
     assert!(start.elapsed() < Duration::from_secs(2));
     let error = result.expect_err("loading must time out");
     assert!(error.rendered.contains("loading emitted program: timed out"), "{error:?}");
