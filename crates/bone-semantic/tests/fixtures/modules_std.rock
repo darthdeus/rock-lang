@@ -30,6 +30,7 @@
 // prelude: JsonReader
 // prelude: JsonReaderArray
 // prelude: JsonReaderArrayIter
+// prelude: JsonReaderOffsets
 // prelude: JsonReaderValidation
 // prelude: JsonValue
 // prelude: MapIter
@@ -431,6 +432,7 @@
 // prelude: json_reader_as_str
 // prelude: json_reader_as_str_at
 // prelude: json_reader_at
+// prelude: json_reader_close_container
 // prelude: json_reader_decode
 // prelude: json_reader_empty_array
 // prelude: json_reader_error_path
@@ -441,10 +443,15 @@
 // prelude: json_reader_field_as_str
 // prelude: json_reader_field_as_strict_int
 // prelude: json_reader_field_offset
+// prelude: json_reader_fields
 // prelude: json_reader_float
+// prelude: json_reader_float_components
 // prelude: json_reader_index
 // prelude: json_reader_index_at
 // prelude: json_reader_int
+// prelude: json_reader_is_null
+// prelude: json_reader_is_object
+// prelude: json_reader_materialize
 // prelude: json_reader_null
 // prelude: json_reader_number
 // prelude: json_reader_number_at
