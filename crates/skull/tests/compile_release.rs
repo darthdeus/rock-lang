@@ -43,3 +43,15 @@ fn one_shot_releases_chunk_storage_after_definitions() {
     assert!(emit.compile_counts.chunks > 0);
     assert_eq!(emit.release_stats.chunks, emit.compile_counts.chunks);
 }
+
+#[test]
+fn one_shot_releases_concrete_plans_and_live_build_keeps_them() {
+    let ws = ws_with_stdlib(SOURCE);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).unwrap();
+    let one_shot = emit_workspace_mir(&ws, mid).expect("one shot");
+    let live = emit_full(&ws, mid).expect("live build").0;
+    assert!(one_shot.compile_counts.concrete_plans > 0);
+    assert_eq!(one_shot.release_stats.concrete_plans, one_shot.compile_counts.concrete_plans);
+    assert_eq!(live.release_stats.concrete_plans, 0);
+    assert_eq!(one_shot.lua, live.lua);
+}

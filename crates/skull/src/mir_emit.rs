@@ -5808,6 +5808,19 @@ fn assemble(
     for c in spec_chunks.values() {
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
+    // Factory lowering is the last concrete-plan reader. Keep its text in the
+    // original output slot, but release one-shot plans before copying definitions.
+    let early_definition_stage = if lifetime == CacheLifetime::OneShot {
+        let plan = collect_definition_plan(ws)?;
+        let stage = definition_plan_stage_lua(ws, cg, scx, &cache.concrete.plans, &plan)?;
+        let plans = cache.concrete.plans.len() + cache.concrete.always_plans.len();
+        drop(std::mem::take(&mut cache.concrete));
+        release_stats.concrete_plans = plans
+            - cache.concrete.plans.len() - cache.concrete.always_plans.len();
+        Some((plan, stage))
+    } else {
+        None
+    };
     let mut definitions = LuaDefinitionBuffer::for_assembly(cache.build_kind);
     // Second pass of the callee binding (`docs/backends.md`): every factory's
     // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
@@ -6047,13 +6060,10 @@ fn assemble(
     definitions.append_to(&mut out);
     out.push_str(&callee_binding_pass_lua(&mut callee_binds));
     mark_generated_code_values(ws, &mut code_artifact, cache.build_kind == BuildKind::Program);
-    let definition_plan = skull_mir::definition::collect(ws)?;
-    if definition_plan.census.applications != definition_plan.census.admitted {
-        return Err(CompilerError::new_no_location(format!(
-            "incomplete DefinitionPlan census: {:?}",
-            definition_plan.census
-        )));
-    }
+    let (definition_plan, early_stage) = match early_definition_stage {
+        Some((plan, stage)) => (plan, Some(stage)),
+        None => (collect_definition_plan(ws)?, None),
+    };
     let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &code_artifact)?;
     if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
         return Err(CompilerError::new_no_location(format!(
@@ -6132,7 +6142,10 @@ fn assemble(
     } else if has_artifact_plans && !has_code_slot_publication {
         out.push_str("__rock_artifact_plan_begin()\n");
     }
-    let definition_plan_stage = definition_plan_stage_lua(ws, cg, scx, &cache.concrete.plans, &definition_plan)?;
+    let definition_plan_stage = match early_stage {
+        Some(stage) => stage,
+        None => definition_plan_stage_lua(ws, cg, scx, &cache.concrete.plans, &definition_plan)?,
+    };
     out.push_str(&wrap_large_lua_section(
         "__rock_definition_plan_stage_part",
         &definition_plan_stage,
@@ -6437,6 +6450,16 @@ fn code_slot_publish_lua(
     } else {
         ""
     }
+}
+
+fn collect_definition_plan(ws: &Workspace) -> Result<skull_mir::definition::DefinitionPlan, CompilerError> {
+    let plan = skull_mir::definition::collect(ws)?;
+    if plan.census.applications != plan.census.admitted {
+        return Err(CompilerError::new_no_location(format!(
+            "incomplete DefinitionPlan census: {:?}", plan.census
+        )));
+    }
+    Ok(plan)
 }
 
 fn definition_plan_stage_lua(
