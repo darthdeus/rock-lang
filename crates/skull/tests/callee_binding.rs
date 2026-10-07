@@ -82,8 +82,8 @@ fn binding_lines_are_ordered_callees_before_callers() {
             .unwrap_or_else(|| panic!("no binding line for `{prefix}`"));
         at
     };
-    let mid_bind = position("mid_int_ret_int = __rock_mk_");
-    let top_bind = position("top_int_ret_int = __rock_mk_");
+    let mid_bind = position("mid_int = __rock_mk_");
+    let top_bind = position("top_int = __rock_mk_");
     assert!(
         mid_bind < top_bind,
         "`mid` must bind before `top` captures it"
@@ -107,7 +107,7 @@ fn the_bound_body_is_byte_identical_to_the_unbound_one() {
         .expect("emit_full")
         .0
         .lua;
-    for name in ["mid_int_ret_int", "top_int_ret_int"] {
+    for name in ["mid_int", "top_int"] {
         let unbound_body = function_body(&global, name);
         let bound_body = function_body(&bound, name);
         let inner = unbound_body
@@ -129,10 +129,10 @@ fn a_mutually_recursive_pair_stays_a_global_lookup() {
     let lua = emit(SRC);
     let header = lua
         .lines()
-        .find(|line| line.starts_with("__rock_mk_is_odd_int_ret_bool = function("))
+        .find(|line| line.starts_with("__rock_mk_is_odd_int = function("))
         .expect("is_odd factory");
     assert!(
-        header.contains("leaf_int_ret_int"),
+        header.contains("leaf_int"),
         "expected the off-component callee bound:\n{header}"
     );
     assert!(
@@ -198,7 +198,7 @@ fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
     let script = format!(
-        "{}\nlocal saved_top = saved()\nassert(top_int_ret_int(3) == 33)\n{}\nassert(top_int_ret_int(3) == 36)\nassert(saved_top(3) == 36)\nprint('PASS')\n",
+        "{}\nlocal saved_top = saved()\nassert(top_int(3) == 33)\n{}\nassert(top_int(3) == 36)\nassert(saved_top(3) == 36)\nprint('PASS')\n",
         full.lua, overlay.lua,
     );
     let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");

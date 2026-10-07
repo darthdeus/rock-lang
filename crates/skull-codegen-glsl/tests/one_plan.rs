@@ -403,8 +403,8 @@ fn main() { let a = rock_shader(generic_frag) }
     // CONTROL: the NON-generic helper keeps its ordinary mangled name with no
     // instantiation suffix, which is what makes a program with no generics
     // byte-identical to the pre-instance emission.
-    assert!(out.contains("float concrete_helper_float_ret_float(float "), "{out}");
-    assert!(!out.contains("concrete_helper_float_ret_float_spec"), "{out}");
+    assert!(out.contains("float concrete_helper_float(float "), "{out}");
+    assert!(!out.contains("concrete_helper_float_spec"), "{out}");
 }
 
 /// **A generic helper bound to a non-tier-0 type is still rejected**, and the

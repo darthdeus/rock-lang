@@ -89,7 +89,7 @@ fn clear_all_systems_symbol(main_lua: &str) -> String {
                 .map(|(name, _)| name)
                 .or_else(|| line.strip_prefix("function ").and_then(|rest| rest.split_once('(')).map(|(name, _)| name))
         })
-        .filter(|name| name.starts_with("clear_all_systems_") && name.ends_with("_ret_unit"))
+        .filter(|name| name.starts_with("clear_all_systems_") && !name.contains("__"))
         .collect();
     assert_eq!(names.len(), 1, "one emitted clear_all_systems: {names:?}");
     names[0].to_string()

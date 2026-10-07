@@ -66,7 +66,7 @@ fn main() { }
         "generated decorator target must be a CodeRef: {application}"
     );
     assert!(
-        !application.contains("func = alpha_ret_unit"),
+        !application.contains("func = alpha"),
         "generated decorator target must not freeze the backend body: {application}"
     );
 }

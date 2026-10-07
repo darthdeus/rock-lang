@@ -2,7 +2,7 @@
 //! by the Lua, GLSL, and JS backends.
 //!
 //! The scheme is ALWAYS-MANGLE, keyed on the function's own `(name, declared
-//! signature)` ONLY -- decl-set-independent, position-independent, and
+//! parameter types)` ONLY -- decl-set-independent, position-independent, and
 //! containing NO `__` anywhere (legal in the Lua, JS, and GLSL ES identifier
 //! grammars alike). Every function mangles except the verbatim exemptions:
 //! `extern`, `@nomangle`, `@test`, `main`, `test_*` (deliberate surface names --
@@ -174,13 +174,6 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
         out.push_str(SEP);
         encode_into(ws, pd.ty, &mut out);
     }
-    out.push_str(SEP);
-    out.push_str("ret");
-    out.push_str(SEP);
-    match f.return_ty {
-        Some(ty) => encode_into(ws, ty, &mut out),
-        None => out.push_str("unit"),
-    }
     out
 }
 
@@ -202,6 +195,7 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
             hir::BuiltinTy::Int => "int",
             hir::BuiltinTy::Uint => "uint",
             hir::BuiltinTy::Float => "float",
+            hir::BuiltinTy::F32 => "f32",
             hir::BuiltinTy::Bool => "bool",
             hir::BuiltinTy::String => "string",
             hir::BuiltinTy::Never => "never",
@@ -358,10 +352,32 @@ fn ty_key(ws: &Workspace, ty: TyId, out: &mut String) {
     }
 }
 
+fn function_collision_error(ws: &Workspace, name: &str, prev: &Function, f: &Function) -> CompilerError {
+    let prev_signature = sig_key(ws, prev);
+    let signature = sig_key(ws, f);
+    let msg = if prev_signature.split("\x1f#ret#\x1f").next()
+        == signature.split("\x1f#ret#\x1f").next()
+    {
+        format!(
+            "functions `{}` and `{}` differ only in return type; both would emit as \
+             `{name}` -- rename one of the functions (return types do not distinguish overloads)",
+            prev.name, f.name,
+        )
+    } else {
+        format!(
+            "mangled name `{name}` is produced by two distinct function signatures; \
+             the emitted symbol would resolve to the wrong body -- rename one of the \
+             overloads (mangling is keyed on name + declared parameter types)"
+        )
+    };
+    CompilerError::new_with_label(f.name_span, msg)
+        .with_label(prev.name_span, format!("other declaration of `{}`", prev.name))
+}
+
 /// The permanent collision check (reject, don't fall back). Returns a spanned
 /// error per illegal collision:
 ///   - two DISTINCT signatures producing the same mangled name, or
-///   - a mangled name equal to an exempt function's bare emitted name
+///   - a mangled name equal to a distinct exempt signature's bare emitted name
 /// (so a mangled fn can never shadow, or be shadowed by, an `extern`/`@nomangle`/
 /// `main`/`test_*` surface name). Same discipline as `mint_synthetic` /
 /// `is_reserved_lexical`: the compiler refuses the program rather than emit a
@@ -373,7 +389,7 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     // `sig_key` (the structural distinctness check) is computed LAZILY -- only
     // when two fns hash to the same mangled name, which the corpus proves rare.
     let mut seen: HashMap<String, (&Function, Span)> = HashMap::new();
-    let mut exempt_names: HashMap<String, Span> = HashMap::new();
+    let mut exempt_names: HashMap<String, Vec<&Function>> = HashMap::new();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
 
     for m in ws.modules.iter() {
@@ -382,18 +398,13 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
                 // The EMITTED name, which for a v1 key is its declared segment
                 // -- comparing the raw DefKey here would never match a mangled
                 // name and the exempt-collision check would go silent.
-                exempt_names.entry(mangle_fn(ws, f)).or_insert(f.name_span);
+                exempt_names.entry(mangle_fn(ws, f)).or_default().push(f);
                 continue;
             }
             let name = mangle_fn(ws, f);
             match seen.get(&name) {
                 Some((prev, _)) if sig_key(ws, prev) != sig_key(ws, f) => {
-                    let msg = format!(
-                        "mangled name `{name}` is produced by two distinct function signatures; \
-                         the emitted symbol would resolve to the wrong body -- rename one of the \
-                         overloads (mangling is keyed on name + declared signature)"
-                    );
-                    out.push((name.clone(), CompilerError::new_with_label(f.name_span, msg)));
+                    out.push((name.clone(), function_collision_error(ws, &name, prev, f)));
                 }
                 Some(_) => {} // same overload (backend variant / re-decl): fine.
                 None => {
@@ -461,14 +472,15 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     }
 
     // A non-exempt mangled name equal to an exempt bare name.
-    for (name, (_, span)) in &seen {
-        if exempt_names.contains_key(name) {
-            let msg = format!(
-                "mangled name `{name}` collides with the bare name of an `extern`/`@nomangle`/\
-                 `main`/`test_*` function; the two would share one emitted symbol -- rename the \
-                 mangled function"
-            );
-            out.push((name.clone(), CompilerError::new_with_label(*span, msg)));
+    for (name, (f, _)) in &seen {
+        if let Some(exempt) = exempt_names.get(name) {
+            for prev in exempt {
+                // Backend variants of one signature remain one logical function,
+                // even when the extern variant keeps a bare name.
+                if sig_key(ws, prev) != sig_key(ws, f) {
+                    out.push((name.clone(), function_collision_error(ws, name, prev, f)));
+                }
+            }
         }
     }
 

@@ -35,7 +35,7 @@ fn concurrent_inline_off_and_normal_compiles_keep_their_modes() {
     let off = off.join().expect("inline-off compile thread panicked");
     let normal = normal.join().expect("normal compile thread panicked");
     assert_ne!(off, normal, "the two compile modes produced identical Lua");
-    let call = "r0 = twice_int_ret_int((3))";
+    let call = "r0 = twice_int((3))";
     assert!(off.contains(call), "inline-off compilation lost the retained call");
     assert!(!normal.contains(call), "normal compilation retained the inlineable call");
 }

@@ -584,10 +584,10 @@ fn a_column_read_widens_to_nullable_without_materializing() {
     // The four non-`@inline` entry points mint the value inside their own
     // specialized copy, which carries the `_spec_<key>` suffix.
     for needle in [
-        "pop_arr_T_ret_T_opt_spec",
-        "swap_remove_arr_T_int_ret_T_opt_spec",
-        "remove_at_arr_T_int_ret_T_opt_spec",
-        "sample_arr_T_ret_T_opt_spec",
+        "pop_arr_T_spec",
+        "swap_remove_arr_T_int_spec",
+        "remove_at_arr_T_int_spec",
+        "sample_arr_T_spec",
     ] {
         let body = body_of_synthetic(&lua, needle);
         assert!(

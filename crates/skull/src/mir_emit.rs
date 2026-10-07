@@ -5779,7 +5779,7 @@ fn assemble(
     // (non-spliced) form" -- `@pure @inline` stdlib operators (`+`, `-`, ...)
     // are retained (something calls `+`) but almost always fully spliced away
     // at every call site, so a naive retention-only gate emitted them
-    // standalone anyway (found empirically: `__op_add_int_int_ret_int` and
+    // standalone anyway (found empirically: `__op_add_int_int` and
     // siblings newly appeared in every project's output the moment retention
     // alone drove the inline-body gate). Splicing eligibility is a LOWERING
     // decision the graph does not model (same class of fact as a generic's
@@ -9731,7 +9731,7 @@ fn main() {
             skull_codegen_lua::CalleeBindingMode::Global,
         ] {
             let produced = overlay_for(binding).expect("overlay under either callee shape");
-            assert!(produced.lua.contains("top_ret_int"));
+            assert!(produced.lua.contains("top = __rock_mk_top") || produced.lua.contains("function top("));
         }
     }
 

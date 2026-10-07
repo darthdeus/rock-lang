@@ -89,7 +89,7 @@ fn application_line_content() {
         alpha_app.contains("func: __rock_code_slot_ref(\"named:<test>::alpha<>\")"),
         "decorator function values resolve through their logical CodeRef slot: {alpha_app}"
     );
-    assert!(!alpha_app.contains("func: alpha_ret_unit"), "decorators must not capture a backend body: {alpha_app}");
+    assert!(!alpha_app.contains("func: alpha"), "decorators must not capture a backend body: {alpha_app}");
     assert!(alpha_app.trim_end().ends_with(", 5);"), "literal stage arg: {alpha_app}");
 
     let beta_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"beta\""))

@@ -281,7 +281,7 @@ pub fn luajit_loads(prog: &str, tag: &str) -> Result<(), String> {
 
 /// The body of the emitted definition named (or prefixed by) `name`. `name` is
 /// the rock identifier; the emitted definition is mangled
-/// (`hot_int_int_int_ret_float`), so the prefix is resolved against the
+/// (`hot_int_int_int`), so the prefix is resolved against the
 /// definitions the chunk actually carries.
 ///
 /// Handles both emitted callee shapes: the global-lookup `function <name>(..)`
@@ -386,7 +386,7 @@ pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
 
 /// The full emitted (mangled) name of the top-level fn whose SOURCE name is
 /// `src`, read out of emitted `lua`. Every non-exempt fn mangles by signature
-/// (`free_loop` -> `free_loop_ret_unit`), so this recovers the base symbol from
+/// (`free_loop` -> `free_loop`), so this recovers the base symbol from
 /// which a test builds the synthetic names it owns (`<mangled>__lambda<k>`,
 /// `<mangled>__step`, ...). The base symbol carries NO `__` (that prefix only
 /// appears on the synthetic derivations, and for a `co fn` a `__step`/`__resume`

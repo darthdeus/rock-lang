@@ -100,7 +100,7 @@ fn v1_nominal_types_mint_identifiers_and_keep_the_key_for_identity() {
     );
     assert!(
         emitted.lua.contains("\"v1ty::a::Color::Blue\""),
-        "display text stays the readable path"
+        "display text is the package-qualified path"
     );
 }
 
@@ -210,7 +210,7 @@ pub fn total() -> int {
 /// A specialized body's emitted symbol is built from the instantiation's
 /// CANONICAL identity, and a v1 nominal's canonical name is its DefKey. The
 /// two roles were the same string, so the symbol came out as
-/// `iter_arr_T_ret_VecIter_T_spec_a_n18_v1spec::a::Step_0_z` -- `rock compile`
+/// `iter_arr_T_spec_a_n18_v1spec::a::Step_0_z` -- `rock compile`
 /// exited 0 and wrote a chunk LuaJIT refused with `')' expected near '::'`.
 /// Converting `libs/chess-core` hit this on the first `for m in moves`.
 #[test]
@@ -230,7 +230,7 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
         "a specialized body's SYMBOL must not carry a DefKey"
     );
     assert!(
-        emitted.lua.contains(&format!("function vec_len_arr_T_ret_int_{encoded}(")),
+        emitted.lua.contains(&format!("function vec_len_arr_T_{encoded}(")),
         "the specialized definition takes the nominal's identifier form"
     );
     assert!(

@@ -104,7 +104,7 @@ fn scalar_remap() {
     let glsl = emit(src, &["remap"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float remap_float_float_float_float_float_ret_float(float value, float min1, float max1, float min2, float max2) {\n  \
+        "float remap_float_float_float_float_float(float value, float min1, float max1, float min2, float max2) {\n  \
          return (min2 + (((value - min1) * (max2 - min2)) / (max1 - min1)));\n}"
     );
 }
@@ -121,10 +121,10 @@ fn callee_before_caller() {
     "#;
     let glsl = emit(src, &["map01"]).expect("emit");
     // remap must appear before map01 (topological: callees first).
-    let ri = glsl.find("float remap_float_float_float_float_float_ret_float(").expect("remap emitted");
-    let mi = glsl.find("float map01_float_float_float_ret_float(").expect("map01 emitted");
+    let ri = glsl.find("float remap_float_float_float_float_float(").expect("remap emitted");
+    let mi = glsl.find("float map01_float_float_float(").expect("map01 emitted");
     assert!(ri < mi, "remap should precede map01:\n{glsl}");
-    assert!(glsl.contains("return remap_float_float_float_float_float_ret_float(value, min1, max1, 0.0, 1.0);"), "got:\n{glsl}");
+    assert!(glsl.contains("return remap_float_float_float_float_float(value, min1, max1, 0.0, 1.0);"), "got:\n{glsl}");
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn vec_returning_and_intrinsics() {
         }
     "#;
     let glsl = emit(src, &["random2"]).expect("emit");
-    assert!(glsl.starts_with("vec2 random2_Vec2_ret_Vec2(vec2 p) {"), "got:\n{glsl}");
+    assert!(glsl.starts_with("vec2 random2_Vec2(vec2 p) {"), "got:\n{glsl}");
     assert!(glsl.contains("dot(p, vec2(127.32, 231.4))"), "got:\n{glsl}");
     assert!(glsl.contains("return vec2(fract(sin(da)), fract(sin(db)));"), "got:\n{glsl}");
 }
@@ -153,7 +153,7 @@ fn vec3_vec4_constructors() {
         }
     "#;
     let glsl = emit(src, &["tint"]).expect("emit");
-    assert!(glsl.starts_with("vec4 tint_float_ret_Vec4(float t) {"), "got:\n{glsl}");
+    assert!(glsl.starts_with("vec4 tint_float(float t) {"), "got:\n{glsl}");
     // v(...) maps to native vecN construction, not a helper fn.
     assert!(glsl.contains("vec3(sin(t), cos(t), 0.5)"), "got:\n{glsl}");
     assert!(glsl.contains("return vec4(rgb.x, rgb.y, rgb.z, 1.0);"), "got:\n{glsl}");
@@ -227,7 +227,7 @@ fn if_branch_pick() {
     let glsl = emit(src, &["pick"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float pick_float_float_ret_float(float a, float b) {\n  \
+        "float pick_float_float(float a, float b) {\n  \
          if ((a > b)) {\n    \
            return a;\n  \
          } else {\n    \
@@ -247,7 +247,7 @@ fn vec2_normalize_body() {
     let glsl = emit(src, &["root"]).expect("emit");
     assert!(
         glsl.contains(
-            "vec2 normalize_Vec2_ret_Vec2(vec2 v) {\n  \
+            "vec2 normalize_Vec2(vec2 v) {\n  \
              float len;\n  \
              if (((v.x == 0.0) && (v.y == 0.0))) {\n    \
                return vec2(0.0);\n  \
@@ -269,7 +269,7 @@ fn statement_if_no_else() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f_float_ret_float(float x) {\n  \
+        "float f_float(float x) {\n  \
          float r;\n  \
          r = x;\n  \
          if ((x > 0.0)) {\n    \
@@ -288,7 +288,7 @@ fn if_else_if_ladder() {
     let glsl = emit(src, &["mask"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float mask_float_ret_float(float x) {\n  \
+        "float mask_float(float x) {\n  \
          if ((x < 0.0)) {\n    \
            return 0.0;\n  \
          } else {\n    \
@@ -310,7 +310,7 @@ fn expression_if_into_cell() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f_float_ret_float(float x) {\n  \
+        "float f_float(float x) {\n  \
          float r;\n  \
          r = ((x > 0.0) ? x : (0.0 - x));\n  \
          return r;\n}"
@@ -326,7 +326,7 @@ fn ternary_int_result_outer_coercion() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f_float_ret_float(float x) {\n  \
+        "float f_float(float x) {\n  \
          float r;\n  \
          r = float(((x > 0.0) ? 1 : 2));\n  \
          return r;\n}"
@@ -341,7 +341,7 @@ fn and_in_nested_if() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f_float_float_ret_float(float x, float y) {\n  \
+        "float f_float_float(float x, float y) {\n  \
          if (((x > 0.0) && (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
@@ -356,7 +356,7 @@ fn or_in_nested_if() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f_float_float_ret_float(float x, float y) {\n  \
+        "float f_float_float(float x, float y) {\n  \
          if (((x > 0.0) || (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
@@ -379,7 +379,7 @@ fn early_return_in_counted_for() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f_int_ret_int(int n) {\n  \
+        "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
          int t3;\n  \
@@ -412,7 +412,7 @@ fn while_compound_condition() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f_float_ret_float(float x) {\n  \
+        "float f_float(float x) {\n  \
          float acc;\n  \
          int i;\n  \
          acc = 0.0;\n  \
@@ -441,7 +441,7 @@ fn break_continue_in_counted_for() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f_int_ret_int(int n) {\n  \
+        "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
          int t3;\n  \
@@ -478,7 +478,7 @@ fn break_continue_in_while() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f_int_ret_int(int n) {\n  \
+        "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
          acc = 0;\n  \
@@ -513,7 +513,7 @@ fn nested_loop_with_if() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f_int_ret_int(int n) {\n  \
+        "int f_int(int n) {\n  \
          int acc;\n  \
          int y;\n  \
          int t3;\n  \
@@ -549,7 +549,7 @@ fn const_loop_bound_fold() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f_ret_int() {\n  \
+        "int f() {\n  \
          int acc;\n  \
          int i;\n  \
          acc = 0;\n  \
@@ -586,7 +586,7 @@ fn match_int_ladder() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f_int_ret_int(int n) {\n  \
+        "int f_int(int n) {\n  \
          if ((n == 1)) {\n    \
            return 10;\n  \
          } else {\n    \
@@ -653,7 +653,7 @@ fn nested_while_loops() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f_int_ret_int(int n) {\n  \
+        "int f_int(int n) {\n  \
          int acc;\n  \
          int i;\n  \
          int j;\n  \
@@ -696,7 +696,7 @@ fn int_literal_float_contexts() {
     let glsl = emit(src, &["root"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float root_float_ret_float(float x) {\n  \
+        "float root_float(float x) {\n  \
          float y;\n  \
          y = 0.5;\n  \
          if ((x > 0.0)) {\n    \
@@ -720,7 +720,7 @@ fn int_literal_float_contexts() {
 fn int_param_returned_from_float_fn() {
     let src = r#"@pure fn f(i: int) -> float { return i }"#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(glsl.trim(), "float f_int_ret_float(int i) {\n  return float(i);\n}");
+    assert_eq!(glsl.trim(), "float f_int(int i) {\n  return float(i);\n}");
 }
 
 /// An int arg (non-literal) at a float param gets a `float(...)` wrap.
@@ -731,7 +731,7 @@ fn int_arg_at_float_param() {
         @pure fn f(i: int) -> float { return takes_float(i) }
     "#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert!(glsl.contains("return takes_float_float_ret_float(float(i));"), "got:\n{glsl}");
+    assert!(glsl.contains("return takes_float_float(float(i));"), "got:\n{glsl}");
 }
 
 /// An int (non-literal) mixed into float arithmetic gets a `float(...)` wrap.
@@ -739,7 +739,7 @@ fn int_arg_at_float_param() {
 fn int_in_mixed_arithmetic() {
     let src = r#"@pure fn f(x: float, i: int) -> float { return x + i }"#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert_eq!(glsl.trim(), "float f_float_int_ret_float(float x, int i) {\n  return (x + float(i));\n}");
+    assert_eq!(glsl.trim(), "float f_float_int(float x, int i) {\n  return (x + float(i));\n}");
 }
 
 /// Cell typing: a `let y: float = 0` binding declares `float y;` (from the
@@ -751,7 +751,7 @@ fn let_float_annotation_cell_typing() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f_ret_float() {\n  \
+        "float f() {\n  \
          float y;\n  \
          y = 0.0;\n  \
          return y;\n}"
@@ -811,7 +811,7 @@ fn fragment_entry_scaffold() {
     // Uniforms: one std140 block in field order, then the loose samplers.
     assert!(glsl.contains("layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\nuniform sampler2D scene;"), "got:\n{glsl}");
     // Helper before entry; entry drops uniform/sampler params.
-    let fi = glsl.find("float falloff_float_float_ret_float(float d, float r)").expect("helper emitted");
+    let fi = glsl.find("float falloff_float_float(float d, float r)").expect("helper emitted");
     let gi = glsl.find("vec4 glow(vec2 tc)").expect("entry emitted");
     assert!(fi < gi, "helper must precede entry:\n{glsl}");
     // Uniform-struct reads render as bare uniform names.
@@ -907,9 +907,9 @@ fn mat4_native_multiply() {
         @pure fn compose(a: Mat4, b: Mat4) -> Mat4 { return a * b }
     "#;
     let glsl = emit(src, &["xform", "compose"]).expect("emit");
-    assert!(glsl.contains("vec4 xform_Mat4_Vec4_ret_Vec4(mat4 m, vec4 p) {"), "got:\n{glsl}");
+    assert!(glsl.contains("vec4 xform_Mat4_Vec4(mat4 m, vec4 p) {"), "got:\n{glsl}");
     assert!(glsl.contains("return (m * p);"), "got:\n{glsl}");
-    assert!(glsl.contains("mat4 compose_Mat4_Mat4_ret_Mat4(mat4 a, mat4 b) {"), "got:\n{glsl}");
+    assert!(glsl.contains("mat4 compose_Mat4_Mat4(mat4 a, mat4 b) {"), "got:\n{glsl}");
     assert!(glsl.contains("return (a * b);"), "got:\n{glsl}");
 }
 

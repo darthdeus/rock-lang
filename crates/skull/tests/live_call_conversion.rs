@@ -73,7 +73,7 @@ fn field_derived_len_is_evaluated_once_through_conversion() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0\n0");
     assert_eq!(
-        body.matches("vec_len_arr_T_ret_int_spec_p_int(").count(),
+        body.matches("vec_len_arr_T_spec_p_int(").count(),
         1,
         "the direct field expression must contain one length call:\n{body}"
     );

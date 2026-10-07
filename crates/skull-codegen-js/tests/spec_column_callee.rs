@@ -83,7 +83,7 @@ fn a_column_element_call_reaches_its_specialized_body() {
         "the column-element call must target a specialized body:\n{js}"
     );
     assert!(
-        js.contains("function pick_arr_T_int_fn_T_ret_float_ret_float_spec_"),
+        js.contains("function pick_arr_T_int_fn_T_ret_float_spec_"),
         "expected a standalone specialized `pick` definition:\n{js}"
     );
 }

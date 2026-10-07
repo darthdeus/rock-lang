@@ -237,7 +237,7 @@ fn column_vec_iterated_inside_a_nested_fn() {
         .expect("column [V2] iterated in a nested fn must emit");
     let body = crate::common::body_of_synthetic(&lua, "_inner_");
     assert!(
-        !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
+        !body.contains("next_VecIter_T("),
         "nested fn called the UNSPECIALIZED VecIter `next` over column storage \
          (the specialized copy is `..._spec_a_n2_V2_0_z`):\n{body}"
     );
@@ -292,7 +292,7 @@ fn column_vec_iterated_inside_a_co_fn() {
         .expect("column [V2] iterated in a co fn must emit");
     let body = crate::common::body_of_synthetic(&lua, "__step");
     assert!(
-        !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
+        !body.contains("next_VecIter_T("),
         "co fn `__step` called the UNSPECIALIZED VecIter `next` over column \
          storage (the raised error is swallowed by `__resume`'s pcall):\n{body}"
     );
@@ -324,7 +324,7 @@ fn column_vec_iterated_in_a_global_initializer() {
         .expect("column [V2] iterated in a global initializer must emit");
     let body = crate::common::body_of_synthetic(&lua, "ginit_TOTAL");
     assert!(
-        !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
+        !body.contains("next_VecIter_T("),
         "global initializer called the UNSPECIALIZED VecIter `next` over column \
          storage:\n{body}"
     );
@@ -373,9 +373,9 @@ fn stdlib_vec_surface_works_over_column_storage() {
     // this test is named for: each plain-generic entry point reaches a standalone
     // The encoded `a_n2_V2_0_z` key is the parameterless nominal `V2`.
     for callee in [
-        "vec_set_arr_T_int_T_ret_unit_spec_a_n2_V2_0_z(",
-        "pop_arr_T_ret_T_opt_spec_a_n2_V2_0_z(",
-        "clear_arr_T_ret_unit_spec_a_n2_V2_0_z(",
+        "vec_set_arr_T_int_T_spec_a_n2_V2_0_z(",
+        "pop_arr_T_spec_a_n2_V2_0_z(",
+        "clear_arr_T_spec_a_n2_V2_0_z(",
     ] {
         assert!(
             lua.contains(callee),

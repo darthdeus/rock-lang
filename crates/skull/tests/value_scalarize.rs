@@ -504,7 +504,7 @@ fn main() {
 #[test]
 fn leaf_form_value_copy_in_a_closure_builds_one_box() {
     let lua = emit_module(LEAF_FORM_SAVED_IN_CLOSURE);
-    let body = function_body(&lua, "with_saved_fn_ret_unit_ret_unit__lambda0");
+    let body = function_body(&lua, "with_saved_fn_ret_unit__lambda0");
     assert_eq!(
         body.matches("Mat4_lct(").count() + body.matches("Mat4_ct(").count(),
         1,

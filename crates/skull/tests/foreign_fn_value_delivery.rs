@@ -27,12 +27,12 @@ fn defines(lua: &str, symbol: &str) -> bool {
     definition_symbols(lua).iter().any(|s| s == symbol)
 }
 
-const SYMBOL: &str = "sqrt_float_ret_float";
+const SYMBOL: &str = "sqrt_float";
 /// A foreign body that IS spliced at its call sites -- integer `+` lowers to a
 /// native op rather than a residual call. Asserted in the SAME emission as the
 /// arm below, so "define every retained foreign body" cannot be what makes the
 /// arm pass.
-const SPLICED: &str = "__op_add_int_int_ret_int";
+const SPLICED: &str = "__op_add_int_int";
 
 #[test]
 fn a_foreign_body_taken_as_a_value_is_defined() {

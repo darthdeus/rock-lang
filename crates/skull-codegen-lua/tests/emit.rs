@@ -490,7 +490,7 @@ fn int_literal_and_return() {
     assert_eq!(
         emit("fn five() -> int { 5 }", "five"),
         "\
-function five_ret_int()
+function five()
   ::bb0::
   do return (5) end
 end
@@ -503,7 +503,7 @@ fn param_cell_read() {
     assert_eq!(
         emit("fn id(x: int) -> int { x }", "id"),
         "\
-function id_int_ret_int(c0)
+function id_int(c0)
   ::bb0::
   do return c0 end
 end
@@ -516,7 +516,7 @@ fn int_arithmetic() {
     assert_eq!(
         emit_std("fn add(a: int, b: int) -> int { a + b }", "add"),
         "\
-function add_int_int_ret_int(c0, c1)
+function add_int_int(c0, c1)
   ::bb0::
   do return (c0 + c1) end
 end
@@ -630,7 +630,7 @@ fn inline_lua_with_inline_annotation_is_spliced() {
         "use_it",
     );
     assert!(
-        !body.contains("dbl_int_ret_int("),
+        !body.contains("dbl_int("),
         "@inline inline(lua) should be spliced, not called:\n{body}"
     );
     assert!(
@@ -649,7 +649,7 @@ fn inline_lua_without_inline_annotation_is_called() {
         "use_it",
     );
     assert!(
-        body.contains("dbl_int_ret_int("),
+        body.contains("dbl_int("),
         "plain inline(lua) should be called, not spliced:\n{body}"
     );
 }
@@ -944,7 +944,7 @@ fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
         "destructure must be zero-alloc multi-assign, not a table build:\n{body}"
     );
     assert!(
-        body.lines().any(|l| l.contains(", ") && l.contains("= pair_ret_tuple2_bool_int(")),
+        body.lines().any(|l| l.contains(", ") && l.contains("= pair(")),
         "expected a multi-assign call line `a, b = pair(...)`:\n{body}"
     );
 }
@@ -963,7 +963,7 @@ fn use_it() -> int { let t = pair(); t.1 }";
         !body.contains("[1]") && !body.contains("[2]"),
         "non-escaping whole-stored tuple should scalarize, not pack:\n{body}"
     );
-    assert!(body.contains("= pair_ret_tuple2_bool_int()"), "multi-assign call expected:\n{body}");
+    assert!(body.contains("= pair()"), "multi-assign call expected:\n{body}");
 }
 
 #[test]
@@ -974,7 +974,7 @@ fn if_as_value_branch_and_cell_join() {
     assert_eq!(
         emit("fn sign(x: int) -> int { if x < 0 { 0 } else { 1 } }", "sign"),
         "\
-function sign_int_ret_int(c0)
+function sign_int(c0)
   local r0
   ::bb0::
   if (c0 < (0)) then goto bb1 else goto bb2 end
@@ -1403,18 +1403,18 @@ fn a_non_recursive_tail_call_follows_the_shape_switch() {
 
     let all = emit_clean_shaped(src, "forward", TailCallShape::All);
     assert!(
-        all.contains("do return leaf_int_ret_int(c0) end"),
+        all.contains("do return leaf_int(c0) end"),
         "expected the forwarded tail call:\n{all}"
     );
 
     for shape in [TailCallShape::None, TailCallShape::Cycles] {
         let lua = emit_clean_shaped(src, "forward", shape);
         assert!(
-            lua.contains("r0 = leaf_int_ret_int(c0)") && lua.contains("do return r0 end"),
+            lua.contains("r0 = leaf_int(c0)") && lua.contains("do return r0 end"),
             "expected a non-tail call under {shape:?}:\n{lua}"
         );
         assert!(
-            !lua.contains("do return leaf_int_ret_int"),
+            !lua.contains("do return leaf_int"),
             "expected no forwarded tail call under {shape:?}:\n{lua}"
         );
     }
@@ -1430,13 +1430,13 @@ fn a_self_recursive_tail_call_keeps_its_shape_under_cycles() {
     for shape in [TailCallShape::All, TailCallShape::Cycles] {
         let lua = emit_clean_shaped(src, "down", shape);
         assert!(
-            lua.contains("do return down_int_int_ret_int("),
+            lua.contains("do return down_int_int("),
             "expected the recursive tail call kept under {shape:?}:\n{lua}"
         );
     }
     let none = emit_clean_shaped(src, "down", TailCallShape::None);
     assert!(
-        !none.contains("do return down_int_int_ret_int("),
+        !none.contains("do return down_int_int("),
         "expected no forwarded tail call under None:\n{none}"
     );
 }
@@ -1450,12 +1450,12 @@ fn a_mutually_recursive_tail_call_keeps_its_shape_under_cycles() {
 
     let even = emit_clean_shaped(src, "is_even", TailCallShape::Cycles);
     assert!(
-        even.contains("do return is_odd_int_ret_bool("),
+        even.contains("do return is_odd_int("),
         "expected the mutual-recursion leg kept under Cycles:\n{even}"
     );
     let odd = emit_clean_shaped(src, "is_odd", TailCallShape::Cycles);
     assert!(
-        odd.contains("do return is_even_int_ret_bool("),
+        odd.contains("do return is_even_int("),
         "expected the mutual-recursion leg kept under Cycles:\n{odd}"
     );
 }
@@ -1567,7 +1567,7 @@ fn callee_binding_global_mode_emits_no_factory() {
     let src = "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
     let lua = emit_clean_bound(src, "caller", CalleeBindingMode::Global);
     assert!(
-        lua.starts_with("function caller_int_ret_int("),
+        lua.starts_with("function caller_int("),
         "expected the unbound definition:\n{lua}"
     );
     assert!(
@@ -1586,18 +1586,18 @@ fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
     let bound = emit_clean_bound(src, "caller", CalleeBindingMode::Upvalue);
     assert!(
         bound.starts_with(
-            "__rock_mk_caller_int_ret_int = function(leaf_int_ret_int) return function("
+            "__rock_mk_caller_int = function(leaf_int) return function("
         ),
         "expected the factory header:\n{bound}"
     );
     assert!(
-        bound.contains("caller_int_ret_int = __rock_mk_caller_int_ret_int(leaf_int_ret_int)\n"),
+        bound.contains("caller_int = __rock_mk_caller_int(leaf_int)\n"),
         "expected the binding line:\n{bound}"
     );
     // The body is the ONLY copy and is byte-identical to the unbound one: the
     // factory parameter is named like the global, so no call site is rewritten.
     let body = global
-        .strip_prefix("function caller_int_ret_int")
+        .strip_prefix("function caller_int")
         .expect("unbound definition")
         .trim_end_matches('\n');
     assert!(
@@ -1615,7 +1615,7 @@ fn callee_binding_excludes_same_component_callees() {
                fn is_odd(n: int) -> bool { if n == 0 { return leaf(n) == 1 }\n  is_even(n - 1) }";
     let bound = emit_clean_bound(src, "is_odd", CalleeBindingMode::Upvalue);
     assert!(
-        bound.starts_with("__rock_mk_is_odd_int_ret_bool = function(leaf_int_ret_int) return "),
+        bound.starts_with("__rock_mk_is_odd_int = function(leaf_int) return "),
         "expected only the off-component callee bound:\n{bound}"
     );
     assert!(
@@ -1632,7 +1632,7 @@ fn callee_binding_excludes_self_recursion() {
                fn down(n: int) -> int { if n == 0 { return leaf(0) }\n  down(n - 1) }";
     let bound = emit_clean_bound(src, "down", CalleeBindingMode::Upvalue);
     assert!(
-        bound.starts_with("__rock_mk_down_int_ret_int = function(leaf_int_ret_int) return "),
+        bound.starts_with("__rock_mk_down_int = function(leaf_int) return "),
         "expected the self-recursive call left global:\n{bound}"
     );
 }
@@ -1670,12 +1670,12 @@ fn callee_binding_caps_at_the_lua_upvalue_limit() {
         "expected exactly {cap} bound callees:\n{header}"
     );
     assert!(
-        params.starts_with("leaf000_int_ret_int, ") && params.ends_with(&format!("leaf{:03}_int_ret_int", cap - 1)),
+        params.starts_with("leaf000_int, ") && params.ends_with(&format!("leaf{:03}_int", cap - 1)),
         "expected the first {cap} callees in name order:\n{params}"
     );
     for i in cap..count {
         assert!(
-            !params.contains(&format!("leaf{i:03}_int_ret_int")),
+            !params.contains(&format!("leaf{i:03}_int")),
             "expected `leaf{i:03}` left global:\n{params}"
         );
     }

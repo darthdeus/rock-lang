@@ -23,7 +23,7 @@ struct PresentU {
 @group(0) @binding(2) var tex_src_tex: texture_2d<f32>;
 @group(0) @binding(3) var samp_src_tex: sampler;
 
-fn present_frag_SrcTex_PresentU_Vec2_ret_Vec4(uv: vec2<f32>) -> vec4<f32> {
+fn present_frag_SrcTex_PresentU_Vec2(uv: vec2<f32>) -> vec4<f32> {
   var dst: vec2<f32> = vec2<f32>(0.0);
   var texel: vec2<f32> = vec2<f32>(0.0);
   var scale: vec2<f32> = vec2<f32>(0.0);
@@ -56,5 +56,5 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVert
 
 @fragment
 fn fragment_main(input: FullscreenVertexOut) -> @location(0) vec4<f32> {
-  return present_frag_SrcTex_PresentU_Vec2_ret_Vec4(input.uv);
+  return present_frag_SrcTex_PresentU_Vec2(input.uv);
 }

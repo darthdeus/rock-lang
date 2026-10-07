@@ -88,7 +88,7 @@ fn generic_intrinsic_key_is_declared_signature_mangle() {
     let key = mangle_fn(&ws, gid_generic);
     // The declared-signature mangle: generic param encoded as its NAME (`T`),
     // no `int`/`bool` from either call site.
-    assert_eq!(key, "gid_T_ret_T", "generic intrinsic key must be the declared-signature mangle");
+    assert_eq!(key, "gid_T", "generic intrinsic key must be the declared-signature mangle");
     assert!(is_intrinsic(gid_generic));
     assert!(!is_native_required(gid_generic));
     assert!(expand_kind(gid_generic).is_none());
@@ -115,7 +115,7 @@ fn struct_expand_is_an_expansion_intrinsic() {
 
     assert_eq!(
         mangle_fn(&ws, upairs),
-        "upairs_T_ret_arr_tuple2_string_U",
+        "upairs_T",
         "always-mangle: the declared-signature mangle (generic param as `T`)"
     );
 

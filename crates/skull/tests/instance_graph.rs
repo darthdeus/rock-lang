@@ -275,7 +275,7 @@ fn main() {
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
     // `next` is one overload per iterator type, so the mangling carries the
-    // receiver: `next_VecIter_T_ret_...`. The three levels of the chain must
+    // receiver: `next_VecIter_T`. The three levels of the chain must
     // each appear, at their own concrete instantiation.
     for want in ["next_VecIter", "next_MapIter", "next_FilterIter"] {
         assert!(
@@ -1240,7 +1240,7 @@ fn main() { bump(1) }
         .iter()
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "bump")
         .expect("no `bump` instance");
-    assert_eq!(g.logical_symbol(&ws, bump), "bump_int_ret_int");
+    assert_eq!(g.logical_symbol(&ws, bump), "bump_int");
 }
 
 /// A call INSIDE a shared generic body, walked at an instance, resolves through
@@ -1775,7 +1775,7 @@ fn main() { let x = G }
     );
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let g = instance_graph::build(&ws, roots, false);
-    let hole = g.uninstantiated_roots.get("pick_ret_int").unwrap_or_else(|| {
+    let hole = g.uninstantiated_roots.get("pick").unwrap_or_else(|| {
         panic!("no hole recorded for `pick`: {:?}", g.uninstantiated_roots)
     });
     assert_eq!(

@@ -1,15 +1,15 @@
 //! Hot-reload stability of the unified always-mangle scheme.
 //!
-//! skull mangles every non-exempt fn by its own `(name, declared signature)`
+//! skull mangles every non-exempt fn by its own `(name, declared parameter types)`
 //! ONLY (`skull-mir/src/mangle.rs`), so a fn's emitted symbol is
 //! decl-set-independent: adding or removing an unrelated overload of `foo`
 //! anywhere does NOT rename the existing `foo(int)` symbol. It stays
-//! `foo_int_ret_int` with or without a `foo(string)` sibling.
+//! `foo_int` with or without a `foo(string)` sibling.
 //!
 //! That is what makes a hot reload safe. A reload re-`dofile`s the chunk in the
 //! SAME lua state (an add-overload edit is an `Interface` edit -> `SkullReload::
 //! Full`, NOT a `ShapeChanged` restart). Because the symbol name is unchanged,
-//! the new `foo_int_ret_int` overwrites the running `_G.foo_int_ret_int` IN
+//! the new `foo_int` overwrites the running `_G.foo_int` IN
 //! PLACE, and any surviving pre-reload code that resolves `foo(int)` by name (a
 //! suspended `co fn`, a preserved closure/callback) sees the NEW body -- no
 //! orphaned stale global.
@@ -31,7 +31,7 @@ use crate::common::ws_of;
 /// `rock stone` publishes a whole `main.lua` and re-runs the binding pass
 /// instead of an overlay (`crates/rock-cli/tests/stone_full_reload_binding.rs`).
 /// The mangling property itself is shape-independent: the symbol is still
-/// `foo_int_ret_int` either way.
+/// `foo_int` either way.
 fn emit_program(src: &str) -> String {
     let ws = ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
@@ -65,8 +65,7 @@ fn run_luajit(test: &str, prog: &str) -> String {
 
 // v1: `foo(int)` body returns the version marker 51 (no arithmetic -- the
 // stdlib-free `ws_of` has no `__op_*`). `probe` calls `foo` BY NAME; under
-// always-mangle both emit as `foo_int_ret_int` / `probe_ret_int` (no bare
-// globals), and `probe`'s body is `GETGLOBAL "foo_int_ret_int"`.
+// always-mangle both emit as `foo_int` / `probe`, and `probe`'s body is `GETGLOBAL "foo_int"`.
 const V1: &str = "\
 fn foo(x: int) -> int { return 51 }
 fn probe() -> int { return foo(5) }
@@ -75,7 +74,7 @@ fn main() {}
 
 // Reload target WITH the unrelated overload added. `foo(int)` body edited to
 // return 52; a `foo(string)` overload is added (the only other change). The int
-// overload STILL emits as `foo_int_ret_int` -- the added overload does not
+// overload STILL emits as `foo_int` -- the added overload does not
 // rename it.
 const V2_OVERLOAD: &str = "\
 fn foo(x: int) -> int { return 52 }
@@ -85,7 +84,7 @@ fn main() {}
 ";
 
 // CONTROL reload target: identical `foo(int)` body edit (return 52), NO overload
-// added -- same emitted symbol `foo_int_ret_int`.
+// added -- same emitted symbol `foo_int`.
 const V2_CONTROL: &str = "\
 fn foo(x: int) -> int { return 52 }
 fn probe() -> int { return foo(5) }
@@ -93,7 +92,7 @@ fn main() {}
 ";
 
 /// CONTROL: a plain body edit hot-reloads correctly -- surviving pre-reload code
-/// (`GETGLOBAL foo_int_ret_int`) sees the NEW body, because the re-dofile
+/// (`GETGLOBAL foo_int`) sees the NEW body, because the re-dofile
 /// overwrites the symbol in place.
 ///
 /// `old_probe` is the v1 `probe` fn VALUE captured before the reload; its body
@@ -105,7 +104,7 @@ fn body_edit_without_overload_hot_reloads_running_code() {
     let after = emit_program(V2_CONTROL);
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local old_probe = probe_ret_int\n\
+         local old_probe = probe\n\
          _G.HOT_RELOAD = true\n{after}\n\
          print('old_probe=' .. old_probe())\n"
     );
@@ -119,7 +118,7 @@ fn body_edit_without_overload_hot_reloads_running_code() {
 /// FLIPPED SENTINEL (was: pinned the orphan-on-rename bug; now: guards the fix).
 ///
 /// Adding an unrelated `foo(string)` overload does NOT rename the emitted
-/// `foo(int)` symbol -- it stays `foo_int_ret_int` in both v1 and v2. On the
+/// `foo(int)` symbol -- it stays `foo_int` in both v1 and v2. On the
 /// in-place hot reload the new body lands under the SAME name, so surviving
 /// pre-reload code that resolves `foo(int)` by name sees the NEW body (52). No
 /// bare `foo` global was ever emitted (every non-exempt fn mangles), so there is
@@ -134,10 +133,10 @@ fn overload_add_orphans_running_global_sentinel() {
     let after = emit_program(V2_OVERLOAD);
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local old_probe = probe_ret_int\n\
+         local old_probe = probe\n\
          _G.HOT_RELOAD = true\n{after}\n\
          print('fresh=' .. old_probe())\n\
-         print('canonical=' .. foo_int_ret_int(5))\n\
+         print('canonical=' .. foo_int(5))\n\
          print('bare_foo_present=' .. tostring(_G.foo ~= nil))\n"
     );
     let out = run_luajit("overload", &script);
@@ -145,14 +144,14 @@ fn overload_add_orphans_running_global_sentinel() {
     let canon = out.lines().find(|l| l.starts_with("canonical=")).unwrap();
     let bare = out.lines().find(|l| l.starts_with("bare_foo_present=")).unwrap();
 
-    // FIXED: surviving GETGLOBAL-foo_int_ret_int code sees the edited body.
+    // FIXED: surviving GETGLOBAL-foo_int code sees the edited body.
     assert_eq!(
         fresh, "fresh=52",
         "always-mangle: the added overload must not rename foo(int); surviving code sees the \
          edited body. If this is 51 the mangle stopped being decl-set-independent. got: {out}"
     );
     // The reloaded chunk's authoritative int fn carries the edit, at the SAME name.
-    assert_eq!(canon, "canonical=52", "foo_int_ret_int must carry the edit; got: {out}");
+    assert_eq!(canon, "canonical=52", "foo_int must carry the edit; got: {out}");
     // No bare `foo` global exists under always-mangle -- there is nothing to orphan.
     assert_eq!(bare, "bare_foo_present=false", "no bare foo global should be emitted; got: {out}");
 }

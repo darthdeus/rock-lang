@@ -301,7 +301,7 @@ fn caller() -> int { return apply(1, unchanged) }
         .collect();
     assert_eq!(staged.len(), 1, "the changed caller must stage its unchanged callback: {staged:?}");
     assert!(
-        staged[0].contains("unchanged_int_ret_int"),
+        staged[0].contains("unchanged_int"),
         "the callback stage must point at the body already loaded from the full artifact: {}",
         staged[0]
     );
@@ -482,7 +482,7 @@ fn the_generic_fixture_emits_a_standalone_specialization() {
     let mid = skull::user_module_id(&ws).unwrap();
     let lua = emit_full(&ws, mid).expect("emit_full").0.lua;
     assert!(
-        lua.contains("function first_arr_T_ret_T_spec_a_n2_V2_0_z("),
+        lua.contains("function first_arr_T_spec_a_n2_V2_0_z("),
         "fixture must emit a standalone specialized body"
     );
 }
@@ -507,7 +507,7 @@ fn an_overlay_redefines_a_changed_specialization() {
     let ws1 = crate::common::ws_of(v1);
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full, mut cache) = emit_full_global(&ws1, mid).expect("emit_full v1");
-    let spec = "function first_arr_T_ret_T_spec_a_n2_V2_0_z(";
+    let spec = "function first_arr_T_spec_a_n2_V2_0_z(";
     assert!(full.lua.contains(spec), "control: the full build defines the specialization");
 
     let ws2 = crate::common::ws_of(v2);
@@ -774,7 +774,7 @@ fn an_overlay_carries_a_graph_added_library_body() {
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full, mut cache) = emit_full_global(&ws1, mid).expect("emit_full v1");
     let defines =
-        |lua: &str| lua.lines().any(|l| l.starts_with("function is_ascii_ws_int_ret_bool("));
+        |lua: &str| lua.lines().any(|l| l.starts_with("function is_ascii_ws_int("));
     assert!(
         !defines(&full.lua),
         "control: v1 must not define `is_ascii_ws`, or the overlay assertion below \
@@ -784,7 +784,7 @@ fn an_overlay_carries_a_graph_added_library_body() {
     let ws2 = crate::common::ws_with_stdlib(v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
     assert!(
-        overlay.lua.contains("is_ascii_ws_int_ret_bool("),
+        overlay.lua.contains("is_ascii_ws_int("),
         "control: the edited body must actually call it:\n{}",
         overlay.lua
     );
@@ -889,7 +889,7 @@ fn one_liveness_walk_decides_the_specialized_bodies() {
     let ws = crate::common::ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
     let lua = emit_full(&ws, mid).expect("emit_full").0.lua;
-    let def = "function first_arr_T_ret_T_spec_a_n2_V2_0_z(";
+    let def = "function first_arr_T_spec_a_n2_V2_0_z(";
     assert_eq!(
         lua.matches(def).count(),
         1,

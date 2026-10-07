@@ -67,7 +67,7 @@ fn arena_random_at_a_nobox_element_works() {
 fn arena_random_at_a_nobox_element_targets_the_specialized_copy() {
     let lua = crate::common::try_emit_module(MARKED).expect("marked column element must emit");
     assert!(
-        lua.contains("random_Arena_T_ret_tuple2_Entity_T_T_opt_spec_"),
+        lua.contains("random_Arena_T_spec_"),
         "the tuple-returning `random` call must carry its instantiation key and \
          target the specialized copy:\n{lua}"
     );

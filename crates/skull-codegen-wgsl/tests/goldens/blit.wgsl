@@ -13,7 +13,7 @@ struct FullscreenU {
 @group(0) @binding(1) var tex_input_tex: texture_2d<f32>;
 @group(0) @binding(2) var samp_input_tex: sampler;
 
-fn blit_frag_InputTex_Vec2_ret_Vec4(uv: vec2<f32>) -> vec4<f32> {
+fn blit_frag_InputTex_Vec2(uv: vec2<f32>) -> vec4<f32> {
   return textureSample(tex_input_tex, samp_input_tex, uv);
 }
 
@@ -30,5 +30,5 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVert
 
 @fragment
 fn fragment_main(input: FullscreenVertexOut) -> @location(0) vec4<f32> {
-  return blit_frag_InputTex_Vec2_ret_Vec4(input.uv);
+  return blit_frag_InputTex_Vec2(input.uv);
 }

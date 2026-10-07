@@ -30,8 +30,8 @@ fn co_emits_plain_rock_callee_transitively() {
     assert!(js.contains("function root("), "root under its given name:\n{js}");
     // Callees under the shared (name + signature) mangle, one definition each
     // even though `leaf` is reached twice.
-    assert_eq!(js.matches("function helper_int_ret_int").count(), 1, "{js}");
-    assert_eq!(js.matches("function leaf_int_ret_int").count(), 1, "{js}");
+    assert_eq!(js.matches("function helper_int").count(), 1, "{js}");
+    assert_eq!(js.matches("function leaf_int").count(), 1, "{js}");
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
     assert!(!js.contains("Math.abs"), "user `abs` must not map to Math.abs:\n{js}");
-    assert!(js.contains("function abs_bool_ret_int"), "user `abs` co-emitted:\n{js}");
+    assert!(js.contains("function abs_bool"), "user `abs` co-emitted:\n{js}");
 }
 
 #[test]

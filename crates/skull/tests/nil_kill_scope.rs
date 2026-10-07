@@ -176,7 +176,7 @@ fn every_nil_kill_names_a_declared_local() {
     // as one nested call with the `v` results as trailing arguments. If the
     // inliner ever swallows `noise`, this test stops exercising the path and
     // must say so rather than pass vacuously.
-    let forwarded = lua.matches("noise_Vec3_ret_float(v_float_float_float_ret_Vec3(").count();
+    let forwarded = lua.matches("noise_Vec3(v_float_float_float(").count();
     assert!(
         forwarded >= 4,
         "fixture no longer emits the forwarded `noise(v(..))` shape ({forwarded} sites); \

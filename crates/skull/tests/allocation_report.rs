@@ -440,7 +440,7 @@ fn make_worker() -> Coroutine<Event> {
         .allocation_report
         .bodies
         .values()
-        .filter(|body| body.emitted_name.contains("worker_int_ret_Coroutine_Event"))
+        .filter(|body| body.emitted_name.contains("worker_int"))
         .collect::<Vec<_>>();
     assert!(
         coroutine_bodies

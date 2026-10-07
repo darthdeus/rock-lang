@@ -97,7 +97,7 @@ fn main() {
     let defs = definitions_of(&lua, "identity");
     assert_eq!(defs.len(), 2, "one definition per instance, got {defs:?}");
     assert!(
-        !defs.contains(&"identity_T_ret_T".to_string()),
+        !defs.contains(&"identity_T".to_string()),
         "no body is mangled on the DECLARED signature -- there is no shared \
          generic snapshot to be one, got {defs:?}"
     );
@@ -122,8 +122,8 @@ fn main() {
 "#,
     );
     let defs = definitions_of(&lua, "plain");
-    assert_eq!(defs, vec!["plain_int_ret_int".to_string()], "non-generic emits once, unrenamed");
-    assert_eq!(callees_named_in(&lua, "main", "plain"), vec!["plain_int_ret_int".to_string()]);
+    assert_eq!(defs, vec!["plain_int".to_string()], "non-generic emits once, unrenamed");
+    assert_eq!(callees_named_in(&lua, "main", "plain"), vec!["plain_int".to_string()]);
 }
 
 /// A generic caller invoking a generic callee: the callee instance is selected

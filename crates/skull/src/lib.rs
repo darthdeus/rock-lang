@@ -2298,7 +2298,7 @@ mod tests {
         assert!(!prelude.contains("ffi.new(\"uint64_t\", 0)"));
     }
 
-    /// Bare-name aliases (`_G["pick"] = pick_bool_ret_int`) for the user module's
+    /// Bare-name aliases (`_G["pick"] = pick_bool`) for the user module's
     /// fns, so the execution-oracle drivers can keep calling by SOURCE name under
     /// always-mangle (every non-exempt fn now emits a mangled symbol). A name with
     /// more than one non-exempt definition is left unaliased -- a bare-name call
@@ -2454,7 +2454,7 @@ mod tests {
     #[test]
     fn int_literal_function() {
         let lua = emit("fn five() -> int { 5 }");
-        assert!(lua.contains("function five_ret_int()"), "got:\n{lua}");
+        assert!(lua.contains("function five()"), "got:\n{lua}");
         // The literal is a single-use pure value -> tree-folded into the return.
         assert!(lua.contains("do return (5)"), "got:\n{lua}");
     }
@@ -2699,7 +2699,7 @@ mod tests {
         );
         // Top-level shared step fn — NOT a per-instance `local function` closure.
         assert!(
-            lua.contains("function counter_ret_Coroutine_int_unit_unit__step("),
+            lua.contains("function counter__step("),
             "expected top-level step fn, got:\n{lua}"
         );
         assert!(
@@ -2711,7 +2711,7 @@ mod tests {
             "expected the tagged+stamped frame table, got:\n{lua}"
         );
         assert!(
-            lua.contains("pcall(counter_ret_Coroutine_int_unit_unit__step,"),
+            lua.contains("pcall(counter__step,"),
             "expected name-referenced pcall, got:\n{lua}"
         );
         // State machine: writes to the state field + a completed terminal -3
@@ -2922,7 +2922,7 @@ mod tests {
     /// assertion scope to one fn and ignore the always-emitted value-struct
     /// `copy = function(v) return V2_ct(...) end` metatype helpers.
     fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so
+        // Every non-exempt fn emits under its mangled name (`mk`), so
         // match the `function <name>` PREFIX and scope from the header's `(` to
         // the next top-level definition. Under the bound callee shape the
         // definition reads `__rock_mk_<name> = function(<callees>) return

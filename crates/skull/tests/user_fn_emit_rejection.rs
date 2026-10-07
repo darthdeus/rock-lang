@@ -104,7 +104,7 @@ fn stdlib_parity_gaps_stay_lenient() {
 /// producer is fixed. So the gate is verified by MUTATION instead -- deleting
 /// the implicit-iter coercion's `spec_bindings` delivery in
 /// `skull_mir::lower::expr` reintroduces it, and emission then reports
-/// ``iter_arr_T_ret_VecIter_T` is reached at its DECLARATION` where it
+/// ``iter_arr_T` is reached at its DECLARATION` where it
 /// previously produced a running program that crashed. The message deliberately
 /// carries no `internal:` label: an unconstrained type argument lands on the
 /// same arm and is a PROGRAM error, so naming it a compiler invariant failure

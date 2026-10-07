@@ -1,6 +1,6 @@
 // The scalar-ABI leaf COUNT across a call boundary for a nested-nullable shape:
 // `consume` must take one param per leaf INCLUDING the nested presence tag.
-// Verified by reading the emitted signature -- `consume_Outer_ret_int(c0,c1,c2,c3)`,
+// Verified by reading the emitted signature -- `consume_Outer(c0,c1,c2,c3)`,
 // four leaves for `{ a: P?, b: int }`.
 //
 // It does NOT cover `leaf_param_names`, despite the original intent: that names

@@ -207,7 +207,7 @@ fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
         before.difference(&case.instance_names()).map(short).collect();
     assert_eq!(
         removed,
-        vec!["chain_a_ret_int", "chain_b_ret_int", "chain_c_ret_int"],
+        vec!["chain_a", "chain_b", "chain_c"],
         "expected exactly the three stranded instances, out of {} before",
         before.len()
     );
@@ -251,11 +251,11 @@ fn deleting_the_only_external_edge_prunes_a_mutually_reachable_cycle() {
 
     assert!(!case.has_instance_named("cyc_a"), "`cyc_a` survived: the cycle kept itself alive");
     assert!(!case.has_instance_named("cyc_b"), "`cyc_b` survived: the cycle kept itself alive");
-    // BY NAME, not by count: the third is `__op_sub_int_int_ret_int`, whose
+    // BY NAME, not by count: the third is `__op_sub_int_int`, whose
     // only caller was the cycle, and a count would hide a swap.
     let removed: Vec<String> =
         before.difference(&case.instance_names()).map(short).collect();
-    assert_eq!(removed, vec!["__op_sub_int_int_ret_int", "cyc_a_int_ret_int", "cyc_b_int_ret_int"]);
+    assert_eq!(removed, vec!["__op_sub_int_int", "cyc_a_int", "cyc_b_int"]);
     assert_eq!(stats.pruned, removed.len());
     case.assert_matches_fresh("cycle pruning");
     assert_scoped(&stats, "cycle pruning");

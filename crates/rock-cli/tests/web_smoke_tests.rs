@@ -390,7 +390,7 @@ fn web_chrome_screenshot_and_click_pick_mag() {
             // republishes the bank. Indexing the result (`rp[0]`/`rp[1]`) reads
             // undefined and the whole expression collapses to [null, null].
             "--click-expr",
-            "(function(){               var rpx=render_pos_Movable_ret_Vec2(__G.player.movable), rpy=__rock_ret1;               var sx=world_to_screen_Vec2_ret_Vec2(rpx,rpy+1.5), sy=__rock_ret1;               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+sx*(r.width/__SW.logicalW),                       r.top+sy*(r.height/__SW.logicalH)];})()",
+            "(function(){               var rpx=render_pos_Movable(__G.player.movable), rpy=__rock_ret1;               var sx=world_to_screen_Vec2(rpx,rpy+1.5), sy=__rock_ret1;               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+sx*(r.width/__SW.logicalW),                       r.top+sy*(r.height/__SW.logicalH)];})()",
             // Ask the game's OWN accessor rather than a mirror global: this is
             // the same call `pick_at_cursor` makes, so it exercises the real
             // path (MRT id write -> PBO readback -> SELECTION -> ClickTarget)
@@ -406,7 +406,7 @@ fn web_chrome_screenshot_and_click_pick_mag() {
             // only a payload-carrying one is an object with `__variant`. Read
             // both, or a unit variant reads as undefined.
             "--expect",
-            "(function(){var t=pick_from_id_int_ret_ClickTarget(__G.HOVER_ENTITY_ID); \
+            "(function(){var t=pick_from_id_int(__G.HOVER_ENTITY_ID); \
              return (__G.HOVER_ENTITY_ID ? \"hover\" : \"nohover\") + \":\" + \
              (typeof t === \"string\" ? t : t.__variant);})()",
             "--value",
