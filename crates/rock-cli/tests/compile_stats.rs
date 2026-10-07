@@ -74,6 +74,26 @@ fn disabled_stats_and_build_output_are_identical() {
 
 #[test]
 fn compile_slot_wait_is_its_own_phase() {
+    use std::time::{Duration, Instant};
+    use wait_timeout::ChildExt;
+
+    struct ReapChild(std::process::Child);
+    impl Drop for ReapChild {
+        fn drop(&mut self) {
+            match self.0.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {},
+                Err(error) => log::warn!("checking compile child during cleanup: {error}"),
+            }
+            if let Err(error) = self.0.kill() {
+                log::warn!("killing compile child during cleanup: {error}");
+            }
+            if let Err(error) = self.0.wait() {
+                log::warn!("reaping compile child during cleanup: {error}");
+            }
+        }
+    }
+
     let dir = fixture();
     let slots = dir.path().join("slots");
     std::fs::create_dir(&slots).unwrap();
@@ -81,18 +101,32 @@ fn compile_slot_wait_is_its_own_phase() {
         .open(slots.join("batch-0")).unwrap();
     held.lock().unwrap();
     let stats = dir.path().join("stats.jsonl");
-    let child = command().arg("compile").arg(dir.path()).arg("--output").arg(dir.path().join("out.lua"))
+    let log = dir.path().join("stderr.log");
+    let mut child = ReapChild(command().arg("compile").arg(dir.path()).arg("--output").arg(dir.path().join("out.lua"))
         .env("ROCK_COMPILE_STATS", &stats).env("ROCK_COMPILE_SLOTS", "1")
         .env("ROCK_COMPILE_CLASS", "batch").env("ROCK_COMPILE_SLOT_DIR", &slots)
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    held.unlock().unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        .env("STONE_LOG", "info").env("ROCK_LOG_COLOR", "never")
+        .stdout(std::process::Stdio::null()).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let stderr = std::fs::read_to_string(&log).unwrap();
+        if stderr.contains("[COMPILE] waiting for a compile slot") { break }
+        assert!(child.0.try_wait().unwrap().is_none(), "compile exited before waiting: {stderr}");
+        assert!(Instant::now() < deadline, "compile never reported slot contention: {stderr}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The lower bound starts after contention is observed, excluding child startup.
+    let observed = Instant::now();
+    std::thread::sleep(Duration::from_millis(300));
+    let held_for = observed.elapsed();
+    drop(held);
+    let status = child.0.wait_timeout(Duration::from_secs(30)).unwrap()
+        .expect("compile did not finish after releasing its slot");
+    assert!(status.success(), "{}", std::fs::read_to_string(&log).unwrap());
     let record: Value = serde_json::from_str(std::fs::read_to_string(stats).unwrap().trim()).unwrap();
     assert_eq!(record["compile_slot"]["slot"], "batch-0");
     let waited = record["compile_slot"]["waited_ms"].as_f64().unwrap();
-    assert!(waited >= 250.0, "{record}");
+    assert!(waited >= held_for.as_secs_f64() * 1000.0, "held after observing contention: {held_for:?}; {record}");
     let first = &record["phases"][0];
     assert_eq!(first["name"], "compile slot");
     assert!(first["wall_ms"].as_f64().unwrap() >= waited, "{record}");

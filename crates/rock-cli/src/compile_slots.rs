@@ -59,6 +59,8 @@ thread_local! {
     static LAST_ACQUISITION: RefCell<Option<SlotAcquisition>> = const { RefCell::new(None) };
     #[cfg(test)]
     static TEST_CONFIG: RefCell<Option<SlotConfig>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static WAIT_OBSERVER: RefCell<Option<std::sync::mpsc::Sender<()>>> = const { RefCell::new(None) };
 }
 
 /// The last slot this thread took, for tests that see only a compile's result.
@@ -238,6 +240,12 @@ pub(crate) fn acquire_with(config: &SlotConfig, what: &str) -> Result<CompileSlo
         if !waiting {
             waiting = true;
             log::info!(target: "COMPILE", "waiting for a compile slot for {what}; busy: {}", describe_holders(&config.dir, &names));
+            #[cfg(test)]
+            WAIT_OBSERVER.with(|observer| {
+                if let Some(sender) = observer.borrow_mut().take() {
+                    sender.send(()).expect("slot-wait observer disconnected");
+                }
+            });
         }
         std::thread::sleep(RETRY_INTERVAL);
     }
@@ -283,19 +291,49 @@ pub(crate) fn assert_compile_waits_for_slot<T: Send + 'static>(
     let slots = tempfile::tempdir().unwrap();
     let config = SlotConfig { dir: slots.path().to_path_buf(), batch_slots: 1, class: CompileClass::Batch };
     let held = acquire_with(&config, "test holder").unwrap();
-    let worker = std::thread::spawn(move || {
+    let (worker, waiting) = spawn_slot_waiter(move || {
         set_thread_config(Some(config));
         let result = compile();
         (result, last_acquisition())
     });
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!worker.is_finished(), "the compile ran while the only batch slot was held");
-    drop(held);
-    let (result, acquisition) = worker.join().unwrap();
+    let ((result, acquisition), held_for) = finish_slot_waiter(held, worker, waiting);
     let acquisition = acquisition.expect("the compile took no slot");
     assert_eq!(acquisition.slot.as_deref(), Some("batch-0"));
-    assert!(acquisition.waited >= Duration::from_millis(250), "{acquisition:?}");
+    assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
     result
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_slot_waiter<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> (std::thread::JoinHandle<T>, std::sync::mpsc::Receiver<()>) {
+    let (sender, waiting) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        WAIT_OBSERVER.with(|observer| *observer.borrow_mut() = Some(sender));
+        work()
+    });
+    (worker, waiting)
+}
+
+#[cfg(test)]
+pub(crate) fn finish_slot_waiter<T>(
+    held: CompileSlot,
+    worker: std::thread::JoinHandle<T>,
+    waiting: std::sync::mpsc::Receiver<()>,
+) -> (T, Duration) {
+    let observed = waiting.recv_timeout(Duration::from_secs(30));
+    let started = Instant::now();
+    if observed.is_ok() {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let held_for = started.elapsed();
+    let finished_while_held = worker.is_finished();
+    // Release and join before any assertion, including a missing contention signal.
+    drop(held);
+    let result = worker.join();
+    observed.expect("the compile never reported slot contention");
+    assert!(!finished_while_held, "the compile ran while the only batch slot was held");
+    (result.unwrap(), held_for)
 }
 
 #[cfg(test)]
@@ -333,16 +371,14 @@ mod tests {
         let config = config(dir.path(), 1, CompileClass::Batch);
         let first = acquire_with(&config, "first").unwrap();
         assert_eq!(first.acquisition().slot.as_deref(), Some("batch-0"));
-        let waiter = {
+        let (waiter, waiting) = {
             let config = config.clone();
-            std::thread::spawn(move || acquire_with(&config, "second").map(|slot| slot.acquisition().clone()))
+            spawn_slot_waiter(move || acquire_with(&config, "second").map(|slot| slot.acquisition().clone()))
         };
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!waiter.is_finished(), "the second compile took a slot while the only one was held");
-        drop(first);
-        let second = waiter.join().unwrap().unwrap();
+        let (second, held_for) = finish_slot_waiter(first, waiter, waiting);
+        let second = second.unwrap();
         assert_eq!(second.slot.as_deref(), Some("batch-0"));
-        assert!(second.waited >= Duration::from_millis(250), "{second:?}");
+        assert!(second.waited >= held_for, "held after observing contention: {held_for:?}; {second:?}");
     }
 
     #[test]
@@ -351,14 +387,14 @@ mod tests {
         let config = config(dir.path(), 1, CompileClass::Batch);
         let held = acquire_with(&config, "held").unwrap();
         assert!(slot_is_free(dir.path(), AUTHOR_SLOT));
-        let waiter = {
+        let (waiter, waiting) = {
             let config = config.clone();
-            std::thread::spawn(move || acquire_with(&config, "batch").map(|slot| slot.acquisition().clone()))
+            spawn_slot_waiter(move || acquire_with(&config, "batch").map(|slot| slot.acquisition().clone()))
         };
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(!waiter.is_finished(), "batch work took a slot other than its own");
-        drop(held);
-        assert_eq!(waiter.join().unwrap().unwrap().slot.as_deref(), Some("batch-0"));
+        let (acquisition, held_for) = finish_slot_waiter(held, waiter, waiting);
+        let acquisition = acquisition.unwrap();
+        assert_eq!(acquisition.slot.as_deref(), Some("batch-0"));
+        assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
     }
 
     #[test]

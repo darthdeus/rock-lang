@@ -4948,7 +4948,10 @@ fn test_limit_names_real_test_after_forged_marker() {
 
 #[test]
 fn package_compile_holds_a_compile_slot_only_while_compiling() {
-    use crate::compile_slots::{acquire_with, last_acquisition, set_thread_config, CompileClass, SlotConfig};
+    use crate::compile_slots::{
+        acquire_with, finish_slot_waiter, last_acquisition, set_thread_config,
+        spawn_slot_waiter, CompileClass, SlotConfig,
+    };
     let slots = tempfile::tempdir().expect("slot dir");
     let config = SlotConfig { dir: slots.path().to_path_buf(), batch_slots: 1, class: CompileClass::Batch };
     let package = tempfile::tempdir().expect("package");
@@ -4965,21 +4968,18 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
         slot_file.display())).unwrap();
 
     let held = acquire_with(&config, "test holder").unwrap();
-    let compile = {
+    let (compile, waiting) = {
         let config = config.clone();
         let package = package.path().to_str().unwrap().to_owned();
-        std::thread::spawn(move || {
+        spawn_slot_waiter(move || {
             set_thread_config(Some(config));
             let result = super::skull_build_package_with_limit(&package, Duration::from_secs(10), 1, None);
             (result, last_acquisition())
         })
     };
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!compile.is_finished(), "the package compiled while the only batch slot was held");
-    drop(held);
-    let (result, acquisition) = compile.join().unwrap();
+    let ((result, acquisition), held_for) = finish_slot_waiter(held, compile, waiting);
     assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })), "{result:?}");
     let acquisition = acquisition.expect("the package compile took no slot");
     assert_eq!(acquisition.slot.as_deref(), Some("batch-0"));
-    assert!(acquisition.waited >= Duration::from_millis(250), "{acquisition:?}");
+    assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
 }
