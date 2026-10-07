@@ -791,15 +791,16 @@ fn jv_int_pair(v: JsonValue?, def_w: int, def_h: int) -> (int, int) {
 }
 
 // A validated source position, or an adapter for an already materialized value.
-// Object field indexes hold source offsets, never descendant values.
+// Object field indexes hold source offsets, never descendant values. Readers
+// keep the source text, not a parser, so they store no identity struct.
 nobox value JsonReader {
-    parser: JsonParser? = null,
+    src: string? = null,
     at: int = -1,
     value: JsonValue? = null,
     fields: Map<string, int>? = null,
 }
 
-struct JsonReaderArray {
+value JsonReaderArray {
     reader: JsonReader,
     values: [JsonValue]? = null,
     first: int = -1,
@@ -812,7 +813,6 @@ struct JsonReaderArrayIter {
 }
 
 struct JsonReaderValidation {
-    parser: JsonParser,
     keys: [string] = [],
     indices: [int] = [],
     problem: string = "invalid JSON",
@@ -825,6 +825,19 @@ struct JsonReaderValidation {
 @inline fn json_reader_int(value: int) -> JsonReader { return json_reader_value(json_int(value)) }
 @inline fn json_reader_float(value: float) -> JsonReader { return json_reader_value(json_float(value)) }
 @inline fn json_reader_str(value: string) -> JsonReader { return json_reader_value(json_str(value)) }
+// Every reader read reseeds this one parser: reads are leaf scans, and a parser
+// allocated per read costs more than the source reader saves.
+global __json_reader_scratch: JsonParser = JsonParser { src: "", pos: 0, len: 0, ok: true, depth: 0 }
+
+@inline fn json_reader_parser(src: string, at: int) -> JsonParser {
+    let p = __json_reader_scratch
+    p.src = src
+    p.pos = at
+    p.len = src.len()
+    p.ok = true
+    p.depth = 0
+    return p
+}
 @inline fn json_reader_empty_array() -> JsonReaderArray { return JsonReaderArray { reader: json_reader_null() } }
 
 fn json_reader_error_path(validation: JsonReaderValidation) -> string {
@@ -836,8 +849,7 @@ fn json_reader_error_path(validation: JsonReaderValidation) -> string {
     return path
 }
 
-fn json_reader_validate(validation: JsonReaderValidation) {
-    let p = validation.parser
+fn json_reader_validate(p: JsonParser, validation: JsonReaderValidation) {
     parse_skip_ws(p)
     if p.pos >= p.len { p.ok = false; return }
     let b = p.src.unit_at(p.pos)
@@ -880,7 +892,7 @@ fn json_reader_validate(validation: JsonReaderValidation) {
             validation.keys.push(key)
             validation.indices.push(if object { -1 } else { index })
         }
-        json_reader_validate(validation)
+        json_reader_validate(p, validation)
         if !p.ok { return }
         if validation.track_path {
             let _ = validation.keys.pop()
@@ -899,16 +911,16 @@ fn json_reader_validate(validation: JsonReaderValidation) {
 
 fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null) -> JsonReader? {
     let p = JsonParser { src, pos: 0, len: src.len(), ok: true, depth: 0 }
-    let validation = JsonReaderValidation { parser: p, track_path: rejected != null }
+    let validation = JsonReaderValidation { track_path: rejected != null }
     parse_skip_ws(p)
     let at = p.pos
-    json_reader_validate(validation)
+    json_reader_validate(p, validation)
     parse_skip_ws(p)
     if !p.ok || p.pos != p.len {
         if let report = rejected { report(json_reader_error_path(validation), p.pos, validation.problem) }
         return null
     }
-    return JsonReader { parser: p, at, fields: if p.src.unit_at(at) == 123 { validation.root_fields } else { null } }
+    return JsonReader { src, at, fields: if p.src.unit_at(at) == 123 { validation.root_fields } else { null } }
 }
 
 // Source positions are created only after validation. This scan needs no
@@ -938,13 +950,17 @@ fn json_reader_skip(p: JsonParser) {
 }
 
 @inline fn json_reader_at(reader: JsonReader, at: int) -> JsonReader {
-    return JsonReader { parser: reader.parser, at }
+    return JsonReader { src: reader.src, at }
 }
 
 fn json_reader_index(reader: JsonReader) -> JsonReader {
     if reader.fields != null { return reader }
-    if reader.parser == null || reader.at < 0 { return reader }
-    let p = reader.parser.unwrap()
+    if reader.src == null || reader.at < 0 { return reader }
+    return json_reader_index_with(json_reader_parser(reader.src.unwrap(), reader.at), reader)
+}
+
+// Leaves `p` on the object's closing brace.
+fn json_reader_index_with(p: JsonParser, reader: JsonReader) -> JsonReader {
     if p.src.unit_at(reader.at) != 123 { return reader }
     let fields: Map<string, int> = map_new()
     p.pos = reader.at + 1
@@ -959,7 +975,7 @@ fn json_reader_index(reader: JsonReader) -> JsonReader {
         parse_skip_ws(p)
         if p.src.unit_at(p.pos) == 44 { p.pos += 1; parse_skip_ws(p) }
     }
-    return JsonReader { parser: reader.parser, at: reader.at, fields }
+    return JsonReader { src: reader.src, at: reader.at, fields }
 }
 
 fn json_reader_field_offset(reader: JsonReader, key: string) -> int {
@@ -968,7 +984,7 @@ fn json_reader_field_offset(reader: JsonReader, key: string) -> int {
         let at = fields.get(key) ?? return -1
         return at
     }
-    let p = reader.parser.unwrap()
+    let p = json_reader_parser(reader.src.unwrap(), reader.at)
     if p.src.unit_at(reader.at) != 123 { return -1 }
     p.pos = reader.at + 1
     parse_skip_ws(p)
@@ -1005,19 +1021,19 @@ fn json_reader_as_str_at(p: JsonParser, at: int) -> string? {
 fn json_reader_as_str(reader: JsonReader) -> string? {
     if let value = reader.value { return json_as_str(value) }
     if reader.at < 0 { return null }
-    return json_reader_as_str_at(reader.parser.unwrap(), reader.at)
+    return json_reader_as_str_at(json_reader_parser(reader.src.unwrap(), reader.at), reader.at)
 }
 
-fn json_reader_as_bool_at(p: JsonParser, at: int) -> bool? {
+fn json_reader_as_bool_at(src: string, at: int) -> bool? {
     if at < 0 { return null }
-    let b = p.src.unit_at(at)
+    let b = src.unit_at(at)
     return if b == 116 { true } else if b == 102 { false } else { null }
 }
 
 fn json_reader_as_bool(reader: JsonReader) -> bool? {
     if let value = reader.value { return json_as_bool(value) }
     if reader.at < 0 { return null }
-    return json_reader_as_bool_at(reader.parser.unwrap(), reader.at)
+    return json_reader_as_bool_at(reader.src.unwrap(), reader.at)
 }
 
 fn json_reader_number_at(p: JsonParser, at: int, strict: bool = false) -> float? {
@@ -1037,7 +1053,7 @@ fn json_reader_number(reader: JsonReader, strict: bool = false) -> float? {
         return json_as_float(value)
     }
     if reader.at < 0 { return null }
-    return json_reader_number_at(reader.parser.unwrap(), reader.at, strict)
+    return json_reader_number_at(json_reader_parser(reader.src.unwrap(), reader.at), reader.at, strict)
 }
 
 fn json_reader_as_float(reader: JsonReader) -> float? { return json_reader_number(reader) }
@@ -1060,7 +1076,7 @@ fn json_reader_read_int(reader: JsonReader, strict: bool) -> int? {
         return json_as_int(value)
     }
     if reader.at < 0 { return null }
-    return json_reader_read_int_at(reader.parser.unwrap(), reader.at, strict)
+    return json_reader_read_int_at(json_reader_parser(reader.src.unwrap(), reader.at), reader.at, strict)
 }
 
 fn json_reader_as_int(reader: JsonReader) -> int? { return json_reader_read_int(reader, false) }
@@ -1071,9 +1087,8 @@ fn json_reader_as_array(reader: JsonReader) -> JsonReaderArray? {
         return JsonReaderArray { reader, values: json_as_array(value) ?? return null }
     }
     if reader.at < 0 { return null }
-    let p = reader.parser.unwrap()
+    let p = json_reader_parser(reader.src.unwrap(), reader.at + 1)
     if p.src.unit_at(reader.at) != 91 { return null }
-    p.pos = reader.at + 1
     parse_skip_ws(p)
     return JsonReaderArray { reader, first: p.pos }
 }
@@ -1091,15 +1106,14 @@ fn json_reader_as_array(reader: JsonReader) -> JsonReaderArray? {
         return (true, json_reader_value(value))
     }
     if it.pos < 0 { return (false, json_reader_null()) }
-    let p = array.reader.parser.unwrap()
-    if p.src.unit_at(it.pos) == 93 { return (false, json_reader_null()) }
     let at = it.pos
+    let p = json_reader_parser(array.reader.src.unwrap(), at)
+    if p.src.unit_at(at) == 93 { return (false, json_reader_null()) }
     let entry = json_reader_at(array.reader, at)
     if p.src.unit_at(at) == 123 {
-        entry = json_reader_index(entry)
+        entry = json_reader_index_with(p, entry)
         p.pos += 1
     } else {
-        p.pos = at
         json_reader_skip(p)
     }
     parse_skip_ws(p)
@@ -1141,33 +1155,33 @@ fn json_reader_field_as_str(reader: JsonReader, key: string) -> string? {
     if let value = reader.value { return json_as_str(json_field(value, key) ?? json_null()) }
     let at = json_reader_field_offset(reader, key)
     if at < 0 { return null }
-    return json_reader_as_str_at(reader.parser.unwrap(), at)
+    return json_reader_as_str_at(json_reader_parser(reader.src.unwrap(), at), at)
 }
 
 fn json_reader_field_as_bool(reader: JsonReader, key: string) -> bool? {
     if let value = reader.value { return json_as_bool(json_field(value, key) ?? json_null()) }
     let at = json_reader_field_offset(reader, key)
     if at < 0 { return null }
-    return json_reader_as_bool_at(reader.parser.unwrap(), at)
+    return json_reader_as_bool_at(reader.src.unwrap(), at)
 }
 
 fn json_reader_field_as_float(reader: JsonReader, key: string) -> float? {
     if let value = reader.value { return json_as_float(json_field(value, key) ?? json_null()) }
     let at = json_reader_field_offset(reader, key)
     if at < 0 { return null }
-    return json_reader_number_at(reader.parser.unwrap(), at)
+    return json_reader_number_at(json_reader_parser(reader.src.unwrap(), at), at)
 }
 
 fn json_reader_field_as_int(reader: JsonReader, key: string) -> int? {
     if let value = reader.value { return json_as_int(json_field(value, key) ?? json_null()) }
     let at = json_reader_field_offset(reader, key)
     if at < 0 { return null }
-    return json_reader_read_int_at(reader.parser.unwrap(), at, false)
+    return json_reader_read_int_at(json_reader_parser(reader.src.unwrap(), at), at, false)
 }
 
 fn json_reader_field_as_strict_int(reader: JsonReader, key: string) -> int? {
     if let value = reader.value { return match json_field(value, key) ?? json_null() { JsonValue::Int(i) => i, _ => null } }
     let at = json_reader_field_offset(reader, key)
     if at < 0 { return null }
-    return json_reader_read_int_at(reader.parser.unwrap(), at, true)
+    return json_reader_read_int_at(json_reader_parser(reader.src.unwrap(), at), at, true)
 }
