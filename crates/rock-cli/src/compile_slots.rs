@@ -76,7 +76,6 @@ pub(crate) struct CompileSlot {
 }
 
 impl CompileSlot {
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by compile statistics"))]
     pub(crate) fn acquisition(&self) -> &SlotAcquisition {
         &self.acquisition
     }

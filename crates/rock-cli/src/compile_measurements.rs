@@ -62,6 +62,7 @@ impl Scope {
                 "pid": std::process::id(), "kind": kind, "command": command,
                 "entry": entry, "rock_num_threads": std::env::var("ROCK_NUM_THREADS").ok(),
                 "rayon_threads": threads, "job_id": std::env::var("ROCK_JOB_ID").ok(),
+                "compile_slot": null,
             }),
             phases: Vec::new(), timings: Vec::new(),
             totals: json!({"source_files": null, "source_bytes": null,
@@ -100,6 +101,19 @@ pub(crate) fn phase(name: &str) {
         sample["wall_ms"] = json!((now - pending.boundary).as_secs_f64() * 1000.0);
         pending.phases.push(sample);
         pending.boundary = now;
+    });
+}
+
+/// The slot wait is its own phase so the compile phases exclude it.
+pub(crate) fn slot(acquisition: &crate::compile_slots::SlotAcquisition) {
+    phase("compile slot");
+    PENDING.with(|state| {
+        if let Some(pending) = state.borrow_mut().as_mut() {
+            pending.record["compile_slot"] = json!({
+                "slot": acquisition.slot,
+                "waited_ms": acquisition.waited.as_secs_f64() * 1000.0,
+            });
+        }
     });
 }
 

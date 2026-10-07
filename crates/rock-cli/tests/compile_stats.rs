@@ -16,7 +16,9 @@ fn command() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rock"));
     cmd.env("ROCK_NUM_THREADS", "4").env("ROCK_INVOCATION_LOG", "off")
         .env_remove("ROCK_TEST_FILTER").env_remove("ROCK_COMPILE_STATS")
-        .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE");
+        .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
+        // Fixture compiles must not queue behind the machine's real compiles.
+        .env("ROCK_COMPILE_SLOTS", "0");
     cmd
 }
 
@@ -38,7 +40,8 @@ fn package_compile_appends_one_phase_record() {
     assert!(record["peak_rss_bytes"].as_u64().unwrap() > 0);
     let phases = record["phases"].as_array().unwrap();
     let names: Vec<_> = phases.iter().map(|phase| phase["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["discovery", "parse+stdlib", "semantic", "codegen", "prepare", "write"]);
+    assert_eq!(names, ["compile slot", "discovery", "parse+stdlib", "semantic", "codegen", "prepare", "write"]);
+    assert_eq!(record["compile_slot"], serde_json::json!({"slot": null, "waited_ms": 0.0}));
     for phase in phases {
         assert!(phase["peak_rss_bytes"].as_u64().unwrap() > 0);
         assert!(phase["wall_ms"].as_f64().unwrap() >= 0.0);
@@ -67,6 +70,32 @@ fn disabled_stats_and_build_output_are_identical() {
     assert_eq!(records[0]["phases"].as_array().unwrap().last().unwrap()["name"], "write");
     assert_eq!(records[0]["totals"]["source_files"], 1);
     assert_eq!(records[0]["totals"]["source_bytes"], "fn helper() -> int { 1 }\n".len());
+}
+
+#[test]
+fn compile_slot_wait_is_its_own_phase() {
+    let dir = fixture();
+    let slots = dir.path().join("slots");
+    std::fs::create_dir(&slots).unwrap();
+    let held = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(slots.join("batch-0")).unwrap();
+    held.lock().unwrap();
+    let stats = dir.path().join("stats.jsonl");
+    let child = command().arg("compile").arg(dir.path()).arg("--output").arg(dir.path().join("out.lua"))
+        .env("ROCK_COMPILE_STATS", &stats).env("ROCK_COMPILE_SLOTS", "1")
+        .env("ROCK_COMPILE_CLASS", "batch").env("ROCK_COMPILE_SLOT_DIR", &slots)
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    held.unlock().unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let record: Value = serde_json::from_str(std::fs::read_to_string(stats).unwrap().trim()).unwrap();
+    assert_eq!(record["compile_slot"]["slot"], "batch-0");
+    let waited = record["compile_slot"]["waited_ms"].as_f64().unwrap();
+    assert!(waited >= 250.0, "{record}");
+    let first = &record["phases"][0];
+    assert_eq!(first["name"], "compile slot");
+    assert!(first["wall_ms"].as_f64().unwrap() >= waited, "{record}");
 }
 
 #[test]
