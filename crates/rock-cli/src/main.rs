@@ -7,7 +7,26 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub use rock_cli::*;
 // use notify::{Config, RecommendedWatcher, Watcher};
 
+// mi_option_allow_thp in libmimalloc-sys 0.1.47's bundled v3 header.
+const MI_OPTION_ALLOW_THP: std::ffi::c_int = 43;
+
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array.00100")]
+// Precede mimalloc's constructor (priority 101 with clang) and its THP OS setup.
+static ALLOCATOR_INIT: extern "C" fn() = configure_allocator;
+
+extern "C" fn configure_allocator() {
+    unsafe extern "C" {
+        fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);
+    }
+    // SAFETY: the option is valid; startup calls take no pointers or allocations.
+    unsafe { mi_option_set_default(MI_OPTION_ALLOW_THP, 0) }
+}
+
 fn main() {
+    // Avoid direct THP compaction on compiler faults; explicit MIMALLOC_ALLOW_THP still wins.
+    configure_allocator();
     // `rock lsp <subcommand>` is the LSP server + one-shot CLI handlers (there
     // is no separate `rock-lsp` binary — folding it in keeps a single `rock`
     // artifact that can't go stale against the embedded stdlib). Intercepted
@@ -154,4 +173,57 @@ fn main() {
 
     cleanup_all_children();
     rock_cli::invocation_log::finish(Some(0), "return");
+}
+
+#[cfg(test)]
+mod allocator_tests {
+    unsafe extern "C" {
+        fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
+    }
+
+    #[test]
+    fn thp_defaults_off_and_environment_overrides() {
+        let exe = std::env::current_exe().expect("test executable");
+        let default = if cfg!(target_os = "linux") { "0 0" } else { "1 0" };
+        for (value, expected) in [(None, default), (Some("1"), "1 1"),
+            (Some("0"), "0 0"), (Some("ON"), "1 1")] {
+            let mut child = std::process::Command::new(&exe);
+            child.args(["--exact", "allocator_tests::thp_option_child", "--nocapture"])
+                .env("ROCK_THP_OPTION_CHILD", expected)
+                .env_remove("MIMALLOC_ALLOW_THP");
+            if let Some(value) = value {
+                child.env("MIMALLOC_ALLOW_THP", value);
+            }
+            let out = child.output().expect("spawn allocator option witness");
+            assert!(out.status.success(), "MIMALLOC_ALLOW_THP={value:?}: {}{}",
+                String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    #[test]
+    fn thp_option_child() {
+        let Some(expected) = std::env::var_os("ROCK_THP_OPTION_CHILD") else {
+            return;
+        };
+        // SAFETY: the option is valid and this fresh process owns its settings.
+        let before = unsafe { mi_option_get(super::MI_OPTION_ALLOW_THP) };
+        #[cfg(target_os = "linux")]
+        if before == 0 {
+            // SAFETY: this prctl query takes only scalar arguments.
+            let disabled = unsafe {
+                libc::prctl(libc::PR_GET_THP_DISABLE, 0usize, 0usize, 0usize, 0usize)
+            };
+            if disabled == -1 {
+                // Kernels without this THP control reject the query with EINVAL.
+                let error = std::io::Error::last_os_error();
+                assert_eq!(error.raw_os_error(), Some(libc::EINVAL), "{error}");
+            } else {
+                assert_ne!(disabled, 0, "THP default missed mimalloc's OS initialization");
+            }
+        }
+        super::configure_allocator();
+        // SAFETY: as above.
+        let after = unsafe { mi_option_get(super::MI_OPTION_ALLOW_THP) };
+        assert_eq!(format!("{before} {after}"), expected.to_string_lossy());
+    }
 }
