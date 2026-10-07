@@ -31,6 +31,9 @@ fn main() {
         }
     }
 
+    // Apply the process-wide purge default; the LSP path above keeps its default.
+    allocator::purge_freed_pages_immediately();
+
     // Install the one logger before anything can log (see
     // docs/logging-architecture.md). Idempotent; reads STONE_LOG.
     rock_log::init();

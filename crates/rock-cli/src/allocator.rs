@@ -8,6 +8,7 @@ extern crate mimalloc as _;
 unsafe extern "C" {
     // mimalloc's C API; the `mimalloc` crate does not re-export it.
     fn mi_collect(force: bool);
+    fn mi_option_set_default(option: std::ffi::c_int, value: std::ffi::c_long);
     fn mi_process_info(
         elapsed_msecs: *mut usize, user_msecs: *mut usize, system_msecs: *mut usize,
         current_rss: *mut usize, peak_rss: *mut usize,
@@ -59,6 +60,17 @@ fn linux_current_rss() -> std::io::Result<u64> {
     }
     pages.checked_mul(page_size as u64)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "RSS byte count overflow"))
+}
+
+// `mi_option_purge_delay` in the vendored mimalloc.h `mi_option_e`; the sys
+// crate's `extended` constants omit it.
+const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
+
+/// Return freed mimalloc pages promptly; explicit environment options win.
+pub fn purge_freed_pages_immediately() {
+    // A set default yields to an option mimalloc read from the environment.
+    // SAFETY: mi_option_set_default takes no pointers; the option is valid.
+    unsafe { mi_option_set_default(MI_OPTION_PURGE_DELAY, 0) }
 }
 
 #[cfg(all(test, not(feature = "sequential")))]
@@ -238,5 +250,54 @@ mod tests {
             rayon::ThreadPoolBuilder::new().build_global().is_ok(),
             "release_freed_memory initialized the rayon global pool under `sequential`",
         );
+    }
+
+    unsafe extern "C" {
+        fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
+    }
+
+    // Fresh processes isolate mimalloc startup options. The default and
+    // explicit overrides read before the setter also pin the option index.
+    #[test]
+    fn purge_delay_defaults_to_immediate_and_env_overrides() {
+        let exe = std::env::current_exe().expect("test binary path");
+        for (env, before, after) in [
+            (None, 1000, 0),
+            (Some(("MIMALLOC_PURGE_DELAY", "7")), 7, 7),
+            (Some(("mimalloc_purge_delay", "9")), 9, 9),
+        ] {
+            let mut child = std::process::Command::new(&exe);
+            child
+                .arg("--exact")
+                .arg("allocator::tests::purge_delay_child")
+                .arg("--nocapture")
+                .env("ROCK_ALLOC_PURGE_CHILD", format!("{before} {after}"))
+                .env_remove("MIMALLOC_PURGE_DELAY")
+                .env_remove("mimalloc_purge_delay");
+            if let Some((key, value)) = env {
+                child.env(key, value);
+            }
+            let out = child.output().expect("spawn fresh test process");
+            assert!(
+                out.status.success(),
+                "purge delay with MIMALLOC_PURGE_DELAY={env:?}: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
+    }
+
+    #[test]
+    fn purge_delay_child() {
+        let Some(expect) = std::env::var_os("ROCK_ALLOC_PURGE_CHILD") else {
+            return;
+        };
+        let expect = expect.to_string_lossy().into_owned();
+        // SAFETY: mi_option_get takes no pointers and accepts any valid option.
+        let before = unsafe { mi_option_get(super::MI_OPTION_PURGE_DELAY) };
+        super::purge_freed_pages_immediately();
+        // SAFETY: as above.
+        let after = unsafe { mi_option_get(super::MI_OPTION_PURGE_DELAY) };
+        assert_eq!(format!("{before} {after}"), expect, "purge delay before and after");
     }
 }

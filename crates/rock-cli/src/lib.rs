@@ -28,7 +28,7 @@ pub use std::time::Duration;
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 
-mod allocator;
+pub mod allocator;
 mod compile_measurements;
 pub mod backend_stats;
 pub mod bone_backend;
