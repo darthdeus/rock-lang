@@ -2926,3 +2926,52 @@ fn a_boot_owned_task_is_restored_and_still_polled_in_the_next_entry() {
     assert_eq!(worker.verdict(), "PASS", "{worker:?}");
     assert!(c.population("expects_pass") > 0, "the arms compared no expect records");
 }
+
+#[test]
+fn a_lua_allocator_installation_belongs_to_the_live_native_provider() {
+    rock_host::engine_build::build_engine_libs("testbed").expect("stage Stone");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let scratch = tempfile::tempdir().expect("separate native provider");
+    let lib = if cfg!(target_os = "macos") { "libstone.dylib" } else { "libstone.so" };
+    let provider = scratch.path().join(lib);
+    std::fs::copy(root.join("tmp").join(lib), &provider).expect("copy native provider");
+    struct RestoreProvider(Option<std::ffi::OsString>);
+    impl Drop for RestoreProvider {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(old) => unsafe { std::env::set_var("ROCK_STONE_LIB", old) },
+                None => unsafe { std::env::remove_var("ROCK_STONE_LIB") },
+            }
+        }
+    }
+    let _restore = RestoreProvider(std::env::var_os("ROCK_STONE_LIB"));
+    // The serial harness owns the process environment. A staged toolchain uses
+    // a different file from tmp/libstone, even when their bytes are identical.
+    unsafe { std::env::set_var("ROCK_STONE_LIB", &provider) };
+    let (isolated, worker) = differential(
+        &["testbed::b0_lua_allocator_seed"], "testbed::b0_lua_allocator_probe");
+    assert_equivalent("testbed::b0_lua_allocator_probe", &compare(&isolated, &worker));
+    assert_eq!(isolated.verdict(), "PASS", "{isolated:?}");
+    assert_eq!(worker.verdict(), "PASS", "{worker:?}");
+    assert!(worker.seq > 0, "the probe must cross a shared-worker boundary");
+    assert_eq!(worker.expects_pass.len(), 4, "all allocator assertions must run");
+}
+
+#[test]
+fn a_lua_allocator_window_is_closed_at_the_worker_boundary() {
+    let (isolated, worker) = differential(
+        &["testbed::b0_lua_allocator_open_seed"], "testbed::b0_lua_allocator_probe");
+    assert_equivalent("testbed::b0_lua_allocator_probe", &compare(&isolated, &worker));
+    assert_eq!(isolated.verdict(), "PASS", "{isolated:?}");
+    assert_eq!(worker.verdict(), "PASS", "{worker:?}");
+    assert!(worker.seq > 0, "the probe must cross a shared-worker boundary");
+}
+
+#[test]
+fn an_uninstalled_lua_allocator_reports_failure_without_aborting() {
+    let records = run_worker_suite(Backend::Skull, "testbed",
+        &["testbed::b0_lua_allocator_uninstalled".to_string()]).expect("run refusal fixture");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
+    assert_eq!(records[0].0.expects_pass.len(), 3, "every refusal must be observed");
+}
