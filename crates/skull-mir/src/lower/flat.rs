@@ -407,6 +407,29 @@ impl Builder<'_> {
         self.emit_cur(Inst::Store { cell: result, value: absent });
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = box_bb;
+        let eid = self.ws.enums_by_name[&shape.name];
+        let units: Vec<_> = self.ws.modules[eid.module.index()].enums[eid.def]
+            .variants.iter()
+            .filter(|v| matches!(v.payload, VariantPayload::Unit))
+            .map(|v| v.name)
+            .collect();
+        for variant in units {
+            let known_tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
+            let is_unit = self.emit_cur(Inst::Eq(tag, known_tag));
+            let unit_bb = self.f.new_block();
+            let next_bb = self.f.new_block();
+            self.f.set_term(self.cur, Term::Branch {
+                cond: is_unit, then_bb: unit_bb, else_bb: next_bb,
+            });
+            self.cur = unit_bb;
+            let global = Ustr::from(format!(
+                "__rock_enum_{}_{}", crate::mangle::type_symbol(self.ws, shape.name), variant,
+            ).as_str());
+            let singleton = self.emit_cur(Inst::Global(global));
+            self.emit_cur(Inst::Store { cell: result, value: singleton });
+            self.f.set_term(self.cur, Term::Goto(join));
+            self.cur = next_bb;
+        }
         let boxed = self.emit_cur(Inst::MakeEnumDyn {
             tag,
             ty: shape.name,

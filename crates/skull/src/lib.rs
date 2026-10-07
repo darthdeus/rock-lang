@@ -554,6 +554,7 @@ local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
+_G.__ROCK_ENUM_UNITS = {}
 -- Ordinary-fn `defer` unwinding (skull_mir::mir::DEFER_PUSH). Registering a
 -- defer pushes its cleanup closure and every scope-exit splice pops it, so the
 -- stack holds exactly the cleanups of scopes still open. A body that pushes
@@ -1705,6 +1706,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                 ));
             } else {
                 // Mixed: unit variants are interned singleton tables.
+                let mut units = Vec::new();
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
                         let sym = skull_mir::mangle::type_symbol(ws, e.name);
@@ -1716,7 +1718,14 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                             var = v.name,
                             ty = sym,
                         ));
+                        units.push(format!("[{:?}] = {g}", v.name.as_str()));
                     }
+                }
+                if !units.is_empty() {
+                    out.push_str(&format!(
+                        "_G.__ROCK_ENUM_UNITS[{:?}] = {{ {} }}\n",
+                        skull_mir::mangle::type_symbol(ws, e.name).as_str(), units.join(", "),
+                    ));
                 }
             }
         }

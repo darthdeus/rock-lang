@@ -65,6 +65,8 @@ mod expansion_admission;
 mod concrete_expansion;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
+#[path = "mixed_enum_boxing.rs"]
+mod mixed_enum_boxing;
 #[path = "enum_flat_equality.rs"]
 mod enum_flat_equality;
 #[path = "enum_flat_field_spread.rs"]

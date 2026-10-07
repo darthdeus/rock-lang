@@ -1762,6 +1762,13 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     return hit or nil
 """
 
+// Reconstructed mixed-enum units have the same identity as source constants.
+@nomangle inline(lua) fn __rock_enum_unit(ty: string, variant: string) -> any = """
+    local units = _G.__ROCK_ENUM_UNITS
+    local variants = units and units[ty]
+    return variants and variants[variant] or nil
+"""
+
 // Aliasing-preserving, cycle-safe deep copy. `seen` maps each already-copied
 // source table to its copy; recording `seen[obj] = copy` BEFORE recursing
 // children makes two references to one table (or one shared capture box) copy
@@ -1792,6 +1799,8 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     if type(obj) ~= "table" then
         return obj
     end
+    local unit = __rock_enum_unit(rawget(obj, "__ty"), rawget(obj, "__variant"))
+    if unit then return unit end
     if seen[obj] then
         return seen[obj]
     end
@@ -2218,7 +2227,10 @@ inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
         error("expected strided Vec")
     end
     local base = (index - 1) * h.stride
-    local out = { __variant = vec._data[base + 1], __ty = h.elem }
+    local tag = vec._data[base + 1]
+    local unit = __rock_enum_unit(h.elem, tag)
+    if unit then return unit end
+    local out = { __variant = tag, __ty = h.elem }
     for j = 2, h.stride do
         local value = vec._data[base + j]
         if value ~= false then out[j - 1] = value end
