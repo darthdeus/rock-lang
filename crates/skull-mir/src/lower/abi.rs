@@ -32,7 +32,6 @@ use super::{
     slot_param_names, FieldShape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
     ValueStorage,
 };
-use super::shape::declared_value_storage;
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
 
@@ -937,19 +936,26 @@ impl PartialEq for RepArena {
 
 impl Eq for RepArena {}
 
-fn mono_value_storage(
+fn value_shape_facts(
     ws: &Workspace,
-    target: FnBackend,
     ty: &crate::monoty::MonoTy,
-) -> Option<ValueStorage> {
+    shape: &ValueShape,
+) -> (Option<ValueStorage>, bool) {
     let (payload, _) = ty.peel_nullable();
     let crate::monoty::MonoTy::App {
         ctor: crate::monoty::MonoCtor::Nominal(name), ..
     } = payload
     else {
-        return None;
+        return (None, false);
     };
-    declared_value_storage(ws, target, *name)
+    assert_eq!(*name, shape.name, "value shape must describe its nominal type");
+    let Some(plan) = super::shape::planned_value(ws, *name) else {
+        return (None, false);
+    };
+    let column_eligible = ws.struct_by_name.get(name).is_some_and(|sid| {
+        super::shape::has_value_plan(&ws.modules[sid.module.index()].structs[sid.def])
+    }) && (plan.shape.is_some() || (declared_nobox(ws, ty) && plan.gc_shape.is_some()));
+    (Some(plan.storage), column_eligible)
 }
 
 /// The Lua wide-value calling convention, decision 1 of
@@ -1094,24 +1100,6 @@ fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
     crate::lower::is_nobox_nominal(ws, *name)
 }
 
-fn column_eligible_for_shape(
-    ws: &Workspace,
-    ty: &crate::monoty::MonoTy,
-    shape: &ValueShape,
-) -> bool {
-    let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(name), ..
-    } = ty.peel_nullable().0
-    else {
-        return false;
-    };
-    let Some(sid) = ws.struct_by_name.get(&name) else { return false };
-    super::shape::has_value_plan(&ws.modules[sid.module.index()].structs[sid.def])
-        && super::shape::planned_value(ws, shape.name).is_some_and(|plan| {
-            plan.shape.is_some() || (declared_nobox(ws, ty) && plan.gc_shape.is_some())
-        })
-}
-
 impl RepArena {
     fn equivalent(&self, other: &Self) -> bool {
         if std::ptr::eq(self, other) {
@@ -1193,8 +1181,7 @@ impl RepArena {
         ty: &crate::monoty::MonoTy,
         shape: ValueShape,
     ) -> RepId {
-        let storage = mono_value_storage(ws, target, ty);
-        let column_eligible = column_eligible_for_shape(ws, ty, &shape);
+        let (storage, column_eligible) = value_shape_facts(ws, ty, &shape);
         let nobox = declared_nobox(ws, ty);
         let id = self.intern_with_facts(
             target,
