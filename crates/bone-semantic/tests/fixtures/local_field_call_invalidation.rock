@@ -103,3 +103,15 @@ fn f(row: Row) -> int {
     }
     0
 }
+
+//- field_survives_selected_pure_method
+value Place { x: int }
+struct Row { goal: Place? }
+@pure fn Row.read(row) -> bool { true }
+fn read(x: int) -> bool { true }
+fn f(row: Row) {
+    if row.goal != null && row.read() {
+        let observed = row.goal
+          //^ Place
+    }
+}

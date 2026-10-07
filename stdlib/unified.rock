@@ -1482,7 +1482,7 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
     vec._data[i + 1] = v
 """
 
-fn vec_len<T>(vec: [T]) -> int {
+@pure fn vec_len<T>(vec: [T]) -> int {
     return vec.len
 }
 
@@ -1510,7 +1510,7 @@ fn vec_len<T>(vec: [T]) -> int {
 // `__vec_checked_*` family, never to `vec_get`/`vec_set`.
 @inline fn Vec<T>.push(vec, item: T) { vec_push(vec, item) }
 @inline fn Vec<T>.set(vec, index: int, value: T) { vec_set(vec, index, value) }
-@inline fn Vec<T>.len(vec) -> int { return vec_len(vec) }
+@pure @inline fn Vec<T>.len(vec) -> int { return vec_len(vec) }
 
 
 fn Vec<T>.pop(vec) -> T? {
@@ -1523,7 +1523,7 @@ fn Vec<T>.pop(vec) -> T? {
     return value
 }
 
-fn Vec<T>.is_empty(vec) -> bool {
+@pure fn Vec<T>.is_empty(vec) -> bool {
     return vec.len == 0
 }
 

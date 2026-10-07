@@ -15,10 +15,10 @@
 //! alias. Whole-local bindings survive because callees cannot reassign them.
 
 use bone_core::hir;
-use bone_core::hir::{BinOp, BindingInfo, CallFamily, Callee, Expr, Statement};
+use bone_core::hir::{BinOp, BindingInfo, Callee, Expr, Statement};
 use bone_core::prelude::*;
 
-use crate::{fn_has_anno, infer_expr_used, peel_nullable, resolve_callee, BodyCtx, Gamma, Use};
+use crate::{fn_has_anno, infer_expr_used, peel_nullable, BodyCtx, Gamma, Use};
 
 /// The root of a refinement path: a local binding or a global (by name).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -70,11 +70,9 @@ fn path_prefixes((root, fields): Narrow) -> Vec<Narrow> {
 /// `impure()` may null `g` before the body runs. Whole-local bindings are immune;
 /// their fields can change through aliases.
 ///
-/// A named call is effect-free iff every candidate it resolves to is `@pure`
-/// (a `@pure` body provably writes no global -- `verify_pure_expr`); the `all`
-/// is conservative for overload sets. A method / fn-value / unresolved callee is
-/// opaque -> effect. A `@pure` call's ARGUMENTS are still walked (`pure_fn(
-/// impure())` is an effect through the argument).
+/// Conditions have already been inferred: use the selected overload, including
+/// UFCS calls, rather than a spelling-based overload family. Arguments can
+/// still invalidate a path even when the selected callee is pure.
 fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
         Expr::Call {
@@ -82,12 +80,10 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
             args,
             ..
         } => {
-            let candidates = resolve_callee(gamma, &CallFamily::from_name(name));
-            let callee_pure = !candidates.is_empty()
-                && candidates.iter().all(|(mid, fid)| {
-                    fn_has_anno(&gamma.workspace.module(*mid).functions[*fid], "pure")
+            let callee_pure = gamma.out.resolved_overload_calls.get(&e)
+                .is_some_and(|&(mid, fid)| {
+                    fn_has_anno(&gamma.workspace.module(mid).functions[fid], "pure")
                 });
-            // `is_null` is a known-pure builtin with no candidate function.
             let callee_pure = callee_pure || name.as_str() == "is_null";
             if !callee_pure {
                 return true;
