@@ -258,7 +258,7 @@ fn run_supervisor(
     timeout: Duration,
     stone_dir: Option<&std::path::Path>,
 ) -> std::result::Result<(), String> {
-    let mut command = c_native_test_command(binary, stone_dir);
+    let (mut command, _scratch) = c_native_test_command(binary, stone_dir)?;
     command.process_group(0);
     command.arg(output_dir);
     if let Some(slot) = slot {
@@ -330,10 +330,10 @@ fn read_result(dir: &std::path::Path, slot: usize) -> std::result::Result<String
 mod tests {
     use super::*;
 
-    fn supervisor_fixture(body: &str) -> CompiledC {
+    fn supervisor_fixture(body: &str, timeout_seconds: u64) -> CompiledC {
         let source = format!(
-            "#define _POSIX_C_SOURCE 200809L\n#define ROCK_TEST_COUNT 2\n#define ROCK_TEST_TIMEOUT_SECONDS 1\n\
-             #include <signal.h>\n#include <stdio.h>\n#include <unistd.h>\n\
+            "#define _POSIX_C_SOURCE 200809L\n#define ROCK_TEST_COUNT 2\n#define ROCK_TEST_TIMEOUT_SECONDS {timeout_seconds}\n\
+             #include <signal.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\n\
              static int wedged(void) {{ printf(\"%ld\\n\", (long)getpid()); fflush(stdout); {body} return 0; }}\n\
              static int survivor(void) {{ puts(\"finished\"); return 0; }}\n\
              static int (*const rock_tests[])(void) = {{wedged, survivor}};\n{}",
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn supervisor_enforces_deadline_when_child_ignores_alarm() {
-        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}");
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}", 1);
         let dir = compiled._dir.path();
         let start = Instant::now();
         let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3), None);
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn supervisor_death_cleans_up_running_child() {
-        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); kill(getppid(), SIGKILL); for (;;) {}");
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); kill(getppid(), SIGKILL); for (;;) {}", 1);
         let dir = compiled._dir.path();
         let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3), None);
         let gone = child_is_gone(dir);
@@ -381,11 +381,48 @@ mod tests {
 
     #[test]
     fn supervisor_watchdog_cleans_up_running_child() {
-        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}");
+        let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); for (;;) {}", 1);
         let dir = compiled._dir.path();
         let run = run_supervisor(&compiled.binary, dir, None, Duration::from_millis(200), None);
         let gone = child_is_gone(dir);
         assert!(run.unwrap_err().contains("supervisor timed out"));
         assert!(gone, "child outlived supervisor watchdog");
+    }
+
+    #[test]
+    fn supervisor_scratch_is_writable_unique_and_removed_after_success_and_abort() {
+        let mut roots = std::collections::HashSet::new();
+        for fail in [false, true] {
+            let body = format!(r#"
+                const char *root = getenv("ROCK_TEST_TMP");
+                if (!root) {{ puts("missing scratch root"); return 1; }}
+                char path[4096];
+                int length = snprintf(path, sizeof(path), "%s/probe", root);
+                if (length < 0 || (size_t)length >= sizeof(path)) return 2;
+                FILE *probe = fopen(path, "w");
+                if (!probe) return 3;
+                if (fputs("scratch", probe) < 0 || fclose(probe)) return 4;
+                puts(root);
+                fflush(stdout);
+                {}
+            "#, if fail { "abort();" } else { "" });
+            let compiled = supervisor_fixture(&body, C_NATIVE_TEST_TIMEOUT.as_secs());
+            let dir = compiled._dir.path();
+            let run = run_supervisor(&compiled.binary, dir, None, C_NATIVE_TEST_TIMEOUT + Duration::from_secs(5), None);
+            let output = fs_err::read_to_string(dir.join("0.out")).unwrap();
+            let root = output.lines().nth(1).expect("native scratch path");
+            assert!(run.is_ok(), "{run:?}");
+            assert!(std::path::Path::new(root).is_absolute(), "{output}");
+            assert!(roots.insert(root.to_owned()), "scratch roots were reused");
+            assert!(!std::path::Path::new(root).exists(), "scratch survived: {root}");
+            if fail {
+                let raw: i32 = fs_err::read_to_string(dir.join("0.status")).unwrap().trim().parse().unwrap();
+                assert_eq!(std::process::ExitStatus::from_raw(raw).signal(), Some(libc::SIGABRT));
+                assert!(read_result(dir, 0).is_err());
+            } else {
+                assert!(read_result(dir, 0).is_ok());
+            }
+            assert_eq!(read_result(dir, 1).unwrap().trim(), "finished");
+        }
     }
 }

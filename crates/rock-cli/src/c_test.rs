@@ -1054,7 +1054,7 @@ fn c_native_command(binary: &std::path::Path) -> Command {
 fn c_native_test_command(
     binary: &std::path::Path,
     stone_dir: Option<&std::path::Path>,
-) -> Command {
+) -> std::result::Result<(Command, tempfile::TempDir), String> {
     let mut command = c_native_command(binary);
     // Match Lua @tests: explicit GL setup is hidden and may use offscreen SDL.
     command.env("STONE_HEADLESS", "1");
@@ -1065,7 +1065,9 @@ fn c_native_test_command(
             command.env("STONE_SOURCE_DIR", stone_dir);
         }
     }
-    command
+    let scratch = crate::common::test_scratch_dir(&mut command)
+        .map_err(|error| format!("native test scratch directory failed: {error}"))?;
+    Ok((command, scratch))
 }
 
 fn validate_c_frame_request(
@@ -1129,7 +1131,8 @@ fn run_native_test(
     timeout: Duration,
     stone_dir: Option<&std::path::Path>,
 ) -> std::result::Result<std::process::Output, String> {
-    let mut child = c_native_test_command(binary, stone_dir)
+    let (mut command, _scratch) = c_native_test_command(binary, stone_dir)?;
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1485,6 +1488,49 @@ mod tests {
             .expect_err("wedged native test must time out");
         assert!(error.contains("timed out after 100ms"), "{error}");
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn native_test_scratch_is_writable_unique_and_removed_after_success_and_abort() {
+        let mut roots = std::collections::HashSet::new();
+        for fail in [false, true] {
+            let source = format!(r#"
+                #include <stdio.h>
+                #include <stdlib.h>
+                int main(void) {{
+                    const char *root = getenv("ROCK_TEST_TMP");
+                    if (!root) {{ puts("missing scratch root"); return 1; }}
+                    char path[4096];
+                    int length = snprintf(path, sizeof(path), "%s/probe", root);
+                    if (length < 0 || (size_t)length >= sizeof(path)) return 2;
+                    FILE *probe = fopen(path, "w");
+                    if (!probe) return 3;
+                    if (fputs("scratch", probe) < 0 || fclose(probe)) return 4;
+                    puts(root);
+                    fflush(stdout);
+                    {}
+                    return 0;
+                }}
+            "#, if fail { "abort();" } else { "" });
+            let compiled = super::compile_source(&source).expect("scratch fixture compiles");
+            let output = super::run_native_test(&compiled.binary, Duration::from_secs(3), None)
+                .expect("scratch fixture finishes");
+            let text = String::from_utf8(output.stdout).unwrap();
+            let root = text.trim();
+            assert!(std::path::Path::new(root).is_absolute(), "{text}");
+            assert!(roots.insert(root.to_owned()), "scratch roots were reused");
+            assert!(!std::path::Path::new(root).exists(), "scratch survived: {root}");
+            if fail {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    assert_eq!(output.status.signal(), Some(libc::SIGABRT));
+                }
+                assert!(!output.status.success());
+            } else {
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            }
+        }
     }
 
     #[test]

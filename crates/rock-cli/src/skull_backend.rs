@@ -1052,8 +1052,7 @@ fn run_test_program(
     crate::common::apply_test_rock_dir(&mut command);
     // Shards and concurrent runs share one worktree; each process gets its own
     // scratch root, removed when this returns.
-    let scratch = crate::common::test_scratch_dir()?;
-    command.env("ROCK_TEST_TMP", scratch.path());
+    let _scratch = crate::common::test_scratch_dir(&mut command)?;
     // An inherited selection would silently narrow an unsharded run.
     match selection {
         Some(selection) => command.env("ROCK_TEST_SHARD_TESTS", selection),

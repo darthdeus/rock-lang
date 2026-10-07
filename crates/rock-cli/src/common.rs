@@ -117,14 +117,17 @@ pub fn apply_test_rock_dir(command: &mut std::process::Command) {
 
 /// A fresh directory for one test process's scratch files (`ROCK_TEST_TMP`),
 /// under the worktree `tmp/` the tests used before, so it stays disk-backed.
-pub fn test_scratch_dir() -> Result<tempfile::TempDir> {
+/// Keep it alive until the child and its descendants have exited.
+pub fn test_scratch_dir(command: &mut std::process::Command) -> Result<tempfile::TempDir> {
     let root = match std::env::var_os("ROCK_DIR") {
         Some(dir) => std::path::PathBuf::from(dir),
         None => std::env::current_dir()?,
     };
     let tmp = root.join("tmp");
     fs_err::create_dir_all(&tmp)?;
-    Ok(tempfile::Builder::new().prefix("rock-test-").tempdir_in(tmp)?)
+    let scratch = tempfile::Builder::new().prefix("rock-test-").tempdir_in(tmp)?;
+    command.env("ROCK_TEST_TMP", scratch.path());
+    Ok(scratch)
 }
 
 pub struct ProcessManager;
