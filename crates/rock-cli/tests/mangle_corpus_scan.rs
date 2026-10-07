@@ -56,6 +56,7 @@ fn encode_ty(ws: &Workspace, ty: TyId, sep: &str) -> String {
             hir::BuiltinTy::Int => "int",
             hir::BuiltinTy::Uint => "uint",
             hir::BuiltinTy::Float => "float",
+            hir::BuiltinTy::F32 => "f32",
             hir::BuiltinTy::Bool => "bool",
             hir::BuiltinTy::String => "string",
             hir::BuiltinTy::Never => "never",
@@ -194,15 +195,12 @@ fn repo_root() -> std::path::PathBuf {
 fn workspace_for_dir(rel: &str) -> Option<Workspace> {
     let dir = repo_root().join(rel);
     let dir = dir.to_str().unwrap();
-    let analysis = match rock_host::compilation_units::analyze_files_in_directory(dir) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("  [{rel}] analyze failed: {e}");
-            return None;
-        }
-    };
-    let unit = analysis.project_compilation_unit();
-    let sources = match rock_host::compilation_units::load_sources_for_compilation_unit(&unit) {
+    let spec = rock_cli::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
+    workspace_for_spec(rel, &spec)
+}
+
+fn workspace_for_spec(rel: &str, spec: &rock_cli::unified_compile::SourceSpec) -> Option<Workspace> {
+    let sources = match rock_cli::unified_compile::discover_sources(spec) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("  [{rel}] load_sources failed: {e}");
@@ -228,17 +226,17 @@ fn workspace_for_dir(rel: &str) -> Option<Workspace> {
                 modules.push(m);
             }
             Err(e) => {
-                eprintln!("  [{dir}] parse failed for {id}: {}", e.message);
+                eprintln!("  [{rel}] parse failed for {id}: {}", e.message);
                 return None;
             }
         }
     }
-    let aliases = bone_query::package_aliases::for_manifest_dir(std::path::Path::new(dir))
+    let aliases = bone_query::package_aliases::for_manifest_dir(&repo_root().join(rel))
         .unwrap_or_default();
     match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
         Ok(ws) => Some(ws),
         Err(e) => {
-            eprintln!("  [{dir}] semantic_pass returned Err: {}", e.message);
+            eprintln!("  [{rel}] semantic_pass returned Err: {}", e.message);
             None
         }
     }
@@ -305,6 +303,180 @@ fn collisions(groups: &HashMap<String, HashSet<String>>, exempt: &HashSet<String
     let sig = groups.values().filter(|s| s.len() > 1).count();
     let exempt_hit = groups.keys().filter(|k| exempt.contains(*k)).count();
     (sig, exempt_hit)
+}
+
+/// Use the production encoder, removing only the top-level return segment.
+/// An empty parameter list identifies the old scheme without confusing a
+/// function-typed parameter's own `_ret_unit` suffix with that segment.
+fn without_return(ws: &Workspace, f: &Function) -> String {
+    let mut probe = f.clone();
+    probe.param_decls.clear();
+    probe.return_ty = None;
+    let old_scheme = skull_mir::mangle::mangle_fn(ws, &probe)
+        == format!("{}_ret_unit", skull_mir::mangle::symbol_of_key(f.name));
+    let mut candidate = f.clone();
+    candidate.return_ty = None;
+    let name = skull_mir::mangle::mangle_fn(ws, &candidate);
+    if old_scheme { name.strip_suffix("_ret_unit").unwrap().to_string() } else { name }
+}
+
+fn fixture_sections(source: &str) -> Vec<(&str, &str)> {
+    let mut sections = Vec::new();
+    let mut current = None;
+    let mut cursor = 0;
+    for line in source.split_inclusive('\n') {
+        if let Some(name) = line.trim_end().strip_prefix("//- ") {
+            if let Some((name, start)) = current.take() {
+                sections.push((name, &source[start..cursor]));
+            }
+            current = Some((name, cursor + line.len()));
+        }
+        cursor += line.len();
+    }
+    if let Some((name, start)) = current { sections.push((name, &source[start..])); }
+    sections
+}
+
+fn workspace_for_section(label: &str, source: &str) -> Result<Workspace, String> {
+    let files = bone_semantic::test_support::parse_embedded_files(source);
+    let mut modules = Vec::new();
+    if files.is_empty() {
+        modules.push(skull_parser::parse_module_clean(source, Ustr::from(label)).map_err(|e| e.message)?);
+    } else {
+        for file in rock_host::stdlib_loader::stdlib_files() {
+            let id = Ustr::from(format!("<stdlib:{}>", file.name).as_str());
+            modules.push(skull_parser::parse_module_clean(file.contents, id).map_err(|e| e.message)?);
+        }
+        for file in files {
+            let id = Ustr::from(format!("{label}/{}", file.file).as_str());
+            let mut module = skull_parser::parse_module_clean_with_dialect(file.src, id, file.dialect)
+                .map_err(|e| e.message)?;
+            module.package = file.package.map(|(name, id)| skull_parser::PackageTag {
+                id, self_name: name.to_string(),
+            });
+            modules.push(module);
+        }
+    }
+    let mut packages: Vec<_> = modules.iter().filter_map(|m| m.package.clone()).collect();
+    packages.sort_by_key(|p| p.id);
+    packages.dedup_by_key(|p| p.id);
+    let aliases = bone_core::modules::NsAliases {
+        packages: packages.iter().map(|p| bone_core::modules::PackageAliases {
+            id: p.id,
+            self_name: Ustr::from(p.self_name.as_str()),
+            aliases: packages.iter().filter(|other| other.id != p.id)
+                .map(|other| (Ustr::from(other.self_name.as_str()), other.id)).collect(),
+        }).collect(),
+    };
+    bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases).map_err(|e| e.message)
+}
+
+#[test]
+fn corpus_without_return_collision_scan() {
+    let root = repo_root();
+    let mut dirs: Vec<String> = walkdir::WalkDir::new(&root)
+        .into_iter()
+        .filter_entry(|e| !matches!(e.file_name().to_str(), Some(".git" | "target" | "tmp" | "node_modules")))
+        .map(|e| e.expect("corpus inventory"))
+        .filter(|e| e.file_name() == "stick.toml")
+        .map(|e| e.path().parent().unwrap().strip_prefix(&root).unwrap().to_str().unwrap().to_string())
+        .collect();
+    dirs.sort();
+    let mut pairs = Vec::new();
+    let mut scanned = 0;
+    let mut functions = 0;
+    let mut failed = Vec::new();
+    let mut inspect = |label: &str, ws: Workspace| {
+        scanned += 1;
+        let mut names: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let mut exempt: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for m in &ws.modules {
+            for (_, f) in m.functions.iter() {
+                let declaration = format!("{}:{} `{}`", f.name_span.file, f.name_span.line_range.0 + 1, f.name);
+                if skull_mir::mangle::is_exempt(f) {
+                    exempt.entry(skull_mir::mangle::mangle_fn(&ws, f)).or_default()
+                        .push((sig_key(&ws, f), declaration));
+                    continue;
+                }
+                functions += 1;
+                names.entry(without_return(&ws, f)).or_default().push((
+                    sig_key(&ws, f),
+                    declaration,
+                ));
+            }
+        }
+        for (name, decls) in names {
+            if let Some(bare) = exempt.get(&name) {
+                for (key, decl) in &decls {
+                    for (other_key, other) in bare {
+                        if key != other_key {
+                            pairs.push(format!("[{label}] `{name}`: {decl} <-> exempt {other}"));
+                        }
+                    }
+                }
+            }
+            for (i, (key, decl)) in decls.iter().enumerate() {
+                for (other_key, other) in &decls[i + 1..] {
+                    if key != other_key {
+                        pairs.push(format!("[{label}] `{name}`: {decl} <-> {other}"));
+                    }
+                }
+            }
+        }
+        eprintln!("SCANNED {label}");
+    };
+    inspect("stdlib", workspace_stdlib_only());
+    for dir in &dirs {
+        match workspace_for_dir(dir) {
+            Some(ws) => inspect(dir, ws),
+            None => failed.push(dir.clone()),
+        }
+    }
+    // Package discovery includes each package's test suite. Standalone Rock
+    // fixtures are separate compilation units, with their declared libraries.
+    let mut fixtures: Vec<_> = walkdir::WalkDir::new(&root)
+        .into_iter()
+        .filter_entry(|e| !matches!(e.file_name().to_str(), Some(".git" | "target" | "tmp" | "node_modules")))
+        .map(|e| e.expect("test inventory"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rock")
+            && e.path().components().any(|part| part.as_os_str() == "tests"))
+        .map(|e| e.into_path())
+        .filter(|path| rock_host::stick::StickConfig::find_from_dir(path.parent().unwrap())
+            .expect("fixture package lookup").is_none())
+        .filter(|path| !rock_host::source_files::source_file_new(path)
+            .expect("fixture source facts").is_test_util)
+        .collect();
+    fixtures.sort();
+    let mut negative_sections = 0;
+    for path in fixtures {
+        let label = path.strip_prefix(&root).unwrap().to_str().unwrap();
+        let source = std::fs::read_to_string(&path).expect("fixture source");
+        let sections = fixture_sections(&source);
+        if !sections.is_empty() {
+            for (name, source) in sections {
+                if name.contains("@fail") { negative_sections += 1; continue; }
+                let section_label = format!("{label}::{name}");
+                match workspace_for_section(&section_label, source) {
+                    Ok(ws) => inspect(&section_label, ws),
+                    Err(e) => {
+                        eprintln!("FAILED {section_label}: {e}");
+                        failed.push(section_label);
+                    }
+                }
+            }
+            continue;
+        }
+        let spec = rock_cli::unified_compile::SourceSpec::Files(vec![path.clone()]);
+        match workspace_for_spec(label, &spec) {
+            Some(ws) => inspect(label, ws),
+            None => failed.push(label.to_string()),
+        }
+    }
+    pairs.sort();
+    for pair in &pairs { eprintln!("COLLISION {pair}"); }
+    eprintln!("WITHOUT_RETURN workspaces={scanned} functions={functions} pairs={} negative_sections={negative_sections} failed={failed:?}", pairs.len());
+    assert!(pairs.is_empty(), "return-free symbols collide: {pairs:#?}");
+    assert!(failed.is_empty(), "corpus units failed to load: {failed:?}");
 }
 
 #[test]
