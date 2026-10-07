@@ -225,7 +225,8 @@ fn add_world_damage_snapshot_fixture(progress: &Path) -> PathBuf {
     .expect("generated progress must be JSON");
     root["world_damage"] = serde_json::json!([{
         "level": {"namespace": "official", "name": "crypt"},
-        "chunks": [{"x": 1, "y": 0, "face": 0, "generation": 1, "tail": []}],
+        "chunks": [{"x": 1, "y": 0, "face": 0, "generation": 1, "base": 0}],
+        "burns": [],
     }]);
     std::fs::write(
         progress,
@@ -711,17 +712,21 @@ fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
     let env_owned = fixture_env("world_damage", &progress, &layout, &settings);
     let env = env_refs(&env_owned);
     let recorded = run_mag(2, Some(&replay), None, &env);
+    assert_eq!(
+        recorded["mag"]["SAVE_BOOT_LOADED"],
+        true,
+        "the current-schema snapshot fixture must load: {}",
+        recorded["mag"]["SAVE_LAST_REJECTION"]
+    );
     let recorded_snapshot = std::fs::read(&snapshot).expect("read recorded snapshot");
     let log = std::fs::read_to_string(&replay).expect("read world damage replay");
-    // A chunk is two sidecars of one generation now, colour and material, so
-    // it contributes two bootstrap inputs. The fixture writes only the colour
-    // PNG, and the material one is captured as ABSENT -- which is what lets
-    // playback derive it instead of probing disk.
+    // The five ordinary inputs include the current stamp journal. A chunk
+    // contributes two more: colour bytes and an absent material sidecar.
     let material_key = format!("{snapshot_key}/m");
     let material_wire_key = hex_bytes(&material_key);
     assert_eq!(
         log.lines().filter(|line| line.starts_with("boot ")).count(),
-        6,
+        7,
         "the colour and material sidecars add one captured bootstrap input each\n{log}"
     );
     assert_eq!(
