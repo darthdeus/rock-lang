@@ -30,9 +30,17 @@ pub(crate) fn process_memory() -> serde_json::Value {
     };
     #[cfg(not(target_os = "linux"))]
     let rss = Some(values[3] as u64);
+    memory_sample(&values, rss)
+}
+
+fn memory_sample(values: &[usize; 8], rss: Option<u64>) -> serde_json::Value {
+    // mimalloc casts its signed commit counters to size_t. Its approximate
+    // arena accounting can drive the current counter below zero after large
+    // frees, so a negative value is no byte count: report it unknown.
+    let commit = |value: usize| u64::try_from(value as i64).ok();
     serde_json::json!({
         "rss_bytes": rss, "peak_rss_bytes": values[4],
-        "commit_bytes": values[5], "peak_commit_bytes": values[6],
+        "commit_bytes": commit(values[5]), "peak_commit_bytes": commit(values[6]),
     })
 }
 
@@ -128,6 +136,17 @@ mod tests {
         assert!(memory["rss_bytes"].as_u64().unwrap() >= data.len() as u64,
             "RSS omitted a resident system allocation: {memory}");
         assert!(memory["peak_rss_bytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn negative_mimalloc_commit_counter_is_reported_unknown() {
+        // Measured in a `rock test mag` prepare phase after the workspace drop.
+        let mut values = [0usize; 8];
+        values[5] = -549_257_216i64 as usize;
+        values[6] = 3_875_405_824;
+        let memory = super::memory_sample(&values, Some(1_383_763_968));
+        assert!(memory["commit_bytes"].is_null(), "wrapped commit counter: {memory}");
+        assert_eq!(memory["peak_commit_bytes"], 3_875_405_824u64);
     }
 
     /// The compiler allocates on rayon workers and the host frees the result
