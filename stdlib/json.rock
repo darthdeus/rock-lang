@@ -931,8 +931,7 @@ fn json_reader_decode(src: string, rejected: fn(string, int, string)? = null, in
     }
     if p.src.unit_at(at) == 123 {
         let root_offsets = validation.offsets.get(at) ?? JsonReaderOffsets {}
-        root_offsets.fields = validation.root_fields
-        validation.offsets[at] = root_offsets
+        validation.offsets[at] = JsonReaderOffsets { fields: validation.root_fields, end: root_offsets.end }
     }
     return JsonReader { src, at, offsets: validation.offsets }
 }
