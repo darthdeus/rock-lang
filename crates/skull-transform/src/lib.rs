@@ -899,6 +899,7 @@ enum FieldSrc {
     CellLoad(Idx<Cell>),
     /// A nullable value cell's presence leaf on a ctor store.
     ConstTrue,
+    ConstNil,
 }
 
 /// If `inst` is a scalarizable aggregate ctor, its identity + logical field list.
@@ -1649,14 +1650,21 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                         fs.into_iter().map(|f| (f, FieldSrc::CellLoad(src))).collect(),
                     )));
                 }
-                Ok(ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize]).map(
-                    |(_, mut fields)| {
-                        if needs_presence(*cell) {
-                            fields.push((present_field, FieldSrc::ConstTrue));
-                        }
-                        (i, *cell, fields)
-                    },
-                ))
+                let Some((_, mut fields)) =
+                    ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
+                else {
+                    return Ok(None);
+                };
+                if needs_presence(*cell) {
+                    fields.push((present_field, FieldSrc::ConstTrue));
+                }
+                // An omitted box key reads nil, even after a previous variant
+                // populated the scalar cell in a loop or coroutine frame.
+                let mut missing = candidate_fields(*cell)?;
+                missing.retain(|f| !fields.iter().any(|(name, _)| name == f));
+                missing.sort_unstable();
+                fields.extend(missing.into_iter().map(|f| (f, FieldSrc::ConstNil)));
+                Ok(Some((i, *cell, fields)))
             }
             _ => Ok(None),
             }
@@ -1726,6 +1734,11 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 }
                 FieldSrc::ConstTrue => {
                     let cv = func.alloc_inst(Inst::Const(Lit::Bool(true)));
+                    news.push(cv);
+                    cv
+                }
+                FieldSrc::ConstNil => {
+                    let cv = func.alloc_inst(Inst::Const(Lit::Nil));
                     news.push(cv);
                     cv
                 }

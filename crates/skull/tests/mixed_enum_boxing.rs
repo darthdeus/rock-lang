@@ -1,5 +1,57 @@
 use crate::common::{emit_module, run_luajit};
 
+const FIELD_READ_LOOP: &str = r#"
+enum State { Idle, Casting(string, int), Named { name: string } }
+struct Combat { state: State }
+fn set_state(combat: Combat, i: int) {
+    combat.state = if i % 4 == 0 { State::Casting("spell", i) }
+        else if i % 4 == 2 { State::Named { name: "named" } }
+        else { State::Idle }
+}
+@nomangle fn field_read_loop() -> bool {
+    let combat = Combat { state: State::Idle }
+    for i in 0..12 {
+        set_state(combat, i)
+        let state = combat.state
+        if i % 2 == 1 { if state != State::Idle { return false } }
+        else if state == State::Idle { return false }
+    }
+    return true
+}
+co fn tick() -> Coroutine<int> { yield 1 }
+co fn field_read_await_loop(combat: Combat) -> Coroutine<int> {
+    for i in 0..12 {
+        set_state(combat, i)
+        let state = combat.state
+        await tick()
+        if i % 2 == 1 { yield if state == State::Idle { 1 } else { 0 } }
+        else { yield if state != State::Idle { 1 } else { 0 } }
+    }
+}
+@nomangle fn field_read_coroutine() -> bool {
+    let c = field_read_await_loop(Combat { state: State::Idle })
+    for _ in 0..12 {
+        if c.resume() != 1 { return false }
+        if c.resume() != 1 { return false }
+    }
+    return c.resume() == null
+}
+"#;
+
+#[test]
+fn mixed_enum_field_read_loop_clears_previous_payload() {
+    let lua = emit_module(FIELD_READ_LOOP);
+    assert_eq!(run_luajit(&format!("{lua}\nprint(field_read_loop())\n"),
+        "mixed_enum_field_loop"), "true");
+}
+
+#[test]
+fn mixed_enum_field_read_across_await_clears_previous_payload() {
+    let lua = emit_module(FIELD_READ_LOOP);
+    assert_eq!(run_luajit(&format!("{lua}\nprint(field_read_coroutine())\n"),
+        "mixed_enum_field_await"), "true");
+}
+
 const SRC: &str = r#"
 nobox value Wide { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int }
 enum Choice { None, Empty, Text(string), Wide(Wide) }
