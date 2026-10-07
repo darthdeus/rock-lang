@@ -227,6 +227,14 @@ fn perf_json_frame_ms_is_uniform_series() {
         assert_stat_block(block, &format!("frame_ms.{series}"), true);
         assert_eq!(block["n"], doc["frames"], "{series} must cover every measured frame");
     }
+    let trailing = &doc["frame_ms_trailing"];
+    for series in ["logic_cpu", "render_cpu", "effective_cpu", "present", "rendered"] {
+        assert_stat_block(&trailing[series], &format!("frame_ms_trailing.{series}"), true);
+        let expected = doc["frames"].as_u64().unwrap().min(120);
+        assert_eq!(trailing[series]["n"].as_u64(), Some(expected));
+    }
+    assert_stat_block(&trailing["gpu"], "frame_ms_trailing.gpu", false);
+
     let gpu = frame_ms
         .get("gpu")
         .unwrap_or_else(|| panic!("frame_ms.gpu missing: {frame_ms}"));
