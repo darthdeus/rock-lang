@@ -2343,7 +2343,7 @@ fn do_run_all_sims_recorded(
     // independent once the compiled output is invocation-owned.
     let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = active_indices
         .into_iter()
-        .partition(|&i| is_reload_lane(env_by_wire.get(&wire_names[i]).map_or(&[][..], |v| v)));
+        .partition(|&i| entry_is_reload_lane(&wire_names[i], &env_by_wire));
 
     // Concurrent children cannot stream: their progress lines would interleave
     // into nonsense. Buffer instead and print each sim's complete record in
@@ -2622,15 +2622,8 @@ pub fn do_run_allocation_census(
         }
     }
 
-    let mut reload_idx = Vec::new();
-    let mut ordinary_idx = Vec::new();
-    for (i, name) in selected.iter().enumerate() {
-        if entry_is_reload_lane(name, &env_by_wire) {
-            reload_idx.push(i);
-        } else {
-            ordinary_idx.push(i);
-        }
-    }
+    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) =
+        (0..selected.len()).partition(|&i| entry_is_reload_lane(&selected[i], &env_by_wire));
     let jobs = resolve_jobs(jobs, false, jobs_force)?;
     // Reload entries own the Session and an isolated copy of the boot chunk.
     let mut reload_lane = reload_lane_session(
@@ -3155,11 +3148,7 @@ fn run_specs_worker_mode(
     let (exclusive, poolable): (Vec<_>, Vec<_>) = isolated
         .into_iter()
         .map(|(idx, r)| (active_indices[idx], r))
-        .partition(|(i, _)| {
-            parse_sim_chain(&specs[*i])
-                .iter()
-                .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
-        });
+        .partition(|(i, _)| entry_is_reload_lane(&specs[*i], env_by_wire));
 
     // One entry's scheduling estimate and where it came from: this machine's
     // history first, else the checked-in seeded median, else nothing. A lane
@@ -3349,9 +3338,8 @@ fn run_specs_worker_mode(
         }
     });
 
-    // ONE child for the whole lane, entries in sequence: `FRAME_COUNT` is the
-    // only key the reload sims differ on and it is runner-owned, so they share
-    // the boot signature `[("STONE_HOT_RELOAD", "1")]`.
+    // Reload workers run serially through the lane's session. Only entries
+    // with compatible boot signatures share a child process.
     //
     // Each reload sim restores the source it edited before it stops, so an
     // entry cannot hand reloaded code to its successor; `revert_reload_edits`
@@ -3369,13 +3357,9 @@ fn run_specs_worker_mode(
         let lane = reload_lane
             .ok_or_else(|| anyhow!("reload sims were selected without a lane session"))?;
         let (lane_stone, lane_output) = (&mut lane.stone, lane.output.as_str());
-        let (lane_alone, lane_chained): (Vec<_>, Vec<_>) = exclusive.iter().partition(|(i, _)| {
-            parse_sim_chain(&specs[*i])
-                .iter()
-                .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
-        });
-        for (i, _) in &lane_alone {
-            let i = *i;
+        let reload_indices: Vec<usize> = exclusive.iter().map(|(i, _)| *i).collect();
+        let (lane_alone, lane_chains) = group_reload_worker_specs(&reload_indices, specs, env_by_wire);
+        for i in lane_alone {
             let (_, summary) = run_named_entry(
                 project,
                 &specs[i],
@@ -3391,11 +3375,11 @@ fn run_specs_worker_mode(
             )?;
             done.push((i, summary));
         }
-        if !lane_chained.is_empty() {
+        for lane_chained in lane_chains {
             let lane_specs: Vec<String> =
-                lane_chained.iter().map(|(i, _)| specs[*i].clone()).collect();
+                lane_chained.iter().map(|i| specs[*i].clone()).collect();
             let lane_entry_ids: Option<Vec<u64>> = entry_ids
-                .map(|ids| lane_chained.iter().map(|(i, _)| ids[*i]).collect());
+                .map(|ids| lane_chained.iter().map(|i| ids[*i]).collect());
             let results = run_specs_recovering(
                 project,
                 lane_output,
@@ -3414,7 +3398,7 @@ fn run_specs_worker_mode(
                     lane_chained.len()
                 ));
             }
-            for ((i, _), (_, summary, _crossed)) in lane_chained.iter().zip(results) {
+            for (i, (_, summary, _crossed)) in lane_chained.iter().zip(results) {
                 done.push((*i, summary));
             }
         }
@@ -3674,7 +3658,8 @@ fn revert_reload_edits(
 ///
 /// An entry is a comma-chain of parts sharing one `$OUT`; if ANY part opts into
 /// the reload lane the whole entry is exclusive, because the parts run in one
-/// sequence and the session must not be live while another child exists.
+/// sequence. This selects the session-owned chunk; sharing a worker also
+/// requires compatible boot signatures (`group_reload_worker_specs`).
 fn entry_is_reload_lane(
     chain_spec: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
@@ -4354,18 +4339,43 @@ fn worker_ineligibility(
             ));
         }
     }
-    // A chain's parts run as consecutive entries of one queue, so they must
-    // agree with each other exactly as distinct entries must.
-    let first_sig = boot_signature(env_by_wire.get(parts[0]).map_or(&[][..], |v| v));
+    entry_boot_signature(spec, env_by_wire).err()
+}
+
+fn entry_boot_signature(
+    spec: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+) -> std::result::Result<Vec<(String, String)>, String> {
+    let parts = parse_sim_chain(spec);
+    let Some(head) = parts.first() else {
+        return Err("empty sim name".to_string());
+    };
+    let first_sig = boot_signature(env_by_wire.get(*head).map_or(&[][..], |v| v));
     for part in &parts[1..] {
         if boot_signature(env_by_wire.get(*part).map_or(&[][..], |v| v)) != first_sig {
-            return Some(format!(
-                "chain parts `{}` and `{part}` disagree on their @sim_env boot signature",
-                parts[0]
+            return Err(format!(
+                "chain parts `{head}` and `{part}` disagree on their @sim_env boot signature"
             ));
         }
     }
-    None
+    Ok(first_sig)
+}
+
+fn group_specs_by_boot_signature(
+    indices: impl IntoIterator<Item = usize>,
+    specs: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+) -> Vec<Vec<usize>> {
+    let mut groups: Vec<(Vec<(String, String)>, Vec<usize>)> = Vec::new();
+    for i in indices {
+        let sig = entry_boot_signature(&specs[i], env_by_wire)
+            .expect("only boot-compatible entries are grouped");
+        match groups.iter_mut().find(|(s, _)| *s == sig) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((sig, vec![i])),
+        }
+    }
+    groups.into_iter().map(|(_, members)| members).collect()
 }
 
 /// Partition entry specs for worker mode: groups of specs sharing a boot
@@ -4380,24 +4390,32 @@ fn group_worker_specs(
     specs: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
 ) -> (Vec<Vec<usize>>, Vec<(usize, String)>) {
-    let mut groups: Vec<(Vec<(String, String)>, Vec<usize>)> = Vec::new();
+    let mut eligible = Vec::new();
     let mut isolated: Vec<(usize, String)> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
         if let Some(reason) = worker_ineligibility(spec, env_by_wire) {
             isolated.push((i, reason));
-            continue;
-        }
-        let head = parse_sim_chain(spec)
-            .first()
-            .copied()
-            .expect("an empty chain is classified ineligible above");
-        let sig = boot_signature(env_by_wire.get(head).map_or(&[][..], |v| v));
-        match groups.iter_mut().find(|(s, _)| *s == sig) {
-            Some((_, members)) => members.push(i),
-            None => groups.push((sig, vec![i])),
+        } else {
+            eligible.push(i);
         }
     }
-    (groups.into_iter().map(|(_, members)| members).collect(), isolated)
+    (group_specs_by_boot_signature(eligible, specs, env_by_wire), isolated)
+}
+
+/// Reload workers share the lane's session, but each boot signature needs its
+/// own child. Incompatible comma-chain parts use the fresh-process entry path.
+fn group_reload_worker_specs(
+    indices: &[usize],
+    specs: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+) -> (Vec<usize>, Vec<Vec<usize>>) {
+    let (alone, chained): (Vec<_>, Vec<_>) = indices.iter().copied().partition(|&i| {
+        parse_sim_chain(&specs[i])
+            .iter()
+            .any(|p| declares_worker_isolated(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+            || entry_boot_signature(&specs[i], env_by_wire).is_err()
+    });
+    (alone, group_specs_by_boot_signature(chained, specs, env_by_wire))
 }
 
 fn entry_backend_exclusion(
@@ -8053,6 +8071,55 @@ mod tests {
         assert_eq!(lanes.concat(), group);
         assert_eq!(worker_lane_count(0, 4), 0);
         assert_eq!(worker_lane_count(3, 0), 1);
+    }
+
+    #[test]
+    fn reload_worker_chains_partition_boot_signatures_and_preserve_isolation() {
+        let specs = ["ordinary", "reload", "submit", "budget", "alone", "reload"]
+            .map(str::to_string);
+        let wires = HashMap::from([
+            ("reload".into(), env(&[("STONE_HOT_RELOAD", "1")])),
+            ("submit".into(), env(&[("STONE_HOT_RELOAD", "1"), ("SIM_SKIP_RENDER", "submit")])),
+            ("budget".into(), env(&[("STONE_HOT_RELOAD", "1"), ("FRAME_COUNT", "900")])),
+            ("alone".into(), env(&[("STONE_HOT_RELOAD", "1"), ("SIM_WORKER_ISOLATED", "1")])),
+        ]);
+        let (ordinary, isolated) = group_worker_specs(&specs, &wires);
+        let reload_indices: Vec<usize> = isolated.iter()
+            .filter(|(i, _)| entry_is_reload_lane(&specs[*i], &wires))
+            .map(|(i, _)| *i).collect();
+        let (alone, chains) = group_reload_worker_specs(&reload_indices, &specs, &wires);
+        let mut planned = ordinary.concat();
+        planned.extend(&alone);
+        planned.extend(chains.concat());
+        planned.sort_unstable();
+        assert_eq!(planned, (0..specs.len()).collect::<Vec<_>>(), "every occurrence has one runner");
+        assert!(ordinary.iter().flatten().all(|&i| !entry_is_reload_lane(&specs[i], &wires)));
+        assert_eq!(alone, vec![4], "the boot-scoped reload entry runs alone");
+        for chain in &chains {
+            let signature = boot_signature(&wires[&specs[chain[0]]]);
+            assert!(chain.iter().all(|&i| boot_signature(&wires[&specs[i]]) == signature),
+                "one reload worker must have one boot signature: {chain:?}");
+        }
+        assert_eq!(chains, vec![vec![1, 3, 5], vec![2]],
+            "budgets share a boot; render modes split it, in first-appearance order");
+    }
+
+    #[test]
+    fn reload_worker_chains_keep_incompatible_and_boot_scoped_parts_alone() {
+        let specs = ["reload", "reload,submit", "reload,alone", "reload,ordinary", "reload,budget"]
+            .map(str::to_string);
+        let wires = HashMap::from([
+            ("reload".into(), env(&[("STONE_HOT_RELOAD", "1")])),
+            ("submit".into(), env(&[("STONE_HOT_RELOAD", "1"), ("SIM_SKIP_RENDER", "submit")])),
+            ("alone".into(), env(&[("STONE_HOT_RELOAD", "1"), ("SIM_WORKER_ISOLATED", "1")])),
+            ("budget".into(), env(&[("STONE_HOT_RELOAD", "1"), ("FRAME_COUNT", "900")])),
+        ]);
+        let indices: Vec<usize> = (0..specs.len()).collect();
+        let (alone, chains) = group_reload_worker_specs(&indices, &specs, &wires);
+        assert_eq!(alone, vec![1, 2, 3],
+            "incompatible chain parts and any isolated part need fresh processes");
+        assert_eq!(chains, vec![vec![0, 4]],
+            "compatible comma-chain parts still share the reload worker");
     }
 
     #[test]

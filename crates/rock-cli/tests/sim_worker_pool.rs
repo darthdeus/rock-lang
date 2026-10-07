@@ -736,7 +736,35 @@ fn assert_bank_writer_leaves_the_tracked_bank(name: &str, bank: &str) {
 
 #[test]
 fn a_sound_bank_writer_leaves_the_tracked_bank() {
-    assert_bank_writer_leaves_the_tracked_bank("sound_bank_transaction", "mag/assets/sound_bank.json");
+    let bank = workspace_root().join("mag/assets/sound_bank.json");
+    let original = match std::fs::read(&bank) {
+        Ok(bytes) => Some((bytes, std::fs::metadata(&bank).expect("bank metadata"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read original sound bank: {error}"),
+    };
+    // The sound project owns this generated bank; a fresh checkout has none.
+    let result = std::panic::catch_unwind(|| {
+        rock_cli::package::prepare_sound_bank(workspace_root().join("mag").to_str().expect("project path"))
+            .expect("prepare production sound bank");
+        assert_bank_writer_leaves_the_tracked_bank("sound_bank_transaction", "mag/assets/sound_bank.json");
+    });
+    match original {
+        Some((bytes, metadata)) => {
+            std::fs::write(&bank, bytes).expect("restore original sound bank");
+            std::fs::set_permissions(&bank, metadata.permissions()).expect("restore bank permissions");
+            std::fs::File::options().write(true).open(&bank).expect("open restored bank")
+                .set_times(std::fs::FileTimes::new().set_modified(metadata.modified().expect("original bank mtime")))
+                .expect("restore bank mtime");
+        }
+        None => match std::fs::remove_file(&bank) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => panic!("remove generated fixture bank: {error}"),
+        },
+    }
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
 }
 
 #[test]
