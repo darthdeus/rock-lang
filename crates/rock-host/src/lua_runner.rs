@@ -72,6 +72,7 @@ fn run_lua_code_with_timeout_at(
     }
 
     let mut cmd = std::process::Command::new(luajit_path);
+    crate::compiler_thp::configure_runtime_command(&mut cmd);
     cmd.envs(env.iter().copied());
     // `-` = "run stdin as a script". WITHOUT it luajit treats piped stdin as an
     // INTERACTIVE session: it prints a fatal error and still exits 0. That is the

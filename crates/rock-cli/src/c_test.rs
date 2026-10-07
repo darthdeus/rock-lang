@@ -1044,6 +1044,7 @@ fn invalidate_artifact(path: &std::path::Path) -> std::io::Result<()> {
 
 fn c_native_command(binary: &std::path::Path) -> Command {
     let mut command = Command::new(binary);
+    rock_host::compiler_thp::configure_runtime_command(&mut command);
     command.env(
         rock_host::project::lib_path_var(),
         rock_host::project::lib_path_with_inherited(),

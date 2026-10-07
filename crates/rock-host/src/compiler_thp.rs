@@ -3,6 +3,15 @@
 use std::io;
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+const PR_SET_THP_DISABLE: std::ffi::c_int = 41;
+#[cfg(target_os = "linux")]
+const PR_GET_THP_DISABLE: std::ffi::c_int = 42;
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
+}
+
 const DEFAULT_MARKER: &str = "ROCK_COMPILER_THP_DEFAULT";
 
 /// Restart before compilation so mimalloc sees the default during OS init.
@@ -16,7 +25,7 @@ pub fn enter_compiler_process() -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let inherited = {
         // SAFETY: scalar-only query; preserve an externally disabled parent too.
-        let state = unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) };
+        let state = unsafe { prctl(PR_GET_THP_DISABLE, 0usize, 0usize, 0usize, 0usize) };
         if state < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -40,7 +49,7 @@ pub fn enter_compiler_process() -> io::Result<()> {
     }
 }
 
-/// Tests, sim workers and games share this runtime spawn boundary.
+/// Lua, C, JS and GLSL execution share this runtime spawn boundary.
 pub fn configure_runtime_command(command: &mut Command) {
     let Some(inherited) = std::env::var_os(DEFAULT_MARKER) else { return; };
     command.env_remove(DEFAULT_MARKER);
@@ -59,8 +68,8 @@ pub fn configure_runtime_command(command: &mut Command) {
         unsafe {
             command.pre_exec(move || {
                 let state = state.filter(|s| *s == 0 || *s == 1)
-                    .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-                if libc::prctl(libc::PR_SET_THP_DISABLE, state, 0, 0, 0) != 0 {
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+                if prctl(PR_SET_THP_DISABLE, state as usize, 0usize, 0usize, 0usize) != 0 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())

@@ -36,6 +36,3 @@ tempfile = "3.0"
 ustr = { workspace = true }
 atomic_refcell = { workspace = true }
 rayon = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"

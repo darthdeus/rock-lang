@@ -542,6 +542,7 @@ fn spawn_runner(
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(runner);
+    rock_host::compiler_thp::configure_runtime_command(&mut cmd);
     cmd.arg("--profile").arg(profile);
     cmd.env(
         rock_host::project::lib_path_var(),

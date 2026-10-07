@@ -22,6 +22,7 @@ pub fn run_node_code_with_timeout(
     timeout: Option<Duration>,
 ) -> Result<NodeRun, CompilerError> {
     let mut cmd = std::process::Command::new("node");
+    crate::compiler_thp::configure_runtime_command(&mut cmd);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -86,7 +87,9 @@ pub fn run_node_code_with_timeout(
 /// (`run_node_code_with_timeout`) stays test-only; a real program can run
 /// arbitrarily long and must not be truncated at 15s (D5).
 pub fn run_node_code_streaming(code: &str) -> Result<i32, CompilerError> {
-    let mut child = std::process::Command::new("node")
+    let mut cmd = std::process::Command::new("node");
+    crate::compiler_thp::configure_runtime_command(&mut cmd);
+    let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())

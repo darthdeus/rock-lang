@@ -44,7 +44,7 @@ fn main() {
 
     if compiler_process(args.command, args.list) {
         if let Err(error) = rock_host::compiler_thp::enter_compiler_process() {
-            eprintln!("Error: cannot start compiler with its THP default: {error}");
+            log::error!(target: "CLI", "cannot start compiler with its THP default: {error}");
             std::process::exit(1);
         }
     }
@@ -252,6 +252,26 @@ mod allocator_tests {
             assert!(out.status.success(), "runtime child: {}{}",
                 String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             print!("{}", String::from_utf8_lossy(&out.stdout));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let root = tempfile::tempdir().expect("Lua runner proxy");
+                let proxy = root.path().join("luajit");
+                let exe = std::env::current_exe().unwrap().to_string_lossy()
+                    .replace('\'', "'\"'\"'");
+                std::fs::write(&proxy, format!(
+                    "#!/usr/bin/env bash\nexec '{exe}' --exact allocator_tests::thp_process_child --nocapture\n"
+                )).unwrap();
+                std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
+                unsafe { std::env::set_var("ROCK_LUAJIT", &proxy) };
+                let expected = std::env::var("ROCK_THP_TEST_RUNTIME_EXPECT").unwrap();
+                let out = rock_host::lua_runner::run_lua_code_with_timeout_and_env(
+                    "", Some(std::time::Duration::from_secs(10)),
+                    &[("ROCK_THP_TEST_ROLE", "runtime"), ("ROCK_THP_TEST_EXPECT", &expected)],
+                ).expect("stdin Lua runtime witness");
+                assert!(out.success, "stdin Lua runtime: {}", out.combined());
+                print!("stdin Lua runtime: {}", out.stdout);
+            }
         }
     }
 }
