@@ -284,6 +284,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
+    drop(modules);
     if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)) {
         return JsUnitOutcome::UnitFail {
             reason: "build var resolution failed".to_string(),
@@ -587,6 +588,7 @@ pub(crate) fn try_emit_js_program_project_cached(
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
+    drop(modules);
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {

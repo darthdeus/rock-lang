@@ -548,6 +548,7 @@ fn check_project(
             rendered: crate::skull_backend::render_project_errs(&sources, &errors),
             expected_failure_tests: None,
         })?;
+    drop(modules);
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|error| {
         FileCheckError {
             reason: "build var resolution failed".to_string(),

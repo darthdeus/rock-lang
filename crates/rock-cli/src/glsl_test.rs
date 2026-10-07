@@ -346,6 +346,7 @@ fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) 
             }
         }
     };
+    drop(modules);
     let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
         Ok(tests) => tests,
         Err(e) => return UnitOutcome::UnitFail { reason: categorize(&e.message), rendered: e.message },
