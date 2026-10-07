@@ -7,6 +7,7 @@
 //! another process that may need one.
 
 use anyhow::{anyhow, Context, Result};
+#[cfg(test)]
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Seek, Write};
@@ -54,14 +55,15 @@ pub(crate) struct SlotAcquisition {
 
 thread_local! {
     static HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    #[cfg(test)]
     static LAST_ACQUISITION: RefCell<Option<SlotAcquisition>> = const { RefCell::new(None) };
     #[cfg(test)]
     static TEST_CONFIG: RefCell<Option<SlotConfig>> = const { RefCell::new(None) };
 }
 
-/// The last slot this thread took, for compile statistics. Every covered
-/// compile acquires on the thread that runs it.
-#[cfg_attr(not(test), expect(dead_code, reason = "read by compile statistics"))]
+/// The last slot this thread took, for tests that see only a compile's result.
+/// Every covered compile acquires on the thread that runs it.
+#[cfg(test)]
 pub(crate) fn last_acquisition() -> Option<SlotAcquisition> {
     LAST_ACQUISITION.with(|last| last.borrow().clone())
 }
@@ -113,6 +115,7 @@ pub(crate) fn acquire(what: &str) -> Result<CompileSlot> {
     };
     slot.marks_thread = true;
     HOLDING.with(|holding| holding.set(true));
+    #[cfg(test)]
     LAST_ACQUISITION.with(|last| *last.borrow_mut() = Some(slot.acquisition.clone()));
     Ok(slot)
 }

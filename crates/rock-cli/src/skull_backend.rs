@@ -2564,8 +2564,8 @@ pub fn skull_compile_project_with_inputs(
 }
 
 fn skull_run_project(dir: &str) -> Result<()> {
-    let stats = crate::compile_measurements::Scope::begin(dir);
     use std::path::PathBuf;
+    let stats = crate::compile_measurements::Scope::begin(dir);
     ensure_renderer_feature(dir)?;
     let is_game = rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false);
     if is_game {

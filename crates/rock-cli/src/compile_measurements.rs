@@ -37,7 +37,9 @@ impl Scope {
         if PENDING.with(|pending| pending.borrow().is_some()) {
             return Self(false);
         }
-        let Some(path) = std::env::var_os("ROCK_COMPILE_STATS") else { return Self(false) };
+        let Some(path) = std::env::var_os("ROCK_COMPILE_STATS").filter(|path| !path.is_empty()) else {
+            return Self(false)
+        };
         let command = COMMAND.get().copied().unwrap_or("other");
         let kind = if std::env::var_os("ROCK_SIM_COMPILE_RECEIPT_PREPARE").is_some() {
             "sim compile child"

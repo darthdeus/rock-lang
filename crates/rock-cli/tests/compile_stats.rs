@@ -109,6 +109,15 @@ fn append_failure_logs_and_preserves_compile_success() {
 }
 
 #[test]
+fn empty_stats_path_disables_recording() {
+    let dir = fixture();
+    let out = command().arg("test").arg(dir.path()).env("ROCK_COMPILE_STATS", "").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!text.contains("COMPILE_STATS"), "an empty path must not try to record: {text}");
+}
+
+#[test]
 fn concurrent_compiles_append_complete_records() {
     let dir = fixture();
     let stats = dir.path().join("stats.jsonl");
