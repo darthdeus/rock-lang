@@ -1963,6 +1963,9 @@ fn skull_emit_project_with_inputs(
     };
     crate::compile_measurements::phase("semantic");
     crate::compile_measurements::timings("bone", &ws.phase_timings);
+    // The workspace owns everything lint, emission and metadata read; the
+    // parse trees would otherwise stay live through the emit peak.
+    drop(modules);
     ws.comptime_inputs = inputs;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
@@ -2023,18 +2026,17 @@ fn skull_emit_project_with_inputs(
         log::error!(target: "SKULL", "state metadata planning failed for {}", dir);
         crate::ablation_report::exit_with_census(1);
     }
-    // The bone Workspace + HIR modules are dead once `lua` is built -- this is a
-    // terminal compile path (`compile`/`run` of a project; never looped in tests
-    // or backend-stats), so the only thing after this is the output write / a
-    // luajit exec / process exit. Freeing them inline is ~2ms on the critical
-    // path (mag: ws ~1ms + modules ~1ms); hand the drop to the rayon pool so it
-    // overlaps that tail. `sources` (rock SourceFiles, RefCell-backed and ~0.01ms
-    // to drop) stays inline. Both `ws` and `modules` are owned (bone has no
-    // Rc/RefCell), hence Send. A `sequential` build drops inline.
+    // The bone Workspace is dead once `lua` is built -- this is a terminal
+    // compile path (`compile`/`run` of a project; never looped in tests or
+    // backend-stats), so the only thing after this is the output write / a
+    // luajit exec / process exit. Hand the drop to the rayon pool so it overlaps
+    // that tail. `sources` (rock SourceFiles, RefCell-backed and ~0.01ms to
+    // drop) stays inline. `ws` is owned (bone has no Rc/RefCell), hence Send.
+    // A `sequential` build drops inline.
     #[cfg(not(feature = "sequential"))]
-    rayon::spawn(move || drop((ws, modules)));
+    rayon::spawn(move || drop(ws));
     #[cfg(feature = "sequential")]
-    drop((ws, modules));
+    drop(ws);
     stats.success();
     Ok((lua, emits_main))
 }
