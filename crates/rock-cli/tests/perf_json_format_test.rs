@@ -359,6 +359,11 @@ fn perf_json_memory_has_uniform_blocks() {
 fn perf_json_gc_window_has_trustworthy_reconciliation() {
     let doc = run_perf_json_window_with_sections(
         "games/match3", Some((4, 2)), true, Some("stopped"));
+    let trace = &doc["memory"]["gc_window"]["jit_trace"];
+    assert_eq!(trace["available"].as_bool(), Some(true), "counter-only attach required: {trace}");
+    for key in ["starts", "compiles", "aborts", "flushes"] {
+        assert!(trace[key].as_i64().is_some_and(|n| n >= 0), "window {key} missing: {trace}");
+    }
     let mem = &doc["memory"];
     let gc = &mem["gc_window"];
     assert_eq!(gc["requested_frames"].as_i64(), Some(4));
