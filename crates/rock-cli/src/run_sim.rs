@@ -8120,6 +8120,15 @@ mod tests {
     }
 
     #[test]
+    fn duration_estimate_totals_stay_within_the_recorded_integer_domain() {
+        let costs = [u64::MAX / 2 + 1, u64::MAX / 2 + 1, 1234];
+        let wide: u128 = costs.iter().map(|&ms| ms as u128).sum();
+        let representable = u64::try_from(wide).unwrap_or(u64::MAX);
+        assert_eq!(sum_estimates(costs.into_iter().map(|ms| (Some(ms), None))).0,
+            Some(representable));
+    }
+
+    #[test]
     fn duration_blocks_reduce_a_slow_tail_without_changing_predecessor_order() {
         let group: Vec<usize> = (0..100).collect();
         let costs: Vec<u64> = group.iter().map(|i| if [53, 54, 55, 56].contains(i) { 20_000 } else { 100 }).collect();
