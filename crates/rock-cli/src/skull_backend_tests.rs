@@ -4421,7 +4421,7 @@ mod skull_stone_lint_snapshot_tests {
         let project = std::path::PathBuf::from(project);
         let source = project.join("mobs.rock");
         let v1 = std::fs::read_to_string(&source).expect("MAG source");
-        let v2 = super::super::body_digit_flip(&v1, "Player.update_mobs").expect("MAG edit");
+        let v2 = super::super::body_digit_flip(&v1, "mag_actor_special").expect("MAG edit");
         let outputs = tempfile::tempdir().expect("output dir");
         let root = project.to_str().unwrap();
         let main = outputs.path().join("main.lua");
@@ -4508,7 +4508,7 @@ mod skull_stone_lint_snapshot_tests {
         );
         let source = project.join("mobs.rock");
         let v1 = std::fs::read_to_string(&source).expect("MAG source");
-        let v2 = super::super::body_digit_flip(&v1, "Player.update_mobs").expect("MAG edit");
+        let v2 = super::super::body_digit_flip(&v1, "mag_actor_special").expect("MAG edit");
         let outputs = tempfile::tempdir().expect("output dir");
         let root = project.to_str().unwrap();
         let main = outputs.path().join("main.lua");

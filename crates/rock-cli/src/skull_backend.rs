@@ -3347,6 +3347,8 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     let mut last_body_meta = (0usize, false, 0usize, 0isize);
     let mut last_phases: Vec<(&'static str, std::time::Duration)> = Vec::new();
     let mut last_update_phases: Vec<(&'static str, std::time::Duration)> = Vec::new();
+    let phase_stats = std::env::var_os("SKULL_ITER_PHASE_STATS").is_some();
+    let mut phase_samples = std::collections::BTreeMap::<String, Vec<f64>>::new();
 
     for i in 0..(warmup + iters) {
         let text = if i % 2 == 0 { &state_a } else { &state_b };
@@ -3444,6 +3446,23 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         };
 
         if i >= warmup {
+            if phase_stats {
+                for (label, value) in [
+                    ("session update", update_ms),
+                    ("diagnostics", diag_ms),
+                    ("lints", lint_ms),
+                    ("emit overlay", emit_ms),
+                    ("atomic write", write_ms),
+                ] {
+                    phase_samples.entry(label.to_string()).or_default().push(value);
+                }
+                for (prefix, timings) in [("session", &update_phases), ("emit", &phases)] {
+                    for (label, duration) in timings {
+                        phase_samples.entry(format!("{prefix}/{label}")).or_default()
+                            .push(duration.as_secs_f64() * 1000.0);
+                    }
+                }
+            }
             let backend_ms = update_ms + diag_ms + lint_ms + emit_ms;
             samples.push(backend_ms);
             if write_disk {
@@ -3503,6 +3522,18 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
             disk_var.sqrt(),
             if disk_mean > 0.0 { disk_var.sqrt() / disk_mean * 100.0 } else { 0.0 },
         );
+    }
+    if phase_stats {
+        eprintln!("\n  per-phase samples [ms]: phase | n | mean | p50 | p99 | min");
+        for (label, mut values) in phase_samples {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            values.sort_by(f64::total_cmp);
+            let percentile = |p: f64| {
+                values[((p / 100.0) * (values.len() as f64 - 1.0)).round() as usize]
+            };
+            eprintln!("    phase | {label} | {} | {mean:.6} | {:.6} | {:.6} | {:.6}",
+                values.len(), percentile(50.0), percentile(99.0), values[0]);
+        }
     }
     eprintln!("\n  last-pass breakdown (the two-file split path):");
     eprintln!(
