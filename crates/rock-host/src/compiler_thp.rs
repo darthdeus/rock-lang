@@ -12,7 +12,8 @@ unsafe extern "C" {
     fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
 }
 
-const DEFAULT_MARKER: &str = "ROCK_COMPILER_THP_DEFAULT";
+// Allocator policy must stay outside ROCK_, whose environment keys sim artifacts.
+const DEFAULT_MARKER: &str = "MIMALLOC_ROCK_COMPILER_THP_DEFAULT";
 
 /// Restart before compilation so mimalloc sees the default during OS init.
 /// Setting its option in main misses allocations made by Rust startup.

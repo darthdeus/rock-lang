@@ -192,7 +192,7 @@ mod allocator_tests {
                 .env("ROCK_THP_TEST_ROLE", "compiler")
                 .env("ROCK_THP_TEST_EXPECT", compiler)
                 .env("ROCK_THP_TEST_RUNTIME_EXPECT", runtime)
-                .env_remove("ROCK_COMPILER_THP_DEFAULT")
+                .env_remove("MIMALLOC_ROCK_COMPILER_THP_DEFAULT")
                 .env_remove("MIMALLOC_ALLOW_THP")
                 .env_remove("mimalloc_allow_thp");
             if let Some(value) = value {
@@ -228,7 +228,7 @@ mod allocator_tests {
         assert_eq!(option as i64, expected, "{role} allocator option");
         if role == "runtime" && std::env::var("ROCK_THP_TEST_DEFAULT").as_deref() == Ok("1") {
             assert!(std::env::var_os("MIMALLOC_ALLOW_THP").is_none());
-            assert!(std::env::var_os("ROCK_COMPILER_THP_DEFAULT").is_none());
+            assert!(std::env::var_os("MIMALLOC_ROCK_COMPILER_THP_DEFAULT").is_none());
         }
         println!("{role} THP option={option}");
         #[cfg(target_os = "linux")]
