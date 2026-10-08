@@ -150,7 +150,7 @@ co fn slow() -> Coroutine<Wait> {
             })).collect::<Vec<_>>()
         })).unwrap()).unwrap();
         let out = Command::new(rock_bin()).arg("sim").arg(&project).args(specs)
-            .args([mode, "-j", "4"]).current_dir(workspace_root())
+            .args([mode, "-j", "4", "--jobs-force"]).current_dir(workspace_root())
             .env("ROCK_SIM_LOG_DIR", &history).env("ROCK_SIM_TIMEOUT_SECS", "60")
             .output().unwrap();
         assert!(out.status.success(), "{label}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -276,7 +276,8 @@ fn run_project_workers_with_history(project: &str, specs: &[&str], jobs: &str) -
 
     let mut args = vec!["sim", project];
     args.extend_from_slice(specs);
-    args.extend_from_slice(&["--workers", "-j", jobs]);
+    // These fixtures witness explicit worker counts independently of free VRAM.
+    args.extend_from_slice(&["--workers", "-j", jobs, "--jobs-force"]);
 
     let out = Command::new(rock_bin())
         .args(&args)
