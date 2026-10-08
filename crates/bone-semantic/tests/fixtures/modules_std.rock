@@ -466,8 +466,6 @@
 // prelude: json_reader_str
 // prelude: json_reader_strict_int
 // prelude: json_reader_validate
-// prelude: json_reader_validate_array
-// prelude: json_reader_validate_object
 // prelude: json_reader_validate_string
 // prelude: json_reader_value
 // prelude: json_str
