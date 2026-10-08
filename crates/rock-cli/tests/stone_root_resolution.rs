@@ -239,3 +239,37 @@ fn direct_stone_asset_root_is_supplied_to_both_test_backends() {
 fn transitive_stone_asset_root_is_supplied_to_both_test_backends() {
     check_test_asset_root(true);
 }
+
+#[test]
+fn stone_package_tests_self_provision_the_stone_root() {
+    // `rock test stone` runs with stone itself as the graph root. The runner
+    // must resolve that root and inject it (preamble + setup_stone) instead
+    // of failing global init when no ambient Stone root is configured.
+    // This pins provisioning only: it asserts a stone test executes and the
+    // global-init error is absent. It deliberately asserts neither suite
+    // success (stone::c_ui_text_art_cache_and_coverage is red for separate,
+    // out-of-scope engine causes) nor failure.
+    let repo = root();
+    let result = Command::new(rock_bin())
+        .current_dir(&repo)
+        .args(["test", repo.join("stone").to_str().unwrap(), "--test-threads", "1"])
+        .env_remove("STONE_SOURCE_DIR")
+        .env_remove("__ROCK_STONE_DIR")
+        .env_remove("GAME_SOURCE_DIR")
+        .env("ROCK_TEST_VERBOSE", "1")
+        .output()
+        .expect("run stone package tests without ambient Stone root");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !text.contains("Stone source directory is not configured"),
+        "stone's own suite must self-provision its source root instead of failing global init:\n{text}"
+    );
+    assert!(
+        text.contains("stone::replay_input_authority_device_policy"),
+        "a stone test must execute and report without ambient configuration:\n{text}"
+    );
+}

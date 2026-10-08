@@ -3763,6 +3763,11 @@ pub(crate) fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std:
     let manifest_dir = config_path.parent().unwrap_or(&config_path);
     let graph = rock_host::stick::graph::PackageGraph::build(manifest_dir)?;
     let root = graph.root();
+    // Stone testing itself: the root IS the stone package, so resolve its own
+    // directory instead of reporting no Stone root (which fails global init).
+    if graph.package(root).manifest_name == "stone" {
+        return Ok(Some(graph.package(root).root.clone()));
+    }
     Ok(graph
         .packages()
         .iter()
