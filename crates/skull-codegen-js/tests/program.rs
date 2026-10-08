@@ -16,6 +16,36 @@ fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
         .program
 }
 
+#[test]
+fn nested_native_layout_values_keep_javascript_field_access() {
+    let ws = ws_with(r#"
+nobox value Cell { x: int, y: int }
+nobox value Location { region: int, cell: Cell }
+value Motion { active: bool, at: Location, weight: float }
+struct Holder { motion: Motion }
+fn read(owner: Holder) -> int {
+    return owner.motion.at.region + owner.motion.at.cell.x + owner.motion.at.cell.y
+}
+fn main() -> int {
+    let owner = Holder { motion: Motion { active: true,
+        at: Location { region: 7, cell: Cell { x: 3, y: 5 } }, weight: 2.5 } }
+    assert(read(owner) == 15)
+    let prior = owner.motion.at
+    owner.motion.at.cell.x = 11
+    assert(read(owner) == 23)
+    assert(prior.cell.x == 3 && prior.cell.y == 5)
+    return read(owner)
+}
+"#);
+    let js = emit_program(&ws);
+    let source = format!("var __G = {{}};\n{}\n{}\n{js}\nconsole.log(main());",
+        skull_codegen_js::JS_SESSION_RUNTIME, skull_codegen_js::JS_CALL_HELPER);
+    let output = node().arg("-e").arg(source)
+        .output().expect("run nested value JavaScript");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "23");
+}
+
 /// `<a>` appears before `<b>` in `s` (both must be present).
 fn ordered(s: &str, a: &str, b: &str) {
     let ia = s.find(a).unwrap_or_else(|| panic!("missing `{a}` in:\n{s}"));

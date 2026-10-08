@@ -57,7 +57,8 @@ impl Builder<'_> {
             let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(owner) else {
                 break;
             };
-            if !self.scx.values_first_class && self.is_value_struct(sname)
+            if self.scx.target == bone_semantic::hir::FnBackend::Lua
+                && !self.scx.values_first_class && self.is_value_struct(sname)
                 && self.is_mutable_place(owner)?
                 && self.native_projection_holder(owner)
                 && self.scx.rep_arena()
