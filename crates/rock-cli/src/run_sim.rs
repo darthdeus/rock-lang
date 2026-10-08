@@ -369,13 +369,13 @@ fn record_sim_compile_phase(
             return;
         }
     }
-    let result = append_sim_compile_timing(&path, &bytes);
+    let result = append_sim_trace(&path, &bytes);
     if let Err(error) = result {
         log::warn!(target: "SIM", "cannot write compile timing {}: {error}", path.display());
     }
 }
 
-fn append_sim_compile_timing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn append_sim_trace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -5002,11 +5002,35 @@ fn envelope_name_matches(rest: &str, expected: &str, line: &str) -> Result<()> {
     }
 }
 
+/// Admission namespace used by the physical worker spawn.
+pub fn sim_worker_slot_directory() -> Result<PathBuf> {
+    let root = match std::env::var_os("ROCK_SIM_WORKER_SLOT_DIR") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        Some(_) => anyhow::bail!("ROCK_SIM_WORKER_SLOT_DIR must not be empty"),
+        None => {
+            #[cfg(unix)]
+            { PathBuf::from(format!("/tmp/rock-sim-worker-slots-{}", unsafe { libc::geteuid() })) }
+            #[cfg(not(unix))]
+            { std::env::temp_dir().join("rock-sim-worker-slots") }
+        }
+    };
+    Ok(root)
+}
+
+fn record_worker_wait(label: &str) {
+    let Some(path) = std::env::var_os("ROCK_SIM_WORKER_WAIT_LOG") else { return };
+    let bytes = format!("wait\t{label}\n");
+    if let Err(error) = append_sim_trace(Path::new(&path), bytes.as_bytes()) {
+        log::warn!(target: "SIM", "cannot write worker wait trace: {error}");
+    }
+}
+
 /// All callers meet at the physical spawn, including library gates and their
 /// test-binary/CLI subprocesses. Kernel locks share this budget across them;
 /// a harness mutex or a per-invocation -j bound cannot do that.
 /// `ROCK_SIM_WORKER_SLOTS` lowers the existing CPU/RAM/GPU bound. The default
-/// slot directory is shared across worktrees; `ROCK_SIM_WORKER_SLOT_DIR`
+/// slot directory is shared by the OS user even under a fixture HOME;
+/// `ROCK_SIM_WORKER_SLOT_DIR`
 /// gives resource-isolated fixtures their own namespace.
 fn acquire_worker_slot(label: &str) -> Result<std::fs::File> {
     let budget = sim_job_budget();
@@ -5017,15 +5041,7 @@ fn acquire_worker_slot(label: &str) -> Result<std::fs::File> {
         Err(std::env::VarError::NotPresent) => budget,
         Err(error) => return Err(anyhow!("ROCK_SIM_WORKER_SLOTS: {error}")),
     };
-    let root = match std::env::var_os("ROCK_SIM_WORKER_SLOT_DIR") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        Some(_) => anyhow::bail!("ROCK_SIM_WORKER_SLOT_DIR must not be empty"),
-        None => {
-            let home = std::env::var_os("HOME").filter(|home| !home.is_empty())
-                .ok_or_else(|| anyhow!("no HOME for sim worker admission; set ROCK_SIM_WORKER_SLOT_DIR"))?;
-            PathBuf::from(home).join("tmp").join("rock-sim-worker-slots")
-        }
-    };
+    let root = sim_worker_slot_directory()?;
     fs_err::create_dir_all(&root).with_context(|| format!("create worker slots {}", root.display()))?;
     let mut files = (0..slots).map(|slot| {
         let path = root.join(format!("worker-{slot}.lock"));
@@ -5045,7 +5061,7 @@ fn acquire_worker_slot(label: &str) -> Result<std::fs::File> {
             }
         }
         if !waiting {
-            record_sim_lifecycle("proc_wait", label);
+            record_worker_wait(label);
             log::info!(target: "SIM", "waiting for one of {slots} host sim worker slots");
             waiting = true;
         }

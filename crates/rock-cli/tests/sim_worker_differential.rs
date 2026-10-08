@@ -3077,11 +3077,25 @@ fn worker_admission_helper_process() {
 
 #[test]
 fn actual_worker_spawns_share_admission_across_threads_and_processes() {
+    assert_worker_admission(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fixture_home_cannot_bypass_the_worker_spawn_budget() {
+    assert_worker_admission(true);
+}
+
+fn assert_worker_admission(default_namespace: bool) {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let (scratch, project) = worker_load_fixture();
-    let slots = scratch.path().join("slots");
-    std::fs::create_dir(&slots).unwrap();
+    let slots = if default_namespace {
+        rock_cli::run_sim::sim_worker_slot_directory().expect("production admission config")
+    } else {
+        scratch.path().join("slots")
+    };
+    std::fs::create_dir_all(&slots).unwrap();
     // Reserve the sole configured permit using the kernel, independently of
     // the runner. Neither a library helper nor a CLI child may spawn over it.
     let held = std::fs::File::options().read(true).write(true).create(true).truncate(false)
@@ -3089,6 +3103,7 @@ fn actual_worker_spawns_share_admission_across_threads_and_processes() {
     held.lock().unwrap();
     let mut children = Vec::new();
     let mut traces = Vec::new();
+    let mut waits = Vec::new();
     for index in 0..3 {
         let trace = scratch.path().join(format!("trace-{index}.log"));
         let mut command = if index < 2 {
@@ -3101,7 +3116,20 @@ fn actual_worker_spawns_share_admission_across_threads_and_processes() {
             command.arg("sim").arg(&project).arg("probe");
             command
         };
-        command.env("ROCK_SIM_WORKER_SLOTS", "1").env("ROCK_SIM_WORKER_SLOT_DIR", &slots)
+        let wait_trace = scratch.path().join(format!("wait-{index}.log"));
+        if default_namespace {
+            command.env_remove("ROCK_SIM_WORKER_SLOT_DIR");
+            if index == 0 {
+                let real_home = std::env::var_os("HOME").expect("build tool home");
+                command.env("CARGO_HOME", std::env::var_os("CARGO_HOME")
+                    .unwrap_or_else(|| std::path::PathBuf::from(real_home).join(".cargo").into_os_string()));
+                command.env("HOME", scratch.path().join("fixture-home"));
+            }
+        } else {
+            command.env("ROCK_SIM_WORKER_SLOT_DIR", &slots);
+        }
+        command.env("ROCK_SIM_WORKER_SLOTS", "1")
+            .env("ROCK_SIM_WORKER_WAIT_LOG", &wait_trace)
             .env("ROCK_SIM_LIFECYCLE_LOG", &trace)
             .env("ROCK_SIM_LOG_DIR", scratch.path().join(format!("history-{index}")))
             .stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -3112,13 +3140,17 @@ fn actual_worker_spawns_share_admission_across_threads_and_processes() {
         }
         children.push(WorkerLoadChild(Some(command.spawn().expect("spawn admission caller"))));
         traces.push(trace);
+        waits.push(wait_trace);
     }
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let logs: Vec<_> = traces.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
         assert!(logs.iter().all(|log| !log.contains("proc_start\t")),
             "a real worker spawned while the only permit was held: {logs:?}");
-        if logs.iter().all(|log| log.contains("proc_wait\t")) { break; }
+        assert!(logs.iter().all(|log| log.is_empty()),
+            "waiting must preserve the existing spawn/entry lifecycle format: {logs:?}");
+        let waiting: Vec<_> = waits.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
+        if waiting.iter().all(|log| log.contains("wait\t")) { break; }
         assert!(Instant::now() < deadline, "all callers must reach admission: {logs:?}");
         std::thread::sleep(Duration::from_millis(20));
     }
