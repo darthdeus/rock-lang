@@ -26,6 +26,9 @@
 use std::path::Path;
 use std::process::Command;
 
+// Cold MAG assets need scheduling margin in the concurrent native fixture lane.
+const REPLAY_PHASE_TIMEOUT_SECS: &str = "180";
+
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -59,6 +62,15 @@ fn bitgun_world_props_have_no_host_resources() {
     assert!(text.contains("[LINT] bitgun: no findings"), "Bitgun still captures a host resource: {text}");
 }
 
+#[test]
+fn bitgun_grass_autosave_is_owned_by_the_host_canvas() {
+    let world = sim_state_names("bitgun", 3);
+    assert!(!world.is_empty(), "the production checkpoint census must be populated");
+    for name in ["BLOOD_CANVAS", "GRASS_AUTOSAVE_TIMER"] {
+        assert!(!world.contains(name), "{name} must follow the rebuilt host canvas");
+    }
+}
+
 /// Sim-state global names = the engine predicate's output, resolved to the
 /// logical names used by dump-state rather than re-listed in Rust.
 fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String> {
@@ -71,7 +83,7 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
             "--record", &log.to_string_lossy(), "--checkpoint-interval", "1",
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -545,7 +557,7 @@ fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::
             "--dump-state", "--output", &scratch.path().to_string_lossy(),
         ])
         .envs(env.iter().copied())
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn plain run");
@@ -562,7 +574,7 @@ fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
             "--dump-state", "--output", &scratch.path().to_string_lossy(),
         ])
         .envs(env.iter().copied())
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn replay");
@@ -603,7 +615,7 @@ fn run_record_dump_observed(
             "--dump-state", "--output", &scratch.path().to_string_lossy(),
         ])
         .envs(env.iter().copied())
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn live record");
@@ -633,7 +645,7 @@ fn record_without_dump_state_ignores_clock_override() {
         .env("STONE_TEST_UNIX_SECONDS", "1000")
         .env_remove("DUMP_STATE")
         .env_remove("STONE_REPLAY")
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record without dump-state");
@@ -669,7 +681,7 @@ fn restore_returns_to_snapshot_tick_state() {
             "frame", game, "-n", "30", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -1340,7 +1352,7 @@ fn a_v14_replay_without_a_start_is_rejected() {
             "frame", "bitgun", "-n", "10", "--replay", &log_s,
             "--dump-state", "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn replay");
@@ -1568,7 +1580,7 @@ fn scrub_to_earlier_tick_matches_plain_run() {
             "frame", game, "-n", "60", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -1616,7 +1628,7 @@ fn scrub_reports_seek_cost_and_resimulation_population() {
             "frame", game, "-n", "60", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -1659,7 +1671,7 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
             "frame", game, "-n", "80", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -1735,7 +1747,7 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
             "frame", game, "-n", "60", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -3905,7 +3917,7 @@ fn replay_reports_its_own_costs() {
             "frame", game, "-n", "100", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -4138,7 +4150,7 @@ fn lambda_in_state_survives_keyframe_scrub() {
             "frame", game, "-n", "60", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -4220,7 +4232,7 @@ fn reload_during_replay_invalidates_keyframes() {
             "frame", game, "-n", "50", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -4272,7 +4284,7 @@ fn ab_loop_cycles_and_restores_correct_state() {
             "frame", game, "-n", "60", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -4325,7 +4337,7 @@ fn ab_loop_survives_incremental_reload_via_rederive() {
             "frame", game, "-n", "80", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -4380,7 +4392,7 @@ fn wide_loop_keyframe_survives_eviction() {
             "frame", game, "-n", "100", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -4435,7 +4447,7 @@ fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
             "frame", game, "-n", "100", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
