@@ -1096,55 +1096,58 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
 }
 
 
-/// `<Name>_lct(<one param per primitive leaf, in `value_leaf_paths` order>)`:
-/// allocate the cdata and write each leaf through a hoisted nested reference.
-/// The call site stays a single expression, so const-hoisting and the
-/// read-only-use analysis are untouched.
-fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
-    // Names are POSITIONAL indices, never derived from the path. A
-    // dot->underscore mapping is not injective: sibling fields `pos` (holding
-    // `inner`) and `pos_inner` both render `l_pos_inner`, and Lua silently lets
-    // the later duplicate shadow the earlier, writing one leaf's value into the
-    // other. Dotted keys are injective precisely because `.` cannot appear in an
-    // identifier; deriving identifiers back from them throws that away.
+/// Allocate a native value from scalar leaves without nested FFI descriptors.
+fn leaf_ctor_def(ws: &Workspace, name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
+    let sym = skull_mir::mangle::type_symbol(ws, name);
     let params: Vec<String> = (0..paths.len()).map(|i| format!("l{i}")).collect();
-    let mut body = String::new();
-    let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  local t = {name}_ct()\n"));
-    // One local per distinct nested prefix (EVERY ancestor, shortest first, so
-    // `b` is bound before `b.lo`), so a leaf write never re-indexes an aggregate
-    // field -- each such index allocates a reference cdata.
-    let mut refs: Vec<String> = Vec::new();
-    for p in paths {
-        let comps: Vec<&str> = p.as_str().split('.').collect();
-        for n in 1..comps.len() {
-            let prefix = comps[..n].join(".");
-            if !refs.iter().any(|r| *r == prefix) {
-                refs.push(prefix);
-            }
+    let mut body = format!("  local t = {sym}_ct()\n");
+    for (i, path) in paths.iter().enumerate() {
+        let key = if path.contains('.') {
+            skull_mir::lower::cdata_leaf_alias(ws, name, path.as_str())
+        } else {
+            *path
+        };
+        body.push_str(&format!("  t.{key} = {}\n", params[i]));
+    }
+    format!("{sym}_lct = function({})\n{body}  return t\nend\n", params.join(", "))
+}
+
+fn cdata_alias_fields(
+    ws: &Workspace,
+    ffi_names: &rustc_hash::FxHashSet<ustr::Ustr>,
+    root: ustr::Ustr,
+    child: ustr::Ustr,
+    prefix: &str,
+) -> Result<String, CompilerError> {
+    if let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, child)
+        .and_then(|plan| plan.cdata().cloned())
+    {
+        let tag = skull_mir::lower::cdata_leaf_alias(ws, root, &format!("{prefix}.__tag"));
+        let mut out = format!("int {tag}; ");
+        for (name, ct) in shape.slots {
+            let alias = skull_mir::lower::cdata_leaf_alias(ws, root, &format!("{prefix}.{name}"));
+            out.push_str(&format!("{ct} {alias}; "));
+        }
+        return Ok(out);
+    }
+    let sid = ws.struct_by_name[&child];
+    let mut out = String::new();
+    for field in &ws.modules[sid.module.index()].structs[sid.def].fields {
+        let ct = c_field_type(ws, field.storage_ty)
+            .ok_or_else(|| CompilerError::new_no_location(format!("native leaf alias has no C type: {child}.{}", field.name)))?;
+        let dep = ustr::Ustr::from(&ct);
+        let path = format!("{prefix}.{}", field.name);
+        if ffi_names.contains(&dep) || skull_mir::lower::EnumPlan::for_name(ws, dep)
+            .is_some_and(|plan| plan.cdata().is_some())
+        {
+            let nested = cdata_alias_fields(ws, ffi_names, root, dep, &path)?;
+            out.push_str(&format!("struct {{ {nested} }}; "));
+        } else {
+            let alias = skull_mir::lower::cdata_leaf_alias(ws, root, &path);
+            out.push_str(&format!("{} {alias}; ", skull_mir::mangle::type_symbol(ws, dep)));
         }
     }
-    refs.sort_by_key(|r| r.matches('.').count());
-    let ref_local = |r: &str| -> String {
-        format!("r{}", refs.iter().position(|x| x == r).expect("prefix registered"))
-    };
-    for r in &refs {
-        let base = match r.rsplit_once('.') {
-            Some((pre, last)) => format!("{}.{last}", ref_local(pre)),
-            None => format!("t.{r}"),
-        };
-        let _ = std::fmt::Write::write_fmt(
-            &mut body,
-            format_args!("  local {} = {base}\n", ref_local(r)),
-        );
-    }
-    for (i, p) in paths.iter().enumerate() {
-        let target = match p.as_str().rsplit_once('.') {
-            Some((prefix, last)) => format!("{}.{last}", ref_local(prefix)),
-            None => format!("t.{p}"),
-        };
-        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  {target} = {}\n", params[i]));
-    }
-    format!("{name}_lct = function({})\n{body}  return t\nend\n", params.join(", "))
+    Ok(out)
 }
 
 /// Emit the `ffi.cdef` typedefs + `<Name>_ct = ffi.typeof(...)` constructors for
@@ -1211,10 +1214,22 @@ fn value_struct_defs(
                 let dep = ustr::Ustr::from(ct.as_str());
                 if ffi_names.contains(&dep) && !emitted.contains(&dep) {
                     blocked = true;
+                    continue;
                 }
                 // The dependency key above is the LOGICAL name (what the
                 // workspace sets hold); the cdef text is the C one.
-                body.push_str(&format!("  {} {};\n", skull_mir::mangle::type_symbol(ws, dep), f.name));
+                let field_type = skull_mir::mangle::type_symbol(ws, dep);
+                if ffi_names.contains(&dep) || skull_mir::lower::EnumPlan::for_name(ws, dep)
+                    .is_some_and(|plan| plan.cdata().is_some())
+                {
+                    // Mirror nested aggregates rather than spelling padding as
+                    // char arrays: padding fields would change the native ABI's
+                    // integer/SSE classification for by-value FFI calls.
+                    let aliases = cdata_alias_fields(ws, &ffi_names, s.name, dep, f.name.as_str())?;
+                    body.push_str(&format!("  union {{ {field_type} {}; struct {{ {aliases} }}; }};\n", f.name));
+                } else {
+                    body.push_str(&format!("  {field_type} {};\n", f.name));
+                }
             }
             if blocked {
                 next.push(s);
@@ -1235,7 +1250,7 @@ fn value_struct_defs(
                     )
                     .map_err(|e| CompilerError::new_no_location(e.message))?;
                 if paths.iter().any(|p| p.contains('.')) {
-                    ctors.push_str(&leaf_ctor_def(sym, &paths));
+                    ctors.push_str(&leaf_ctor_def(ws, s.name, &paths));
                 }
                 emitted.insert(s.name);
                 progress = true;
@@ -1319,6 +1334,12 @@ fn value_leaf_layout_checks(
                 off = l.byte_off,
                 path = l.path,
             );
+        }
+        for leaf in leaves.iter().filter(|leaf| leaf.path.contains('.')) {
+            let alias = skull_mir::lower::cdata_leaf_alias(ws, name, leaf.path.as_str());
+            let _ = writeln!(out,
+                "if ffi.offsetof(\"{sym}\", \"{alias}\") ~= {off} then error(\"skull leaf alias drift: {sym}.{alias}\", 0) end",
+                off = leaf.byte_off);
         }
         storage.push_str(&skull_mir::lower::nb_value_storage_lua(ws, name, &leaves, size));
     }

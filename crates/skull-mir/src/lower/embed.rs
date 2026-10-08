@@ -36,7 +36,7 @@ impl Builder<'_> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<(Idx<Expr>, Ustr), CompilerError> {
-        let (base, key, _) = self.physical_field_layout(base, field)?;
+        let (base, key, _, _) = self.physical_field_layout(base, field)?;
         Ok((base, key))
     }
 
@@ -46,10 +46,10 @@ impl Builder<'_> {
         &self,
         base: Idx<Expr>,
         field: Ustr,
-    ) -> Result<(Idx<Expr>, Ustr, Option<ValueShape>), CompilerError> {
+    ) -> Result<(Idx<Expr>, Ustr, Option<ValueShape>, bool), CompilerError> {
         let mut parts = vec![field];
         let mut cur = base;
-        let mut physical = (base, field, None);
+        let mut physical = (base, field, None, false);
         while let Expr::FieldAccess { base: owner, field: child_field } = self.body.expr_arena[cur] {
             if self.swizzle_of(owner, child_field).is_some() {
                 break;
@@ -57,6 +57,23 @@ impl Builder<'_> {
             let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.field_base_ty(owner) else {
                 break;
             };
+            if !self.scx.values_first_class && self.is_value_struct(sname)
+                && self.is_mutable_place(owner)?
+                && self.native_projection_holder(owner)
+                && self.scx.rep_arena()
+                    .nominal_value_storage_required(self.ws, self.scx.target, sname)
+                    .map_err(|e| self.gap_here(e.message))? == ValueStorage::CData
+            {
+                let path = std::iter::once(child_field.as_str())
+                    .chain(parts.iter().rev().map(|part| part.as_str()))
+                    .collect::<Vec<_>>().join(".");
+                let paths = self.scx.rep_arena()
+                    .nominal_value_leaf_paths_required(self.ws, self.scx.target, sname)
+                    .map_err(|e| self.gap_here(e.message))?;
+                if paths.iter().any(|leaf| leaf.as_str() == path) {
+                    physical = (owner, cdata_leaf_alias(self.ws, sname, &path), None, true);
+                }
+            }
             let plan = self.struct_field_plan(sname, child_field, false)?;
             let child = match plan.inline_child() {
                 Some(child) => Some(child),
@@ -77,13 +94,26 @@ impl Builder<'_> {
                             }
                         });
                     }
-                    physical = (owner, Ustr::from(&format!("{child_field}.{relative}")), projected);
+                    physical = (owner, Ustr::from(&format!("{child_field}.{relative}")), projected, false);
                 }
             }
             parts.push(child_field);
             cur = owner;
         }
         Ok(physical)
+    }
+
+    // Groups, tuple projections and container views have no boxed native
+    // holder. Their existing value/address lowering owns those reads.
+    fn native_projection_holder(&self, mut base: Idx<Expr>) -> bool {
+        loop {
+            match self.body.expr_arena[base] {
+                Expr::FieldAccess { base: owner, .. } => base = owner,
+                Expr::Var(binding) => return !self.group_binds.contains_key(&raw(binding))
+                    && !self.tuple_binds.contains_key(&raw(binding)),
+                _ => return false,
+            }
+        }
     }
 
     /// The leaf-table value `base` projects a field out of, seen through `ref`.

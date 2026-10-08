@@ -834,11 +834,27 @@ impl Builder<'_> {
         }
     }
 
+    pub(crate) fn check_ref_holder(&self, e: Idx<Expr>) -> Result<(), CompilerError> {
+        if let Expr::FieldAccess { base, field } = self.body.expr_arena[e] {
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(owner), .. }) = self.field_base_ty(base) {
+                if self.struct_field_plan(owner, field, false)?.inline_child().is_some() {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[e],
+                        "cannot borrow an inline value field: its leaves have no holder to alias; \
+                         borrow the containing value or copy the field".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A `ref` borrow (local initializer, argument or returned place): the place
     /// itself, as [`Self::lower_place_base`] lowers it, with its root cell marked
     /// [`Cell::borrowed`]. Marked whatever the borrowed type is: a borrowed
     /// struct can still reach a `value` field that is written through the alias.
     pub(crate) fn lower_ref_borrow(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        self.check_ref_holder(e)?;
         let place = self.lower_place_base(e)?;
         let mut cur = place;
         loop {
@@ -1150,7 +1166,7 @@ impl Builder<'_> {
                 }
                 // An embed LEAF write composes to one dotted key on the parent
                 // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
-                let (pbase, key, projected_shape) = self.physical_field_layout(base, field)?;
+                let (pbase, key, projected_shape, _) = self.physical_field_layout(base, field)?;
                 let b = self.lower_place_base(pbase)?;
                 if let Some(sname) = self.leaf_table_base(base)?
                     && self.leaf_table_value_child(sname, field)?.is_some()

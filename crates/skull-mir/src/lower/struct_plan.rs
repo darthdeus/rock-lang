@@ -66,6 +66,22 @@ impl StructFieldPlan {
     }
 }
 
+/// A native primitive projection aliases the original nested bytes. Hex paths
+/// keep dots injective; avoid the entire declared-field prefix namespace.
+pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
+    let sid = ws.struct_by_name[&owner];
+    let fields = &ws.modules[sid.module.index()].structs[sid.def].fields;
+    let mut prefix = "__rock_leaf_".to_string();
+    while fields.iter().any(|field| field.name.as_str().starts_with(&prefix)) {
+        prefix.push('_');
+    }
+    use std::fmt::Write as _;
+    for byte in path.bytes() {
+        let _ = write!(prefix, "{byte:02x}");
+    }
+    Ustr::from(&prefix)
+}
+
 /// The build-owned struct registry input shared by late representation
 /// consumers. Its roots are the structs this MIR can realize; closing over
 /// declared child fields also owns any value representation needed to observe

@@ -356,7 +356,11 @@ impl Builder<'_> {
                 }
                 // An embed LEAF read composes to one dotted key on the parent
                 // that holds it; no intermediate projection exists.
-                let (pbase, mut key, projected_shape) = self.physical_field_layout(base, field)?;
+                let (pbase, mut key, projected_shape, native_leaf) = self.physical_field_layout(base, field)?;
+                if native_leaf {
+                    let parent = self.lower_place_base(pbase)?;
+                    return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field: key })));
+                }
                 if key != field {
                     // A value parent can still be UNBOXED (a param, a local):
                     // project the path off its Group rather than pack a box

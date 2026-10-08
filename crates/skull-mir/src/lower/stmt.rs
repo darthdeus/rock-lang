@@ -317,6 +317,7 @@ impl Builder<'_> {
             self.cur_span = self.body.statement_spans.get(sidx).copied();
             match self.body.statement_arena[sidx].clone() {
                 Statement::Let { name, value } => {
+                    if self.binding_is_ref(name) { self.check_ref_holder(value)?; }
                     // Scalar values live in leaf cells, matching the call ABI
                     // instead of relying on later SROA.
                     let threaded_shape = if let Some(shape) = self.flat_enum_value_shape_of(value)? {

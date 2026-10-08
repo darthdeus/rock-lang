@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "cdata_leaf_projection.rs"]
+mod cdata_leaf_projection;
+
 mod compile_release;
 
 #[path = "allocation_report.rs"]
