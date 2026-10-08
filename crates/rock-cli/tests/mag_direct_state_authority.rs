@@ -1095,6 +1095,9 @@ fn mag_world_presentation_state_has_explicit_owners() {
         "fn init_cloud()",
         "fn Player.update_cloud(player)",
         "fn Player.draw_cloud(player)",
+        "decals: [WorldMark]",
+        "decal_head: int",
+        "let decals = state.decals",
     ];
     for source in &sources {
         let text = fs::read_to_string(source).expect("read MAG source");
@@ -1119,8 +1122,6 @@ fn mag_world_presentation_state_has_explicit_owners() {
     let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read run source");
     assert!(run.contains("player.update_teleport_arrival()"));
     let world = fs::read_to_string(repo.join("mag/world_levels.rock")).expect("read world source");
-    assert!(world.contains("decals: [WorldMark]"));
-    assert!(world.contains("decal_head: int"));
     let presentation = fs::read_to_string(repo.join("mag/world_presentation.rock"))
         .expect("read MAG world presentation source");
     assert!(presentation.contains(
@@ -1229,9 +1230,6 @@ fn mag_world_presentation_state_has_explicit_owners() {
     }
 
     let blood = fs::read_to_string(repo.join("mag/blood.rock")).expect("read blood source");
-    assert!(blood.contains("world_space_index(world, space)"));
-    assert!(blood.contains("let state = world.spaces[index].get().unwrap()"));
-    assert!(blood.contains("let decals = state.decals"));
     assert!(blood.contains("presentation.drop_particle_seq"));
 }
 
