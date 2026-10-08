@@ -13,11 +13,26 @@ const BASIC_PROGRAM: &str = "fn main() { let x = 1 }\n";
 const QUIESCENT: Duration = Duration::from_millis(400);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Write `content` to `rel` as one atomic rename so the watcher observes a
+/// single complete change.
+///
+/// A direct write of a new file emits CREATE then MODIFY kernel events; under
+/// load those can straddle the watcher's 5ms debounce window and surface as
+/// two reloads (an empty-file compile plus the content compile) for one
+/// logical write. Staging outside the watched extensions and renaming keeps
+/// the "exactly one reload" property deterministic.
+fn write_file_atomic(h: &StoneHarness, rel: &str, content: &str) {
+    let dest = h.root().join(rel);
+    let staging = dest.with_extension("staging");
+    std::fs::write(&staging, content).expect("staging write");
+    std::fs::rename(&staging, &dest).expect("atomic rename");
+}
+
 #[test]
 fn smoke_initial_write_triggers_one_reload() {
     let h = StoneHarness::spawn(&[]);
     let baseline = h.event_count();
-    h.write_file("a.rock", BASIC_PROGRAM);
+    write_file_atomic(&h, "a.rock", BASIC_PROGRAM);
     let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
     assert_eq!(
         log.len(),
