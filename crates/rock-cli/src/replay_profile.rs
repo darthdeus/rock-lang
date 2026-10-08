@@ -503,8 +503,8 @@ mod tests {
     fn zero_runs_and_future_replay_versions_fail_closed() {
         assert!(validate_runs(0).is_err());
         assert!(validate_runs(1).is_ok());
-        assert!(ReplayReport::parse("STONE_REPLAY 18").unwrap_err().to_string()
-            .contains("unsupported replay version 18"));
+        assert!(ReplayReport::parse("STONE_REPLAY 19").unwrap_err().to_string()
+            .contains("unsupported replay version 19"));
         assert!(parse_range("0-0", 0).is_err());
     }
 }

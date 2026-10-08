@@ -367,6 +367,10 @@ impl ReplayReport {
                         bail!("line {line_number}: orphaned image publication row");
                     }
                     let data = decode_hex(fields[2], line_number, "image publications")?;
+                    if let Some(reason) = rock_replay_protocol::image_requests_predate_class(
+                        report.version, &data) {
+                        bail!("line {line_number}: {reason}");
+                    }
                     rock_replay_protocol::validate_image_events(&data)
                         .map_err(|e| anyhow::anyhow!("line {line_number}: {e}"))?;
                     if report.inputs.last_mut().unwrap().image_publications.replace(data).is_some() {
