@@ -1514,8 +1514,9 @@ mod tests {
                 }}
             "#, if fail { "abort();" } else { "" });
             let compiled = super::compile_source(&source).expect("scratch fixture compiles");
-            let output = super::run_native_test(&compiled.binary, Duration::from_secs(3), None)
-                .expect("scratch fixture finishes");
+            // The separate timeout test owns deadline assertions; cleanup needs scheduling margin.
+            let output = super::run_native_test(&compiled.binary, Duration::from_secs(30), None)
+                .unwrap_or_else(|error| panic!("scratch fixture finishes (abort={fail}): {error}"));
             let text = String::from_utf8(output.stdout).unwrap();
             let root = text.trim();
             assert!(std::path::Path::new(root).is_absolute(), "{text}");
