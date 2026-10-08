@@ -3,7 +3,7 @@
 //! profiler. Reads a real game project off disk and warms the real stdlib, so
 //! it is `#[ignore]`'d; run explicitly:
 //!
-//!   cargo test -p rock-cli --test bone_incremental_timing -- --ignored --nocapture
+//!   cargo test -p rock-cli --test rock_cli_tests bone_incremental_timing -- --ignored --nocapture
 //!
 //! Question it answers: on a single-body edit, where does `rebuild_module`'s
 //! time actually go? `expand_and_desugar` runs over the WHOLE combined set
@@ -55,7 +55,7 @@ fn measure_body_edit_phase_breakdown() {
     let warm = warm_stdlib();
     let proj_rel = std::env::var("BONE_BENCH_PROJ").unwrap_or_else(|_| "mag".into());
     let file_suffix =
-        std::env::var("BONE_BENCH_FILE").unwrap_or_else(|_| "combat.rock".into());
+        std::env::var("BONE_BENCH_FILE").unwrap_or_else(|_| "mag/combat.rock".into());
     let needle = std::env::var("BONE_BENCH_NEEDLE")
         .unwrap_or_else(|_| "return reagent_data(kind).name".into());
 
@@ -63,7 +63,9 @@ fn measure_body_edit_phase_breakdown() {
     let files = project_files(&proj);
     assert!(files.len() > 1, "{proj_rel} should have several modules");
 
-    let mut session = bone_incremental::session::Session::new(warm, files.clone(), &bone_core::modules::NsAliases::default())
+    let aliases = bone_query::package_aliases::for_manifest_dir(std::path::Path::new(&proj))
+        .expect("project dependency aliases");
+    let mut session = bone_incremental::session::Session::new(warm, files.clone(), &aliases)
         .unwrap_or_else(|e| panic!("session warm failed: {}", e.message));
 
     // The module we will edit, and a single-body edit inside it (signature
@@ -104,15 +106,23 @@ fn measure_body_edit_phase_breakdown() {
 /// -> emit_overlay produces (a) the changed function's definition, (b) the
 /// CodeRef slot publication, and (c) accumulates
 /// across edits (a second edit's overlay still carries the first). Run:
-///   cargo test -p rock-cli --test bone_incremental_timing emit_overlay -- --ignored --nocapture
+///   cargo test -p rock-cli --test rock_cli_tests bone_incremental_timing::emit_overlay -- --ignored --nocapture
 #[test]
 #[ignore = "reads a real project off disk; run with --ignored"]
 fn emit_overlay_changed_fn_plus_code_slot_accumulates() {
     let warm = warm_stdlib();
     let proj = concat!(env!("CARGO_MANIFEST_DIR"), "/../../games/match3");
     let files = project_files(proj);
-    let mut session = bone_incremental::session::Session::new(warm, files.clone(), &bone_core::modules::NsAliases::default())
+    let aliases = bone_query::package_aliases::for_manifest_dir(std::path::Path::new(proj))
+        .expect("project dependency aliases");
+    let mut session = bone_incremental::session::Session::new(warm, files.clone(), &aliases)
         .unwrap_or_else(|e| panic!("session warm failed: {}", e.message));
+    // An emitting session resolves `[build.vars]` once per build, exactly as
+    // `bone_backend::bone_session_for_emission` does; without the stamp,
+    // `build_var("GIT_SHA")` in stone's profiling module fails at emit.
+    session.ws.comptime_inputs =
+        rock_cli::comptime::inputs_for_entry_path(std::path::Path::new(proj))
+            .expect("build var resolution");
 
     let (_baseline, mut cache) = {
         let ws = session.workspace();
@@ -124,17 +134,28 @@ fn emit_overlay_changed_fn_plus_code_slot_accumulates() {
         .iter()
         .find(|f| f.path.ends_with("main.rock"))
         .expect("match3 main.rock");
-    let needle = "return random_int(0, NUM_TILE_TYPES)";
+    let needle = "static t: M3Types = m3_uniform(NUM_TILE_TYPES)";
     assert_eq!(target.text.matches(needle).count(), 1, "edit anchor unique");
 
     // First body edit -> overlay carries the changed fn + its slot publication.
-    let edit1 = target.text.replace(needle, &format!("{needle} // overlay-test-1"));
+    // The edit must be semantic: a comment-only edit is LayoutOnly and
+    // reinfers nothing, so the overlay would carry no fn.
+    let edit1 = target.text.replace(
+        needle,
+        "static t: M3Types = m3_uniform(NUM_TILE_TYPES + 0) // overlay-test-1",
+    );
     let r1 = session.update_file(&target.path, &edit1).expect("update 1");
     assert_eq!(r1.tier, bone_incremental::session::UpdateTier::BodyOnly, "body edit");
     let ov1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred)
         .expect("emit_overlay");
 
-    assert!(ov1.lua.contains("\nfunction "), "overlay must redefine a fn:\n{}", &ov1.lua[..ov1.lua.len().min(400)]);
+    // The changed fn's definition, whatever its current shape (plain `function`
+    // or a `__rock_mk_` maker): the overlay must carry the edit.
+    assert!(
+        ov1.lua.lines().any(|l| l.contains("tile_types") && l.contains("function")),
+        "overlay must redefine the changed fn:\n{}",
+        &ov1.lua[..ov1.lua.len().min(400)]
+    );
     assert!(ov1.lua.contains("__rock_code_slot_stage("), "overlay must publish CodeRef slots");
     assert!(!ov1.lua.contains("__rock_rebind_system"), "overlay must not emit a name-based registry repair");
     let lines1 = ov1.lua.lines().count();
@@ -143,7 +164,10 @@ fn emit_overlay_changed_fn_plus_code_slot_accumulates() {
     // first fn's redefinition too).
     let needle2 = "return grid[y * GRID_W + x]";
     if target.text.matches(needle2).count() == 1 {
-        let edit2 = edit1.replace(needle2, &format!("{needle2} // overlay-test-2"));
+        let edit2 = edit1.replace(
+            needle2,
+            "return grid[y * GRID_W + x + 0] // overlay-test-2",
+        );
         let r2 = session.update_file(&target.path, &edit2).expect("update 2");
         let ov2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred)
             .expect("emit_overlay");
