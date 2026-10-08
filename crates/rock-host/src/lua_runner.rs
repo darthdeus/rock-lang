@@ -201,6 +201,194 @@ pub fn run_lua_code(code: &str) -> Result<LuaRun, CompilerError> {
 mod tests {
     use super::*;
 
+    /// Process env vars touched by this test, restored on drop -- including
+    /// when an assert unwinds, so a failure cannot leak LD_PRELOAD/PATH/
+    /// STONE_RENDERDOC_* into a sibling test sharing this process.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        /// SAFETY: the caller upholds the same nextest-process-isolation
+        /// assumption as the stone_jv test; the guard restores on every exit.
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let mut saved = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                saved.push((*key, std::env::var_os(key)));
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, prev) in self.saved.drain(..) {
+                unsafe {
+                    match prev {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Explicitly-set env on a Command (`get_envs` is the only reader;
+    /// ambient inheritance is invisible, which is exactly the pin).
+    fn cmd_env(cmd: &std::process::Command, key: &str) -> Option<std::ffi::OsString> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+    }
+
+    /// The STONE_RENDERDOC preload gate reaches only the final game spawn:
+    /// `build_luajit_command` gains the lib while the bytecode compile and
+    /// the stdin harness spawns stay clean, and everything stays clean when
+    /// the switch is unset. Append semantics and lib resolution are pinned
+    /// through the pure helpers: this test mutates only STONE_RENDERDOC_*
+    /// process-wide (no sibling reads them), never LD_PRELOAD/PATH, so it
+    /// stays green under threaded `cargo test` as well as nextest.
+    #[test]
+    fn renderdoc_gate_reaches_only_the_final_spawn() {
+        use std::ffi::OsStr;
+        use std::path::Path;
+
+        const SENTINEL: &str = "/ambient/sentinel.so";
+        const TEMPLATE: &str = "/tmp/rd-gate-test/captures/mag-crypt";
+        let lua = Path::new("tmp/main.lua");
+
+        // Append semantics, pure: ambient preserved first, scrub-empty
+        // contributes no entry (entries are `:`-separated per ld.so).
+        let joined = crate::project::join_preload(
+            Some(OsStr::new(SENTINEL)),
+            OsStr::new("librenderdoc.so"),
+        );
+        let binding = joined.to_string_lossy();
+        let entries: Vec<_> = binding.split(':').collect();
+        assert_eq!(entries, vec![SENTINEL, "librenderdoc.so"]);
+        assert_eq!(
+            crate::project::join_preload(None, OsStr::new("librenderdoc.so")).to_string_lossy(),
+            "librenderdoc.so"
+        );
+        assert_eq!(
+            crate::project::join_preload(Some(OsStr::new("")), OsStr::new("librenderdoc.so"))
+                .to_string_lossy(),
+            "librenderdoc.so"
+        );
+
+        // Resolution, pure: override verbatim, renderdoccmd sibling, bare
+        // fallback. Canonicalized: production canonicalizes the PATH hit.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonical tempdir");
+        let bin = root.join("bin");
+        let lib = root.join("lib");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::create_dir_all(&lib).expect("lib");
+        std::fs::write(bin.join("renderdoccmd"), "#!/bin/sh\n").expect("fake renderdoccmd");
+        let sibling = lib.join("librenderdoc.so");
+        std::fs::write(&sibling, "fake").expect("fake lib");
+        let resolve = crate::project::resolve_renderdoc_lib_with;
+        assert_eq!(
+            resolve(
+                Some(sibling.as_os_str().to_os_string()),
+                Some(std::ffi::OsString::from("/no/such/bin"))
+            ),
+            sibling.as_os_str()
+        );
+        assert_eq!(
+            resolve(None, Some(bin.as_os_str().to_os_string())),
+            sibling.as_os_str()
+        );
+        assert_eq!(
+            resolve(None, Some(std::ffi::OsString::from("/no/such/bin"))).to_string_lossy(),
+            "librenderdoc.so"
+        );
+        assert_eq!(resolve(None, None).to_string_lossy(), "librenderdoc.so");
+
+        // Gate ON with an explicit lib override (a real file: keeps the
+        // missing-override warning out of the test output).
+        {
+            let override_lib = sibling.to_string_lossy().into_owned();
+            let _guard = EnvGuard::set(&[
+                ("STONE_RENDERDOC", Some(TEMPLATE)),
+                ("STONE_RENDERDOC_LIB", Some(&override_lib)),
+            ]);
+            if cfg!(target_os = "linux") {
+                let game = crate::project::build_luajit_command(lua, &[]);
+                let preload = cmd_env(&game, "LD_PRELOAD")
+                    .expect("gate sets LD_PRELOAD on the final game spawn")
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(
+                    preload.contains(&override_lib),
+                    "gate must append the override lib: {preload}"
+                );
+
+                let bytecode =
+                    crate::project::build_luajit_bytecode_command(lua, Path::new("tmp/main.ljbc"));
+                assert!(
+                    cmd_env(&bytecode, "LD_PRELOAD").is_none(),
+                    "bytecode compile is not the final spawn"
+                );
+            }
+            if cfg!(unix) {
+                // Harness spawn observed through real children: an explicit
+                // child preload passes through exactly, and without one no
+                // gate lib appears. The sentinel travels via the child's own
+                // env, never via process-global LD_PRELOAD.
+                let probe = root.join("print_preload");
+                std::fs::write(&probe, "#!/bin/sh\ncat >/dev/null\necho \"LD_PRELOAD=$LD_PRELOAD\"\n")
+                    .expect("probe script");
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755))
+                    .expect("probe executable");
+                let run = run_lua_code_with_timeout_at(
+                    &probe,
+                    "",
+                    Some(std::time::Duration::from_secs(10)),
+                    &[("LD_PRELOAD", SENTINEL)],
+                )
+                .expect("probe child runs");
+                assert!(run.success, "probe child failed: {}", run.combined());
+                assert_eq!(
+                    run.stdout.trim(),
+                    format!("LD_PRELOAD={SENTINEL}"),
+                    "harness spawn must pass the child preload through exactly"
+                );
+                let bare = run_lua_code_with_timeout_at(
+                    &probe,
+                    "",
+                    Some(std::time::Duration::from_secs(10)),
+                    &[],
+                )
+                .expect("bare probe child runs");
+                assert!(
+                    !bare.stdout.contains("librenderdoc"),
+                    "harness spawn must not gain the gate lib: {}",
+                    bare.stdout
+                );
+            }
+        }
+
+        // Gate OFF: STONE_RENDERDOC unset leaves the final spawn clean too.
+        {
+            let _guard = EnvGuard::set(&[("STONE_RENDERDOC", None), ("STONE_RENDERDOC_LIB", None)]);
+            if cfg!(target_os = "linux") {
+                let game = crate::project::build_luajit_command(lua, &[]);
+                assert!(
+                    cmd_env(&game, "LD_PRELOAD").is_none(),
+                    "gate off must not touch LD_PRELOAD"
+                );
+            }
+        }
+    }
+
     #[test]
     fn load_error_wins_over_stdin_broken_pipe() {
         let mut code = "local = 1\n".to_string();

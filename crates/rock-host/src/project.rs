@@ -533,7 +533,10 @@ fn write_atomic_with(
 /// `app_args`. Callers configure stdio + add extra env vars before
 /// spawning. Single place where the luajit + lib paths are resolved
 /// for game execution -- shared by rock run, rock stone, rock perf,
-/// rock frame, rock sim.
+/// rock frame, rock sim. Also the single place the STONE_RENDERDOC
+/// preload gate applies (see `apply_renderdoc_gate`): the final game
+/// spawn only. The bytecode compile and stdin harness spawns never
+/// gain the preload.
 pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
     let luajit_path = luajit_path();
     let mut cmd = std::process::Command::new(&luajit_path);
@@ -548,10 +551,139 @@ pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::proces
     cmd.arg(lua_file)
         .env("LUA_PATH", lua_path_value())
         .env(lib_path_var(), lib_path_with_inherited());
+    apply_renderdoc_gate(&mut cmd);
     for arg in app_args {
         cmd.arg(arg);
     }
     cmd
+}
+
+/// Env switch enabling a RenderDoc GPU capture: the value is the capture
+/// file path template stone hands to `SetCaptureFilePathTemplate`
+/// (RenderDoc appends `_frame<N>.rdc`).
+pub const RENDERDOC_ENV: &str = "STONE_RENDERDOC";
+/// Optional swap count after which stone auto-triggers one capture.
+/// Without it, captures are manual via `stone_renderdoc_trigger_capture`.
+pub const RENDERDOC_FRAME_ENV: &str = "STONE_RENDERDOC_FRAME";
+/// Optional explicit `librenderdoc.so` path for the preload gate.
+pub const RENDERDOC_LIB_ENV: &str = "STONE_RENDERDOC_LIB";
+
+/// `Some(template)` when a RenderDoc capture was requested, else `None`.
+/// Empty counts as unset, matching the `ROCK_LUAJIT` precedent.
+pub fn renderdoc_capture_requested() -> Option<String> {
+    std::env::var(RENDERDOC_ENV).ok().filter(|v| !v.is_empty())
+}
+
+/// Resolve the `librenderdoc.so` path to preload: `STONE_RENDERDOC_LIB`
+/// (verbatim, even when missing -- the child then fails loudly naming the
+/// user's path), else the `../lib/librenderdoc.so` sibling of `renderdoccmd`
+/// on PATH (the nix case), else the bare name for loader search. Never fails.
+pub fn resolve_renderdoc_lib() -> std::ffi::OsString {
+    resolve_renderdoc_lib_with(
+        std::env::var_os(RENDERDOC_LIB_ENV).filter(|v| !v.is_empty()),
+        std::env::var_os("PATH"),
+    )
+}
+
+pub(crate) fn resolve_renderdoc_lib_with(
+    lib_override: Option<std::ffi::OsString>,
+    path_var: Option<std::ffi::OsString>,
+) -> std::ffi::OsString {
+    if let Some(lib) = lib_override {
+        return lib;
+    }
+    if let Some(exe) = find_on_path_in(path_var.as_deref(), "renderdoccmd")
+        && let Some(sibling) = renderdoc_lib_sibling_of(&exe)
+    {
+        return sibling.into_os_string();
+    }
+    std::ffi::OsString::from("librenderdoc.so")
+}
+
+fn find_on_path_in(path_var: Option<&std::ffi::OsStr>, name: &str) -> Option<PathBuf> {
+    let path = path_var?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// `<prefix>/lib/librenderdoc.so` for a `<prefix>/bin/renderdoccmd`.
+/// Canonicalizes first: on NixOS the PATH entry is a `/run` symlink whose
+/// textual `../lib` does not exist.
+fn renderdoc_lib_sibling_of(exe: &Path) -> Option<PathBuf> {
+    let canon = fs_err::canonicalize(exe).ok()?;
+    let lib = canon.parent()?.parent()?.join("lib").join("librenderdoc.so");
+    lib.is_file().then_some(lib)
+}
+
+/// Append `lib` to an ambient `LD_PRELOAD` value (append, never clobber).
+/// A present-but-empty ambient value is the scrub signature (some parent
+/// already loaded the lib); it contributes no entry.
+pub(crate) fn join_preload(
+    existing: Option<&std::ffi::OsStr>,
+    lib: &std::ffi::OsStr,
+) -> std::ffi::OsString {
+    let mut joined = std::ffi::OsString::new();
+    if let Some(existing) = existing.filter(|v| !v.is_empty()) {
+        joined.push(existing);
+        joined.push(":");
+    }
+    joined.push(lib);
+    joined
+}
+
+/// Append the resolved lib to the child command's `LD_PRELOAD` (append,
+/// never clobber). Called ONLY from `build_luajit_command` -- the final
+/// game spawn.
+///
+/// `librenderdoc.so` empties `LD_PRELOAD` in every process it loads into,
+/// so an ambient preload never survives the rock -> luajit chain (rock
+/// would load the lib first and scrub the var). Setting it explicitly on
+/// the final spawn's `Command` is the only shape that reaches the game.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+pub fn apply_renderdoc_gate(cmd: &mut std::process::Command) {
+    if renderdoc_capture_requested().is_none() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let lib = resolve_renderdoc_lib();
+        if let Some(override_path) = std::env::var_os(RENDERDOC_LIB_ENV).filter(|v| !v.is_empty())
+            && !Path::new(&override_path).is_file()
+        {
+            eprintln!(
+                "rock: {}={} does not exist; the game will fail its RenderDoc load loudly",
+                RENDERDOC_LIB_ENV,
+                override_path.to_string_lossy()
+            );
+        }
+        let joined = join_preload(std::env::var_os("LD_PRELOAD").as_deref(), &lib);
+        cmd.env("LD_PRELOAD", joined);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        static WARN: std::sync::Once = std::sync::Once::new();
+        WARN.call_once(|| {
+            eprintln!(
+                "rock: {RENDERDOC_ENV} is set, but RenderDoc has no macOS support; \
+                 the game runs unhooked (use apitrace for GL captures)"
+            );
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        static WARN: std::sync::Once = std::sync::Once::new();
+        WARN.call_once(|| {
+            eprintln!(
+                "rock: {RENDERDOC_ENV} is set, but the Windows preload gate is not implemented; \
+                 the game runs unhooked"
+            );
+        });
+    }
 }
 
 /// Recursively find every `.rock` file under `source_dir` (absolute paths,
