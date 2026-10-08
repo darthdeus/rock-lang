@@ -219,7 +219,7 @@ pub(crate) fn acquire_with(config: &SlotConfig, what: &str) -> Result<CompileSlo
                 Ok(()) => {
                     let mut file = files.swap_remove(index);
                     let waited = started.elapsed();
-                    if let Err(error) = write_holder(&mut file, what) {
+                    if let Err(error) = write_holder(&mut file, what, std::env::args()) {
                         log::warn!(target: "COMPILE", "recording the holder of compile slot {}: {error}", names[index]);
                     }
                     if waiting {
@@ -261,11 +261,11 @@ fn open_slot(path: &Path) -> Result<File> {
         .with_context(|| format!("opening compile slot {}", path.display()))
 }
 
-fn write_holder(file: &mut File, what: &str) -> std::io::Result<()> {
+fn write_holder(file: &mut File, what: &str, args: impl IntoIterator<Item = String>) -> std::io::Result<()> {
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
-    let cmdline = std::env::args().collect::<Vec<_>>().join(" ");
+    let cmdline = crate::invocation_log::redact_var_values(args).join(" ");
     file.set_len(0)?;
     file.rewind()?;
     writeln!(file, "pid={} start={started} for={what} cmd={cmdline}", std::process::id())
@@ -338,6 +338,19 @@ pub(crate) fn finish_slot_waiter<T>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_holder_record_never_contains_var_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("batch-0");
+        let mut file = super::open_slot(&path).unwrap();
+        let args = ["rock", "package", "mag", "--var", "TELEMETRY_TOKEN=holder-secret-1", "--var=OTHER=holder-secret-2"];
+        super::write_holder(&mut file, "package", args.iter().map(|arg| arg.to_string())).unwrap();
+        let record = std::fs::read_to_string(&path).unwrap();
+        assert!(!record.contains("holder-secret"), "holder record leaked a --var value: {record}");
+        assert!(record.contains("TELEMETRY_TOKEN") && record.contains("OTHER"), "holder record keeps the names: {record}");
+        assert!(super::describe_holders(dir.path(), &["batch-0".to_string()]).find("holder-secret").is_none());
+    }
+
     use super::*;
 
     fn config(dir: &Path, batch_slots: usize, class: CompileClass) -> SlotConfig {

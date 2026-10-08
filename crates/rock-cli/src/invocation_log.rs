@@ -109,7 +109,7 @@ pub fn begin(command: &'static str, backend: &str) {
     record.insert("schema".into(), json!(SCHEMA));
     record.insert("kind".into(), json!(command));
     record.insert("backend".into(), json!(backend));
-    record.insert("argv".into(), json!(std::env::args().collect::<Vec<_>>()));
+    record.insert("argv".into(), json!(redact_var_values(std::env::args())));
     record.insert("exe".into(), json!(std::env::current_exe().ok()));
     record.insert("host".into(), json!(hostname()));
     record.insert("pid".into(), json!(pid));
@@ -456,9 +456,40 @@ fn process_name(pid: libc::pid_t) -> Option<String> {
     }
 }
 
+/// Command-line arguments with every `--var NAME=VALUE` value replaced:
+/// build variables carry secrets such as TELEMETRY_TOKEN, and recorded
+/// command lines reach logs and other processes' diagnostics.
+pub(crate) fn redact_var_values(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut value_next = false;
+    for arg in args {
+        let (prefix, assignment) = if value_next {
+            ("", arg.as_str())
+        } else if let Some(rest) = arg.strip_prefix("--var=") {
+            ("--var=", rest)
+        } else {
+            value_next = arg == "--var";
+            out.push(arg);
+            continue;
+        };
+        value_next = false;
+        let name = assignment.split_once('=').map_or(assignment, |(name, _)| name);
+        out.push(format!("{prefix}{name}=<redacted>"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_argv_redacts_every_var_value() {
+        let args = ["rock", "package", "mag", "--var", "TOKEN=s3cret", "--channel", "steam", "--var=K=v=2", "--var"];
+        let redacted = redact_var_values(args.iter().map(|arg| arg.to_string()));
+        assert_eq!(redacted, ["rock", "package", "mag", "--var", "TOKEN=<redacted>", "--channel", "steam",
+            "--var=K=<redacted>", "--var"]);
+    }
 
     #[test]
     fn utc_formats_known_instants() {
