@@ -11,7 +11,11 @@ use crate::stone_harness::StoneHarness;
 
 const BASIC_PROGRAM: &str = "fn main() { let x = 1 }\n";
 const QUIESCENT: Duration = Duration::from_millis(400);
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Backstop for one settled wait. The wait itself is completion-led (it ends
+/// on the event or on child death); this only catches hangs and lost events.
+/// The first compile (SkullStone::init) takes ~17s at full-suite load on
+/// host-a, so the old 10s budget flaked with last_count=0.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Write `content` to `rel` as one atomic rename so the watcher observes a
 /// single complete change.

@@ -40,9 +40,19 @@ pub enum Event {
     Other(Value),
 }
 
+/// Backstop for `await_ready`: child spawn plus the seeded initial compile.
+/// Completion-led: ready or child death ends the wait; this only catches hangs.
+/// The first SkullStone::init takes ~17s at full-suite load on host-a.
+const READY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Stall budget granted by each new event while settling: progress extends
+/// the wait, so a slow-but-moving compile stream settles on its own events,
+/// not on the clock. Bounded by one grant past the first-event budget.
+const SETTLE_STALL_BUDGET: Duration = Duration::from_secs(60);
+
 pub struct StoneHarness {
     tempdir: tempfile::TempDir,
-    child: Child,
+    child: Mutex<Child>,
     stdin: ChildStdin,
     events: Arc<Mutex<Vec<Event>>>,
     stderr_buf: Arc<Mutex<String>>,
@@ -125,7 +135,7 @@ impl StoneHarness {
 
         let h = Self {
             tempdir,
-            child,
+            child: Mutex::new(child),
             stdin,
             events,
             stderr_buf,
@@ -240,7 +250,13 @@ impl StoneHarness {
         quiescent: Duration,
         timeout: Duration,
     ) -> Vec<ReloadEvent> {
-        let deadline = Instant::now() + timeout;
+        let started = Instant::now();
+        // First-event budget: the initial SkullStone::init takes ~17s at
+        // full-suite load, so this must dwarf any per-compile latency. Each
+        // new event then grants a stall budget, capped so a steady drip of
+        // events still trips the backstop instead of hanging the suite.
+        let hard_cap = started + timeout + SETTLE_STALL_BUDGET;
+        let mut deadline = started + timeout;
         let mut last_count = self.event_count();
         let mut saw_required_event = baseline.map_or(true, |n| last_count > n);
         let mut last_change = Instant::now();
@@ -251,24 +267,34 @@ impl StoneHarness {
                 last_count = now_count;
                 if baseline.map_or(true, |n| now_count > n) {
                     saw_required_event = true;
+                    deadline = (Instant::now() + SETTLE_STALL_BUDGET).min(hard_cap);
                 }
                 last_change = Instant::now();
             }
             if saw_required_event && last_change.elapsed() >= quiescent {
                 return self.reload_log();
             }
-            if Instant::now() >= deadline {
-                let expectation = baseline.map_or_else(
-                    || "the event stream to settle".to_string(),
-                    |n| format!("an event after baseline {n}"),
-                );
+            // The child only exits mid-test on a crash (shutdown comes from
+            // Drop at test end): fail fast with its stderr, not the backstop.
+            if let Some(status) = self.child_exit() {
                 panic!(
-                    "await_settled: expected {}, never quiet for {}ms within {}ms (last_count={}, saw_required_event={})",
-                    expectation,
-                    quiescent.as_millis(),
-                    timeout.as_millis(),
+                    "await_settled: child exited ({status}) while waiting for {}, waited {}ms (last_count={}, saw_required_event={})\n{}",
+                    settle_expectation(baseline),
+                    started.elapsed().as_millis(),
                     last_count,
                     saw_required_event,
+                    self.failure_context(),
+                );
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "await_settled: expected {}, never quiet for {}ms (last_count={}, saw_required_event={}, waited {}ms)\n{}",
+                    settle_expectation(baseline),
+                    quiescent.as_millis(),
+                    last_count,
+                    saw_required_event,
+                    started.elapsed().as_millis(),
+                    self.failure_context(),
                 );
             }
         }
@@ -301,7 +327,7 @@ impl StoneHarness {
     }
 
     fn await_ready(&self) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + READY_TIMEOUT;
         loop {
             let saw_ready = self
                 .events
@@ -312,16 +338,60 @@ impl StoneHarness {
             if saw_ready {
                 return;
             }
-            if Instant::now() >= deadline {
-                let stderr = self.stderr_buf.lock().unwrap().clone();
-                let events = self.events.lock().unwrap().clone();
+            if let Some(status) = self.child_exit() {
                 panic!(
-                    "stone-test child never emitted ready within 15s\nevents observed: {:?}\nchild stderr:\n{}",
-                    events, stderr,
+                    "stone-test child exited ({status}) before emitting ready\n{}",
+                    self.failure_context(),
+                );
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "stone-test child never emitted ready within {}s\n{}",
+                    READY_TIMEOUT.as_secs(),
+                    self.failure_context(),
                 );
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Exit status if the child is gone, without blocking.
+    fn child_exit(&self) -> Option<std::process::ExitStatus> {
+        self.child.lock().unwrap().try_wait().ok().flatten()
+    }
+
+    /// Child liveness line for timeout diagnostics. Locks nothing but the child.
+    fn child_status(&self) -> String {
+        match self.child.lock().unwrap().try_wait() {
+            Ok(None) => "alive".to_string(),
+            Ok(Some(status)) => format!("exited: {status}"),
+            Err(e) => format!("wait error: {e}"),
+        }
+    }
+
+    /// What the child was doing when a wait gave up: liveness, observed
+    /// events, and the tail of its stderr. Each store is cloned under its
+    /// own lock and released before formatting, so this nests no locks.
+    fn failure_context(&self) -> String {
+        let status = self.child_status();
+        let events = self.events.lock().unwrap().clone();
+        let stderr = self.stderr_buf.lock().unwrap().clone();
+        let event_summary = if events.len() <= 16 {
+            format!("{events:?}")
+        } else {
+            format!(
+                "{} events, last 8: {:?}",
+                events.len(),
+                &events[events.len() - 8..]
+            )
+        };
+        let err_lines: Vec<&str> = stderr.lines().collect();
+        let err_tail = if err_lines.len() <= 30 {
+            stderr
+        } else {
+            err_lines[err_lines.len() - 30..].join("\n")
+        };
+        format!("child: {status}\nevents observed: {event_summary}\nchild stderr (tail):\n{err_tail}")
     }
 
     fn send(&mut self, cmd: &str, args: Value) {
@@ -338,12 +408,13 @@ impl Drop for StoneHarness {
         // Ask politely first, then SIGKILL if the child wedges.
         self.send("shutdown", json!({}));
         let deadline = Instant::now() + Duration::from_secs(2);
+        let mut child = self.child.lock().unwrap();
         loop {
-            match self.child.try_wait() {
+            match child.try_wait() {
                 Ok(Some(_)) => return,
                 Ok(None) if Instant::now() >= deadline => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
+                    let _ = child.kill();
+                    let _ = child.wait();
                     return;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
@@ -351,6 +422,13 @@ impl Drop for StoneHarness {
             }
         }
     }
+}
+
+fn settle_expectation(baseline: Option<usize>) -> String {
+    baseline.map_or_else(
+        || "the event stream to settle".to_string(),
+        |n| format!("an event after baseline {n}"),
+    )
 }
 
 fn parse_event(v: &Value) -> Event {
