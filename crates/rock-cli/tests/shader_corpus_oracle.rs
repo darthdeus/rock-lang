@@ -1098,7 +1098,7 @@ global oracle_sim_shader_registration: string = rock_shader(oracle_sim_shader)
 }
 
 #[test]
-#[ignore = "real 31-project Phase-4 corpus oracle"]
+#[ignore = "real 57-project Phase-4 corpus oracle"]
 fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
     let root = repo_root();
     let projects = discovered_bin_projects(&root);
@@ -1119,19 +1119,19 @@ fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
     }
     rows.sort_by(|a, b| a.key.cmp(&b.key));
 
-    assert_eq!(examined, 33, "bin-project population moved");
-    assert_eq!(shader_bearing, 32, "shader-bearing project population moved");
-    assert_eq!(shaderless, 1, "shaderless project population moved");
+    assert_eq!(examined, 57, "bin-project population moved");
+    assert_eq!(shader_bearing, 47, "shader-bearing project population moved");
+    assert_eq!(shaderless, 10, "shaderless project population moved");
     assert_eq!(examined, shader_bearing + shaderless, "project denominators do not partition");
     let shader_keys: BTreeSet<(&str, &str)> = rows
         .iter()
         .map(|row| (row.key.project.as_str(), row.key.shader.as_str()))
         .collect();
-    assert_eq!(shader_keys.len(), 735, "shader population moved");
-    assert_eq!(rows.len(), 1470, "profile row population moved");
+    assert_eq!(shader_keys.len(), 1137, "shader population moved");
+    assert_eq!(rows.len(), 2274, "profile row population moved");
     assert_eq!(
         rows.iter().map(|row| row.stage_sections).sum::<usize>(),
-        2940,
+        4548,
         "stage-section denominator moved"
     );
     assert!(
