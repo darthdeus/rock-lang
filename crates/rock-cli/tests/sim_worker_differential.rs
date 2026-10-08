@@ -2977,3 +2977,188 @@ fn an_uninstalled_lua_allocator_reports_failure_without_aborting() {
     assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
     assert_eq!(records[0].0.expects_pass.len(), 3, "every refusal must be observed");
 }
+
+fn worker_load_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let scratch = tempfile::tempdir().expect("worker load fixture");
+    let project = scratch.path().join("worker_load_fixture");
+    std::fs::create_dir_all(project.join("tests/sims")).unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    std::fs::write(project.join("stick.toml"), format!(
+        "[package]\nname = \"worker_load_fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"fixture\"\n", root.join("stone"))).unwrap();
+    std::fs::write(project.join("main.rock"),
+        "fn main() { stone_run_game(GameConfig { title: \"worker load\", width: 64, height: 64 }) }\n").unwrap();
+    #[cfg(unix)]
+    let signal = libc::SIGUSR1;
+    #[cfg(not(unix))]
+    let signal = 0;
+    std::fs::write(project.join("tests/sims/load.rock"), r#"
+inline(lua) fn terminate_worker() = """
+local ffi = require('ffi')
+ffi.cdef('int raise(int);')
+ffi.C.raise($SIGNAL)
+"""
+@sim
+co fn probe() -> Coroutine<Wait> {
+    start_game "worker_load_fixture"
+    await frame()
+    sim_expect(frame_seq > 0, "the admitted worker reached a frame")
+    stop_sim()
+}
+@sim
+co fn signalled() -> Coroutine<Wait> {
+    start_game "worker_load_fixture"
+    terminate_worker()
+    stop_sim()
+}
+"#.replace("$SIGNAL", &signal.to_string())).unwrap();
+    (scratch, project)
+}
+
+/// Kill/reap before unwinding so failed admission assertions cannot leave a
+/// child executing against a deleted fixture or holding a host permit.
+struct WorkerLoadChild(Option<std::process::Child>);
+
+impl WorkerLoadChild {
+    fn finish(mut self) -> std::process::Output {
+        self.0.take().unwrap().wait_with_output().expect("worker load child output")
+    }
+}
+
+impl Drop for WorkerLoadChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            #[cfg(unix)]
+            {
+                // The helper and its workers inherit this private process group.
+                // Kill all of them before a failed assertion removes the fixture.
+                if unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) } != 0 {
+                    let error = std::io::Error::last_os_error();
+                    // ESRCH means the whole group already ended.
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        eprintln!("worker load group cleanup kill: {error}");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            if !matches!(child.try_wait(), Ok(Some(_))) {
+                if let Err(error) = child.kill() {
+                    eprintln!("worker load child cleanup kill: {error}");
+                }
+            }
+            if let Err(error) = child.wait() {
+                eprintln!("worker load child cleanup wait: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn worker_admission_helper_process() {
+    let Some(project) = std::env::var_os("ROCK_WORKER_LOAD_PROJECT") else { return };
+    let project = project.to_str().unwrap();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let records = run_worker_suite(Backend::Skull, project,
+                &["probe".to_string()]).expect("admitted suite");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
+            assert!(!records[0].0.expects_pass.is_empty());
+        });
+        scope.spawn(|| {
+            let (isolated, shared) = run_differential(Backend::Skull, project,
+                &DifferentialPlan { predecessors: Vec::new(), target: "probe".to_string() })
+                .expect("admitted differential");
+            assert_equivalent("admitted worker", &compare(&isolated, &shared));
+            assert_eq!(shared.verdict(), "PASS", "{shared:?}");
+            assert!(!shared.expects_pass.is_empty());
+        });
+    });
+}
+
+#[test]
+fn actual_worker_spawns_share_admission_across_threads_and_processes() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let (scratch, project) = worker_load_fixture();
+    let slots = scratch.path().join("slots");
+    std::fs::create_dir(&slots).unwrap();
+    // Reserve the sole configured permit using the kernel, independently of
+    // the runner. Neither a library helper nor a CLI child may spawn over it.
+    let held = std::fs::File::options().read(true).write(true).create(true).truncate(false)
+        .open(slots.join("worker-0.lock")).unwrap();
+    held.lock().unwrap();
+    let mut children = Vec::new();
+    let mut traces = Vec::new();
+    for index in 0..3 {
+        let trace = scratch.path().join(format!("trace-{index}.log"));
+        let mut command = if index < 2 {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["sim_worker_differential::worker_admission_helper_process", "--exact", "--nocapture"])
+                .env("ROCK_WORKER_LOAD_PROJECT", &project);
+            command
+        } else {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+            command.arg("sim").arg(&project).arg("probe");
+            command
+        };
+        command.env("ROCK_SIM_WORKER_SLOTS", "1").env("ROCK_SIM_WORKER_SLOT_DIR", &slots)
+            .env("ROCK_SIM_LIFECYCLE_LOG", &trace)
+            .env("ROCK_SIM_LOG_DIR", scratch.path().join(format!("history-{index}")))
+            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        children.push(WorkerLoadChild(Some(command.spawn().expect("spawn admission caller"))));
+        traces.push(trace);
+    }
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let logs: Vec<_> = traces.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
+        assert!(logs.iter().all(|log| !log.contains("proc_start\t")),
+            "a real worker spawned while the only permit was held: {logs:?}");
+        if logs.iter().all(|log| log.contains("proc_wait\t")) { break; }
+        assert!(Instant::now() < deadline, "all callers must reach admission: {logs:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(held);
+    for child in children {
+        let output = child.finish();
+        assert!(output.status.success(), "{}{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+    for trace in traces {
+        let log = std::fs::read_to_string(trace).unwrap();
+        let mut live = 0;
+        let mut completed = 0;
+        for line in log.lines() {
+            match line.split('\t').next().unwrap() {
+                "proc_start" => { live += 1; assert_eq!(live, 1, "{log}"); }
+                "proc_end" => { live -= 1; completed += 1; }
+                _ => {}
+            }
+        }
+        assert_eq!(live, 0, "{log}");
+        assert!(completed > 0, "no admitted worker completed: {log}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_worker_signal_is_reported_with_its_termination_cause() {
+    use std::os::unix::process::ExitStatusExt;
+    let native = std::process::Command::new("sh").args(["-c", "kill -USR1 $$"])
+        .status().expect("independent native exit oracle");
+    assert!(native.signal().is_some(), "the native control must die by signal: {native}");
+    let (_scratch, project) = worker_load_fixture();
+    let records = run_worker_suite(Backend::Skull, project.to_str().unwrap(),
+        &["signalled".to_string()]).expect("signal is an entry failure");
+    assert_eq!(records.len(), 1);
+    let record = &records[0].0;
+    assert_eq!(record.verdict(), "FAIL", "{record:?}");
+    assert!(!record.timed_out, "the worker signalled itself: {record:?}");
+    let expected = format!("ended with {native}; runner_killed=false");
+    assert!(record.errors.iter().any(|error| error.message.contains(&expected)),
+        "the raw exit signal and killer provenance must survive in the production record: {record:?}");
+}

@@ -5002,6 +5002,87 @@ fn envelope_name_matches(rest: &str, expected: &str, line: &str) -> Result<()> {
     }
 }
 
+/// All callers meet at the physical spawn, including library gates and their
+/// test-binary/CLI subprocesses. Kernel locks share this budget across them;
+/// a harness mutex or a per-invocation -j bound cannot do that.
+/// `ROCK_SIM_WORKER_SLOTS` lowers the existing CPU/RAM/GPU bound. The default
+/// slot directory is shared across worktrees; `ROCK_SIM_WORKER_SLOT_DIR`
+/// gives resource-isolated fixtures their own namespace.
+fn acquire_worker_slot(label: &str) -> Result<std::fs::File> {
+    let budget = sim_job_budget();
+    let slots = match std::env::var("ROCK_SIM_WORKER_SLOTS") {
+        Ok(raw) => raw.parse::<usize>().ok().filter(|n| *n > 0)
+            .ok_or_else(|| anyhow!("ROCK_SIM_WORKER_SLOTS={raw:?} must be a positive integer"))?
+            .min(budget),
+        Err(std::env::VarError::NotPresent) => budget,
+        Err(error) => return Err(anyhow!("ROCK_SIM_WORKER_SLOTS: {error}")),
+    };
+    let root = match std::env::var_os("ROCK_SIM_WORKER_SLOT_DIR") {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        Some(_) => anyhow::bail!("ROCK_SIM_WORKER_SLOT_DIR must not be empty"),
+        None => {
+            let home = std::env::var_os("HOME").filter(|home| !home.is_empty())
+                .ok_or_else(|| anyhow!("no HOME for sim worker admission; set ROCK_SIM_WORKER_SLOT_DIR"))?;
+            PathBuf::from(home).join("tmp").join("rock-sim-worker-slots")
+        }
+    };
+    fs_err::create_dir_all(&root).with_context(|| format!("create worker slots {}", root.display()))?;
+    let mut files = (0..slots).map(|slot| {
+        let path = root.join(format!("worker-{slot}.lock"));
+        // Retain inodes: unlinking a slot can strand waiters on the old lock.
+        std::fs::File::options().read(true).write(true).create(true).truncate(false)
+            .open(&path).with_context(|| format!("open worker slot {}", path.display()))
+    }).collect::<Result<Vec<_>>>()?;
+    let mut waiting = false;
+    loop {
+        for (index, file) in files.iter().enumerate() {
+            match file.try_lock() {
+                Ok(()) => {
+                    return Ok(files.swap_remove(index));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(error)) => return Err(error).context("lock sim worker slot"),
+            }
+        }
+        if !waiting {
+            record_sim_lifecycle("proc_wait", label);
+            log::info!(target: "SIM", "waiting for one of {slots} host sim worker slots");
+            waiting = true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+struct AdmittedWorker {
+    child: Child,
+    _slot: std::fs::File,
+}
+
+impl std::ops::Deref for AdmittedWorker {
+    type Target = Child;
+    fn deref(&self) -> &Child { &self.child }
+}
+
+impl std::ops::DerefMut for AdmittedWorker {
+    fn deref_mut(&mut self) -> &mut Child { &mut self.child }
+}
+
+impl Drop for AdmittedWorker {
+    fn drop(&mut self) {
+        match self.child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => log::warn!(target: "SIM", "sim worker cleanup status: {error}"),
+        }
+        if let Err(error) = self.child.kill() {
+            log::warn!(target: "SIM", "sim worker cleanup kill: {error}");
+        }
+        if let Err(error) = self.child.wait() {
+            log::warn!(target: "SIM", "sim worker cleanup reap: {error}");
+        }
+    }
+}
+
 /// Spawn ONE luajit process that runs `parts` in order and demux its side
 /// channel into one summary per part.
 ///
@@ -5204,6 +5285,7 @@ fn run_worker(
     }
 
     let label = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(",");
+    let worker_slot = acquire_worker_slot(&label)?;
     let worker_attempt = recorder
         .map(|recorder| {
             let mut entries = Vec::new();
@@ -5220,7 +5302,7 @@ fn run_worker(
         })
         .unwrap_or(0);
     crate::compile_slots::report_spawn_phase("execution");
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
             if let Some(recorder) = recorder {
@@ -5229,6 +5311,7 @@ fn run_worker(
             return Err(error.into());
         }
     };
+    let mut child = AdmittedWorker { child, _slot: worker_slot };
     let process_id = child.id();
     if let Some(recorder) = recorder {
         recorder.worker_started(worker_attempt, process_id);
@@ -5703,6 +5786,10 @@ fn run_worker(
             summary.timed_out = timed_out;
             if !status.success() {
                 summary.process_failure_code = Some(status.code().unwrap_or(-1));
+                summary.errors.push(SiteMessage {
+                    message: format!("sim worker process ended with {status}; runner_killed={runner_killed}"),
+                    site: String::new(),
+                });
             }
         }
 
