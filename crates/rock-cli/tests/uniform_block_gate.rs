@@ -13,6 +13,7 @@
 //! every block it registers, so it must exit 0.
 
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
@@ -40,7 +41,7 @@ fn run_frame(force_unfilled: bool) -> (String, bool) {
     if force_unfilled {
         cmd.env("STONE_UNIFORM_BLOCK_FORCE_UNFILLED", "1");
     }
-    let out = cmd.output().expect("spawn rock frame");
+    let out = cmd.output_with_deadline().expect("spawn rock frame");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.success())
@@ -53,7 +54,7 @@ fn run_sim(name: &str, force_unfilled: bool) -> (String, bool) {
     if force_unfilled {
         cmd.env("STONE_UNIFORM_BLOCK_FORCE_UNFILLED", "1");
     }
-    let out = cmd.output().expect("spawn rock sim");
+    let out = cmd.output_with_deadline().expect("spawn rock sim");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.success())
@@ -77,6 +78,7 @@ fn run_sim(name: &str, force_unfilled: bool) -> (String, bool) {
 /// PASS, or the injected failure would say nothing about the injection.
 #[test]
 fn one_frame_stop_sim_still_sees_its_own_frames_draws() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (control, control_ok) = run_sim("testbed::b3_stop_after_one_frame", false);
     assert!(
         control_ok,
@@ -100,6 +102,7 @@ fn one_frame_stop_sim_still_sees_its_own_frames_draws() {
 
 #[test]
 fn unfilled_uniform_block_fails_a_bounded_run() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (control, control_ok) = run_frame(false);
     assert!(
         control_ok,

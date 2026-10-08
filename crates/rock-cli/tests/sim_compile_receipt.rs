@@ -1,4 +1,5 @@
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn list_sims(
     project: &str,
@@ -16,11 +17,12 @@ fn list_sims(
     } else {
         command.env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE");
     }
-    command.output().expect("spawn rock sim --list")
+    command.output_with_deadline().expect("spawn rock sim --list")
 }
 
 #[test]
 fn prepared_sim_receipt_reuses_one_project_compile() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let receipt_dir = dir.path().join("receipts");
     let timing_log = dir.path().join("compile.jsonl");
@@ -96,6 +98,7 @@ fn prepared_sim_receipt_reuses_one_project_compile() {
 
 #[test]
 fn prepared_sim_receipt_rejects_changed_project_sources() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let receipt_dir = dir.path().join("receipts");
@@ -137,6 +140,7 @@ fn prepared_sim_receipt_rejects_changed_project_sources() {
 
 #[test]
 fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let timing_log = dir.path().join("compile.jsonl");
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -154,7 +158,7 @@ fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
         .env("ROCK_SIM_COMPILE_TIMING", &timing_log)
         .env("ROCK_SIM_LOG_DIR", dir.path().join("history"))
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .output()
+        .output_with_deadline()
         .expect("run testbed sim");
     assert!(
         output.status.success(),
@@ -183,6 +187,7 @@ fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
 
 #[test]
 fn sim_run_compile_child_keeps_the_invocations_selection() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -200,7 +205,7 @@ fn sim_run_compile_child_keeps_the_invocations_selection() {
             .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
             .env("ROCK_SIM_LOG_DIR", dir.path().join("history"))
             .env("ROCK_SIM_TIMEOUT_SECS", "180")
-            .output()
+            .output_with_deadline()
             .expect("run testbed sim");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "`{flag} {value}` must reject the run:\n{stderr}");
@@ -296,7 +301,7 @@ impl CacheRun<'_> {
         for (key, value) in env {
             command.env(key, value);
         }
-        let output = command.output().expect("run fixture sim");
+        let output = command.output_with_deadline().expect("run fixture sim");
         assert!(
             output.status.success(),
             "{label}: fixture sim failed ({}):\n{}\n{}",
@@ -334,6 +339,7 @@ fn cache_entries(cache: &std::path::Path) -> Vec<String> {
 
 #[test]
 fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_changes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
@@ -401,7 +407,7 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
         let signed = Command::new("codesign")
             .args(["--force", "--sign", "-", "--identifier", "rock-sim-cache-fixture"])
             .arg(&compiler)
-            .output()
+            .output_with_deadline()
             .expect("change rock copy's signed identity");
         assert!(
             signed.status.success(),
@@ -431,15 +437,23 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
 
 #[test]
 fn concurrent_sim_runs_share_one_compile_cache_entry() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
     let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
+    let deadline = SpawnBudget::deadline();
     std::thread::scope(|scope| {
-        let a = scope.spawn(|| run.compiled("concurrent-a", "cache_probe", &[], &[]));
-        let b = scope.spawn(|| run.compiled("concurrent-b", "cache_probe", &[], &[]));
+        let a = scope.spawn(|| {
+            let _spawn_budget = SpawnBudget::enter(deadline);
+            run.compiled("concurrent-a", "cache_probe", &[], &[])
+        });
+        let b = scope.spawn(|| {
+            let _spawn_budget = SpawnBudget::enter(deadline);
+            run.compiled("concurrent-b", "cache_probe", &[], &[])
+        });
         a.join().expect("first run");
         b.join().expect("second run");
     });
@@ -449,6 +463,7 @@ fn concurrent_sim_runs_share_one_compile_cache_entry() {
 
 #[test]
 fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     use std::io::Write;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -479,7 +494,7 @@ fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
             .env("ROCK_COMPILE_CLASS", "batch")
             .stdout(Stdio::from(std::fs::File::create(dir.path().join(format!("{label}.out"))).unwrap()))
             .stderr(Stdio::from(std::fs::File::create(dir.path().join(format!("{label}.err"))).unwrap()))
-            .spawn().expect("spawn cold request")
+            .spawn_with_deadline().expect("spawn cold request")
     };
     let mut a = spawn("a");
     let mut b = spawn("b");
@@ -518,6 +533,7 @@ fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
 
 #[test]
 fn sim_run_forwards_build_var_overrides_to_its_compile() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
@@ -529,6 +545,7 @@ fn sim_run_forwards_build_var_overrides_to_its_compile() {
 
 #[test]
 fn sim_compile_receipt_narrow_selection_excludes_unselected_body() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
@@ -548,6 +565,7 @@ fn sim_compile_receipt_narrow_selection_excludes_unselected_body() {
 
 #[test]
 fn sim_compile_receipt_cache_distinguishes_selection_and_prefers_full_entry() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
@@ -567,6 +585,7 @@ fn sim_compile_receipt_cache_distinguishes_selection_and_prefers_full_entry() {
 
 #[test]
 fn sim_compile_receipt_named_dependency_is_registered_and_runs() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
@@ -629,14 +648,14 @@ co fn dynamic_probe() -> Coroutine<Wait> {
         .env("ROCK_SIM_COMPILE_RECEIPT_DIR", &receipt_root)
         .env("ROCK_SIM_COMPILE_RECEIPT_PREPARE", "1")
         .env("ROCK_SIM_COMPILE_SELECTION", "[\"dynamic_probe\"]")
-        .output().unwrap();
+        .output_with_deadline().unwrap();
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("cannot resolve dynamic SIMS access"));
     let full = Command::new(&rock).args(["sim", "--list"]).arg(&project)
         .env("ROCK_SIM_COMPILE_RECEIPT_DIR", &receipt_root)
         .env("ROCK_SIM_COMPILE_RECEIPT_PREPARE", "1")
         .env_remove("ROCK_SIM_COMPILE_SELECTION")
-        .output().unwrap();
+        .output_with_deadline().unwrap();
     assert!(full.status.success(), "{}", String::from_utf8_lossy(&full.stderr));
 }
 
@@ -656,6 +675,7 @@ fn copy_stone_sources(source: &std::path::Path, target: &std::path::Path) {
 
 #[test]
 fn sim_compile_receipt_v1_entry_point_and_short_name_selection_run() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");

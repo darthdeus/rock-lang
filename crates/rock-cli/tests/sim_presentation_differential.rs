@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::sync::Mutex;
 
 static SIM_LOCK: Mutex<()> = Mutex::new(());
@@ -26,7 +27,7 @@ fn run_sim(name: &str) -> std::process::Output {
         .args(["sim", "mag", name])
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
-        .output()
+        .output_with_deadline()
         .unwrap_or_else(|error| panic!("spawn {name}: {error}"))
 }
 
@@ -88,6 +89,7 @@ const REPEATABILITY_RUNS: usize = 4;
 
 #[test]
 fn mag_simulation_repeatability() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let _guard = SIM_LOCK.lock().unwrap();
     let digests: Vec<i64> = (0..REPEATABILITY_RUNS)
         .map(|_| {
@@ -113,6 +115,7 @@ fn mag_simulation_repeatability() {
 /// lose the discriminator and this reddens rather than passing vacuously.
 #[test]
 fn mag_simulation_presentation_independence() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let _guard = SIM_LOCK.lock().unwrap();
     let out_headless = run_sim("sim_repeatability_headless");
     assert_sim_pass("sim_repeatability_headless", &out_headless);
@@ -186,6 +189,7 @@ fn mag_simulation_presentation_independence() {
 /// function of the wisp's index, which is what makes it green.
 #[test]
 fn mag_simulation_presentation_seed_does_not_steer_simulation() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let _guard = SIM_LOCK.lock().unwrap();
 
     let out_baseline = run_sim("sim_repeatability_headless");

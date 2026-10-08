@@ -19,6 +19,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,6 +35,7 @@ fn rock_bin() -> PathBuf {
 
 #[test]
 fn renderer_excluded_entry_prints_one_verdict_beside_a_passing_sim() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let run = run_project_workers(
         "mag",
         &["wgpu_water_packets", "teleport_pad_arrival_phases"],
@@ -69,6 +71,7 @@ fn sim_fixture_project(root: &Path, name: &str) -> PathBuf {
 
 #[test]
 fn single_and_multi_name_workers_boot_the_same_bytecode_format() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let fixture = tempfile::tempdir().expect("boot format fixture");
     let project = sim_fixture_project(fixture.path(), "boot_format_fixture");
     std::fs::write(project.join("tests/sims/boot.rock"), r#"
@@ -96,7 +99,7 @@ co fn boot_probe() -> Coroutine<Wait> {
             .env("ROCK_SIM_LOG_DIR", fixture.path().join(label))
             .env("ROCK_SIM_COMPILE_CACHE_DIR", fixture.path().join("cache"))
             .env("ROCK_SIM_TIMEOUT_SECS", "60")
-            .output().expect("run boot format fixture");
+            .output_with_deadline().expect("run boot format fixture");
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success(), "{label}: {text}");
@@ -116,6 +119,7 @@ co fn boot_probe() -> Coroutine<Wait> {
 
 #[test]
 fn duration_allocated_workers_preserve_isolated_results_in_three_orders() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     use serde_json::{json, Value};
     let fixture = tempfile::tempdir().expect("duration fixture");
     let project = sim_fixture_project(fixture.path(), "duration_fixture");
@@ -135,7 +139,7 @@ co fn slow() -> Coroutine<Wait> {
     stop_sim()
 }
 "#).unwrap();
-    let machine = Command::new("uname").arg("-srmn").output().unwrap();
+    let machine = Command::new("uname").arg("-srmn").output_with_deadline().unwrap();
     assert!(machine.status.success());
     let machine = String::from_utf8(machine.stdout).unwrap();
     let costs = [("fast", 100u64), ("slow", 20_000)];
@@ -152,7 +156,7 @@ co fn slow() -> Coroutine<Wait> {
         let out = Command::new(rock_bin()).arg("sim").arg(&project).args(specs)
             .args([mode, "-j", "4", "--jobs-force"]).current_dir(workspace_root())
             .env("ROCK_SIM_LOG_DIR", &history).env("ROCK_SIM_TIMEOUT_SECS", "60")
-            .output().unwrap();
+            .output_with_deadline().unwrap();
         assert!(out.status.success(), "{label}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let event_paths: Vec<_> = std::fs::read_dir(&history).unwrap().map(|entry| entry.unwrap().path().join("events.jsonl"))
             .filter(|path| path.is_file()).collect();
@@ -204,6 +208,7 @@ co fn slow() -> Coroutine<Wait> {
 
 #[test]
 fn renderer_exclusions_print_once_in_named_runs_and_implicit_suites() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let fixture = tempfile::tempdir().expect("renderer exclusion fixture");
     let project = sim_fixture_project(fixture.path(), "renderer_fixture");
     std::fs::write(project.join("tests/sims/exclusions.rock"), r#"
@@ -234,7 +239,7 @@ co fn runtime() -> Coroutine<Wait> {
                 .current_dir(workspace_root())
                 .env("ROCK_SIM_TIMEOUT_SECS", "30")
                 .env("ROCK_SIM_LOG_DIR", fixture.path().join("history"))
-                .output().expect("run renderer fixture");
+                .output_with_deadline().expect("run renderer fixture");
             let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             assert!(out.status.success(), "{mode} {names:?}:\n{text}");
             for name in if names.len() == 1 { &["planned"][..] } else { &["planned", "runtime"][..] } {
@@ -286,7 +291,7 @@ fn run_project_workers_with_history(project: &str, specs: &[&str], jobs: &str) -
         .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
         .env("ROCK_SIM_LOG_DIR", &history)
         .env_remove("SIM_SKIP_RENDER")
-        .output()
+        .output_with_deadline()
         .expect("run rock sim --workers");
 
     let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
@@ -362,6 +367,7 @@ const EIGHT: [&str; 8] = [
 /// also show a peak above one.
 #[test]
 fn several_booted_workers_run_at_once() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // These testbed names have no seeded timings. An empty private history
     // exercises the count fallback: 64 entries buy two blocks at -j 4.
     let specs: Vec<&str> = EIGHT.iter().copied().cycle().take(64).collect();
@@ -391,6 +397,7 @@ fn several_booted_workers_run_at_once() {
 
 #[test]
 fn small_signature_groups_do_not_buy_singleton_boots() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let specs = [
         "testbed::b0_budget_pred",
         "testbed::b0_budget_probe",
@@ -427,6 +434,7 @@ fn small_signature_groups_do_not_buy_singleton_boots() {
 
 #[test]
 fn omitted_skip_render_shares_with_explicit_default() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // A fixture project, not game sims: the property is the worker pool's boot
     // signature, and game sims come and go with their rules.
     let fixture = tempfile::tempdir().expect("skip-render fixture");
@@ -473,6 +481,7 @@ fn omitted_skip_render_shares_with_explicit_default() {
 
 #[test]
 fn world_restore_does_not_leave_keyframes_in_the_successor() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let run = run_workers(&[
         "testbed::scene_owned_task_survives_world_image_restore",
         "testbed::t1a_worker_registries_stay_bounded",
@@ -484,6 +493,7 @@ fn world_restore_does_not_leave_keyframes_in_the_successor() {
 
 #[test]
 fn mag_world_restore_preserves_successor_boot_fonts() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     for specs in [
         ["mob_cast_world_image_and_arena_reuse", "direct_session_state_world_image_restores_the_authority"],
         ["world_environment_state_round_trips_through_world_image"; 2],
@@ -504,6 +514,7 @@ fn mag_world_restore_preserves_successor_boot_fonts() {
 
 #[test]
 fn mag_run_stop_preserves_successor_boot_assets() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let specs = [
         "build_watermark_layout", "target_cycle_sim",
         "build_watermark_layout", "target_cycle_sim",
@@ -554,6 +565,7 @@ fn entry_end_frame_counts(events: &[serde_json::Value]) -> Vec<(String, u64)> {
 
 #[test]
 fn shared_worker_records_each_entry_frame_count_before_restore() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let specs = ["build_watermark_layout", "target_cycle_sim"];
     let (run, history) = run_project_workers_with_history("mag", &specs, "1");
     assert!(run.success, "shared worker entries pass:\n{}", run.combined());
@@ -596,6 +608,7 @@ fn shared_worker_records_each_entry_frame_count_before_restore() {
 /// only that something ran, not that `-j` chose it.
 #[test]
 fn one_job_still_runs_one_worker_at_a_time() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let run = run_workers(&EIGHT, "1");
     assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
     let (peak, total) = peak_procs(&run.trace);
@@ -613,6 +626,7 @@ fn one_job_still_runs_one_worker_at_a_time() {
 /// untouched.
 #[test]
 fn a_dead_worker_does_not_reach_another_lane() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // Lanes split a signature group per 56 entries, so the neighbours repeat to
     // 60: 61 entries make two contiguous lanes at -j 3, the crash in the first.
     const NEIGHBOURS: [&str; 5] = [
@@ -653,6 +667,7 @@ fn a_dead_worker_does_not_reach_another_lane() {
 /// the shipped bound-callee emission shape.
 #[test]
 fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     const RELOAD: &str = "testbed::reload_probe";
     let dir = tempfile::tempdir().expect("trace tempdir");
     let trace_path = dir.path().join("lifecycle.log");
@@ -666,7 +681,7 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
         .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
         .env("ROCK_SKULL_CALLEE_BINDING", "upvalue")
         .env_remove("SIM_SKIP_RENDER")
-        .output()
+        .output_with_deadline()
         .expect("run rock sim --workers");
     let combined = format!(
         "{}{}",
@@ -714,6 +729,7 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
 /// be the reporting order.
 #[test]
 fn results_stay_positional_and_ordered_under_the_pool() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let specs = ["testbed::b0_rng_probe", "testbed::b0_leak_probe", "testbed::b0_rng_probe", "testbed::co_join2_tuple"];
     let run = run_workers(&specs, "4");
     assert!(run.success, "every sim here passes standalone:\n{}", run.combined());
@@ -747,6 +763,7 @@ fn results_stay_positional_and_ordered_under_the_pool() {
 
 #[test]
 fn manual_sims_are_excluded_only_from_implicit_suites() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let fixture = tempfile::tempdir().expect("manual sim fixture");
     let project = fixture.path().join("manual_fixture");
     std::fs::create_dir_all(project.join("tests/sims")).unwrap();
@@ -781,7 +798,7 @@ co fn gallery() -> Coroutine<Wait> {
                 .env("ROCK_SIM_TIMEOUT_SECS", "30")
                 .env("ROCK_SIM_LOG_DIR", &history)
                 .env("ROCK_SIM_WARN_SECS", "0.001")
-                .output().expect("run manual fixture")
+                .output_with_deadline().expect("run manual fixture")
         };
         let implicit = run(&[]);
         let text = format!("{}{}", String::from_utf8_lossy(&implicit.stdout), String::from_utf8_lossy(&implicit.stderr));
@@ -848,6 +865,7 @@ fn assert_bank_writer_leaves_the_tracked_bank(name: &str, bank: &str) {
 
 #[test]
 fn a_sound_bank_writer_leaves_the_tracked_bank() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let bank = workspace_root().join("mag/assets/sound_bank.json");
     let original = match std::fs::read(&bank) {
         Ok(bytes) => Some((bytes, std::fs::metadata(&bank).expect("bank metadata"))),
@@ -881,11 +899,13 @@ fn a_sound_bank_writer_leaves_the_tracked_bank() {
 
 #[test]
 fn a_visual_bank_writer_leaves_the_tracked_bank() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_bank_writer_leaves_the_tracked_bank("visual_bank_worktree_watcher", "mag/assets/visual_bank.json");
 }
 
 #[test]
 fn jit_boot_mode_enabled_is_restored_between_entries() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let run = run_workers(&["testbed::b0_jit_on_seed", "testbed::b0_jit_on_probe"], "1");
     assert_eq!(peak_procs(&run.trace), (1, 1), "must share one boot:\n{}", run.combined());
     assert!(run.success, "JIT boot mode must survive a predecessor toggle:\n{}", run.combined());
@@ -894,6 +914,7 @@ fn jit_boot_mode_enabled_is_restored_between_entries() {
 
 #[test]
 fn jit_boot_mode_explicitly_disabled_is_restored_between_entries() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let run = run_workers(&["testbed::b0_jit_off_seed", "testbed::b0_jit_off_probe"], "1");
     assert_eq!(peak_procs(&run.trace), (1, 1), "must share one boot:\n{}", run.combined());
     assert!(run.success, "explicit JIT-off boot policy must survive a predecessor toggle:\n{}", run.combined());

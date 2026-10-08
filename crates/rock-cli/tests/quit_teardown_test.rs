@@ -16,6 +16,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -27,13 +28,14 @@ fn workspace_root() -> &'static Path {
 
 #[test]
 fn quit_from_late_draw_exits_cleanly() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let output = Command::new(rock_bin)
         .args(["frame", "demos/quit_from_late_draw", "-n", "30"])
         // Generous watchdog: init + a few frames on a HiDPI box under CI load.
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame");
 
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -10,6 +10,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -31,7 +32,7 @@ fn record_with_env(game: &str, frames: u32, env: &[(&str, &str)]) -> (tempfile::
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
     (dir, log_s)
@@ -54,7 +55,7 @@ fn replay_raw(game: &str, log: &str, env: &[(&str, &str)]) -> std::process::Outp
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay")
 }
 
@@ -79,6 +80,7 @@ fn with_header(text: &str, version: u32, build: Option<&str>) -> String {
 
 #[test]
 fn new_recordings_stamp_a_real_exact_artifact_identity() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     assert!(text.starts_with(&format!("{}\n", rock_replay_protocol::replay_header())),
@@ -106,6 +108,7 @@ fn new_recordings_stamp_a_real_exact_artifact_identity() {
 
 #[test]
 fn new_format_rejects_a_different_project_source_before_the_first_game_tick() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     let changed = text.lines().map(|line| {
@@ -124,6 +127,7 @@ fn new_format_rejects_a_different_project_source_before_the_first_game_tick() {
 
 #[test]
 fn new_format_rejects_a_missing_source_revision_before_the_first_game_tick() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     let changed = text
@@ -144,6 +148,7 @@ fn new_format_rejects_a_missing_source_revision_before_the_first_game_tick() {
 
 #[test]
 fn legacy_v11_without_source_remains_playable() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     let legacy = crate::stone_harness::downgrade_replay(&text, 11)
@@ -161,6 +166,7 @@ fn legacy_v11_without_source_remains_playable() {
 /// and playback continues (the desync checkpoints locate any actual drift).
 #[test]
 fn new_format_warns_on_a_build_mismatch_and_still_plays() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     let recorded = text
@@ -180,6 +186,7 @@ fn new_format_warns_on_a_build_mismatch_and_still_plays() {
 
 #[test]
 fn new_format_rejects_a_missing_build_id() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     std::fs::write(&log, with_header(&text, 8, None)).expect("remove build id");
@@ -191,6 +198,7 @@ fn new_format_rejects_a_missing_build_id() {
 
 #[test]
 fn new_format_rejects_a_degenerate_build_id() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     std::fs::write(&log, with_header(&text, 8, Some("dev"))).expect("degrade build id");
@@ -206,6 +214,7 @@ fn new_format_rejects_a_degenerate_build_id() {
 /// always had, on the same one mechanism.
 #[test]
 fn new_format_warns_on_a_reload_marker_and_still_plays() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_RELOAD_AT_FRAME", "5")]);
     let text = std::fs::read_to_string(&log).expect("read log");
     assert!(text.lines().any(|line| line.starts_with("reload ")), "fixture must contain a reload marker");
@@ -218,12 +227,13 @@ fn new_format_warns_on_a_reload_marker_and_still_plays() {
 
 #[test]
 fn emitted_lua_has_no_shadow_effect_plan() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("compile dir");
     let lua = dir.path().join("bitgun.lua");
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["compile", "../bitgun", "--output", &lua.to_string_lossy()])
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn Lua compile");
     assert!(out.status.success(), "Lua compile failed\n{}", String::from_utf8_lossy(&out.stderr));
     let emitted = std::fs::read_to_string(&lua).expect("read emitted Lua");
@@ -235,6 +245,7 @@ fn emitted_lua_has_no_shadow_effect_plan() {
 /// writes a `reload <tick>` marker.
 #[test]
 fn record_stamps_build_id_and_reload_marker() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env(
         "bitgun", 15,
         &[ ("STONE_RELOAD_AT_FRAME", "5")],
@@ -253,6 +264,7 @@ fn record_stamps_build_id_and_reload_marker() {
 /// Legacy replay versions retain warning-only reload compatibility.
 #[test]
 fn replay_warns_on_reload_marked_log() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[("STONE_RELOAD_AT_FRAME", "5")]);
     let text = std::fs::read_to_string(&log).expect("read log");
     std::fs::write(&log, with_header(&text, 7, Some("buildAAA"))).expect("rewrite legacy log");
@@ -269,6 +281,7 @@ fn replay_warns_on_reload_marked_log() {
 /// STONE_SAVE_REPRO_AUTO_AT_FRAME hook (F9 itself is author-verified).
 #[test]
 fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("last.replay");
     let scratch = tempfile::tempdir().expect("scratch");
@@ -281,7 +294,7 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
         .env("STONE_SAVE_REPRO_AUTO_AT_FRAME", "8")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -302,7 +315,7 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay");
     assert!(
         rep.status.success(),
@@ -315,6 +328,7 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
 /// not. Exact v8 rejection is covered above.
 #[test]
 fn replay_warns_on_build_id_mismatch_only() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_with_env("bitgun", 15, &[]);
     let text = std::fs::read_to_string(&log).expect("read log");
     std::fs::write(&log, with_header(&text, 7, Some("buildAAA"))).expect("rewrite legacy log");

@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     // `crates/rock-cli/` -> workspace root.
@@ -42,6 +43,7 @@ const OTHER_SIM: &str = "auto_move";
 
 #[test]
 fn concurrent_sim_invocations_do_not_share_compiled_output() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
     let rock = rock_bin();
     assert!(rock.exists(), "rock binary not built at {}", rock.display());
@@ -57,7 +59,7 @@ fn concurrent_sim_invocations_do_not_share_compiled_output() {
         .env("ROCK_SIM_TIMEOUT_SECS", "60")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .spawn_with_deadline()
         .expect("spawn victim");
 
     // While it parks, run the other project to completion. Its compile writes a
@@ -66,7 +68,7 @@ fn concurrent_sim_invocations_do_not_share_compiled_output() {
         .current_dir(&root)
         .args(["sim", OTHER_PROJECT, OTHER_SIM])
         .env("ROCK_SIM_TIMEOUT_SECS", "60")
-        .output()
+        .output_with_deadline()
         .expect("run other invocation");
     assert!(
         other.status.success(),

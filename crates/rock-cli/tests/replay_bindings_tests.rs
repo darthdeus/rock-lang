@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -12,6 +13,7 @@ fn workspace_root() -> &'static Path {
 
 #[test]
 fn mag_record_stamps_a_nonempty_binding_overlay_before_ticks() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("record dir");
     let log = dir.path().join("bindings.replay");
     let scratch = tempfile::tempdir().expect("scratch dir");
@@ -22,7 +24,7 @@ fn mag_record_stamps_a_nonempty_binding_overlay_before_ticks() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
 
@@ -48,6 +50,7 @@ fn mag_record_stamps_a_nonempty_binding_overlay_before_ticks() {
 
 #[test]
 fn replay_uses_recorded_bindings_after_disk_changes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // Resolved before HOME is substituted below.
     let vault = crate::stone_harness::art_vault_env();
     let home = tempfile::tempdir().expect("record home");
@@ -86,7 +89,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("XDG_DATA_HOME", &data)
         .env(vault.0, &vault.1)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(record.status.success(), "record failed: {}", String::from_utf8_lossy(&record.stderr));
 
@@ -121,7 +124,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("XDG_DATA_HOME", &data)
         .env(vault.0, &vault.1)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn changed replay");
     assert!(changed_run.status.success(), "changed replay failed: {}", String::from_utf8_lossy(&changed_run.stderr));
     let changed_state: serde_json::Value = serde_json::from_slice(&changed_run.stdout).expect("changed replay state");
@@ -141,7 +144,7 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
         .env("XDG_DATA_HOME", &data)
         .env(vault.0, &vault.1)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn clean replay");
     assert!(clean_run.status.success(), "clean replay failed: {}", String::from_utf8_lossy(&clean_run.stderr));
     let clean_state: serde_json::Value = serde_json::from_slice(&clean_run.stdout).expect("clean replay state");

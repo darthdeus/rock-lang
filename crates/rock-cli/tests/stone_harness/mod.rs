@@ -9,6 +9,9 @@
 
 #![allow(dead_code)] // grows over phases B/C
 
+mod spawn;
+pub use spawn::{HeavyCommandExt, SpawnBudget};
+
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};

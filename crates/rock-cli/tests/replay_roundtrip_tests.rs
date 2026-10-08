@@ -17,6 +17,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -43,7 +44,7 @@ fn run_frame(game: &str, frames: u32, extra: &[&str]) -> serde_json::Value {
         .args(&args)
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame");
     assert!(
         output.status.success(),
@@ -72,7 +73,7 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
         .args(&args)
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame")
 }
 
@@ -94,7 +95,7 @@ fn run_frame_raw_env(
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame")
 }
 
@@ -119,7 +120,7 @@ fn run_frame_env(
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame");
     assert!(
         output.status.success(),
@@ -152,6 +153,7 @@ fn strip_diagnostics(v: &mut serde_json::Value) {
 /// coords fine (records write %a hex; both round-trip).
 #[test]
 fn replay_applies_recorded_window_resize() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("resize.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -185,6 +187,7 @@ fn replay_applies_recorded_window_resize() {
 /// write-at-shutdown), the crash left an empty/absent log.
 #[test]
 fn record_log_survives_a_crash_via_incremental_flush() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("crash.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -223,6 +226,7 @@ fn record_log_survives_a_crash_via_incremental_flush() {
 
 #[test]
 fn replay_reproduces_dump_state_byte_identical() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let frames = 30;
     let dir = tempfile::tempdir().expect("replay-log dir");
@@ -272,6 +276,7 @@ fn replay_reproduces_dump_state_byte_identical() {
 /// last tick to hold a key + a mouse button and assert replay applies both.
 #[test]
 fn replay_applies_recorded_keys_and_buttons() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let frames = 10;
     let dir = tempfile::tempdir().expect("replay-log dir");
@@ -310,6 +315,7 @@ fn replay_applies_recorded_keys_and_buttons() {
 
 #[test]
 fn replay_applies_explicit_v6_pad_buttons_and_axes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("replay-log dir");
     let log = dir.path().join("pad-v6.replay");
     let text = "STONE_REPLAY 6\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\n"
@@ -332,6 +338,7 @@ fn replay_applies_explicit_v6_pad_buttons_and_axes() {
 
 #[test]
 fn recording_and_branch_rewrite_use_the_v9_pad_record_renderer() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("replay-log dir");
     let log = dir.path().join("v9-renderer.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -346,6 +353,7 @@ fn recording_and_branch_rewrite_use_the_v9_pad_record_renderer() {
 
 #[test]
 fn replay_rejects_malformed_v6_pad_axis_records() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("replay-log dir");
     let log = dir.path().join("malformed-pad-v6.replay");
     let text = "STONE_REPLAY 6\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\n"
@@ -367,6 +375,7 @@ fn replay_rejects_malformed_v6_pad_axis_records() {
 /// accepting a different scheduler path.
 #[test]
 fn replay_rejects_unconsumed_job_decision_records() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("unconsumed-job-decision.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -439,6 +448,7 @@ fn main() {
 
 #[test]
 fn replay_roundtrips_produced_job_decision_rows() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_fixture, project) = write_job_decision_fixture();
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("job-decisions.replay");
@@ -541,6 +551,7 @@ fn replay_roundtrips_produced_job_decision_rows() {
 /// back to a live (non-replayed) run whose output looks plausible.
 #[test]
 fn replay_rejects_missing_log() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let out = run_frame_raw("bitgun", 5, &["--replay", "/nonexistent/no.replay"]);
     assert!(
         !out.status.success(),
@@ -559,6 +570,7 @@ fn replay_rejects_missing_log() {
 /// short reads as a shorter, wrong repro.
 #[test]
 fn replay_rejects_corrupt_log() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
 
     let not_a_log = dir.path().join("not_a_log.replay");
@@ -591,6 +603,7 @@ fn replay_rejects_corrupt_log() {
 
 #[test]
 fn replay_rejects_malformed_v5_environment_records() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let cases = [
         ("missing payload", "env STONE_QUIET 1"),
         ("extra field", "env STONE_QUIET 1 31 extra"),
@@ -620,6 +633,7 @@ fn replay_rejects_malformed_v5_environment_records() {
 
 #[test]
 fn replay_preserves_v1_to_v5_load_compatibility() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     for version in 1..=5 {
         let dir = tempfile::tempdir().expect("dir");
         let log = dir.path().join(format!("v{version}.replay"));
@@ -645,6 +659,7 @@ fn replay_preserves_v1_to_v5_load_compatibility() {
 
 #[test]
 fn replay_preserves_a_physical_tap_completed_between_frames() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (fixture, project) = write_job_decision_fixture();
     std::fs::write(fixture.path().join("main.rock"), r#"
 global TAP_OBSERVED: bool = false
@@ -765,7 +780,7 @@ fn main() {
     let profiled = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["replay-profile", &project, log.to_str().unwrap(), "--range", "0-2",
             "--runs", "2", "--output", output_dir.to_str().unwrap()])
-        .current_dir(workspace_root()).output().expect("profile taps");
+        .current_dir(workspace_root()).output_with_deadline().expect("profile taps");
     assert!(profiled.status.success(), "tap profiling failed: {}",
         String::from_utf8_lossy(&profiled.stderr));
     let rows: Vec<serde_json::Value> = String::from_utf8(profiled.stdout).unwrap()
@@ -777,6 +792,7 @@ fn main() {
 
 #[test]
 fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     const FRAMES: u32 = 420;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("mag.replay");
@@ -823,7 +839,7 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
         .args(["replay-profile", "mag", log.to_str().unwrap(), "--range", &profile_range,
             "--runs", "2", "--output", output_dir.to_str().unwrap()])
         .env("PERF_MODE", "1").env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root()).output().expect("profile MAG replay");
+        .current_dir(workspace_root()).output_with_deadline().expect("profile MAG replay");
     assert!(output.status.success(), "MAG profiling failed: {}\n{}",
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout).unwrap()

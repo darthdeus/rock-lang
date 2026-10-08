@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::time::{Duration, Instant};
 
 fn workspace_root() -> PathBuf {
@@ -18,6 +20,7 @@ fn workspace_root() -> PathBuf {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_sim_over_its_memory_cap_is_killed_and_named() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
     let started = Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -25,7 +28,7 @@ fn a_sim_over_its_memory_cap_is_killed_and_named() {
         .current_dir(&root)
         .env("ROCK_SIM_MEMORY_MB", "512")
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
-        .output()
+        .output_with_deadline()
         .expect("run rock sim");
     let elapsed = started.elapsed();
     let combined = format!(

@@ -1231,8 +1231,10 @@ pub fn do_perf(
 ) -> Result<()> {
     use crate::common::ProcessManager;
 
+    crate::compile_slots::report_spawn_phase("compile");
     let compiled = compile_game_for_run(backend, path, &output)?;
     let lua_file = &compiled.lua_file;
+    crate::compile_slots::report_spawn_phase("runtime-prepare");
 
     // `frames == 1` is the clap default (user didn't pass --frames).
     // If --seconds is also missing, fall back to 300 frames (~5s at 60fps).
@@ -1307,6 +1309,7 @@ pub fn do_perf(
         Duration::from_secs_f64(wall_budget.max(30.0))
     };
 
+    crate::compile_slots::report_spawn_phase("execution");
     let mut child = cmd.spawn()?;
     let process_result = ProcessManager::wait_with_startup_budget(
         &mut child, startup_timeout, timeout_duration,
@@ -1421,8 +1424,10 @@ pub fn do_one_frame(
 ) -> Result<()> {
     use crate::common::ProcessManager;
 
+    crate::compile_slots::report_spawn_phase("compile");
     let compiled = compile_game_for_run(backend, path, &output)?;
     let lua_file = &compiled.lua_file;
+    crate::compile_slots::report_spawn_phase("runtime-prepare");
     let replay_source = replay_source_for(path)?;
 
     if frames == 1 {
@@ -1461,6 +1466,7 @@ pub fn do_one_frame(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     // Use spawn instead of output to implement the progress watchdog.
+    crate::compile_slots::report_spawn_phase("execution");
     let mut child = cmd.spawn()?;
 
     let watchdog = frame_watchdog();

@@ -16,6 +16,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 // CARGO_MANIFEST_DIR is `<repo>/crates/rock-cli`; the rock process resolves its
 // `tmp/` output to the repo root regardless of launch cwd, so target that.
@@ -29,6 +30,7 @@ fn repo_root() -> &'static Path {
 
 #[test]
 fn frame_wipes_stale_overlay() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = repo_root();
     let output = tempfile::tempdir().expect("frame output");
     let overlay = output.path().join("incremental.lua");
@@ -50,7 +52,7 @@ fn frame_wipes_stale_overlay() {
         // gate is about the overlay contents, not cold-start latency.
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(root)
-        .output()
+        .output_with_deadline()
         .expect("run rock frame");
 
     let combined = format!(

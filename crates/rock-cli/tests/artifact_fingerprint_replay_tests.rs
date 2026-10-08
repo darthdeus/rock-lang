@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
@@ -21,7 +22,7 @@ fn record() -> (tempfile::TempDir, String) {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
     (dir, log.to_string_lossy().into_owned())
@@ -41,12 +42,13 @@ fn replay(log: &str) -> std::process::Output {
         .args(["frame", "bitgun", "-n", "15", "--replay", log, "--output", &scratch.path().to_string_lossy()])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("replay")
 }
 
 #[test]
 fn v8_names_a_changed_artifact_and_plays_it_anyway() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record();
     let original = std::fs::read_to_string(&log).expect("read replay");
     let artifact_a = original

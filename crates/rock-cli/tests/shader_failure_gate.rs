@@ -12,6 +12,7 @@
 //! the wrong reason.
 
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
@@ -39,7 +40,7 @@ fn run_frame(force_shader_failure: bool) -> (String, bool) {
     if force_shader_failure {
         cmd.env("STONE_SHADER_FORCE_FAIL", "1");
     }
-    let out = cmd.output().expect("spawn rock frame");
+    let out = cmd.output_with_deadline().expect("spawn rock frame");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.success())
@@ -47,6 +48,7 @@ fn run_frame(force_shader_failure: bool) -> (String, bool) {
 
 #[test]
 fn shader_compile_failure_fails_a_bounded_run() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (text, ok) = run_frame(true);
     assert!(
         text.contains("shader compilation failed"),
@@ -63,6 +65,7 @@ fn shader_compile_failure_fails_a_bounded_run() {
 /// would hold on a broken game / missing GL rather than on the shader failure.
 #[test]
 fn clean_run_still_passes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (text, ok) = run_frame(false);
     assert!(ok, "the control run must pass:\n{text}");
     assert!(

@@ -25,6 +25,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 // Cold MAG assets need scheduling margin in the concurrent native fixture lane.
 const REPLAY_PHASE_TIMEOUT_SECS: &str = "180";
@@ -38,10 +39,11 @@ fn workspace_root() -> &'static Path {
 
 #[test]
 fn mag_world_state_has_no_host_resources() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["lint", "mag", "--lints=host_resource_in_game_memory"])
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("run MAG host-resource lint");
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -51,10 +53,11 @@ fn mag_world_state_has_no_host_resources() {
 
 #[test]
 fn bitgun_world_props_have_no_host_resources() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["lint", "bitgun", "--lints=host_resource_in_game_memory"])
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("run Bitgun host-resource lint");
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -64,6 +67,7 @@ fn bitgun_world_props_have_no_host_resources() {
 
 #[test]
 fn bitgun_grass_autosave_is_owned_by_the_host_canvas() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let world = sim_state_names("bitgun", 3);
     assert!(!world.is_empty(), "the production checkpoint census must be populated");
     for name in ["BLOOD_CANVAS", "GRASS_AUTOSAVE_TIMER"] {
@@ -85,7 +89,7 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
     let text = std::fs::read_to_string(&log).unwrap();
@@ -304,6 +308,7 @@ const MAG_S3_PLATFORM_WORLD_EXCLUDED: &[&str] = &[
 
 #[test]
 fn replay_snapshot_oracle_includes_effective_pad_state_only() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("bitgun", 3);
     assert!(names.contains("pad_down"), "effective pad buttons must be replay state: {names:?}");
     assert!(names.contains("pad_axes"), "effective pad axes must be replay state: {names:?}");
@@ -350,6 +355,7 @@ fn replay_snapshot_oracle_includes_effective_pad_state_only() {
 
 #[test]
 fn mag_audio_and_vfx_projections_are_not_world_image_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
     assert!(names.contains("pad_down"), "the Mag census must include effective input state: {names:?}");
@@ -379,6 +385,7 @@ fn mag_audio_and_vfx_projections_are_not_world_image_state() {
 
 #[test]
 fn mag_host_projections_are_not_world_image_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
     for name in MAG_HOST_PROJECTION_WORLD_EXCLUDED {
@@ -391,6 +398,7 @@ fn mag_host_projections_are_not_world_image_state() {
 
 #[test]
 fn mag_s3_presentation_globals_are_not_world_image_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag S3 census must examine a nonzero population");
     for name in MAG_S3_PLATFORM_WORLD_EXCLUDED {
@@ -403,6 +411,7 @@ fn mag_s3_presentation_globals_are_not_world_image_state() {
 
 #[test]
 fn mag_seek_census_admits_aggregate_owners_not_superseded_direct_globals() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag checkpoint census must examine a nonzero population");
     assert_mag_seek_census_owners(&names);
@@ -429,6 +438,7 @@ fn assert_mag_panel_plan_census(sim: &std::collections::HashSet<String>) {
 
 #[test]
 fn mag_panel_draw_plan_is_derived_not_world_image() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("mag", 3);
     assert!(!names.is_empty(), "the Mag panel-plan census must examine a nonzero population");
     assert_mag_panel_plan_census(&names);
@@ -442,6 +452,7 @@ fn mag_panel_draw_plan_is_derived_not_world_image() {
 /// that plays anything, so the census reaches the declaration alone.
 #[test]
 fn sfx_browser_replay_voice_is_not_world_image_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("testbed", 3);
     assert!(names.contains("time"), "the census must reach Stone's own globals: {names:?}");
     assert!(!names.contains("dt"), "native frame delta is host projection: {names:?}");
@@ -457,6 +468,7 @@ fn sfx_browser_replay_voice_is_not_world_image_state() {
 
 #[test]
 fn skin_gallery_seed_is_platform_state_outside_world_image() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("testbed", 3);
     assert!(names.contains("time"), "the census must reach Stone's own globals: {names:?}");
     assert!(!names.contains("dt"), "native frame delta is host projection: {names:?}");
@@ -470,7 +482,7 @@ fn skin_gallery_seed_is_platform_state_outside_world_image() {
     let compiled = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["compile", "games/testbed", "--output", &output.to_string_lossy()])
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("compile testbed");
     assert!(
         compiled.status.success(),
@@ -517,6 +529,7 @@ fn skin_gallery_seed_is_platform_state_outside_world_image() {
 ///    `UI_TEXT_OVERFLOW_N`.
 #[test]
 fn stones_platform_class_keeps_its_unannotated_host_state_out_of_the_world_image() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("testbed", 3);
     assert!(names.contains("time"), "the census must reach Stone's own globals: {names:?}");
     assert!(!names.contains("dt"), "native frame delta is host projection: {names:?}");
@@ -538,6 +551,7 @@ fn stones_platform_class_keeps_its_unannotated_host_state_out_of_the_world_image
 /// `session` globals stay in the world image after the declaration.
 #[test]
 fn stones_platform_class_does_not_swallow_its_explicit_session_globals() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let names = sim_state_names("testbed", 3);
     for name in ["time", "TIME_SCALE", "WORLD_MODE"] {
         assert!(
@@ -559,7 +573,7 @@ fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::
         .envs(env.iter().copied())
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn plain run");
     assert!(out.status.success(), "plain run failed: {}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).expect("dump-state JSON")
@@ -576,7 +590,7 @@ fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
         .envs(env.iter().copied())
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay");
     assert!(out.status.success(), "replay failed: {}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).expect("dump-state JSON")
@@ -617,7 +631,7 @@ fn run_record_dump_observed(
         .envs(env.iter().copied())
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn live record");
     let state = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
@@ -634,6 +648,7 @@ fn run_record_dump_observed(
 
 #[test]
 fn record_without_dump_state_ignores_clock_override() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("record-clock-authority.replay");
     let scratch = tempfile::tempdir().unwrap();
@@ -647,7 +662,7 @@ fn record_without_dump_state_ignores_clock_override() {
         .env_remove("STONE_REPLAY")
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record without dump-state");
     assert!(
         output.status.success(),
@@ -669,6 +684,7 @@ fn current_tick(s: &serde_json::Value) -> i64 {
 
 #[test]
 fn restore_returns_to_snapshot_tick_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("restore.replay");
@@ -683,7 +699,7 @@ fn restore_returns_to_snapshot_tick_state() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -1133,6 +1149,7 @@ fn mag_progress_for_clock_probe() -> serde_json::Value {
 
 #[test]
 fn mag_full_replay_uses_recorded_session_clock() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (recorded, replayed) = mag_clock_record_replay_arms(&mag_progress_for_clock_probe());
     let recorded_at = stone_dump_timestamp(&recorded);
     let replayed_at = stone_dump_timestamp(&replayed);
@@ -1156,6 +1173,7 @@ fn mag_full_replay_uses_recorded_session_clock() {
 // replay mode (stone/engine/replay.rock), before `__stone_replay` exists.
 #[test]
 fn ordinary_play_ignores_the_replay_clock_override() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let progress_path = dir.path().join("progress.json");
     let progress_s = progress_path.to_string_lossy().into_owned();
@@ -1209,6 +1227,7 @@ fn ordinary_play_ignores_the_replay_clock_override() {
 // same at both, an engine-time reconstruction advances between them.
 #[test]
 fn record_mode_stamps_the_real_clock_not_engine_time() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let fixture_early = dir.path().join("record-clock-early.replay").to_string_lossy().into_owned();
     let fixture_late = dir.path().join("record-clock-late.replay").to_string_lossy().into_owned();
@@ -1263,6 +1282,7 @@ fn record_mode_stamps_the_real_clock_not_engine_time() {
 // selected frame count, so no gameplay system has to consume wall time.
 #[test]
 fn mag_replay_reconstructs_advancing_wall_clock() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let fixture = dir.path().join("clock-advance.replay");
     let fixture_s = fixture.to_string_lossy().into_owned();
@@ -1337,6 +1357,7 @@ fn mag_replay_reconstructs_advancing_wall_clock() {
 // renders a negative build age, with no diagnostic anywhere.
 #[test]
 fn a_v14_replay_without_a_start_is_rejected() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("no-start.replay").to_string_lossy().into_owned();
     run_record_dump("bitgun", 15, &log_s, &[]);
@@ -1354,7 +1375,7 @@ fn a_v14_replay_without_a_start_is_rejected() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1381,6 +1402,7 @@ fn a_v14_replay_without_a_start_is_rejected() {
 // is observed through an explicit fixture path, never the real save file.
 #[test]
 fn replay_does_not_write_mag_progress() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let fixture_s = dir.path().join("no-persist.replay").to_string_lossy().into_owned();
     let progress_path = dir.path().join("progress.json");
@@ -1425,6 +1447,7 @@ fn replay_does_not_write_mag_progress() {
 
 #[test]
 fn mag_cast_seek_restores_scheduler_owner() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let fixture = dir.path().join("mag-cast-seek.replay");
     let fixture_s = fixture.to_string_lossy().into_owned();
@@ -1569,6 +1592,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
 /// with interval 10 restores the tick-20 keyframe, not tick 0).
 #[test]
 fn scrub_to_earlier_tick_matches_plain_run() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("scrub.replay");
@@ -1582,7 +1606,7 @@ fn scrub_to_earlier_tick_matches_plain_run() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -1617,6 +1641,7 @@ fn scrub_to_earlier_tick_matches_plain_run() {
 
 #[test]
 fn scrub_reports_seek_cost_and_resimulation_population() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("seek-metrics.replay");
@@ -1630,7 +1655,7 @@ fn scrub_reports_seek_cost_and_resimulation_population() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -1661,6 +1686,7 @@ fn scrub_reports_seek_cost_and_resimulation_population() {
 
 #[test]
 fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("exact-two-scrubs.replay");
@@ -1673,7 +1699,7 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
     let text = std::fs::read_to_string(&log).expect("read exact replay");
@@ -1736,6 +1762,7 @@ fn exact_recorded_replay_supports_two_backward_scene_image_scrubs() {
 
 #[test]
 fn refused_scrub_does_not_leave_seek_active_or_complete() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("refused-scrub.replay");
@@ -1749,7 +1776,7 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -1775,6 +1802,7 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
 
 #[test]
 fn live_record_rewind_matches_plain_replay_at_target() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let history: u32 = 40;
     let target: i64 = 25;
@@ -1839,6 +1867,7 @@ fn live_record_rewind_matches_plain_replay_at_target() {
 
 #[test]
 fn live_rewind_builds_lazy_index_without_recording_periodic_captures() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let target: i64 = 55;
     let dir = tempfile::tempdir().unwrap();
@@ -1892,6 +1921,7 @@ fn live_rewind_builds_lazy_index_without_recording_periodic_captures() {
 
 #[test]
 fn live_rewind_ignores_superseded_wall_clock_window() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-no-window.replay");
@@ -1925,6 +1955,7 @@ fn live_rewind_ignores_superseded_wall_clock_window() {
 
 #[test]
 fn live_rewind_after_body_reload_uses_boot_only() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-reload.replay");
@@ -1950,6 +1981,7 @@ fn live_rewind_after_body_reload_uses_boot_only() {
 
 #[test]
 fn live_full_reload_refuses_after_invalidating_all_keyframes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-full-reload.replay");
@@ -1980,6 +2012,7 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
 
 #[test]
 fn long_live_bitgun_rewind_reports_lazy_index_costs() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let seek_frame: u32 = 200;
     let target: i64 = 105;
@@ -2025,6 +2058,7 @@ fn long_live_bitgun_rewind_reports_lazy_index_costs() {
 /// concrete integration case that render-skipped resimulation used to lose.
 #[test]
 fn mag_main_menu_transition_survives_seek_resimulation() {
+    let _spawn_budget = SpawnBudget::for_test(180);
     let game = "mag";
     let frames = 120;
     let target: u32 = 110;
@@ -2267,6 +2301,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
 
 #[test]
 fn mag_replay_census_answers_the_host_performance_prompt() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("host-prompt.replay").to_string_lossy().into_owned();
     let progress = dir.path().join("progress.json").to_string_lossy().into_owned();
@@ -2291,6 +2326,7 @@ fn mag_replay_census_answers_the_host_performance_prompt() {
 
 #[test]
 fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
+    let _spawn_budget = SpawnBudget::for_test(180);
     let game = "mag";
     let frames = 160;
     let target: u32 = 150;
@@ -2424,6 +2460,7 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
 
 #[test]
 fn mag_second_live_rewind_reflective_sample_is_rebuilt_before_hidden_late_draw() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("second-rewind-reflection.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -2496,6 +2533,7 @@ fn mag_second_live_rewind_reflective_sample_is_rebuilt_before_hidden_late_draw()
 
 #[test]
 fn mag_first_live_rewind_is_the_nearest_working_reflection_control() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("first-rewind-reflection-control.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -2535,6 +2573,7 @@ fn mag_first_live_rewind_is_the_nearest_working_reflection_control() {
 
 #[test]
 fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "survivors";
     let runtime_frames = 80;
     let dir = tempfile::tempdir().unwrap();
@@ -2599,6 +2638,7 @@ fn recorded_tick_lines(path: &str) -> usize {
 /// `STONE_LIVE_REWIND_SUPPORTED == 1`: boot WAS admissible here.
 #[test]
 fn live_record_rewind_refuses_late_created_unsupported_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "survivors";
     let runtime_frames = 80;
     let dir = tempfile::tempdir().unwrap();
@@ -2664,6 +2704,7 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
 
 #[test]
 fn live_admission_failure_clears_partial_history() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "survivors";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("live-cadence-refused.replay");
@@ -2697,6 +2738,7 @@ fn live_admission_failure_clears_partial_history() {
 /// resimulation, so the landing state has to carry it.
 #[test]
 fn live_record_rewind_admits_supported_late_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "survivors";
     let history: u32 = 40;
     let target: i64 = 25;
@@ -2760,6 +2802,7 @@ fn live_record_rewind_admits_supported_late_state() {
 /// runs cannot be compared byte-for-byte because `dt` is real wall-clock time.
 #[test]
 fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let horizon: i64 = 40;
     let dir = tempfile::tempdir().unwrap();
@@ -2863,6 +2906,7 @@ fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
 /// author-verified, per the timeline bar's own convention.
 #[test]
 fn live_timeline_bar_exposes_retained_history_while_recording() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
 
@@ -2912,6 +2956,7 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
 
 #[test]
 fn ordinary_recording_captures_no_world_image_by_default() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("default-no-world-image.replay").to_string_lossy().into_owned();
     let state = run_record_dump("bitgun", 30, &log, &[]);
@@ -2926,6 +2971,7 @@ fn ordinary_recording_captures_no_world_image_by_default() {
 
 #[test]
 fn ordinary_replay_captures_no_world_image_by_default() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("default-replay-no-world-image.replay").to_string_lossy().into_owned();
     let _ = run_record_dump("bitgun", 30, &log, &[]);
@@ -2938,6 +2984,7 @@ fn ordinary_replay_captures_no_world_image_by_default() {
 
 #[test]
 fn live_recording_without_timeline_has_zero_periodic_captures_even_with_old_cadence_env() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("no-periodic.replay").to_string_lossy().into_owned();
     let state = run_record_dump(
@@ -2958,6 +3005,7 @@ fn live_recording_without_timeline_has_zero_periodic_captures_even_with_old_cade
 
 #[test]
 fn replay_picker_live_action_opens_history_without_indexing_it() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("picker-live.replay").to_string_lossy().into_owned();
     let state = run_record_dump(
@@ -2975,6 +3023,7 @@ fn replay_picker_live_action_opens_history_without_indexing_it() {
 
 #[test]
 fn far_seek_builds_intermediate_lazy_keyframes_and_matches_plain_playback() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("lazy-far-seek.replay").to_string_lossy().into_owned();
     let _ = run_record_dump("bitgun", 80, &log, &[]);
@@ -3008,6 +3057,7 @@ fn far_seek_builds_intermediate_lazy_keyframes_and_matches_plain_playback() {
 
 #[test]
 fn second_seek_restores_from_the_nearest_lazily_generated_keyframe() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("lazy-nearest.replay").to_string_lossy().into_owned();
     let _ = run_record_dump("bitgun", 80, &log, &[]);
@@ -3034,6 +3084,7 @@ fn second_seek_restores_from_the_nearest_lazily_generated_keyframe() {
 
 #[test]
 fn world_image_opt_in_refusal_does_not_stop_recording() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("boot-refusal-recording.replay").to_string_lossy().into_owned();
     let frames = 40;
@@ -3057,6 +3108,7 @@ fn world_image_opt_in_refusal_does_not_stop_recording() {
 
 #[test]
 fn replay_file_contains_observations_and_bootstrap_but_no_world_image_payload() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("observations-only.replay").to_string_lossy().into_owned();
     let _ = run_record_dump("bitgun", 20, &log, &[]);
@@ -3110,6 +3162,7 @@ fn nth_tick_line(path: &str, n: usize) -> Option<String> {
 /// and compare its simulation state with the live branched state.
 #[test]
 fn explicit_branch_truncates_every_future_bearing_surface_together() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let branch_tick: i64 = 25;
     let horizon: i64 = 40;
@@ -3256,6 +3309,7 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
 /// cannot expose the production phase ordering.
 #[test]
 fn draw_phase_branch_while_paused_commits_at_displayed_tick() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let branch_tick: i64 = 25;
     let dir = tempfile::tempdir().unwrap();
@@ -3290,6 +3344,7 @@ fn draw_phase_branch_while_paused_commits_at_displayed_tick() {
 
 #[test]
 fn draw_phase_branch_while_playing_includes_the_request_frame_tick() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("draw-playing.replay").to_string_lossy().into_owned();
@@ -3326,6 +3381,7 @@ fn draw_phase_branch_while_playing_includes_the_request_frame_tick() {
 
 #[test]
 fn branch_projects_game_input_authority_and_drops_replay_latches() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let run_probe = |log_s: &str, fresh_mouse: bool| {
         let mut env = vec![
             ("STONE_INPUT_PROBE_KEY", "input_probe"),
@@ -3385,6 +3441,7 @@ fn branch_projects_game_input_authority_and_drops_replay_latches() {
 
 #[test]
 fn resume_live_here_persists_the_branched_mag_world_not_the_discarded_future() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("mag-branch-persistence.replay").to_string_lossy().into_owned();
     let progress = dir.path().join("progress.json");
@@ -3461,6 +3518,7 @@ fn resume_live_here_persists_the_branched_mag_world_not_the_discarded_future() {
 
 #[test]
 fn literal_temporary_path_mag_product_smoke() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let replay = dir.path().join("literal-product.replay");
     let replay_s = replay.to_string_lossy().into_owned();
@@ -3571,6 +3629,7 @@ fn literal_temporary_path_mag_product_smoke() {
 
 #[test]
 fn recorded_game_input_is_projected_into_replay_authority() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("recorded-input.replay").to_string_lossy().into_owned();
     let _ = run_record_dump("bitgun", 40, &log_s, &[]);
@@ -3604,6 +3663,7 @@ fn recorded_game_input_is_projected_into_replay_authority() {
 
 #[test]
 fn replay_of_a_log_with_a_midrun_resize_matches_recording() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("resize.replay").to_string_lossy().into_owned();
@@ -3645,6 +3705,7 @@ fn replay_of_a_log_with_a_midrun_resize_matches_recording() {
 
 #[test]
 fn seek_across_midrun_resize_matches_plain_playback() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("resize-seek.replay").to_string_lossy().into_owned();
     let _recorded = run_record_dump(
@@ -3692,6 +3753,7 @@ fn seek_across_midrun_resize_matches_plain_playback() {
 
 #[test]
 fn screenshot_after_render_skipped_seek_reaches_its_frame_budget() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("screenshot-seek.replay").to_string_lossy().into_owned();
     let state = run_record_dump(
@@ -3721,6 +3783,7 @@ fn screenshot_after_render_skipped_seek_reaches_its_frame_budget() {
 /// future still playable, and no in-memory collection cut.
 #[test]
 fn a_failed_branch_rewrite_leaves_the_future_intact() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let horizon: i64 = 40;
     let dir = tempfile::tempdir().unwrap();
@@ -3778,6 +3841,7 @@ fn a_failed_branch_rewrite_leaves_the_future_intact() {
 /// shows up here as a horizon longer than the file.
 #[test]
 fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("rebranch.replay").to_string_lossy().into_owned();
@@ -3811,6 +3875,7 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
 
 #[test]
 fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("rebranch-floor.replay").to_string_lossy().into_owned();
     let live = run_record_dump(
@@ -3846,6 +3911,7 @@ fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
 /// A-B loop jump.
 #[test]
 fn playback_jumps_clear_real_stone_transients_and_keep_persistent_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "survivors";
     let dir = tempfile::tempdir().unwrap();
 
@@ -3932,6 +3998,7 @@ fn playback_jumps_clear_real_stone_transients_and_keep_persistent_state() {
 /// measurement of the machine.
 #[test]
 fn replay_reports_its_own_costs() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
 
@@ -3945,7 +4012,7 @@ fn replay_reports_its_own_costs() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -4165,6 +4232,7 @@ fn lambda_counter(s: &serde_json::Value) -> i64 {
 /// keyframe AND resims forward, invoking the restored lambda after the edit.
 #[test]
 fn lambda_in_state_survives_keyframe_scrub() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("lambda.replay");
@@ -4178,7 +4246,7 @@ fn lambda_in_state_survives_keyframe_scrub() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -4228,6 +4296,7 @@ fn lambda_in_state_survives_keyframe_scrub() {
 /// real gameplay global (`MOBS`) stays present.
 #[test]
 fn audio_resources_excluded_from_sim_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let sim = sim_state_names("bitgun", 3);
     assert!(
         sim.contains("MOBS"),
@@ -4247,6 +4316,7 @@ fn audio_resources_excluded_from_sim_state() {
 /// without the reload, and that the reload was counted.
 #[test]
 fn reload_during_replay_invalidates_keyframes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("reload.replay");
@@ -4260,7 +4330,7 @@ fn reload_during_replay_invalidates_keyframes() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -4299,6 +4369,7 @@ fn reload_during_replay_invalidates_keyframes() {
 /// be populated (the A-jump seam measurement).
 #[test]
 fn ab_loop_cycles_and_restores_correct_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("loop.replay");
@@ -4312,7 +4383,7 @@ fn ab_loop_cycles_and_restores_correct_state() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -4352,6 +4423,7 @@ fn ab_loop_cycles_and_restores_correct_state() {
 /// moment A's keyframe is gone.
 #[test]
 fn ab_loop_survives_incremental_reload_via_rederive() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("loopreload.replay");
@@ -4365,7 +4437,7 @@ fn ab_loop_survives_incremental_reload_via_rederive() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -4407,6 +4479,7 @@ fn ab_loop_survives_incremental_reload_via_rederive() {
 /// with correct state -- never silently diverging past B.
 #[test]
 fn wide_loop_keyframe_survives_eviction() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("wideloop.replay");
@@ -4420,7 +4493,7 @@ fn wide_loop_keyframe_survives_eviction() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -4462,6 +4535,7 @@ fn wide_loop_keyframe_survives_eviction() {
 /// would not fire and current_tick would stay at 90.
 #[test]
 fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("win.replay");
@@ -4475,7 +4549,7 @@ fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -4530,6 +4604,7 @@ fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
 /// queue that happened to be busy.
 #[test]
 fn a_restore_reinstalls_the_image_requests_that_were_still_outstanding() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("queue.png");
     std::fs::copy(workspace_root().join("mag/assets/cursors/color/01.png"), &image)

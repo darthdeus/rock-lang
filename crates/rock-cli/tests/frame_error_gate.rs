@@ -14,6 +14,7 @@
 //! the wrong reason.
 
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
@@ -48,7 +49,7 @@ fn run_frame_with(envs: &[(&str, String)]) -> (String, bool) {
     for (key, value) in envs {
         cmd.env(key, value);
     }
-    let out = cmd.output().expect("spawn rock frame");
+    let out = cmd.output_with_deadline().expect("spawn rock frame");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.success())
@@ -56,6 +57,7 @@ fn run_frame_with(envs: &[(&str, String)]) -> (String, bool) {
 
 #[test]
 fn a_repeating_caught_frame_error_fails_once_with_its_total() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (text, ok) = run_frame(Some(2));
     assert!(
         text.contains("forced frame error"),
@@ -112,6 +114,7 @@ fn a_repeating_caught_frame_error_fails_once_with_its_total() {
 /// remaining frame of a session, with the queue never draining.
 #[test]
 fn a_frame_error_still_publishes_queued_image_uploads() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let image = repo_root().join("games/match3/tests/sims/smoke.snap/boot.png");
     let (text, ok) = run_frame_with(&[
         ("STONE_TEST_IMAGE_LOAD_AT_FRAME", "2".to_string()),
@@ -133,6 +136,7 @@ fn a_frame_error_still_publishes_queued_image_uploads() {
 /// above cannot be passing because `rock frame games/match3` is broken.
 #[test]
 fn a_clean_bounded_run_still_passes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (text, ok) = run_frame(None);
     assert!(ok, "the uninjected control run must pass:\n{text}");
     assert!(

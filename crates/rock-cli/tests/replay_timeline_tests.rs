@@ -10,6 +10,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -39,7 +40,7 @@ fn run_frame_env(
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame");
     assert!(
         out.status.success(),
@@ -79,7 +80,7 @@ fn run_record_dump_observed(
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn live record");
     let state = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
@@ -119,7 +120,7 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
     let text = std::fs::read_to_string(&log).expect("read log");
@@ -137,6 +138,7 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
 /// frames render.
 #[test]
 fn start_paused_freezes_tick_and_time() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let s = run_frame_env("bitgun", 30, &[], &[("STONE_START_PAUSED", "1")]);
     assert_eq!(current_tick(&s), 0, "paused run must not advance the tick counter");
     assert_eq!(
@@ -150,6 +152,7 @@ fn start_paused_freezes_tick_and_time() {
 /// Queued step-frames advance exactly that many ticks, then re-freeze.
 #[test]
 fn step_frames_advance_exactly_n_ticks() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let s = run_frame_env(
         "bitgun",
         30,
@@ -166,6 +169,7 @@ fn step_frames_advance_exactly_n_ticks() {
 /// Run-to-tick fast-forwards to the target tick, then pauses there.
 #[test]
 fn run_to_tick_stops_at_target() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let s = run_frame_env("bitgun", 40, &[], &[("STONE_RUN_TO_TICK", "10")]);
     assert_eq!(
         current_tick(&s),
@@ -189,6 +193,7 @@ fn run_to_tick_stops_at_target() {
 /// this would catch a predicate that failed to exclude them.
 #[test]
 fn seek_reaches_same_state_as_stepping() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("seek.replay");
@@ -203,7 +208,7 @@ fn seek_reaches_same_state_as_stepping() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -246,6 +251,7 @@ fn seek_reaches_same_state_as_stepping() {
 /// seek every probe is muted; a normal run mutes none.
 #[test]
 fn audio_muted_only_while_seeking() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let seek = run_frame_env(
         "bitgun",
         40,
@@ -272,6 +278,7 @@ fn audio_muted_only_while_seeking() {
 /// through the same audio gate even when it is not currently seeking.
 #[test]
 fn headless_frame_runs_are_quiet() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let state = run_frame_env(
         "bitgun",
         5,
@@ -289,6 +296,7 @@ fn headless_frame_runs_are_quiet() {
 
 #[test]
 fn headless_audio_quiet_does_not_suppress_mag_vfx() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let state = run_frame_env(
         "mag",
         2,
@@ -309,6 +317,7 @@ fn headless_audio_quiet_does_not_suppress_mag_vfx() {
 /// 20->25) and assert the probe was muted; break-verify by flipping the gate.
 #[test]
 fn backward_scrub_mutes_audio_through_the_same_gate() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 60);
     let scrubbed = run_frame_env(
         "bitgun",
@@ -342,6 +351,7 @@ fn backward_scrub_mutes_audio_through_the_same_gate() {
 /// the extra draw call never perturbs the byte-identity guard.
 #[test]
 fn cursor_ghost_draws_only_during_windowed_replay() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 20);
     let windowed = run_frame_env(
         "bitgun",
@@ -372,6 +382,7 @@ fn cursor_ghost_draws_only_during_windowed_replay() {
 /// the observable globals; non-`.replay` files are ignored.
 #[test]
 fn replay_picker_lists_and_parses_headers() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     std::fs::write(
         dir.path().join("a.replay"),
@@ -425,6 +436,7 @@ fn replay_picker_lists_and_parses_headers() {
 /// past log-end, and assert the ghost drew at the recorded position.
 #[test]
 fn cursor_ghost_marks_recorded_pointer_when_frozen() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 10);
     let text = std::fs::read_to_string(&log).unwrap();
     let patched = text
@@ -467,6 +479,7 @@ fn cursor_ghost_marks_recorded_pointer_when_frozen() {
 /// at top-left. With the fix the ghost skips entirely (0 draws).
 #[test]
 fn cursor_ghost_skips_before_first_tick() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 20);
     let s = run_frame_env(
         "bitgun",
@@ -500,7 +513,7 @@ fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
     (dir, log_s)
@@ -514,6 +527,7 @@ fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
 /// end. Only the ImGui-IO path could cause that.
 #[test]
 fn space_toggles_pause_via_imgui_not_replayed_input() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 20);
     let frozen = run_frame_env(
         "bitgun",
@@ -538,6 +552,7 @@ fn space_toggles_pause_via_imgui_not_replayed_input() {
 /// advanced exactly one tick.
 #[test]
 fn right_steps_one_tick_via_imgui_not_replayed_input() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 20);
     let stepped = run_frame_env(
         "bitgun",
@@ -559,6 +574,7 @@ fn right_steps_one_tick_via_imgui_not_replayed_input() {
 
 #[test]
 fn shift_right_uses_the_modifier_mapping_for_fast_forward() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 100);
     let jumped = run_frame_env(
         "bitgun",
@@ -582,6 +598,7 @@ fn shift_right_uses_the_modifier_mapping_for_fast_forward() {
 
 #[test]
 fn live_seek_keeps_the_timeline_tool_overlay_interactive() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("live-tool-seek.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -658,6 +675,7 @@ fn live_seek_keeps_the_timeline_tool_overlay_interactive() {
 
 #[test]
 fn punctuation_tool_bindings_reach_the_time_scale_ladder() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let slower = run_frame_env(
         "bitgun",
         10,
@@ -701,6 +719,7 @@ fn punctuation_tool_bindings_reach_the_time_scale_ladder() {
 /// recorded log never carries `b` in keys_down, so only the ImGui-IO path sets it.
 #[test]
 fn loop_marker_b_set_via_imgui_not_replayed_input() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_short_log("bitgun", 20);
     let marked = run_frame_env(
         "bitgun",
@@ -729,6 +748,7 @@ fn loop_marker_b_set_via_imgui_not_replayed_input() {
 /// saving a repro at frame 10, then replays the saved repro.
 #[test]
 fn save_repro_writes_a_replayable_from_boot_log() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("live.replay");
@@ -744,7 +764,7 @@ fn save_repro_writes_a_replayable_from_boot_log() {
         .env("STONE_SAVE_REPRO_PATH", repro.to_string_lossy().as_ref())
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record+save");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -760,7 +780,7 @@ fn save_repro_writes_a_replayable_from_boot_log() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay");
     assert!(
         rep.status.success(),
@@ -789,7 +809,7 @@ fn record_log_with_keys(game: &str, frames: u32, keys_at: &[(usize, &str)]) -> t
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
 
@@ -828,6 +848,7 @@ fn record_log_with_keys(game: &str, frames: u32, keys_at: &[(usize, &str)]) -> t
 /// ignored".
 #[test]
 fn recorded_keys_cannot_toggle_engine_debug_windows() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = record_log_with_keys(
         "bitgun",
         40,
@@ -944,7 +965,7 @@ fn run_frame_stderr(game: &str, frames: u32, extra: &[&str], env: &[(&str, &str)
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame");
     assert!(
         out.status.success(),
@@ -964,6 +985,7 @@ fn run_frame_stderr(game: &str, frames: u32, extra: &[&str], env: &[(&str, &str)
 /// matching one must stay silent -- a warning that always fires is not a gate.
 #[test]
 fn a_replay_names_the_environment_it_disagrees_with() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("env.replay");
@@ -977,7 +999,7 @@ fn a_replay_names_the_environment_it_disagrees_with() {
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .env("STONE_QUIET", "1")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
@@ -1027,6 +1049,7 @@ fn a_replay_names_the_environment_it_disagrees_with() {
 
 #[test]
 fn mag_screenshot_environment_reaches_header_and_mismatch_warning() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("mag-screenshot.replay");
@@ -1039,7 +1062,7 @@ fn mag_screenshot_environment_reaches_header_and_mismatch_warning() {
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .env("MAG_SCREENSHOT", "1")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn Mag record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
 
@@ -1071,6 +1094,7 @@ fn mag_screenshot_environment_reaches_header_and_mismatch_warning() {
 /// reaches the same header path.
 #[test]
 fn the_recorded_environment_survives_awkward_values() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let cases: [(&str, Option<&str>, &str); 5] = [
         ("unset", None, "env STONE_QUIET 0 "),
@@ -1094,7 +1118,7 @@ fn the_recorded_environment_survives_awkward_values() {
             Some(v) => { cmd.env("STONE_QUIET", v); }
             None => { cmd.env_remove("STONE_QUIET"); }
         }
-        let out = cmd.output().expect("spawn record");
+        let out = cmd.output_with_deadline().expect("spawn record");
         assert!(out.status.success(), "{label}: record failed: {}", String::from_utf8_lossy(&out.stderr));
 
         let text = std::fs::read_to_string(&log).expect("read log");
@@ -1138,7 +1162,7 @@ fn run_frame_stderr_optional_env(
         Some(v) => { cmd.env(key, v); }
         None => { cmd.env_remove(key); }
     }
-    let out = cmd.output().expect("failed to spawn rock frame");
+    let out = cmd.output_with_deadline().expect("failed to spawn rock frame");
     assert!(
         out.status.success(),
         "rock frame {game} {extra:?} exited {:?}\nstderr:\n{}",

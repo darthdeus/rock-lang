@@ -5,6 +5,7 @@
 //!
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -25,7 +26,7 @@ fn rock_sim(names: &[&str]) -> (Output, String) {
         .args(names)
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
-        .output()
+        .output_with_deadline()
         .expect("run rock sim");
     let combined = format!(
         "{}{}",
@@ -37,6 +38,7 @@ fn rock_sim(names: &[&str]) -> (Output, String) {
 
 #[test]
 fn a_v1_sim_runs_by_its_unambiguous_short_name() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (out, combined) = rock_sim(&["unique_short_name"]);
     assert!(out.status.success(), "the short name must select the sim:\n{combined}");
     assert!(
@@ -48,6 +50,7 @@ fn a_v1_sim_runs_by_its_unambiguous_short_name() {
 
 #[test]
 fn an_ambiguous_v1_sim_short_name_names_its_candidates() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (out, combined) = rock_sim(&["shared_short_name"]);
     assert!(!out.status.success(), "an ambiguous short name must fail:\n{combined}");
     assert!(
@@ -64,6 +67,7 @@ fn an_ambiguous_v1_sim_short_name_names_its_candidates() {
 /// entry plan and die as `malformed entry plan line: <a valid sim>`.
 #[test]
 fn names_that_are_not_sims_are_all_refused_before_any_sim_boots() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (out, combined) = rock_sim(&[
         "unique_short_name",
         "helper_probe",
@@ -84,6 +88,7 @@ fn names_that_are_not_sims_are_all_refused_before_any_sim_boots() {
 
 #[test]
 fn a_qualified_v1_sim_name_selects_one_of_two_same_short_names() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (out, combined) = rock_sim(&["sim_v1_names::other::shared_short_name", "unique_short_name"]);
     assert!(out.status.success(), "{combined}");
     assert!(
@@ -95,6 +100,7 @@ fn a_qualified_v1_sim_name_selects_one_of_two_same_short_names() {
 
 #[test]
 fn a_v1_sim_snapshot_finds_its_baseline_beside_the_declaring_file() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (out, combined) = rock_sim(&["other_snapshot_baseline"]);
     assert!(out.status.success(), "the committed baseline must be found and match:\n{combined}");
     // The snapshot comparison is the sim's only expect.

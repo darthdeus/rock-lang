@@ -16,6 +16,7 @@
 //! would pass on a testbed that could not start at all.
 
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
@@ -43,7 +44,7 @@ fn run_frame(subject: Option<&str>) -> (String, bool) {
     if let Some(s) = subject {
         cmd.env("RICH_REJECT", s);
     }
-    let out = cmd.output().expect("spawn rock frame");
+    let out = cmd.output_with_deadline().expect("spawn rock frame");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.success())
@@ -60,41 +61,49 @@ fn assert_rejects(subject: &str, needle: &str) {
 
 #[test]
 fn a_newline_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("newline", "rich text is one line");
 }
 
 #[test]
 fn a_carriage_return_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("carriage_return", "rich text is one line");
 }
 
 #[test]
 fn a_tab_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("tab", "rich text is one line");
 }
 
 #[test]
 fn an_unsupported_byte_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("unsupported_byte", "byte 127");
 }
 
 #[test]
 fn a_malformed_sequence_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("malformed_sequence", "starts a malformed sequence");
 }
 
 #[test]
 fn a_codepoint_absent_from_every_font_rejects_by_codepoint_and_offset() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("missing_codepoint", "codepoint 128512 at offset 1");
 }
 
 #[test]
 fn a_late_missing_codepoint_rejects_before_partial_measure_or_emission() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("missing_codepoint_late", "codepoint 128512 at offset 0");
 }
 
 #[test]
 fn a_stale_font_handle_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("stale_font", "stale font handle");
 }
 
@@ -103,16 +112,19 @@ fn a_stale_font_handle_rejects() {
 /// through on the grounds that there is nothing to walk.
 #[test]
 fn a_stale_font_handle_rejects_for_an_empty_sequence() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("empty_stale_font", "stale font handle");
 }
 
 #[test]
 fn a_stale_fallback_handle_rejects_for_an_empty_sequence() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("empty_stale_fallback", "stale font handle");
 }
 
 #[test]
 fn a_fallback_selected_glyph_without_the_requested_face_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("fallback_missing_face", "declares no bold face");
 }
 
@@ -121,17 +133,20 @@ fn a_fallback_selected_glyph_without_the_requested_face_rejects() {
 /// asked for bold would never find out -- so an undeclared face rejects.
 #[test]
 fn an_undeclared_bold_face_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("undeclared_bold", "declares no bold face");
 }
 
 #[test]
 fn an_undeclared_italic_face_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("undeclared_italic", "declares no italic face");
 }
 
 /// Declaring one axis must not admit the combination.
 #[test]
 fn a_half_declared_bold_italic_face_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("undeclared_bold_italic", "declares no bold-italic face");
 }
 
@@ -140,6 +155,7 @@ fn a_half_declared_bold_italic_face_rejects() {
 /// spans drawn.
 #[test]
 fn an_undeclared_face_in_a_later_span_rejects() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_rejects("undeclared_late_span", "declares no italic face");
 }
 
@@ -147,6 +163,7 @@ fn an_undeclared_face_in_a_later_span_rejects() {
 /// above cannot be passing because `rock frame games/testbed` is broken.
 #[test]
 fn an_uninjected_run_still_passes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (text, ok) = run_frame(None);
     assert!(ok, "the uninjected control run must pass:\n{text}");
     assert!(

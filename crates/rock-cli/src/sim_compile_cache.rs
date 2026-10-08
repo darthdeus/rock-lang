@@ -55,6 +55,7 @@ const UNKEYED_ENV: &[&str] = &[
     "ROCK_JOB_ID",
     // Compile records describe the compile; they never change its output.
     "ROCK_COMPILE_STATS",
+    crate::compile_slots::SPAWN_PHASE_FILE_ENV,
     // Slot settings only decide when the compile starts, not what it emits;
     // keying them made interactive and batch runs miss each other's entries.
     crate::compile_slots::SLOTS_ENV,
@@ -339,6 +340,7 @@ fn lock_key(root: &Path, key: &str) -> Result<File> {
     match file.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
+            crate::compile_slots::report_spawn_phase("cache-wait");
             let holder = std::fs::read_to_string(&path)
                 .with_context(|| format!("read sim compile lock {}", path.display()))?;
             let pid = holder.trim();

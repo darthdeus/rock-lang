@@ -7,6 +7,7 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -28,12 +29,13 @@ fn run_census(output: &Path) -> std::process::Output {
             "testbed::sim_allocation_control",
         ])
         .env("ROCK_SIM_TIMEOUT_SECS", "60")
-        .output()
+        .output_with_deadline()
         .expect("spawn allocation census")
 }
 
 #[test]
 fn census_reports_exact_fixture_frames_and_keeps_both_arms() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("census artifact directory");
     let output_path = dir.path().join("sim-allocation-census.json");
     let run = run_census(&output_path);

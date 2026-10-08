@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -26,6 +27,7 @@ fn events(root: &Path) -> Vec<Value> {
 
 #[test]
 fn ordinary_shared_worker_run_writes_validated_lifecycle() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -40,7 +42,7 @@ fn ordinary_shared_worker_run_writes_validated_lifecycle() {
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .output()
+        .output_with_deadline()
         .expect("run shared worker witness");
     assert!(
         output.status.success(),
@@ -69,13 +71,14 @@ fn ordinary_shared_worker_run_writes_validated_lifecycle() {
 
 #[test]
 fn single_name_preserves_requested_and_effective_mode_metadata() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["sim", "testbed", "testbed::co_join2_tuple", "--workers", "-j", "4"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .output()
+        .output_with_deadline()
         .expect("run single-name witness");
     assert!(
         output.status.success(),
@@ -96,6 +99,7 @@ fn single_name_preserves_requested_and_effective_mode_metadata() {
 
 #[test]
 fn recovery_record_keeps_actual_worker_failure_and_occurrences() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -110,7 +114,7 @@ fn recovery_record_keeps_actual_worker_failure_and_occurrences() {
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .output()
+        .output_with_deadline()
         .expect("run recovery witness");
     assert!(!output.status.success(), "crash fixture must fail its invocation");
 
@@ -155,6 +159,7 @@ fn recovery_record_keeps_actual_worker_failure_and_occurrences() {
 /// contract cannot ride on it.
 #[test]
 fn native_refusal_recovery_keeps_cause_and_responsible_entry() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -170,7 +175,7 @@ fn native_refusal_recovery_keeps_cause_and_responsible_entry() {
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .output()
+        .output_with_deadline()
         .expect("run native-refusal witness");
     assert!(
         output.status.success(),
@@ -196,12 +201,13 @@ fn native_refusal_recovery_keeps_cause_and_responsible_entry() {
 
 #[test]
 fn quiet_handled_error_still_writes_terminal_record() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["sim", "testbed", "no_such_sim", "--quiet"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
-        .output()
+        .output_with_deadline()
         .expect("run handled-error witness");
     assert!(!output.status.success(), "unknown sim must fail");
     let records = events(root.path());
@@ -213,20 +219,21 @@ fn quiet_handled_error_still_writes_terminal_record() {
 
 #[test]
 fn concurrent_invocations_keep_independent_histories() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
     let first = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["sim", "testbed", "testbed::co_join2_tuple"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .spawn()
+        .spawn_with_deadline()
         .expect("spawn first invocation");
     let second = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["sim", "testbed", "testbed::co_join3_tuple"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
-        .spawn()
+        .spawn_with_deadline()
         .expect("spawn second invocation");
     let first = first.wait_with_output().expect("wait first invocation");
     let second = second.wait_with_output().expect("wait second invocation");

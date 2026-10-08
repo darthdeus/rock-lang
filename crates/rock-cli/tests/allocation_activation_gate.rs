@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -12,6 +13,7 @@ fn repo_root() -> PathBuf {
 #[test]
 #[ignore = "spawns an instrumented bounded game (-P full)"]
 fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let scratch = tempfile::tempdir().expect("scratch");
     let counts = scratch.path().join("activation.tsv");
     let manifest = scratch.path().join("activation.manifest.txt");
@@ -23,7 +25,7 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
         .arg(&lua)
         .env("ROCK_FRAME_TIMEOUT_SECS", "120")
         .env("SKULL_ALLOCATION_ACTIVATION", &counts)
-        .output()
+        .output_with_deadline()
         .expect("spawn instrumented bounded run");
     assert!(
         output.status.success(),
@@ -117,7 +119,7 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
         .arg(&counts)
         .arg("all")
         .arg(&lua_artifact)
-        .output()
+        .output_with_deadline()
         .expect("join allocation sites to generated Lua");
     assert!(
         joined.status.success(),
@@ -177,6 +179,7 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
 #[test]
 #[ignore = "spawns an instrumented sim (-P full)"]
 fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let scratch = tempfile::tempdir().expect("scratch");
     let heatmap = scratch.path().join("heatmap");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -185,7 +188,7 @@ fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
         .arg(&heatmap)
         .args(["testbed", "testbed::sim_allocation_allocating", "testbed::sim_allocation_control"])
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
-        .output()
+        .output_with_deadline()
         .expect("spawn allocation-site sim matrix");
     assert!(
         output.status.success(),
@@ -225,6 +228,7 @@ fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
 #[test]
 #[ignore = "spawns an instrumented sim (-P full)"]
 fn sim_command_reports_a_child_that_never_loads() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let scratch = tempfile::tempdir().expect("scratch");
     let heatmap = scratch.path().join("heatmap");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -233,7 +237,7 @@ fn sim_command_reports_a_child_that_never_loads() {
         .arg(&heatmap)
         .args(["crates/rock-cli/test-data/sim-load-failure", "load_failure_reaches_the_report"])
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
-        .output()
+        .output_with_deadline()
         .expect("spawn allocation-site sim");
     let combined = format!(
         "{}{}",

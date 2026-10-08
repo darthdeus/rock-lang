@@ -17,6 +17,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
@@ -40,7 +41,7 @@ fn record_and_dump_survivors_state(log: &str, scratch: &Path) -> serde_json::Val
         .env("ROCK_TEST_SEED", "42")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame");
     assert!(
         out.status.success(),
@@ -53,6 +54,7 @@ fn record_and_dump_survivors_state(log: &str, scratch: &Path) -> serde_json::Val
 
 #[test]
 fn arena_globals_project_as_live_rows_and_replay_deterministically() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("arena.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -125,7 +127,7 @@ fn arena_globals_project_as_live_rows_and_replay_deterministically() {
         .env("ROCK_TEST_SEED", "42")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay");
     assert!(
         rep.status.success(),

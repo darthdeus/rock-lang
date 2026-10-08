@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,7 +33,7 @@ fn run_frame_dump(
         cmd.env("MATCH3_PRESET", p);
     }
 
-    let output = cmd.output().expect("failed to spawn rock frame");
+    let output = cmd.output_with_deadline().expect("failed to spawn rock frame");
     assert!(
         output.status.success(),
         "rock frame {game} exited with {:?}\nstderr: {}",
@@ -86,6 +87,7 @@ fn grid_row(state: &serde_json::Value, row: usize) -> String {
 
 #[test]
 fn test_determinism_same_seed_produces_identical_boards() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let a = run_frame_dump("games/match3", 1, 42, None);
     let b = run_frame_dump("games/match3", 1, 42, None);
     assert_eq!(
@@ -96,6 +98,7 @@ fn test_determinism_same_seed_produces_identical_boards() {
 
 #[test]
 fn test_different_seeds_produce_different_boards() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let a = run_frame_dump("games/match3", 1, 42, None);
     let b = run_frame_dump("games/match3", 1, 43, None);
     assert_ne!(
@@ -106,6 +109,7 @@ fn test_different_seeds_produce_different_boards() {
 
 #[test]
 fn test_initial_state_invariants() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // Score, moves, and grid size must be the same regardless of preset.
     for preset in [None, Some("cascade"), Some("many_moves")] {
         let state = run_frame_dump("games/match3", 1, 42, preset);
@@ -121,6 +125,7 @@ fn test_initial_state_invariants() {
 
 #[test]
 fn test_cascade_preset_grid_matches_definition() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // The cascade preset string is "YGBPYGBP/GBPYGBPY/RBRPYGBP/BPBYGBPY/BOBYGBPY/ORRPYGBP/OGYBGYGB/YBGPYBGP".
     // Verify that parse_compact_grid decoded it correctly using the tile label encoding.
     let state = run_frame_dump("games/match3", 1, 42, Some("cascade"));
@@ -134,6 +139,7 @@ fn test_cascade_preset_grid_matches_definition() {
 
 #[test]
 fn test_many_moves_preset_grid_matches_definition() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // "RGBYRPGB/BGRPYBGR/GRYPBGRP/RPBGYRPB/PYRGBPYR/YRPBGYRP/BPYRGBPY/GRPYBGRP"
     let state = run_frame_dump("games/match3", 1, 42, Some("many_moves"));
 
@@ -144,6 +150,7 @@ fn test_many_moves_preset_grid_matches_definition() {
 
 #[test]
 fn test_30_frames_no_input_board_unchanged() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // With no player input the board must not change across frames.
     // Verifies the @update loop does not mutate state spuriously.
     let frame1 = run_frame_dump("games/match3", 1, 42, Some("cascade"));
@@ -162,12 +169,14 @@ fn test_30_frames_no_input_board_unchanged() {
 
 #[test]
 fn test_match3_cascade_preset_frame1() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let state = run_frame_dump("games/match3", 1, 42, Some("cascade"));
     insta::assert_json_snapshot!(match3_runtime(&state));
 }
 
 #[test]
 fn test_match3_many_moves_preset_frame1() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let state = run_frame_dump("games/match3", 1, 42, Some("many_moves"));
     insta::assert_json_snapshot!(match3_runtime(&state));
 }
@@ -177,6 +186,7 @@ fn test_match3_many_moves_preset_frame1() {
 // streams may differ between backends.
 #[test]
 fn test_match3_seeded_random_board_frame1() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // No preset — verifies seed alone produces a deterministic board.
     let state = run_frame_dump("games/match3", 1, 42, None);
     insta::assert_json_snapshot!(match3_runtime(&state));
@@ -184,6 +194,7 @@ fn test_match3_seeded_random_board_frame1() {
 
 #[test]
 fn test_match3_seeded_random_board_alt_seed() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // A second seed to widen coverage. Snapshot will differ from seed 42.
     let state = run_frame_dump("games/match3", 1, 99, None);
     insta::assert_json_snapshot!(match3_runtime(&state));
@@ -198,11 +209,12 @@ fn test_match3_seeded_random_board_alt_seed() {
 /// game's stderr, which `rock sim` forwards verbatim.
 #[test]
 fn test_errored_coroutine_is_logged() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let output = Command::new(rock_bin)
         .args(["sim", "testbed", "testbed::errored_co_logs"])
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock sim");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);

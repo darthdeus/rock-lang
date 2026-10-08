@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -45,7 +46,7 @@ fn run_mag(
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn MAG frame");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -94,7 +95,7 @@ fn run_mag_raw(
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn MAG frame")
 }
 
@@ -246,6 +247,7 @@ fn add_world_damage_snapshot_fixture(progress: &Path) -> PathBuf {
 
 #[test]
 fn binding_history_bootstrap_ignores_mutated_and_deleted_live_history() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -336,6 +338,7 @@ fn binding_history_bootstrap_ignores_mutated_and_deleted_live_history() {
 
 #[test]
 fn settings_bootstrap_replays_a_real_ui_setting_without_touching_disk_b() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -382,6 +385,7 @@ fn settings_bootstrap_replays_a_real_ui_setting_without_touching_disk_b() {
 
 #[test]
 fn repeated_settings_consumer_reuses_the_first_bootstrap_read() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -428,6 +432,7 @@ fn repeated_settings_consumer_reuses_the_first_bootstrap_read() {
 
 #[test]
 fn repeated_settings_consumer_reuses_absent_bootstrap_without_second_disk_probe() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -478,6 +483,7 @@ fn repeated_settings_consumer_reuses_absent_bootstrap_without_second_disk_probe(
 
 #[test]
 fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -604,6 +610,7 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
 
 #[test]
 fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -656,6 +663,7 @@ fn progress_bootstrap_captures_absence_and_keeps_b_read_only() {
 
 #[test]
 fn progress_bootstrap_captures_existing_save_bytes_and_applies_them_once() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -691,6 +699,7 @@ fn progress_bootstrap_captures_existing_save_bytes_and_applies_them_once() {
 
 #[test]
 fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -771,6 +780,7 @@ fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
 
 #[test]
 fn progress_bootstrap_can_be_captured_when_play_starts_after_menu_ticks() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -811,6 +821,7 @@ fn progress_bootstrap_can_be_captured_when_play_starts_after_menu_ticks() {
 
 #[test]
 fn new_replay_fails_closed_when_a_declared_bootstrap_is_missing() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -841,6 +852,7 @@ fn new_replay_fails_closed_when_a_declared_bootstrap_is_missing() {
 
 #[test]
 fn duplicate_bootstrap_keys_are_rejected() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -866,6 +878,7 @@ fn duplicate_bootstrap_keys_are_rejected() {
 
 #[test]
 fn legacy_replay_warns_about_each_missing_bootstrap_contract() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -897,6 +910,7 @@ fn legacy_replay_warns_about_each_missing_bootstrap_contract() {
 
 #[test]
 fn save_repro_retains_bootstrap_entries() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -922,6 +936,7 @@ fn save_repro_retains_bootstrap_entries() {
 
 #[test]
 fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -975,6 +990,7 @@ fn branch_rewrite_retains_bootstrap_entries_in_canonical_key_order() {
 
 #[test]
 fn spell_layout_bootstrap_captures_empty_file_and_keeps_b_read_only() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");
@@ -1017,6 +1033,7 @@ fn spell_layout_bootstrap_captures_empty_file_and_keeps_b_read_only() {
 
 #[test]
 fn progress_bootstrap_records_each_reload_and_deletion() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("fixture dir");
     let progress = empty_progress_path(&dir);
     let layout = dir.path().join("spellbook-layout.jsonl");

@@ -4,6 +4,7 @@
 //! filled stamps, so pixel output cannot make the failure pass accidentally.
 
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
@@ -29,7 +30,7 @@ fn run_frame(force_unfilled: bool) -> (String, bool) {
     if force_unfilled {
         cmd.env("STONE_TEXTURE_SLOT_FORCE_UNFILLED", "1");
     }
-    let out = cmd.output().expect("spawn rock frame");
+    let out = cmd.output_with_deadline().expect("spawn rock frame");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.success())
@@ -49,7 +50,7 @@ fn run_named_sim(name: &str, env: &[(&str, &str)]) -> (String, bool) {
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd.output().expect("spawn rock sim");
+    let out = cmd.output_with_deadline().expect("spawn rock sim");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     (text, out.status.success())
@@ -57,6 +58,7 @@ fn run_named_sim(name: &str, env: &[(&str, &str)]) -> (String, bool) {
 
 #[test]
 fn unfilled_texture_slot_fails_a_bounded_run() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (control, control_ok) = run_frame(false);
     assert!(control_ok, "control run must succeed.\n{control}");
     assert!(
@@ -77,6 +79,7 @@ fn unfilled_texture_slot_fails_a_bounded_run() {
 
 #[test]
 fn unfilled_texture_slot_fails_a_sim() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (control, control_ok) = run_sim(false);
     assert!(control_ok, "control sim must succeed.\n{control}");
 
@@ -111,6 +114,7 @@ fn unfilled_texture_slot_fails_a_sim() {
 /// which is what makes a four-sampler program unauditable per draw.
 #[test]
 fn an_activation_mark_survives_every_audit_until_the_program_is_rebound() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (ok, ok_success) =
         run_named_sim("texture_slot_mark_tiers", &[("SIM_TIER_ARM", "activation_survives")]);
     assert!(
@@ -152,6 +156,7 @@ fn an_activation_mark_survives_every_audit_until_the_program_is_rebound() {
 /// samples whatever the previous draw left on unit 0.
 #[test]
 fn an_unresolvable_image_handle_is_not_a_filled_slot() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (control, control_ok) = run_named_sim("implicit_texture_bind", &[]);
     assert!(
         control_ok,
@@ -168,6 +173,7 @@ fn an_unresolvable_image_handle_is_not_a_filled_slot() {
 
 #[test]
 fn an_unresolvable_explicit_bind_is_not_a_filled_slot() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (control, control_ok) = run_named_sim("explicit_texture_bind", &[]);
     assert!(control_ok, "a resolved explicit bind must satisfy its slot.\n{control}");
 
@@ -182,6 +188,7 @@ fn an_unresolvable_explicit_bind_is_not_a_filled_slot() {
 
 #[test]
 fn a_required_texture_bind_rejects_an_unknown_sampler() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (out, ok) = run_named_sim("unknown_texture_sampler", &[]);
     assert!(ok, "the draw itself remains valid.\n{out}");
     for sampler in ["not_a_sampler", "not_a_sampler_either"] {

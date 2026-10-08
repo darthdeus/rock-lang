@@ -17,9 +17,17 @@ use std::time::{Duration, Instant};
 pub(crate) const SLOT_DIR_ENV: &str = "ROCK_COMPILE_SLOT_DIR";
 pub(crate) const SLOTS_ENV: &str = "ROCK_COMPILE_SLOTS";
 pub(crate) const CLASS_ENV: &str = "ROCK_COMPILE_CLASS";
+pub(crate) const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";
 
 const AUTHOR_SLOT: &str = "author-0";
 const RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+pub(crate) fn report_spawn_phase(phase: &str) {
+    let Some(path) = std::env::var_os(SPAWN_PHASE_FILE_ENV) else { return };
+    if let Err(error) = fs_err::write(&path, phase) {
+        log::warn!(target: "CLI", "cannot record spawn phase {phase} at {}: {error}", Path::new(&path).display());
+    }
+}
 /// Planned peak of one full mag compile (measured 4.3-5.4 GB).
 const COMPILE_PEAK_MIB: u64 = 4608;
 
@@ -205,6 +213,7 @@ fn ram_batch_slots(total_ram_mib: Option<u64>) -> usize {
 }
 
 pub(crate) fn acquire_with(config: &SlotConfig, what: &str) -> Result<CompileSlot> {
+    report_spawn_phase("slot-wait");
     let started = Instant::now();
     fs_err::create_dir_all(&config.dir).context("creating the compile slot directory")?;
     let names = config.candidates();
@@ -229,6 +238,7 @@ pub(crate) fn acquire_with(config: &SlotConfig, what: &str) -> Result<CompileSlo
                         log::debug!(target: "COMPILE", "took compile slot {} for {what} in {waited:?}", names[index]);
                     }
                     let acquisition = SlotAcquisition { slot: Some(names[index].clone()), waited };
+                    report_spawn_phase("compile");
                     return Ok(CompileSlot { file: Some(file), acquisition, marks_thread: false });
                 }
                 Err(TryLockError::WouldBlock) => {}

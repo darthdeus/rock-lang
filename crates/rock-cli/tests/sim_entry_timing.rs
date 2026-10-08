@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -23,6 +24,7 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 fn a_raised_frame_in_one_entry_does_not_abort_its_worker_batch() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let fixture = tempfile::tempdir().expect("timing fixture");
     let project = fixture.path().join("timing_fixture");
     std::fs::create_dir_all(project.join("tests/sims")).unwrap();
@@ -71,7 +73,7 @@ co fn passes_after() -> Coroutine<Wait> {
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "60")
         .env("ROCK_SIM_LOG_DIR", fixture.path().join("history"))
-        .output().expect("run timing fixture");
+        .output_with_deadline().expect("run timing fixture");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     eprintln!("{text}");
 

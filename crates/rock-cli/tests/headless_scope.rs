@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -18,11 +20,12 @@ fn workspace_root() -> PathBuf {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_sim_worker_runs_in_the_headless_slice() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["sim", "crates/rock-cli/test-data/headless-scope", "sim_worker_runs_in_the_sim_slice"])
         .current_dir(workspace_root())
         .env_remove("ROCK_HEADLESS_SCOPE")
-        .output()
+        .output_with_deadline()
         .expect("run rock sim");
     let combined = format!(
         "{}{}",
@@ -41,7 +44,7 @@ fn frame_cgroup(scope_env: Option<&str>) -> String {
     if let Some(value) = scope_env {
         cmd.env("ROCK_HEADLESS_SCOPE", value);
     }
-    let out = cmd.output().expect("run rock frame");
+    let out = cmd.output_with_deadline().expect("run rock frame");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "rock frame failed:\n{stdout}{}", String::from_utf8_lossy(&out.stderr));
     let state: serde_json::Value = serde_json::from_str(stdout.trim()).expect("--dump-state prints JSON");
@@ -51,6 +54,7 @@ fn frame_cgroup(scope_env: Option<&str>) -> String {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_frame_run_uses_the_headless_slice_unless_opted_out() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let inherited = std::fs::read_to_string("/proc/self/cgroup").expect("caller cgroup");
     let scoped = frame_cgroup(None);
     assert!(scoped.contains("/rock-headless.slice/"), "rock frame child cgroup: {scoped}");

@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,7 +33,7 @@ fn record_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record");
     assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
     (dir, log_s)
@@ -63,6 +64,7 @@ fn frames_run(stderr: &str) -> u32 {
 /// it did not stop when the log was spent.
 #[test]
 fn windowed_replay_keeps_looping_past_log_end() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_log("bitgun", 10);
 
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -71,7 +73,7 @@ fn windowed_replay_keeps_looping_past_log_end() {
         .env("FRAME_COUNT", "30")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "rock replay must exit 0\nstderr:\n{stderr}");
@@ -90,6 +92,7 @@ fn windowed_replay_keeps_looping_past_log_end() {
 /// spent, however large FRAME_COUNT is -- the opposite of windowed playback.
 #[test]
 fn headless_frame_replay_exits_at_log_end() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let (_dir, log) = record_log("bitgun", 10);
     let scratch = tempfile::tempdir().expect("scratch");
 
@@ -100,7 +103,7 @@ fn headless_frame_replay_exits_at_log_end() {
         ])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn frame replay");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "frame replay must exit 0\nstderr:\n{stderr}");
@@ -114,10 +117,11 @@ fn headless_frame_replay_exits_at_log_end() {
 /// `rock replay` needs both a game and a log path.
 #[test]
 fn replay_command_rejects_missing_args() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["replay", "bitgun"])
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn");
     assert!(!out.status.success(), "missing log arg must fail");
     assert!(
@@ -130,10 +134,11 @@ fn replay_command_rejects_missing_args() {
 /// A `--replay` pointing at a nonexistent log aborts (reject, don't fall back).
 #[test]
 fn replay_command_rejects_missing_log() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["replay", "bitgun", "/nonexistent/no.replay"])
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn");
     assert!(!out.status.success(), "missing log must fail");
     assert!(

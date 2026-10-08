@@ -2,6 +2,7 @@
 //! the timing values exact where format/alignment is under test, and compare
 //! authoritative state separately from the wall-clock diagnostics.
 
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -13,6 +14,7 @@ fn workspace_root() -> &'static Path {
 
 #[test]
 fn replay_playback_cannot_emit_live_telemetry() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let repository = workspace_root().parent().expect("repository root");
     let source = std::fs::read_to_string(repository.join("stone/engine/systems/telemetry.rock"))
         .expect("telemetry source");
@@ -87,7 +89,7 @@ fn record_raw(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> Outpu
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record")
 }
 
@@ -108,7 +110,7 @@ fn record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serd
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn record dump");
     assert!(
         out.status.success(),
@@ -141,7 +143,7 @@ fn replay_raw(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> Outpu
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay")
 }
 
@@ -162,7 +164,7 @@ fn replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serd
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay dump");
     assert!(
         out.status.success(),
@@ -198,6 +200,7 @@ fn exact_phase_samples(n: usize, first: u64) -> String {
 
 #[test]
 fn replay_profile_range_emits_every_requested_observation_and_the_final_boundary() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("replay profile range");
     let log = dir.path().join("range.replay");
     let timings = exact_samples(8, 10_000);
@@ -375,6 +378,7 @@ fn strip_observational_dump(v: &mut serde_json::Value) {
 
 #[test]
 fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("aligned.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -419,6 +423,7 @@ fn timing_samples_align_exactly_with_observation_ordinals_and_ticks() {
 
 #[test]
 fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("image-load.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -453,6 +458,7 @@ fn a_runtime_image_miss_is_attached_to_its_completed_replay_observation() {
 
 #[test]
 fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let plain = dir.path().join("plain.replay");
     let profiled = dir.path().join("profiled.replay");
@@ -516,6 +522,7 @@ fn opted_in_slow_frames_carry_bounded_named_profiler_attribution() {
 
 #[test]
 fn playback_profiles_only_recorded_slow_ordinals_without_mutating_the_source() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("playback-profile.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -551,6 +558,7 @@ fn playback_profiles_only_recorded_slow_ordinals_without_mutating_the_source() {
 
 #[test]
 fn real_recording_produces_a_nonzero_timing_population() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("measured.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -573,6 +581,7 @@ fn real_recording_produces_a_nonzero_timing_population() {
 
 #[test]
 fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("crash-tail.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -610,6 +619,7 @@ fn crash_tail_can_omit_only_the_final_completed_timing_sample() {
 
 #[test]
 fn legacy_v8_without_timing_remains_playable_and_reports_an_empty_track() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("legacy.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -628,6 +638,7 @@ fn legacy_v8_without_timing_remains_playable_and_reports_an_empty_track() {
 
 #[test]
 fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("legacy-v9.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -650,6 +661,7 @@ fn legacy_v9_total_timing_remains_playable_without_phase_attribution() {
 
 #[test]
 fn legacy_v10_phase_timing_remains_playable_without_slow_profiles() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("legacy-v10.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -672,6 +684,7 @@ fn legacy_v10_phase_timing_remains_playable_without_slow_profiles() {
 
 #[test]
 fn malformed_duplicate_and_orphan_timing_records_are_rejected() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let base = dir.path().join("base.replay");
     let base_s = base.to_string_lossy().into_owned();
@@ -738,6 +751,7 @@ fn malformed_duplicate_and_orphan_timing_records_are_rejected() {
 
 #[test]
 fn malformed_duplicate_and_orphan_slow_profiles_are_rejected() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let base = dir.path().join("profile-base.replay");
     let base_s = base.to_string_lossy().into_owned();
@@ -798,6 +812,7 @@ fn malformed_duplicate_and_orphan_slow_profiles_are_rejected() {
 
 #[test]
 fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let original = dir.path().join("original.replay");
     let changed = dir.path().join("changed.replay");
@@ -899,6 +914,7 @@ fn recorded_and_playback_tracks_are_distinct_and_timing_cannot_change_state() {
 
 #[test]
 fn timeline_populates_timing_and_backward_then_forward_scrub_keeps_alignment() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("timeline.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -968,6 +984,7 @@ fn timeline_populates_timing_and_backward_then_forward_scrub_keeps_alignment() {
 
 #[test]
 fn resume_live_here_drops_abandoned_timing_and_appends_fresh_branch_samples() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let log = dir.path().join("branch-timing.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -1058,6 +1075,7 @@ fn resume_live_here_drops_abandoned_timing_and_appends_fresh_branch_samples() {
 
 #[test]
 fn save_repro_preserves_timing_and_hidden_resimulation_has_no_playback_samples() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("log dir");
     let source = dir.path().join("source.replay");
     let repro = dir.path().join("repro.replay");

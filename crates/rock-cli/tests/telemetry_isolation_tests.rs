@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,12 +35,13 @@ fn boot_mag(
     if let Some(path) = settings_override {
         command.env("MAG_SETTINGS_PATH_OVERRIDE", path);
     }
-    let out = command.output().expect("spawn rock frame");
+    let out = command.output_with_deadline().expect("spawn rock frame");
     assert!(out.status.success(), "rock frame mag failed: {}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[test]
 fn overridden_settings_never_withdraw_the_players_telemetry_consent() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     // Resolved before HOME is substituted below.
     let vault = crate::stone_harness::art_vault_env();
     let home = tempfile::tempdir().expect("home");

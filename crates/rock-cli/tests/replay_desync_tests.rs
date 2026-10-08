@@ -12,6 +12,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -52,7 +53,7 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root());
     configure_game_fixture(&mut command, game);
-    command.output()
+    command.output_with_deadline()
         .expect("failed to spawn rock frame")
 }
 
@@ -70,6 +71,7 @@ fn assert_ok(out: &std::process::Output, ctx: &str) {
 /// and a clean exit.
 #[test]
 fn clean_roundtrip_with_checkpoints_reports_no_divergence() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("ck.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -99,6 +101,7 @@ fn clean_roundtrip_with_checkpoints_reports_no_divergence() {
 /// survive the report.
 #[test]
 fn injected_checkpoint_divergence_is_detected_and_named() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("inj.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -143,6 +146,7 @@ fn injected_checkpoint_divergence_is_detected_and_named() {
 /// and says nothing about desync.
 #[test]
 fn desync_compare_is_off_past_a_reload() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("reload_ck.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -169,7 +173,7 @@ fn desync_compare_is_off_past_a_reload() {
         .env("STONE_RELOAD_AT_FRAME", "5")
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("spawn replay");
     assert!(
         rep.status.success(),
@@ -225,7 +229,7 @@ fn assert_seek_across_checkpoints_clean(game: &str) {
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root());
     configure_game_fixture(&mut command, game);
-    let rep = command.output()
+    let rep = command.output_with_deadline()
         .expect("spawn seek replay");
     assert!(
         rep.status.success(),
@@ -241,6 +245,7 @@ fn assert_seek_across_checkpoints_clean(game: &str) {
 
 #[test]
 fn seek_across_checkpoints_does_not_false_positive_bitgun() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_seek_across_checkpoints_clean("bitgun");
 }
 
@@ -249,6 +254,7 @@ fn seek_across_checkpoints_does_not_false_positive_bitgun() {
 /// exclusion and the skip-compare-while-seeking path.
 #[test]
 fn seek_across_checkpoints_does_not_false_positive_mag() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     assert_seek_across_checkpoints_clean("mag");
 }
 
@@ -258,6 +264,7 @@ fn seek_across_checkpoints_does_not_false_positive_mag() {
 /// order, this fails and names it.
 #[test]
 fn per_tick_checkpoints_have_no_false_positives() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("dir");
     let log = dir.path().join("k1.replay");
     let log_s = log.to_string_lossy().into_owned();

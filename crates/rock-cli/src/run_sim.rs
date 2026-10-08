@@ -1027,6 +1027,7 @@ fn prepare_sims_out_of_process(
     output_path: PathBuf,
     selection: &[String],
 ) -> Result<PreparedSims> {
+    crate::compile_slots::report_spawn_phase("compile-prepare");
     if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
         return prepare_sims(backend, project_path, output_path);
     }
@@ -1059,6 +1060,7 @@ fn compile_receipt_in_child(
     receipt_root: &Path,
     selection: &[String],
 ) -> Result<()> {
+    crate::compile_slots::report_spawn_phase("compile");
     let exe = std::env::current_exe().context("locating the rock binary for the sim compile")?;
     let status = std::process::Command::new(&exe)
         .args(compile_child_invocation_args())
@@ -1115,6 +1117,7 @@ fn compile_sims_with_allocation(
     HashMap<String, String>,
     crate::skull_backend::SkullStone,
 )> {
+    crate::compile_slots::report_spawn_phase("compile");
     // Only skull serves sims now (bone has no codegen, rock is gone): build the
     // bone workspace once (a live Session, tests included), emit the game-shaped
     // main.lua with its `@sim` registry, and collect the wire/env list from the
@@ -5216,6 +5219,7 @@ fn run_worker(
             )
         })
         .unwrap_or(0);
+    crate::compile_slots::report_spawn_phase("execution");
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {

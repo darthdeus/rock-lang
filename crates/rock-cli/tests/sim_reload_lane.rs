@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -18,6 +19,7 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 fn rejected_reload_ends_the_child_without_waiting_for_the_watchdog() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -27,7 +29,7 @@ fn rejected_reload_ends_the_child_without_waiting_for_the_watchdog() {
         ])
         .current_dir(&root)
         .env("ROCK_SIM_TIMEOUT_SECS", "10")
-        .output()
+        .output_with_deadline()
         .expect("run rock sim");
     let combined = format!(
         "{}{}",

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -55,12 +56,13 @@ fn run_sim(name: &str) -> std::process::Output {
         .args(["sim", "mag", name])
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
-        .output()
+        .output_with_deadline()
         .unwrap_or_else(|error| panic!("spawn {name}: {error}"))
 }
 
 #[test]
 fn virtual_controller_reaches_the_production_rock_authority() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let output = run_sim("physical_pad_integration");
     assert_eq!(
         assert_sim_pass("physical_pad_integration", &output),
@@ -70,6 +72,7 @@ fn virtual_controller_reaches_the_production_rock_authority() {
 
 #[test]
 fn binding_changes_survive_a_fresh_process() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
     let vault = crate::stone_harness::art_vault_env();
     let pref_root = tempfile::tempdir().expect("pref root");
@@ -90,7 +93,7 @@ fn binding_changes_survive_a_fresh_process() {
             .env("XDG_STATE_HOME", &state)
             .env("XDG_CACHE_HOME", &cache)
             .env(vault.0, &vault.1)
-            .output()
+            .output_with_deadline()
             .unwrap_or_else(|error| panic!("spawn {name}: {error}"))
     };
 
@@ -113,6 +116,7 @@ fn binding_changes_survive_a_fresh_process() {
 
 #[test]
 fn controller_only_traversal_reaches_production_consumers() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let output = run_sim("controller_traversal");
     assert_sim_pass("controller_traversal", &output);
 }
