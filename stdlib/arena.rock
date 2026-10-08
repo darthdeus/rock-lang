@@ -87,7 +87,7 @@ fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
 // `T` is pinned by the handle rather than left to the call site: an oracle
 // taking two bare ints has nothing to infer from, and the use site's expected
 // type is `T?`, which silently instantiates the store's column as `[T?]`.
-fn __arena_store<T>(arena: Arena<T>) -> ArenaStore<T>? {
+@inline fn __arena_store<T>(arena: Arena<T>) -> ArenaStore<T>? {
     let boxed = __arena_store_any(arena._scene_id, arena._arena_id)
     if is_null(boxed) { return null }
     let store: ArenaStore<T> = cast(boxed.unwrap())
@@ -338,7 +338,7 @@ fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
 }
 
 @frame_ref_source
-fn Arena<T>.borrow(arena, entity: Entity<T>) -> (ref T)? {
+@inline fn Arena<T>.borrow(arena, entity: Entity<T>) -> (ref T)? {
     if !__arena_owns(arena, entity) { return null }
     let found = __arena_store(arena)
     if found == null { return null }
