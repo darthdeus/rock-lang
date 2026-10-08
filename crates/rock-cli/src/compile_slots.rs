@@ -462,7 +462,8 @@ mod tests {
     fn hold_slot_until_killed() {
         let Some(dir) = std::env::var_os(CHILD_DIR_ENV) else { return };
         let _slot = acquire_with(&config(Path::new(&dir), 1, CompileClass::Batch), "child").unwrap();
-        println!("held");
+        // Serial libtest prints its test-name prefix without a trailing newline.
+        println!("\nheld");
         std::io::stdout().flush().unwrap();
         std::thread::sleep(Duration::from_secs(60));
     }
@@ -472,7 +473,7 @@ mod tests {
         use std::io::BufRead;
         let dir = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "compile_slots::tests::hold_slot_until_killed", "--ignored", "--nocapture"])
+            .args(["--exact", "compile_slots::tests::hold_slot_until_killed", "--ignored", "--nocapture", "--test-threads=1"])
             .env(CHILD_DIR_ENV, dir.path())
             .stdout(std::process::Stdio::piped())
             .spawn()
