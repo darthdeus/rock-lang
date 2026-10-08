@@ -465,9 +465,11 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         for source in &sources {
             let text = fs::read_to_string(source).expect("read MAG source");
             for (line_number, line) in text.lines().enumerate() {
-                if line.contains(field)
-                    && !line.contains(qualified)
-                    && !line.trim_start().starts_with(declaration)
+                // Save-file JSON keys name the field as data, not as an access.
+                let code = without_string_literals(line);
+                if code.contains(field)
+                    && !code.contains(qualified)
+                    && !code.trim_start().starts_with(declaration)
                 {
                     findings.push(format!(
                         "{}:{}: unqualified Player-owned field `{field}`",
@@ -1469,4 +1471,28 @@ fn mag_tick_intent_is_overwritten_before_the_live_tick_consumes_it() {
         .find("mag_simulation_tick(world, tick_intent, dt)")
         .expect("canonical tick call");
     assert!(fill < consume, "input must be filled before the live tick consumes it");
+}
+
+fn without_string_literals(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+                out.push('"');
+            }
+        } else {
+            if ch == '"' {
+                in_string = true;
+            }
+            out.push(ch);
+        }
+    }
+    out
 }
