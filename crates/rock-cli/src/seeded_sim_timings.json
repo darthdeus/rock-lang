@@ -321,7 +321,6 @@
     "chain_lightning_reused_effects_reset": 412,
     "chain_lightning_waits_for_its_world_to_resume": 570,
     "chapel_gate_door_light_witness": 4106,
-    "chapel_key_progression": 531,
     "chapel_key_unlock_deadline_uses_owning_world_clock": 477,
     "chapel_pillar_blocks_cast": 475,
     "chapel_wisps_cross_gate": 693,
