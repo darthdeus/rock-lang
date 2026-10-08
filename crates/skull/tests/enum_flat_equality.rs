@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, require_luajit, run_luajit};
 
 const SRC: &str = r#"
 nobox value Pos { x: int, y: int }
@@ -50,14 +50,7 @@ fn flat_enum_equality_compares_threaded_cells_without_boxes() {
 
 #[test]
 fn flat_enum_equality_preserves_variant_and_payload_semantics() {
-    if std::process::Command::new("luajit")
-        .arg("-v")
-        .output()
-        .is_err()
-    {
-        eprintln!("luajit not found; skipping execution check");
-        return;
-    }
+    require_luajit();
     let mut lua = emit_module(SRC);
     lua.push_str("\nprint(equal_tag(1, 3, 4), equal_tag(1, 3, 5), equal_tag(0, 3, 4), equal_tag(2, 3, 4), not_equal_tag(1, 3, 4), not_equal_tag(1, 3, 5), equal_targets(1, 3, 4, 1, 3, 4), equal_targets(1, 3, 4, 1, 3, 5), equal_targets(0, 0, 0, 0, 9, 9), equal_targets(0, 0, 0, 2, 0, 0), equal_maybe(-1, -1), equal_maybe(-1, 1), equal_maybe(1, 1))\n");
     let path = std::env::temp_dir().join(format!("skull_flat_enum_eq_{}.lua", std::process::id()));

@@ -7,7 +7,7 @@
 //! A `value` struct holding the enum field therefore scalarizes into a C-layout
 //! cdata with an int field (NOT a Lua table) and works across the scalar ABI
 //! (by-value pass). See `docs/skull-enum-value-types.md`.
-use crate::common::{emit_mir, emit_module};
+use crate::common::{emit_mir, emit_module, require_luajit};
 
 const SRC: &str = r#"
 enum BlendMode { Alpha, Additive, Multiply }
@@ -68,10 +68,7 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
 /// rejects a value struct with an enum field -- so it runs skull-only here.
 #[test]
 fn value_struct_with_enum_field_runs_correctly() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return;
-    }
+    require_luajit();
     let emit = emit_mir(SRC);
     let mut prog = emit.lua.clone();
     // Capture print, run the @test fn (`@test` names are unmangled), echo output.
@@ -101,12 +98,9 @@ fn value_struct_with_enum_field_runs_correctly() {
 }
 
 /// Compile `src`, append a print-capturing harness that calls `fn_name`, run under
-/// luajit, and return the captured stdout (`None` if luajit is unavailable).
-fn run_skull_test(src: &str, fn_name: &str) -> Option<String> {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return None;
-    }
+/// luajit, and return the captured stdout (panicking if luajit is unavailable).
+fn run_skull_test(src: &str, fn_name: &str) -> String {
+    require_luajit();
     let mut prog = emit_mir(src).lua.clone();
     prog.push_str(&format!(
         "\nlocal __b=\"\"\nlocal __op=print\n\
@@ -119,7 +113,7 @@ fn run_skull_test(src: &str, fn_name: &str) -> Option<String> {
     let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
     let _ = std::fs::remove_file(&path);
     assert!(out.status.success(), "luajit failed:\nstderr: {}", String::from_utf8_lossy(&out.stderr));
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
+    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 /// SENTINEL (`docs/test-sentinels.md`): a payload-free enum that ESCAPES into `any`
@@ -144,7 +138,7 @@ fn t() {
 }
 fn main() { t() }
 "#;
-    let Some(stdout) = run_skull_test(SRC, "t") else { return };
+    let stdout = run_skull_test(SRC, "t");
     assert_eq!(
         stdout.trim(),
         "1",

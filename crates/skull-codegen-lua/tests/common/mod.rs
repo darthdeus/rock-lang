@@ -6,6 +6,15 @@ use skull_mir::lower::{lower_instance_with_plans, ScalarCtx};
 use skull_mir::mir::{FuncRef, MirFunc};
 use skull_mir::monoty::MonoInterner;
 
+/// Panic unless `luajit` runs. Execution-oracle tests call this up front
+/// instead of skipping when the binary is absent: a host without luajit must
+/// report red for tests that never ran, never green.
+pub fn require_luajit() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        panic!("luajit is required for this execution test but was not found on PATH");
+    }
+}
+
 pub fn lower_test_ref(
     ws: &bone_semantic::inference::Workspace,
     mid: bone_semantic::prelude::ModuleId,

@@ -10,7 +10,7 @@
 //! (the mag `mag.grid.floors_walls` regression). The SROA forwarding pass in
 //! `skull-transform` forwards those reads to the ctor operands so DCE drops the
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, require_luajit, run_luajit};
 
 const NULLABLE_ASSET_READ: &str = r#"
 value Handle { id: int, tags: [int] }
@@ -155,14 +155,13 @@ fn value_struct_with_whole_use_keeps_cdata() {
     );
     // Runtime guard against a BAD fold (e.g. an uninitialized-cell read): the value
     // must be exactly 33.
-    if std::process::Command::new("luajit").arg("-v").output().is_ok() {
-        let path = std::env::temp_dir().join(format!("skull_coexist_{}.lua", std::process::id()));
-        std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
-        let out = std::process::Command::new("luajit").arg(&path).output().expect("run");
-        let _ = std::fs::remove_file(&path);
-        assert!(out.status.success(), "luajit failed:\n{}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "33", "coexist must compute correctly");
-    }
+    require_luajit();
+    let path = std::env::temp_dir().join(format!("skull_coexist_{}.lua", std::process::id()));
+    std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
+    let out = std::process::Command::new("luajit").arg(&path).output().expect("run");
+    let _ = std::fs::remove_file(&path);
+    assert!(out.status.success(), "luajit failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "33", "coexist must compute correctly");
 }
 
 #[test]

@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use crate::common::require_luajit;
+
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
         .iter()
@@ -123,6 +125,8 @@ fn is_known_divergence(file: &str, test: &str) -> bool {
 #[test]
 #[ignore = "execution oracle; run with --ignored --nocapture"]
 fn corpus_execution_oracle() {
+    // A missing luajit must fail here with its name, not as per-file TIMEOUTs.
+    require_luajit();
     let tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests");
     let mut files = Vec::new();
     collect_rock_files(&tests_dir, &mut files);

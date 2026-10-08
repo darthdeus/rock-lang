@@ -10,7 +10,7 @@
 //! cdata-eligible (cut 1 is single-scalar-payload) and keep the table -- exactly
 //! the case this SROA targets. (A single-scalar enum is now a value cdata instead;
 //! see `enum_cdata.rs`.) Escaping table enums keep the table.
-use crate::common::{emit_module, function_body};
+use crate::common::{emit_module, function_body, require_luajit};
 
 const COALESCE_SRC: &str = r#"
 enum Resource { Image(int), Named(string), Empty }
@@ -89,7 +89,7 @@ fn main() { t() }
 
 #[test]
 fn nullable_enum_coalesce_preserves_evaluation_and_escaping_payloads() {
-    let Some(stdout) = run_t(COALESCE_SEMANTICS_SRC) else { panic!("luajit required") };
+    let stdout = run_t(COALESCE_SEMANTICS_SRC);
     assert_eq!(stdout, "5 30 4 31\n4 1\n41\n47\n10\n-7 53\n59");
 }
 
@@ -192,12 +192,9 @@ fn run_t_path() -> std::path::PathBuf {
 }
 
 /// Emit `src`, append a print-capturing harness that calls `t()`, run under
-/// luajit, and return the captured stdout (`None` if luajit is unavailable).
-fn run_t(src: &str) -> Option<String> {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return None;
-    }
+/// luajit, and return the captured stdout (panicking if luajit is unavailable).
+fn run_t(src: &str) -> String {
+    require_luajit();
     let mut prog = emit_module(src);
     prog.push_str(
         "\nlocal __b=\"\"\nlocal __op=print\n\
@@ -210,18 +207,18 @@ fn run_t(src: &str) -> Option<String> {
     let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
     let _ = std::fs::remove_file(&path);
     assert!(out.status.success(), "luajit failed:\nstderr: {}", String::from_utf8_lossy(&out.stderr));
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 #[test]
 fn nonescaping_payload_enum_runs_correctly() {
-    let Some(stdout) = run_t(SRC) else { return };
+    let stdout = run_t(SRC);
     assert_eq!(stdout, "1 99 3", "got {stdout:?}");
 }
 
 #[test]
 fn mixed_payload_and_unit_enum_runs_correctly() {
-    let Some(stdout) = run_t(MIXED_SRC) else { return };
+    let stdout = run_t(MIXED_SRC);
     assert_eq!(stdout, "1 99 7 4", "got {stdout:?}");
 }
 
@@ -265,7 +262,7 @@ fn dynamic_enum_spread_immediately_consumed_by_loop_stays_scalar() {
 
 #[test]
 fn dynamic_enum_spread_loop_runs_correctly() {
-    let Some(stdout) = run_t(DYNAMIC_SPREAD_LOOP) else { return };
+    let stdout = run_t(DYNAMIC_SPREAD_LOOP);
     assert_eq!(stdout, "9", "got {stdout:?}");
 }
 
@@ -306,7 +303,7 @@ fn dynamic_enum_spread_keeps_box_at_vector_escape() {
 
 #[test]
 fn dynamic_enum_spread_escape_runs_correctly() {
-    let Some(stdout) = run_t(DYNAMIC_SPREAD_ESCAPE) else { return };
+    let stdout = run_t(DYNAMIC_SPREAD_ESCAPE);
     assert_eq!(stdout, "2 Mouse", "got {stdout:?}");
 }
 
@@ -370,7 +367,7 @@ fn tuple_match_materializes_a_bound_enum_that_escapes() {
 
 #[test]
 fn tuple_enum_match_runs_correctly() {
-    let Some(stdout) = run_t(TUPLE_ENUM_MATCH) else { return };
+    let stdout = run_t(TUPLE_ENUM_MATCH);
     assert_eq!(stdout, "true false true false 1 Key", "got {stdout:?}");
 }
 
@@ -436,7 +433,7 @@ fn nested_flat_enums_cross_a_nobox_value_wire_without_boxes() {
 
 #[test]
 fn nested_flat_enums_in_a_nobox_value_run_correctly() {
-    let Some(stdout) = run_t(NOBOX_NESTED_ENUM_FIELDS) else { return };
+    let stdout = run_t(NOBOX_NESTED_ENUM_FIELDS);
     assert_eq!(stdout, "17", "got {stdout:?}");
 }
 
@@ -474,7 +471,7 @@ fn nested_flat_enum_still_materializes_at_vector_escape() {
 
 #[test]
 fn nested_flat_enum_escape_runs_correctly() {
-    let Some(stdout) = run_t(NOBOX_NESTED_ENUM_ESCAPE) else { return };
+    let stdout = run_t(NOBOX_NESTED_ENUM_ESCAPE);
     assert_eq!(stdout, "8", "got {stdout:?}");
 }
 
@@ -539,6 +536,6 @@ fn nested_flat_enums_cross_an_ordinary_value_wire_without_boxes() {
 
 #[test]
 fn nested_flat_enums_in_an_ordinary_value_run_correctly() {
-    let Some(stdout) = run_t(VALUE_NESTED_ENUM_FIELDS) else { return };
+    let stdout = run_t(VALUE_NESTED_ENUM_FIELDS);
     assert_eq!(stdout, "9 9", "got {stdout:?}");
 }

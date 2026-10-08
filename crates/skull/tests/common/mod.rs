@@ -496,6 +496,15 @@ pub fn ws_of(src: &str) -> Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
 }
 
+/// Panic unless `luajit` runs. Execution-oracle tests call this up front
+/// instead of skipping when the binary is absent: a host without luajit must
+/// report red for tests that never ran, never green.
+pub fn require_luajit() {
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        panic!("luajit is required for this execution test but was not found on PATH");
+    }
+}
+
 /// Run `prog` under luajit, returning trimmed stdout (panicking with stderr on a
 /// non-zero exit). `tag` disambiguates the temp file so parallel tests never
 /// collide (nextest is process-per-test, but be safe under `cargo test` threads).

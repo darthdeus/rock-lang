@@ -12,10 +12,7 @@ use skull_mir::mir::FuncRef;
 
 #[test]
 fn allocation_activation_scopes_hits_and_callbacks_to_replay_observations() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return;
-    }
+    common::require_luajit();
     let output = std::env::temp_dir().join(format!(
         "rock-allocation-observations-{}.tsv",
         std::process::id()
@@ -111,6 +108,7 @@ fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) 
 
 #[test]
 fn absent_field_store_skips_nil_key_insertion_and_preserves_clearing() {
+    common::require_luajit();
     let lua = emit_clean(
         "struct Row { payload: string? = null } fn update(row: Row, value: string?) { row.payload = value }",
         "update",
@@ -174,6 +172,7 @@ fn numeric_selection_rejects_effectful_and_inclusive_branches() {
 
 #[test]
 fn numeric_selection_preserves_special_values_and_guarded_assignment() {
+    common::require_luajit();
     for (condition, yes, no, native) in [
         ("<", "a", "b", "min"),
         ("<", "b", "a", "max"),
@@ -206,6 +205,7 @@ print('selection-ok')
 
 #[test]
 fn numeric_selection_preserves_writes_before_the_comparison() {
+    common::require_luajit();
     let lua = emit_clean(r#"
 struct Probe { value: float, writes: int }
 @nomangle fn choose(a: float, b: float, p: Probe) -> float {
@@ -271,7 +271,7 @@ fn emit_clean_shaped(src: &str, fn_name: &str, shape: TailCallShape) -> String {
 /// roots, run a Lua `driver` expression (e.g. `"sign(-5)"`) under luajit, and
 /// return its trimmed stdout. This keeps inlining disabled and delivers the
 /// residual stdlib instances instead of depending on a splice for completeness.
-/// Skips if luajit is absent so the suite still runs on a bare box.
+/// Panics if luajit is absent: a host without it must fail these tests, never pass them.
 fn run(src: &str, driver: &str) -> String {
     run_shaped(src, driver, TailCallShape::All)
 }
@@ -318,10 +318,7 @@ fn run_shaped_bound_looped(
             })
             .collect()
     });
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return driver.to_string(); // tests compare against this -> trivially pass
-    }
+    common::require_luajit();
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");

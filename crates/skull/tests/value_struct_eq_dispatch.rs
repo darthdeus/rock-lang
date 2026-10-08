@@ -6,7 +6,7 @@
 // `skull/src/lib.rs`) that native `==` reaches directly. `eq_route`
 // (`skull-mir/src/lower/dispatch.rs`) now recognizes same-named `value`
 // struct operands and routes to `EqRoute::Primitive`.
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, require_luajit, run_luajit};
 
 #[test]
 fn vector_handle_equality_does_not_materialize_carriers() {
@@ -123,10 +123,7 @@ fn make(tag: string, x: float, y: float) -> V2 {
 
 #[test]
 fn value_struct_equality_evaluates_each_operand_exactly_once() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return;
-    }
+    require_luajit();
     let mut lua = emit_module(SINGLE_EVAL_CONTROL);
     lua.push_str("\nprint(eq_effectful())\n");
     let out = run_luajit(&lua, "value_struct_eq_single_eval");
@@ -159,10 +156,7 @@ value Wrap { tag: int, name: string }
 
 #[test]
 fn value_struct_equality_preserves_semantics() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return;
-    }
+    require_luajit();
     let mut lua = emit_module(SEMANTIC_CORRECTNESS);
     lua.push_str(
         "\nprint(eq_scalar(1.0, 2.0, 1.0, 2.0), eq_scalar(1.0, 2.0, 1.0, 3.0), ne_scalar(1.0, 2.0, 1.0, 3.0), ne_scalar(1.0, 2.0, 1.0, 2.0), eq_gc_same_ref(5), ne_gc_different_tag(5, 6))\n",
@@ -224,10 +218,7 @@ fn differ(x: Handle<int>, y: Handle<int>) -> bool { return x != y }
 
 #[test]
 fn scalar_value_leaf_equality_keeps_field_semantics() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return;
-    }
+    require_luajit();
     let mut lua = emit_module(SCALAR_LEAF_SEMANTICS);
     lua.push_str(
         "\nprint(handle_eq(1, 2, 1, 2), handle_eq(1, 2, 1, 3), handle_eq(1, 2, 4, 2))\
@@ -263,10 +254,7 @@ fn differ(h: Holder, t: Tint) -> bool { return h.tint.unwrap() != t }
 
 #[test]
 fn stored_float_value_equality_matches_a_fresh_operand() {
-    if std::process::Command::new("luajit").arg("-v").output().is_err() {
-        eprintln!("luajit not found; skipping execution check");
-        return;
-    }
+    require_luajit();
     let mut lua = emit_module(STORED_FLOAT_VALUE);
     lua.push_str("\nprint(stored_float_eq(0.4, 0.1), stored_float_ne(0.4, 0.1), stored_float_eq(0.5, 0.25))\n");
     let out = run_luajit(&lua, "value_struct_eq_stored_float");
