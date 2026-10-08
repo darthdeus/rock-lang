@@ -318,7 +318,6 @@
     "chain_lightning_release_split": 686,
     "chain_lightning_release_zero_recipient_control": 516,
     "chain_lightning_respects_los_from_the_primary_target": 552,
-    "chain_lightning_reused_effects_reset": 412,
     "chain_lightning_waits_for_its_world_to_resume": 570,
     "chapel_gate_door_light_witness": 4106,
     "chapel_key_unlock_deadline_uses_owning_world_clock": 477,
