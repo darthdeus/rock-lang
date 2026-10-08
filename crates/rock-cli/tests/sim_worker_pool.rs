@@ -68,6 +68,53 @@ fn sim_fixture_project(root: &Path, name: &str) -> PathBuf {
 }
 
 #[test]
+fn single_and_multi_name_workers_boot_the_same_bytecode_format() {
+    let fixture = tempfile::tempdir().expect("boot format fixture");
+    let project = sim_fixture_project(fixture.path(), "boot_format_fixture");
+    std::fs::write(project.join("tests/sims/boot.rock"), r#"
+inline(lua) fn record_boot_format() = """
+local input = assert(io.open(arg[0], 'rb'))
+local magic = input:read(3)
+input:close()
+local output = assert(io.open(os.getenv('ROCK_FIXTURE_BOOT_FORMAT'), 'ab'))
+output:write(string.format('%02x%02x%02x\n', magic:byte(1, 3)))
+output:close()
+"""
+@sim
+co fn boot_probe() -> Coroutine<Wait> {
+    start_game "boot_format_fixture"
+    record_boot_format()
+    sim_expect(true, "boot format recorded from the running chunk")
+    stop_sim()
+}
+"#).unwrap();
+    let formats = |label: &str, specs: &[&str]| -> Vec<String> {
+        let capture = fixture.path().join(format!("{label}.txt"));
+        let out = Command::new(rock_bin()).arg("sim").arg(&project).args(specs)
+            .args(["--isolated", "-j", "1"]).current_dir(workspace_root())
+            .env("ROCK_FIXTURE_BOOT_FORMAT", &capture)
+            .env("ROCK_SIM_LOG_DIR", fixture.path().join(label))
+            .env("ROCK_SIM_COMPILE_CACHE_DIR", fixture.path().join("cache"))
+            .env("ROCK_SIM_TIMEOUT_SECS", "60")
+            .output().expect("run boot format fixture");
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{label}: {text}");
+        assert_eq!(text.lines().filter(|line| line.contains("boot_probe: PASS")).count(),
+            specs.len(), "{label}: {text}");
+        std::fs::read_to_string(capture).expect("running chunk formats")
+            .lines().map(str::to_owned).collect()
+    };
+    let single = formats("single", &["boot_probe"]);
+    let multi = formats("multi", &["boot_probe", "boot_probe"]);
+    assert_eq!(single.len(), 1);
+    assert_eq!(multi.len(), 2);
+    assert!(multi.iter().all(|format| format == &single[0]),
+        "single-name and multi-name workers boot different formats: {single:?} vs {multi:?}");
+    assert_eq!(single[0], "1b4c4a", "workers must boot LuaJIT bytecode");
+}
+
+#[test]
 fn duration_allocated_workers_preserve_isolated_results_in_three_orders() {
     use serde_json::{json, Value};
     let fixture = tempfile::tempdir().expect("duration fixture");

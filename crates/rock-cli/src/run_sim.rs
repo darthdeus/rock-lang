@@ -1353,6 +1353,7 @@ fn do_run_sim_opts_recorded(
         update_snapshots,
         &prepared.source_files,
     );
+    emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
 
     let (display_name, summary) = run_named_entry(
