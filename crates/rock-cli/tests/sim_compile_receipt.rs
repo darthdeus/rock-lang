@@ -444,14 +444,14 @@ fn concurrent_sim_runs_share_one_compile_cache_entry() {
     write_cache_fixture(&project);
     let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
-    let deadline = SpawnBudget::deadline();
+    let budget = SpawnBudget::budget();
     std::thread::scope(|scope| {
         let a = scope.spawn(|| {
-            let _spawn_budget = SpawnBudget::enter(deadline);
+            let _spawn_budget = SpawnBudget::enter(budget);
             run.compiled("concurrent-a", "cache_probe", &[], &[])
         });
         let b = scope.spawn(|| {
-            let _spawn_budget = SpawnBudget::enter(deadline);
+            let _spawn_budget = SpawnBudget::enter(budget);
             run.compiled("concurrent-b", "cache_probe", &[], &[])
         });
         a.join().expect("first run");

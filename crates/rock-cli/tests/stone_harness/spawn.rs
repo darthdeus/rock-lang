@@ -1,23 +1,61 @@
+//! Per-spawn phase budgets for heavy child processes.
+//!
+//! A heavy test enters one [`SpawnBudget`]; every child it spawns then gets
+//! fresh per-phase caps derived from that budget instead of sharing one
+//! absolute deadline. A slow-but-progressing spawn under load passes: the
+//! slot wait survives while the compile queue moves, compiles get a generous
+//! cap, and execution gets the full budget from when it starts. A hang still
+//! fails, named with the phase it died in, within its phase cap.
+
 use std::cell::Cell;
 use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 thread_local! {
-    static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static BUDGET: Cell<Option<Duration>> = const { Cell::new(None) };
 }
 
+/// How often [`BudgetedChild::wait`] checks the child and its reported phase.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Fresh cap for draining output pipes after the child exits. A descendant
+/// can hold a pipe after the launcher is gone; this bounds that wait without
+/// eating the phase budgets.
+const DRAIN_CAP: Duration = Duration::from_secs(30);
+
+/// Overall slot-wait multiple of the budget. With a moving queue a waiter can
+/// legitimately outlast one budget; the stall cap is the hang bound, this one
+/// only caps pathological starvation while others cycle through the slots.
+const SLOT_OVERALL_MULTIPLE: u32 = 5;
+
+/// Compile and cache-wait multiple of the budget: one generous compile, not
+/// one shared deadline slice. Timeouts report the elapsed time so slow
+/// compiles under load stay visible instead of silently passing.
+const COMPILE_MULTIPLE: u32 = 2;
+
+/// Per-spawn phase budgets for one heavy test.
+///
+/// The budget is a duration, not a deadline: each spawned child gets fresh
+/// caps (spawn and execution: the budget; slot stall: the budget without
+/// queue movement, overall: five budgets; compile and cache-wait: two
+/// budgets). Sequential spawns never inherit each other's spent time, so a
+/// test with several slow-but-progressing children passes. Nested budgets
+/// take the tighter one; dropping the guard restores the outer budget, even
+/// across an assertion unwind, so a fixture failure never leaks a zero budget
+/// into its siblings.
 pub struct SpawnBudget {
-    previous: Option<Instant>,
+    previous: Option<Duration>,
     // A guard restores the thread on which it was entered.
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl SpawnBudget {
     pub fn new(limit: Duration) -> Self {
-        Self::enter(Instant::now() + limit)
+        Self::enter(limit)
     }
 
     pub fn for_test(seconds: u64) -> Self {
@@ -25,13 +63,13 @@ impl SpawnBudget {
         Self::new(Duration::from_secs(seconds.saturating_sub(5)))
     }
 
-    pub fn deadline() -> Instant {
-        DEADLINE.with(|deadline| deadline.get().expect("heavy test must enter a SpawnBudget before spawning"))
+    pub fn budget() -> Duration {
+        BUDGET.with(|budget| budget.get().expect("heavy test must enter a SpawnBudget before spawning"))
     }
 
-    pub fn enter(deadline: Instant) -> Self {
-        let previous = DEADLINE.with(|current| current.replace(Some(
-            current.get().map_or(deadline, |outer| outer.min(deadline))
+    pub fn enter(limit: Duration) -> Self {
+        let previous = BUDGET.with(|current| current.replace(Some(
+            current.get().map_or(limit, |outer| outer.min(limit))
         )));
         Self { previous, _thread: std::marker::PhantomData }
     }
@@ -39,7 +77,7 @@ impl SpawnBudget {
 
 impl Drop for SpawnBudget {
     fn drop(&mut self) {
-        DEADLINE.with(|deadline| deadline.set(self.previous));
+        BUDGET.with(|budget| budget.set(self.previous));
     }
 }
 
@@ -55,15 +93,16 @@ impl HeavyCommandExt for Command {
     }
 
     fn spawn_with_deadline(&mut self) -> io::Result<BudgetedChild> {
-        let deadline = SpawnBudget::deadline();
+        let budget = SpawnBudget::budget();
         let label = format!("{:?} {:?}", self.get_program(), self.get_args().collect::<Vec<_>>());
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        if budget.is_zero() {
             return Err(io::Error::new(io::ErrorKind::TimedOut,
-                format!("spawn {label}: test wall budget exhausted before spawn; phase=spawn")));
+                format!("spawn {label} refused: spawn budget is zero before spawn; phase=spawn")));
         }
         // Preserve shorter explicit execution limits; leave defaults alone.
-        let cap = remaining.as_secs().saturating_sub(1);
+        // One second inside the execution budget, so the child's own watchdog
+        // reports first instead of racing the outer phase cap.
+        let cap = budget.as_secs().saturating_sub(1);
         if cap > 0 {
             for key in ["ROCK_FRAME_TIMEOUT_SECS", "ROCK_SIM_TIMEOUT_SECS"] {
                 let requested = self.get_envs().find(|(name, _)| *name == key)
@@ -77,6 +116,7 @@ impl HeavyCommandExt for Command {
         let phase = tempfile::NamedTempFile::new()?;
         std::fs::write(phase.path(), "spawn")?;
         self.env("ROCK_SPAWN_PHASE_FILE", phase.path());
+        let slot_dir = effective_slot_dir(self);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -85,8 +125,37 @@ impl HeavyCommandExt for Command {
         let mut child = self.spawn()?;
         let stdout = child.stdout.take().map(Drain::start);
         let stderr = child.stderr.take().map(Drain::start);
-        Ok(BudgetedChild { child, deadline, label, phase, stdout, stderr, reaped: false })
+        Ok(BudgetedChild { child, budget, spawned_at: Instant::now(), slot_dir, label, phase, stdout, stderr, reaped: false })
     }
+}
+
+/// The compile slot directory the child will wait on: its explicit override,
+/// else the inherited environment, else the scheduler's home default. This
+/// mirrors the scheduler's directory resolution (see `compile_slots.rs`) so
+/// the parent watches the same queue the child joins. It must not change
+/// what the child runs: no new environment is set from it.
+fn effective_slot_dir(command: &Command) -> Option<PathBuf> {
+    let mut explicit = None;
+    for (key, value) in command.get_envs() {
+        if key == "ROCK_COMPILE_SLOT_DIR" {
+            explicit = Some(value.map(PathBuf::from));
+        }
+    }
+    match explicit {
+        Some(Some(dir)) if !dir.as_os_str().is_empty() => Some(dir),
+        // Removed or empty: the child falls back to its home default too.
+        Some(_) => default_slot_dir(),
+        None => std::env::var_os("ROCK_COMPILE_SLOT_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(default_slot_dir),
+    }
+}
+
+fn default_slot_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join("tmp/rock-compile-slots"))
 }
 
 struct Drain {
@@ -119,9 +188,156 @@ impl Drain {
     fn snapshot(&self) -> Vec<u8> { self.bytes.lock().unwrap().clone() }
 }
 
+/// One budgeted wait bucket. The child reports fine-grained phases; buckets
+/// group them so a sub-step transition never restarts a cap.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PhaseBucket {
+    Spawn,
+    SlotWait,
+    CacheWait,
+    Compile,
+    Execution,
+    OutputDrain,
+    Unknown,
+}
+
+fn bucket_for(phase: &str) -> PhaseBucket {
+    match phase {
+        "spawn" => PhaseBucket::Spawn,
+        "slot-wait" => PhaseBucket::SlotWait,
+        "cache-wait" => PhaseBucket::CacheWait,
+        "compile-prepare" | "compile" => PhaseBucket::Compile,
+        "runtime-prepare" | "execution" => PhaseBucket::Execution,
+        _ => PhaseBucket::Unknown,
+    }
+}
+
+impl PhaseBucket {
+    fn name(&self) -> &'static str {
+        match self {
+            PhaseBucket::Spawn => "spawn",
+            PhaseBucket::SlotWait => "slot-wait",
+            PhaseBucket::CacheWait => "cache-wait",
+            PhaseBucket::Compile => "compile",
+            PhaseBucket::Execution => "execution",
+            PhaseBucket::OutputDrain => "output-drain",
+            PhaseBucket::Unknown => "unknown phase",
+        }
+    }
+
+    fn cap(&self, budget: Duration) -> Duration {
+        match self {
+            PhaseBucket::Spawn | PhaseBucket::Execution | PhaseBucket::Unknown => budget,
+            PhaseBucket::SlotWait => budget.saturating_mul(SLOT_OVERALL_MULTIPLE),
+            PhaseBucket::CacheWait | PhaseBucket::Compile => budget.saturating_mul(COMPILE_MULTIPLE),
+            PhaseBucket::OutputDrain => DRAIN_CAP,
+        }
+    }
+}
+
+struct Breach {
+    bucket: PhaseBucket,
+    stall: bool,
+    elapsed: Duration,
+    cap: Duration,
+}
+
+impl Breach {
+    fn describe(&self) -> String {
+        if self.stall {
+            format!("{} with a stalled queue ({:?} without queue movement of {:?} stall cap)",
+                self.bucket.name(), self.elapsed, self.cap)
+        } else {
+            format!("{} ({:?} elapsed of {:?} cap)", self.bucket.name(), self.elapsed, self.cap)
+        }
+    }
+}
+
+/// The current holder record of every slot file. Any change (an acquisition
+/// rewrites its record) proves the queue is moving. Releases alone are
+/// silent, but a released slot is taken within one retry interval, so a live
+/// queue always shows turnover.
+fn snapshot_slot_queue(dir: Option<&Path>) -> Option<Vec<(String, Vec<u8>)>> {
+    let dir = dir?;
+    let mut holders = Vec::new();
+    for item in std::fs::read_dir(dir).ok()? {
+        let item = item.ok()?;
+        holders.push((
+            item.file_name().to_string_lossy().into_owned(),
+            std::fs::read(item.path()).unwrap_or_default(),
+        ));
+    }
+    holders.sort();
+    Some(holders)
+}
+
+/// The child's latest reported phase, if it has completed a write. The child
+/// writes with a plain truncating write, so an empty read is a torn write,
+/// not a phase.
+fn read_spawn_phase(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+struct WaitState {
+    current: PhaseBucket,
+    /// One timer per bucket, started at first observation and never reset:
+    /// flapping between phases must not extend any cap.
+    started: [Option<Instant>; 7],
+    slot_progress_at: Instant,
+    queue: Option<Vec<(String, Vec<u8>)>>,
+    slot_dir: Option<PathBuf>,
+}
+
+impl WaitState {
+    fn new(spawned_at: Instant, slot_dir: Option<PathBuf>) -> Self {
+        let mut started = [None; 7];
+        started[PhaseBucket::Spawn as usize] = Some(spawned_at);
+        Self { current: PhaseBucket::Spawn, started, slot_progress_at: Instant::now(), queue: None, slot_dir }
+    }
+
+    fn advance(&mut self, phase: Option<&str>, budget: Duration) -> Result<(), Breach> {
+        let now = Instant::now();
+        if let Some(name) = phase {
+            let bucket = bucket_for(name);
+            if bucket != self.current {
+                self.current = bucket;
+                let started = &mut self.started[bucket as usize];
+                if started.is_none() {
+                    *started = Some(now);
+                }
+                // Any transition proves the child alive; a flap back into the
+                // slot queue must not inherit a stale stall clock.
+                self.slot_progress_at = now;
+            }
+        }
+        let start = self.started[self.current as usize].expect("current bucket timer");
+        let cap = self.current.cap(budget);
+        let elapsed = now.saturating_duration_since(start);
+        if elapsed >= cap {
+            return Err(Breach { bucket: self.current, stall: false, elapsed, cap });
+        }
+        if self.current == PhaseBucket::SlotWait {
+            let snapshot = snapshot_slot_queue(self.slot_dir.as_deref());
+            if snapshot != self.queue {
+                self.queue = snapshot;
+                self.slot_progress_at = now;
+            }
+            let idle = now.saturating_duration_since(self.slot_progress_at);
+            if idle >= budget {
+                return Err(Breach { bucket: self.current, stall: true, elapsed: idle, cap: budget });
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct BudgetedChild {
     child: Child,
-    deadline: Instant,
+    budget: Duration,
+    spawned_at: Instant,
+    slot_dir: Option<PathBuf>,
     label: String,
     phase: tempfile::NamedTempFile,
     stdout: Option<Drain>,
@@ -133,45 +349,45 @@ impl BudgetedChild {
     pub fn kill(&mut self) -> io::Result<()> { self.stop() }
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
-        use wait_timeout::ChildExt;
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        match self.child.wait_timeout(remaining)? {
-            Some(status) => {
+        let mut state = WaitState::new(self.spawned_at, self.slot_dir.clone());
+        loop {
+            if let Some(status) = self.child.try_wait()? {
                 self.reaped = true;
-                Ok(status)
+                return Ok(status);
             }
-            None => {
-                let phase = match std::fs::read_to_string(self.phase.path()) {
-                    Ok(phase) if !phase.trim().is_empty() => phase,
-                    Ok(_) => "unknown (phase write incomplete)".to_string(),
-                    Err(error) => format!("unknown (cannot read phase: {error})"),
-                };
+            let phase = read_spawn_phase(self.phase.path());
+            if let Err(breach) = state.advance(phase.as_deref(), self.budget) {
+                let name = phase.as_deref().unwrap_or("unknown");
                 self.stop()?;
                 self.child.wait()?;
                 self.reaped = true;
-                Err(self.timeout(&phase))
+                return Err(self.timeout(name, &breach));
             }
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
 
-    fn timeout(&self, phase: &str) -> io::Error {
+    fn timeout(&self, phase: &str, breach: &Breach) -> io::Error {
         let stdout = self.stdout.as_ref().map(Drain::snapshot).unwrap_or_default();
         let stderr = self.stderr.as_ref().map(Drain::snapshot).unwrap_or_default();
         io::Error::new(io::ErrorKind::TimedOut, format!(
-            "spawn {} exceeded the remaining test wall budget; phase={} (slot wait + compile + execution)\nstdout:\n{}\nstderr:\n{}",
-            self.label, phase.trim(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr)
+            "spawn {} exceeded its {} budget; phase={}\nstdout:\n{}\nstderr:\n{}",
+            self.label, breach.describe(), phase.trim(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr)
         ))
     }
 
     pub fn wait_with_output(mut self) -> io::Result<Output> {
         let status = self.wait()?;
         // A descendant can hold a pipe after the launcher has exited.
+        let drain_deadline = Instant::now() + DRAIN_CAP;
         while [self.stdout.as_ref(), self.stderr.as_ref()].into_iter().flatten()
             .any(|drain| !drain.reader.is_finished())
         {
-            if Instant::now() >= self.deadline {
+            if Instant::now() >= drain_deadline {
                 self.stop()?;
-                return Err(self.timeout("output-drain"));
+                return Err(self.timeout("output-drain", &Breach {
+                    bucket: PhaseBucket::OutputDrain, stall: false, elapsed: DRAIN_CAP, cap: DRAIN_CAP,
+                }));
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -275,19 +491,25 @@ mod tests {
                 std::io::stdout().write_all(&data).unwrap();
                 std::io::stderr().write_all(&data).unwrap();
             }
+            Ok(action) if action.starts_with("hang_in:") => {
+                let phase = action.trim_start_matches("hang_in:");
+                let file = std::env::var_os("ROCK_SPAWN_PHASE_FILE").expect("phase file env");
+                std::fs::write(file, phase).unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
             _ => {}
         }
     }
 
     #[test]
-    fn whole_spawn_deadline_stops_a_slow_child_and_names_the_command() {
+    fn spawn_cap_stops_a_child_that_never_reports_a_phase() {
         let _budget = SpawnBudget::new(Duration::from_millis(250));
         let start = Instant::now();
         let error = child("sleep").output_with_deadline().expect_err("slow spawn must time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("spawn_helper"), "{error}");
-        assert!(error.to_string().contains("phase="), "{error}");
-        assert!(start.elapsed() < Duration::from_secs(1), "deadline did not stop the child");
+        assert!(error.to_string().contains("phase=spawn"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(1), "spawn cap did not stop the child");
     }
 
     #[test]
@@ -308,11 +530,12 @@ mod tests {
     }
 
     #[test]
-    fn sequential_spawns_share_the_remaining_test_budget() {
+    fn sequential_spawns_each_get_a_fresh_execution_budget() {
+        // Two 150 ms children under a 250 ms budget: a shared deadline would
+        // kill the second, but per-spawn caps grant each its own budget.
         let _budget = SpawnBudget::new(Duration::from_millis(250));
         assert!(child("short").output_with_deadline().unwrap().status.success());
-        let error = child("short").output_with_deadline().expect_err("second child cannot restart the wall budget");
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(child("short").output_with_deadline().unwrap().status.success());
     }
 
     #[test]
@@ -361,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn deadline_stops_descendants_that_hold_the_output_pipes() {
+    fn budget_stops_descendants_that_hold_the_output_pipes() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
         let _budget = SpawnBudget::new(Duration::from_millis(500));
@@ -375,52 +598,139 @@ mod tests {
         assert_eq!(result.expect_err("descendant spawn must time out").kind(), io::ErrorKind::TimedOut);
     }
 
+    fn assert_hang_reports_phase_within(phase: &str, budget: Duration, cap: Duration, within: Duration) {
+        let _budget = SpawnBudget::new(budget);
+        let start = Instant::now();
+        let error = child(&format!("hang_in:{phase}")).output_with_deadline()
+            .expect_err("a hung child must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains(&format!("phase={phase}")), "{error}");
+        assert!(start.elapsed() >= cap, "hang in {phase} died before its cap: {:?}", start.elapsed());
+        assert!(start.elapsed() < within, "hang in {phase} escaped its cap: {:?}", start.elapsed());
+    }
+
     #[test]
-    fn whole_spawn_deadline_covers_compile_slot_wait() {
-        use std::io::Write;
+    fn execution_hang_fails_with_the_named_phase_within_its_cap() {
+        assert_hang_reports_phase_within("execution", Duration::from_millis(250), Duration::from_millis(250), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn compile_hang_reports_the_compile_phase_within_its_cap() {
+        assert_hang_reports_phase_within("compile", Duration::from_millis(250), Duration::from_millis(500), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn cache_wait_hang_reports_the_cache_wait_phase_within_its_cap() {
+        assert_hang_reports_phase_within("cache-wait", Duration::from_millis(250), Duration::from_millis(500), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn queue_snapshot_changes_only_when_a_holder_record_changes() {
         let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        let slots = dir.path().join("slots");
+        assert!(snapshot_slot_queue(None).is_none());
+        assert!(snapshot_slot_queue(Some(&dir.path().join("missing"))).is_none());
+        std::fs::write(dir.path().join("batch-0"), "pid=1 start=1").unwrap();
+        let first = snapshot_slot_queue(Some(dir.path())).unwrap();
+        assert_eq!(snapshot_slot_queue(Some(dir.path())).unwrap(), first);
+        std::fs::write(dir.path().join("batch-0"), "pid=2 start=2").unwrap();
+        assert_ne!(snapshot_slot_queue(Some(dir.path())).unwrap(), first);
+    }
+
+    /// A minimal sim project: `rock sim --list` takes a compile slot for it.
+    fn write_slot_probe_project(dir: &Path) -> PathBuf {
+        let project = dir.join("project");
         std::fs::create_dir(&project).unwrap();
-        std::fs::create_dir(&slots).unwrap();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
         std::fs::write(project.join("stick.toml"), format!(
             "[package]\nname = \"deadline-probe\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"deadline\"\n", root.join("stone")
         )).unwrap();
         std::fs::write(project.join("main.rock"), "fn main() {}\n@sim\nco fn deadline_probe() -> Coroutine<Wait> { stop_sim() }\n").unwrap();
-        let mut slot = std::fs::File::options().create(true).truncate(false).read(true).write(true)
-            .open(slots.join("batch-0")).unwrap();
-        slot.lock().unwrap();
-        writeln!(slot, "{} deadline test barrier", std::process::id()).unwrap();
-        let _budget = SpawnBudget::new(Duration::from_secs(10));
-        let mut pending = Command::new(env!("CARGO_BIN_EXE_rock"))
-            .args(["sim", "--list"]).arg(&project)
-            .env("ROCK_COMPILE_SLOT_DIR", &slots).env("ROCK_COMPILE_SLOTS", "1")
+        project
+    }
+
+    fn slot_probe_command(project: &Path, slots: &Path) -> Command {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+        command.args(["sim", "--list"]).arg(project)
+            .env("ROCK_COMPILE_SLOT_DIR", slots).env("ROCK_COMPILE_SLOTS", "1")
             .env("ROCK_COMPILE_CLASS", "batch").env("ROCK_SIM_COMPILE_CACHE", "0")
             .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR").env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
             .stdout(Stdio::piped()).stderr(Stdio::piped())
-            .current_dir(root).spawn_with_deadline().unwrap();
+            .current_dir(root);
+        command
+    }
+
+    fn await_slot_wait(pending: &BudgetedChild) {
         let ready_deadline = Instant::now() + Duration::from_secs(10);
-        while std::fs::read_to_string(pending.phase.path()).unwrap() != "slot-wait" {
+        while read_spawn_phase(pending.phase.path()).as_deref() != Some("slot-wait") {
             assert!(Instant::now() < ready_deadline, "compiler never reached the held slot");
             std::thread::sleep(Duration::from_millis(10));
         }
-        pending.deadline = Instant::now() + Duration::from_millis(250);
+    }
+
+    fn hold_batch_zero(slots: &Path) -> std::fs::File {
+        use std::io::Write;
+        let mut slot = std::fs::File::options().create(true).truncate(false).read(true).write(true)
+            .open(slots.join("batch-0")).unwrap();
+        slot.lock().unwrap();
+        writeln!(slot, "{} slot test barrier", std::process::id()).unwrap();
+        slot
+    }
+
+    #[test]
+    fn slot_wait_stall_reports_the_slot_wait_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_slot_probe_project(dir.path());
+        let slots = dir.path().join("slots");
+        std::fs::create_dir(&slots).unwrap();
+        let slot = hold_batch_zero(&slots);
+        let _budget = SpawnBudget::new(Duration::from_secs(10));
+        let mut pending = slot_probe_command(&project, &slots).spawn_with_deadline().unwrap();
+        await_slot_wait(&pending);
+        // Shrink the budget the waiter sees: a queue with no turnover must
+        // fail as a stall, named, instead of hanging on the held slot.
+        pending.budget = Duration::from_millis(250);
         let started = Instant::now();
         let output = pending.wait_with_output();
         slot.unlock().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(2), "slot wait escaped its deadline");
-        let error = output.expect_err("slot wait must consume the spawn budget");
+        assert!(started.elapsed() < Duration::from_secs(2), "slot wait escaped its stall cap");
+        let error = output.expect_err("slot wait must fail on a stalled queue");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("phase=slot-wait"), "{error}");
+        assert!(error.to_string().contains("stalled"), "{error}");
         drop(_budget);
         let _control_budget = SpawnBudget::new(Duration::from_secs(30));
-        let control = Command::new(env!("CARGO_BIN_EXE_rock"))
-            .args(["sim", "--list"]).arg(&project)
-            .env("ROCK_COMPILE_SLOT_DIR", &slots).env("ROCK_COMPILE_SLOTS", "1")
-            .env("ROCK_COMPILE_CLASS", "batch").env("ROCK_SIM_COMPILE_CACHE", "0")
-            .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR").env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
-            .current_dir(root).output_with_deadline().unwrap();
+        let control = slot_probe_command(&project, &slots).output_with_deadline().unwrap();
         assert!(control.status.success(), "fixture must compile: {}", String::from_utf8_lossy(&control.stderr));
+    }
+
+    #[test]
+    fn slot_wait_survives_a_moving_queue_past_the_stall_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = write_slot_probe_project(dir.path());
+        let slots = dir.path().join("slots");
+        std::fs::create_dir(&slots).unwrap();
+        let slot = hold_batch_zero(&slots);
+        let _budget = SpawnBudget::new(Duration::from_secs(1));
+        let pending = slot_probe_command(&project, &slots).spawn_with_deadline().unwrap();
+        await_slot_wait(&pending);
+        let phase_path = pending.phase.path().to_path_buf();
+        let waiter = std::thread::spawn(move || pending.wait_with_output());
+        // Churn an unused slot file ten times per stall cap: the queue moves,
+        // so the waiter must outlive twice the stall cap it would otherwise
+        // die at.
+        let churn = slots.join("batch-1");
+        let start = Instant::now();
+        let mut tick = 0;
+        while start.elapsed() < Duration::from_millis(2200) {
+            tick += 1;
+            std::fs::write(&churn, format!("pid={} start=0 churn={tick}", std::process::id())).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!waiter.is_finished(), "waiter died while the queue moved");
+        }
+        assert_eq!(read_spawn_phase(&phase_path).as_deref(), Some("slot-wait"));
+        slot.unlock().unwrap();
+        let output = waiter.join().unwrap().expect("waiter finishes once the slot frees");
+        assert!(output.status.success(), "fixture must compile: {}", String::from_utf8_lossy(&output.stderr));
     }
 }
