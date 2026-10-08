@@ -496,6 +496,19 @@ end
 }
 
 #[test]
+fn zero_argument_call_preserves_value_without_a_bare_global() {
+    let src = "fn five() -> int { 5 } fn answer() -> int { five() }";
+    let lua = format!("{}{}", emit(src, "five"), emit(src, "answer"));
+    let run = std::process::Command::new(rock_host::project::luajit_path())
+        .arg("-e")
+        .arg(format!("{lua}\nassert(_G.five == nil and _G.answer == nil)\nprint(answer_0())"))
+        .output()
+        .expect("run emitted zero-argument call");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "5");
+}
+
+#[test]
 fn param_cell_read() {
     assert_eq!(
         emit("fn id(x: int) -> int { x }", "id"),

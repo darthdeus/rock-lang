@@ -38,6 +38,16 @@ fn mangled(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<String> 
 }
 
 #[test]
+fn zero_parameter_symbol_does_not_collide_with_restore_lookup_name() {
+    let ws = ws_of("fn hidden_callback() {}");
+    let mid = ws.module_ids[&Ustr::from("<test>")];
+    let (_, callback) = ws.module(mid).functions.iter()
+        .find(|(_, f)| f.name.as_str() == "hidden_callback")
+        .expect("restore callback declaration");
+    assert_ne!(mangle_fn(&ws, callback), callback.name.as_str());
+}
+
+#[test]
 fn zero_parameter_function_gets_the_arity_marker() {
     let ws = ws_of(
         r#"
