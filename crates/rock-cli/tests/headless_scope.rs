@@ -51,8 +51,10 @@ fn frame_cgroup(scope_env: Option<&str>) -> String {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_frame_run_uses_the_headless_slice_unless_opted_out() {
+    let inherited = std::fs::read_to_string("/proc/self/cgroup").expect("caller cgroup");
     let scoped = frame_cgroup(None);
     assert!(scoped.contains("/rock-headless.slice/"), "rock frame child cgroup: {scoped}");
+    assert_ne!(scoped.trim(), inherited.trim(), "the default must create a child scope");
     let direct = frame_cgroup(Some("0"));
-    assert!(!direct.contains("/rock-headless.slice/"), "ROCK_HEADLESS_SCOPE=0 child cgroup: {direct}");
+    assert_eq!(direct.trim(), inherited.trim(), "ROCK_HEADLESS_SCOPE=0 must inherit the caller cgroup");
 }

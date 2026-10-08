@@ -2850,23 +2850,12 @@ fn a_subset_refuses_a_name_it_cannot_measure() {
 /// fail whichever one happens to be running when their sum crosses it.
 #[test]
 fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
-    const VAR: &str = "ROCK_SIM_TIMEOUT_SECS";
-    struct Restore(Option<String>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            // SAFETY: the heavy harness runs single-threaded (--test-threads=1).
-            unsafe {
-                match &self.0 {
-                    Some(v) => std::env::set_var(VAR, v),
-                    None => std::env::remove_var(VAR),
-                }
-            }
-        }
-    }
-    let _restore = Restore(std::env::var(VAR).ok());
     // Each entry sleeps 4s; three of them plus boot cannot fit in 12s, while
     // every single entry fits with room to spare.
-    unsafe { std::env::set_var(VAR, "12") };
+    if isolated_environment_test(
+        "the_wall_clock_deadline_is_per_entry_not_per_worker",
+        "ROCK_SIM_TIMEOUT_SECS", std::ffi::OsStr::new("12"),
+    ) { return; }
 
     let records = run_worker_suite(Backend::Skull, "testbed", &vec!["testbed::b2_slow_entry".to_string(); 3])
         .expect("the suite call itself must not error");
@@ -2929,25 +2918,18 @@ fn a_boot_owned_task_is_restored_and_still_polled_in_the_next_entry() {
 
 #[test]
 fn a_lua_allocator_installation_belongs_to_the_live_native_provider() {
-    rock_host::engine_build::build_engine_libs("testbed").expect("stage Stone");
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-    let scratch = tempfile::tempdir().expect("separate native provider");
-    let lib = if cfg!(target_os = "macos") { "libstone.dylib" } else { "libstone.so" };
-    let provider = scratch.path().join(lib);
-    std::fs::copy(root.join("tmp").join(lib), &provider).expect("copy native provider");
-    struct RestoreProvider(Option<std::ffi::OsString>);
-    impl Drop for RestoreProvider {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(old) => unsafe { std::env::set_var("ROCK_STONE_LIB", old) },
-                None => unsafe { std::env::remove_var("ROCK_STONE_LIB") },
-            }
-        }
+    let name = "a_lua_allocator_installation_belongs_to_the_live_native_provider";
+    if std::env::var("ROCK_WORKER_GATE_CHILD").as_deref() != Ok(name) {
+        rock_host::engine_build::build_engine_libs("testbed").expect("stage Stone");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let scratch = tempfile::tempdir().expect("separate native provider");
+        let lib = if cfg!(target_os = "macos") { "libstone.dylib" } else { "libstone.so" };
+        let provider = scratch.path().join(lib);
+        std::fs::copy(root.join("tmp").join(lib), &provider).expect("copy native provider");
+        // Keep the borrowed provider alive until its isolated test process exits.
+        assert!(isolated_environment_test(name, "ROCK_STONE_LIB", provider.as_os_str()));
+        return;
     }
-    let _restore = RestoreProvider(std::env::var_os("ROCK_STONE_LIB"));
-    // The serial harness owns the process environment. A staged toolchain uses
-    // a different file from tmp/libstone, even when their bytes are identical.
-    unsafe { std::env::set_var("ROCK_STONE_LIB", &provider) };
     let (isolated, worker) = differential(
         &["testbed::b0_lua_allocator_seed"], "testbed::b0_lua_allocator_probe");
     assert_equivalent("testbed::b0_lua_allocator_probe", &compare(&isolated, &worker));
@@ -2957,6 +2939,22 @@ fn a_lua_allocator_installation_belongs_to_the_live_native_provider() {
     assert!(!worker.diagnostics.contains("Initialized successfully"),
         "the allocator probe must not recover into a fresh process: {}", worker.diagnostics);
     assert_eq!(worker.expects_pass.len(), 4, "all allocator assertions must run");
+}
+
+fn isolated_environment_test(name: &str, key: &str, value: &std::ffi::OsStr) -> bool {
+    if std::env::var("ROCK_WORKER_GATE_CHILD").as_deref() == Ok(name) {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([&format!("sim_worker_differential::{name}"), "--exact", "--nocapture"])
+        .env("ROCK_WORKER_GATE_CHILD", name)
+        .env(key, value)
+        .output().expect("isolated worker gate");
+    assert!(output.status.success(), "isolated {name} failed:\n{}{}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "isolated {name} must execute its test:\n{}", String::from_utf8_lossy(&output.stdout));
+    true
 }
 
 #[test]
