@@ -2266,6 +2266,30 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
 }
 
 #[test]
+fn mag_replay_census_answers_the_host_performance_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("host-prompt.replay").to_string_lossy().into_owned();
+    let progress = dir.path().join("progress.json").to_string_lossy().into_owned();
+    let layout = dir.path().join("layout.jsonl").to_string_lossy().into_owned();
+    let settings = dir.path().join("settings.json").to_string_lossy().into_owned();
+    let bindings = dir.path().join("bindings.json").to_string_lossy().into_owned();
+    let state = run_record_dump("mag", 20, &log, &[
+        ("MAG_BOOT_PLAYING", "1"), ("STONE_ASSET_STUB", "1"),
+        ("PERF_MODE", "1"), ("PERF_DT", "0.05"), ("MAG_SCREENSHOT", "1"),
+        ("MAG_REPLAY_STATE_CENSUS", "1"),
+        ("MAG_PROGRESS_PATH_OVERRIDE", &progress),
+        ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", &layout),
+        ("MAG_SETTINGS_PATH_OVERRIDE", &settings),
+        ("MAG_BINDINGS_PATH_OVERRIDE", &bindings),
+    ]);
+    assert!(state["__stone_diag"]["MAG_REPLAY_WORLD_DIGEST"].as_i64().is_some_and(|n| n != 0),
+        "the production census must run in a populated world");
+    let prompt = &state["mag"]["LOW_FPS_NUDGE"];
+    assert_eq!(prompt["shown"].as_bool(), Some(true), "the census must answer the host advisory");
+    assert_eq!(prompt["visible"].as_bool(), Some(false), "host performance must not add census focus rows");
+}
+
+#[test]
 fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
     let game = "mag";
     let frames = 160;
@@ -2291,6 +2315,8 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
             ("PERF_MODE", "1"),
             ("PERF_DT", "0.1"),
             ("MAG_BOOT_MENU", "1"),
+            ("MAG_REPLAY_STATE_CENSUS", "1"),
+            ("MAG_REPLAY_STATE_CENSUS_TICK", &census_tick),
             ("MAG_PROGRESS_PATH_OVERRIDE", progress_s.as_str()),
             ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_s.as_str()),
             ("MAG_SETTINGS_PATH_OVERRIDE", settings_s.as_str()),
