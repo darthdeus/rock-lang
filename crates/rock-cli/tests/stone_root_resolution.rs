@@ -268,8 +268,17 @@ fn stone_package_tests_self_provision_the_stone_root() {
         !text.contains("Stone source directory is not configured"),
         "stone's own suite must self-provision its source root instead of failing global init:\n{text}"
     );
+    // A passing suite lists only its slowest tests, so the executed count, not
+    // a particular name, proves that stone's tests ran.
+    let executed = text
+        .lines()
+        .find_map(|line| line.split_once(" @tests passed").map(|(head, _)| head))
+        .and_then(|head| head.rsplit(' ').next())
+        .and_then(|counts| counts.split_once('/'))
+        .and_then(|(_, total)| total.parse::<usize>().ok())
+        .unwrap_or(0);
     assert!(
-        text.contains("stone::replay_input_authority_device_policy"),
+        executed > 0,
         "a stone test must execute and report without ambient configuration:\n{text}"
     );
 }
