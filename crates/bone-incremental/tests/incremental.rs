@@ -45,7 +45,14 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
     let mut modules = Vec::with_capacity(files.len());
     for f in files {
         let (path, text) = (&f.path, &f.text);
-        let module = parse_rock_with_file(text, path)?;
+        let mut module =
+            skull_parser::parse_module_with_dialect(text, Ustr::from(path.as_str()), f.dialect)?;
+        // The oracle must see what the session sees: `Session::new` stamps
+        // these same facts on every parse. A no-op for legacy fixtures
+        // (Legacy/None/Game/Any are the parser defaults).
+        module.package = f.package.clone();
+        module.memory_class = f.memory_class;
+        module.global_policy = f.global_policy;
         assert!(
             !module.items.is_empty(),
             "harness fixture {path} parsed to zero items; bone keys modules by \
@@ -58,11 +65,16 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
 
 /// Fresh whole-workspace check of warm ++ `files` — the oracle's ground
 /// truth. `warm` are the same parsed modules the session under test was
-/// built with, in the same (first) position.
-fn batch_check(warm: &[skull_parser::Ast], files: &Files) -> Result<Workspace, CompilerError> {
+/// built with, in the same (first) position. `aliases` is the host graph's
+/// table for real-project sets, default (empty) for legacy fixtures.
+fn batch_check(
+    warm: &[skull_parser::Ast],
+    files: &Files,
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
     let mut modules = warm.to_vec();
     modules.extend(parse_files(files)?);
-    semantic_pass(&mut modules)
+    semantic_pass_with_aliases(&mut modules, aliases)
 }
 
 // ---------------------------------------------------------------------------
@@ -149,8 +161,8 @@ fn origin_doubled() -> int {
 #[test]
 fn comparator_equal_programs_compare_equal() {
     let fs = files(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    let left = batch_check(&[], &fs).expect("batch check");
-    let right = batch_check(&[], &fs).expect("batch check");
+    let left = batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("batch check");
+    let right = batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("batch check");
     ws_equiv(&left, &right, &fs, 1).expect("identical batch runs must compare equal");
 }
 
@@ -162,8 +174,8 @@ fn comparator_detects_type_divergence() {
     let int_version = files(&[("a.rock", "fn f() -> int   { let v = 1   \n v }")]);
     let float_version = files(&[("a.rock", "fn f() -> float { let v = 1.0 \n v }")]);
 
-    let left = batch_check(&[], &int_version).expect("batch check");
-    let right = batch_check(&[], &float_version).expect("batch check");
+    let left = batch_check(&[], &int_version, &bone_core::modules::NsAliases::default()).expect("batch check");
+    let right = batch_check(&[], &float_version, &bone_core::modules::NsAliases::default()).expect("batch check");
 
     let err = ws_equiv(&left, &right, &int_version, 1)
         .expect_err("comparator must detect differing inferred types");
@@ -198,6 +210,8 @@ struct Harness {
     texts: Files,
     /// Offset stride for the per-offset type comparison.
     stride: usize,
+    /// The host graph's alias tables (default/empty for legacy fixtures).
+    aliases: bone_core::modules::NsAliases,
 }
 
 impl Harness {
@@ -208,12 +222,30 @@ impl Harness {
     }
 
     fn with_warm(warm: Vec<skull_parser::Ast>, texts: Files, stride: usize) -> Harness {
-        let session = Session::new(warm.clone(), texts.clone(), &bone_core::modules::NsAliases::default()).expect("session init");
+        Harness::with_warm_aliases(
+            warm,
+            texts,
+            stride,
+            bone_core::modules::NsAliases::default(),
+        )
+    }
+
+    /// [`with_warm`] for real-project sets, whose v1 `use` paths resolve
+    /// through the host graph's alias tables.
+    fn with_warm_aliases(
+        warm: Vec<skull_parser::Ast>,
+        texts: Files,
+        stride: usize,
+        aliases: bone_core::modules::NsAliases,
+    ) -> Harness {
+        let session =
+            Session::new(warm.clone(), texts.clone(), &aliases).expect("session init");
         let h = Harness {
             session,
             warm,
             texts,
             stride,
+            aliases,
         };
         h.assert_matches_batch();
         h
@@ -246,7 +278,8 @@ impl Harness {
     }
 
     fn assert_matches_batch(&self) {
-        let batch = batch_check(&self.warm, &self.texts).expect("batch check of session texts");
+        let batch =
+            batch_check(&self.warm, &self.texts, &self.aliases).expect("batch check of session texts");
         ws_equiv(self.session.workspace(), &batch, &self.texts, self.stride)
             .unwrap_or_else(|d| panic!("incremental != fresh: {d}"));
     }
@@ -1624,7 +1657,7 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
     use bone_semantic::hir::BodyOwner;
     let src = "fn a() -> int { 111 }\nfn b() -> int { 222 }\nfn c() -> int { 333 }";
     let fs = files(&[("m.rock", src)]);
-    let ws = batch_check(&[], &fs).expect("batch check");
+    let ws = batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("batch check");
     let mid = mid_for(&ws, "m.rock");
     let mut module = ws.module(mid).clone();
 
@@ -1749,7 +1782,7 @@ fn relower_function_in_place_matches_fresh_lower() {
     let inf = bone_semantic::semantic_passes::check_module(&ws, mid, ws.module(mid)).expect("reinfer");
     ws.set_inference(mid, inf);
 
-    let fresh = batch_check(&[], &fs).expect("fresh batch");
+    let fresh = batch_check(&[], &fs, &bone_core::modules::NsAliases::default()).expect("fresh batch");
     ws_equiv(&ws, &fresh, &fs, 1)
         .expect("relower_function_in_place(same cooked source) must equal a fresh full lower");
 }
@@ -1761,7 +1794,8 @@ fn relower_function_in_place_matches_fresh_lower() {
 
 fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
     // Mirrors rock_host::stdlib_loader::stdlib_files() (the canonical list);
-    // kept local so bone tests carry no rock-host dep.
+    // kept as a local `include_str!` table so the warm set stays independent
+    // of the loader's path resolution.
     const STDLIB: &[(&str, &str)] = &[
         ("unified.rock", include_str!("../../../stdlib/unified.rock")),
         ("logging.rock", include_str!("../../../stdlib/logging.rock")),
@@ -2478,6 +2512,17 @@ fn fuzz_session_synthetic() {
 /// only (no file deletion - real signatures cross files, and bone's
 /// interface lowering fail-fasts on those; the synthetic fuzz owns
 /// deletion). Coarse profile stride keeps wall time reasonable.
+///
+/// `true` when `text` carries a `#script` directive line, the files
+/// production dependency discovery skips. A line scan, not the preprocessor
+/// lexer; close enough for a tripwire (the match3 closure has none today).
+fn is_script_source(text: &str) -> bool {
+    text.lines().any(|l| {
+        let t = l.trim_start();
+        t == "#script" || t.starts_with("#script ") || t.starts_with("#script\t")
+    })
+}
+
 #[test]
 fn fuzz_session_real_match3() {
     if std::env::var("ROCK_FUZZ_REAL").is_err() {
@@ -2485,49 +2530,65 @@ fn fuzz_session_real_match3() {
         return;
     }
 
-    // The same source set `rock watch match3` discovers: the game files plus
-    // the stone engine's rock sources (match3 signatures use engine types
-    // like IVec2, and bone's interface lowering fail-fasts on unknown type
-    // names). Engine files join the workspace but are never mutated.
-    fn rock_files_under(dir: &str, out: &mut Vec<String>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+    // The same source set `rock watch match3` discovers: the manifest's whole
+    // dependency closure (game + stone engine + cores), each file stamped with
+    // the dialect and owning package the graph assigns it. Mirrors
+    // `rock_cli::unified_compile::discover_sources` (Directory arm). Only the
+    // root package's files get mutated.
+    let workspace_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let manifest_dir = format!("{workspace_root}/games/match3");
+    let graph =
+        rock_host::stick::graph::PackageGraph::build(std::path::Path::new(&manifest_dir))
+            .expect("match3 package graph");
+    let root = graph.root();
+    let mut all_files: Files = Vec::new();
+    let mut originals: Files = Vec::new();
+    for id in graph.load_order() {
+        let node = graph.package(*id);
+        // The root package loads from the invoked directory; dependencies
+        // always load their whole root.
+        let load_dir = if *id == root {
+            std::path::PathBuf::from(&manifest_dir)
+        } else {
+            node.root.clone()
         };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                rock_files_under(&p.to_string_lossy(), out);
-            } else if p.extension().is_some_and(|e| e == "rock") {
-                out.push(p.to_string_lossy().to_string());
+        let selected = graph.selected_rock_files(*id, &load_dir).expect("selected rock files");
+        for path in selected {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            // Production skips `#script` files in dependencies
+            // (`unified_compile`); none exist in this closure today, so a
+            // newcomer fails loudly rather than silently diverging.
+            assert!(
+                *id == root || !is_script_source(&text),
+                "dependency {} gained a #script file; mirror unified_compile's is_script skip",
+                path.display()
+            );
+            let f = bone_incremental::session::SessionFile {
+                path: path.to_string_lossy().to_string(),
+                text,
+                dialect: node.dialect,
+                package: Some(skull_parser::PackageTag {
+                    id: node.id.0,
+                    self_name: node.self_name.clone(),
+                }),
+                memory_class: node.memory_class,
+                global_policy: node.global_policy,
+            };
+            if *id == root {
+                originals.push(f.clone());
             }
+            all_files.push(f);
         }
     }
-
-    let workspace_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-    let mut game_paths = Vec::new();
-    rock_files_under(&format!("{workspace_root}/games/match3"), &mut game_paths);
-    let mut engine_paths = Vec::new();
-    rock_files_under(&format!("{workspace_root}/stone"), &mut engine_paths);
-    game_paths.sort();
-    engine_paths.sort();
     assert!(
-        !game_paths.is_empty(),
+        !originals.is_empty(),
         "real fuzz found no game .rock files under games/match3/ -- path moved? \
          (guards against a silent skip / div-by-zero on an empty set)"
     );
 
-    let read = |p: &String| {
-        bone_incremental::session::SessionFile::legacy(
-            p.clone(),
-            std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {p}: {e}")),
-        )
-    };
-    // Only the game files get mutated.
-    let originals: Files = game_paths.iter().map(read).collect();
-    let mut all_files: Files = engine_paths.iter().map(read).collect();
-    all_files.extend(originals.clone());
-
-    let mut h = Harness::with_warm(stdlib_warm_modules(), all_files, 13);
+    let aliases = bone_query::package_aliases::from_graph(&graph);
+    let mut h = Harness::with_warm_aliases(stdlib_warm_modules(), all_files, 13, aliases);
 
     let seed = fuzz_seed();
     let mut rng = Rng::new(seed);
@@ -2563,9 +2624,9 @@ fn comparator_detects_diagnostic_divergence() {
     let clean = files(&[("a.rock", "fn f() -> int { 1 }")]);
     let broken = files(&[("a.rock", "fn f() -> int { true }")]);
 
-    let left = batch_check(&[], &clean).expect("batch check");
-    let right =
-        batch_check(&[], &broken).expect("batch check (body errors are per-owner, not Err)");
+    let left = batch_check(&[], &clean, &bone_core::modules::NsAliases::default()).expect("batch check");
+    let right = batch_check(&[], &broken, &bone_core::modules::NsAliases::default())
+        .expect("batch check (body errors are per-owner, not Err)");
 
     let err = ws_equiv(&left, &right, &clean, 1)
         .expect_err("comparator must detect differing diagnostics");
@@ -2790,4 +2851,34 @@ fn coroutine_body_edit_is_reported_in_reinferred() {
          the bone-lower item-footprint excludes the `co` prefix, so body_at misses)",
         r.reinferred.len()
     );
+}
+
+/// ALIASING is whole-program: editing only the callee's file must change the
+/// verdict at the unchanged caller's element-reference call, both ways.
+#[test]
+fn relocation_verdict_follows_an_edit_to_the_callee() {
+    let clean_callee = "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cell.v = cells.len() }";
+    let growing_callee =
+        "value Cell { v: int }\nfn touch(cell: ref Cell, cells: [Cell]) { cells.push(Cell { v: 2 })\n cell.v = 7 }";
+    let caller = "fn main() { let cells: [Cell] = [Cell { v: 1 }]\n touch(cells[0], cells) }";
+    let relocations = |session: &Session| {
+        session
+            .diagnostics()
+            .iter()
+            .filter(|e| e.message.contains("relocatable Vec or Map element"))
+            .count()
+    };
+    let mut session = Session::new(
+        stdlib_warm_modules(),
+        files(&[("cell.rock", clean_callee), ("main.rock", caller)]),
+        &bone_core::modules::NsAliases::default(),
+    )
+    .expect("session");
+    assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
+
+    session.update_file("cell.rock", growing_callee).expect("update");
+    assert_eq!(relocations(&session), 1, "{:?}", session.diagnostics());
+
+    session.update_file("cell.rock", clean_callee).expect("update");
+    assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
 }

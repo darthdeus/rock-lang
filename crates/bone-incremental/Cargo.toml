@@ -15,5 +15,12 @@ comfy-la-arena = { workspace = true }
 smallvec = { workspace = true }
 itertools = { workspace = true }
 
+[dev-dependencies]
+# Real-project tests only: graph discovery (rock-host) and the alias tables
+# (bone-query) the session needs for v1 `use` paths. The bone-query edge is a
+# dev-only cycle (bone-query depends on bone-incremental), which Cargo permits.
+rock-host = { path = "../rock-host" }
+bone-query = { path = "../bone-query" }
+
 [lints]
 workspace = true
