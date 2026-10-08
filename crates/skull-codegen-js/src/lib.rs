@@ -1405,6 +1405,15 @@ function stone_get_image_size(img, pw, ph) {
   if (s) { pw[0] = s.w; ph[0] = s.h; return; }
   pw[0] = 1; ph[0] = 1; // white fallback / canvas texture default
 }
+// Header probe over the boot-preloaded bitmaps: the size an asset would load
+// at, without creating a GL texture. False when the path never preloaded,
+// the same failure value stone-rs returns for a missing header.
+function stone_probe_image_size(path, pw, ph) {
+  var bmp = __SW.imageBitmaps[path];
+  if (bmp === undefined) return false;
+  pw[0] = bmp.width; ph[0] = bmp.height;
+  return true;
+}
 
 // 0 = NEAREST, 1 = LINEAR. Anything else is a caller bug, not a default:
 // silently picking one filter is invisible until it magnifies. Twin of
