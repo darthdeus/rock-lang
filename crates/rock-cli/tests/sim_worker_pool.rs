@@ -485,7 +485,7 @@ fn world_restore_does_not_leave_keyframes_in_the_successor() {
 #[test]
 fn mag_world_restore_preserves_successor_boot_fonts() {
     for specs in [
-        ["mag_live_run_world_image_rewinds", "direct_session_state_world_image_restores_the_authority"],
+        ["mob_cast_world_image_and_arena_reuse", "direct_session_state_world_image_restores_the_authority"],
         ["world_environment_state_round_trips_through_world_image"; 2],
     ] {
         let run = run_project_workers("mag", &specs, "1");
