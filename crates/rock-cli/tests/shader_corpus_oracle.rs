@@ -5,7 +5,7 @@
 //! against `emit_shader_*_with_view`; the row encoding is explicit and never
 //! hashes a `Debug` rendering of a plan.
 
-use rock_cli::glsl_test::validate_shader_workspace;
+use rock_cli::glsl_test::validate_workspace;
 use skull_codegen_glsl::{BlockWire, GlslProfile, ShaderAbiPlan};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
 use skull_mir::mir::FuncRef;
@@ -431,7 +431,7 @@ fn target_for(profile: GlslProfile) -> skull::target_projection::TargetSpec {
 }
 
 fn snapshot_project(project: &str, path: &Path) -> Vec<ShaderRow> {
-    let ws = validate_shader_workspace(path.to_str().unwrap()).expect("workspace");
+    let ws = validate_workspace(path.to_str().unwrap()).expect("workspace");
     let pairs = skull_mir::lower::collect_shader_pairs(&ws).expect("shader pairs");
     let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
         .iter()
@@ -984,7 +984,7 @@ fn shader_oracle_rejects_a_view_population_missing_from_emission() {
         shader_fixture_source("return value + 1.0"),
     )
     .expect("fixture source");
-    let ws = validate_shader_workspace(temp.path().to_str().unwrap()).expect("workspace");
+    let ws = validate_workspace(temp.path().to_str().unwrap()).expect("workspace");
     let pairs = skull_mir::lower::collect_shader_pairs(&ws).expect("shader pairs");
     let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
         .iter()
@@ -1044,6 +1044,56 @@ fn shader_oracle_rejects_a_view_population_missing_from_emission() {
     assert!(
         failure.contains(&format!("{key:?}")),
         "the rejection must name its exact project/shader/profile key: {failure}"
+    );
+}
+
+#[test]
+fn snapshot_project_resolves_shader_sim_helpers_in_marker_free_test_files() {
+    let outer = tempfile::tempdir().expect("fixture tempdir");
+    let project = outer.path().join("sim-helper-project");
+    let tests_dir = project.join("tests");
+    std::fs::create_dir_all(&tests_dir).expect("fixture tests dir");
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"sim-helper-project\"\nversion = \"0.1.0\"\ntype = \"lib\"\n",
+    )
+    .expect("fixture manifest");
+    std::fs::write(project.join("main.rock"), "fn main() {}\n")
+        .expect("fixture production source");
+    std::fs::write(
+        tests_dir.join("helper.rock"),
+        "fn oracle_cross_file_helper(value: float) -> float { return value + 1.0 }\n",
+    )
+    .expect("fixture helper");
+    std::fs::write(
+        tests_dir.join("sim.rock"),
+        r#"
+@shader(fragment)
+fn oracle_sim_shader(tc: Vec2) -> Vec4 {
+    let value = oracle_cross_file_helper(tc.x)
+    return Vec4 { x: value, y: 0.0, z: 0.0, w: 1.0 }
+}
+
+global oracle_sim_shader_registration: string = rock_shader(oracle_sim_shader)
+"#,
+    )
+    .expect("fixture sim");
+    let rows = snapshot_project("fixture", &project);
+    assert_eq!(
+        rows.iter().map(|row| row.key.clone()).collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            RowKey {
+                project: "fixture".into(),
+                shader: "oracle_sim_shader".into(),
+                profile: "330core",
+            },
+            RowKey {
+                project: "fixture".into(),
+                shader: "oracle_sim_shader".into(),
+                profile: "300es",
+            },
+        ]),
+        "one sim-registered shader x two profiles"
     );
 }
 
