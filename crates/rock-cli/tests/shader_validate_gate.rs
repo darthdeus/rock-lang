@@ -5,12 +5,6 @@
 //! decorative). Mirrors `glsl_runner_gate.rs`; the one sanctioned skip is a
 //! genuine no-display environment (runner exit 2).
 
-use std::sync::Mutex;
-
-/// `ROCK_GLSL_RUNNER` is process-global; serialize the tests that set it so
-/// they stay correct under plain `cargo test` (nextest is process-per-test).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
 /// A tempdir project registering one pipeline pair and one fullscreen entry.
 /// Single `.rock` file: directory discovery needs no stick.toml for that.
 fn mini_project(dir: &std::path::Path) -> String {
@@ -59,7 +53,7 @@ fn fake_runner(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 
 #[test]
 fn missing_runner_is_a_hard_error() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::glsl_runner_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = mini_project(tmp.path());
     unsafe { std::env::set_var("ROCK_GLSL_RUNNER", "/nonexistent/stone-glsl-runner") };
@@ -78,7 +72,7 @@ fn missing_runner_is_a_hard_error() {
 /// collection must still have happened.
 #[test]
 fn validates_a_minimal_project() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::glsl_runner_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = mini_project(tmp.path());
     let summary =
@@ -106,7 +100,7 @@ fn validates_a_minimal_project() {
 #[cfg(unix)]
 #[test]
 fn runner_fail_lines_become_failures() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::glsl_runner_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = mini_project(tmp.path());
     let fake = fake_runner(

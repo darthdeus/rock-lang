@@ -3,12 +3,6 @@
 //! a broken gate (hard error), never a skip. Only a genuine no-display/driver
 //! environment (runner exit 2) may skip-with-log.
 
-use std::sync::Mutex;
-
-/// `ROCK_GLSL_RUNNER` is process-global; serialize the tests that set it so
-/// they stay correct under plain `cargo test` (nextest is process-per-test).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
 fn workspace_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -45,7 +39,7 @@ fn fake_runner(dir: &std::path::Path, exit_code: i32) -> std::path::PathBuf {
 
 #[test]
 fn missing_runner_is_a_hard_error() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::glsl_runner_env();
     unsafe { std::env::set_var("ROCK_GLSL_RUNNER", "/nonexistent/stone-glsl-runner") };
     let result = rock_cli::glsl_test::glsl_test_run(&corpus(), false);
     unsafe { std::env::remove_var("ROCK_GLSL_RUNNER") };
@@ -61,7 +55,7 @@ fn missing_runner_is_a_hard_error() {
 #[cfg(unix)]
 #[test]
 fn probe_anomaly_is_a_hard_error() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::glsl_runner_env();
     let dir = tempfile::tempdir().expect("tempdir");
     let runner = fake_runner(dir.path(), 3);
     unsafe { std::env::set_var("ROCK_GLSL_RUNNER", &runner) };
@@ -79,7 +73,7 @@ fn probe_anomaly_is_a_hard_error() {
 #[cfg(unix)]
 #[test]
 fn no_display_still_skips_with_log() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = crate::glsl_runner_env();
     let dir = tempfile::tempdir().expect("tempdir");
     let runner = fake_runner(dir.path(), 2);
     unsafe { std::env::set_var("ROCK_GLSL_RUNNER", &runner) };

@@ -47,6 +47,7 @@ fn compile(package: &Path) -> String {
 }
 
 fn validate_core(package: &Path) {
+    let _guard = crate::glsl_runner_env();
     let package_text = package.to_string_lossy().into_owned();
     let summary = rock_cli::glsl_test::shader_validate_run(&[package_text], false)
         .expect("shader validation run");

@@ -2,6 +2,15 @@
 
 mod stone_harness;
 
+/// `ROCK_GLSL_RUNNER` is process-global and these tests share one process:
+/// every test that sets it or resolves the runner holds this lock, or a
+/// concurrent reader spawns another test's deleted fake runner.
+pub(crate) static GLSL_RUNNER_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn glsl_runner_env() -> std::sync::MutexGuard<'static, ()> {
+    GLSL_RUNNER_ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[path = "invocation_log.rs"]
 mod invocation_log;
 #[path = "ablation_census_survives_failure.rs"]

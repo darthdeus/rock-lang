@@ -50,6 +50,7 @@ fn only_macos_exempts_the_es_real_driver_profile() {
 
 #[test]
 fn glsl_runnable_coverage_ratchet() {
+    let _guard = crate::glsl_runner_env();
     let summary = rock_cli::glsl_test::glsl_test_run(&corpus(), false)
         .unwrap_or_else(|e| panic!("glsl gate cannot run: {e:#}"));
 
