@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 use serde_json::Value;
 
@@ -60,7 +61,7 @@ fn run_perf_json_window_with_sections(
     if detailed_sections {
         command.env("PERF_NO_SECTIONS", "0");
     }
-    let output = command.output().expect("failed to spawn rock perf");
+    let output = command.output_with_deadline().expect("failed to spawn rock perf");
 
     assert!(
         output.status.success(),
@@ -145,9 +146,15 @@ fn assert_stat_block(block: &Value, ctx: &str, require_samples: bool) {
 }
 
 #[test]
-fn perf_json_has_top_level_shape() {
+fn perf_json_default_shape_memory_and_graphics() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let doc = run_perf_json("games/match3");
+    perf_json_has_top_level_shape(&doc);
+    perf_json_memory_has_uniform_blocks(&doc);
+    perf_json_graphics_has_counters(&doc);
+}
 
+fn perf_json_has_top_level_shape(doc: &Value) {
     for key in [
         "run", "frames", "warmup_s", "frame_ms", "sections", "graphics", "memory", "resources",
     ] {
@@ -210,6 +217,7 @@ fn perf_json_has_top_level_shape() {
 
 #[test]
 fn perf_json_frame_ms_is_uniform_series() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let doc = run_perf_json_window("games/match3", Some((120, 100)));
     let frame_ms = &doc["frame_ms"];
     assert!(
@@ -251,6 +259,7 @@ fn perf_json_frame_ms_is_uniform_series() {
 
 #[test]
 fn perf_json_sections_have_uniform_blocks() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let doc = run_perf_json_with_sections("games/match3");
     assert_eq!(doc["run"]["sections"], Value::String("on".to_string()));
     let sections = doc["sections"]
@@ -294,9 +303,7 @@ fn perf_json_sections_have_uniform_blocks() {
     }
 }
 
-#[test]
-fn perf_json_memory_has_uniform_blocks() {
-    let doc = run_perf_json("games/match3");
+fn perf_json_memory_has_uniform_blocks(doc: &Value) {
     let mem = &doc["memory"];
 
     for group in ["heap_kb"] {
@@ -366,6 +373,7 @@ fn perf_json_memory_has_uniform_blocks() {
 
 #[test]
 fn perf_json_gc_window_has_trustworthy_reconciliation() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let doc = run_perf_json_window_with_sections(
         "games/match3", Some((4, 2)), true, Some("stopped"));
     let trace = &doc["memory"]["gc_window"]["jit_trace"];
@@ -466,6 +474,7 @@ fn perf_json_gc_window_has_trustworthy_reconciliation() {
 
 #[test]
 fn perf_json_gc_window_names_and_applies_both_collector_modes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     for (mode, running) in [("stopped", false), ("running", true)] {
         let doc = run_perf_json_window_with_sections(
             "games/match3", Some((4, 2)), false, Some(mode));
@@ -481,6 +490,7 @@ fn perf_json_gc_window_names_and_applies_both_collector_modes() {
 
 #[test]
 fn perf_json_retires_heap_delta_allocation_fields() {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let doc = run_perf_json_window_with_sections(
         "games/match3", Some((4, 2)), true, Some("running"));
     let memory = &doc["memory"];
@@ -494,9 +504,7 @@ fn perf_json_retires_heap_delta_allocation_fields() {
     }
 }
 
-#[test]
-fn perf_json_graphics_has_counters() {
-    let doc = run_perf_json("games/match3");
+fn perf_json_graphics_has_counters(doc: &Value) {
     let g = &doc["graphics"];
     for key in [
         "draw_calls",
