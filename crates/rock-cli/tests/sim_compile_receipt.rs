@@ -2,12 +2,13 @@ use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn list_sims(
+    rock: &std::path::Path,
     project: &str,
     receipt_dir: &std::path::Path,
     timing_log: &std::path::Path,
     prepare: bool,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = Command::new(rock);
     command
         .args(["sim", "--list", project])
         .env("ROCK_SIM_COMPILE_RECEIPT_DIR", receipt_dir)
@@ -24,22 +25,23 @@ fn list_sims(
 fn prepared_sim_receipt_reuses_one_project_compile() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let receipt_dir = dir.path().join("receipts");
     let timing_log = dir.path().join("compile.jsonl");
 
-    let prepared = list_sims("testbed", &receipt_dir, &timing_log, true);
+    let prepared = list_sims(&rock, "testbed", &receipt_dir, &timing_log, true);
     assert!(
         prepared.status.success(),
         "receipt preparation failed:\n{}",
         String::from_utf8_lossy(&prepared.stderr)
     );
-    let reused_a = list_sims("testbed", &receipt_dir, &timing_log, false);
+    let reused_a = list_sims(&rock, "testbed", &receipt_dir, &timing_log, false);
     assert!(
         reused_a.status.success(),
         "first receipt reuse failed:\n{}",
         String::from_utf8_lossy(&reused_a.stderr)
     );
-    let reused_b = list_sims("testbed", &receipt_dir, &timing_log, false);
+    let reused_b = list_sims(&rock, "testbed", &receipt_dir, &timing_log, false);
     assert!(
         reused_b.status.success(),
         "second receipt reuse failed:\n{}",
@@ -87,7 +89,7 @@ fn prepared_sim_receipt_reuses_one_project_compile() {
     let mut main = std::fs::read(&main_path).expect("read receipt main.lua");
     main.extend_from_slice(b"\n-- tampered\n");
     std::fs::write(&main_path, main).expect("tamper receipt main.lua");
-    let rejected = list_sims("testbed", &receipt_dir, &timing_log, false);
+    let rejected = list_sims(&rock, "testbed", &receipt_dir, &timing_log, false);
     let stderr = String::from_utf8_lossy(&rejected.stderr);
     assert!(!rejected.status.success(), "a modified receipt artifact must be rejected");
     assert!(
@@ -100,6 +102,7 @@ fn prepared_sim_receipt_reuses_one_project_compile() {
 fn prepared_sim_receipt_rejects_changed_project_sources() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let receipt_dir = dir.path().join("receipts");
     let timing_log = dir.path().join("compile.jsonl");
@@ -121,7 +124,7 @@ fn prepared_sim_receipt_rejects_changed_project_sources() {
     std::fs::write(project.join("main.rock"), source).expect("write fixture source");
     let project_arg = project.to_string_lossy();
 
-    let prepared = list_sims(&project_arg, &receipt_dir, &timing_log, true);
+    let prepared = list_sims(&rock, &project_arg, &receipt_dir, &timing_log, true);
     assert!(
         prepared.status.success(),
         "receipt preparation failed:\n{}",
@@ -129,7 +132,7 @@ fn prepared_sim_receipt_rejects_changed_project_sources() {
     );
     std::fs::write(project.join("main.rock"), format!("{source}\n// changed\n"))
         .expect("change fixture source");
-    let rejected = list_sims(&project_arg, &receipt_dir, &timing_log, false);
+    let rejected = list_sims(&rock, &project_arg, &receipt_dir, &timing_log, false);
     let stderr = String::from_utf8_lossy(&rejected.stderr);
     assert!(!rejected.status.success(), "a source-stale receipt must be rejected");
     assert!(
@@ -142,13 +145,14 @@ fn prepared_sim_receipt_rejects_changed_project_sources() {
 fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let timing_log = dir.path().join("compile.jsonl");
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("workspace root")
         .to_path_buf();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = Command::new(&rock)
         .args(["sim", "testbed", "testbed::co_join2_tuple"])
         .current_dir(&workspace)
         .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
@@ -189,6 +193,7 @@ fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
 fn sim_run_compile_child_keeps_the_invocations_selection() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
@@ -198,7 +203,7 @@ fn sim_run_compile_child_keeps_the_invocations_selection() {
         ("--var", "UNDECLARED_SIM_VAR=1", "--var UNDECLARED_SIM_VAR is not declared"),
         ("--channel", "undeclared-channel", "channel \"undeclared-channel\" is not declared"),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        let output = Command::new(&rock)
             .args(["sim", "testbed", "testbed::co_join2_tuple", flag, value])
             .current_dir(&workspace)
             .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
@@ -279,6 +284,25 @@ struct CacheRun<'a> {
     scratch: &'a std::path::Path,
 }
 
+fn copy_rock_executable(source: &std::path::Path, destination: &std::path::Path) {
+    let permissions = std::fs::metadata(source)
+        .expect("read rock executable permissions")
+        .permissions();
+    std::fs::copy(source, destination).expect("copy rock executable");
+    std::fs::set_permissions(destination, permissions)
+        .expect("preserve rock executable permissions");
+}
+
+fn pinned_rock(tempdir: &std::path::Path) -> std::path::PathBuf {
+    pin_rock_executable(std::path::Path::new(env!("CARGO_BIN_EXE_rock")), tempdir)
+}
+
+fn pin_rock_executable(source: &std::path::Path, tempdir: &std::path::Path) -> std::path::PathBuf {
+    let pinned = tempdir.join("rock-pinned");
+    copy_rock_executable(source, &pinned);
+    pinned
+}
+
 impl CacheRun<'_> {
     /// Run the fixture's sim once and report whether that run compiled.
     fn compiled(&self, label: &str, sim: &str, args: &[&str], env: &[(&str, &str)]) -> bool {
@@ -338,13 +362,34 @@ fn cache_entries(cache: &std::path::Path) -> Vec<String> {
 }
 
 #[test]
-fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_changes() {
+fn sim_compile_cache_run_survives_original_executable_removal() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let source = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
+    let original = dir.path().join("rock-original");
+    copy_rock_executable(&source, &original);
+    let rock = pin_rock_executable(&original, dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
-    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
+    let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
+
+    assert!(run.compiled("before-removal", "cache_probe", &[], &[]), "cold run compiles");
+    std::fs::remove_file(&original).expect("remove the replaceable original path");
+    assert!(
+        !run.compiled("after-removal", "cache_probe", &[], &[]),
+        "the cached fixture still runs after the original executable path disappears"
+    );
+}
+
+#[test]
+fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_changes() {
+    let _spawn_budget = SpawnBudget::for_test(120);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
+    let project = dir.path().join("project");
+    let cache = dir.path().join("cache");
+    write_cache_fixture(&project);
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
 
     assert!(run.compiled("cold", "cache_probe", &[], &[]), "an empty cache compiles");
@@ -394,7 +439,12 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
     assert!(run.compiled("stdlib-edit", "cache_probe", &[], &stdlib_env), "a stdlib edit recompiles");
 
     let compiler = dir.path().join("rock-copy");
-    std::fs::copy(&rock, &compiler).expect("copy rock");
+    copy_rock_executable(&rock, &compiler);
+    assert_eq!(
+        std::fs::read(&rock).expect("read pinned rock"),
+        std::fs::read(&compiler).expect("read byte-identical rock copy"),
+        "compiler identity copy starts with identical executable bytes"
+    );
     let changed = CacheRun { rock: &compiler, ..run };
     assert!(
         !changed.compiled("compiler-copy", "cache_probe", &[], &[]),
@@ -426,6 +476,11 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
         bytes.push(0);
         std::fs::write(&compiler, bytes).expect("change rock copy");
     }
+    assert_ne!(
+        std::fs::read(&rock).expect("read pinned rock"),
+        std::fs::read(&compiler).expect("read changed rock copy"),
+        "changed compiler copy has distinct executable bytes"
+    );
     assert!(changed.compiled("compiler", "cache_probe", &[], &[]), "a changed compiler recompiles");
 
     let entries = cache_entries(&cache);
@@ -439,10 +494,10 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
 fn concurrent_sim_runs_share_one_compile_cache_entry() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
-    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     let budget = SpawnBudget::budget();
     std::thread::scope(|scope| {
@@ -469,6 +524,7 @@ fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
     use std::time::{Duration, Instant};
 
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     let slots = dir.path().join("slots");
@@ -479,7 +535,7 @@ fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
     slot.lock().unwrap();
     writeln!(slot, "{} test barrier", std::process::id()).unwrap();
     let spawn = |label: &str| {
-        Command::new(env!("CARGO_BIN_EXE_rock"))
+        Command::new(&rock)
             .arg("sim").arg(&project).arg("cache_probe")
             .current_dir(workspace_root())
             .env("ROCK_DIR", workspace_root())
@@ -535,10 +591,10 @@ fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
 fn sim_run_forwards_build_var_overrides_to_its_compile() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
-    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     assert!(run.compiled("forwarded", "forwarded_probe", &["--var", "PROBE=forwarded"], &[]));
 }
@@ -547,10 +603,10 @@ fn sim_run_forwards_build_var_overrides_to_its_compile() {
 fn sim_compile_receipt_narrow_selection_excludes_unselected_body() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
-    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     assert!(run.compiled("narrow", "cache_probe", &[], &[]));
     let entries = cache_entries(&cache);
@@ -567,10 +623,10 @@ fn sim_compile_receipt_narrow_selection_excludes_unselected_body() {
 fn sim_compile_receipt_cache_distinguishes_selection_and_prefers_full_entry() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
-    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     assert!(run.compiled("first", "cache_probe", &[], &[]));
     assert!(run.compiled("second", "other_probe", &[], &[]), "another selection must compile");
@@ -587,6 +643,7 @@ fn sim_compile_receipt_cache_distinguishes_selection_and_prefers_full_entry() {
 fn sim_compile_receipt_named_dependency_is_registered_and_runs() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
@@ -635,7 +692,6 @@ co fn dynamic_probe() -> Coroutine<Wait> {
 }
 "#);
     std::fs::write(path, source).unwrap();
-    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     assert!(run.compiled("lookup", "lookup_probe", &[], &[]));
     let entries = cache_entries(&cache);
@@ -677,6 +733,7 @@ fn copy_stone_sources(source: &std::path::Path, target: &std::path::Path) {
 fn sim_compile_receipt_v1_entry_point_and_short_name_selection_run() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let dir = tempfile::tempdir().expect("tempdir");
+    let rock = pinned_rock(dir.path());
     let project = dir.path().join("project");
     let cache = dir.path().join("cache");
     write_cache_fixture(&project);
@@ -687,7 +744,6 @@ fn sim_compile_receipt_v1_entry_point_and_short_name_selection_run() {
     std::fs::write(project.join("imports.rock"),
         "pub(package) use stone::*;\npub(package) use stone_core::*;\n").unwrap();
     std::fs::write(manifest, text).unwrap();
-    let rock = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     assert!(run.compiled("v1", "cache_probe", &[], &[]));
 }
