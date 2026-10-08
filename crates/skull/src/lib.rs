@@ -2463,7 +2463,7 @@ mod tests {
     #[test]
     fn int_literal_function() {
         let lua = emit("fn five() -> int { 5 }");
-        assert!(lua.contains("function five()"), "got:\n{lua}");
+        assert!(lua.contains("function five_0()"), "got:\n{lua}");
         // The literal is a single-use pure value -> tree-folded into the return.
         assert!(lua.contains("do return (5)"), "got:\n{lua}");
     }
@@ -2708,7 +2708,7 @@ mod tests {
         );
         // Top-level shared step fn — NOT a per-instance `local function` closure.
         assert!(
-            lua.contains("function counter__step("),
+            lua.contains("function counter_0__step("),
             "expected top-level step fn, got:\n{lua}"
         );
         assert!(
@@ -2720,7 +2720,7 @@ mod tests {
             "expected the tagged+stamped frame table, got:\n{lua}"
         );
         assert!(
-            lua.contains("pcall(counter__step,"),
+            lua.contains("pcall(counter_0__step,"),
             "expected name-referenced pcall, got:\n{lua}"
         );
         // State machine: writes to the state field + a completed terminal -3

@@ -9848,7 +9848,7 @@ fn main() {
             skull_codegen_lua::CalleeBindingMode::Global,
         ] {
             let produced = overlay_for(binding).expect("overlay under either callee shape");
-            assert!(produced.lua.contains("top = __rock_mk_top") || produced.lua.contains("function top("));
+            assert!(produced.lua.contains("top_0 = __rock_mk_top_0") || produced.lua.contains("function top_0("));
         }
     }
 

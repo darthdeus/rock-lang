@@ -487,7 +487,7 @@ fn int_literal_and_return() {
     assert_eq!(
         emit("fn five() -> int { 5 }", "five"),
         "\
-function five()
+function five_0()
   ::bb0::
   do return (5) end
 end
@@ -941,8 +941,8 @@ fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
         "destructure must be zero-alloc multi-assign, not a table build:\n{body}"
     );
     assert!(
-        body.lines().any(|l| l.contains(", ") && l.contains("= pair(")),
-        "expected a multi-assign call line `a, b = pair(...)`:\n{body}"
+        body.lines().any(|l| l.contains(", ") && l.contains("= pair_0(")),
+        "expected a multi-assign call line `a, b = pair_0(...)`:\n{body}"
     );
 }
 
@@ -960,7 +960,7 @@ fn use_it() -> int { let t = pair(); t.1 }";
         !body.contains("[1]") && !body.contains("[2]"),
         "non-escaping whole-stored tuple should scalarize, not pack:\n{body}"
     );
-    assert!(body.contains("= pair()"), "multi-assign call expected:\n{body}");
+    assert!(body.contains("= pair_0()"), "multi-assign call expected:\n{body}");
 }
 
 #[test]

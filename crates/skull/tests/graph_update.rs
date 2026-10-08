@@ -207,7 +207,7 @@ fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
         before.difference(&case.instance_names()).map(short).collect();
     assert_eq!(
         removed,
-        vec!["chain_a", "chain_b", "chain_c"],
+        vec!["chain_a_0", "chain_b_0", "chain_c_0"],
         "expected exactly the three stranded instances, out of {} before",
         before.len()
     );

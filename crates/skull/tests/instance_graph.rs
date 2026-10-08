@@ -1775,7 +1775,7 @@ fn main() { let x = G }
     );
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let g = instance_graph::build(&ws, roots, false);
-    let hole = g.uninstantiated_roots.get("pick").unwrap_or_else(|| {
+    let hole = g.uninstantiated_roots.get("pick_0").unwrap_or_else(|| {
         panic!("no hole recorded for `pick`: {:?}", g.uninstantiated_roots)
     });
     assert_eq!(

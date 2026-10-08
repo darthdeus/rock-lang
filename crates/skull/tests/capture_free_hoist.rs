@@ -115,21 +115,21 @@ fn main() {
 
 /// A definition whose name equals a hoisted lambda's `<enclosing>__lambda<k>`
 /// name must be REJECTED (a spanned `CompilerError`, not a panic / silent
-/// clobber). `foo() -> fn()` mangles to `foo`, so its capture-free
-/// lambda hoists to `foo__lambda0`; a `@nomangle` fn keeps that
+/// clobber). `foo() -> fn()` mangles to `foo_0`, so its capture-free
+/// lambda hoists to `foo_0__lambda0`; a `@nomangle` fn keeps that
 /// bare name and collides. (A PLAIN user fn would itself mangle and could no
 /// longer BE a bare synthetic name.) Full family: `synthetic_name_collision.rs`.
 #[test]
 fn hoist_name_collision_with_user_fn_rejected() {
     let src = r#"
 @nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
-@nomangle fn foo__lambda0() -> int { return 99 }
+@nomangle fn foo_0__lambda0() -> int { return 99 }
 fn foo() -> fn() { return () => { sink(1) } }
 fn main() {}
 "#;
     let err = crate::common::try_emit_module(src).err().expect("the collision must be rejected");
     assert!(
-        err.message.contains("foo__lambda0") && err.message.contains("compiler-reserved synthetic name"),
+        err.message.contains("foo_0__lambda0") && err.message.contains("compiler-reserved synthetic name"),
         "rejection names the colliding synthetic name; got: {}",
         err.message
     );

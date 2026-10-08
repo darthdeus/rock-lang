@@ -1494,7 +1494,7 @@ mod overlay_runtime_tests {
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay carries the redefined body and slot publication only.
         assert!(
-            overlay.lua.contains("function tick()")
+            overlay.lua.contains("function tick_0()")
                 && !overlay.lua.contains("__rock_rebind_system"),
             "overlay must redefine the body without a name-based registry repair:\n{}",
             overlay.lua
@@ -1652,7 +1652,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must carry the re-emitted coroutine (its top-level step fn).
         assert!(
-            overlay.lua.contains("counter__step("),
+            overlay.lua.contains("counter_0__step("),
             "overlay must re-emit the coroutine's step fn:\n{}",
             overlay.lua
         );
@@ -1707,10 +1707,10 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must re-emit the whole frame-slot channel.
-        assert!(overlay.lua.contains("gen__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
+        assert!(overlay.lua.contains("gen_0__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
         assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
         assert!(
-            overlay.lua.contains("function gen__advance(")
+            overlay.lua.contains("function gen_0__advance(")
                 && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::advance\")")
                 && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
             "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
@@ -1736,7 +1736,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// The load-bearing hot-reload case: a flat-enum coroutine created + first-resumed
     /// under v0, then resumed again ACROSS a body-edit overlay on the SAME live object
     /// (the engine's per-frame poll pattern). The live object keeps its v0
-    /// `__advance`/`__resume` closures, but `__advance` calls `gen__step` by GLOBAL
+    /// `__advance`/`__resume` closures, but `__advance` calls `gen_0__step` by GLOBAL
     /// name, so a mid-flight resume runs the NEW step -- writing the new yield leaves
     /// into the SAME reused `__y*` slots on the object/frame (the enum shape is
     /// unchanged), which the (baseline, unchanged) `pump` reads directly. If
@@ -1898,7 +1898,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// `await` under hot reload: a live outer+inner delegation chain must pick up
     /// a BodyOnly edit to the INNER co fn's body. The chain is advance-by-field
     /// (outer holds the inner object) + step-by-global-name (inner's stale advance
-    /// resolves `inner__step` at call time), and both mechanisms must compose
+    /// resolves `inner_0__step` at call time), and both mechanisms must compose
     /// across the delegation boundary. Guards the Part B kill/advance/delegate
     /// refactor (docs/coroutine-allocation-plan.md).
     #[test]
@@ -1932,7 +1932,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         // pump #1 under v0: outer primes inner, re-yields inner's Tick(1). Overlay
         // (layout-stable: constants only). pump #2 resumes the live chain: the
-        // inner's stale advance runs the NEW inner__step -> Tick(20). pump #3:
+        // inner's stale advance runs the NEW inner_0__step -> Tick(20). pump #3:
         // inner done -> outer's delegate exits, outer completes -> -1.
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
         match composed {
@@ -2061,7 +2061,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 // Per-fn skips are also an acceptable surface -- but the co fn
                 // must NOT emit with a silently-dropped hook.
                 assert!(
-                    !full.lua.contains("function gen__step("),
+                    !full.lua.contains("function gen_0__step("),
                     "a co fn with a non-lambda hook arg must not emit:\n{}",
                     full.lua
                 );
@@ -2088,7 +2088,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 // Emission collects per-fn skips rather than failing the whole
                 // unit -- accept either surface, but the co fn must NOT emit.
                 assert!(
-                    !full.lua.contains("function gen__step("),
+                    !full.lua.contains("function gen_0__step("),
                     "a co fn with `yield` inside a defer body must not emit:\n{}",
                     full.lua
                 );
@@ -2539,7 +2539,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     // top-level body emitted IN THE SAME CHUNK as the step (const-hoist
     // precedent), so a BodyOnly overlay carries it. A test that would also pass
     // against pre-P1 emission (inline `function(...)` closures, no
-    // `gen__step__lambda<k>` global) is not evidence -- each asserts the
+    // `gen_0__step__lambda<k>` global) is not evidence -- each asserts the
     // hoisted body is present in the overlay.
 
     /// The frame layout stamp for a coroutine ctor `function <ctor>()`: the
@@ -2573,9 +2573,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     }
 
     /// A capturing co-fn lambda whose BODY is edited (operator `+` -> `*`): the
-    /// overlay must carry the hoisted `gen__step__lambda0` body, and a
+    /// overlay must carry the hoisted `gen_0__step__lambda0` body, and a
     /// coroutine created AFTER the reload runs the new lambda behavior. Equals a
-    /// fresh full build of v1. The `overlay.lua.contains("gen__step__lambda0")`
+    /// fresh full build of v1. The `overlay.lua.contains("gen_0__step__lambda0")`
     /// assertion is what discriminates P1 from pre-P1 (which had no hoisted
     /// global -- the lambda was an inline closure inside the step).
     #[test]
@@ -2606,7 +2606,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(
-            overlay.lua.contains("gen__step__lambda0"),
+            overlay.lua.contains("gen_0__step__lambda0"),
             "the overlay must carry the hoisted lambda body (const-hoist precedent); \
              absence means pre-P1 inline-closure emission"
         );
@@ -2649,20 +2649,20 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         // Layout-stable premise: an operator edit doesn't touch the frame canon.
         assert_eq!(
-            layout_stamp(&full0.lua, "gen"),
+            layout_stamp(&full0.lua, "gen_0"),
             {
                 let mut s = bone_session(files(&v1)).expect("session v1 probe");
                 let m = skull::user_module_id(s.workspace()).unwrap();
                 let f = skull::mir_emit::emit_full(s.workspace(), m).expect("emit v1 probe").0;
                 let _ = &mut s;
-                layout_stamp(&f.lua, "gen")
+                layout_stamp(&f.lua, "gen_0")
             },
             "an operator-only edit must be layout-stable (no frame-cell change)"
         );
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        assert!(overlay.lua.contains("gen__step__lambda1"), "overlay must carry the hoisted g body");
+        assert!(overlay.lua.contains("gen_0__step__lambda1"), "overlay must carry the hoisted g body");
 
         // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
         // record now resolves lambda0's edited body, then g uses lambda1.
@@ -2793,8 +2793,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         assert_eq!(
-            layout_stamp(&full0.lua, "gen"),
-            layout_stamp(&fresh.lua, "gen"),
+            layout_stamp(&full0.lua, "gen_0"),
+            layout_stamp(&fresh.lua, "gen_0"),
             "the lambda-local edit must not change the coroutine frame stamp"
         );
         let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
@@ -2842,8 +2842,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         assert_ne!(
-            layout_stamp(&full0.lua, "gen"),
-            layout_stamp(&fresh.lua, "gen"),
+            layout_stamp(&full0.lua, "gen_0"),
+            layout_stamp(&fresh.lua, "gen_0"),
             "a co-fn-level local must shift the frame layout stamp"
         );
 

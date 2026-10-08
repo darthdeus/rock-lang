@@ -7,7 +7,9 @@
 //! grammars alike). Every function mangles except the verbatim exemptions:
 //! `extern`, `@nomangle`, `@test`, `main`, `test_*` (deliberate surface names --
 //! `extern(lua)` IS the Lua builtin; `@nomangle` is an explicit shadow the author
-//! owns; `main`/`test_*`/`@test` are runner entry points).
+//! owns; `main`/`test_*`/`@test` are runner entry points). A function with no
+//! parameters gets the arity marker `_0` (`foo()` -> `foo_0`), so a mangled name
+//! never equals its source name.
 //!
 //! The separator is a single `_` (adopted after a corpus-wide collision scan
 //! found zero collisions over stdlib + stone + every game, ~23k fns --
@@ -173,6 +175,12 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
     for pd in &f.param_decls {
         out.push_str(SEP);
         encode_into(ws, pd.ty, &mut out);
+    }
+    // The arity marker keeps a parameterless symbol off its source name, which
+    // Lua's `_G[name]` would otherwise reach (ZERO_ARG_MANGLING).
+    if f.param_decls.is_empty() {
+        out.push_str(SEP);
+        out.push('0');
     }
     out
 }

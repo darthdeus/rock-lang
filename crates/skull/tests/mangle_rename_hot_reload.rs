@@ -65,7 +65,7 @@ fn run_luajit(test: &str, prog: &str) -> String {
 
 // v1: `foo(int)` body returns the version marker 51 (no arithmetic -- the
 // stdlib-free `ws_of` has no `__op_*`). `probe` calls `foo` BY NAME; under
-// always-mangle both emit as `foo_int` / `probe`, and `probe`'s body is `GETGLOBAL "foo_int"`.
+// always-mangle both emit as `foo_int` / `probe_0`, and `probe`'s body is `GETGLOBAL "foo_int"`.
 const V1: &str = "\
 fn foo(x: int) -> int { return 51 }
 fn probe() -> int { return foo(5) }
@@ -104,7 +104,7 @@ fn body_edit_without_overload_hot_reloads_running_code() {
     let after = emit_program(V2_CONTROL);
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local old_probe = probe\n\
+         local old_probe = probe_0\n\
          _G.HOT_RELOAD = true\n{after}\n\
          print('old_probe=' .. old_probe())\n"
     );
@@ -133,7 +133,7 @@ fn overload_add_orphans_running_global_sentinel() {
     let after = emit_program(V2_OVERLOAD);
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local old_probe = probe\n\
+         local old_probe = probe_0\n\
          _G.HOT_RELOAD = true\n{after}\n\
          print('fresh=' .. old_probe())\n\
          print('canonical=' .. foo_int(5))\n\

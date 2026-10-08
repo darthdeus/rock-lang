@@ -549,7 +549,7 @@ fn const_loop_bound_fold() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "int f() {\n  \
+        "int f_0() {\n  \
          int acc;\n  \
          int i;\n  \
          acc = 0;\n  \
@@ -751,7 +751,7 @@ fn let_float_annotation_cell_typing() {
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
-        "float f() {\n  \
+        "float f_0() {\n  \
          float y;\n  \
          y = 0.0;\n  \
          return y;\n}"

@@ -1,0 +1,79 @@
+//! A mangled name never equals its source name (ZERO_ARG_MANGLING,
+//! `docs/mangle-unification-plan.md`): a non-exempt function with no parameters
+//! carries the `_0` arity marker, so Lua's `_G[name]` cannot reach it by its
+//! declared name. Exempt surface names stay bare.
+
+use std::sync::LazyLock;
+
+use skull_mir::mangle::{collision_errors, mangle_fn};
+use ustr::Ustr;
+
+static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| {
+            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
+fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+}
+
+fn mangled(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<String> {
+    let mid = ws.module_ids[&Ustr::from("<test>")];
+    let found: Vec<String> = ws
+        .module(mid)
+        .functions
+        .iter()
+        .filter(|(_, f)| f.name.as_str() == name)
+        .map(|(_, f)| mangle_fn(ws, f))
+        .collect();
+    assert!(!found.is_empty(), "no fn `{name}`");
+    found
+}
+
+#[test]
+fn zero_parameter_function_gets_the_arity_marker() {
+    let ws = ws_of(
+        r#"
+fn foo() -> int { return 1 }
+fn bar(x: int) -> int { return x }
+"#,
+    );
+    assert_eq!(mangled(&ws, "foo"), ["foo_0"]);
+    assert_eq!(mangled(&ws, "bar"), ["bar_int"]);
+}
+
+#[test]
+fn exempt_zero_parameter_functions_keep_their_names() {
+    let ws = ws_of(
+        r#"
+@nomangle fn kept() {}
+@test fn decorated() {}
+fn test_entry() {}
+extern(lua) fn clock() -> float
+fn main() {}
+"#,
+    );
+    for name in ["kept", "decorated", "test_entry", "clock", "main"] {
+        assert_eq!(mangled(&ws, name), [name]);
+    }
+}
+
+#[test]
+fn mangled_marker_clashing_with_exempt_bare_name_is_rejected() {
+    let ws = ws_of(
+        r#"
+fn foo() -> int { return 1 }
+@nomangle fn foo_0() -> int { return 2 }
+"#,
+    );
+    let errors = collision_errors(&ws);
+    assert_eq!(errors.len(), 1, "{:?}", errors.iter().map(|(n, e)| (n, &e.message)).collect::<Vec<_>>());
+    assert_eq!(errors[0].0, "foo_0");
+}
