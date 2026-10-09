@@ -284,9 +284,28 @@ fn run_project_workers_with_history(project: &str, specs: &[&str], jobs: &str) -
     // These fixtures witness explicit worker counts independently of free VRAM.
     args.extend_from_slice(&["--workers", "-j", jobs, "--jobs-force"]);
 
+    // A GPU probe reporting no free memory pins the planner to one lane, so
+    // every overlap witness exercises the forced path on any host. A private
+    // admission namespace keeps other concurrently running tests' workers
+    // from occupying the slots the forced lanes are admitted through.
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("fake tool dir");
+    let nvidia = bin.join("nvidia-smi");
+    std::fs::write(&nvidia, "#!/usr/bin/env bash\nprintf '0\\n'\n").expect("fake nvidia-smi");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&nvidia, std::fs::Permissions::from_mode(0o755))
+            .expect("fake nvidia-smi mode");
+    }
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").expect("PATH")));
+
     let out = Command::new(rock_bin())
         .args(&args)
         .current_dir(workspace_root())
+        .env("PATH", std::env::join_paths(paths).expect("PATH join"))
+        .env("ROCK_SIM_WORKER_SLOT_DIR", dir.path().join("worker-slots"))
+        .env_remove("ROCK_SIM_WORKER_SLOTS")
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
         .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
         .env("ROCK_SIM_LOG_DIR", &history)

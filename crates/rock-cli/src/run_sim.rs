@@ -3747,9 +3747,14 @@ pub(crate) fn resolve_jobs(requested: Option<usize>, update_snapshots: bool, for
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| log::warn!(target: "SIM",
             "--jobs {jobs} exceeds the default memory budget of {budget} lanes"));
+        FORCED_SIM_JOBS.fetch_max(jobs, std::sync::atomic::Ordering::Relaxed);
     }
     Ok(jobs)
 }
+
+/// Lanes this process was forced above the memory budget; worker admission
+/// (`acquire_worker_slot`) honors the same override. Zero when not forced.
+static FORCED_SIM_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: usize, force: bool) -> Result<usize> {
     if update_snapshots {
@@ -5028,12 +5033,15 @@ fn record_worker_wait(label: &str) {
 /// All callers meet at the physical spawn, including library gates and their
 /// test-binary/CLI subprocesses. Kernel locks share this budget across them;
 /// a harness mutex or a per-invocation -j bound cannot do that.
-/// `ROCK_SIM_WORKER_SLOTS` lowers the existing CPU/RAM/GPU bound. The default
+/// The bound is the existing CPU/RAM/GPU budget, raised to the lane count an
+/// invocation forced with `--jobs-force`: a forced lane must be admitted, or
+/// the planner the flag overrides would serialize it here instead.
+/// `ROCK_SIM_WORKER_SLOTS` lowers that bound. The default
 /// slot directory is shared by the OS user even under a fixture HOME;
 /// `ROCK_SIM_WORKER_SLOT_DIR`
 /// gives resource-isolated fixtures their own namespace.
 fn acquire_worker_slot(label: &str) -> Result<std::fs::File> {
-    let budget = sim_job_budget();
+    let budget = sim_job_budget().max(FORCED_SIM_JOBS.load(std::sync::atomic::Ordering::Relaxed));
     let slots = match std::env::var("ROCK_SIM_WORKER_SLOTS") {
         Ok(raw) => raw.parse::<usize>().ok().filter(|n| *n > 0)
             .ok_or_else(|| anyhow!("ROCK_SIM_WORKER_SLOTS={raw:?} must be a positive integer"))?
