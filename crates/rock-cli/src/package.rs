@@ -11,8 +11,10 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sound_core::AssetResolver;
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use rodio::Source;
 
 pub const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
 
@@ -272,6 +274,89 @@ struct CompiledSoundPackage {
     dependencies: Vec<String>,
 }
 
+const SOUND_RECIPE_BUCKETS: usize = 64;
+
+fn sound_metadata_cached(project_dir: &Path, source_path: &Path, bytes: &[u8]) -> Result<Value> {
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let cache_dir = project_dir.join("assets/.runtime-data/sounds");
+    let cache_path = cache_dir.join(format!("{digest}.json"));
+    if let Ok(cached) = std::fs::read(&cache_path) {
+        if let Ok(value) = serde_json::from_slice::<Value>(&cached) {
+            if sound_metadata_valid(&value) && value["digest"].as_str() == Some(digest.as_str()) {
+                return Ok(value);
+            }
+        }
+        log::warn!(target: "SOUND", "invalid sound metadata cache {}; decoding {}",
+            cache_path.display(), source_path.display());
+        match std::fs::remove_file(&cache_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let mut metadata = decode_sound_metadata(bytes).map_err(|error| {
+        anyhow::anyhow!("package: sound source {}: {error}", source_path.display())
+    })?;
+    metadata["digest"] = json!(digest);
+    std::fs::create_dir_all(&cache_dir)?;
+    let encoded = serde_json::to_vec(&metadata)?;
+    let mut pending = tempfile::Builder::new()
+        .prefix("sound-metadata-")
+        .tempfile_in(&cache_dir)?;
+    pending.write_all(&encoded)?;
+    match pending.persist(&cache_path) {
+        Ok(_) => {}
+        Err(error) if cache_path.exists() => {
+            let cached = std::fs::read(&cache_path)?;
+            let value: Value = serde_json::from_slice(&cached)?;
+            if !sound_metadata_valid(&value) || value["digest"].as_str() != Some(digest.as_str()) {
+                return Err(anyhow::anyhow!("package: invalid sound metadata cache {}",
+                    cache_path.display()));
+            }
+            drop(error.file);
+        }
+        Err(error) => return Err(error.error.into()),
+    }
+    Ok(metadata)
+}
+
+fn sound_metadata_valid(value: &Value) -> bool {
+    let frames = value["frames"].as_u64().unwrap_or(0);
+    let rate = value["rate"].as_u64().unwrap_or(0);
+    let channels = value["channels"].as_u64().unwrap_or(0);
+    let Some(peaks) = value["peaks"].as_array() else { return false };
+    let digest = value["digest"].as_str().unwrap_or("");
+    frames > 0 && rate > 0 && channels > 0 && peaks.len() == SOUND_RECIPE_BUCKETS
+        && digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && peaks.iter().all(|peak| peak.as_f64().is_some_and(|value| value.is_finite() && value >= 0.0))
+}
+
+fn decode_sound_metadata(bytes: &[u8]) -> Result<Value> {
+    let mut decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec()))
+        .map_err(|error| anyhow::anyhow!("decode failed: {error}"))?;
+    let rate = decoder.sample_rate().get();
+    let channels = decoder.channels().get();
+    let samples: Vec<f32> = decoder.by_ref().collect();
+    if samples.is_empty() || channels == 0 || rate == 0 {
+        anyhow::bail!("decoded source has no PCM frames");
+    }
+    let frames = samples.len() / channels as usize;
+    if frames == 0 {
+        anyhow::bail!("decoded source has no complete frame");
+    }
+    let mut peaks = Vec::with_capacity(SOUND_RECIPE_BUCKETS);
+    for bucket in 0..SOUND_RECIPE_BUCKETS {
+        let low = bucket * samples.len() / SOUND_RECIPE_BUCKETS;
+        let high = (bucket + 1) * samples.len() / SOUND_RECIPE_BUCKETS;
+        let peak = samples[low..high].iter().fold(0.0f32, |peak, sample| {
+            peak.max(sample.abs())
+        });
+        peaks.push(peak);
+    }
+    Ok(json!({ "frames": frames, "rate": rate, "channels": channels, "peaks": peaks }))
+}
+
 struct CompiledVisualPackage {
     bank_key: String,
     schema: u64,
@@ -414,6 +499,7 @@ fn compile_sound_project(
     let bank_bytes = sound_core::serialize_runtime_bank(&bank)
         .map_err(|error| anyhow::anyhow!("package: sound project {}: {error}", sound.project))?;
     let mut dependencies = Vec::with_capacity(bank.dependencies.len());
+    let mut recipes = serde_json::Map::new();
     for dependency in &bank.dependencies {
         let asset = rock_host::release::resolve_asset_with_overlays(
             project_dir,
@@ -435,10 +521,22 @@ fn compile_sound_project(
                 "package: sound dependency is not stageable: {dependency}"
             ));
         };
+        let source_bytes = std::fs::read(&asset.source).map_err(|error| {
+            anyhow::anyhow!("package: sound dependency {} could not be read: {error}", asset.source.display())
+        })?;
+        recipes.insert(
+            dependency.clone(),
+            sound_metadata_cached(project_dir, &asset.source, &source_bytes)?,
+        );
         rock_host::release::include_release_asset(selection, asset);
         dependencies.push(format!("{game_key}/{dependency}"));
     }
     dependencies.sort();
+    let mut bank_value: Value = serde_json::from_slice(&bank_bytes)
+        .map_err(|error| anyhow::anyhow!("package: compiled sound bank could not be decoded: {error}"))?;
+    bank_value["recipes"] = Value::Object(recipes);
+    let bank_bytes = serde_json::to_vec(&bank_value)
+        .map_err(|error| anyhow::anyhow!("package: compiled sound bank metadata could not be encoded: {error}"))?;
     Ok(Some(CompiledSoundPackage {
         project: sound.project.clone(),
         bank_key: format!("{game_key}/assets/sound_bank.json"),
@@ -722,6 +820,92 @@ fn remove_if_present(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    fn pcm_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
+        let data_bytes = (samples.len() * std::mem::size_of::<i16>()) as u32;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for sample in samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        wav
+    }
+
+    fn decoded_sound_oracle(bytes: &[u8]) -> (usize, u32, u16, f32) {
+        let mut decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let rate = decoder.sample_rate().get();
+        let channels = decoder.channels().get();
+        let duration = decoder.total_duration().unwrap().as_secs_f32();
+        let samples: Vec<f32> = decoder.collect();
+        let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        (samples.len() / channels as usize, rate, channels, peak)
+    }
+
+    #[test]
+    fn sound_metadata_is_decoded_and_cached_by_source_digest() {
+        let project = tempfile::tempdir().expect("metadata cache fixture");
+        let source = project.path().join("cue.wav");
+        let samples: Vec<i16> = (0..128).map(|index| {
+            if index % 2 == 0 { 16_384 } else { 0 }
+        }).collect();
+        let bytes = pcm_wav(&samples, 8_000);
+        std::fs::write(&source, &bytes).expect("source fixture");
+        let (frames, rate, channels, source_peak) = decoded_sound_oracle(&bytes);
+
+        let first = sound_metadata_cached(project.path(), &source, &bytes)
+            .expect("the PCM source should be decoded");
+        assert_eq!(first["frames"].as_u64(), Some(frames as u64),
+            "frame count agrees with an independent decode of the source");
+        assert_eq!(first["rate"].as_u64(), Some(rate as u64),
+            "sample rate agrees with an independent decode of the source");
+        assert_eq!(first["channels"].as_u64(), Some(channels as u64),
+            "channel count agrees with an independent decode of the source");
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        assert_eq!(first["digest"].as_str(), Some(digest.as_str()),
+            "the runtime recipe carries its source identity");
+        let peaks = first["peaks"].as_array().expect("thumbnail envelope");
+        assert_eq!(peaks.len(), 64, "the thumbnail has the runtime envelope width");
+        let thumbnail_peak = peaks.iter().map(|peak| peak.as_f64().unwrap() as f32)
+            .fold(0.0f32, f32::max);
+        assert!((thumbnail_peak - source_peak).abs() < 0.00001,
+            "the thumbnail retains the loudest decoded source sample");
+
+        let cache_dir = project.path().join("assets/.runtime-data/sounds");
+        let cache_path = cache_dir.join(format!("{digest}.json"));
+        assert!(cache_path.is_file(), "the cache entry is named by the source digest");
+        let cached_bytes = std::fs::read(&cache_path).unwrap();
+        let second = sound_metadata_cached(project.path(), &source, &bytes)
+            .expect("the same digest should reuse its recipe");
+        assert_eq!(second, first);
+        assert_eq!(std::fs::read(&cache_path).unwrap(), cached_bytes,
+            "a cache hit leaves its metadata untouched");
+
+        std::fs::write(&cache_path, b"corrupt cache entry").unwrap();
+        let repaired = sound_metadata_cached(project.path(), &source, &bytes)
+            .expect("a corrupt digest entry should be decoded and repaired");
+        assert_eq!(repaired, first);
+        assert!(sound_metadata_valid(&serde_json::from_slice::<Value>(
+            &std::fs::read(&cache_path).unwrap()).unwrap()),
+            "the repaired digest entry is valid metadata");
+
+        let changed = pcm_wav(&[0; 128], 8_000);
+        let _ = sound_metadata_cached(project.path(), &source, &changed)
+            .expect("changed bytes have their own cache entry");
+        let changed_digest = format!("{:x}", Sha256::digest(&changed));
+        assert!(cache_dir.join(format!("{changed_digest}.json")).is_file(),
+            "changed source bytes receive a separate metadata entry");
+    }
 
     #[test]
     fn development_bank_publishes_only_content_changes() {
