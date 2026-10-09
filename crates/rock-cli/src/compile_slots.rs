@@ -439,12 +439,13 @@ struct PoolState {
 
 impl PoolState {
     fn scan(dir: &Path, pool_mib: u64) -> Result<Self> {
-        let live = |dir: &Path, removable: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
+        let live = |dir: &Path, owned: &dyn Fn(&str) -> bool, removable: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
             let mut entries = Vec::new();
             for item in fs_err::read_dir(dir)? {
                 let item = item?;
                 let name = item.file_name().to_string_lossy().into_owned();
-                if name == AUTHOR_SLOT || name == "guard" || name == "seq" || !item.file_type()?.is_file() {
+                // Dot files include the AppleDouble `._*` files macOS writes on ExFAT.
+                if name.starts_with('.') || !owned(&name) || name == AUTHOR_SLOT || !item.file_type()?.is_file() {
                     continue;
                 }
                 match live_record(&item.path())? {
@@ -468,8 +469,9 @@ impl PoolState {
             entries.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(entries)
         };
-        let holders = live(dir, &|name| name.starts_with(HELD_PREFIX))?;
-        let queue = live(&dir.join(QUEUE_DIR), &|_| true)?;
+        let is_ticket = |name: &str| name.len() == 12 && name.bytes().all(|b| b.is_ascii_digit());
+        let holders = live(dir, &|_| true, &|name| name.strip_prefix(HELD_PREFIX).is_some_and(is_ticket))?;
+        let queue = live(&dir.join(QUEUE_DIR), &is_ticket, &|_| true)?;
         Ok(Self { pool_mib, holders, queue })
     }
 
@@ -529,15 +531,16 @@ fn write_holder(file: &mut File, what: &str, reserve_mib: u64, args: impl IntoIt
     writeln!(file, "pid={} start={started} for={what} reserve_mib={reserve_mib} cmd={cmdline}", std::process::id())
 }
 
-/// The peak-measurement key of a compile of `what`: its package name, so
-/// every worktree's copy of a package and every run of a test fixture share
-/// one measurement.
+/// The peak-measurement key of a compile of `what`: its package name and the
+/// `rock` subcommand, so every worktree's copy of a package and every run of
+/// a test fixture share one measurement, while `rock test mag` (tests
+/// included, about 4.9 GB) stays apart from `rock compile mag` (about 1.4 GB).
 fn package_key(what: &str) -> Option<String> {
     let manifest = Path::new(what).join("stick.toml");
     match rock_host::stick::StickConfig::from_path_optional(&manifest) {
         Ok(config) => config.map(|config| {
-            config.package.name.chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            format!("{}.{}", config.package.name, crate::compile_measurements::command()).chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
                 .collect()
         }),
         Err(error) => {
@@ -835,6 +838,21 @@ mod tests {
     }
 
     #[test]
+    fn files_outside_the_naming_scheme_are_never_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(QUEUE_DIR)).unwrap();
+        let foreign = ["._held-000000000001", "queue/._guard", "queue/notes", "held-notes"];
+        for name in foreign {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        std::fs::write(dir.path().join("queue/000000000001"), "pid=1").unwrap();
+        let pool = PoolState::scan(dir.path(), 4608).unwrap();
+        assert!(pool.holders.is_empty() && pool.queue.is_empty());
+        assert!(foreign.iter().all(|name| dir.path().join(name).exists()), "a foreign file was removed");
+        assert!(!dir.path().join("queue/000000000001").exists(), "a dead ticket stays");
+    }
+
+    #[test]
     fn batch_never_takes_the_author_slot() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path(), 1, CompileClass::Batch);
@@ -928,7 +946,7 @@ mod tests {
         let package = tempfile::tempdir().unwrap();
         assert_eq!(package_key(package.path().to_str().unwrap()), None);
         std::fs::write(package.path().join("stick.toml"), "[package]\nname = \"slot/probe\"\ntype = \"lib\"\n").unwrap();
-        assert_eq!(package_key(package.path().to_str().unwrap()).as_deref(), Some("slot_probe"));
+        assert_eq!(package_key(package.path().to_str().unwrap()).as_deref(), Some("slot_probe.other"));
     }
 
     const CHILD_DIR_ENV: &str = "ROCK_COMPILE_SLOT_TEST_CHILD_DIR";

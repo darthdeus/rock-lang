@@ -14,6 +14,11 @@ pub(crate) fn set_command(command: &'static str) {
     let _ = COMMAND.set(command);
 }
 
+/// The running `rock` subcommand, or "other" before `main` names it.
+pub(crate) fn command() -> &'static str {
+    COMMAND.get().copied().unwrap_or("other")
+}
+
 thread_local! {
     static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
 }
@@ -40,7 +45,7 @@ impl Scope {
         let Some(path) = std::env::var_os("ROCK_COMPILE_STATS").filter(|path| !path.is_empty()) else {
             return Self(false)
         };
-        let command = COMMAND.get().copied().unwrap_or("other");
+        let command = command();
         let kind = if std::env::var_os("ROCK_SIM_COMPILE_RECEIPT_PREPARE").is_some() {
             "sim compile child"
         } else {
