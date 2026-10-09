@@ -36,12 +36,12 @@ const EVICTING_PREFIX: &str = ".evicting-";
 const STALE_STAGING: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// The cache root, or `None` when `ROCK_SIM_COMPILE_CACHE=0` turns it off or
-/// the running compiler cannot be hashed.
+/// `rock_exe`, the compiler that keys and fills it, cannot be hashed.
 /// Defaults to `~/tmp/rock-sim-compile-cache` so worktrees share one bounded
 /// store on disk rather than the small `/tmp`.
-pub(super) fn root() -> Result<Option<PathBuf>> {
+pub(super) fn root(rock_exe: &Path) -> Result<Option<PathBuf>> {
     if std::env::var_os(CACHE_ENV).is_some_and(|value| value == "0")
-        || crate::skull_backend::compile_cache_compiler_sha256().is_none()
+        || crate::skull_backend::compile_cache_compiler_sha256(rock_exe).is_none()
     {
         return Ok(None);
     }
@@ -74,7 +74,7 @@ pub(super) fn identity(
     comptime: &bone_semantic::inference::ComptimeInputs,
     rock_exe: &Path,
 ) -> Result<serde_json::Value> {
-    crate::skull_backend::compile_cache_identity(project, backend, comptime)
+    crate::skull_backend::compile_cache_identity(project, backend, comptime, rock_exe)
 }
 
 fn key(

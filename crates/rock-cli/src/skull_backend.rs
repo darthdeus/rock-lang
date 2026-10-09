@@ -158,25 +158,44 @@ fn compile_cache_stdlib_digest() -> serde_json::Value {
     })
 }
 
-/// SHA-256 of the running compiler image, or `None` when it cannot be pinned
-/// (the binary was replaced after this process started, or changed while being
-/// hashed). Compile caches are off without it: a key must name the compiler
-/// that produced the artifact, not whatever is at the executable's path now.
-pub(crate) fn compile_cache_compiler_sha256() -> Option<&'static str> {
-    static COMPILER_SHA256: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    COMPILER_SHA256
-        .get_or_init(|| match running_image_sha256() {
-            Ok(Some(hash)) => Some(hash),
-            Ok(None) => {
-                log::warn!(target: "CLI", "the rock binary changed after this process started; compile caches are off");
-                None
-            }
-            Err(error) => {
-                log::warn!(target: "CLI", "cannot hash the running rock binary; compile caches are off: {error:#}");
-                None
-            }
-        })
-        .as_deref()
+/// This `rock` binary, for compiles that run in this process or in a child of it.
+pub(crate) fn current_rock_exe() -> Result<std::path::PathBuf> {
+    std::env::current_exe().context("locating the rock binary")
+}
+
+/// SHA-256 of the compiler `rock_exe` names, or `None` when it cannot be
+/// pinned. Compile caches are off without it: a key must name the compiler
+/// that produced the artifact, not whatever is at the path now. This process's
+/// own binary is pinned to its running image, refused when replaced after the
+/// process started; another binary (a test harness keying the `rock` it spawns)
+/// is hashed from its path, refused when it changes during the read. Memoized
+/// per path.
+pub(crate) fn compile_cache_compiler_sha256(rock_exe: &std::path::Path) -> Option<String> {
+    static HASHES: std::sync::OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, Option<String>>>> =
+        std::sync::OnceLock::new();
+    let hashes = HASHES.get_or_init(Default::default);
+    if let Some(hash) = hashes.lock().unwrap().get(rock_exe) {
+        return hash.clone();
+    }
+    let running = std::env::current_exe().is_ok_and(|exe| exe == rock_exe);
+    let hash = if running {
+        running_image_sha256()
+    } else {
+        file_sha256_if_unchanged_since(rock_exe, std::time::SystemTime::now())
+    };
+    let hash = match hash {
+        Ok(Some(hash)) => Some(hash),
+        Ok(None) => {
+            log::warn!(target: "CLI", "{} changed while it was keyed; compile caches are off", rock_exe.display());
+            None
+        }
+        Err(error) => {
+            log::warn!(target: "CLI", "cannot hash {}; compile caches are off: {error:#}", rock_exe.display());
+            None
+        }
+    };
+    hashes.lock().unwrap().insert(rock_exe.to_path_buf(), hash.clone());
+    hash
 }
 
 #[cfg(target_os = "linux")]
@@ -226,11 +245,12 @@ pub(crate) fn compile_cache_identity(
     project: &std::path::Path,
     backend: crate::Backend,
     comptime: &bone_semantic::inference::ComptimeInputs,
+    rock_exe: &std::path::Path,
 ) -> Result<serde_json::Value> {
     use anyhow::Context;
     // Null only where caching is off; a child that cannot pin its compiler keys
     // its receipt to null, which no parent lookup matches.
-    let compiler_sha256 = compile_cache_compiler_sha256();
+    let compiler_sha256 = compile_cache_compiler_sha256(rock_exe);
     let preamble = skull_game_preamble(&project.to_string_lossy())
         .context("resolve the game preamble for the compile cache key")?;
     Ok(serde_json::json!({
@@ -412,6 +432,16 @@ mod compile_cache_compiler_tests {
             "a binary replaced after the process started is not the running compiler",
         );
         assert!(running_image_sha256().unwrap().is_some(), "the test binary predates its own process");
+    }
+
+    #[test]
+    fn compiler_hash_pins_this_process_and_hashes_another_binary_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("rock");
+        std::fs::write(&exe, b"harness rock").unwrap();
+        assert_eq!(compile_cache_compiler_sha256(&exe), Some(cache_sha256_bytes(b"harness rock")));
+        let running = current_rock_exe().unwrap();
+        assert_eq!(compile_cache_compiler_sha256(&running), running_image_sha256().unwrap());
     }
 }
 

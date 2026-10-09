@@ -52,7 +52,12 @@ impl Lookup {
         comptime: &bone_semantic::inference::ComptimeInputs,
     ) -> Result<Self> {
         let project = project.canonicalize().with_context(|| format!("canonicalize {}", project.display()))?;
-        let identity = crate::skull_backend::compile_cache_identity(&project, backend, comptime)?;
+        let identity = crate::skull_backend::compile_cache_identity(
+            &project,
+            backend,
+            comptime,
+            &crate::skull_backend::current_rock_exe()?,
+        )?;
         let inputs = frame_source_inputs(&project)?;
         let configured_renderer = renderer_name(crate::skull_backend::skull_renderer_backend(
             &project.to_string_lossy(),
@@ -139,7 +144,7 @@ fn cache_root() -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     if std::env::var_os(CACHE_ENV).is_some_and(|value| value == "0")
-        || crate::skull_backend::compile_cache_compiler_sha256().is_none()
+        || crate::skull_backend::compile_cache_compiler_sha256(&crate::skull_backend::current_rock_exe()?).is_none()
     {
         return Ok(None);
     }

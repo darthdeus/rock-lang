@@ -961,7 +961,7 @@ fn prepare_sims(
         compile_sims_with_allocation(backend, project_path.clone(), output_path.clone(), None, &selection)?;
     let inputs = receipt_inputs_from_stone(&project_path, &stone)?;
     let cache_identity =
-        sim_compile_cache::identity(&project_path, backend, stone.comptime_inputs(), &current_rock_exe()?)?;
+        sim_compile_cache::identity(&project_path, backend, stone.comptime_inputs(), &crate::skull_backend::current_rock_exe()?)?;
     let receipt_selection = if stone.sim_selection_is_full() { Vec::new() } else { selection };
     drop(stone);
     timed_sim_compile_phase(
@@ -1037,7 +1037,7 @@ fn prepare_sims_out_of_process(
     let project_path = project_path.canonicalize().with_context(|| {
         format!("canonicalize sim project {}", project_path.display())
     })?;
-    if let Some(cache) = sim_compile_cache::root()? {
+    if let Some(cache) = sim_compile_cache::root(rock_exe)? {
         return sim_compile_cache::prepare(backend, &project_path, &output_path, &cache, rock_exe, selection);
     }
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
@@ -1052,11 +1052,6 @@ fn prepare_sims_out_of_process(
         &output_path,
         None,
     )
-}
-
-/// This `rock` binary, for the CLI entry points that compile sims in a child.
-pub(crate) fn current_rock_exe() -> Result<PathBuf> {
-    std::env::current_exe().context("locating the rock binary for the sim compile")
 }
 
 /// Compile `project` in a child `rock_exe sim --list` that publishes its receipt
@@ -1331,7 +1326,7 @@ fn do_run_sim_opts_recorded(
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `MATCH3_PRESET`.
     let mut prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), output_path.clone(), &current_rock_exe()?, &[sim_name.to_string()])
+        prepare_sims_out_of_process(backend, project_path.clone(), output_path.clone(), &crate::skull_backend::current_rock_exe()?, &[sim_name.to_string()])
     })?;
     let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
     let sim_name = sim_name.as_str();
@@ -1723,7 +1718,7 @@ fn do_run_named_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &current_rock_exe()?, names)
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &crate::skull_backend::current_rock_exe()?, names)
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
@@ -2258,7 +2253,7 @@ fn do_run_all_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &current_rock_exe()?, &[])
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &crate::skull_backend::current_rock_exe()?, &[])
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
