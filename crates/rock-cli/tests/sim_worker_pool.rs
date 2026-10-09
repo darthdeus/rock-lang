@@ -885,35 +885,13 @@ fn assert_bank_writer_leaves_the_tracked_bank(name: &str, bank: &str) {
 #[test]
 fn a_sound_bank_writer_leaves_the_tracked_bank() {
     let _spawn_budget = SpawnBudget::for_test(120);
-    let bank = workspace_root().join("mag/assets/sound_bank.json");
-    let original = match std::fs::read(&bank) {
-        Ok(bytes) => Some((bytes, std::fs::metadata(&bank).expect("bank metadata"))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => panic!("read original sound bank: {error}"),
-    };
-    // The sound project owns this generated bank; a fresh checkout has none.
-    let result = std::panic::catch_unwind(|| {
-        rock_cli::package::prepare_sound_bank(workspace_root().join("mag").to_str().expect("project path"))
-            .expect("prepare production sound bank");
-        assert_bank_writer_leaves_the_tracked_bank("sound_bank_transaction", "mag/assets/sound_bank.json");
-    });
-    match original {
-        Some((bytes, metadata)) => {
-            rock_host::project::write_atomic(&bank, &bytes).expect("restore original sound bank");
-            std::fs::set_permissions(&bank, metadata.permissions()).expect("restore bank permissions");
-            std::fs::File::options().write(true).open(&bank).expect("open restored bank")
-                .set_times(std::fs::FileTimes::new().set_modified(metadata.modified().expect("original bank mtime")))
-                .expect("restore bank mtime");
-        }
-        None => match std::fs::remove_file(&bank) {
-            Ok(()) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(error) => panic!("remove generated fixture bank: {error}"),
-        },
-    }
-    if let Err(error) = result {
-        std::panic::resume_unwind(error);
-    }
+    // The sound project owns this generated bank and a fresh checkout has none,
+    // so prepare it as every `rock sim` does. It stays afterwards: sibling tests
+    // boot MAG from this same file concurrently, and removing or rewinding it
+    // under them boots a game with no sound bank.
+    rock_cli::package::prepare_sound_bank(workspace_root().join("mag").to_str().expect("project path"))
+        .expect("prepare production sound bank");
+    assert_bank_writer_leaves_the_tracked_bank("sound_bank_transaction", "mag/assets/sound_bank.json");
 }
 
 #[test]
