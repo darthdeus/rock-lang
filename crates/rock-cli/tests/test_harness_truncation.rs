@@ -18,12 +18,11 @@ fn rock() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rock"))
 }
 
-fn write_source(name: &str, body: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("rock_harness_truncation_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    let path = dir.join(name);
+fn write_source(name: &str, body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let path = dir.path().join(name);
     std::fs::write(&path, body).expect("write source");
-    path
+    (dir, path)
 }
 
 fn run_test(path: &std::path::Path) -> (bool, String) {
@@ -34,6 +33,28 @@ fn run_test(path: &std::path::Path) -> (bool, String) {
         String::from_utf8_lossy(&out.stderr)
     );
     (out.status.success(), combined)
+}
+
+fn declared_test_count(source: &str) -> usize {
+    source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("@test fn "))
+        .count()
+}
+
+fn reported_test_total(output: &str) -> usize {
+    let summary = output
+        .lines()
+        .find(|line| line.contains("skull backend:"))
+        .unwrap_or_else(|| panic!("missing skull test summary:\n{output}"));
+    let (_, counts) = summary.split_once("skull backend:").expect("summary marker");
+    let (_, denominator) = counts.split_once('/').expect("passed/total summary");
+    let digits = denominator
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>();
+    digits.parse().unwrap_or_else(|_| panic!("invalid test total in summary:\n{summary}"))
 }
 
 /// `b` kills the process, so `c` -- which would FAIL -- never runs.
@@ -67,17 +88,17 @@ const ONE_ORDINARY_FAILURE: &str = r#"
 
 #[test]
 fn a_test_that_kills_the_process_fails_the_run() {
-    let path = write_source("hard_exit.rock", HARD_EXIT_MIDWAY);
+    let (_dir, path) = write_source("hard_exit.rock", HARD_EXIT_MIDWAY);
     let (success, combined) = run_test(&path);
     assert!(
         !success,
         "`rock test` exited 0 for a run that died midway; two of three tests \
          never ran and one of those would have failed:\n{combined}"
     );
-    assert!(
-        !combined.contains("1/1"),
-        "the total shrank to the tests that happened to run -- a truncated run \
-         must not report a self-consistent green tally:\n{combined}"
+    assert_eq!(
+        reported_test_total(&combined),
+        declared_test_count(HARD_EXIT_MIDWAY),
+        "the summary total must include declared tests that never reported:\n{combined}"
     );
 }
 
@@ -85,19 +106,24 @@ fn a_test_that_kills_the_process_fails_the_run() {
 /// the marker count against the number of declared tests.
 #[test]
 fn a_premature_clean_exit_fails_the_run() {
-    let path = write_source("clean_exit.rock", CLEAN_EXIT_MIDWAY);
+    let (_dir, path) = write_source("clean_exit.rock", CLEAN_EXIT_MIDWAY);
     let (success, combined) = run_test(&path);
     assert!(
         !success,
         "`rock test` exited 0 for a run truncated by `os.exit(0)`; the status \
          cannot see this one, only the missing markers can:\n{combined}"
     );
+    assert_eq!(
+        reported_test_total(&combined),
+        declared_test_count(CLEAN_EXIT_MIDWAY),
+        "the summary total must include tests omitted by an early clean exit:\n{combined}"
+    );
 }
 
 /// The control. A fix that failed every run would satisfy both tests above.
 #[test]
 fn an_ordinary_run_still_passes() {
-    let path = write_source("all_pass.rock", ALL_PASS);
+    let (_dir, path) = write_source("all_pass.rock", ALL_PASS);
     let (success, combined) = run_test(&path);
     assert!(success, "a clean two-test file must still pass:\n{combined}");
     assert!(
@@ -110,7 +136,7 @@ fn an_ordinary_run_still_passes() {
 /// test failure rather than a harness error, and must still fail the run.
 #[test]
 fn an_ordinary_assertion_failure_is_still_a_test_failure() {
-    let path = write_source("one_fail.rock", ONE_ORDINARY_FAILURE);
+    let (_dir, path) = write_source("one_fail.rock", ONE_ORDINARY_FAILURE);
     let (success, combined) = run_test(&path);
     assert!(!success, "a failing @test must fail the run:\n{combined}");
     assert!(
