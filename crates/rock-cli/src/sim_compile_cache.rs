@@ -23,8 +23,7 @@
 //! mid-load falls back to compiling.
 
 use super::*;
-use std::fs::{File, TryLockError};
-use std::io::{Seek, Write};
+use std::fs::File;
 
 const CACHE_ENV: &str = "ROCK_SIM_COMPILE_CACHE";
 const CACHE_DIR_ENV: &str = "ROCK_SIM_COMPILE_CACHE_DIR";
@@ -36,48 +35,9 @@ const EVICTING_PREFIX: &str = ".evicting-";
 /// A staging dir older than this belongs to a run that died mid-compile.
 const STALE_STAGING: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Environment the compile can read: the prefixes cover every variable the
-/// compiler crates and the game preamble read. Unknown names under them are
-/// keyed, so a new compile setting cannot produce a wrong hit. `STONE_` is the
-/// engine's runtime namespace (`--jv`, `STONE_LOG`, `STONE_HEADLESS`); the
-/// compile reads only `STONE_LOG`, to time its own passes.
-const KEYED_ENV_PREFIXES: &[&str] = &["ROCK_", "SKULL_", "BONE_"];
-const KEYED_ENV_NAMES: &[&str] = &["GAME_ART_VAULT", "GAME_SOURCE_DIR", "CARGO_TARGET_DIR", "HOME"];
-/// Variables under those prefixes that only the sim runner, its reports or
-/// job tooling read; never the compile.
-const UNKEYED_ENV: &[&str] = &[
-    CACHE_ENV,
-    CACHE_DIR_ENV,
-    CACHE_MAX_MB_ENV,
-    SIM_COMPILE_RECEIPT_DIR_ENV,
-    SIM_COMPILE_RECEIPT_PREPARE_ENV,
-    SIM_COMPILE_SELECTION_ENV,
-    "ROCK_JOB_ID",
-    // Compile records describe the compile; they never change its output.
-    "ROCK_COMPILE_STATS",
-    crate::compile_slots::SPAWN_PHASE_FILE_ENV,
-    // Slot settings only decide when the compile starts, not what it emits;
-    // keying them made interactive and batch runs miss each other's entries.
-    crate::compile_slots::SLOTS_ENV,
-    crate::compile_slots::CLASS_ENV,
-    crate::compile_slots::SLOT_DIR_ENV,
-    // Invocation-log settings and tags; never read by the compile.
-    "ROCK_INVOCATION_LOG",
-    crate::invocation_log::PARENT_ENV,
-    "ROCK_CHANGE_ID",
-    // rock_log's per-invocation clock origin, inherited by children.
-    "ROCK_LOG_EPOCH_MS",
-    "ROCK_SIM_COMPILE_TIMING",
-    "ROCK_SIM_ENTRY_PLAN",
-    "ROCK_SIM_KEEP_BUILD",
-    "ROCK_SIM_LIFECYCLE_LOG",
-    "ROCK_SIM_LOG_DIR",
-    "ROCK_SIM_MEMORY_MB",
-    "ROCK_SIM_SLOT_LOCK",
-    "ROCK_SIM_SPAWN_BARRIER",
-    "ROCK_SIM_TIMEOUT_SECS",
-];
-const UNKEYED_ENV_PREFIXES: &[&str] = &["ROCK_JOBS_", "ROCK_SIM_WARN_"];
+fn environment_is_keyed(name: &str) -> bool {
+    crate::skull_backend::compile_cache_environment_is_keyed(name)
+}
 
 /// The cache root, or `None` when `ROCK_SIM_COMPILE_CACHE=0` turns it off.
 /// Defaults to `~/tmp/rock-sim-compile-cache` so worktrees share one bounded
@@ -106,74 +66,6 @@ fn budget_bytes() -> Result<u64> {
     Ok(mb * 1024 * 1024)
 }
 
-fn compiler_sha256() -> Result<String> {
-    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    if let Some(hash) = HASH.get() {
-        return Ok(hash.clone());
-    }
-    let exe = std::env::current_exe().context("locating the rock binary to key the sim compile")?;
-    let mut hasher = Sha256::new();
-    std::io::copy(
-        &mut std::fs::File::open(&exe).with_context(|| format!("open {}", exe.display()))?,
-        &mut hasher,
-    )
-    .with_context(|| format!("hash {}", exe.display()))?;
-    Ok(HASH.get_or_init(|| format!("{:x}", hasher.finalize())).clone())
-}
-
-/// The stdlib is read from disk and joins no project's source set.
-fn stdlib_digest() -> serde_json::Value {
-    let mut hasher = Sha256::new();
-    for file in rock_host::stdlib_loader::stdlib_files() {
-        hasher.update(file.name.as_bytes());
-        hasher.update([0]);
-        hasher.update((file.contents.len() as u64).to_le_bytes());
-        hasher.update(file.contents.as_bytes());
-    }
-    serde_json::json!({
-        "dir": rock_host::stdlib_loader::stdlib_dir().to_string_lossy(),
-        "sha256": format!("{:x}", hasher.finalize()),
-    })
-}
-
-/// Values are hashed, never written: a var may be `secret`.
-fn build_vars_sha256(inputs: &bone_semantic::inference::ComptimeInputs) -> String {
-    let mut volatile = inputs.volatile_vars.iter().map(|name| name.as_str()).collect::<Vec<_>>();
-    volatile.sort_unstable();
-    let mut vars = inputs
-        .vars
-        .iter()
-        .filter(|(name, _)| !inputs.volatile_vars.contains(*name))
-        .map(|(name, var)| (name.as_str(), var.value.as_str(), var.secret))
-        .collect::<Vec<_>>();
-    vars.sort_unstable();
-    let canonical = serde_json::json!({
-        "channel": inputs.channel,
-        "modules_mode": inputs.modules_mode,
-        "embed_root": inputs.embed_root.as_ref().map(|root| root.to_string_lossy().into_owned()),
-        "volatile": volatile,
-        "vars": vars,
-    });
-    sha256_bytes(canonical.to_string().as_bytes())
-}
-
-fn environment_is_keyed(name: &str) -> bool {
-    (KEYED_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) || KEYED_ENV_NAMES.contains(&name))
-        && !UNKEYED_ENV.contains(&name)
-        && !UNKEYED_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-}
-
-/// Hashed, never written: the environment can hold credentials.
-fn environment_sha256() -> String {
-    let keyed = std::env::vars_os()
-        .filter_map(|(name, value)| {
-            let name = name.to_string_lossy().into_owned();
-            environment_is_keyed(&name).then(|| (name, value.to_string_lossy().into_owned()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    sha256_bytes(serde_json::json!(keyed).to_string().as_bytes())
-}
-
 /// What the compile read beyond the receipt's context and source inputs. The
 /// compile child records it with the build vars it stamped; a lookup computes
 /// it from the current state.
@@ -182,16 +74,7 @@ pub(super) fn identity(
     backend: crate::Backend,
     comptime: &bone_semantic::inference::ComptimeInputs,
 ) -> Result<serde_json::Value> {
-    let preamble = crate::skull_backend::skull_game_preamble(&project.to_string_lossy())
-        .context("resolve the game preamble for the sim compile key")?;
-    Ok(serde_json::json!({
-        "compiler_sha256": compiler_sha256()?,
-        "backend": backend.name(),
-        "stdlib": stdlib_digest(),
-        "preamble_sha256": sha256_bytes(preamble.as_bytes()),
-        "build_vars_sha256": build_vars_sha256(comptime),
-        "environment_sha256": environment_sha256(),
-    }))
+    crate::skull_backend::compile_cache_identity(project, backend, comptime)
 }
 
 fn key(
@@ -202,7 +85,7 @@ fn key(
 ) -> String {
     let keyed = inputs.iter().filter(|input| input.kind != "embedded").cloned().collect::<Vec<_>>();
     let canonical = serde_json::json!([KEY_SCHEMA, identity, context, receipt_inputs_json(&keyed), selection]);
-    sha256_bytes(canonical.to_string().as_bytes())
+    crate::skull_backend::cache_sha256_bytes(canonical.to_string().as_bytes())
 }
 
 /// The key a stored receipt records, with the identity it was compiled under.
@@ -334,29 +217,7 @@ fn load_cached(entry: &Path, lookup: &Lookup, project: &Path, output: &Path) -> 
 }
 
 fn lock_key(root: &Path, key: &str) -> Result<File> {
-    let path = root.join(format!("{key}.lock"));
-    let mut file = File::options().read(true).write(true).create(true).truncate(false)
-        .open(&path).with_context(|| format!("open sim compile lock {}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            crate::compile_slots::report_spawn_phase("cache-wait");
-            let holder = std::fs::read_to_string(&path)
-                .with_context(|| format!("read sim compile lock {}", path.display()))?;
-            let pid = holder.trim();
-            ::log::info!(target: "SIM", "waiting for {pid} compiling the same sim program");
-            file.lock().with_context(|| format!("wait for sim compile lock {}", path.display()))?;
-        }
-        Err(TryLockError::Error(error)) => {
-            return Err(error).with_context(|| format!("lock sim compile key {key}"));
-        }
-    }
-    // Keep the inode: unlinking even an unlocked file can strand an existing
-    // waiter on it. Kernel locks die with the holder; replace its stale PID.
-    file.set_len(0).context("clear sim compile lock holder")?;
-    file.rewind().context("rewind sim compile lock holder")?;
-    writeln!(file, "{}", std::process::id()).context("record sim compile lock holder")?;
-    Ok(file)
+    crate::skull_backend::compile_cache_lock_key(root, key)
 }
 
 /// Store a freshly compiled receipt under `key` only if what it records
@@ -380,111 +241,31 @@ fn publish(receipt: &Path, entry: &Path, lookup: &Lookup) -> Result<()> {
         let changed = if changed.is_empty() { "sources or context".to_string() } else { changed.join(", ") };
         return Err(anyhow!("inputs changed while compiling ({changed})"));
     }
-    match std::fs::rename(receipt, entry) {
-        Ok(()) => Ok(()),
-        // A publisher outside this lock may already have stored the same key.
-        Err(_) if entry.join("receipt.json").is_file() => Ok(()),
-        Err(error) => {
-            Err(error).with_context(|| format!("publish {} -> {}", receipt.display(), entry.display()))
-        }
-    }
+    crate::skull_backend::compile_cache_publish_dir(receipt, entry, "receipt.json")
 }
 
 fn mark_used(entry: &Path) -> Result<()> {
-    std::fs::File::options()
-        .write(true)
-        .open(entry.join("receipt.json"))
-        .context("open receipt manifest")?
-        .set_modified(std::time::SystemTime::now())
-        .context("touch receipt manifest")
+    crate::skull_backend::compile_cache_mark_used(entry, "receipt.json")
 }
 
 /// Rename first so a concurrent lookup sees the entry gone, never half-deleted.
 fn evict(root: &Path, entry: &Path) -> Result<()> {
-    let doomed = tempfile::Builder::new()
-        .prefix(EVICTING_PREFIX)
-        .tempdir_in(root)
-        .context("create eviction dir")?
-        .keep();
-    let target = doomed.join("entry");
-    match std::fs::rename(entry, &target) {
-        Ok(()) => {}
-        // Another run evicted it first.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            let moved = Err(error).with_context(|| format!("move {} aside", entry.display()));
-            return remove_evicted(&doomed).and(moved);
-        }
-    }
-    remove_evicted(&doomed)
-}
-
-/// Two runs can clear the same leftover eviction dir at once.
-fn remove_evicted(doomed: &Path) -> Result<()> {
-    match std::fs::remove_dir_all(doomed) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("remove {}", doomed.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
-fn dir_bytes(dir: &Path) -> Result<u64> {
-    let mut total = 0;
-    for file in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
-        total += file?.metadata()?.len();
-    }
-    Ok(total)
+    crate::skull_backend::compile_cache_evict(root, entry, EVICTING_PREFIX)
 }
 
 /// Least recently used entries go first; `keep` (the entry this run just
 /// published) never does. Also clears staging dirs of runs that died.
 fn evict_to_budget(root: &Path, budget: u64, keep: &Path) -> Result<()> {
-    let now = std::time::SystemTime::now();
-    let mut entries = Vec::new();
-    let mut total = 0u64;
-    for item in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let item = item?;
-        let path = item.path();
-        let name = item.file_name().to_string_lossy().into_owned();
-        if name.starts_with(EVICTING_PREFIX) {
-            remove_evicted(&path)?;
-            continue;
-        }
-        if name.starts_with(STAGING_PREFIX) {
-            let age = item.metadata()?.modified()?;
-            if now.duration_since(age).unwrap_or_default() > STALE_STAGING {
-                std::fs::remove_dir_all(&path)
-                    .with_context(|| format!("remove stale staging {}", path.display()))?;
-            }
-            continue;
-        }
-        // An entry another run is evicting can vanish between listing and stat.
-        let Ok(used) = std::fs::metadata(path.join("receipt.json")).and_then(|meta| meta.modified())
-        else {
-            continue;
-        };
-        let Ok(bytes) = dir_bytes(&path) else { continue };
-        total += bytes;
-        entries.push((used, bytes, path));
-    }
-    entries.sort();
-    for (_, bytes, path) in entries {
-        if total <= budget {
-            break;
-        }
-        if path == keep {
-            continue;
-        }
-        evict(root, &path)?;
-        total -= bytes;
-    }
-    Ok(())
+    crate::skull_backend::compile_cache_evict_to_budget(
+        root, budget, keep, "receipt.json", STAGING_PREFIX, EVICTING_PREFIX, STALE_STAGING,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::TryLockError;
+    use std::io::Write;
 
     #[test]
     fn key_lock_holder_process() {
@@ -564,7 +345,38 @@ mod tests {
 
     #[test]
     fn runner_only_environment_is_unkeyed_and_compile_settings_are_keyed() {
-        for name in ["ROCK_SIM_TIMEOUT_SECS", "ROCK_JOB_ID", "ROCK_COMPILE_STATS", "ROCK_COMPILE_SLOTS", "ROCK_COMPILE_CLASS", "ROCK_COMPILE_SLOT_DIR", "ROCK_JOBS_SELF", "ROCK_SIM_WARN_FACTOR", "STONE_JV", CACHE_DIR_ENV] {
+        for name in [
+            "ROCK_SIM_TIMEOUT_SECS",
+            "ROCK_FRAME_TIMEOUT_SECS",
+            "ROCK_FRAME_WATCHDOG",
+            "ROCK_PERF_STARTUP_WATCHDOG",
+            "ROCK_FRAME_COMPILE_CACHE",
+            "ROCK_FRAME_COMPILE_CACHE_DIR",
+            "ROCK_FRAME_COMPILE_CACHE_MAX_MB",
+            "ROCK_FRAME_COMPILE_CACHE_STATS",
+            "ROCK_BUILD_COMMAND",
+            "ROCK_SKULL_ROUTE_PROFILE",
+            "ROCK_RUN_SIM",
+            "ROCK_TEST_SEED",
+            "ROCK_NUM_THREADS",
+            "ROCK_HEADLESS_SCOPE",
+            "FRAME_COUNT",
+            "TAKE_SCREENSHOT",
+            "DUMP_STATE",
+            "STONE_HEADLESS",
+            "STONE_RECORD",
+            "STONE_REPLAY",
+            "STONE_REPLAY_SOURCE",
+            "ROCK_JOB_ID",
+            "ROCK_COMPILE_STATS",
+            "ROCK_COMPILE_SLOTS",
+            "ROCK_COMPILE_CLASS",
+            "ROCK_COMPILE_SLOT_DIR",
+            "ROCK_JOBS_SELF",
+            "ROCK_SIM_WARN_FACTOR",
+            "STONE_JV",
+            CACHE_DIR_ENV,
+        ] {
             assert!(!environment_is_keyed(name), "{name}");
         }
         for name in ["ROCK_SKULL_TAIL_CALLS", "SKULL_INLINE_OFF", "ROCK_STDLIB_DIR", "GAME_ART_VAULT", "ROCK_SIM_NEW"] {
