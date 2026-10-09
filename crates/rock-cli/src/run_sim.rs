@@ -5805,8 +5805,16 @@ fn run_worker(
     // happened: the LAST one that started. For a single-entry worker that is
     // entry 0, exactly as before.
     let blamed = streams.iter().rposition(|s| s.started).unwrap_or(0);
+    let worker_end = describe_worker_end(
+        &status,
+        timed_out,
+        timeout,
+        runner_killed,
+        memory_error.as_ref(),
+        &collected,
+    );
 
-    let mut summaries = Vec::with_capacity(parts.len());
+    let mut summaries: Vec<SimSummary> = Vec::with_capacity(parts.len());
     for (i, (part, stream)) in parts.iter().zip(streams.iter()).enumerate() {
         let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
         summary.frame_count = stream.frame_count;
@@ -5817,9 +5825,16 @@ fn run_worker(
         }
         if !stream.started {
             summary.never_started = true;
+            // Callers without recovery see the worker only through the entries
+            // it stranded, so the record names how the process ended.
+            let ineligible = summaries
+                .iter()
+                .find_map(|earlier| earlier.worker_ineligible.as_deref())
+                .map(|reason| format!("; an earlier entry ended the worker as ineligible: {reason}"))
+                .unwrap_or_default();
             summary.errors.push(SiteMessage {
                 message: format!(
-                    "sim `{}` never started: the worker process ended during an earlier entry",
+                    "sim `{}` never started: the worker process ended during an earlier entry ({worker_end}{ineligible})",
                     part.name
                 ),
                 site: String::new(),
@@ -6021,6 +6036,43 @@ enum Grouping {
 /// Run `entry_specs` (each a comma-chain sharing one `$OUT`) and return a
 /// record per entry. Every entry's `$OUT` stays live until its child has
 /// exited and its deferred artifacts have been processed.
+/// How a worker process ended, for the entries it never started: its exit
+/// status (code or signal), whether the runner killed it and why, and the last
+/// lines of game stderr outside the `__SIM__` channel.
+fn describe_worker_end(
+    status: &ExitStatus,
+    timed_out: bool,
+    timeout: Duration,
+    runner_killed: bool,
+    memory_error: Option<&SiteMessage>,
+    stderr: &[String],
+) -> String {
+    const TAIL: usize = 8;
+    let mut out = format!("worker {status}");
+    if timed_out {
+        out.push_str(&format!("; the runner killed it at the {}s entry deadline", timeout.as_secs()));
+    } else if let Some(memory) = memory_error {
+        out.push_str(&format!("; {}", memory.message));
+    } else if runner_killed {
+        out.push_str("; the runner killed it");
+    } else if let Some(note) = crate::headless_scope::outside_kill_note(status, runner_killed) {
+        out.push_str(&format!("; {note}"));
+    }
+    let game: Vec<&str> = stderr
+        .iter()
+        .filter(|line| !line.starts_with("__SIM__ "))
+        .map(String::as_str)
+        .collect();
+    let tail = &game[game.len().saturating_sub(TAIL)..];
+    if tail.is_empty() {
+        out.push_str("; no game stderr");
+    } else {
+        let tail: Vec<String> = tail.iter().map(|line| line.chars().take(240).collect()).collect();
+        out.push_str(&format!("; last game stderr: {}", tail.join(" | ")));
+    }
+    out
+}
+
 fn run_entries(
     project: &str,
     output: &str,

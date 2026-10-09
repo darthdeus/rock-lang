@@ -1271,6 +1271,26 @@ fn a_crashed_worker_recovers_its_unstarted_entries() {
     );
 }
 
+/// Without recovery, the entries a dead worker stranded are all a caller sees
+/// of it, so their record has to say how the process ended.
+#[test]
+fn a_stranded_entry_names_how_its_worker_ended() {
+    let (_, worker) = differential(
+        &["testbed::b2_crash_head,testbed::b2_crash_tail"],
+        "testbed::b0_leak_probe",
+    );
+    let stranded = worker
+        .errors
+        .iter()
+        .find(|m| m.message.contains("never started"))
+        .unwrap_or_else(|| panic!("the probe must be stranded behind the crash: {worker:?}"));
+    assert!(
+        stranded.message.contains("exit status: 7"),
+        "the stranded entry must name the worker's exit status: {}",
+        stranded.message
+    );
+}
+
 /// An entry that REPLACES the boot checkpoint mid-run (the checkpoint-
 /// machinery sims do this by design) must not have its mid-entry image
 /// silently restored into the next entry -- that was observed as a corruption
