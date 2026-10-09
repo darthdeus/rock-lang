@@ -204,9 +204,16 @@ fn sim_memory_cap_mb() -> Option<u64> {
 }
 
 /// Resident plus swapped memory of a live process, in MB. Swap counts: the
-/// looping sim that set the cap held 20 of its 25 GB in swap.
+/// looping sim that set the cap held 20 of its 25 GB in swap. None while the
+/// process still runs on this process's address space: `spawn` can return
+/// while the child is inside execve, before its new mm replaces the runner's,
+/// and /proc then reports the runner's memory as the child's.
 #[cfg(target_os = "linux")]
 fn process_memory_mb(pid: u32) -> Option<u64> {
+    // Checked before the read: once the child's mm differs it never reverts.
+    if shares_runner_address_space(pid) {
+        return None;
+    }
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let mut kb = 0u64;
     for line in status.lines() {
@@ -215,6 +222,26 @@ fn process_memory_mb(pid: u32) -> Option<u64> {
         }
     }
     Some(kb / 1024)
+}
+
+#[cfg(target_os = "linux")]
+fn shares_runner_address_space(pid: u32) -> bool {
+    const KCMP_VM: libc::c_int = 1;
+    // SAFETY: scalar-only syscall.
+    let order = unsafe {
+        libc::syscall(libc::SYS_kcmp, libc::getpid(), pid as libc::pid_t, KCMP_VM, 0usize, 0usize)
+    };
+    if order < 0 {
+        // Without kcmp the cap still measures; only the execve window is unguarded.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!(target: "SIM",
+                "kcmp failed ({}); the sim memory cap may read a child still inside execve as the runner",
+                std::io::Error::last_os_error());
+        }
+        return false;
+    }
+    order == 0
 }
 
 /// The `/proc` memory fields of a live process, in MB, so a cap kill says
@@ -7750,6 +7777,56 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    extern "C" fn block_in_shared_address_space(_: *mut libc::c_void) -> libc::c_int {
+        // Raw syscall only: this child runs on the test's heap and TLS.
+        loop {
+            unsafe {
+                libc::syscall(libc::SYS_ppoll, std::ptr::null_mut::<libc::pollfd>(), 0usize,
+                    std::ptr::null::<libc::timespec>(), std::ptr::null::<libc::sigset_t>());
+            }
+        }
+    }
+
+    /// `spawn` can return while the child is still inside execve on the
+    /// runner's address space; measured then, a fat runner reads as a fat
+    /// child and the cap kills a healthy sim worker before its first entry.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fat_runner_does_not_trip_the_cap_of_a_small_child() {
+        let ballast = vec![1u8; 512 << 20];
+        let mut stack = vec![0u8; 256 << 10];
+        let stack_top = (stack.as_mut_ptr() as usize + stack.len()) & !15;
+        let pid = unsafe {
+            libc::clone(block_in_shared_address_space, stack_top as *mut libc::c_void,
+                libc::CLONE_VM | libc::SIGCHLD, std::ptr::null_mut())
+        };
+        assert!(pid > 0, "clone: {}", std::io::Error::last_os_error());
+        let measured = process_memory_mb(pid as u32);
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+        }
+        std::hint::black_box(&ballast);
+        assert_eq!(measured, None, "a child on the runner's address space was measured as its own");
+
+        let mut small = std::process::Command::new("sleep").arg("5").spawn().expect("spawn sleep");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let measured = loop {
+            if let Some(mb) = process_memory_mb(small.id()) {
+                break Some(mb);
+            }
+            if std::time::Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let _ = small.kill();
+        let _ = small.wait();
+        let mb = measured.expect("an exec'd child is measured");
+        assert!(mb < 256, "sleep measured at {mb} MB");
+    }
 
     #[test]
     fn sim_receipt_prepare_releases_session() {
