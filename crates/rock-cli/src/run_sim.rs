@@ -3751,11 +3751,16 @@ pub(crate) fn resolve_jobs(requested: Option<usize>, lanes: Option<usize>, updat
     let requested = narrow_to_lanes(requested, lanes);
     let budget = sim_job_budget();
     let jobs = resolve_jobs_with(requested, update_snapshots, default_sim_jobs(), budget, force)?;
-    if force && requested.is_some() && !update_snapshots && jobs > budget {
+    if let Some(asked) = requested.filter(|_| !update_snapshots) {
         static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| log::warn!(target: "SIM",
-            "--jobs {jobs} exceeds the default memory budget of {budget} lanes"));
-        FORCED_SIM_JOBS.fetch_max(jobs, std::sync::atomic::Ordering::Relaxed);
+        if force && jobs > budget.lanes() {
+            WARNED.call_once(|| log::warn!(target: "SIM",
+                "--jobs {jobs} exceeds the default budget of {} lanes", budget.lanes()));
+            FORCED_SIM_JOBS.fetch_max(jobs, std::sync::atomic::Ordering::Relaxed);
+        } else if !force && jobs < asked.min(default_sim_jobs()) {
+            WARNED.call_once(|| log::warn!(target: "SIM",
+                "--jobs {asked} exceeds the free-GPU budget of {} lanes; running {jobs}", budget.gpu));
+        }
     }
     Ok(jobs)
 }
@@ -3768,7 +3773,26 @@ fn narrow_to_lanes(requested: Option<usize>, lanes: Option<usize>) -> Option<usi
     requested.map(|jobs| lanes.map_or(jobs, |lanes| jobs.min(lanes.max(1))))
 }
 
-fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: usize, force: bool) -> Result<usize> {
+/// The default lane budgets, each at least one lane and at most the cores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JobBudget {
+    /// From total physical RAM: a fixed property of the host.
+    ram: usize,
+    /// From GPU memory free at launch: a load reading.
+    gpu: usize,
+}
+
+impl JobBudget {
+    fn lanes(&self) -> usize {
+        self.ram.min(self.gpu)
+    }
+}
+
+/// An explicit request above the RAM budget fails without `--jobs-force`.
+/// One above only the free-GPU budget runs at that budget instead
+/// (GPU_JOBS_CLAMP, `docs/gate-speed-plan.md`): free VRAM measures what else
+/// is running, and load costs lanes, not the run.
+fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: JobBudget, force: bool) -> Result<usize> {
     if update_snapshots {
         if requested.is_some_and(|j| j > 1) {
             log::warn!(target: "SIM",
@@ -3776,10 +3800,15 @@ fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: us
         }
         return Ok(1);
     }
-    if let Some(jobs) = requested.filter(|j| !force && *j > budget) {
-        anyhow::bail!("--jobs {jobs} exceeds the default memory budget of {budget} lanes; use --jobs-force to override");
-    }
-    Ok(requested.unwrap_or(budget).clamp(1, cores.max(1)))
+    let jobs = match requested {
+        None => budget.lanes(),
+        Some(jobs) if force => jobs,
+        Some(jobs) if jobs > budget.ram => {
+            anyhow::bail!("--jobs {jobs} exceeds the RAM budget of {} lanes; use --jobs-force to override", budget.ram);
+        }
+        Some(jobs) => jobs.min(budget.gpu),
+    };
+    Ok(jobs.clamp(1, cores.max(1)))
 }
 
 /// GPU memory one sim child is planned at. Measured 2026-09-22 on the Linux
@@ -3810,13 +3839,13 @@ fn vram_budgeted_jobs(cores: usize, free_vram_mib: Option<u64>) -> usize {
 /// Total-RAM planning bound: the Studio's 36 GiB / 10 lanes avoided swap
 /// and beat 14 and 7 lanes at full-asset cap 2 in the same-SHA registry sweep
 /// (`docs/gate-speed-plan.md`). Keep the ratio exact rather than rounding MiB.
-fn memory_budgeted_jobs(cores: usize, total_ram_mib: Option<u64>, free_vram_mib: Option<u64>) -> usize {
-    let gpu_jobs = vram_budgeted_jobs(cores, free_vram_mib);
-    let ram_jobs = total_ram_mib.map(|ram| {
+fn memory_budgets(cores: usize, total_ram_mib: Option<u64>, free_vram_mib: Option<u64>) -> JobBudget {
+    let gpu = vram_budgeted_jobs(cores, free_vram_mib);
+    let ram = total_ram_mib.map(|ram| {
         usize::try_from(ram.saturating_mul(10) / (36 * 1024))
             .unwrap_or(cores).clamp(1, cores.max(1))
     }).unwrap_or(cores.max(1));
-    gpu_jobs.min(ram_jobs)
+    JobBudget { ram, gpu }
 }
 
 fn total_system_memory_mib() -> Option<u64> {
@@ -3827,10 +3856,10 @@ fn total_system_memory_mib() -> Option<u64> {
     mib
 }
 
-/// The default job count for this process, read once so every resolution in
-/// one invocation agrees and the decision is logged once.
-fn sim_job_budget() -> usize {
-    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+/// The lane budgets for this process, read once so every resolution in one
+/// invocation agrees and the decision is logged once.
+fn sim_job_budget() -> JobBudget {
+    static BUDGET: std::sync::OnceLock<JobBudget> = std::sync::OnceLock::new();
     *BUDGET.get_or_init(|| {
         let cores = default_sim_jobs();
         let total_ram = total_system_memory_mib();
@@ -3842,10 +3871,11 @@ fn sim_job_budget() -> usize {
                 None
             }
         };
-        let jobs = memory_budgeted_jobs(cores, total_ram, free_vram);
+        let budget = memory_budgets(cores, total_ram, free_vram);
         log::info!(target: "SIM",
-            "default jobs {jobs}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane, free GPU {free_vram:?} MiB less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane");
-        jobs
+            "default jobs {}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane ({} lanes), free GPU {free_vram:?} MiB less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane ({} lanes)",
+            budget.lanes(), budget.ram, budget.gpu);
+        budget
     })
 }
 
@@ -5053,7 +5083,7 @@ fn record_worker_wait(label: &str) {
 /// `ROCK_SIM_WORKER_SLOT_DIR`
 /// gives resource-isolated fixtures their own namespace.
 fn acquire_worker_slot(label: &str) -> Result<std::fs::File> {
-    let budget = sim_job_budget().max(FORCED_SIM_JOBS.load(std::sync::atomic::Ordering::Relaxed));
+    let budget = sim_job_budget().lanes().max(FORCED_SIM_JOBS.load(std::sync::atomic::Ordering::Relaxed));
     let slots = match std::env::var("ROCK_SIM_WORKER_SLOTS") {
         Ok(raw) => raw.parse::<usize>().ok().filter(|n| *n > 0)
             .ok_or_else(|| anyhow!("ROCK_SIM_WORKER_SLOTS={raw:?} must be a positive integer"))?
@@ -8228,12 +8258,12 @@ mod tests {
     /// unique before spawning.
     #[test]
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
-        let (cores, budget) = (32, 4);
+        let (cores, budget) = (32, JobBudget { ram: 4, gpu: 4 });
 
-        assert_eq!(resolve_jobs_with(None, false, cores, budget, false).unwrap(), budget, "no request takes the memory budget");
+        assert_eq!(resolve_jobs_with(None, false, cores, budget, false).unwrap(), 4, "no request takes the memory budget");
         assert_eq!(resolve_jobs_with(Some(1), false, cores, budget, false).unwrap(), 1);
         let error = resolve_jobs_with(Some(10), false, cores, budget, false).unwrap_err();
-        assert!(error.to_string().contains("memory budget of 4"));
+        assert!(error.to_string().contains("RAM budget of 4"));
         assert!(error.to_string().contains("--jobs-force"));
         assert_eq!(resolve_jobs_with(Some(4), false, cores, budget, false).unwrap(), 4);
         assert_eq!(resolve_jobs_with(Some(8), true, cores, budget, false).unwrap(), 1);
@@ -8248,11 +8278,23 @@ mod tests {
     }
 
     #[test]
+    fn a_request_above_only_the_free_gpu_budget_runs_at_that_budget() {
+        let (cores, budget) = (32, JobBudget { ram: 10, gpu: 2 });
+        assert_eq!(resolve_jobs_with(Some(8), false, cores, budget, false).unwrap(), 2);
+        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget, false).unwrap(), 2);
+        let error = resolve_jobs_with(Some(11), false, cores, budget, false).unwrap_err();
+        assert!(error.to_string().contains("--jobs 11 exceeds the RAM budget of 10"), "{error}");
+        // Force still takes the request as asked.
+        assert_eq!(resolve_jobs_with(Some(8), false, cores, budget, true).unwrap(), 8);
+        assert_eq!(resolve_jobs_with(None, false, cores, budget, false).unwrap(), 2);
+    }
+
+    #[test]
     fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
-        let (cores, budget) = (32, 1);
+        let (cores, budget) = (32, JobBudget { ram: 1, gpu: 1 });
         // One name under a one-lane budget runs in its one lane.
         assert_eq!(resolve_jobs_with(narrow_to_lanes(Some(4), Some(1)), false, cores, budget, false).unwrap(), 1);
-        // Two names still need two lanes, which the budget refuses.
+        // Two names still need two lanes, which the RAM budget refuses.
         let error = resolve_jobs_with(narrow_to_lanes(Some(4), Some(2)), false, cores, budget, false).unwrap_err();
         assert!(error.to_string().contains("--jobs 2 exceeds"), "{error}");
         // Unknown lanes leave the request alone; no request stays no request.
@@ -8276,17 +8318,17 @@ mod tests {
 
     #[test]
     fn default_jobs_fit_ram_and_gpu_budgets() {
-        let studio = memory_budgeted_jobs(14, Some(36 * 1024), None);
-        assert_eq!(studio, 10);
+        let studio = memory_budgets(14, Some(36 * 1024), None);
+        assert_eq!(studio.lanes(), 10);
         assert_eq!(resolve_jobs_with(None, false, 14, studio, false).unwrap(), 10);
         assert_eq!(resolve_jobs_with(Some(14), false, 14, studio, true).unwrap(), 14);
         assert_eq!(resolve_jobs_with(Some(14), true, 14, studio, true).unwrap(), 1);
-        assert_eq!(memory_budgeted_jobs(32, Some(62 * 1024), Some(17851)), 5);
-        assert_eq!(memory_budgeted_jobs(32, Some(62 * 1024), None), 17);
-        assert_eq!(memory_budgeted_jobs(2, Some(36 * 1024), None), 2);
-        assert_eq!(memory_budgeted_jobs(14, Some(0), None), 1);
-        assert_eq!(memory_budgeted_jobs(0, Some(36 * 1024), None), 1);
-        assert_eq!(memory_budgeted_jobs(14, None, None), 14);
+        assert_eq!(memory_budgets(32, Some(62 * 1024), Some(17851)).lanes(), 5);
+        assert_eq!(memory_budgets(32, Some(62 * 1024), None).lanes(), 17);
+        assert_eq!(memory_budgets(2, Some(36 * 1024), None).lanes(), 2);
+        assert_eq!(memory_budgets(14, Some(0), None).lanes(), 1);
+        assert_eq!(memory_budgets(0, Some(36 * 1024), None).lanes(), 1);
+        assert_eq!(memory_budgets(14, None, None).lanes(), 14);
     }
 
     #[test]
