@@ -274,8 +274,6 @@ struct CompiledSoundPackage {
     dependencies: Vec<String>,
 }
 
-const SOUND_RECIPE_BUCKETS: usize = 64;
-
 fn sound_metadata_cached(project_dir: &Path, source_path: &Path, bytes: &[u8]) -> Result<Value> {
     let digest = format!("{:x}", Sha256::digest(bytes));
     let cache_dir = project_dir.join("assets/.runtime-data/sounds");
@@ -322,39 +320,34 @@ fn sound_metadata_cached(project_dir: &Path, source_path: &Path, bytes: &[u8]) -
 }
 
 fn sound_metadata_valid(value: &Value) -> bool {
+    let Some(object) = value.as_object() else { return false };
+    if object.len() != 4 || object.keys().any(|key| {
+        !matches!(key.as_str(), "frames" | "rate" | "channels" | "digest")
+    }) {
+        return false;
+    }
     let frames = value["frames"].as_u64().unwrap_or(0);
     let rate = value["rate"].as_u64().unwrap_or(0);
     let channels = value["channels"].as_u64().unwrap_or(0);
-    let Some(peaks) = value["peaks"].as_array() else { return false };
     let digest = value["digest"].as_str().unwrap_or("");
-    frames > 0 && rate > 0 && channels > 0 && peaks.len() == SOUND_RECIPE_BUCKETS
-        && digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && peaks.iter().all(|peak| peak.as_f64().is_some_and(|value| value.is_finite() && value >= 0.0))
+    frames > 0 && rate > 0 && channels > 0 && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn decode_sound_metadata(bytes: &[u8]) -> Result<Value> {
-    let mut decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec()))
+    let decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec()))
         .map_err(|error| anyhow::anyhow!("decode failed: {error}"))?;
     let rate = decoder.sample_rate().get();
     let channels = decoder.channels().get();
-    let samples: Vec<f32> = decoder.by_ref().collect();
-    if samples.is_empty() || channels == 0 || rate == 0 {
+    let sample_count = decoder.count();
+    if sample_count == 0 || channels == 0 || rate == 0 {
         anyhow::bail!("decoded source has no PCM frames");
     }
-    let frames = samples.len() / channels as usize;
+    let frames = sample_count / channels as usize;
     if frames == 0 {
         anyhow::bail!("decoded source has no complete frame");
     }
-    let mut peaks = Vec::with_capacity(SOUND_RECIPE_BUCKETS);
-    for bucket in 0..SOUND_RECIPE_BUCKETS {
-        let low = bucket * samples.len() / SOUND_RECIPE_BUCKETS;
-        let high = (bucket + 1) * samples.len() / SOUND_RECIPE_BUCKETS;
-        let peak = samples[low..high].iter().fold(0.0f32, |peak, sample| {
-            peak.max(sample.abs())
-        });
-        peaks.push(peak);
-    }
-    Ok(json!({ "frames": frames, "rate": rate, "channels": channels, "peaks": peaks }))
+    Ok(json!({ "frames": frames, "rate": rate, "channels": channels }))
 }
 
 struct CompiledVisualPackage {
@@ -842,18 +835,16 @@ mod tests {
         wav
     }
 
-    fn decoded_sound_oracle(bytes: &[u8]) -> (usize, u32, u16, f32) {
-        let mut decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+    fn decoded_sound_oracle(bytes: &[u8]) -> (usize, u32, u16) {
+        let decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
         let rate = decoder.sample_rate().get();
         let channels = decoder.channels().get();
-        let duration = decoder.total_duration().unwrap().as_secs_f32();
-        let samples: Vec<f32> = decoder.collect();
-        let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-        (samples.len() / channels as usize, rate, channels, peak)
+        let samples = decoder.count();
+        (samples / channels as usize, rate, channels)
     }
 
     #[test]
-    fn sound_metadata_is_decoded_and_cached_by_source_digest() {
+    fn sound_metadata_is_cached_by_digest_without_peak_thumbnails() {
         let project = tempfile::tempdir().expect("metadata cache fixture");
         let source = project.path().join("cue.wav");
         let samples: Vec<i16> = (0..128).map(|index| {
@@ -861,7 +852,7 @@ mod tests {
         }).collect();
         let bytes = pcm_wav(&samples, 8_000);
         std::fs::write(&source, &bytes).expect("source fixture");
-        let (frames, rate, channels, source_peak) = decoded_sound_oracle(&bytes);
+        let (frames, rate, channels) = decoded_sound_oracle(&bytes);
 
         let first = sound_metadata_cached(project.path(), &source, &bytes)
             .expect("the PCM source should be decoded");
@@ -874,12 +865,8 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(&bytes));
         assert_eq!(first["digest"].as_str(), Some(digest.as_str()),
             "the runtime recipe carries its source identity");
-        let peaks = first["peaks"].as_array().expect("thumbnail envelope");
-        assert_eq!(peaks.len(), 64, "the thumbnail has the runtime envelope width");
-        let thumbnail_peak = peaks.iter().map(|peak| peak.as_f64().unwrap() as f32)
-            .fold(0.0f32, f32::max);
-        assert!((thumbnail_peak - source_peak).abs() < 0.00001,
-            "the thumbnail retains the loudest decoded source sample");
+        assert!(first.get("peaks").is_none(),
+            "compiled sound recipes carry no peak thumbnails");
 
         let cache_dir = project.path().join("assets/.runtime-data/sounds");
         let cache_path = cache_dir.join(format!("{digest}.json"));
@@ -890,6 +877,17 @@ mod tests {
         assert_eq!(second, first);
         assert_eq!(std::fs::read(&cache_path).unwrap(), cached_bytes,
             "a cache hit leaves its metadata untouched");
+
+        let mut thumbnail_cache = first.clone();
+        thumbnail_cache["peaks"] = json!(vec![0.5; 64]);
+        std::fs::write(&cache_path, serde_json::to_vec(&thumbnail_cache).unwrap()).unwrap();
+        let repaired_thumbnail = sound_metadata_cached(project.path(), &source, &bytes)
+            .expect("an old thumbnail-bearing cache should be replaced");
+        assert_eq!(repaired_thumbnail, first,
+            "the cached recipe is rebuilt without compile-time peaks");
+        let persisted: Value = serde_json::from_slice(&std::fs::read(&cache_path).unwrap()).unwrap();
+        assert!(persisted.get("peaks").is_none(),
+            "the digest cache does not retain editor peak thumbnails");
 
         std::fs::write(&cache_path, b"corrupt cache entry").unwrap();
         let repaired = sound_metadata_cached(project.path(), &source, &bytes)
