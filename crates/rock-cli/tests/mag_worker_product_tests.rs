@@ -2,6 +2,10 @@ use rock_cli::run_sim::{run_differential, run_worker_suite, DifferentialPlan};
 use rock_cli::sim_record::compare;
 use rock_cli::Backend;
 
+fn rock() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_BIN_EXE_rock"))
+}
+
 fn without_absent_agent_daemon_diagnostic(text: &str) -> String {
     text.lines()
         .filter(|line| {
@@ -23,7 +27,7 @@ fn mag_worker_reset_discards_unfinished_save() {
         "mag::async_save_worker_reset_seed".to_string(),
         "mag::async_save_worker_reset_seed".to_string(),
     ];
-    let worker = run_worker_suite(Backend::Skull, "mag", &entries)
+    let worker = run_worker_suite(Backend::Skull, "mag", rock(), &entries)
         .expect("save reset worker queue must run");
     assert_eq!(worker.len(), 2, "both save reset entries must run");
     assert!(worker[1].1, "second seed must cross the first seed's live worker boundary");
@@ -43,13 +47,14 @@ fn mag_worker_boundary_restores_game_diagnostics() {
         "mag::worker_boundary_game_diagnostics_seed".to_string(),
         "mag::worker_boundary_game_diagnostics_probe".to_string(),
     ];
-    let worker = run_worker_suite(Backend::Skull, "mag", &entries)
+    let worker = run_worker_suite(Backend::Skull, "mag", rock(), &entries)
         .expect("game diagnostics worker queue must run");
     assert_eq!(worker.len(), 2, "both entries must run");
     assert!(worker[1].1, "probe must cross the seed's live worker boundary");
     let isolated = run_differential(
         Backend::Skull,
         "mag",
+        rock(),
         &DifferentialPlan { predecessors: Vec::new(), target: entries[1].clone() },
     )
     .expect("fresh-process control must run")
@@ -81,7 +86,7 @@ fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
         "mag::boot_image_scene_registry_npcs_probe".to_string(),
         "mag::spell_damages".to_string(),
     ];
-    let worker = run_worker_suite(Backend::Skull, "mag", &entries)
+    let worker = run_worker_suite(Backend::Skull, "mag", rock(), &entries)
         .expect("MAG BootImage product queue must run");
     assert_eq!(worker.len(), entries.len(), "one record per queued entry");
     assert_eq!(
@@ -104,6 +109,7 @@ fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
         let isolated = run_differential(
             Backend::Skull,
             "mag",
+            rock(),
             &DifferentialPlan {
                 predecessors: Vec::new(),
                 target: entry.clone(),

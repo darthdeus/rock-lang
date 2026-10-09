@@ -72,6 +72,7 @@ pub(super) fn identity(
     project: &Path,
     backend: crate::Backend,
     comptime: &bone_semantic::inference::ComptimeInputs,
+    rock_exe: &Path,
 ) -> Result<serde_json::Value> {
     crate::skull_backend::compile_cache_identity(project, backend, comptime)
 }
@@ -112,9 +113,9 @@ struct Lookup {
 }
 
 impl Lookup {
-    fn current(backend: crate::Backend, project: &Path, selection: &[String]) -> Result<Self> {
+    fn current(backend: crate::Backend, project: &Path, rock_exe: &Path, selection: &[String]) -> Result<Self> {
         let comptime = crate::comptime::inputs_for_project_dir(project)?;
-        let identity = identity(project, backend, &comptime)?;
+        let identity = identity(project, backend, &comptime, rock_exe)?;
         let current = CurrentReceiptState::of(project)?;
         let key = key(&identity, &current.context, &current.inputs, selection);
         Ok(Self { key, identity, current })
@@ -122,12 +123,13 @@ impl Lookup {
 }
 
 /// `prepare_sims` through the cache: load the entry for the current inputs,
-/// or compile in a child and publish its receipt for later runs.
+/// or compile in a child `rock_exe` and publish its receipt for later runs.
 pub(super) fn prepare(
     backend: crate::Backend,
     project: &Path,
     output: &Path,
     root: &Path,
+    rock_exe: &Path,
     selection: &[String],
 ) -> Result<PreparedSims> {
     let budget = budget_bytes()?;
@@ -135,7 +137,7 @@ pub(super) fn prepare(
         .with_context(|| format!("create sim compile cache {}", root.display()))?;
     let selection = normalized_sim_selection(selection);
     let full_lookup = timed_sim_compile_phase("compile_sims", "cache_lookup", project, Some(output), || {
-        Lookup::current(backend, project, &[])
+        Lookup::current(backend, project, rock_exe, &[])
     })?;
     if !selection.is_empty() {
         match load_cached(&root.join(&full_lookup.key), &full_lookup, project, output) {
@@ -180,7 +182,7 @@ pub(super) fn prepare(
         .prefix(STAGING_PREFIX)
         .tempdir_in(root)
         .with_context(|| format!("stage a sim compile under {}", root.display()))?;
-    compile_receipt_in_child(backend, project, staging.path(), &selection)?;
+    compile_receipt_in_child(backend, project, rock_exe, staging.path(), &selection)?;
     let receipt = sim_receipt_project_dir(staging.path(), project);
     let prepared = consume_sim_receipt(&receipt, project, output, None)?;
     let (compiled_key, _) = manifest_key(&receipt)?;

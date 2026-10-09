@@ -21,6 +21,10 @@ use rock_cli::run_sim::{run_differential, run_worker_suite, DifferentialPlan};
 use rock_cli::sim_record::{compare, Comparison, SimRecord, COMPARED_ARMS};
 use rock_cli::Backend;
 
+fn rock() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_BIN_EXE_rock"))
+}
+
 /// Arms whose denominator these fixtures deliberately leave at zero, with the
 /// reason. `errors` counts runner/sim `error` ops, and every op that emits one
 /// also fails its sim -- a fixture built to populate it would be a permanently
@@ -35,7 +39,7 @@ fn differential(predecessors: &[&str], target: &str) -> (SimRecord, SimRecord) {
         predecessors: predecessors.iter().map(|s| s.to_string()).collect(),
         target: target.to_string(),
     };
-    run_differential(Backend::Skull, "testbed", &plan)
+    run_differential(Backend::Skull, "testbed", rock(), &plan)
         .unwrap_or_else(|e| panic!("differential for `{target}` failed to run: {e:#}"))
 }
 
@@ -44,6 +48,7 @@ fn a_mag_demand_draw_does_not_reuse_a_predecessors_frame_stamp() {
     let records = run_worker_suite(
         Backend::Skull,
         "mag",
+        rock(),
         &[
             "mag::paperdoll_interaction_image_and_figure".to_string(),
             "mag::targeting_rings".to_string(),
@@ -61,6 +66,7 @@ fn a_mag_movement_fixture_does_not_leave_a_kind_speed_override() {
     let records = run_worker_suite(
         Backend::Skull,
         "mag",
+        rock(),
         &[
             "mag::flow_budget_and_occupancy".to_string(),
             "mag::live_and_scenario_movement_match_schedule_and_occupied_refusal".to_string(),
@@ -323,7 +329,7 @@ fn a_predecessors_live_scene_does_not_reach_the_next_entry() {
 #[test]
 fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
     let entries = vec!["testbed::t1a_worker_registries_stay_bounded".to_string(); 12];
-    let records = run_worker_suite(Backend::Skull, "testbed", &entries)
+    let records = run_worker_suite(Backend::Skull, "testbed", rock(), &entries)
         .expect("the repeated StateImage worker queue must run");
     assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
     let crossed = records.iter().filter(|(_, crossed)| *crossed).count();
@@ -339,7 +345,7 @@ fn state_image_worker_registries_stay_bounded_across_repeated_entries() {
 #[test]
 fn repeated_bootimage_entries_prove_immutable_owner_conservation() {
     let entries = vec!["testbed::t1a_worker_registries_stay_bounded".to_string(); 8];
-    let records = run_worker_suite(Backend::Skull, "testbed", &entries)
+    let records = run_worker_suite(Backend::Skull, "testbed", rock(), &entries)
         .expect("the repeated BootImage ownership queue must run");
     assert_eq!(records.len(), entries.len(), "the worker returned one record per entry");
     let crossed = records.iter().filter(|(_, crossed)| *crossed).count();
@@ -1072,7 +1078,7 @@ fn an_incompatible_boot_signature_is_refused_with_its_reason() {
         predecessors: vec!["testbed::b0_env_conflict".to_string()],
         target: "testbed::b0_env_probe".to_string(),
     };
-    let err = run_differential(Backend::Skull, "testbed", &plan)
+    let err = run_differential(Backend::Skull, "testbed", rock(), &plan)
         .expect_err("a worker must not serve two different boot signatures");
     let msg = format!("{err:#}");
     assert!(
@@ -1091,7 +1097,7 @@ fn an_out_interpolating_env_is_refused_with_its_own_reason() {
         predecessors: vec!["testbed::b0_env_outref_head".to_string()],
         target: "testbed::b0_env_outref_tail".to_string(),
     };
-    let err = run_differential(Backend::Skull, "testbed", &plan)
+    let err = run_differential(Backend::Skull, "testbed", rock(), &plan)
         .expect_err("a worker cannot give one process two different $OUT-derived values");
     let msg = format!("{err:#}");
     assert!(
@@ -1156,6 +1162,7 @@ fn an_errored_main_closes_without_recovery_or_tail_updates() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &[
             "testbed::b0_main_error_head".to_string(),
             "testbed::b0_main_error_probe".to_string(),
@@ -1227,6 +1234,7 @@ fn a_crashed_worker_recovers_its_unstarted_entries() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &["testbed::b2_crash_head,testbed::b2_crash_tail".to_string(), "testbed::b0_leak_probe".to_string()],
     )
     .expect("the suite call itself must not error: the crash is an entry failure");
@@ -1277,6 +1285,7 @@ fn a_replaced_boot_checkpoint_is_refused_not_restored() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &["testbed::b1_checkpoint_take_succeeds".to_string(), "testbed::b1_checkpoint_membership".to_string()],
     )
     .expect("the suite call itself must not error: the refusal is an entry failure");
@@ -1359,6 +1368,7 @@ fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_work
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &[
             "testbed::b3_canvas_head".to_string(),
             "testbed::b3_canvas_seed".to_string(),
@@ -1437,6 +1447,7 @@ fn an_entry_that_resized_boots_scene_targets_keeps_its_worker() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &[
             "testbed::b3_canvas_resize_head".to_string(),
             "testbed::b3_canvas_resize_seed".to_string(),
@@ -1477,6 +1488,7 @@ fn an_entry_that_shortened_a_boot_pyramid_keeps_its_worker() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &[
             "testbed::b3_pyramid_shrink_head".to_string(),
             "testbed::b3_pyramid_shrink_seed".to_string(),
@@ -1526,6 +1538,7 @@ fn a_predecessors_voice_on_a_boot_sound_does_not_reach_the_next_entry() {
     let records = run_worker_suite(
         Backend::Skull,
         "bitgun",
+        rock(),
         &["bitgun::b3_voice_leak_seed".to_string(), "bitgun::b3_voice_leak_probe".to_string()],
     )
     .expect("the suite call itself must not error");
@@ -1574,6 +1587,7 @@ fn an_entry_that_runs_the_games_shutdown_systems_keeps_its_worker() {
     let records = run_worker_suite(
         Backend::Skull,
         "mag",
+        rock(),
         &[
             "mag::telemetry_death_then_withdrawal_leaves_nothing".to_string(),
             "mag::combat_report_empty_state_and_reset_lifecycle".to_string(),
@@ -1619,6 +1633,7 @@ fn a_restored_value_struct_still_compares_by_value() {
     let records = run_worker_suite(
         Backend::Skull,
         "mag",
+        rock(),
         &[
             "mag::worker_value_struct_eq_seed".to_string(),
             "mag::worker_value_struct_eq_probe".to_string(),
@@ -1755,6 +1770,7 @@ fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
     let healthy = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &["testbed::b0_leak_seed".to_string(), "testbed::b0_leak_probe".to_string(), "testbed::b0_rng_probe".to_string()],
     )
     .expect("the healthy queue must run");
@@ -1773,6 +1789,7 @@ fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
     let recovered = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &["testbed::b2_crash_head,testbed::b2_crash_tail".to_string(), "testbed::b0_leak_probe".to_string()],
     )
     .expect("the suite call itself must not error: the crash is an entry failure");
@@ -1807,6 +1824,7 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
+        rock(),
         &["testbed::b3_cc_painted_head".to_string(), "testbed::b3_cc_painted_probe".to_string()],
     )
     .expect("the suite call itself must not error: ineligibility is a scheduling fact");
@@ -2857,7 +2875,7 @@ fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
         "ROCK_SIM_TIMEOUT_SECS", Some(std::ffi::OsStr::new("12")),
     ) { return; }
 
-    let records = run_worker_suite(Backend::Skull, "testbed", &vec!["testbed::b2_slow_entry".to_string(); 3])
+    let records = run_worker_suite(Backend::Skull, "testbed", rock(), &vec!["testbed::b2_slow_entry".to_string(); 3])
         .expect("the suite call itself must not error");
     assert_eq!(records.len(), 3);
     let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
@@ -2976,7 +2994,7 @@ fn a_lua_allocator_window_is_closed_at_the_worker_boundary() {
 
 #[test]
 fn an_uninstalled_lua_allocator_reports_failure_without_aborting() {
-    let records = run_worker_suite(Backend::Skull, "testbed",
+    let records = run_worker_suite(Backend::Skull, "testbed", rock(),
         &["testbed::b0_lua_allocator_uninstalled".to_string()]).expect("run refusal fixture");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
@@ -3072,14 +3090,14 @@ fn worker_admission_helper_process() {
     let project = project.to_str().unwrap();
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let records = run_worker_suite(Backend::Skull, project,
+            let records = run_worker_suite(Backend::Skull, project, rock(),
                 &["probe".to_string()]).expect("admitted suite");
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
             assert!(!records[0].0.expects_pass.is_empty());
         });
         scope.spawn(|| {
-            let (isolated, shared) = run_differential(Backend::Skull, project,
+            let (isolated, shared) = run_differential(Backend::Skull, project, rock(),
                 &DifferentialPlan { predecessors: Vec::new(), target: "probe".to_string() })
                 .expect("admitted differential");
             assert_equivalent("admitted worker", &compare(&isolated, &shared));
@@ -3241,7 +3259,7 @@ fn a_worker_signal_is_reported_with_its_termination_cause() {
         .status().expect("independent native exit oracle");
     assert!(native.signal().is_some(), "the native control must die by signal: {native}");
     let (_scratch, project) = worker_load_fixture();
-    let records = run_worker_suite(Backend::Skull, project.to_str().unwrap(),
+    let records = run_worker_suite(Backend::Skull, project.to_str().unwrap(), rock(),
         &["signalled".to_string()]).expect("signal is an entry failure");
     assert_eq!(records.len(), 1);
     let record = &records[0].0;

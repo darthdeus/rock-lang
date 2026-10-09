@@ -471,6 +471,7 @@ impl CommandContext {
             crate::run_sim::run_multi_order_gate(
                 backend,
                 &self.args.files[0],
+                &crate::run_sim::current_rock_exe()?,
                 &self.args.files[1..],
             )
         } else if self.args.files.len() == 1 {

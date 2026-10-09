@@ -960,7 +960,8 @@ fn prepare_sims(
     let (wire_names, env_by_wire, source_files, stone) =
         compile_sims_with_allocation(backend, project_path.clone(), output_path.clone(), None, &selection)?;
     let inputs = receipt_inputs_from_stone(&project_path, &stone)?;
-    let cache_identity = sim_compile_cache::identity(&project_path, backend, stone.comptime_inputs())?;
+    let cache_identity =
+        sim_compile_cache::identity(&project_path, backend, stone.comptime_inputs(), &current_rock_exe()?)?;
     let receipt_selection = if stone.sim_selection_is_full() { Vec::new() } else { selection };
     drop(stone);
     timed_sim_compile_phase(
@@ -1020,11 +1021,13 @@ fn consume_sim_receipt(
 /// The receipt goes through the cross-run compile cache (`sim_compile_cache`)
 /// unless `ROCK_SIM_COMPILE_CACHE=0`, which compiles into a one-run receipt.
 /// An explicit receipt lane (`ROCK_SIM_COMPILE_RECEIPT_DIR`) keeps its own
-/// rules. This spawns `current_exe`, so only the CLI entry points use it.
+/// rules. The compile child is `rock_exe`: the CLI passes itself, a test
+/// harness the `rock` binary it was built beside.
 fn prepare_sims_out_of_process(
     backend: crate::Backend,
     project_path: PathBuf,
     output_path: PathBuf,
+    rock_exe: &Path,
     selection: &[String],
 ) -> Result<PreparedSims> {
     crate::compile_slots::report_spawn_phase("compile-prepare");
@@ -1035,14 +1038,14 @@ fn prepare_sims_out_of_process(
         format!("canonicalize sim project {}", project_path.display())
     })?;
     if let Some(cache) = sim_compile_cache::root()? {
-        return sim_compile_cache::prepare(backend, &project_path, &output_path, &cache, selection);
+        return sim_compile_cache::prepare(backend, &project_path, &output_path, &cache, rock_exe, selection);
     }
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
     let root = tempfile::Builder::new()
         .prefix("sim-receipt-")
         .tempdir_in("tmp")
         .context("creating sim compile receipt directory")?;
-    compile_receipt_in_child(backend, &project_path, root.path(), selection)?;
+    compile_receipt_in_child(backend, &project_path, rock_exe, root.path(), selection)?;
     consume_sim_receipt(
         &sim_receipt_project_dir(root.path(), &project_path),
         &project_path,
@@ -1051,18 +1054,23 @@ fn prepare_sims_out_of_process(
     )
 }
 
-/// Compile `project` in a child `rock sim --list` that publishes its receipt
+/// This `rock` binary, for the CLI entry points that compile sims in a child.
+pub(crate) fn current_rock_exe() -> Result<PathBuf> {
+    std::env::current_exe().context("locating the rock binary for the sim compile")
+}
+
+/// Compile `project` in a child `rock_exe sim --list` that publishes its receipt
 /// under `receipt_root`, with this invocation's flags that change what the
 /// compile builds or reports.
 fn compile_receipt_in_child(
     backend: crate::Backend,
     project_path: &Path,
+    rock_exe: &Path,
     receipt_root: &Path,
     selection: &[String],
 ) -> Result<()> {
     crate::compile_slots::report_spawn_phase("compile");
-    let exe = std::env::current_exe().context("locating the rock binary for the sim compile")?;
-    let status = std::process::Command::new(&exe)
+    let status = std::process::Command::new(rock_exe)
         .args(compile_child_invocation_args())
         .arg("sim")
         .arg("--list")
@@ -1075,7 +1083,7 @@ fn compile_receipt_in_child(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .status()
-        .with_context(|| format!("spawning the sim compile `{} sim --list`", exe.display()))?;
+        .with_context(|| format!("spawning the sim compile `{} sim --list`", rock_exe.display()))?;
     if !status.success() {
         return Err(anyhow!(
             "cannot compile project {}: the sim compile process exited with {status}",
@@ -1323,7 +1331,7 @@ fn do_run_sim_opts_recorded(
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `MATCH3_PRESET`.
     let mut prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), output_path.clone(), &[sim_name.to_string()])
+        prepare_sims_out_of_process(backend, project_path.clone(), output_path.clone(), &current_rock_exe()?, &[sim_name.to_string()])
     })?;
     let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
     let sim_name = sim_name.as_str();
@@ -1715,7 +1723,7 @@ fn do_run_named_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), names)
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &current_rock_exe()?, names)
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
@@ -2250,7 +2258,7 @@ fn do_run_all_sims_recorded(
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &[])
+        prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), &current_rock_exe()?, &[])
     })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
@@ -6482,6 +6490,7 @@ fn select_gate_corpus(registry: &[String], selected: &[String]) -> Result<Vec<St
 pub fn run_multi_order_gate(
     backend: crate::Backend,
     project: &str,
+    rock_exe: &Path,
     selected: &[String],
 ) -> Result<()> {
     use crate::sim_record::{compare, COMPARED_ARMS};
@@ -6493,7 +6502,7 @@ pub fn run_multi_order_gate(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let prepared = prepare_sims(backend, project_path, PathBuf::from(&output))?;
+    let prepared = prepare_sims_out_of_process(backend, project_path, PathBuf::from(&output), rock_exe, &[])?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
     // Hot-reload sims are out of the corpus, and not because they are awkward:
@@ -6635,9 +6644,12 @@ pub fn run_multi_order_gate(
     Ok(())
 }
 
+/// `rock_exe` compiles the project in a child, so a test harness running many
+/// suites at once never holds a compiler's memory itself.
 pub fn run_worker_suite(
     backend: crate::Backend,
     project: &str,
+    rock_exe: &Path,
     entry_specs: &[String],
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
     rock_host::project::ensure_workspace_root()?;
@@ -6660,7 +6672,7 @@ pub fn run_worker_suite(
 
     let out_dir = timed_sim_output_dir("run_worker_suite", &project_path)?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let prepared = prepare_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+    let prepared = prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), rock_exe, &[])?;
     let env_by_wire = prepared.env_by_wire;
 
     let results = timed_sim_compile_phase(
@@ -6692,10 +6704,12 @@ pub struct DifferentialPlan {
 ///
 /// Both sides go through the same spawn, demux, artifact and record code, so
 /// the two schemas cannot drift; the ONLY difference is how many entries share
-/// the process. Compare them with [`crate::sim_record::compare`].
+/// the process. Compare them with [`crate::sim_record::compare`]. `rock_exe`
+/// compiles the project, as in [`run_worker_suite`].
 pub fn run_differential(
     backend: crate::Backend,
     project: &str,
+    rock_exe: &Path,
     plan: &DifferentialPlan,
 ) -> Result<(crate::sim_record::SimRecord, crate::sim_record::SimRecord)> {
     rock_host::project::ensure_workspace_root()?;
@@ -6718,7 +6732,7 @@ pub fn run_differential(
 
     let out_dir = timed_sim_output_dir("run_differential", &project_path)?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let prepared = prepare_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+    let prepared = prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), rock_exe, &[])?;
     let env_by_wire = prepared.env_by_wire;
 
     let isolated = timed_sim_compile_phase(
