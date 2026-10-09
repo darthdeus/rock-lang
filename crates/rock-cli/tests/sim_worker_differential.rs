@@ -2854,7 +2854,7 @@ fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
     // every single entry fits with room to spare.
     if isolated_environment_test(
         "the_wall_clock_deadline_is_per_entry_not_per_worker",
-        "ROCK_SIM_TIMEOUT_SECS", std::ffi::OsStr::new("12"),
+        "ROCK_SIM_TIMEOUT_SECS", Some(std::ffi::OsStr::new("12")),
     ) { return; }
 
     let records = run_worker_suite(Backend::Skull, "testbed", &vec!["testbed::b2_slow_entry".to_string(); 3])
@@ -2927,7 +2927,7 @@ fn a_lua_allocator_installation_belongs_to_the_live_native_provider() {
         let provider = scratch.path().join(lib);
         std::fs::copy(root.join("tmp").join(lib), &provider).expect("copy native provider");
         // Keep the borrowed provider alive until its isolated test process exits.
-        assert!(isolated_environment_test(name, "ROCK_STONE_LIB", provider.as_os_str()));
+        assert!(isolated_environment_test(name, "ROCK_STONE_LIB", Some(provider.as_os_str())));
         return;
     }
     let (isolated, worker) = differential(
@@ -2941,15 +2941,20 @@ fn a_lua_allocator_installation_belongs_to_the_live_native_provider() {
     assert_eq!(worker.expects_pass.len(), 4, "all allocator assertions must run");
 }
 
-fn isolated_environment_test(name: &str, key: &str, value: &std::ffi::OsStr) -> bool {
+/// Reruns `name` in a child process with `key` set to `value`, or removed when
+/// `value` is None. True in the parent, which must then return.
+fn isolated_environment_test(name: &str, key: &str, value: Option<&std::ffi::OsStr>) -> bool {
     if std::env::var("ROCK_WORKER_GATE_CHILD").as_deref() == Ok(name) {
         return false;
     }
-    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
-        .args([&format!("sim_worker_differential::{name}"), "--exact", "--nocapture"])
-        .env("ROCK_WORKER_GATE_CHILD", name)
-        .env(key, value)
-        .output().expect("isolated worker gate");
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
+    command.args([&format!("sim_worker_differential::{name}"), "--exact", "--nocapture"])
+        .env("ROCK_WORKER_GATE_CHILD", name);
+    match value {
+        Some(value) => command.env(key, value),
+        None => command.env_remove(key),
+    };
+    let output = command.output().expect("isolated worker gate");
     assert!(output.status.success(), "isolated {name} failed:\n{}{}",
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
@@ -3021,6 +3026,15 @@ struct WorkerLoadChild(Option<std::process::Child>);
 impl WorkerLoadChild {
     fn finish(mut self) -> std::process::Output {
         self.0.take().unwrap().wait_with_output().expect("worker load child output")
+    }
+
+    /// The child's output once it has exited; None while it still runs.
+    fn exited(&mut self) -> Option<std::process::Output> {
+        let child = self.0.as_mut()?;
+        match child.try_wait().expect("poll worker load child") {
+            Some(_) => Some(self.0.take().unwrap().wait_with_output().expect("worker load child output")),
+            None => None,
+        }
     }
 }
 
@@ -3128,6 +3142,8 @@ fn assert_worker_admission(default_namespace: bool) {
         } else {
             command.env("ROCK_SIM_WORKER_SLOT_DIR", &slots);
         }
+        // The fixture is no lane project: its callers compile it themselves.
+        command.env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR");
         command.env("ROCK_SIM_WORKER_SLOTS", "1")
             .env("ROCK_SIM_WORKER_WAIT_LOG", &wait_trace)
             .env("ROCK_SIM_LIFECYCLE_LOG", &trace)
@@ -3179,6 +3195,12 @@ fn await_worker_admission(children: &mut [WorkerLoadChild], traces: &[std::path:
             "waiting must preserve the existing spawn/entry lifecycle format: {logs:?}");
         let waiting: Vec<_> = waits.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
         if waiting.iter().all(|log| log.contains("wait\t")) { break; }
+        for child in children.iter_mut() {
+            if let Some(output) = child.exited() {
+                panic!("an admission caller exited before admission ({}): {}{}", output.status,
+                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            }
+        }
         assert!(Instant::now() < deadline, "all callers must reach admission: {logs:?}");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -3212,6 +3234,9 @@ fn an_admission_caller_that_exits_early_fails_with_its_stderr() {
 #[test]
 fn a_worker_signal_is_reported_with_its_termination_cause() {
     use std::os::unix::process::ExitStatusExt;
+    // The fixture is no lane project, so it runs outside the lane's receipts.
+    if isolated_environment_test("a_worker_signal_is_reported_with_its_termination_cause",
+        "ROCK_SIM_COMPILE_RECEIPT_DIR", None) { return; }
     let native = std::process::Command::new("sh").args(["-c", "kill -USR1 $$"])
         .status().expect("independent native exit oracle");
     assert!(native.signal().is_some(), "the native control must die by signal: {native}");
