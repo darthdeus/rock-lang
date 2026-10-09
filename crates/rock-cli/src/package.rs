@@ -835,12 +835,15 @@ mod tests {
         wav
     }
 
-    fn decoded_sound_oracle(bytes: &[u8]) -> (usize, u32, u16) {
-        let decoder = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
-        let rate = decoder.sample_rate().get();
-        let channels = decoder.channels().get();
-        let samples = decoder.count();
-        (samples / channels as usize, rate, channels)
+    fn wav_header_oracle(bytes: &[u8]) -> (usize, u32, u16) {
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..16], b"WAVEfmt ");
+        assert_eq!(&bytes[36..40], b"data");
+        let channels = u16::from_le_bytes(bytes[22..24].try_into().unwrap());
+        let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        let block_bytes = u16::from_le_bytes(bytes[32..34].try_into().unwrap());
+        let data_bytes = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+        (data_bytes as usize / block_bytes as usize, rate, channels)
     }
 
     #[test]
@@ -852,16 +855,16 @@ mod tests {
         }).collect();
         let bytes = pcm_wav(&samples, 8_000);
         std::fs::write(&source, &bytes).expect("source fixture");
-        let (frames, rate, channels) = decoded_sound_oracle(&bytes);
+        let (frames, rate, channels) = wav_header_oracle(&bytes);
 
         let first = sound_metadata_cached(project.path(), &source, &bytes)
             .expect("the PCM source should be decoded");
         assert_eq!(first["frames"].as_u64(), Some(frames as u64),
-            "frame count agrees with an independent decode of the source");
+            "frame count agrees with the encoded WAV header");
         assert_eq!(first["rate"].as_u64(), Some(rate as u64),
-            "sample rate agrees with an independent decode of the source");
+            "sample rate agrees with the encoded WAV header");
         assert_eq!(first["channels"].as_u64(), Some(channels as u64),
-            "channel count agrees with an independent decode of the source");
+            "channel count agrees with the encoded WAV header");
         let digest = format!("{:x}", Sha256::digest(&bytes));
         assert_eq!(first["digest"].as_str(), Some(digest.as_str()),
             "the runtime recipe carries its source identity");

@@ -879,6 +879,24 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
     }
     assert!(packaged_root.join("assets/sound_bank.json").is_file());
     assert!(!packaged_root.join("sound_project.json").exists(), "authoring project leaked into runtime assets");
+    let bank: Value = serde_json::from_slice(
+        &std::fs::read(packaged_root.join("assets/sound_bank.json")).unwrap(),
+    ).expect("packaged sound bank JSON");
+    let recipes = bank["recipes"].as_object().expect("packaged sound recipes");
+    assert_eq!(recipes.keys().cloned().collect::<BTreeSet<_>>(), sound_dependency_keys(&project),
+        "every catalog source receives exactly one packaged recipe");
+    for (key, recipe) in recipes {
+        assert_eq!(recipe.as_object().unwrap().keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["frames", "rate", "channels", "digest"]),
+            "the compiled bank carries metadata only, with no peak thumbnails");
+        for field in ["frames", "rate", "channels"] {
+            assert!(recipe[field].as_u64().unwrap_or(0) > 0,
+                "packaged recipe {key} has no valid {field}");
+        }
+        let source = std::fs::read(project.join(key)).unwrap();
+        assert_eq!(recipe["digest"], format!("{:x}", Sha256::digest(&source)),
+            "packaged recipe identity agrees with its catalog source bytes");
+    }
 
     let manifest: Value = serde_json::from_slice(
         &std::fs::read(output.path().join("package-manifest.json")).unwrap(),
