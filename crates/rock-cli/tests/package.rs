@@ -11,6 +11,15 @@ fn rock_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
+fn checked_visual_bank_schema() -> u64 {
+    let bytes = std::fs::read(repo_root().join("mag/assets/visual_bank.json"))
+        .expect("checked visual bank");
+    let bank: Value = serde_json::from_slice(&bytes).expect("valid checked visual bank");
+    bank["schema_version"]
+        .as_u64()
+        .expect("integer schema in checked visual bank")
+}
+
 #[cfg(unix)]
 #[test]
 fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
@@ -71,9 +80,11 @@ fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
 
 fn content_revision(catalog: &Path) -> String {
     let script = repo_root().join("tools/release/content_revision.py");
+    let project = catalog.parent().unwrap().parent().unwrap();
     let out = Command::new("python3")
         .arg(script)
         .arg(catalog)
+        .arg(project.join("prop_kits.json"))
         .output()
         .expect("run content revision helper");
     assert!(
@@ -173,6 +184,11 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let manifest_path = build.join("package-manifest.json");
     let manifest_text = std::fs::read_to_string(&manifest_path).expect("package manifest");
     let manifest: Value = serde_json::from_str(&manifest_text).expect("valid package manifest");
+    assert_eq!(
+        manifest["artifacts"]["visual"]["schema"].as_u64(),
+        Some(checked_visual_bank_schema()),
+        "package metadata must report the schema emitted in the checked visual bank"
+    );
     assert!(!manifest_text.contains(secret), "manifest leaked the secret");
     let expected = format!(
         "sha256:{:x}",
@@ -190,6 +206,13 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         .expect("packaged level catalog JSON");
     let levels = catalog_value["levels"].as_array().expect("catalog level entries");
     assert!(!levels.is_empty(), "package stages a nonempty official catalog");
+    let packaged_prop_kits = packaged_root.join("prop_kits.json");
+    assert!(packaged_prop_kits.is_file(), "packaged prop kits are missing");
+    assert_eq!(
+        std::fs::read(&packaged_prop_kits).unwrap(),
+        std::fs::read(repo_root().join("mag/prop_kits.json")).unwrap(),
+        "packaged prop kits must match the content revision source"
+    );
     let mut identities = Vec::new();
     for entry in levels {
         let namespace = entry["namespace"].as_str().expect("catalog entry namespace");
@@ -230,6 +253,8 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let fixture_catalog = fixture_root.join("levels/index.json");
     std::fs::create_dir_all(fixture_catalog.parent().unwrap()).unwrap();
     std::fs::copy(&catalog, &fixture_catalog).unwrap();
+    let fixture_kits = fixture_root.join("prop_kits.json");
+    std::fs::copy(&packaged_prop_kits, &fixture_kits).unwrap();
     let mut depth_path = None;
     for entry in levels {
         let relative = entry["path"].as_str().unwrap();
@@ -252,6 +277,17 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         "CONTENT_REV must change when Crypt Depths changes"
     );
     std::fs::write(&depth_path, depth_bytes).unwrap();
+    let prop_kits_path = fixture_root.join("prop_kits.json");
+    let prop_kits_bytes = std::fs::read(&prop_kits_path).unwrap();
+    let mut changed_prop_kits = prop_kits_bytes.clone();
+    changed_prop_kits.extend_from_slice(b"\n");
+    std::fs::write(&prop_kits_path, changed_prop_kits).unwrap();
+    assert_ne!(
+        content_revision(&fixture_catalog),
+        revision_before_mutations,
+        "CONTENT_REV must change when prop kits change"
+    );
+    std::fs::write(&prop_kits_path, prop_kits_bytes).unwrap();
     let catalog_bytes = std::fs::read(&fixture_catalog).unwrap();
     let mut changed_catalog = catalog_bytes.clone();
     changed_catalog.extend_from_slice(b"\n");
@@ -260,6 +296,16 @@ fn package_manifest_is_the_secret_safe_metadata_boundary() {
         content_revision(&fixture_catalog),
         revision_before_mutations,
         "CONTENT_REV must change when index.json changes"
+    );
+    std::fs::write(&fixture_catalog, catalog_bytes).unwrap();
+    let kits_bytes = std::fs::read(&fixture_kits).unwrap();
+    let mut changed_kits = kits_bytes.clone();
+    changed_kits.extend_from_slice(b"\n");
+    std::fs::write(&fixture_kits, changed_kits).unwrap();
+    assert_ne!(
+        content_revision(&fixture_catalog),
+        revision_before_mutations,
+        "CONTENT_REV must change when prop_kits.json changes"
     );
 
     let level = packaged_root.join("levels/crypt.json");
@@ -385,10 +431,10 @@ fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
     std::fs::create_dir_all(overlay_assets.join("particles")).unwrap();
     std::fs::write(
         project.join("assets/visual_bank.json"),
-        concat!(
-            "{\"schema_version\":1,",
-            "\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",",
-            "\"dependencies\":[]}\n",
+        format!(
+            "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[]}}\n",
+            checked_visual_bank_schema(),
+            "0".repeat(64),
         ),
     )
     .unwrap();
@@ -396,10 +442,10 @@ fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
     std::fs::write(overlay_assets.join("particles/unrelated.png"), b"unrelated").unwrap();
     std::fs::write(
         overlay_assets.join("visual_bank.json"),
-        concat!(
-            "{\"schema_version\":1,",
-            "\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",",
-            "\"dependencies\":[]}\n",
+        format!(
+            "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[]}}\n",
+            checked_visual_bank_schema(),
+            "0".repeat(64),
         ),
     )
     .unwrap();
@@ -473,7 +519,8 @@ fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
     let digest = "a".repeat(64);
     let dependency = format!("assets/.eat/{digest}/characters/mage/mage-idle.png");
     let bank = format!(
-        "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"{}\"]}}\n",
+        "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"{}\"]}}\n",
+        checked_visual_bank_schema(),
         "0".repeat(64),
         dependency,
     );
@@ -491,7 +538,8 @@ fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
     std::fs::write(
         overlay.join("assets/visual_bank.json"),
         format!(
-            "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/{}/missing.png\"]}}\n",
+            "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/{}/missing.png\"]}}\n",
+            checked_visual_bank_schema(),
             "0".repeat(64),
             "b".repeat(64),
         ),
@@ -560,6 +608,59 @@ fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
 }
 
 #[test]
+fn package_rejects_schema_one_visual_bank() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("previous-visual-bank-schema");
+    let output = fixture_root.path().join("package");
+    std::fs::create_dir_all(project.join("assets")).unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"previous-visual-bank-schema\"\n\n[release]\nassets = [\"assets\"]\n",
+    )
+    .unwrap();
+    assert_ne!(
+        checked_visual_bank_schema(),
+        1,
+        "the checked visual bank still uses legacy schema 1"
+    );
+    let bank = json!({
+        "schema_version": 1,
+        "plan_fingerprint": format!("sha256:{}", "0".repeat(64)),
+        "dependencies": [],
+    });
+    std::fs::write(
+        project.join("assets/visual_bank.json"),
+        serde_json::to_vec(&bank).unwrap(),
+    )
+    .unwrap();
+
+    let packaged = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args([
+            "package",
+            project.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn previous-schema package");
+    let stderr = String::from_utf8_lossy(&packaged.stderr);
+    assert!(
+        !packaged.status.success(),
+        "package accepted the schema preceding the production bank format"
+    );
+    assert!(
+        stderr.contains("unsupported visual bank schema"),
+        "previous schema rejection was unclear: {stderr}"
+    );
+    assert!(
+        !output.join("package-manifest.json").exists(),
+        "rejected previous schema package published a manifest"
+    );
+}
+
+#[test]
 fn package_rejects_an_overlay_bank_when_the_worktree_bank_is_missing() {
     let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
     let project = fixture_root.path().join("missing-worktree-visual-bank");
@@ -575,10 +676,10 @@ fn package_rejects_an_overlay_bank_when_the_worktree_bank_is_missing() {
     std::fs::create_dir_all(overlay.join("assets")).unwrap();
     std::fs::write(
         overlay.join("assets/visual_bank.json"),
-        concat!(
-            "{\"schema_version\":1,",
-            "\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",",
-            "\"dependencies\":[]}\n",
+        format!(
+            "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[]}}\n",
+            checked_visual_bank_schema(),
+            "0".repeat(64),
         ),
     )
     .unwrap();

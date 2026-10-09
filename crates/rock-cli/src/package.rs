@@ -481,7 +481,7 @@ fn compile_visual_bank(
         .map_err(|error| anyhow::anyhow!("package: visual bank is invalid JSON: {error}"))?;
     let schema = root.get("schema_version").and_then(Value::as_u64)
         .ok_or_else(|| anyhow::anyhow!("package: visual bank has no integer schema_version"))?;
-    if schema != 1 {
+    if schema != u64::from(rock_host::release::VISUAL_BANK_SCHEMA_VERSION) {
         anyhow::bail!("package: unsupported visual bank schema {schema}");
     }
     let plan_fingerprint = root.get("plan_fingerprint").and_then(Value::as_str)
@@ -814,7 +814,8 @@ mod tests {
         std::fs::write(
             fixture.path().join("assets/visual_bank.json"),
             format!(
-                "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                rock_host::release::VISUAL_BANK_SCHEMA_VERSION,
                 "0".repeat(64),
             ),
         )
@@ -822,7 +823,8 @@ mod tests {
         std::fs::write(
             overlay.join("assets/visual_bank.json"),
             format!(
-                "{{\"schema_version\":1,\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}",
+                rock_host::release::VISUAL_BANK_SCHEMA_VERSION,
                 "0".repeat(64),
             ),
         )
@@ -857,7 +859,10 @@ mod tests {
         std::fs::create_dir_all(overlay.join("assets")).unwrap();
         std::fs::write(
             fixture.path().join("assets/visual_bank.json"),
-            "{\"schema_version\":1,\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/image.png\"]}\n",
+            format!(
+                "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/image.png\"]}}\n",
+                rock_host::release::VISUAL_BANK_SCHEMA_VERSION,
+            ),
         )
         .unwrap();
         std::fs::write(
@@ -867,7 +872,10 @@ mod tests {
         .unwrap();
         std::fs::write(
             overlay.join("assets/visual_bank.json"),
-            "{\"schema_version\":1,\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}\n",
+            format!(
+                "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"dependencies\":[\"assets/.eat/missing/image.png\"]}}\n",
+                rock_host::release::VISUAL_BANK_SCHEMA_VERSION,
+            ),
         )
         .unwrap();
 
@@ -926,7 +934,7 @@ mod tests {
         };
         let visual = CompiledVisualPackage {
             bank_key: bank_key.clone(),
-            schema: 1,
+            schema: u64::from(rock_host::release::VISUAL_BANK_SCHEMA_VERSION),
             plan_fingerprint: format!("sha256:{}", "0".repeat(64)),
             dependencies: vec![generated.clone()],
             fixed_output_keys: [format!("{game}/assets/characters/mage/mage-idle.png")].into(),

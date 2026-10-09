@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::stick::StickConfig;
 
 pub const ASSET_OVERLAYS_ENV: &str = "ROCK_ASSET_OVERLAYS";
+pub const VISUAL_BANK_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct ReleaseAsset {
