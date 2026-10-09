@@ -3088,7 +3088,7 @@ fn a_fixture_home_cannot_bypass_the_worker_spawn_budget() {
 
 fn assert_worker_admission(default_namespace: bool) {
     use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let (scratch, project) = worker_load_fixture();
     let slots = if default_namespace {
         rock_cli::run_sim::sim_worker_slot_directory().expect("production admission config")
@@ -3142,18 +3142,7 @@ fn assert_worker_admission(default_namespace: bool) {
         traces.push(trace);
         waits.push(wait_trace);
     }
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let logs: Vec<_> = traces.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
-        assert!(logs.iter().all(|log| !log.contains("proc_start\t")),
-            "a real worker spawned while the only permit was held: {logs:?}");
-        assert!(logs.iter().all(|log| log.is_empty()),
-            "waiting must preserve the existing spawn/entry lifecycle format: {logs:?}");
-        let waiting: Vec<_> = waits.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
-        if waiting.iter().all(|log| log.contains("wait\t")) { break; }
-        assert!(Instant::now() < deadline, "all callers must reach admission: {logs:?}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    await_worker_admission(&mut children, &traces, &waits, Duration::from_secs(120));
     drop(held);
     for child in children {
         let output = child.finish();
@@ -3174,6 +3163,49 @@ fn assert_worker_admission(default_namespace: bool) {
         assert_eq!(live, 0, "{log}");
         assert!(completed > 0, "no admitted worker completed: {log}");
     }
+}
+
+/// Waits until every caller reports a blocked admission while the permit is
+/// held. No caller may spawn a worker or exit before the permit drops.
+fn await_worker_admission(children: &mut [WorkerLoadChild], traces: &[std::path::PathBuf],
+    waits: &[std::path::PathBuf], timeout: std::time::Duration) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + timeout;
+    loop {
+        let logs: Vec<_> = traces.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
+        assert!(logs.iter().all(|log| !log.contains("proc_start\t")),
+            "a real worker spawned while the only permit was held: {logs:?}");
+        assert!(logs.iter().all(|log| log.is_empty()),
+            "waiting must preserve the existing spawn/entry lifecycle format: {logs:?}");
+        let waiting: Vec<_> = waits.iter().map(|path| std::fs::read_to_string(path).unwrap_or_default()).collect();
+        if waiting.iter().all(|log| log.contains("wait\t")) { break; }
+        assert!(Instant::now() < deadline, "all callers must reach admission: {logs:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_admission_caller_that_exits_early_fails_with_its_stderr() {
+    use std::time::{Duration, Instant};
+    let scratch = tempfile::tempdir().expect("early exit fixture");
+    let child = std::process::Command::new("sh")
+        .args(["-c", "echo early-exit-marker >&2; exit 3"])
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .spawn().expect("spawn early-exit caller");
+    let mut children = vec![WorkerLoadChild(Some(child))];
+    let traces = vec![scratch.path().join("trace.log")];
+    let waits = vec![scratch.path().join("wait.log")];
+    let started = Instant::now();
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        await_worker_admission(&mut children, &traces, &waits, Duration::from_secs(20));
+    })).expect_err("a caller that exits before admission must fail the wait");
+    let message = failure.downcast_ref::<String>().cloned()
+        .or_else(|| failure.downcast_ref::<&str>().map(|text| text.to_string()))
+        .unwrap_or_default();
+    assert!(started.elapsed() < Duration::from_secs(10),
+        "an exited caller must fail the wait at once, not at its deadline: {message}");
+    assert!(message.contains("early-exit-marker"), "the caller's stderr must surface: {message}");
 }
 
 #[cfg(unix)]
