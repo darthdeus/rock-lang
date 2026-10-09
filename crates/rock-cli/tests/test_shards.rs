@@ -22,6 +22,10 @@ f:write(name, " ", tostring(ffi.C.getpid()), "\n")
 f:close()
 """
 pub inline(lua) fn quit() = """ os.exit(0) """
+pub inline(lua) fn crash() = """
+io.stderr:write("shard fixture stderr marker\\n")
+os.exit(23)
+"""
 pub inline(lua) fn record_scratch(name: string) = """
 local ffi = require("ffi")
 pcall(ffi.cdef, "int getpid(void);")
@@ -60,15 +64,23 @@ fn run(project: &Path, shards: &str) -> Run {
 }
 
 fn run_filtered(project: &Path, shards: Option<&str>, filter: Option<&str>) -> Run {
+    run_filtered_with_verbose(project, shards, filter, true)
+}
+
+fn run_filtered_with_verbose(project: &Path, shards: Option<&str>, filter: Option<&str>, verbose: bool) -> Run {
     let log = project.join("shard.log");
     let timings = project.join("timings.jsonl");
     let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
     command.arg("test").arg(project.join("tests"))
         .current_dir(root())
-        .env("ROCK_TEST_VERBOSE", "1")
         .env("ROCK_TEST_TIMINGS", &timings)
         .env("SHARD_LOG", &log)
         .env_remove("ROCK_TEST_FILTER");
+    if verbose {
+        command.env("ROCK_TEST_VERBOSE", "1");
+    } else {
+        command.env_remove("ROCK_TEST_VERBOSE");
+    }
     match shards {
         Some(shards) => command.env("ROCK_TEST_SHARDS", shards),
         None => command.env_remove("ROCK_TEST_SHARDS"),
@@ -171,6 +183,24 @@ fn a_dying_shard_names_its_unfinished_tests() {
         assert!(text.contains("d_1: never reported"), "shards={shards}: the dying test is named:\n{text}");
         assert_eq!(passed, finished.len(), "shards={shards}: finished tests passed:\n{text}");
     }
+}
+
+#[test]
+fn a_dying_shard_reports_cause_without_verbose_mode() {
+    let source = r#"
+@test fn crash_test() { crash() }
+@test fn after_crash() { record("after_crash") }
+"#;
+    let (_dir, project) = package(&[("crash.rock", source)]);
+    let run = run_filtered_with_verbose(&project, Some("1"), None, false);
+    let text = &run.text;
+
+    assert!(!run.success, "the crashed shard must fail the command:\n{text}");
+    assert!(text.contains("crash_test: never reported"), "the active test is named:\n{text}");
+    assert!(text.contains("exit code 23"), "the child's exit status is shown:\n{text}");
+    assert!(text.contains("running test `crash_test`"), "the running test is identified:\n{text}");
+    assert!(text.contains("shard fixture stderr marker"), "the child's stderr is shown:\n{text}");
+    assert!(!text.contains("=== failure details ==="), "the fixture did not enable verbose mode:\n{text}");
 }
 
 /// The filter selects first and the shards split only the selection: each

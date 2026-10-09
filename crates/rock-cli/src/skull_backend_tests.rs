@@ -1,4 +1,6 @@
 use std::time::Duration;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 
 #[test]
 fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
@@ -4830,7 +4832,8 @@ fn test_limit_kills_and_names_stuck_file() {
     assert_test_run_bounded(&dir, "stuck file was not bounded");
     match result {
         Ok(super::SkullOutcome::TestFail { passed: 0, fails, .. }) => {
-            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")), "{fails:?}");
+            assert!(fails.iter().any(|f| f.contains("first.rock") && f.contains("timed out")
+                && f.contains("CPU-time budget")), "{fails:?}");
         }
         other => panic!("{other:?}"),
     }
@@ -4894,6 +4897,54 @@ fn test_limit_names_hung_test_after_healthy_ones() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[cfg(unix)]
+fn wait_for_test_watchdog_fixture(script: &str, limit: Duration) -> crate::common::ProcessResult {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn watchdog fixture");
+    crate::common::ProcessManager::wait_with_test_watchdog(
+        &mut child,
+        limit,
+        crate::common::TestWatch {
+            token: "watch-token".to_string(),
+            tests: 2,
+        },
+    )
+    .expect("wait for watchdog fixture")
+}
+
+#[cfg(unix)]
+#[test]
+fn test_limit_counts_time_as_progress_between_tests() {
+    let script = r#"
+printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
+printf '__SKULL__\tTIME\tfirst_test\t1.0\tpass\twatch-token\t0\n'
+sleep 0.4
+printf 'ROCK_TEST_START\twatch-token\t1\n' >&2
+printf '__SKULL__\tTIME\tsecond_test\t1.0\tpass\twatch-token\t1\n'
+"#;
+    let run = wait_for_test_watchdog_fixture(script, Duration::from_millis(100));
+    assert!(!run.timed_out, "a completed TIME line must start a fresh inter-test budget: {run:?}");
+    assert!(run.output.status.success(), "the child should finish after the gap: {run:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_limit_uses_child_cpu_for_a_slow_test() {
+    let script = r#"
+printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
+sleep 0.4
+printf '__SKULL__\tTIME\tfirst_test\t400.0\tpass\twatch-token\t0\n'
+"#;
+    let run = wait_for_test_watchdog_fixture(script, Duration::from_millis(100));
+    assert!(!run.timed_out, "wall time without child CPU must not exhaust the test budget: {run:?}");
+    assert!(run.output.status.success(), "the slow but completed test should pass: {run:?}");
 }
 
 #[test]
