@@ -739,6 +739,13 @@ struct FnEmit<'a> {
     /// Entry mode: global field name -> GLSL type (for `ty_of` on those reads).
     /// Names are collision-checked unique, so one combined map covers all bases.
     uniform_fields: HashMap<Ustr, GlslTy>,
+    /// Entry mode: sampler/array param cells, which render AS the declared
+    /// global itself (`texture(t, ..)` reads `t`) and so keep their exact
+    /// spelling while every other cell renames apart from the globals.
+    global_ref_cells: HashSet<Idx<Cell>>,
+    /// Entry mode: global names no local or value param may take (the
+    /// program's whole declared-global surface, plus written builtins).
+    reserved_names: HashSet<String>,
     ignored_type_cells: HashSet<Idx<Cell>>,
     /// Cosmetic folds (`docs/shaders.md`, cosmetic tier). A diamond's
     /// single-use result cell -> the expression it renders as; the diamond itself
@@ -1022,6 +1029,18 @@ fn emit_fn_def_with(
             .map(|s| s.global_params.iter().map(|&i| mf.params[i]).collect())
             .unwrap_or_default(),
         uniform_fields: entry.map(|s| s.uniform_fields.iter().copied().collect()).unwrap_or_default(),
+        global_ref_cells: entry
+            .map(|s| {
+                s.sampler_params
+                    .iter()
+                    .chain(s.arrays.iter())
+                    .map(|&i| mf.params[i])
+                    .collect()
+            })
+            .unwrap_or_default(),
+        reserved_names: entry
+            .map(|s| s.reserved.iter().map(|u| u.to_string()).collect())
+            .unwrap_or_default(),
         ignored_type_cells: entry
             .map(|s| {
                 s.global_params
@@ -1123,6 +1142,24 @@ fn emit_fn_def_with(
     ))
 }
 
+/// A cell's preferred GLSL spelling: its source name with the compiler's own
+/// `__rock_` prefix stripped and `__` runs collapsed (a Rock local cannot
+/// shadow what it cannot spell), else a cell-indexed temporary.
+fn cell_base_name(cell: &Cell, cid: Idx<Cell>) -> String {
+    cell.name
+        .map(|n| {
+            let mut s = n.as_str().to_string();
+            if let Some(stripped) = s.strip_prefix("__rock_") {
+                s = stripped.to_string();
+            }
+            while s.contains("__") {
+                s = s.replace("__", "_");
+            }
+            s
+        })
+        .unwrap_or_else(|| format!("t{}", cid.into_raw().into_u32()))
+}
+
 impl FnEmit<'_> {
     fn push(&mut self, line: &str) {
         for _ in 0..self.indent {
@@ -1133,22 +1170,16 @@ impl FnEmit<'_> {
     }
 
     /// Assign a unique GLSL identifier to every cell (source name, deduped).
+    ///
+    /// In entry mode the hoisted locals share the function scope with the
+    /// program's bare globals, so a local named like a uniform lane (or an
+    /// attribute, varying, sampler, array member or output) would shadow it
+    /// with no diagnostic. Global-reference cells (sampler/array params) claim
+    /// their exact spellings first -- they ARE the global -- and every other
+    /// cell dedups apart from the reserved globals as well as its siblings.
     fn assign_cell_names(&mut self) {
         let mut used: HashSet<String> = HashSet::default();
-        for (cid, cell) in self.f.cells.iter() {
-            let base = cell
-                .name
-                .map(|n| {
-                    let mut s = n.as_str().to_string();
-                    if let Some(stripped) = s.strip_prefix("__rock_") {
-                        s = stripped.to_string();
-                    }
-                    while s.contains("__") {
-                        s = s.replace("__", "_");
-                    }
-                    s
-                })
-                .unwrap_or_else(|| format!("t{}", cid.into_raw().into_u32()));
+        let claim = |used: &mut HashSet<String>, base: String| -> String {
             let mut name = base.clone();
             let mut k = 0;
             while used.contains(&name) {
@@ -1156,6 +1187,24 @@ impl FnEmit<'_> {
                 name = format!("{base}_{k}");
             }
             used.insert(name.clone());
+            name
+        };
+        // Global references first, in cell order (deterministic): a sampler
+        // keeps `t` while a same-named local becomes `t_1`, never the reverse.
+        let mut refs: Vec<Idx<Cell>> = self.global_ref_cells.iter().copied().collect();
+        refs.sort_by_key(|c| c.into_raw().into_u32());
+        for cid in refs {
+            let base = cell_base_name(&self.f.cells[cid], cid);
+            let name = claim(&mut used, base);
+            self.cell_name.insert(cid, name);
+        }
+        used.extend(self.reserved_names.iter().cloned());
+        for (cid, cell) in self.f.cells.iter() {
+            if self.cell_name.contains_key(&cid) {
+                continue;
+            }
+            let base = cell_base_name(cell, cid);
+            let name = claim(&mut used, base);
             self.cell_name.insert(cid, name);
         }
     }
@@ -2702,6 +2751,9 @@ struct EntryShape {
     /// `void main()` mode: presence switches emission to `void main()` with a
     /// return-struct destructure (vertex varyings, or MRT fragment outputs).
     main_out: Option<MainOut>,
+    /// Global names the entry's locals and value params must not take (every
+    /// bare global the program declares, so hoisting cannot shadow one).
+    reserved: Vec<Ustr>,
 }
 
 /// The default fullscreen vertex stage -- identical to the hand-written
@@ -2742,6 +2794,7 @@ fn entry_shape(
         sampler_params: sampler_params.to_vec(),
         arrays: Vec::new(),
         main_out: None,
+        reserved: entry_reserved_names(iface),
     }
 }
 
@@ -4649,6 +4702,7 @@ fn emit_vertex_stage(
             fields: iface.varyings.iter().map(|v| (v.name, wire_glsl(v.kind))).collect(),
             builtin: Some(("position", "gl_Position", GlslTy::Vec4)),
         }),
+        reserved: entry_reserved_names(iface),
     };
     let (mf, helpers, dependencies) =
         (&stage.ir.body, stage.render_helpers(ws, interner)?, stage.dependencies());
@@ -4745,6 +4799,7 @@ fn emit_fragment_stage(
         sampler_params: fs.samplers.iter().map(|&(i, _, _)| i).collect(),
         arrays: fs.arrays.iter().map(|a| a.param).collect(),
         main_out,
+        reserved: entry_reserved_names(iface),
     };
     let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws, interner)?, stage.dependencies());
 
@@ -4811,6 +4866,51 @@ fn emit_fragment_stage(
     Ok((out, dependencies))
 }
 
+/// Every interface-declared name landing in GLSL's ONE cross-stage namespace:
+/// attributes, uniform/engine members, array members, varyings, samplers and
+/// MRT outs. The completeness argument lives here once: every name a program
+/// declares is in the interface exactly once, so a role added to the interface
+/// joins every consumer by existing rather than by someone remembering to
+/// chain it.
+fn interface_global_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
+    iface
+        .vertex_inputs
+        .iter()
+        .flat_map(|i| i.attrs.iter().map(|(n, _)| *n))
+        .chain(iface.uniform_groups.iter().flat_map(|g| g.members.iter().map(|(n, _)| *n)))
+        .chain(iface.array_groups.iter().flat_map(|g| g.members.iter().map(|m| m.name)))
+        .chain(iface.varyings.iter().map(|v| v.name))
+        .chain(iface.textures.iter().flat_map(|t| t.samplers.iter().map(|(n, _)| *n)))
+        .chain(iface.bare_samplers.iter().map(|s| s.name))
+        .chain(match &iface.fragment_output {
+            FragmentOutput::Mrt(outs) => outs.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Every global name an entry's locals and value params must not take: the
+/// interface's whole census above, plus the stage I/O the interface never
+/// claims (A1's `TexCoord`, single-output `FragColor`) and the two GL builtins
+/// a `void main()` entry writes (`gl_Position`, `gl_FragDepth`). One set for
+/// every entry: over-reservation is semantics-preserving (a renamed local keeps
+/// every use through its one `cell_name`), while under-reservation is the
+/// silent shadowing miscompile, so this errs wide. Mangled helper names and
+/// block names are out: a local spelling one is unreachable in practice, and a
+/// collision there is a loud driver error (calling a non-function), never a
+/// silent wrong read.
+fn entry_reserved_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
+    interface_global_names(iface)
+        .into_iter()
+        .chain([
+            Ustr::from("TexCoord"),
+            Ustr::from("FragColor"),
+            Ustr::from("gl_Position"),
+            Ustr::from("gl_FragDepth"),
+        ])
+        .collect()
+}
+
 /// Reject duplicate global names across BOTH stages (decision 7): attributes,
 /// uniforms, varyings, samplers and the reserved gl_Position/FragColor share
 /// one GLSL namespace -- the linked program has a single uniform namespace, so
@@ -4848,20 +4948,7 @@ fn check_pipeline_collisions(
     if !matches!(iface.fragment_output, FragmentOutput::Mrt(_)) {
         seen.insert(Ustr::from("FragColor"));
     }
-    let names = iface
-        .vertex_inputs
-        .iter()
-        .flat_map(|i| i.attrs.iter().map(|(n, _)| *n))
-        .chain(iface.uniform_groups.iter().flat_map(|g| g.members.iter().map(|(n, _)| *n)))
-        .chain(iface.array_groups.iter().flat_map(|g| g.members.iter().map(|m| m.name)))
-        .chain(iface.varyings.iter().map(|v| v.name))
-        .chain(iface.textures.iter().flat_map(|t| t.samplers.iter().map(|(n, _)| *n)))
-        .chain(iface.bare_samplers.iter().map(|s| s.name))
-        .chain(match &iface.fragment_output {
-            FragmentOutput::Mrt(outs) => outs.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
-            _ => Vec::new(),
-        });
-    for n in names {
+    for n in interface_global_names(iface) {
         if !seen.insert(n) {
             return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
         }
