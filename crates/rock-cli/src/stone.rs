@@ -1,6 +1,9 @@
 use crate::*;
 use std::process::{Child, Command, Stdio};
 
+#[path = "frame_compile_cache.rs"]
+mod frame_compile_cache;
+
 /// macOS-specific: Spawn a detached monitor process to ensure child cleanup
 ///
 /// This function implements orphan process prevention for macOS, which doesn't have
@@ -1425,7 +1428,9 @@ pub fn do_one_frame(
     use crate::common::ProcessManager;
 
     crate::compile_slots::report_spawn_phase("compile");
-    let compiled = compile_game_for_run(backend, path, &output)?;
+    let compiled = frame_compile_cache::compile_game_for_frame(
+        backend, path, &output, frames, requested_renderer.clone(),
+    )?;
     let lua_file = &compiled.lua_file;
     crate::compile_slots::report_spawn_phase("runtime-prepare");
     let replay_source = replay_source_for(path)?;
