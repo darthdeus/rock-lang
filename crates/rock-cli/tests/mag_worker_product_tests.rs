@@ -70,8 +70,9 @@ fn mag_worker_boundary_restores_game_diagnostics() {
 
 #[test]
 fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
+    // The seed entry was ported to package tests and deleted; the probe keeps
+    // the queue's scene half.
     let entries = vec![
-        "mag::boot_image_scene_registry_npcs_seed".to_string(),
         "mag::boot_image_scene_registry_npcs_probe".to_string(),
         "mag::spell_damages".to_string(),
     ];
@@ -80,8 +81,8 @@ fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
     assert_eq!(worker.len(), entries.len(), "one record per queued entry");
     assert_eq!(
         worker.iter().filter(|(_, crossed)| *crossed).count(),
-        2,
-        "both successor entries must cross a live worker boundary"
+        1,
+        "the successor entry must cross a live worker boundary"
     );
 
     for (entry, (worker_record, _)) in entries.iter().zip(&worker) {
