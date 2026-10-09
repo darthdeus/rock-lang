@@ -83,6 +83,9 @@ const COMPILE_CACHE_UNKEYED_ENV: &[&str] = &[
     "ROCK_SIM_SLOT_LOCK",
     "ROCK_SIM_SPAWN_BARRIER",
     "ROCK_SIM_TIMEOUT_SECS",
+    "ROCK_SIM_WORKER_SLOTS",
+    "ROCK_SIM_WORKER_SLOT_DIR",
+    "ROCK_SIM_WORKER_WAIT_LOG",
 ];
 const COMPILE_CACHE_UNKEYED_ENV_PREFIXES: &[&str] = &["ROCK_JOBS_", "ROCK_SIM_WARN_"];
 
@@ -155,23 +158,79 @@ fn compile_cache_stdlib_digest() -> serde_json::Value {
     })
 }
 
+/// SHA-256 of the running compiler image, or `None` when it cannot be pinned
+/// (the binary was replaced after this process started, or changed while being
+/// hashed). Compile caches are off without it: a key must name the compiler
+/// that produced the artifact, not whatever is at the executable's path now.
+pub(crate) fn compile_cache_compiler_sha256() -> Option<&'static str> {
+    static COMPILER_SHA256: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    COMPILER_SHA256
+        .get_or_init(|| match running_image_sha256() {
+            Ok(Some(hash)) => Some(hash),
+            Ok(None) => {
+                log::warn!(target: "CLI", "the rock binary changed after this process started; compile caches are off");
+                None
+            }
+            Err(error) => {
+                log::warn!(target: "CLI", "cannot hash the running rock binary; compile caches are off: {error:#}");
+                None
+            }
+        })
+        .as_deref()
+}
+
+#[cfg(target_os = "linux")]
+fn running_image_sha256() -> Result<Option<String>> {
+    // The kernel resolves this to the mapped image even after its path is replaced.
+    cache_sha256_file(std::path::Path::new("/proc/self/exe")).map(Some)
+}
+
+#[cfg(target_os = "macos")]
+fn running_image_sha256() -> Result<Option<String>> {
+    let exe = std::env::current_exe().context("locate the rock binary to key the compile")?;
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a writable proc_bsdinfo of exactly `size` bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            std::process::id() as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if written != size {
+        return Err(std::io::Error::last_os_error()).context("read this process's start time");
+    }
+    let started = std::time::UNIX_EPOCH
+        + Duration::from_secs(info.pbi_start_tvsec)
+        + Duration::from_micros(info.pbi_start_tvusec);
+    file_sha256_if_unchanged_since(&exe, started)
+}
+
+/// Hash `path` if it is the same file before and after the read and was last
+/// written before `started`; `None` otherwise.
+#[cfg(unix)]
+fn file_sha256_if_unchanged_since(path: &std::path::Path, started: std::time::SystemTime) -> Result<Option<String>> {
+    use std::os::unix::fs::MetadataExt;
+    let stamp = |meta: &std::fs::Metadata| (meta.dev(), meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec());
+    let before = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let hash = cache_sha256_file(path)?;
+    let after = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let written = before.modified().with_context(|| format!("mtime of {}", path.display()))?;
+    Ok((stamp(&before) == stamp(&after) && written <= started).then_some(hash))
+}
+
 pub(crate) fn compile_cache_identity(
     project: &std::path::Path,
     backend: crate::Backend,
     comptime: &bone_semantic::inference::ComptimeInputs,
 ) -> Result<serde_json::Value> {
     use anyhow::Context;
-    use sha2::{Digest, Sha256};
-    static COMPILER_SHA256: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let compiler_sha256 = if let Some(hash) = COMPILER_SHA256.get() {
-        hash.clone()
-    } else {
-        let exe = std::env::current_exe().context("locating the rock binary to key the compile")?;
-        let mut hasher = Sha256::new();
-        std::io::copy(&mut std::fs::File::open(&exe).with_context(|| format!("open {}", exe.display()))?, &mut hasher)
-            .with_context(|| format!("hash {}", exe.display()))?;
-        COMPILER_SHA256.get_or_init(|| format!("{:x}", hasher.finalize())).clone()
-    };
+    // Null only where caching is off; a child that cannot pin its compiler keys
+    // its receipt to null, which no parent lookup matches.
+    let compiler_sha256 = compile_cache_compiler_sha256();
     let preamble = skull_game_preamble(&project.to_string_lossy())
         .context("resolve the game preamble for the compile cache key")?;
     Ok(serde_json::json!({
@@ -295,7 +354,65 @@ pub(crate) fn compile_cache_evict_to_budget(
         compile_cache_evict(root, &path, evicting_prefix)?;
         total -= bytes;
     }
+    sweep_compile_cache_locks(root)
+}
+
+/// Remove key locks that nobody holds and whose entry is gone. A process that
+/// opened a lock but has not locked it yet can lose its inode here; it then
+/// compiles beside the next locker, which costs a duplicate compile, not a
+/// wrong entry (publication tolerates an existing entry).
+fn sweep_compile_cache_locks(root: &std::path::Path) -> Result<()> {
+    use std::fs::TryLockError;
+    for item in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let path = item?.path();
+        let Some(key) = path.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_suffix(".lock")) else {
+            continue;
+        };
+        if root.join(key).exists() {
+            continue;
+        }
+        let file = match std::fs::File::options().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("open compile cache lock {}", path.display())),
+        };
+        match file.try_lock() {
+            Ok(()) => match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error).with_context(|| format!("remove compile cache lock {}", path.display()));
+                }
+                _ => {}
+            },
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(error)) => {
+                return Err(error).with_context(|| format!("probe compile cache lock {}", path.display()));
+            }
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod compile_cache_compiler_tests {
+    use super::*;
+
+    #[test]
+    fn compiler_hash_refuses_a_binary_written_after_the_process_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("rock");
+        std::fs::write(&exe, b"compiler image").unwrap();
+        let written = std::fs::metadata(&exe).unwrap().modified().unwrap();
+        assert_eq!(
+            file_sha256_if_unchanged_since(&exe, written).unwrap().as_deref(),
+            Some(cache_sha256_bytes(b"compiler image").as_str()),
+        );
+        assert_eq!(
+            file_sha256_if_unchanged_since(&exe, written - Duration::from_secs(1)).unwrap(),
+            None,
+            "a binary replaced after the process started is not the running compiler",
+        );
+        assert!(running_image_sha256().unwrap().is_some(), "the test binary predates its own process");
+    }
 }
 
 fn compile_cache_dir_bytes(dir: &std::path::Path) -> Result<u64> {

@@ -35,11 +35,14 @@ const EVICTING_PREFIX: &str = ".evicting-";
 /// A staging dir older than this belongs to a run that died mid-compile.
 const STALE_STAGING: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// The cache root, or `None` when `ROCK_SIM_COMPILE_CACHE=0` turns it off.
+/// The cache root, or `None` when `ROCK_SIM_COMPILE_CACHE=0` turns it off or
+/// the running compiler cannot be hashed.
 /// Defaults to `~/tmp/rock-sim-compile-cache` so worktrees share one bounded
 /// store on disk rather than the small `/tmp`.
 pub(super) fn root() -> Result<Option<PathBuf>> {
-    if std::env::var_os(CACHE_ENV).is_some_and(|value| value == "0") {
+    if std::env::var_os(CACHE_ENV).is_some_and(|value| value == "0")
+        || crate::skull_backend::compile_cache_compiler_sha256().is_none()
+    {
         return Ok(None);
     }
     if let Some(dir) = std::env::var_os(CACHE_DIR_ENV).filter(|value| !value.is_empty()) {
@@ -340,6 +343,26 @@ mod tests {
     }
 
     #[test]
+    fn eviction_sweeps_unheld_key_locks_without_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let kept = entry(root, "a", 1000, 10);
+        entry(root, "b", 1000, 300);
+        for name in ["a", "b", "orphan"] {
+            std::fs::write(root.join(format!("{name}.lock")), b"1\n").unwrap();
+        }
+        let held = lock_key(root, "held").unwrap();
+
+        evict_to_budget(root, 1500, &kept).unwrap();
+
+        assert!(root.join("a.lock").exists(), "a live entry keeps its lock");
+        assert!(root.join("held.lock").exists(), "a held lock stays");
+        assert!(!root.join("b.lock").exists(), "an evicted entry's lock goes");
+        assert!(!root.join("orphan.lock").exists(), "an unheld lock with no entry goes");
+        drop(held);
+    }
+
+    #[test]
     fn runner_only_environment_is_unkeyed_and_compile_settings_are_keyed() {
         for name in [
             "ROCK_SIM_TIMEOUT_SECS",
@@ -370,6 +393,9 @@ mod tests {
             "ROCK_COMPILE_SLOT_DIR",
             "ROCK_JOBS_SELF",
             "ROCK_SIM_WARN_FACTOR",
+            "ROCK_SIM_WORKER_SLOTS",
+            "ROCK_SIM_WORKER_SLOT_DIR",
+            "ROCK_SIM_WORKER_WAIT_LOG",
             "STONE_JV",
             CACHE_DIR_ENV,
         ] {

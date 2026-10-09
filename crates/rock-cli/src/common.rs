@@ -3,14 +3,10 @@ use std::process::Child;
 use std::time::Duration;
 
 /// Compile a game once for `rock frame` / `rock perf` style commands on the
-/// chosen `backend`: ensure workspace root, build engine libs, then a full
-/// from-scratch compile via the backend's `GameCompiler` (skull: `emit_full`).
-/// On success clears tmp/error.txt and returns the `output/main.lua` path luajit
-/// should be exec'd on. On failure writes tmp/error.txt and propagates the error
-/// (caller exits).
-///
-/// `output` is the output directory (typically "tmp"); the returned
-/// path is `<output>/main.lua`.
+/// chosen `backend`: [`prepare_game_compile`], then [`compile_game_into`]
+/// `output`. On success clears tmp/error.txt and returns the `<output>/main.lua`
+/// path luajit should be exec'd on. On failure writes tmp/error.txt and
+/// propagates the error (caller exits).
 pub struct CompiledGame {
     pub lua_file: std::path::PathBuf,
     pub artifact_fingerprint: String,
@@ -21,28 +17,62 @@ pub fn compile_game_for_run(
     path: &str,
     output: &str,
 ) -> Result<CompiledGame> {
-    use std::collections::HashSet;
+    prepare_game_compile(path)?;
+    let artifact = compile_game_into(backend, path, std::path::Path::new(output))?;
+    clear_error_file();
+    Ok(CompiledGame {
+        lua_file: PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
+        artifact_fingerprint: artifact.artifact_fingerprint,
+    })
+}
 
+/// What a from-scratch compile published beside its `main.lua`.
+pub(crate) struct GameArtifact {
+    pub artifact_fingerprint: String,
+    /// Comptime file inputs (`embed_string`) baked into the program.
+    pub embedded_files: Vec<PathBuf>,
+    /// The `[build.vars]` selection the compile stamped, when the backend reports it.
+    pub comptime_inputs: Option<bone_semantic::inference::ComptimeInputs>,
+}
+
+/// Everything a run compile needs before the compiler: workspace root,
+/// renderer feature, sound bank and engine libs.
+pub(crate) fn prepare_game_compile(path: &str) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
     crate::skull_backend::ensure_renderer_feature(path)?;
     crate::package::prepare_sound_bank(path)?;
     rock_host::engine_build::build_engine_libs(path)?;
+    Ok(())
+}
 
-    let output_path = PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
-    let mut compiler = crate::game_runtime::game_compiler_for(backend, path, &output_path);
-    match compiler.compile(&HashSet::new(), true) {
+/// One from-scratch compile of `path` into `<output_dir>/main.lua` via the
+/// backend's `GameCompiler` (skull: `emit_full`). On failure writes
+/// tmp/error.txt and propagates the error; success leaves it to the caller.
+pub(crate) fn compile_game_into(
+    backend: Backend,
+    path: &str,
+    output_dir: &std::path::Path,
+) -> Result<GameArtifact> {
+    use anyhow::Context as _;
+    use std::collections::HashSet;
+
+    let compiled = (|| -> Result<GameArtifact> {
+        std::fs::create_dir_all(output_dir).with_context(|| format!("create {}", output_dir.display()))?;
+        let output_path = output_dir.join(rock_host::project::MAIN_LUA_FILENAME);
+        let mut compiler = crate::game_runtime::game_compiler_for(backend, path, &output_path);
         // One-shot from-scratch compile: always the init path, so the outcome
         // can never request a shape restart (there is no live process).
-        Ok(_) => {
-            let artifact_fingerprint = compiler.artifact_fingerprint()?;
-            clear_error_file();
-            Ok(CompiledGame { lua_file: output_path, artifact_fingerprint })
-        }
-        Err(e) => {
-            record_compilation_error(&e);
-            Err(e)
-        }
+        compiler.compile(&HashSet::new(), true)?;
+        Ok(GameArtifact {
+            artifact_fingerprint: compiler.artifact_fingerprint()?,
+            embedded_files: compiler.comptime_watch_files(),
+            comptime_inputs: compiler.comptime_inputs().cloned(),
+        })
+    })();
+    if let Err(error) = &compiled {
+        record_compilation_error(error);
     }
+    compiled
 }
 
 /// Total RAM in MiB; `None` when the platform gives no reading.

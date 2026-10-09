@@ -63,6 +63,11 @@ pub trait GameCompiler {
     fn artifact_fingerprint(&self) -> Result<String> {
         anyhow::bail!("compiler did not publish an Artifact fingerprint")
     }
+
+    /// The `[build.vars]` selection the current program was compiled with.
+    fn comptime_inputs(&self) -> Option<&bone_semantic::inference::ComptimeInputs> {
+        None
+    }
 }
 
 /// Skull backend: bone `Session` + `SkullEmitCache` (the `SkullStone` holder),
@@ -171,6 +176,10 @@ impl GameCompiler for SkullGameCompiler {
             .as_ref()
             .map(|stone| stone.artifact_fingerprint().to_string())
             .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))
+    }
+
+    fn comptime_inputs(&self) -> Option<&bone_semantic::inference::ComptimeInputs> {
+        self.stone.as_ref().map(|stone| stone.comptime_inputs())
     }
 }
 
