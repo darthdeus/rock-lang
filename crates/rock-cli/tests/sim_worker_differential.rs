@@ -1575,7 +1575,7 @@ fn an_entry_that_runs_the_games_shutdown_systems_keeps_its_worker() {
         Backend::Skull,
         "mag",
         &[
-            "mag::telemetry_ordinary_session_survives_shutdown".to_string(),
+            "mag::telemetry_death_then_withdrawal_leaves_nothing".to_string(),
             "mag::paralyze".to_string(),
         ],
     )
