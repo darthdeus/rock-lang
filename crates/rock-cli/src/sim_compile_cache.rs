@@ -35,10 +35,6 @@ const EVICTING_PREFIX: &str = ".evicting-";
 /// A staging dir older than this belongs to a run that died mid-compile.
 const STALE_STAGING: Duration = Duration::from_secs(6 * 60 * 60);
 
-fn environment_is_keyed(name: &str) -> bool {
-    crate::skull_backend::compile_cache_environment_is_keyed(name)
-}
-
 /// The cache root, or `None` when `ROCK_SIM_COMPILE_CACHE=0` turns it off.
 /// Defaults to `~/tmp/rock-sim-compile-cache` so worktrees share one bounded
 /// store on disk rather than the small `/tmp`.
@@ -217,7 +213,7 @@ fn load_cached(entry: &Path, lookup: &Lookup, project: &Path, output: &Path) -> 
 }
 
 fn lock_key(root: &Path, key: &str) -> Result<File> {
-    crate::skull_backend::compile_cache_lock_key(root, key)
+    crate::skull_backend::compile_cache_lock_key(root, key, "SIM", "sim program")
 }
 
 /// Store a freshly compiled receipt under `key` only if what it records
@@ -377,11 +373,11 @@ mod tests {
             "STONE_JV",
             CACHE_DIR_ENV,
         ] {
-            assert!(!environment_is_keyed(name), "{name}");
+            assert!(!crate::skull_backend::compile_cache_environment_is_keyed(name), "{name}");
         }
         for name in ["ROCK_SKULL_TAIL_CALLS", "SKULL_INLINE_OFF", "ROCK_STDLIB_DIR", "GAME_ART_VAULT", "ROCK_SIM_NEW"] {
-            assert!(environment_is_keyed(name), "{name}");
+            assert!(crate::skull_backend::compile_cache_environment_is_keyed(name), "{name}");
         }
-        assert!(!environment_is_keyed("PATH"));
+        assert!(!crate::skull_backend::compile_cache_environment_is_keyed("PATH"));
     }
 }

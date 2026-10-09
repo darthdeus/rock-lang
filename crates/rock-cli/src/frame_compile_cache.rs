@@ -401,7 +401,7 @@ where
             record_cache_event_best_effort("reject", lookup, frame_count);
         }
     }
-    let _key_lock = crate::skull_backend::compile_cache_lock_key(root, &lookup.key)?;
+    let _key_lock = crate::skull_backend::compile_cache_lock_key(root, &lookup.key, "FRAME", "frame program")?;
     match load_cached(&entry, lookup, output_path) {
         Ok(Some(compiled)) => {
             log::info!(target: "FRAME", "frame compile cache hit {short} after wait");

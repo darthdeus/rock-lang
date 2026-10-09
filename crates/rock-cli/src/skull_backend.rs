@@ -184,7 +184,12 @@ pub(crate) fn compile_cache_identity(
     }))
 }
 
-pub(crate) fn compile_cache_lock_key(root: &std::path::Path, key: &str) -> Result<std::fs::File> {
+pub(crate) fn compile_cache_lock_key(
+    root: &std::path::Path,
+    key: &str,
+    log_target: &'static str,
+    cache_kind: &'static str,
+) -> Result<std::fs::File> {
     use std::io::{Seek, Write};
     use std::fs::File;
     use std::fs::TryLockError;
@@ -197,7 +202,7 @@ pub(crate) fn compile_cache_lock_key(root: &std::path::Path, key: &str) -> Resul
             crate::compile_slots::report_spawn_phase("cache-wait");
             let holder = std::fs::read_to_string(&path)
                 .with_context(|| format!("read compile cache lock {}", path.display()))?;
-            log::info!(target: "COMPILE_CACHE", "waiting for {} to compile cache key {}", holder.trim(), &key[..key.len().min(16)]);
+            log::info!(target: log_target, "waiting for {} compiling the same {} (cache key {})", holder.trim(), cache_kind, &key[..key.len().min(16)]);
             file.lock().with_context(|| format!("wait for compile cache lock {key}"))?;
         }
         Err(error) => return Err(error).with_context(|| format!("lock compile cache key {key}")),
