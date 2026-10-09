@@ -66,7 +66,6 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/walker.rock:23 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
-- mag: 3 other semantic errors
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
 - tests/newtype_generic_unification_reject_wrong_shape.rock: 1 other semantic errors
 - tests/test_utils.rock: Cannot run test-util files directly. Test utilities are meant to be used by test files.
