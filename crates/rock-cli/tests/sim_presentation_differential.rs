@@ -174,19 +174,3 @@ fn mag_simulation_presentation_independence() {
          so the rendered arm consumed no presentation randomness the headless arm did not"
     );
 }
-
-/// The presentation stream must not reach simulation state at all.
-///
-/// `mag_simulation_presentation_independence` above cannot prove this: its two
-/// arms draw the same presentation numbers until the trial card at the end of
-/// the sequence, so every wisp mote gets the same seed in both arms and a
-/// dependency on that seed stays invisible.
-///
-/// That coupling (reseeding the presentation stream moved the digest, through
-/// mote curl noise -> wisp position -> `wisp_gather` -> `Player.mana_per_sec`
-/// -> `player.mana_cur`) is now pinned by the package test
-/// `code_presentation_reseed_keeps_wisp_state_and_digest` in
-/// `mag/tests/simulation_digest_rules.rock`, which spawns wisp motes under
-/// two presentation seeds and requires identical curl seeds, trajectories
-/// and digest. The reseeded sim arm that used to drive this differential is
-/// deleted, so there is no third sim leg to compare here.
