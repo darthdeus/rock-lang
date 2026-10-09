@@ -217,6 +217,35 @@ fn process_memory_mb(pid: u32) -> Option<u64> {
     Some(kb / 1024)
 }
 
+/// The `/proc` memory fields of a live process, in MB, so a cap kill says
+/// whether the growth was heap, mapped files or shared memory.
+#[cfg(target_os = "linux")]
+fn process_memory_breakdown(pid: u32) -> String {
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return "breakdown unavailable".to_string();
+    };
+    status
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            if key == "Name" {
+                return Some(format!("process {}", value.trim()));
+            }
+            if !matches!(key, "RssAnon" | "RssFile" | "RssShmem" | "VmSwap" | "VmSize") {
+                return None;
+            }
+            let kb = value.trim().trim_end_matches("kB").trim().parse::<u64>().ok()?;
+            Some(format!("{key} {} MB", kb / 1024))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_memory_breakdown(_pid: u32) -> String {
+    "breakdown unavailable".to_string()
+}
+
 // Only Linux exposes this cheaply (/proc); elsewhere the cap is not enforced
 // and the wall-clock watchdog remains the only bound.
 #[cfg(not(target_os = "linux"))]
@@ -5586,13 +5615,14 @@ fn run_worker(
                 }
                 if let (Some(cap), Some(used)) = (memory_cap_mb, process_memory_mb(child.id())) {
                     if used > cap {
+                        let breakdown = process_memory_breakdown(child.id());
                         runner_killed = true;
                         let _ = child.kill();
                         let s = child.wait()?;
                         memory_error = Some(SiteMessage {
                             message: format!(
                                 "sim child exceeded its memory cap of {cap} MB ({used} MB resident \
-                                 plus swap) and was killed; override with ROCK_SIM_MEMORY_MB"
+                                 plus swap: {breakdown}) and was killed; override with ROCK_SIM_MEMORY_MB"
                             ),
                             site: String::new(),
                         });
@@ -5814,9 +5844,23 @@ fn run_worker(
         &collected,
     );
 
+    // What the entry the worker ended in reported itself, before the
+    // process-level errors below are added to it.
+    let mut ended_in = String::new();
     let mut summaries: Vec<SimSummary> = Vec::with_capacity(parts.len());
     for (i, (part, stream)) in parts.iter().zip(streams.iter()).enumerate() {
         let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
+        if i == blamed && stream.started {
+            let reports: Vec<&str> = summary
+                .errors
+                .iter()
+                .chain(&summary.expects_fail)
+                .map(|m| m.message.as_str())
+                .collect();
+            if !reports.is_empty() {
+                ended_in = format!("; `{}` reported: {}", part.name, reports.join(" | "));
+            }
+        }
         summary.frame_count = stream.frame_count;
         summary.frame_count_parts = 1;
         summary.process_id = Some(process_id);
@@ -5834,8 +5878,9 @@ fn run_worker(
                 .unwrap_or_default();
             summary.errors.push(SiteMessage {
                 message: format!(
-                    "sim `{}` never started: the worker process ended during an earlier entry ({worker_end}{ineligible})",
-                    part.name
+                    "sim `{}` never started: the worker process ended {} ({worker_end}{ended_in}{ineligible})",
+                    part.name,
+                    if streams[blamed].started { "during an earlier entry" } else { "before any entry started" },
                 ),
                 site: String::new(),
             });
