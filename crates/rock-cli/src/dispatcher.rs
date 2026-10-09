@@ -413,7 +413,13 @@ impl CommandContext {
         if self.args.jobs.is_some_and(|j| j > 1) {
             let updates = self.args.update_snapshots && !self.args.sim_plan
                 && self.args.allocation_census.is_none() && self.args.allocation_sites.is_none();
-            crate::run_sim::resolve_jobs(self.args.jobs, updates, self.args.jobs_force)?;
+            // A named run has one lane per name; the other arms learn theirs
+            // only after compiling.
+            let named_run = self.args.files.len() > 1 && !self.args.sim_plan && !self.args.list
+                && !self.args.multi_order && self.args.allocation_census.is_none()
+                && self.args.allocation_sites.is_none();
+            let lanes = named_run.then(|| self.args.files.len() - 1);
+            crate::run_sim::resolve_jobs(self.args.jobs, lanes, updates, self.args.jobs_force)?;
         }
         if self.args.sim_plan {
             if self.args.files.is_empty() {

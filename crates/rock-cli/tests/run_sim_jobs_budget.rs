@@ -1,26 +1,20 @@
 use std::process::Command;
+use crate::stone_harness::fake_free_gpu_mib;
 
 fn fixture() -> (tempfile::TempDir, Command) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
     let project = dir.path().join("project");
-    let bin = dir.path().join("bin");
     std::fs::create_dir(&project).unwrap();
-    std::fs::create_dir(&bin).unwrap();
     std::fs::write(project.join("stick.toml"), format!(
         "[package]\nname = \"jobs-fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"jobs\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = {{ builtin = \"channel\" }}\nPLATFORM = {{ builtin = \"platform\" }}\n", workspace.join("stone")
     )).unwrap();
     std::fs::write(project.join("main.rock"), "fn main() {}\n@sim\nco fn jobs_probe() -> Coroutine<Wait> { stop_sim() }\n").unwrap();
-    let nvidia = bin.join("nvidia-smi");
-    std::fs::write(&nvidia, "#!/usr/bin/env bash\nprintf '6144\\n'\n").unwrap();
-    std::fs::set_permissions(&nvidia, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut paths = vec![bin];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
     command.arg("sim").arg(&project).current_dir(workspace).env("ROCK_DIR", workspace)
-        .env("ROCK_SIM_COMPILE_CACHE_DIR", dir.path().join("cache"))
-        .env("PATH", std::env::join_paths(paths).unwrap());
+        .env("ROCK_SIM_COMPILE_CACHE_DIR", dir.path().join("cache"));
+    // Free GPU memory at the reserve: a budget of one lane.
+    fake_free_gpu_mib(&mut command, dir.path(), 6144);
     (dir, command)
 }
 
@@ -56,11 +50,13 @@ fn explicit_jobs_within_memory_budget_are_accepted() {
 }
 
 #[test]
-fn single_named_sim_rejects_over_budget_before_compilation() {
+fn named_sims_narrow_jobs_to_their_entries_before_the_budget() {
+    // Four requested lanes for two entries is a request for two; only the two
+    // are held against the one-lane budget, before compilation.
     let (dir, mut command) = fixture();
-    let output = command.args(["jobs_probe", "--jobs", "2"]).output().unwrap();
+    let output = command.args(["jobs_probe", "jobs_probe", "--jobs", "4"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "over-budget request unexpectedly passed: {stderr}");
-    assert!(stderr.contains("memory budget of 1") && stderr.contains("--jobs-force"), "{stderr}");
+    assert!(stderr.contains("--jobs 2 exceeds the default memory budget of 1 lanes"), "{stderr}");
     assert!(!dir.path().join("cache").exists(), "rejection happened after compilation");
 }

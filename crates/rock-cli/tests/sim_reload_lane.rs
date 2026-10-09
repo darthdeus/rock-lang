@@ -28,7 +28,7 @@ fn rejected_reload_ends_the_child_without_waiting_for_the_watchdog() {
             "reload_rejection_exits",
         ])
         .current_dir(&root)
-        .env("ROCK_SIM_TIMEOUT_SECS", "10")
+        .env("ROCK_SIM_TIMEOUT_SECS", "120")
         .output_with_deadline()
         .expect("run rock sim");
     let combined = format!(

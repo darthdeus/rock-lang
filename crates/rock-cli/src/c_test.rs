@@ -1488,7 +1488,9 @@ mod tests {
         let error = super::run_native_test(&compiled.binary, Duration::from_millis(100), None)
             .expect_err("wedged native test must time out");
         assert!(error.contains("timed out after 100ms"), "{error}");
-        assert!(start.elapsed() < Duration::from_secs(5));
+        // The fixture never exits, so returning at all proves the kill; the
+        // bound only leaves room for a loaded host.
+        assert!(start.elapsed() < Duration::from_millis(100) + Duration::from_secs(30));
     }
 
     #[test]

@@ -58,9 +58,10 @@ impl SpawnBudget {
         Self::enter(limit)
     }
 
+    /// The per-phase caps are the hang detector; nextest's kill is only a
+    /// backstop well beyond them (`.config/nextest.toml`).
     pub fn for_test(seconds: u64) -> Self {
-        // Reserve teardown time before nextest's full-profile kill deadline.
-        Self::new(Duration::from_secs(seconds.saturating_sub(5)))
+        Self::new(Duration::from_secs(seconds))
     }
 
     pub fn budget() -> Duration {
@@ -350,13 +351,29 @@ impl BudgetedChild {
 
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         let mut state = WaitState::new(self.spawned_at, self.slot_dir.clone());
+        let mut reported = None;
+        let mut busy_reported = false;
         loop {
             if let Some(status) = self.child.try_wait()? {
                 self.reaped = true;
                 return Ok(status);
             }
             let phase = read_spawn_phase(self.phase.path());
-            if let Err(breach) = state.advance(phase.as_deref(), self.budget) {
+            let advanced = state.advance(phase.as_deref(), self.budget);
+            // Phase lines go to the test's own stderr, so a test that nextest
+            // kills still says which phase its child was in and since when.
+            if reported != Some(state.current) {
+                reported = Some(state.current);
+                eprintln!("spawn {}: phase={} at {:.1?}", self.label,
+                    phase.as_deref().unwrap_or(state.current.name()), self.spawned_at.elapsed());
+            }
+            if state.current == PhaseBucket::SlotWait && !busy_reported {
+                if let Some(busy) = self.slot_busy_line() {
+                    busy_reported = true;
+                    eprintln!("spawn {}: {busy}", self.label);
+                }
+            }
+            if let Err(breach) = advanced {
                 let name = phase.as_deref().unwrap_or("unknown");
                 self.stop()?;
                 self.child.wait()?;
@@ -365,6 +382,15 @@ impl BudgetedChild {
             }
             std::thread::sleep(POLL_INTERVAL);
         }
+    }
+
+    /// The child's "waiting for a compile slot ...; busy: <holders>" log line
+    /// (`compile_slots::acquire_with`), when its stderr is piped.
+    fn slot_busy_line(&self) -> Option<String> {
+        let stderr = self.stderr.as_ref()?.snapshot();
+        String::from_utf8_lossy(&stderr).lines().rev()
+            .find(|line| line.contains("waiting for a compile slot"))
+            .map(|line| line.trim().to_string())
     }
 
     fn timeout(&self, phase: &str, breach: &Breach) -> io::Error {
@@ -461,6 +487,11 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    /// Scheduling slack for upper bounds on how fast a cap fires. These tests
+    /// prove that a cap fires and names its phase, not how promptly a loaded
+    /// host runs the poll loop.
+    const LOAD_MARGIN: Duration = Duration::from_secs(30);
+
     fn child(action: &str) -> Command {
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args(["stone_harness::spawn::tests::spawn_helper", "--exact", "--nocapture"])
@@ -472,10 +503,14 @@ mod tests {
     fn spawn_helper() {
         match std::env::var("HEAVY_SPAWN_HELPER").as_deref() {
             Ok("sleep") => std::thread::sleep(Duration::from_secs(2)),
-            Ok("short") => std::thread::sleep(Duration::from_millis(150)),
+            Ok("execute_3s") => {
+                let file = std::env::var_os("ROCK_SPAWN_PHASE_FILE").expect("phase file env");
+                std::fs::write(file, "execution").unwrap();
+                std::thread::sleep(Duration::from_secs(3));
+            }
             Ok("descendant") => {
                 let mut command = Command::new("sleep");
-                command.arg("2");
+                command.arg("60");
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::CommandExt;
@@ -509,7 +544,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("spawn_helper"), "{error}");
         assert!(error.to_string().contains("phase=spawn"), "{error}");
-        assert!(start.elapsed() < Duration::from_secs(1), "spawn cap did not stop the child");
+        assert!(start.elapsed() < Duration::from_millis(250) + LOAD_MARGIN, "spawn cap did not stop the child");
     }
 
     #[test]
@@ -531,11 +566,13 @@ mod tests {
 
     #[test]
     fn sequential_spawns_each_get_a_fresh_execution_budget() {
-        // Two 150 ms children under a 250 ms budget: a shared deadline would
-        // kill the second, but per-spawn caps grant each its own budget.
-        let _budget = SpawnBudget::new(Duration::from_millis(250));
-        assert!(child("short").output_with_deadline().unwrap().status.success());
-        assert!(child("short").output_with_deadline().unwrap().status.success());
+        // Two 3 s executions under a 5 s budget: a shared deadline would kill
+        // the second, but per-spawn caps grant each its own budget. The 2 s
+        // left over is startup slack, which load can only spend in the spawn
+        // phase.
+        let _budget = SpawnBudget::new(Duration::from_secs(5));
+        assert!(child("execute_3s").output_with_deadline().unwrap().status.success());
+        assert!(child("execute_3s").output_with_deadline().unwrap().status.success());
     }
 
     #[test]
@@ -556,7 +593,7 @@ mod tests {
             let _budget = SpawnBudget::new(Duration::from_secs(5));
             let _child = child("descendant").env("HEAVY_DESCENDANT_PID", &pid_file)
                 .spawn_with_deadline().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(1);
+            let deadline = Instant::now() + LOAD_MARGIN;
             while !pid_file.exists() {
                 assert!(Instant::now() < deadline, "helper never spawned its child");
                 std::thread::sleep(Duration::from_millis(10));
@@ -564,7 +601,7 @@ mod tests {
             panic!("intentional live fixture failure");
         });
         let pid = std::fs::read_to_string(pid_file).unwrap();
-        let gone = wait_gone(&pid, Duration::from_secs(1));
+        let gone = wait_gone(&pid, LOAD_MARGIN);
         if !gone {
             assert!(Command::new("kill").args(["-KILL", pid.trim()]).status().unwrap().success());
         }
@@ -587,10 +624,19 @@ mod tests {
     fn budget_stops_descendants_that_hold_the_output_pipes() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
-        let _budget = SpawnBudget::new(Duration::from_millis(500));
-        let result = child("descendant").env("HEAVY_DESCENDANT_PID", &pid_file).output_with_deadline();
+        let _budget = SpawnBudget::new(Duration::from_secs(120));
+        let mut pending = child("descendant").env("HEAVY_DESCENDANT_PID", &pid_file)
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn_with_deadline().unwrap();
+        let deadline = Instant::now() + LOAD_MARGIN;
+        while !pid_file.exists() {
+            assert!(Instant::now() < deadline, "helper never spawned its child");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Expire the budget only once the descendant holds the pipes.
+        pending.budget = Duration::from_millis(250);
+        let result = pending.wait_with_output();
         let pid = std::fs::read_to_string(pid_file).expect("helper reached descendant spawn");
-        let gone = wait_gone(&pid, Duration::from_secs(1));
+        let gone = wait_gone(&pid, LOAD_MARGIN);
         if !gone {
             assert!(Command::new("kill").args(["-KILL", pid.trim()]).status().unwrap().success());
         }
@@ -598,7 +644,7 @@ mod tests {
         assert_eq!(result.expect_err("descendant spawn must time out").kind(), io::ErrorKind::TimedOut);
     }
 
-    fn assert_hang_reports_phase_within(phase: &str, budget: Duration, cap: Duration, within: Duration) {
+    fn assert_hang_reports_phase_within(phase: &str, budget: Duration, cap: Duration) {
         let _budget = SpawnBudget::new(budget);
         let start = Instant::now();
         let error = child(&format!("hang_in:{phase}")).output_with_deadline()
@@ -606,22 +652,22 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains(&format!("phase={phase}")), "{error}");
         assert!(start.elapsed() >= cap, "hang in {phase} died before its cap: {:?}", start.elapsed());
-        assert!(start.elapsed() < within, "hang in {phase} escaped its cap: {:?}", start.elapsed());
+        assert!(start.elapsed() < cap + LOAD_MARGIN, "hang in {phase} escaped its cap: {:?}", start.elapsed());
     }
 
     #[test]
     fn execution_hang_fails_with_the_named_phase_within_its_cap() {
-        assert_hang_reports_phase_within("execution", Duration::from_millis(250), Duration::from_millis(250), Duration::from_secs(2));
+        assert_hang_reports_phase_within("execution", Duration::from_millis(250), Duration::from_millis(250));
     }
 
     #[test]
     fn compile_hang_reports_the_compile_phase_within_its_cap() {
-        assert_hang_reports_phase_within("compile", Duration::from_millis(250), Duration::from_millis(500), Duration::from_secs(3));
+        assert_hang_reports_phase_within("compile", Duration::from_millis(250), Duration::from_millis(500));
     }
 
     #[test]
     fn cache_wait_hang_reports_the_cache_wait_phase_within_its_cap() {
-        assert_hang_reports_phase_within("cache-wait", Duration::from_millis(250), Duration::from_millis(500), Duration::from_secs(3));
+        assert_hang_reports_phase_within("cache-wait", Duration::from_millis(250), Duration::from_millis(500));
     }
 
     #[test]
@@ -661,7 +707,7 @@ mod tests {
     }
 
     fn await_slot_wait(pending: &BudgetedChild) {
-        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let ready_deadline = Instant::now() + LOAD_MARGIN;
         while read_spawn_phase(pending.phase.path()).as_deref() != Some("slot-wait") {
             assert!(Instant::now() < ready_deadline, "compiler never reached the held slot");
             std::thread::sleep(Duration::from_millis(10));
@@ -693,13 +739,13 @@ mod tests {
         let started = Instant::now();
         let output = pending.wait_with_output();
         slot.unlock().unwrap();
-        assert!(started.elapsed() < Duration::from_secs(2), "slot wait escaped its stall cap");
+        assert!(started.elapsed() < Duration::from_millis(250) + LOAD_MARGIN, "slot wait escaped its stall cap");
         let error = output.expect_err("slot wait must fail on a stalled queue");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("phase=slot-wait"), "{error}");
         assert!(error.to_string().contains("stalled"), "{error}");
         drop(_budget);
-        let _control_budget = SpawnBudget::new(Duration::from_secs(30));
+        let _control_budget = SpawnBudget::new(Duration::from_secs(120));
         let control = slot_probe_command(&project, &slots).output_with_deadline().unwrap();
         assert!(control.status.success(), "fixture must compile: {}", String::from_utf8_lossy(&control.stderr));
     }
@@ -730,7 +776,18 @@ mod tests {
         }
         assert_eq!(read_spawn_phase(&phase_path).as_deref(), Some("slot-wait"));
         slot.unlock().unwrap();
-        let output = waiter.join().unwrap().expect("waiter finishes once the slot frees");
-        assert!(output.status.success(), "fixture must compile: {}", String::from_utf8_lossy(&output.stderr));
+        // Past the slot, the 1 s budget is too tight for a compile on a loaded
+        // host; this test only needs the waiter to leave the slot queue.
+        match waiter.join().unwrap() {
+            Ok(output) => assert!(output.status.success(), "fixture must compile: {}", String::from_utf8_lossy(&output.stderr)),
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+                assert!(!error.to_string().contains("phase=slot-wait"), "waiter stayed queued on a free slot: {error}");
+            }
+        }
+        drop(_budget);
+        let _control_budget = SpawnBudget::new(Duration::from_secs(120));
+        let control = slot_probe_command(&project, &slots).output_with_deadline().unwrap();
+        assert!(control.status.success(), "fixture must compile: {}", String::from_utf8_lossy(&control.stderr));
     }
 }

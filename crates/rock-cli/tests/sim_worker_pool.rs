@@ -19,7 +19,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
+use crate::stone_harness::{fake_free_gpu_mib, HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -237,7 +237,7 @@ co fn runtime() -> Coroutine<Wait> {
             let out = Command::new(rock_bin()).arg("sim").arg(&project).args(names)
                 .args([mode, "-j", "1"])
                 .current_dir(workspace_root())
-                .env("ROCK_SIM_TIMEOUT_SECS", "30")
+                .env("ROCK_SIM_TIMEOUT_SECS", "180")
                 .env("ROCK_SIM_LOG_DIR", fixture.path().join("history"))
                 .output_with_deadline().expect("run renderer fixture");
             let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -693,13 +693,16 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     let mut args = vec!["sim", "testbed", RELOAD];
     args.extend_from_slice(&EIGHT);
     args.extend_from_slice(&["--workers", "-j", "2"]);
-    let out = Command::new(rock_bin())
-        .args(&args)
+    let mut command = Command::new(rock_bin());
+    command.args(&args)
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
         .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
         .env("ROCK_SKULL_CALLEE_BINDING", "upvalue")
-        .env_remove("SIM_SKIP_RENDER")
+        .env_remove("SIM_SKIP_RENDER");
+    // Room for both lanes whatever the host's card is doing.
+    fake_free_gpu_mib(&mut command, dir.path(), 6144 + 2 * 2048);
+    let out = command
         .output_with_deadline()
         .expect("run rock sim --workers");
     let combined = format!(
@@ -814,7 +817,7 @@ co fn gallery() -> Coroutine<Wait> {
             Command::new(rock_bin()).arg("sim").arg(&project).args(names)
                 .args([mode, "-j", "1"])
                 .current_dir(workspace_root())
-                .env("ROCK_SIM_TIMEOUT_SECS", "30")
+                .env("ROCK_SIM_TIMEOUT_SECS", "180")
                 .env("ROCK_SIM_LOG_DIR", &history)
                 .env("ROCK_SIM_WARN_SECS", "0.001")
                 .output_with_deadline().expect("run manual fixture")

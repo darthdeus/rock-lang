@@ -641,3 +641,25 @@ pub fn art_vault_env() -> (&'static str, String) {
     let root = rock_host::art_vault::root().expect("game-art vault");
     (rock_host::art_vault::ENV, root.to_string_lossy().into_owned())
 }
+
+/// Point `command` at a fake `nvidia-smi` in `dir` that reports `free_mib`
+/// of free GPU memory, so the sim job budget never reads the host's GPU.
+///
+/// `rock sim` sizes its default lanes and rejects an over-budget `--jobs`
+/// from the free GPU memory at launch; a test reading the real card passes or
+/// fails with whatever else is running on it.
+pub fn fake_free_gpu_mib(command: &mut Command, dir: &Path, free_mib: u64) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("fake-gpu-bin");
+    std::fs::create_dir_all(&bin).expect("fake nvidia-smi dir");
+    let nvidia = bin.join("nvidia-smi");
+    std::fs::write(&nvidia, format!("#!/usr/bin/env bash\nprintf '{free_mib}\\n'\n")).expect("fake nvidia-smi");
+    std::fs::set_permissions(&nvidia, std::fs::Permissions::from_mode(0o755)).expect("fake nvidia-smi mode");
+    let inherited = command.get_envs().find(|(key, _)| *key == "PATH").and_then(|(_, value)| value)
+        .map(std::ffi::OsStr::to_os_string)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let mut paths = vec![bin];
+    paths.extend(std::env::split_paths(&inherited));
+    command.env("PATH", std::env::join_paths(paths).expect("PATH with fake nvidia-smi"));
+}

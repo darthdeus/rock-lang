@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
+use crate::stone_harness::{fake_free_gpu_mib, HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -73,11 +73,16 @@ fn ordinary_shared_worker_run_writes_validated_lifecycle() {
 fn single_name_preserves_requested_and_effective_mode_metadata() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args(["sim", "testbed", "testbed::co_join2_tuple", "--workers", "-j", "4"])
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command.args(["sim", "testbed", "testbed::co_join2_tuple", "--workers", "-j", "4"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
-        .env("ROCK_SIM_TIMEOUT_SECS", "180")
+        .env("ROCK_SIM_TIMEOUT_SECS", "180");
+    // A one-lane GPU budget: one name runs in one lane, so `-j 4` must not
+    // be held against it.
+    let gpu = tempfile::tempdir().expect("fake GPU dir");
+    fake_free_gpu_mib(&mut command, gpu.path(), 6144);
+    let output = command
         .output_with_deadline()
         .expect("run single-name witness");
     assert!(

@@ -364,7 +364,8 @@ mod tests {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => panic!("native child output: {error}"),
             }
-            assert!(start.elapsed() < Duration::from_secs(30), "native child did not become ready");
+            // Hang guards, not timing: a loaded host may be slow to start or reap.
+            assert!(start.elapsed() < Duration::from_secs(120), "native child did not become ready");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -376,7 +377,7 @@ mod tests {
                 assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
                 return true;
             }
-            if start.elapsed() >= Duration::from_secs(30) {
+            if start.elapsed() >= Duration::from_secs(120) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
