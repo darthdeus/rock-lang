@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,6 +19,36 @@ fn checked_visual_bank_schema() -> u64 {
     bank["schema_version"]
         .as_u64()
         .expect("integer schema in checked visual bank")
+}
+
+fn production_sound_fixture_ogg() -> Vec<u8> {
+    std::fs::read(repo_root().join("mag/assets/sfx/doors/open_01.ogg"))
+        .expect("read production catalog sound fixture")
+}
+
+fn sound_dependency_keys(project: &Path) -> BTreeSet<String> {
+    let sound_project: Value = serde_json::from_slice(
+        &std::fs::read(project.join("sound_project.json")).expect("read sound project input"),
+    )
+    .expect("parse sound project input");
+    let mut keys = BTreeSet::new();
+    for event in sound_project["events"].as_array().expect("sound project events") {
+        for step in event["steps"].as_array().expect("sound event steps") {
+            for layer in step["layers"].as_array().expect("sound step layers") {
+                for source in layer["sources"].as_array().expect("sound layer sources") {
+                    keys.insert(source.as_str().expect("sound source key").to_owned());
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn packaged_sound_dependency_keys(project: &Path, game_key: &str) -> BTreeSet<String> {
+    sound_dependency_keys(project)
+        .into_iter()
+        .map(|key| format!("{game_key}/{key}"))
+        .collect()
 }
 
 #[cfg(unix)]
@@ -60,7 +91,8 @@ fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
     )
     .unwrap();
     std::fs::create_dir_all(project.join("assets/sfx")).unwrap();
-    std::fs::write(project.join("assets/sfx/fixture.ogg"), b"fixture").unwrap();
+    let fixture_ogg = production_sound_fixture_ogg();
+    std::fs::write(project.join("assets/sfx/fixture.ogg"), &fixture_ogg).unwrap();
 
     let output = Command::new(&sdk_rock)
         .current_dir(&project)
@@ -816,10 +848,11 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
   }]
 }
 "#;
+    let fixture_ogg = production_sound_fixture_ogg();
     write_sound_package_fixture(
         &project,
         sound_project,
-        &[("assets/sfx/a.ogg", b"a"), ("assets/sfx/b.ogg", b"b")],
+        &[("assets/sfx/a.ogg", &fixture_ogg), ("assets/sfx/b.ogg", &fixture_ogg)],
     );
 
     let accepted = Command::new(rock_bin())
@@ -836,8 +869,14 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
 
     let game_key = project.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
     let packaged_root = output.path().join("assets").join(&game_key);
-    assert_eq!(std::fs::read(packaged_root.join("assets/sfx/a.ogg")).unwrap(), b"a");
-    assert_eq!(std::fs::read(packaged_root.join("assets/sfx/b.ogg")).unwrap(), b"b");
+    let production_ogg = production_sound_fixture_ogg();
+    for key in sound_dependency_keys(&project) {
+        assert_eq!(
+            std::fs::read(packaged_root.join(&key)).unwrap(),
+            production_ogg,
+            "staged sound dependency differs from source: {key}"
+        );
+    }
     assert!(packaged_root.join("assets/sound_bank.json").is_file());
     assert!(!packaged_root.join("sound_project.json").exists(), "authoring project leaked into runtime assets");
 
@@ -849,10 +888,14 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
     assert_eq!(sound["project"], "sound_project.json");
     assert_eq!(sound["bank"], format!("{game_key}/assets/sound_bank.json"));
     assert_eq!(sound["schema"], 1);
-    assert_eq!(
-        sound["dependencies"],
-        serde_json::json!([format!("{game_key}/assets/sfx/a.ogg"), format!("{game_key}/assets/sfx/b.ogg")])
-    );
+    let expected_dependencies = packaged_sound_dependency_keys(&project, &game_key);
+    let observed_dependencies = sound["dependencies"]
+        .as_array()
+        .expect("manifest sound dependencies")
+        .iter()
+        .map(|dependency| dependency.as_str().expect("dependency path").to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(observed_dependencies, expected_dependencies);
     let keys = manifest["artifacts"]["assets"]["keys"].as_array().unwrap();
     for dependency in sound["dependencies"].as_array().unwrap() {
         assert!(keys.iter().any(|key| key == dependency), "manifest omitted {dependency}");
@@ -884,7 +927,8 @@ fn package_accepts_sound_dependencies_in_arbitrarily_named_asset_directories() {
 }}
 "#
     );
-    let assets = keys.map(|key| (key, b"sound".as_slice()));
+    let fixture_ogg = production_sound_fixture_ogg();
+    let assets = keys.map(|key| (key, fixture_ogg.as_slice()));
     write_sound_package_fixture(&project, &sound_project, &assets);
 
     let accepted = Command::new(rock_bin())
@@ -902,13 +946,14 @@ fn package_accepts_sound_dependencies_in_arbitrarily_named_asset_directories() {
         &std::fs::read(output.path().join("package-manifest.json")).unwrap(),
     )
     .expect("package manifest JSON");
-    let dependencies = manifest["artifacts"]["sound"]["dependencies"].as_array().unwrap();
-    assert_eq!(dependencies.len(), keys.len());
-    for key in keys {
-        assert!(dependencies.iter().any(|dependency| {
-            dependency.as_str().is_some_and(|dependency| dependency.ends_with(key))
-        }));
-    }
+    let dependencies = manifest["artifacts"]["sound"]["dependencies"]
+        .as_array()
+        .expect("manifest sound dependencies")
+        .iter()
+        .map(|dependency| dependency.as_str().expect("dependency path").to_owned())
+        .collect::<BTreeSet<_>>();
+    let game_key = project.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
+    assert_eq!(dependencies, packaged_sound_dependency_keys(&project, &game_key));
 }
 
 #[test]
@@ -946,7 +991,8 @@ fn packaged_sound_dependencies_survive_install_outside_source_tree() {
   "events": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"sources": ["assets/sfx/installed.ogg"]}]}]}]
 }
 "#;
-    write_sound_package_fixture(&project, sound_project, &[("assets/sfx/installed.ogg", b"installed")]);
+    let fixture_ogg = production_sound_fixture_ogg();
+    write_sound_package_fixture(&project, sound_project, &[("assets/sfx/installed.ogg", &fixture_ogg)]);
     let accepted = Command::new(rock_bin())
         .current_dir(repo_root())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
@@ -968,10 +1014,17 @@ fn packaged_sound_dependencies_survive_install_outside_source_tree() {
         &std::fs::read(installed.path().join("package-manifest.json")).unwrap(),
     )
     .expect("installed manifest JSON");
-    for dependency in manifest["artifacts"]["sound"]["dependencies"].as_array().unwrap() {
-        let relative = dependency.as_str().unwrap();
-        assert!(installed.path().join("assets").join(relative).is_file(), "installed dependency missing: {relative}");
-        assert!(!Path::new(relative).is_absolute());
+    let dependencies = manifest["artifacts"]["sound"]["dependencies"]
+        .as_array()
+        .expect("manifest sound dependencies")
+        .iter()
+        .map(|dependency| dependency.as_str().expect("dependency path").to_owned())
+        .collect::<BTreeSet<_>>();
+    let game_key = project.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
+    assert_eq!(dependencies, packaged_sound_dependency_keys(&project, &game_key));
+    for dependency in &dependencies {
+        assert!(installed.path().join("assets").join(dependency).is_file(), "installed dependency missing: {dependency}");
+        assert!(!Path::new(dependency).is_absolute());
     }
     assert!(installed.path().join("assets").join(
         manifest["artifacts"]["sound"]["bank"].as_str().unwrap()
