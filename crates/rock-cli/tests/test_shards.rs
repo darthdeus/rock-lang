@@ -194,13 +194,27 @@ fn a_dying_shard_reports_cause_without_verbose_mode() {
     let (_dir, project) = package(&[("crash.rock", source)]);
     let run = run_filtered_with_verbose(&project, Some("1"), None, false);
     let text = &run.text;
+    let oracle = Command::new("sh")
+        .arg("-c")
+        .arg("printf 'shard fixture stderr marker\\n' >&2; exit 23")
+        .output()
+        .expect("run independent child-status and stderr oracle");
+    let exit_code = oracle.status.code().expect("shell reports its exit code");
+    let stderr = String::from_utf8_lossy(&oracle.stderr);
 
     assert!(!run.success, "the crashed shard must fail the command:\n{text}");
     assert!(text.contains("crash_test: never reported"), "the active test is named:\n{text}");
     assert!(text.contains("stopped: child process stopped"), "the stop cause is shown:\n{text}");
-    assert!(text.contains("exit code 23"), "the child's exit status is shown:\n{text}");
-    assert!(text.contains("running test `test_shards::crash_test`"), "the running test is identified:\n{text}");
-    assert!(text.contains("shard fixture stderr marker"), "the child's stderr is shown:\n{text}");
+    assert!(
+        !oracle.status.success() && text.contains(&format!("exit code {exit_code}")),
+        "the child's observed exit status is shown:\n{text}"
+    );
+    let test_module = module_path!().rsplit("::").next().expect("test module path");
+    assert!(
+        text.contains(&format!("running test `{test_module}::crash_test`")),
+        "the running test is identified:\n{text}"
+    );
+    assert!(text.contains(stderr.trim()), "the independently captured child stderr is shown:\n{text}");
     assert!(!text.contains("=== failure details ==="), "the fixture did not enable verbose mode:\n{text}");
 }
 
