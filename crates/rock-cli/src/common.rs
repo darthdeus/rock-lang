@@ -806,6 +806,7 @@ mod tests {
         assert!(tests.start(0));
         assert!(!tests.start(0), "repeated");
         assert!(tests.start(1), "the next start may be observed before the previous TIME line");
+        assert!(!tests.complete(1), "completion cannot skip ahead");
         assert!(tests.complete(0));
         assert_eq!(tests.running, Some(1), "TIME for the previous test keeps the current test active");
         assert!(!tests.complete(0), "repeated completion");
