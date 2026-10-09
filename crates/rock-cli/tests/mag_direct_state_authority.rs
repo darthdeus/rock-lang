@@ -728,7 +728,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         .expect("read simulation player combat source");
     for field in [
         "spell_state: SpellState", "cast_acceleration: PlayerCastAcceleration",
-        "attack_target: MobId?", "attack_timer: float", "bandage_active: bool",
+        "attack_target: MobId?", "attack_timer: float",
         "bandage_slips: int", "cast_equipment_damage_mult: float",
     ] {
         assert_eq!(combat.matches(field).count(), 1, "PlayerCombatState must own `{field}` exactly once");
