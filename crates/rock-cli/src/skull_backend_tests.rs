@@ -4962,19 +4962,17 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
         spawn_slot_waiter, CompileClass, SlotConfig,
     };
     let slots = tempfile::tempdir().expect("slot dir");
-    let config = SlotConfig { dir: slots.path().to_path_buf(), batch_slots: 1, class: CompileClass::Batch };
+    let config = SlotConfig::for_compiles(slots.path(), 1, CompileClass::Batch);
     let package = tempfile::tempdir().expect("package");
     std::fs::write(package.path().join("stick.toml"),
         "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n").unwrap();
-    // The test process locks the slot itself: it succeeds only if the compile
-    // released the slot before its tests ran.
-    let slot_file = slots.path().join("batch-0");
+    // A held slot is a `held-*` file in the slot directory until released: the
+    // test passes only if the compile released its slot before its tests ran.
     std::fs::write(package.path().join("probe.rock"), format!(
-        "@test inline(lua) fn slot_is_free_during_tests() = \"local ffi = require('ffi'); \
-         ffi.cdef('int open(const char *, int); int flock(int, int);'); \
-         local fd = ffi.C.open('{}', 2); assert(fd >= 0, 'open slot'); \
-         assert(ffi.C.flock(fd, 6) == 0, 'compile slot held while tests run')\"\n",
-        slot_file.display())).unwrap();
+        "@test inline(lua) fn slot_is_free_during_tests() = \"local ls = io.popen('ls -A {}'); \
+         local names = ls:read('*a'); ls:close(); assert(names:find('queue'), 'list slots'); \
+         assert(not names:find('held%-'), 'compile slot held while tests run')\"\n",
+        slots.path().display())).unwrap();
 
     let held = acquire_with(&config, "test holder").unwrap();
     let (compile, waiting) = {
@@ -4989,7 +4987,7 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
     let ((result, acquisition), held_for) = finish_slot_waiter(held, compile, waiting);
     assert!(matches!(result, Ok(super::SkullOutcome::Pass { tests: 1, .. })), "{result:?}");
     let acquisition = acquisition.expect("the package compile took no slot");
-    assert_eq!(acquisition.slot.as_deref(), Some("batch-0"));
+    assert_eq!(acquisition.slot.as_deref(), Some("held-000000000002"));
     assert!(acquisition.waited >= held_for, "held after observing contention: {held_for:?}; {acquisition:?}");
 }
 

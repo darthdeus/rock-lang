@@ -124,7 +124,8 @@ fn compile_slot_wait_is_its_own_phase() {
         .expect("compile did not finish after releasing its slot");
     assert!(status.success(), "{}", std::fs::read_to_string(&log).unwrap());
     let record: Value = serde_json::from_str(std::fs::read_to_string(stats).unwrap().trim()).unwrap();
-    assert_eq!(record["compile_slot"]["slot"], "batch-0");
+    // The test's locked `batch-0` filled the one-compile pool; the compile took the first ticket.
+    assert_eq!(record["compile_slot"]["slot"], "held-000000000001");
     let waited = record["compile_slot"]["waited_ms"].as_f64().unwrap();
     assert!(waited >= held_for.as_secs_f64() * 1000.0, "held after observing contention: {held_for:?}; {record}");
     let first = &record["phases"][0];
