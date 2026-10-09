@@ -228,6 +228,60 @@ fn workspace_root() -> std::path::PathBuf {
 
 /// A one-sim stone package whose build vars come from files the test edits:
 /// `PROBE` is an ordinary command-backed var and `CLOCK` a volatile one.
+/// A library sim run (the `rock_cli_heavy` harness) keys its compile as the
+/// `rock sim --list` child records it, so a repeat run loads the cached
+/// receipt. The test process is no `rock sim` invocation and has no
+/// `ROCK_BUILD_COMMAND`; a build var that reads it, as the telemetry key
+/// loader does, must still resolve to the child's value.
+#[test]
+fn library_sim_runs_key_their_compile_as_the_sim_child_does() {
+    const HELPER: &str = "ROCK_TEST_LIBRARY_SIM_PROJECT";
+    if let Some(project) = std::env::var_os(HELPER) {
+        let rock = std::path::Path::new(env!("CARGO_BIN_EXE_rock"));
+        for run in 0..2 {
+            let records = rock_cli::run_sim::run_worker_suite(
+                rock_cli::Backend::Skull,
+                project.to_str().unwrap(),
+                rock,
+                &["cache_probe".to_string()],
+            )
+            .unwrap_or_else(|error| panic!("library sim run {run}: {error:#}"));
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
+        }
+        return;
+    }
+    let _spawn_budget = SpawnBudget::for_test(120);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    write_cache_fixture(&project);
+    let manifest = project.join("stick.toml");
+    let mut stick = std::fs::read_to_string(&manifest).unwrap();
+    stick.push_str("COMMAND = { cmd = \"echo ${ROCK_BUILD_COMMAND:-none}\" }\n");
+    std::fs::write(&manifest, stick).unwrap();
+    let timing_log = dir.path().join("compile.jsonl");
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args(["sim_compile_receipt::library_sim_runs_key_their_compile_as_the_sim_child_does", "--exact", "--nocapture"])
+        .current_dir(workspace_root())
+        .env(HELPER, &project)
+        .env("ROCK_SIM_COMPILE_CACHE_DIR", dir.path().join("cache"))
+        .env("ROCK_SIM_COMPILE_TIMING", &timing_log)
+        .env_remove("ROCK_SIM_COMPILE_CACHE")
+        .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
+        .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")
+        .env_remove("ROCK_BUILD_COMMAND")
+        .output_with_deadline()
+        .expect("library sim helper");
+    assert!(output.status.success(), "{}{}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+        "the helper must run its test:\n{}", String::from_utf8_lossy(&output.stdout));
+    let timing = std::fs::read_to_string(&timing_log).expect("compile timing log");
+    let count = |phase: &str| timing.lines().filter(|line| line.contains(&format!("\"phase\":\"{phase}\""))).count();
+    assert_eq!(count("cache_lookup"), 2, "{timing}");
+    assert_eq!(count("skull_compile_emit"), 1, "the second library run must hit the cache:\n{timing}");
+}
+
 fn write_cache_fixture(project: &std::path::Path) {
     std::fs::create_dir_all(project).expect("create fixture project");
     std::fs::write(

@@ -130,6 +130,12 @@ pub fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
 /// channel, which nothing declares, and that rejects rather than silently
 /// resolving nothing.
 pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
+    inputs_for_project_dir_as(dir, None)
+}
+
+/// [`inputs_for_project_dir`] as resolved by a `build_command` invocation
+/// (`ROCK_BUILD_COMMAND`), whatever command this process is.
+pub fn inputs_for_project_dir_as(dir: &Path, build_command: Option<&str>) -> Result<ComptimeInputs> {
     let selection = SELECTION.get();
     let stick = rock_host::stick::StickConfig::find_from_dir(dir)?;
     let Some((stick_path, cfg)) = stick else {
@@ -154,7 +160,7 @@ pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
         return Ok(ComptimeInputs::default());
     };
     let project_dir = stick_path.parent().expect("stick.toml has a parent dir").to_path_buf();
-    inputs_for_project_with_config(&project_dir, &cfg)
+    inputs_for_project_with_config(&project_dir, &cfg, build_command)
 }
 
 /// Resolve inputs from a config the caller has already parsed. Release
@@ -163,6 +169,7 @@ pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
 pub fn inputs_for_project_with_config(
     project_dir: &Path,
     cfg: &rock_host::stick::StickConfig,
+    build_command: Option<&str>,
 ) -> Result<ComptimeInputs> {
     let selection = SELECTION.get();
     let mut channel = selection.and_then(|s| s.channel.as_deref());
@@ -186,6 +193,7 @@ pub fn inputs_for_project_with_config(
         channel,
         selection.and_then(|s| s.target_os.as_deref()),
         overrides,
+        build_command,
     )?;
 
     let mut inputs = ComptimeInputs::default();

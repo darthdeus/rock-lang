@@ -114,7 +114,9 @@ struct Lookup {
 
 impl Lookup {
     fn current(backend: crate::Backend, project: &Path, rock_exe: &Path, selection: &[String]) -> Result<Self> {
-        let comptime = crate::comptime::inputs_for_project_dir(project)?;
+        // Resolve the build vars as the `rock sim --list` child will, even
+        // from a test harness that is no `rock sim` invocation.
+        let comptime = crate::comptime::inputs_for_project_dir_as(project, Some(crate::CliCommand::Sim.cli_name()))?;
         let identity = identity(project, backend, &comptime, rock_exe)?;
         let current = CurrentReceiptState::of(project)?;
         let key = key(&identity, &current.context, &current.inputs, selection);

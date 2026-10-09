@@ -184,7 +184,7 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     // compiler. In particular, a secret command is never run a second time
     // merely to create the manifest.
     let inputs = match config.as_ref() {
-        Some(config) => crate::comptime::inputs_for_project_with_config(&project_abs, config)?,
+        Some(config) => crate::comptime::inputs_for_project_with_config(&project_abs, config, None)?,
         None => crate::comptime::inputs_for_project_dir(&project_abs)?,
     };
     crate::skull_backend::skull_compile_project_with_inputs(
