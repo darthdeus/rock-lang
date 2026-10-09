@@ -4919,19 +4919,41 @@ fn wait_for_test_watchdog_fixture(script: &str, limit: Duration) -> crate::commo
     .expect("wait for watchdog fixture")
 }
 
-#[cfg(unix)]
+fn run_lua_watchdog_fixture(source: &str, limit: Duration, tests: usize) -> crate::common::ProcessResult {
+    let dir = tempfile::tempdir().expect("watchdog Lua fixture directory");
+    let script = dir.path().join("watchdog.lua");
+    std::fs::write(&script, source).expect("write watchdog Lua fixture");
+    super::run_test_program(&script, limit, "watch-token".to_string(), tests, None)
+        .expect("run watchdog Lua fixture")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_limit_counts_time_as_progress_between_tests() {
     let script = r#"
-printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
-printf '__SKULL__\tTIME\tfirst_test\t1.0\tpass\twatch-token\t0\n'
-sleep 0.4
-printf 'ROCK_TEST_START\twatch-token\t1\n' >&2
-printf '__SKULL__\tTIME\tsecond_test\t1.0\tpass\twatch-token\t1\n'
+local token = "watch-token"
+local function start(n)
+  io.stderr:write("ROCK_TEST_START\t", token, "\t", n, "\n")
+  io.stderr:flush()
+end
+local function finish(name, n)
+  io.stdout:write("__SKULL__\tTIME\t", name, "\t650.0\tpass\t", token, "\t", n, "\n")
+  io.stdout:flush()
+end
+local function spin(seconds)
+  local deadline = os.clock() + seconds
+  while os.clock() < deadline do end
+end
+start(0)
+spin(0.65)
+finish("first_test", 0)
+spin(0.65)
+start(1)
+finish("second_test", 1)
 "#;
-    let run = wait_for_test_watchdog_fixture(script, Duration::from_millis(100));
+    let run = run_lua_watchdog_fixture(script, Duration::from_secs(1), 2);
     assert!(!run.timed_out, "a completed TIME line must start a fresh inter-test budget: {run:?}");
-    assert!(run.output.status.success(), "the child should finish after the gap: {run:?}");
+        assert!(run.output.status.success(), "the child should finish after the gap: {run:?}");
 }
 
 #[cfg(unix)]
@@ -4939,12 +4961,25 @@ printf '__SKULL__\tTIME\tsecond_test\t1.0\tpass\twatch-token\t1\n'
 fn test_limit_uses_child_cpu_for_a_slow_test() {
     let script = r#"
 printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
-sleep 0.4
-printf '__SKULL__\tTIME\tfirst_test\t400.0\tpass\twatch-token\t0\n'
+sleep 1.5
+printf '__SKULL__\tTIME\tfirst_test\t1500.0\tpass\twatch-token\t0\n'
 "#;
-    let run = wait_for_test_watchdog_fixture(script, Duration::from_millis(100));
+    let run = wait_for_test_watchdog_fixture(script, Duration::from_secs(1));
     assert!(!run.timed_out, "wall time without child CPU must not exhaust the test budget: {run:?}");
     assert!(run.output.status.success(), "the slow but completed test should pass: {run:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_limit_kills_a_blocked_test_at_the_wall_backstop() {
+    let script = r#"
+printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
+exec sleep 30
+"#;
+    let run = wait_for_test_watchdog_fixture(script, Duration::from_millis(100));
+    assert!(run.timed_out, "a blocked child must eventually be bounded: {run:?}");
+    assert_eq!(run.timeout_phase, Some(crate::common::TimeoutPhase::TestWall));
+    assert_eq!(run.running_test, Some(0));
 }
 
 #[test]

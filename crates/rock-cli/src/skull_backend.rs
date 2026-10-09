@@ -940,9 +940,9 @@ pub(crate) fn skull_assemble_project(
 /// its `print` AND `io.write` captured (both restored before the markers are
 /// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line and one
 /// wall-time `TIME` line per test. Before each test it writes a
-/// `ROCK_TEST_START` marker with this run's `token` to stderr, which restarts
-/// the host's hung-test limit; the token only separates accidental test
-/// output from harness markers. `ROCK_TEST_SHARD_TESTS` (1-based indices)
+/// `ROCK_TEST_START` marker with this run's `token` to stderr; the token and
+/// ordinal also trail the TIME line so the host can count completed tests as
+/// progress. `ROCK_TEST_SHARD_TESTS` (1-based indices)
 /// restricts a process to one shard's tests; start ordinals count within it.
 /// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
 /// no trailing newline) would otherwise bypass the buffer and read as empty.
@@ -1055,7 +1055,8 @@ for n, t in ipairs(__skull_run) do
     result = "pass"
     io.write("\n__SKULL__\tPASS\t\n")
   end
-  io.write("\n__SKULL__\tTIME\t", t.name, "\t", string.format("%.3f", ms), "\t", result, "\n")
+  io.write("\n__SKULL__\tTIME\t", t.name, "\t", string.format("%.3f", ms), "\t", result,
+    "\t", __skull_token, "\t", n - 1, "\n")
   -- Reclaim floating test garbage without changing the collector's pacing.
   if __skull_gc_limit_kb > 0 and collectgarbage("count") > __skull_gc_limit_kb then
     collectgarbage("collect")
@@ -1105,7 +1106,15 @@ enum SkullOutcome {
     /// green (0 for a load-only file with no `@test`s).
     Pass { tests: usize, skipped: usize, timings: Vec<TestTiming> },
     /// Some `@test`s failed. `passed` ran green; `fails` holds the rest's detail.
-    TestFail { passed: usize, fails: Vec<String>, skipped: usize, timings: Vec<TestTiming> },
+    /// Abnormal shard stops also carry a concise diagnostic for the default CLI
+    /// summary, independent of `ROCK_TEST_VERBOSE`.
+    TestFail {
+        passed: usize,
+        fails: Vec<String>,
+        skipped: usize,
+        timings: Vec<TestTiming>,
+        diagnostics: Vec<String>,
+    },
 }
 
 /// Wall time of one `@test` that finished, for the slowest-tests report and
@@ -1115,6 +1124,71 @@ struct TestTiming {
     name: String,
     ms: f64,
     status: &'static str,
+}
+
+fn child_exit_status(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit code {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            let name = match signal {
+                libc::SIGABRT => "SIGABRT",
+                libc::SIGBUS => "SIGBUS",
+                libc::SIGFPE => "SIGFPE",
+                libc::SIGILL => "SIGILL",
+                libc::SIGINT => "SIGINT",
+                libc::SIGKILL => "SIGKILL",
+                libc::SIGPIPE => "SIGPIPE",
+                libc::SIGSEGV => "SIGSEGV",
+                libc::SIGTERM => "SIGTERM",
+                _ => "unknown signal",
+            };
+            return format!("signal {signal} ({name})");
+        }
+    }
+    "unknown exit status".to_string()
+}
+
+fn stderr_excerpt(stderr: &[u8]) -> String {
+    const MAX_BYTES: usize = 4096;
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.is_empty() {
+        return "<empty>".to_string();
+    }
+    if text.len() <= MAX_BYTES {
+        return text.to_string();
+    }
+    let mut start = text.len() - MAX_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[earlier stderr omitted]\n{}", &text[start..])
+}
+
+fn timeout_cause(run: &crate::common::ProcessResult, limit: Duration) -> String {
+    match run.timeout_phase {
+        Some(crate::common::TimeoutPhase::TestCpu) => format!(
+            "timed out: child CPU-time budget reached ({:.3}s)",
+            limit.as_secs_f64()
+        ),
+        Some(crate::common::TimeoutPhase::StartupCpu) => format!(
+            "timed out: emitted-program loading used the child CPU-time budget ({:.3}s)",
+            limit.as_secs_f64()
+        ),
+        Some(crate::common::TimeoutPhase::TestWall) => format!(
+            "timed out: wall-clock backstop reached ({}s)",
+            crate::common::test_watchdog_wall_backstop(limit).as_secs_f64()
+        ),
+        Some(crate::common::TimeoutPhase::StartupWall) => format!(
+            "timed out: emitted-program loading reached its wall-clock backstop ({}s)",
+            crate::common::test_watchdog_wall_backstop(limit).as_secs_f64()
+        ),
+        _ => format!("timed out: watchdog stopped the child ({:.3}s configured)", limit.as_secs_f64()),
+    }
 }
 
 /// Run a source string through the full skull pipeline (bone type-check + skull
@@ -1316,6 +1390,7 @@ fn run_emitted_tests(
         .collect();
     let mut passed = 0;
     let mut fails = Vec::new();
+    let mut diagnostics = Vec::new();
     let mut timings = Vec::new();
     for (shard, (indices, run)) in assignment.iter().zip(runs).enumerate() {
         // The harness `pcall`s each test, so an ordinary assertion failure is a
@@ -1326,18 +1401,18 @@ fn run_emitted_tests(
             reason: "test run errored (skull bug)".to_string(),
             rendered: e.to_string(),
         })?;
-        let stdout = format!("{}\n{}", String::from_utf8_lossy(&run.output.stdout),
-            String::from_utf8_lossy(&run.output.stderr));
+        let stdout = String::from_utf8_lossy(&run.output.stdout);
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
         let died = !run.output.status.success();
-        let label = if shards > 1 { format!("shard {}/{shards}: ", shard + 1) } else { String::new() };
+        let label = format!("shard {}/{shards}: ", shard + 1);
 
         // No result lines and no test started => the module didn't even load
         // (a skull bug), not a test failure.
         let markers = crate::test_protocol::parse_skull_markers(&stdout);
-        if markers.is_none() && !run.timed_out && run.running_test.is_none() {
+        if markers.is_none() && !run.timed_out && !died && run.running_test.is_none() {
             return Err(SkullFailure {
                 reason: "invalid lua emitted (skull bug)".to_string(),
-                rendered: format!("{label}{stdout}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
+                rendered: format!("{label}{stdout}\n{stderr}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
             });
         }
         let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
@@ -1384,18 +1459,46 @@ fn run_emitted_tests(
         // is a named failure. This is the only signal for a premature
         // `os.exit(0)`, which exits success and emits no marker at all.
         let stop = if run.timed_out {
-            match run.running_test {
-                Some(_) => format!("timed out: no progress for {}s", limit.as_secs_f64()),
-                None => format!("loading emitted program: timed out after {}s", limit.as_secs_f64()),
-            }
+            timeout_cause(&run, limit)
         } else if died {
-            "the process died".to_string()
+            "child process stopped".to_string()
         } else {
-            "the process exited 0".to_string()
+            "process exited 0 before all tests reported".to_string()
         };
+        let missing = indices.iter().copied().skip(reported).collect::<Vec<_>>();
+        if run.timed_out || died || !missing.is_empty() {
+            let state = if let Some(position) = run.running_test {
+                indices.get(position).map(|&index| format!(
+                    "running test `{}` ({})",
+                    tests[index].name,
+                    files[index],
+                )).unwrap_or_else(|| format!("running shard test ordinal {position}"))
+            } else if let Some(position) = run.last_completed_test {
+                indices.get(position).map(|&index| format!(
+                    "between tests after `{}` ({})",
+                    tests[index].name,
+                    files[index],
+                )).unwrap_or_else(|| "between tests".to_string())
+            } else {
+                "before the first test started".to_string()
+            };
+            let missing = missing.iter().map(|&index| format!(
+                "{}: never reported ({})",
+                tests[index].name,
+                files[index],
+            )).collect::<Vec<_>>().join(", ");
+            diagnostics.push(format!(
+                "{label}stopped: {stop}; exit status: {}; {state}; never reported: {}; stderr:\n{}",
+                child_exit_status(&run.output.status),
+                if missing.is_empty() { "<none>" } else { &missing },
+                stderr_excerpt(&run.output.stderr),
+            ));
+        }
         for (position, &index) in indices.iter().enumerate().skip(reported) {
-            let reason = if run.running_test == Some(position) || run.running_test.is_none() {
+            let reason = if run.running_test == Some(position) {
                 format!("{stop} while it ran")
+            } else if run.running_test.is_none() && run.last_completed_test.is_some() {
+                format!("{stop} between tests")
             } else {
                 "its process stopped before it ran".to_string()
             };
@@ -1414,7 +1517,7 @@ fn run_emitted_tests(
     if fails.is_empty() {
         Ok(SkullOutcome::Pass { tests: passed, skipped, timings })
     } else {
-        Ok(SkullOutcome::TestFail { passed, fails, skipped, timings })
+        Ok(SkullOutcome::TestFail { passed, fails, skipped, timings, diagnostics })
     }
 }
 
@@ -3316,7 +3419,13 @@ pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilt
                     println!("{:.<60} {}", label, "PASS".green());
                 }
             }
-            Ok(Ok(SkullOutcome::TestFail { passed, fails, skipped, timings: unit_timings })) => {
+            Ok(Ok(SkullOutcome::TestFail {
+                passed,
+                fails,
+                skipped,
+                timings: unit_timings,
+                diagnostics,
+            })) => {
                 timings.extend(unit_timings.into_iter().map(|t| (label.clone(), t)));
                 emit_ok += 1;
                 tests_total += passed + fails.len();
@@ -3328,6 +3437,9 @@ pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilt
                     "TESTFAIL".yellow(),
                     format!("{} @test(s) failed", fails.len()).dimmed()
                 );
+                for diagnostic in diagnostics {
+                    println!("  {diagnostic}");
+                }
                 *reason_counts
                     .entry("@test execution failed".to_string())
                     .or_insert(0) += 1;

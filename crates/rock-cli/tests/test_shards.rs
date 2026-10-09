@@ -23,7 +23,7 @@ f:close()
 """
 pub inline(lua) fn quit() = """ os.exit(0) """
 pub inline(lua) fn crash() = """
-io.stderr:write("shard fixture stderr marker\\n")
+io.stderr:write("shard fixture stderr marker\n")
 os.exit(23)
 """
 pub inline(lua) fn record_scratch(name: string) = """
@@ -197,8 +197,9 @@ fn a_dying_shard_reports_cause_without_verbose_mode() {
 
     assert!(!run.success, "the crashed shard must fail the command:\n{text}");
     assert!(text.contains("crash_test: never reported"), "the active test is named:\n{text}");
+    assert!(text.contains("stopped: child process stopped"), "the stop cause is shown:\n{text}");
     assert!(text.contains("exit code 23"), "the child's exit status is shown:\n{text}");
-    assert!(text.contains("running test `crash_test`"), "the running test is identified:\n{text}");
+    assert!(text.contains("running test `test_shards::crash_test`"), "the running test is identified:\n{text}");
     assert!(text.contains("shard fixture stderr marker"), "the child's stderr is shown:\n{text}");
     assert!(!text.contains("=== failure details ==="), "the fixture did not enable verbose mode:\n{text}");
 }

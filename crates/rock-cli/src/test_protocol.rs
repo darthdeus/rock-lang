@@ -18,7 +18,8 @@ pub(crate) struct SkullMarkers {
 }
 
 /// `__SKULL__\tTIME\t<name>\t<ms>\t<pass|fail|value>`: a test's wall time and
-/// the harness-side result; a `value` result is judged by the host.
+/// the harness-side result; a `value` result is judged by the host. The Skull
+/// harness appends its run token and ordinal for watchdog progress tracking.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TestTime {
     pub name: String,
@@ -57,7 +58,7 @@ pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
     let times = time_lines
         .iter()
         .filter_map(|l| {
-            let mut parts = l.splitn(5, '\t').skip(2);
+            let mut parts = l.split('\t').skip(2);
             let time = (|| Some(TestTime {
                 name: parts.next()?.to_string(),
                 ms: parts.next()?.parse().ok()?,
@@ -177,7 +178,7 @@ mod tests {
     #[test]
     fn time_lines_are_parsed_and_not_counted_as_results() {
         let stdout = "__SKULL__\tPASS\t\n\
-                      __SKULL__\tTIME\tt_a\t12.500\tpass\n\
+                      __SKULL__\tTIME\tt_a\t12.500\tpass\twatch-token\t0\n\
                       __SKULL__\tVALUE\tt_b\t42\n\
                       __SKULL__\tTIME\tt_b\t0.031\tvalue\n";
         let m = parse_skull_markers(stdout).expect("markers present");

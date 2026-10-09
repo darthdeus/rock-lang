@@ -203,10 +203,9 @@ impl ProcessManager {
         Self::wait_with_policy(child, WaitPolicy::FrameBudget { startup, budget }, false, false)
     }
 
-    /// Bound program loading and each test separately: the harness's start
-    /// marker for the next test restarts the limit, so it catches a hung test,
-    /// never a long file of healthy ones. Other output, markers without this
-    /// run's token, and repeated or out-of-order starts do not reset it.
+    /// Bound program loading and test progress by the child's CPU time. Valid
+    /// START and TIME markers reset the CPU budget; a generous wall backstop
+    /// still catches a child blocked without consuming CPU.
     pub fn wait_with_test_watchdog(child: &mut Child, limit: Duration, watch: TestWatch) -> Result<ProcessResult> {
         Self::wait_with_policy_and_tests(child, WaitPolicy::Test(limit), false, false, Some(watch))
     }
@@ -234,25 +233,55 @@ impl ProcessManager {
         let observe_progress = !matches!(policy, WaitPolicy::Total(_));
         let (progress_tx, progress_rx) =
             if observe_progress {
-                let (tx, rx) = mpsc::channel::<(std::time::Instant, ProcessProgress)>();
+                let (tx, rx) = mpsc::channel::<ProgressEvent>();
                 (Some(tx), Some(rx))
             } else {
                 (None, None)
             };
+        let test_token = test_watch.as_ref().map(|watch| watch.token.clone());
+        let child_pid = child.id();
 
         // Spawn background threads to drain pipes continuously. This prevents
         // the child from blocking on a full pipe buffer while the parent polls.
         // Read errors are surfaced to parent stderr -- silently truncating
         // would hand callers a partial buffer that looks complete.
         let stdout_thread = child.stdout.take().map(|mut h| {
+            let progress_tx = progress_tx.clone();
+            let test_token = test_token.clone();
             thread::spawn(move || {
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 8192];
+                let mut line = Vec::with_capacity(128);
+                let mut line_overflow = false;
                 loop {
                     match h.read(&mut chunk) {
                         Ok(0) => break,
                         Ok(n) => {
                             buf.extend_from_slice(&chunk[..n]);
+                            if let (Some(tx), Some(token)) = (&progress_tx, test_token.as_deref()) {
+                                for &byte in &chunk[..n] {
+                                    if !line_overflow {
+                                        line.push(byte);
+                                        if line.len() > 4096 {
+                                            line.clear();
+                                            line_overflow = true;
+                                        }
+                                    }
+                                    if byte == b'\n' {
+                                        if !line_overflow {
+                                            if let Some(ordinal) = parse_test_time_progress(&line, token) {
+                                                let _ = tx.send(ProgressEvent {
+                                                    at: std::time::Instant::now(),
+                                                    progress: ProcessProgress::TestTime(ordinal),
+                                                    child_cpu: child_process_cpu_time(child_pid),
+                                                });
+                                            }
+                                        }
+                                        line.clear();
+                                        line_overflow = false;
+                                    }
+                                }
+                            }
                             if forward_stdout {
                                 let mut stdout = io::stdout().lock();
                                 let _ = stdout.write_all(&chunk[..n]);
@@ -268,7 +297,6 @@ impl ProcessManager {
                 buf
             })
         });
-        let test_token = test_watch.as_ref().map(|watch| watch.token.clone());
         let stderr_thread = child.stderr.take().map(|h| {
             let progress_tx = progress_tx.clone();
             thread::spawn(move || {
@@ -290,11 +318,20 @@ impl ProcessManager {
                                 let progress = match policy {
                                     WaitPolicy::Test(_) => test_token.as_deref()
                                         .and_then(|token| parse_test_start(&line, token))
-                                        .map(ProcessProgress::Test),
+                                        .map(ProcessProgress::TestStart),
                                     _ => parse_frame_progress(&line).map(ProcessProgress::Frame),
                                 };
                                 if let Some(progress) = progress {
-                                    let _ = tx.send((std::time::Instant::now(), progress));
+                                    let child_cpu = if matches!(&progress, ProcessProgress::TestStart(_)) {
+                                        child_process_cpu_time(child_pid)
+                                    } else {
+                                        None
+                                    };
+                                    let _ = tx.send(ProgressEvent {
+                                        at: std::time::Instant::now(),
+                                        progress,
+                                        child_cpu,
+                                    });
                                 }
                             }
                         }
@@ -313,7 +350,14 @@ impl ProcessManager {
         let mut last_progress_at = start_time;
         let mut first_progress_at = None;
         let mut latest_progress = None;
-        let mut tests = test_watch.map(|watch| TestSequence { count: watch.tests, next: 0, running: None });
+        let mut tests = test_watch.map(|watch| TestSequence {
+            count: watch.tests,
+            next_start: 0,
+            next_time: 0,
+            running: None,
+            last_completed: None,
+        });
+        let mut last_test_cpu = child_process_cpu_time(child_pid);
         let mut saw_progress = false;
         let timed_out;
         let timeout_phase;
@@ -321,21 +365,33 @@ impl ProcessManager {
 
         loop {
             if let Some(rx) = &progress_rx {
-                for (at, progress) in rx.try_iter() {
-                    if let ProcessProgress::Test(ordinal) = progress {
-                        if !tests.as_mut().is_some_and(|tests| tests.start(ordinal)) {
-                            continue;
+                for event in rx.try_iter() {
+                    let accepted = match &event.progress {
+                        ProcessProgress::TestStart(ordinal) => {
+                            tests.as_mut().is_some_and(|tests| tests.start(*ordinal))
                         }
+                        ProcessProgress::TestTime(ordinal) => {
+                            tests.as_mut().is_some_and(|tests| tests.complete(*ordinal))
+                        }
+                        ProcessProgress::Frame(_) => true,
+                    };
+                    if !accepted {
+                        continue;
                     }
                     saw_progress = true;
                     last_progress_at = if matches!(policy, WaitPolicy::Test(_)) {
-                        at
+                        last_progress_at.max(event.at)
                     } else {
                         std::time::Instant::now()
                     };
                     first_progress_at.get_or_insert(last_progress_at);
-                    if let ProcessProgress::Frame(frame) = progress {
+                    if let ProcessProgress::Frame(frame) = event.progress {
                         latest_progress = Some(frame);
+                    }
+                    if matches!(policy, WaitPolicy::Test(_)) {
+                        if let Some(sample) = event.child_cpu {
+                            last_test_cpu = Some(last_test_cpu.map_or(sample, |previous| previous.max(sample)));
+                        }
                     }
                 }
             }
@@ -358,12 +414,39 @@ impl ProcessManager {
                                 (start_time.elapsed(), startup, TimeoutPhase::Startup)
                             }
                         }
-                        WaitPolicy::Test(limit) => {
-                            if saw_progress {
-                                (last_progress_at.elapsed(), limit, TimeoutPhase::Test)
-                            } else {
-                                (start_time.elapsed(), limit, TimeoutPhase::Startup)
+                        WaitPolicy::Test(cpu_limit) => {
+                            let wall_limit = test_watchdog_wall_backstop(cpu_limit);
+                            let wall_elapsed = last_progress_at.elapsed();
+                            let cpu_elapsed = child_process_cpu_time(child_pid)
+                                .zip(last_test_cpu)
+                                .map(|(now, baseline)| now.saturating_sub(baseline));
+                            if cpu_elapsed.is_some_and(|elapsed| elapsed >= cpu_limit) {
+                                child.kill()?;
+                                status = child.wait()?;
+                                timed_out = true;
+                                timeout_phase = Some(if saw_progress {
+                                    TimeoutPhase::TestCpu
+                                } else {
+                                    TimeoutPhase::StartupCpu
+                                });
+                                break;
                             }
+                            if wall_elapsed >= wall_limit {
+                                child.kill()?;
+                                status = child.wait()?;
+                                timed_out = true;
+                                timeout_phase = Some(if saw_progress {
+                                    TimeoutPhase::TestWall
+                                } else {
+                                    TimeoutPhase::StartupWall
+                                });
+                                break;
+                            }
+                            (wall_elapsed, wall_limit, if saw_progress {
+                                TimeoutPhase::TestWall
+                            } else {
+                                TimeoutPhase::StartupWall
+                            })
                         }
                         WaitPolicy::FrameBudget { startup, budget } => {
                             match first_progress_at {
@@ -372,7 +455,7 @@ impl ProcessManager {
                             }
                         }
                     };
-                    if elapsed >= limit {
+                    if !matches!(policy, WaitPolicy::Test(_)) && elapsed >= limit {
                         child.kill()?;
                         status = child.wait()?;
                         timed_out = true;
@@ -388,15 +471,20 @@ impl ProcessManager {
         let stderr = stderr_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
 
         // Reader joins ensure the final markers have arrived. After a timeout
-        // retain the test that was running when the limit expired.
+        // retain the test state observed when the budget expired.
         if !timed_out || !matches!(policy, WaitPolicy::Test(_)) {
             if let Some(rx) = &progress_rx {
-                for (_, progress) in rx.try_iter() {
-                    match progress {
+                for event in rx.try_iter() {
+                    match event.progress {
                         ProcessProgress::Frame(frame) => latest_progress = Some(frame),
-                        ProcessProgress::Test(ordinal) => {
+                        ProcessProgress::TestStart(ordinal) => {
                             if let Some(tests) = tests.as_mut() {
                                 tests.start(ordinal);
+                            }
+                        }
+                        ProcessProgress::TestTime(ordinal) => {
+                            if let Some(tests) = tests.as_mut() {
+                                tests.complete(ordinal);
                             }
                         }
                     }
@@ -404,15 +492,23 @@ impl ProcessManager {
             }
         }
 
+        let (running_test, last_completed_test) = tests
+            .map(|tests| (tests.running, tests.last_completed))
+            .unwrap_or((None, None));
         Ok(ProcessResult {
             output: std::process::Output { status, stdout, stderr },
             timed_out,
             timeout_phase,
             frame_progress: latest_progress,
-            running_test: tests.and_then(|tests| tests.running),
+            running_test,
+            last_completed_test,
             progress_stopped: matches!(policy, WaitPolicy::Frame { .. }) && saw_progress && timed_out,
         })
     }
+}
+
+pub(crate) fn test_watchdog_wall_backstop(cpu_limit: Duration) -> Duration {
+    cpu_limit.saturating_mul(8).max(Duration::from_secs(5))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -429,7 +525,10 @@ pub enum TimeoutPhase {
     Startup,
     FrameInactivity,
     FrameBudget,
-    Test,
+    StartupCpu,
+    StartupWall,
+    TestCpu,
+    TestWall,
 }
 
 impl std::fmt::Display for TimeoutPhase {
@@ -439,39 +538,67 @@ impl std::fmt::Display for TimeoutPhase {
             Self::Startup => "startup",
             Self::FrameInactivity => "frame inactivity",
             Self::FrameBudget => "frame budget",
-            Self::Test => "test",
+            Self::StartupCpu => "test process startup CPU budget",
+            Self::StartupWall => "test process startup wall backstop",
+            Self::TestCpu => "test child CPU-time budget",
+            Self::TestWall => "test wall-clock backstop",
         })
     }
 }
 
-enum ProcessProgress {
-    Frame(FrameProgress),
-    Test(usize),
+struct ProgressEvent {
+    at: std::time::Instant,
+    progress: ProcessProgress,
+    child_cpu: Option<Duration>,
 }
 
-/// A test harness's start events. The token is generated per run and distinct
-/// from accidental test output, so marker-shaped output without this run's
-/// token is not an event.
+enum ProcessProgress {
+    Frame(FrameProgress),
+    TestStart(usize),
+    TestTime(usize),
+}
+
+/// A test harness's start and completion events. The token is generated per
+/// run and distinct from accidental test output, so marker-shaped output
+/// without this run's token is not an event.
 #[derive(Debug, Clone)]
 pub struct TestWatch {
     pub token: String,
     pub tests: usize,
 }
 
-/// Starts are accepted once each, in declaration order.
+/// Starts and TIME completions are accepted once each, in declaration order.
+/// They arrive on separate pipes, so either side may be observed first.
 struct TestSequence {
     count: usize,
-    next: usize,
+    next_start: usize,
+    next_time: usize,
     running: Option<usize>,
+    last_completed: Option<usize>,
 }
 
 impl TestSequence {
     fn start(&mut self, ordinal: usize) -> bool {
-        if ordinal != self.next || ordinal >= self.count {
+        if ordinal != self.next_start || ordinal >= self.count {
             return false;
         }
-        self.next += 1;
+        self.next_start += 1;
+        if ordinal < self.next_time {
+            return false;
+        }
         self.running = Some(ordinal);
+        true
+    }
+
+    fn complete(&mut self, ordinal: usize) -> bool {
+        if ordinal != self.next_time || ordinal >= self.count {
+            return false;
+        }
+        self.next_time += 1;
+        self.last_completed = Some(ordinal);
+        if self.running == Some(ordinal) {
+            self.running = None;
+        }
         true
     }
 }
@@ -485,6 +612,23 @@ fn parse_test_start(line: &[u8], token: &str) -> Option<usize> {
         return None;
     }
     ordinal.parse().ok()
+}
+
+/// `__SKULL__ TIME` completion records carry the token and ordinal at the tail.
+fn parse_test_time_progress(line: &[u8], token: &str) -> Option<usize> {
+    let line = std::str::from_utf8(line).ok()?;
+    let fields = line.strip_suffix('\n')?.split('\t').collect::<Vec<_>>();
+    if fields.len() != 7
+        || fields[0] != "__SKULL__"
+        || fields[1] != "TIME"
+        || fields[2].is_empty()
+        || fields[3].parse::<f64>().is_err()
+        || !matches!(fields[4], "pass" | "fail" | "value")
+        || fields[5] != token
+    {
+        return None;
+    }
+    fields[6].parse().ok()
 }
 
 fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
@@ -512,6 +656,89 @@ fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn child_process_cpu_time(pid: u32) -> Option<Duration> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat.rsplit_once(')')?.1.split_whitespace().collect::<Vec<_>>();
+    let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
+    let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
+    let ticks = user_ticks.checked_add(system_ticks)?;
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_second <= 0 {
+        return None;
+    }
+    let nanos = u128::from(ticks) * 1_000_000_000 / ticks_per_second as u128;
+    Some(Duration::from_nanos(u64::try_from(nanos).ok()?))
+}
+
+#[cfg(target_os = "macos")]
+fn child_process_cpu_time(pid: u32) -> Option<Duration> {
+    use std::ffi::c_void;
+    use std::os::raw::c_int;
+
+    // proc_pidinfo writes the complete ABI struct, including unused trailing fields.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct ProcTaskInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        total_user: u64,
+        total_system: u64,
+        threads_user: u64,
+        threads_system: u64,
+        policy: i32,
+        faults: i32,
+        pageins: i32,
+        cow_faults: i32,
+        messages_sent: i32,
+        messages_received: i32,
+        syscalls_mach: i32,
+        syscalls_unix: i32,
+        context_switches: i32,
+        thread_count: i32,
+        running_thread_count: i32,
+        priority: i32,
+    }
+
+    #[repr(C)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: *mut c_void, buffersize: c_int) -> c_int;
+    }
+
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> c_int;
+    }
+
+    const PROC_PIDTASKINFO: c_int = 4;
+    let mut info = std::mem::MaybeUninit::<ProcTaskInfo>::zeroed();
+    let size = std::mem::size_of::<ProcTaskInfo>() as c_int;
+    let read = unsafe { proc_pidinfo(pid as c_int, PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), size) };
+    if read != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let ticks = info.total_user.checked_add(info.total_system)?;
+    let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
+    if unsafe { mach_timebase_info(&mut timebase) } != 0 || timebase.numer == 0 || timebase.denom == 0 {
+        return None;
+    }
+    let nanos = u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom);
+    Some(Duration::from_nanos(u64::try_from(nanos).ok()?))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn child_process_cpu_time(_pid: u32) -> Option<Duration> {
+    // Platforms without a live child-CPU query use the wall-clock backstop.
+    None
+}
+
 /// Result of waiting for a child process with timeout
 #[derive(Debug)]
 pub struct ProcessResult {
@@ -519,8 +746,10 @@ pub struct ProcessResult {
     pub timed_out: bool,
     pub timeout_phase: Option<TimeoutPhase>,
     pub frame_progress: Option<FrameProgress>,
-    /// Index of the last test a [`TestWatch`] run started.
+    /// Index of the test whose START has no matching TIME completion.
     pub running_test: Option<usize>,
+    /// Index of the last `TIME` completion a [`TestWatch`] run observed.
+    pub last_completed_test: Option<usize>,
     pub progress_stopped: bool,
 }
 
@@ -533,7 +762,9 @@ pub struct FrameProgress {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_frame_progress, parse_test_start, FrameProgress, TestSequence};
+    use super::{
+        parse_frame_progress, parse_test_start, parse_test_time_progress, FrameProgress, TestSequence,
+    };
 
     #[test]
     fn test_start_requires_the_run_token() {
@@ -546,17 +777,46 @@ mod tests {
     }
 
     #[test]
-    fn test_sequence_accepts_each_start_once_in_order() {
-        let mut tests = TestSequence { count: 3, next: 0, running: None };
+    fn test_time_requires_the_run_token_and_protocol_fields() {
+        assert_eq!(
+            parse_test_time_progress(b"__SKULL__\tTIME\tt_a\t12.500\tpass\tabc\t3\n", "abc"),
+            Some(3),
+        );
+        assert_eq!(
+            parse_test_time_progress(b"__SKULL__\tTIME\tt_a\t12.500\tpass\tforged\t3\n", "abc"),
+            None,
+        );
+        assert_eq!(
+            parse_test_time_progress(b"__SKULL__\tTIME\tt_a\t12.500\tpass\tabc\tx\n", "abc"),
+            None,
+        );
+        assert_eq!(parse_test_time_progress(b"ordinary output\n", "abc"), None);
+    }
+
+    #[test]
+    fn test_sequence_accepts_each_start_and_time_once_in_order() {
+        let mut tests = TestSequence {
+            count: 3,
+            next_start: 0,
+            next_time: 0,
+            running: None,
+            last_completed: None,
+        };
         assert!(!tests.start(1), "skipped ahead");
         assert!(tests.start(0));
         assert!(!tests.start(0), "repeated");
-        assert!(tests.start(1));
-        assert!(!tests.start(0), "stale");
+        assert!(tests.start(1), "the next start may be observed before the previous TIME line");
+        assert!(tests.complete(0));
+        assert_eq!(tests.running, Some(1), "TIME for the previous test keeps the current test active");
+        assert!(!tests.complete(0), "repeated completion");
+        assert!(tests.complete(1));
+        assert!(!tests.start(0), "stale start");
         assert!(tests.start(2));
         assert!(!tests.start(3), "beyond the declared tests");
         assert_eq!(tests.running, Some(2));
+        assert_eq!(tests.last_completed, Some(1));
     }
+
 
     #[test]
     fn frame_progress_parser_keeps_renderer_and_denominator() {
