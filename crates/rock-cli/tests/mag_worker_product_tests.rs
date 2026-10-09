@@ -14,14 +14,19 @@ fn without_absent_agent_daemon_diagnostic(text: &str) -> String {
 
 #[test]
 fn mag_worker_reset_discards_unfinished_save() {
+    // The seed needs a clean worker (its save request must admit), so two
+    // seeds in one worker prove the boundary restore: the second seed runs
+    // on the first seed's unfinished save unless the reset discards it.
+    // (The former probe sim's checks are package tests in
+    // mag/tests/async_save_rules.rock.)
     let entries = vec![
         "mag::async_save_worker_reset_seed".to_string(),
-        "mag::async_save_worker_reset_probe".to_string(),
+        "mag::async_save_worker_reset_seed".to_string(),
     ];
     let worker = run_worker_suite(Backend::Skull, "mag", &entries)
         .expect("save reset worker queue must run");
     assert_eq!(worker.len(), 2, "both save reset entries must run");
-    assert!(worker[1].1, "probe must cross the seed's live worker boundary");
+    assert!(worker[1].1, "second seed must cross the first seed's live worker boundary");
     for (entry, (record, _)) in entries.iter().zip(&worker) {
         assert_eq!(record.verdict(), "PASS", "{entry}: {record:?}");
         assert!(record.errors.is_empty(), "{entry}: {record:?}");
