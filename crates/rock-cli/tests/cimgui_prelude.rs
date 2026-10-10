@@ -246,14 +246,20 @@ fn embedded_files_nonempty() {
         );
     }
     let body = lua_body();
+    // Repinned for the hoisted `__imgui_install_stub`: the inert stub is one
+    // shared installer now (prelude failure branch plus the runner's
+    // platform-init-failed note), and it harvests enum names so `ImGuiKey_*`
+    // answers nil instead of the catch-all function. Behavior stays covered
+    // by the stub probes below and stone's `cimgui_failure_rules` sweep over
+    // the production enums source; this pin remains a change detector only.
     assert_eq!(
         body.len(),
-        3_498,
+        4_866,
         "delicate Lua body byte accounting changed"
     );
     assert_eq!(
         body.bytes().filter(|&byte| byte == b'\n').count(),
-        61,
+        90,
         "delicate Lua body line accounting changed"
     );
 }
