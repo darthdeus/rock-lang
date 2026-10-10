@@ -1,5 +1,5 @@
 //! Machine-wide memory budget for concurrent full compiles
-//! (docs/machine-coordination.md).
+//! (docs/agent-coordination.md).
 //!
 //! The slot directory holds a pool of memory. Each compile reserves its
 //! estimated peak ([`estimate_reserve`]), takes a numbered ticket in `queue/`
