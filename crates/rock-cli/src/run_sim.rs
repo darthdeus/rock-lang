@@ -1308,9 +1308,12 @@ pub fn do_plan_sims(
     } else {
         resolve_sim_specs(&prepared.wire_names, names)?
     };
+    // Explicit requests narrow to their entries (see `resolve_jobs`); a sweep
+    // takes --jobs literally and an over-budget sweep still needs --jobs-force.
+    let lanes = if names.is_empty() { None } else { Some(specs.len()) };
     let mut plan = worker_lane_plan(
         &specs, &prepared.env_by_wire, active_sim_renderer(&project_path),
-        resolve_jobs(jobs, None, false, jobs_force)?,
+        resolve_jobs(jobs, lanes, false, jobs_force)?,
     );
     plan["manual_excluded"] = serde_json::json!(manual_excluded);
     println!("{}", serde_json::to_string_pretty(&plan)?);
@@ -1823,6 +1826,9 @@ fn do_run_named_sims_recorded(
         quiet,
     )?;
     if mode != SimExecMode::Isolated {
+        // The pool re-resolves for its own lanes: hand it the narrowed count
+        // so an explicit over-budget request that fits its entries runs
+        // instead of refusing after the plan already accepted it.
         let results = run_specs_worker_mode(
             &project,
             &output,
@@ -1830,7 +1836,7 @@ fn do_run_named_sims_recorded(
             names,
             quiet,
             update_snapshots,
-            jobs,
+            Some(effective_jobs),
             jobs_force,
             full_asset_jobs,
             reload_lane.as_mut(),
@@ -3825,9 +3831,11 @@ const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 /// destination path is unique before spawning (several `@sim`s can share one
 /// source file, so its `.snap` directory is shared too).
 ///
-/// `lanes` is the number of entries when the caller knows it: a request
-/// above it asks for lanes that will never run, so it is narrowed before the
-/// budget check rather than rejected for them.
+/// `lanes` is the number of entries for an explicit (named) request: a
+/// request above it asks for lanes that will never run, so it is narrowed
+/// before the budget check rather than rejected for them. Sweeps (no names)
+/// pass `None` and take the request literally: an over-budget sweep still
+/// requires `--jobs-force`.
 pub(crate) fn resolve_jobs(requested: Option<usize>, lanes: Option<usize>, update_snapshots: bool, force: bool) -> Result<usize> {
     let requested = narrow_to_lanes(requested, lanes);
     let budget = sim_job_budget();
