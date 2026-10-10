@@ -8,6 +8,57 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
+#[test]
+fn state_metadata_uses_package_graph_owners_for_prefix_overlapping_roots() {
+    let scratch = tempfile::tempdir().expect("overlapping package fixture");
+    let project = scratch.path().join("app");
+    let dependency = scratch.path().join("app-lib");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&dependency).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        format!(
+            "[package]\nname = \"rootfixture\"\ntype = \"bin\"\n[dependencies]\nlib_alias = {{ path = \"{}\" }}\n",
+            dependency.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("stick.toml"),
+        "[package]\nname = \"library\"\ntype = \"lib\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("main.rock"), "global ROOT_MARK: int = 1\nfn main() {}\n").unwrap();
+    std::fs::write(dependency.join("lib.rock"), "global DEP_MARK: int = 2\n").unwrap();
+
+    let graph = rock_cli::PackageGraph::build(&project).expect("build production package graph");
+    let root_owner = graph.package_of_file(&project.join("main.rock")).expect("root owner");
+    let dependency_owner = graph.package_of_file(&dependency.join("lib.rock")).expect("dependency owner");
+    let root_label = graph.package(root_owner).manifest_name.to_lowercase();
+    let dependency_label = graph.package(root_owner).dependencies.iter()
+        .find(|edge| edge.target == dependency_owner)
+        .expect("dependency edge in package graph").declared_key.clone();
+
+    let output_path = project.join("main.lua");
+    let output = Command::new(rock_bin())
+        .current_dir(scratch.path())
+        .args(["compile", "app", "--output", "app/main.lua"])
+        .output()
+        .expect("compile overlapping package fixture");
+    assert!(output.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    let lua = std::fs::read_to_string(output_path).expect("compiled Lua");
+    let metadata = lua.split_once("__ROCK_STATE_METADATA = {")
+        .map(|(_, metadata)| metadata).expect("emitted StateSchema metadata table");
+    fn metadata_entry<'a>(metadata: &'a str, marker: &str) -> &'a str {
+        let start = metadata.find(marker).expect("global in metadata table");
+        metadata[start..].split("},").next().expect("metadata entry")
+    }
+    let root_metadata = metadata_entry(metadata, "ROOT_MARK");
+    let dependency_metadata = metadata_entry(metadata, "DEP_MARK");
+    assert!(root_metadata.contains(&format!("package={root_label:?}")), "root ownership disagrees with PackageGraph:\n{root_metadata}");
+    assert!(dependency_metadata.contains(&format!("package={dependency_label:?}")), "dependency ownership disagrees with PackageGraph:\n{dependency_metadata}");
+}
+
 fn rock_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }

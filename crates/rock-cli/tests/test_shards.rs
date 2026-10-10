@@ -312,3 +312,48 @@ fn default_small_packages_use_one_child() {
         assert_eq!(run.timings.lines().count(), count);
     }
 }
+
+#[test]
+fn inserting_a_test_does_not_move_existing_tests_between_shards() {
+    let existing = r#"
+@test fn alpha() { record("alpha") }
+@test fn bravo() { record("bravo") }
+@test fn charlie() { record("charlie") }
+@test fn delta() { record("delta") }
+"#;
+    let inserted = r#"
+@test fn alpha() { record("alpha") }
+@test fn bravo() { record("bravo") }
+@test fn inserted() { record("inserted") }
+@test fn charlie() { record("charlie") }
+@test fn delta() { record("delta") }
+"#;
+    let (_before_dir, before_project) = package(&[("tests.rock", existing)]);
+    let (_after_dir, after_project) = package(&[("tests.rock", inserted)]);
+    let before = run(&before_project, "2");
+    let after = run(&after_project, "2");
+    assert!(before.success, "baseline shard run failed:\n{}", before.text);
+    assert!(after.success, "inserted shard run failed:\n{}", after.text);
+
+    fn same_shard(log: &str, left: &str, right: &str) -> bool {
+        let pids: BTreeMap<_, _> = log
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                Some((fields.next()?, fields.next()?))
+            })
+            .collect();
+        pids[left] == pids[right]
+    }
+    for (left, right) in [("alpha", "bravo"), ("alpha", "charlie"), ("alpha", "delta"),
+        ("bravo", "charlie"), ("bravo", "delta"), ("charlie", "delta")]
+    {
+        assert_eq!(
+            same_shard(&before.log, left, right),
+            same_shard(&after.log, left, right),
+            "inserting a test changed whether {left} and {right} share a shard\nbefore:\n{}\nafter:\n{}",
+            before.log,
+            after.log,
+        );
+    }
+}
