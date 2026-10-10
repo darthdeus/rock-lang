@@ -183,3 +183,31 @@ fn main() {
     );
     assert_eq!(out, "false\ttrue", "the borrow of a missing key must raise: {out}");
 }
+
+/// Recursion settles a `ref` result only when every return agrees: a recursive
+/// call that hands back a differently stored `ref` still rejects with a span.
+#[test]
+fn recursive_ref_return_of_differently_stored_ref_rejects() {
+    let source = r#"
+value Cell { v: int }
+struct Holder { cell: Cell }
+fn pick(c: ref Cell, h: ref Holder, n: int) -> ref Cell {
+    if n == 0 { return c }
+    return pick(h.cell, h, n - 1)
+}
+fn bump(c: ref Cell) -> int { c.v += 1
+return c.v }
+fn main() {
+    let xs: [Cell] = []
+    xs.push(Cell { v: 10 })
+    let h = Holder { cell: Cell { v: 1 } }
+    print("{bump(pick(xs[0], h, 2))}")
+}
+"#;
+    let err = match try_emit_module(source) {
+        Ok(_) => panic!("a flat and a boxed `ref` return of one callee must not emit"),
+        Err(err) => err,
+    };
+    assert!(err.message.contains("`pick`") && err.message.contains("differently stored reference"), "{err:?}");
+    assert!(!err.labels.is_empty(), "the rejection must carry a source span: {err:?}");
+}
