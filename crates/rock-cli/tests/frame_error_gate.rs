@@ -75,6 +75,7 @@ fn rock_perf_forwards_production_error_and_warning_severity_tags() {
         .arg(output.path())
         .env_remove("STONE_HOT_RELOAD")
         .env("STONE_LOG", "info")
+        .env("ROCK_LOG_COLOR", "always")
         .env("ROCK_FRAME_TIMEOUT_SECS", "120")
         .env("PERF_TEST_LOG_SEVERITIES", "1")
         .output_with_deadline()
@@ -88,17 +89,21 @@ fn rock_perf_forwards_production_error_and_warning_severity_tags() {
     assert!(result.status.success(), "perf run failed:\n{text}");
     assert!(
         text.lines().any(|line| {
-            line.contains("ERROR]")
+            line.contains("\x1b[1;31m[")
+                && line.contains("ERROR]")
                 && line.contains("[PERF_TEST]")
                 && line.contains("production failure severity probe")
+                && line.ends_with("\x1b[0m")
         }),
         "rock perf must forward the production ERROR record with its level:\n{text}"
     );
     assert!(
         text.lines().any(|line| {
-            line.contains("WARN ]")
+            line.contains("\x1b[33m[")
+                && line.contains("WARN ]")
                 && line.contains("[PERF_TEST]")
                 && line.contains("production caution severity probe")
+                && line.ends_with("\x1b[0m")
         }),
         "rock perf must forward the production WARN record with its level:\n{text}"
     );

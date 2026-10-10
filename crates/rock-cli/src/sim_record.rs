@@ -339,48 +339,67 @@ const LOG_TIME_PRECISION: usize = 3;
 /// reproduces it byte for byte is read as a log record here, which was already
 /// true of the stamp before the declaration joined it. Strictness buys
 /// accident-resistance, not forgery-resistance.
-fn strip_log_stamp(line: &str) -> (&str, bool) {
-    let Some(rest) = line.strip_prefix('[') else {
-        return (line, false);
+struct ParsedLogRecord<'a> {
+    level: &'static str,
+    body: &'a str,
+    wall_clock: bool,
+}
+
+fn parse_log_record(line: &str) -> Option<ParsedLogRecord<'_>> {
+    let (line, color_level) = if let Some(line) = line.strip_prefix("\x1b[1;31m") {
+        (line.strip_suffix("\x1b[0m")?, Some("ERROR"))
+    } else if let Some(line) = line.strip_prefix("\x1b[33m") {
+        (line.strip_suffix("\x1b[0m")?, Some("WARN "))
+    } else {
+        (line, None)
     };
+    let rest = line.strip_prefix('[')?;
     let padded = rest.trim_start_matches(' ');
     let padding = rest.len() - padded.len();
     let int_digits = padded
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(padded.len());
     if int_digits == 0 {
-        return (line, false);
+        return None;
     }
     let Some(frac) = padded[int_digits..].strip_prefix('.') else {
-        return (line, false);
+        return None;
     };
     if frac.len() < LOG_TIME_PRECISION
         || !frac.as_bytes()[..LOG_TIME_PRECISION]
             .iter()
             .all(u8::is_ascii_digit)
     {
-        return (line, false);
+        return None;
     }
     let number_width = int_digits + 1 + LOG_TIME_PRECISION;
     if padding != LOG_TIME_WIDTH.saturating_sub(number_width) {
-        return (line, false);
+        return None;
     }
     // A fourth fractional digit fails this, which is what pins the precision.
-    let Some(tail) = frac[LOG_TIME_PRECISION..].strip_prefix("s ") else {
-        return (line, false);
-    };
-    let Some(tail) = LOG_LEVEL_TAGS.iter().find_map(|tag| tail.strip_prefix(tag)) else {
-        return (line, false);
-    };
-    let Some(tail) = tail.strip_prefix(']') else {
-        return (line, false);
-    };
-    match tail.strip_prefix(rock_log::WALL_CLOCK_MARK) {
+    let tail = frac[LOG_TIME_PRECISION..].strip_prefix("s ")?;
+    let (level, tail) = LOG_LEVEL_TAGS
+        .iter()
+        .find_map(|tag| tail.strip_prefix(tag).map(|tail| (*tag, tail)))?;
+    if color_level.is_some_and(|color_level| color_level != level) {
+        return None;
+    }
+    let tail = tail.strip_prefix(']')?;
+    let (body, wall_clock) = match tail.strip_prefix(rock_log::WALL_CLOCK_MARK) {
         Some(body) => (body, true),
-        None => match tail.strip_prefix(' ') {
-            Some(body) => (body, false),
-            None => (line, false),
-        },
+        None => (tail.strip_prefix(' ')?, false),
+    };
+    Some(ParsedLogRecord { level, body, wall_clock })
+}
+
+pub(crate) fn is_error_or_warning_log_record(line: &str) -> bool {
+    parse_log_record(line).is_some_and(|record| matches!(record.level, "ERROR" | "WARN "))
+}
+
+fn strip_log_stamp(line: &str) -> (&str, bool) {
+    match parse_log_record(line) {
+        Some(record) => (record.body, record.wall_clock),
+        None => (line, false),
     }
 }
 
@@ -522,6 +541,8 @@ mod tests {
             ("[   0.789s INFO ] [MAG] hi", "[MAG] hi"),
             ("[   1.296s ERROR] [SLOWFRAME] frame 60 took 69.7ms", "[SLOWFRAME] frame 60 took 69.7ms"),
             ("[   0.001s WARN ] [SIM] careful", "[SIM] careful"),
+            ("\x1b[1;31m[   1.296s ERROR] [PERF_TEST] failure\x1b[0m", "[PERF_TEST] failure"),
+            ("\x1b[33m[   0.001s WARN ] [PERF_TEST] caution\x1b[0m", "[PERF_TEST] caution"),
             ("[  12.500s DEBUG] [ENGINE] x", "[ENGINE] x"),
             ("[1234.567s TRACE] no padding, wide number", "no padding, wide number"),
             ("[   0.000s INFO ] ", ""),
@@ -532,6 +553,20 @@ mod tests {
                 "`{line}` is a real logger stamp and must be stripped"
             );
         }
+    }
+
+    #[test]
+    fn colored_actionable_log_levels_use_the_shared_stamp_parser() {
+        assert!(is_error_or_warning_log_record(
+            "\x1b[1;31m[   1.296s ERROR] [PERF_TEST] failure\x1b[0m"
+        ));
+        assert!(is_error_or_warning_log_record(
+            "\x1b[33m[   0.001s WARN ] [PERF_TEST] caution\x1b[0m"
+        ));
+        assert!(!is_error_or_warning_log_record("[   0.789s INFO ] [PERF_TEST] info"));
+        assert!(!is_error_or_warning_log_record(
+            "\x1b[33m[   1.296s ERROR] [PERF_TEST] wrong color\x1b[0m"
+        ));
     }
 
     /// The stamp is parsed, not sniffed. Everything here merely RESEMBLES one,

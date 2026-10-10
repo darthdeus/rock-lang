@@ -1347,7 +1347,7 @@ pub fn do_perf(
             if line.contains("[profile]")
                 || line.contains("Error")
                 || line.contains("error")
-                || has_perf_logger_error_or_warning_level(line)
+                || crate::sim_record::is_error_or_warning_log_record(line)
             {
                 // Result output, NOT logging: forwarding the spawned game
                 // process's own stderr lines verbatim, not rock-cli diagnostics.
@@ -1377,16 +1377,6 @@ pub fn do_perf(
     )?;
 
     Ok(())
-}
-
-fn has_perf_logger_error_or_warning_level(line: &str) -> bool {
-    let Some(stamp) = line
-        .strip_prefix('[')
-        .and_then(|line| line.split_once(']').map(|(stamp, _)| stamp))
-    else {
-        return false;
-    };
-    matches!(stamp.rsplit_once("s ").map(|(_, level)| level), Some("ERROR" | "WARN "))
 }
 
 /// A bounded frame run gets a startup allowance, then must report completed
