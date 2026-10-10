@@ -155,7 +155,7 @@ pub fn select_assets_with_overlays(
     validate_relative_key(game_key, "game key")?;
     let names = match config {
         Some(config) => config.release_assets(project_dir)?,
-        None => default_asset_names(project_dir),
+        None => default_asset_names(),
     };
 
     let mut by_key = BTreeMap::<String, PathBuf>::new();
@@ -498,12 +498,8 @@ fn key_for(prefix: &str, relative: &str) -> String {
     }
 }
 
-fn default_asset_names(project_dir: &Path) -> Vec<String> {
-    let mut assets = vec!["assets".to_string()];
-    if project_dir.join("level.txt").exists() {
-        assets.push("level.txt".to_string());
-    }
-    assets
+fn default_asset_names() -> Vec<String> {
+    vec!["assets".to_string()]
 }
 
 #[cfg(test)]
@@ -522,13 +518,11 @@ mod tests {
         predefined_levels: Vec<String>,
     }
 
-    fn independent_release_keys(project: &Path, game_key: &str, config: &str) -> Vec<String> {
-        let parsed: ReleaseAssetOracle = basic_toml::from_str(config).unwrap();
-        let roots = parsed
-            .release
-            .assets
-            .into_iter()
-            .chain(parsed.release.predefined_levels);
+    fn independent_keys_for_roots(
+        project: &Path,
+        game_key: &str,
+        roots: impl IntoIterator<Item = String>,
+    ) -> Vec<String> {
         let mut keys = BTreeMap::new();
         for root in roots {
             let source = project.join(root);
@@ -551,6 +545,16 @@ mod tests {
             }
         }
         keys.into_keys().collect()
+    }
+
+    fn independent_release_keys(project: &Path, game_key: &str, config: &str) -> Vec<String> {
+        let parsed: ReleaseAssetOracle = basic_toml::from_str(config).unwrap();
+        let roots = parsed
+            .release
+            .assets
+            .into_iter()
+            .chain(parsed.release.predefined_levels);
+        independent_keys_for_roots(project, game_key, roots)
     }
 
     #[test]
@@ -602,6 +606,33 @@ mod tests {
         assert!(staged.keys.iter().any(|key| key.ends_with("levels/crypt.json")));
         assert!(!staged.keys.iter().any(|key| key.ends_with("level.txt")));
         assert!(!staged.keys.iter().any(|key| key.ends_with("levels/editor.json")));
+
+        let config_without_release = StickConfig::new_from_str("[package]\nname = \"defaults\"\n").unwrap();
+        let default_expected = independent_keys_for_roots(
+            &project,
+            "games/configured-levels",
+            ["assets".to_string()],
+        );
+        let no_config = select_assets_with_overlays(
+            &project,
+            "games/configured-levels",
+            None,
+            root.path(),
+            false,
+            &[],
+        )
+        .unwrap();
+        let config_without_release = select_assets_with_overlays(
+            &project,
+            "games/configured-levels",
+            Some(&config_without_release),
+            root.path(),
+            false,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(keys(&no_config), default_expected, "unconfigured native default is assets only");
+        assert_eq!(keys(&config_without_release), default_expected, "StickConfig default is assets only");
     }
 
     #[test]

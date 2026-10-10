@@ -198,6 +198,7 @@ pub struct BuildVar {
 #[derive(Debug, Clone, Default)]
 pub struct ReleaseConfig {
     pub assets: Option<Vec<String>>,
+    pub predefined_levels: Option<Vec<String>>,
     pub overlay_assets: Option<Vec<String>>,
 }
 
@@ -616,10 +617,11 @@ impl<'de> serde::Deserialize<'de> for ReleaseConfig {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "assets" => { release.assets = Some(map.next_value()?); }
+                        "predefined_levels" => { release.predefined_levels = Some(map.next_value()?); }
                         "overlay_assets" => { release.overlay_assets = Some(map.next_value()?); }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in [release]; known keys: assets, overlay_assets"
+                                "unknown key `{other}` in [release]; known keys: assets, predefined_levels, overlay_assets"
                             )));
                         }
                     }
@@ -1030,21 +1032,21 @@ impl StickConfig {
         Ok(())
     }
 
-    /// Resolve the release asset list once from the already-parsed StickConfig.
-    /// The default mirrors the historical release collector: game `assets/`,
-    /// plus a root-level `level.txt` when present.
-    pub fn release_assets(&self, project_dir: &Path) -> Result<Vec<String>> {
-        let assets = self
+    /// Resolve the release roots once from the already-parsed StickConfig.
+    /// Predefined levels are explicit inputs, independent of the general asset roots.
+    pub fn release_assets(&self, _project_dir: &Path) -> Result<Vec<String>> {
+        let mut assets = self
             .release
             .as_ref()
             .and_then(|release| release.assets.clone())
-            .unwrap_or_else(|| {
-                let mut defaults = vec!["assets".to_string()];
-                if project_dir.join("level.txt").exists() {
-                    defaults.push("level.txt".to_string());
-                }
-                defaults
-            });
+            .unwrap_or_else(|| vec!["assets".to_string()]);
+        if let Some(levels) = self
+            .release
+            .as_ref()
+            .and_then(|release| release.predefined_levels.as_ref())
+        {
+            assets.extend(levels.iter().cloned());
+        }
         for rel in &assets {
             let path = Path::new(rel);
             if rel.is_empty()
