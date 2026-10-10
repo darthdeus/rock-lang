@@ -49,8 +49,13 @@ pub fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     Ok((info.width, info.height, rgba))
 }
 
-/// Mean absolute difference between two PNGs, normalized to [0, 1].
-/// 0.0 = bit-identical, 1.0 = max possible delta.
+/// Max over 32x32-pixel blocks of the per-block mean absolute channel
+/// delta, normalized to [0, 1]. 0.0 = bit-identical, 1.0 = max possible
+/// delta in some block. A whole-frame mean let a sprite-sized defect hide
+/// behind an unchanged background while the tolerance stayed fixed, so the
+/// oracle is the worst region, not the average pixel: a half-tile shift of
+/// one tile fails the default `image_snapshot` tol where the mean passed.
+/// Partial edge blocks average over their own pixels; no pixel is excluded.
 pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
     let (bw, bh, b) = decode_png_rgba8(baseline)?;
     let (aw, ah, a) = decode_png_rgba8(actual)?;
@@ -63,12 +68,27 @@ pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
             ah
         );
     }
-    let mut total: u64 = 0;
-    for (pb, pa) in b.iter().zip(a.iter()) {
-        total += (*pb as i32 - *pa as i32).unsigned_abs() as u64;
+    const BLOCK: u32 = 32;
+    let mut worst: f64 = 0.0;
+    for by in 0..bh.div_ceil(BLOCK) {
+        for bx in 0..bw.div_ceil(BLOCK) {
+            let x0 = bx * BLOCK;
+            let y0 = by * BLOCK;
+            let x1 = (x0 + BLOCK).min(bw);
+            let y1 = (y0 + BLOCK).min(bh);
+            let mut total: u64 = 0;
+            for y in y0..y1 {
+                let o = (y * bw + x0) as usize * 4;
+                let n = (x1 - x0) as usize * 4;
+                for (pb, pa) in b[o..o + n].iter().zip(a[o..o + n].iter()) {
+                    total += (*pb as i32 - *pa as i32).unsigned_abs() as u64;
+                }
+            }
+            let max = (x1 - x0) as u64 * (y1 - y0) as u64 * 4 * 255;
+            worst = worst.max(total as f64 / max as f64);
+        }
     }
-    let max = (bw as u64) * (bh as u64) * 4 * 255;
-    Ok(total as f64 / max as f64)
+    Ok(worst)
 }
 
 /// Pull `duration`, `width`, `height`, `codec`, `nb_frames` out of
