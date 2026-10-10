@@ -18,6 +18,8 @@ const TESTS: &[&str] = &[
     "fer_entity_borrow_writes_the_element",
     "fer_arena_borrow_of_a_removed_entity_is_null",
     "fer_strided_row_args_write_the_element",
+    "fer_recursive_ref_return_writes_the_element",
+    "fer_mutually_recursive_ref_return_writes_the_element",
 ];
 
 fn run_on(backend: Option<&str>) {

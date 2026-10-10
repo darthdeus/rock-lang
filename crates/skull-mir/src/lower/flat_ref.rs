@@ -87,7 +87,22 @@ pub(crate) struct FlatVariants {
     by_key: HashMap<(Instance, FlatSig), Ustr>,
     funcs: Vec<MirFunc>,
     returns: HashMap<(Instance, FlatSig), Option<FlatRefKey>>,
-    scanning: HashSet<(Instance, FlatSig)>,
+    /// Return scans in progress, innermost last.
+    scanning: Vec<ReturnScan>,
+}
+
+/// One in-progress return scan. A call back into it (recursion, direct or
+/// mutual) reads `assumed`; the scan repeats until its answer equals what
+/// it assumed.
+struct ReturnScan {
+    key: (Instance, FlatSig),
+    /// `None` until a pass has an answer: a return that reads an unknown
+    /// answer decides nothing, rather than counting as boxed.
+    assumed: Option<Option<FlatRefKey>>,
+    /// The outermost in-progress scan this pass read an answer from.
+    depends_on: Option<usize>,
+    /// Reads of an unknown answer during this pass.
+    unknown_reads: u32,
 }
 
 pub(crate) type FlatVariantsHandle = Rc<RefCell<FlatVariants>>;
@@ -470,13 +485,18 @@ impl<'a> Builder<'a> {
     ) -> Result<Option<FlatRefKey>, CompilerError> {
         let key = (inst.clone(), sig.to_vec());
         {
-            let reg = self.flat_variants.borrow();
+            let mut reg = self.flat_variants.borrow_mut();
             if let Some(ret) = reg.returns.get(&key) {
                 return Ok(*ret);
             }
-            // A recursive return is decided by the body's other returns.
-            if reg.scanning.contains(&key) {
-                return Ok(None);
+            if let Some(i) = reg.scanning.iter().position(|scan| scan.key == key) {
+                let assumed = reg.scanning[i].assumed;
+                let reader = reg.scanning.last_mut().expect("a scan is in progress");
+                reader.depends_on = Some(reader.depends_on.map_or(i, |d| d.min(i)));
+                if assumed.is_none() {
+                    reader.unknown_reads += 1;
+                }
+                return Ok(assumed.flatten());
             }
         }
         let Some(plan) = self.concrete_plans.get(inst) else { return Ok(None) };
@@ -543,27 +563,93 @@ impl<'a> Builder<'a> {
             }
         }
         let key = (inst.clone(), sig.to_vec());
-        self.flat_variants.borrow_mut().scanning.insert(key.clone());
-        let result = scan.agree_flat_returns(decl, &returns);
+        let depth = {
+            let mut reg = self.flat_variants.borrow_mut();
+            reg.scanning.push(ReturnScan {
+                key: key.clone(),
+                assumed: None,
+                depends_on: None,
+                unknown_reads: 0,
+            });
+            reg.scanning.len() - 1
+        };
+        let result = scan.settle_flat_returns(decl, &returns, depth);
         let mut reg = self.flat_variants.borrow_mut();
-        reg.scanning.remove(&key);
-        if let Ok(ret) = &result {
-            reg.returns.insert(key, *ret);
+        let done = reg.scanning.pop().expect("pushed above");
+        let answer = result?;
+        match done.depends_on {
+            // Read an answer of an enclosing scan, which rescans this one
+            // once its own answer changes.
+            Some(d) if d < depth => {
+                let reader = reg.scanning.last_mut().expect("an enclosing scan");
+                reader.depends_on = Some(reader.depends_on.map_or(d, |r| r.min(d)));
+                if answer.is_none() {
+                    reader.unknown_reads += 1;
+                }
+            }
+            // Settled. A body whose every return recurses never returns and
+            // keeps the ordinary boxed result.
+            _ => {
+                reg.returns.insert(key, answer.flatten());
+            }
         }
-        result
+        Ok(answer.flatten())
+    }
+
+    /// The agreed result of `returns` for the scan at `depth`, repeated with
+    /// each new answer assumed for the scan's own recursive calls until the
+    /// answer stops changing. `None` while every return reads an unknown
+    /// answer.
+    fn settle_flat_returns(
+        &self,
+        decl: &Function,
+        returns: &[Idx<Expr>],
+        depth: usize,
+    ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
+        // Unknown, then the first answer, then its confirmation.
+        const PASSES: usize = 3;
+        for _ in 0..PASSES {
+            let answer = self.agree_flat_returns(decl, returns, depth)?;
+            let mut reg = self.flat_variants.borrow_mut();
+            let scan = &mut reg.scanning[depth];
+            match scan.depends_on {
+                Some(d) if d < depth => return Ok(answer),
+                Some(_) if answer != scan.assumed => {
+                    scan.assumed = answer;
+                    scan.depends_on = None;
+                    scan.unknown_reads = 0;
+                }
+                _ => return Ok(answer),
+            }
+        }
+        Err(CompilerError::new_with_label(
+            decl.name_span,
+            format!(
+                "`{}` returns a `ref` whose storage does not settle across its recursive calls; \
+                 the Lua backend passes a flat-stored element `ref` as the container and a slot, \
+                 so every return must address the same storage",
+                decl.name
+            ),
+        ))
     }
 
     fn agree_flat_returns(
         &self,
         decl: &Function,
         returns: &[Idx<Expr>],
-    ) -> Result<Option<FlatRefKey>, CompilerError> {
+        depth: usize,
+    ) -> Result<Option<Option<FlatRefKey>>, CompilerError> {
+        let unknown_reads = || self.flat_variants.borrow().scanning[depth].unknown_reads;
         let mut agreed: Option<Option<FlatRefKey>> = None;
         for &r in returns {
             if matches!(self.body.expr_arena[r], Expr::Null) || is_phantom_call(self.body, r) {
                 continue;
             }
+            let before = unknown_reads();
             let key = self.classify_flat_ref(r)?;
+            if unknown_reads() != before {
+                continue;
+            }
             match agreed {
                 None => agreed = Some(key),
                 Some(prev) if prev == key => {}
@@ -581,7 +667,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        Ok(agreed.flatten())
+        Ok(agreed)
     }
 
     /// The flat `ref` result of the body being lowered, when its declared
