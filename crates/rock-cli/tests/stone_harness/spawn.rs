@@ -764,18 +764,20 @@ mod tests {
         let slots = dir.path().join("slots");
         std::fs::create_dir(&slots).unwrap();
         let slot = hold_batch_zero(&slots);
-        let _budget = SpawnBudget::new(Duration::from_secs(1));
+        // A 5 s stall cap: churn every 100 ms stays visible to the waiter even
+        // when a loaded host delays both threads by seconds.
+        let _budget = SpawnBudget::new(Duration::from_secs(5));
         let pending = slot_probe_command(&project, &slots).spawn_with_deadline().unwrap();
         await_slot_wait(&pending);
         let phase_path = pending.phase.path().to_path_buf();
         let waiter = std::thread::spawn(move || pending.wait_with_output());
-        // Churn an unused slot file ten times per stall cap: the queue moves,
+        // Churn an unused slot file fifty times per stall cap: the queue moves,
         // so the waiter must outlive twice the stall cap it would otherwise
         // die at.
         let churn = slots.join("batch-1");
         let start = Instant::now();
         let mut tick = 0;
-        while start.elapsed() < Duration::from_millis(2200) {
+        while start.elapsed() < Duration::from_millis(10_500) {
             tick += 1;
             std::fs::write(&churn, format!("pid={} start=0 churn={tick}", std::process::id())).unwrap();
             std::thread::sleep(Duration::from_millis(100));
@@ -783,7 +785,7 @@ mod tests {
         }
         assert_eq!(read_spawn_phase(&phase_path).as_deref(), Some("slot-wait"));
         slot.unlock().unwrap();
-        // Past the slot, the 1 s budget is too tight for a compile on a loaded
+        // Past the slot, the 5 s budget is too tight for a compile on a loaded
         // host; this test only needs the waiter to leave the slot queue.
         match waiter.join().unwrap() {
             Ok(output) => assert!(output.status.success(), "fixture must compile: {}", String::from_utf8_lossy(&output.stderr)),
