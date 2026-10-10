@@ -1108,6 +1108,9 @@ pub struct MirFunc {
     /// sentinel and consume this provenance through their own call ABI.
     pub param_default_guards:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
+    /// Source parameter indices whose scalar literal defaults are supplied by
+    /// direct calls instead of entering the default-fill branch.
+    pub param_default_materialized: std::collections::HashSet<usize>,
     /// Default expression roots keyed by source parameter index. Placement
     /// callers need the callee-owned value when a wire slot is omitted.
     pub param_default_values:
@@ -1328,6 +1331,7 @@ impl MirFunc {
             rep_arena: None,
             params: Vec::new(),
             param_default_guards: Default::default(),
+            param_default_materialized: Default::default(),
             param_default_values: Default::default(),
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),

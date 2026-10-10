@@ -2784,6 +2784,12 @@ impl Builder<'_> {
             if matches!(self.body.expr_arena[*def], Expr::Null) {
                 continue;
             }
+            if matches!(
+                self.body.expr_arena[*def],
+                Expr::Int(_) | Expr::Float(_) | Expr::Bool(_)
+            ) {
+                self.f.param_default_materialized.insert(i);
+            }
             self.f.mark_default_param(cell);
             let cur = self.emit_cur(Inst::Load(cell));
             let nil = self.emit_cur(Inst::Const(Lit::Nil));

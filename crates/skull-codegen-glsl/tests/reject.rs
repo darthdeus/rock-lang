@@ -122,6 +122,19 @@ fn omitted_default_argument_is_available_in_shader_forms() {
     );
 }
 
+#[test]
+fn reject_omitted_expression_default_argument() {
+    let src = r#"
+        @pure fn calculated_default(x: float, offset: float = 0.25 + 0.5) -> float {
+            return x + offset
+        }
+        @pure fn shader_expression_default(x: float) -> float {
+            return calculated_default(x)
+        }
+    "#;
+    reject(src, &["shader_expression_default"], "null literal");
+}
+
 // `match` lowers to `Term::Branch` chains (NOT `Term::Switch`, which lowering
 // never produces), so a tier-0 int `match` is accepted and structured -- see
 // `golden::match_int_ladder`. A match on a non-tier-0 scrutinee still rejects at

@@ -1829,11 +1829,15 @@ impl FnEmit<'_> {
                     cur = t;
                 }
                 Term::Branch { cond, then_bb, else_bb } => {
-                    // Direct shader calls materialize literal defaults at the
-                    // call site. The MIR nil guard is only for dynamic callers
-                    // on Lua/JS, so the typed GLSL callee always takes its
-                    // non-omitted path.
-                    if self.f.param_default_guards.contains_key(&cond) {
+                    // Direct shader calls materialize scalar literal defaults
+                    // at the call site. Other MIR defaults still need their
+                    // nil path, which GLSL cannot represent and must reject.
+                    let materialized_default = self
+                        .f
+                        .param_default_guards
+                        .get(&cond)
+                        .is_some_and(|index| self.f.param_default_materialized.contains(index));
+                    if materialized_default {
                         cur = else_bb;
                         continue;
                     }
