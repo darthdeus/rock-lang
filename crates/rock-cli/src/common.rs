@@ -129,20 +129,10 @@ pub fn record_compilation_error(error: &anyhow::Error) {
 }
 
 /// Process management utilities for child processes
-/// Gives a test child the `ROCK_DIR` a gate would have exported: the working
-/// directory `rock test` was started from, which is where package tests already
-/// resolve repository paths when they fall back to ".". An exported value wins.
-/// Set on the child only; the CLI's own `rock_dir()` lookup must not see it.
+/// Keep a test child on the same Rock tree the CLI resolved, even when the
+/// package fixture is under a temporary working directory.
 pub fn apply_test_rock_dir(command: &mut std::process::Command) {
-    if std::env::var_os("ROCK_DIR").is_some() {
-        return;
-    }
-    match std::env::current_dir().and_then(fs_err::canonicalize) {
-        Ok(root) => {
-            command.env("ROCK_DIR", root);
-        }
-        Err(error) => log::error!(target: "CLI", "could not set ROCK_DIR for the test process: {error}"),
-    }
+    command.env("ROCK_DIR", rock_host::rock_dir());
 }
 
 /// A fresh directory for one test process's scratch files (`ROCK_TEST_TMP`),

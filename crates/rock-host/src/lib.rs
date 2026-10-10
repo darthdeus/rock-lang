@@ -20,14 +20,16 @@ pub mod source_files;
 pub mod stdlib_loader;
 pub mod stick;
 
-#[cfg(target_os = "linux")]
-const ROCK_DIR_FALLBACK: &str = "/home/developer/projects/rock";
-#[cfg(target_os = "macos")]
-const ROCK_DIR_FALLBACK: &str = "/Users/developer/projects/rock";
-#[cfg(target_os = "windows")]
-const ROCK_DIR_FALLBACK: &str = "c:\\dev\\rock";
+fn compiled_source_root() -> std::path::PathBuf {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap_or(manifest_dir)
+        .to_path_buf()
+}
 
-/// Resolve the Rock root directory at runtime from environment, exe path, or CWD.
+/// Resolve the Rock root directory at runtime from environment, exe path, CWD, or source location.
 pub fn resolve_rock_dir_with(
     env_override: Option<String>,
     exe_path: Option<&std::path::Path>,
@@ -69,12 +71,12 @@ pub fn resolve_rock_dir_with(
         }
     }
 
-    ROCK_DIR_FALLBACK.to_string()
+    compiled_source_root().to_string_lossy().into_owned()
 }
 
 /// Resolve the Rock root directory at runtime. `ROCK_DIR` env wins; else derive
 /// from the running exe's location (release install or dev target/); else workspace
-/// root above cwd; else a per-OS fallback.
+/// root above cwd; else the source tree this crate was compiled from.
 pub fn rock_dir() -> String {
     use std::sync::OnceLock;
     static CACHED: OnceLock<String> = OnceLock::new();
