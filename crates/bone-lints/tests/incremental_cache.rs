@@ -1,5 +1,6 @@
 use bone_lints::{
-    IncrementalLintCache, LintCacheUpdate, LintOptions, TextEditDelta, UNUSED_VAR, lint_workspace,
+    HOST_RESOURCE_IN_GAME_MEMORY, IncrementalLintCache, LintCacheUpdate, LintOptions,
+    TextEditDelta, UNUSED_VAR, lint_workspace,
 };
 use bone_semantic::prelude::*;
 
@@ -99,6 +100,63 @@ fn local_body_findings_can_be_added_and_removed() {
     );
     assert!(removed_findings.iter().all(|f| f.lint != UNUSED_VAR));
     assert!(removed_stats.flat_body_requests > 0);
+}
+
+#[test]
+fn cross_module_host_resource_findings_follow_dependency_type_edits() {
+    const DEPENDENCY: &str = "types/host.rock";
+    const CONSUMER: &str = "game/main.rock";
+    let old_types = "struct Payload { marker: int }\n";
+    let new_types = "@host_resource(audio)\nnewtype AudioHandle(int)\n\
+                     struct Payload { handle: AudioHandle }\n";
+    let game = "global STATE: Payload? = null\n\
+                fn main() { print(\"{STATE == null}\") }\n";
+    let old_workspace = workspace_many(&[(DEPENDENCY, old_types), (CONSUMER, game)]);
+    let new_workspace = workspace_many(&[(DEPENDENCY, new_types), (CONSUMER, game)]);
+    let old_source_rows = [(DEPENDENCY, old_types), (CONSUMER, game)];
+    let new_source_rows = [(DEPENDENCY, new_types), (CONSUMER, game)];
+    let old_sources = sources_many(&old_source_rows);
+    let new_sources = sources_many(&new_source_rows);
+    let mut cache = IncrementalLintCache::default();
+    let (initial, _) = cache.update(
+        &old_workspace,
+        &FxHashSet::default(),
+        true,
+        &old_sources,
+        &LintOptions::default(),
+        &LintCacheUpdate::full(),
+    );
+    assert!(
+        initial.iter().all(|finding| finding.lint != HOST_RESOURCE_IN_GAME_MEMORY),
+        "the original dependency type has no host resource: {initial:?}"
+    );
+
+    let (cached, _) = cache.update(
+        &new_workspace,
+        &FxHashSet::default(),
+        true,
+        &new_sources,
+        &LintOptions::default(),
+        &LintCacheUpdate::body_only([Ustr::from(DEPENDENCY)], [], []),
+    );
+    let fresh = lint_workspace(
+        &new_workspace,
+        &FxHashSet::default(),
+        true,
+        &new_sources,
+        &LintOptions::default(),
+    );
+    let expected = fresh
+        .iter()
+        .filter(|finding| finding.lint == HOST_RESOURCE_IN_GAME_MEMORY)
+        .collect::<Vec<_>>();
+    assert_eq!(expected.len(), 1, "fresh lint should find the cross-module handle: {fresh:?}");
+    assert_eq!(expected[0].file(), Ustr::from(CONSUMER));
+    assert_eq!(
+        shapes(&cached),
+        shapes(&fresh),
+        "the incremental cache must match a fresh workspace lint after a dependency edit"
+    );
 }
 
 #[test]
