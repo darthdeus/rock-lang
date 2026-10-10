@@ -2843,13 +2843,13 @@ fn flat_findings_with(
         );
     }
     if sel.enabled(METHOD_SYNTAX) {
-        let started = census.as_ref().map(|_| std::time::Instant::now());
+        let started = std::time::Instant::now();
         let found = method_syntax_in_module(ws, module, types, src);
         let found = filter_suppressed_census(found, src, census.as_deref_mut());
         record_family(
             census.as_deref_mut(),
             CensusFamily::TypeDependent,
-            started.map_or(std::time::Duration::ZERO, |started| started.elapsed()),
+            started.elapsed(),
             1,
             1,
             module.bodies.len(),
@@ -2866,13 +2866,13 @@ fn flat_findings_with(
         );
     }
     if sel.enabled(HOST_RESOURCE_IN_GAME_MEMORY) {
-        let started = census.as_ref().map(|_| std::time::Instant::now());
+        let started = std::time::Instant::now();
         let found = host_resources_in_game_memory_in_module(ws, module);
         let found = filter_suppressed_census(found, src, census.as_deref_mut());
         record_family(
             census.as_deref_mut(),
             CensusFamily::TypeDependent,
-            started.map_or(std::time::Duration::ZERO, |started| started.elapsed()),
+            started.elapsed(),
             1,
             1,
             module.bodies.len(),
@@ -2881,7 +2881,7 @@ fn flat_findings_with(
         out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(HOST_RESOURCE_SUPPRESSION_CENSUS) {
-        let started = census.as_ref().map(|_| std::time::Instant::now());
+        let started = std::time::Instant::now();
         let findings_before = out.len();
         let lines: Vec<&str> = src.lines().collect();
         for found in host_resources_in_game_memory_in_module(ws, module) {
@@ -2915,7 +2915,7 @@ fn flat_findings_with(
         record_family(
             census.as_deref_mut(),
             CensusFamily::TypeDependent,
-            started.map_or(std::time::Duration::ZERO, |started| started.elapsed()),
+            started.elapsed(),
             1,
             1,
             module.bodies.len(),
@@ -3208,8 +3208,6 @@ fn lint_workspace_inner(
     for module in user_modules(ws, warm) {
         let Some(&src) = sources.get(&module.file) else { continue };
         let t_flat = std::time::Instant::now();
-        let type_dependent_before =
-            census.as_deref().map(|census| census.type_dependent.elapsed_ns).unwrap_or(0);
         let flat = flat_findings_with(
             ws,
             &variants,
@@ -3223,16 +3221,11 @@ fn lint_workspace_inner(
         record_family(
             census.as_deref_mut(),
             CensusFamily::Flat,
-            t_flat.elapsed().saturating_sub(std::time::Duration::from_nanos(
-                census
-                    .as_deref()
-                    .map(|census| census.type_dependent.elapsed_ns.saturating_sub(type_dependent_before))
-                    .unwrap_or(0) as u64,
-            )),
+            t_flat.elapsed(),
             1,
             1,
             module.bodies.len(),
-            flat.iter().filter(|finding| !is_type_dependent_lint(finding.lint)).count(),
+            flat.len(),
         );
         out.extend(flat);
 
