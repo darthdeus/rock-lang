@@ -749,9 +749,15 @@ fn assert_sim_state_matches(
             if !sim.contains(name) {
                 continue;
             }
+            let mut got_val = val.clone();
+            let mut want_val = want_pkg[name].clone();
+            if pkg == "stone" && name == "UI_FOCUS" {
+                normalize_focus_pool_tails(&mut got_val);
+                normalize_focus_pool_tails(&mut want_val);
+            }
             collect_f32_state_mismatches(
-                val,
-                &want_pkg[name],
+                &got_val,
+                &want_val,
                 &format!("{pkg}.{name} ({label})"),
                 &mut mismatches,
             );
@@ -765,6 +771,33 @@ fn assert_sim_state_matches(
         mismatches.len(),
         mismatches.join("\n")
     );
+}
+
+fn normalize_focus_pool_tails(value: &mut serde_json::Value) {
+    // Focus pools retain stale tail items; only the counted prefix is active.
+    for (pool_name, count_name) in [("cur", "cur_count"), ("last", "last_count")] {
+        let Some(count) = value
+            .get(count_name)
+            .and_then(serde_json::Value::as_u64)
+        else {
+            continue;
+        };
+        let Some(pool) = value
+            .get_mut(pool_name)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(data) = pool
+            .get_mut("data")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        let active = (count as usize).min(data.len());
+        data.truncate(active);
+        pool.insert("len".to_string(), serde_json::Value::from(active as u64));
+    }
 }
 
 fn assert_sim_state_matches_exact(
@@ -2367,6 +2400,11 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
             ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "86"),
             ("STONE_PHYSICAL_MOUSE_X_2", "960"),
             ("STONE_PHYSICAL_MOUSE_Y_2", "370"),
+            ("STONE_PHYSICAL_MOUSE_MOVE_AT_3", "100"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT_3", "110"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_3", "111"),
+            ("STONE_PHYSICAL_MOUSE_X_3", "1259.5"),
+            ("STONE_PHYSICAL_MOUSE_Y_3", "792.5"),
         ],
     );
     assert_eq!(
