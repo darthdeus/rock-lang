@@ -497,8 +497,11 @@ impl ProcessManager {
     }
 }
 
+/// The wall backstop catches a child blocked without using CPU. A starved but
+/// busy child must reach its CPU budget first, so the floor leaves room for a
+/// loaded host even under a short CPU budget.
 pub(crate) fn test_watchdog_wall_backstop(cpu_limit: Duration) -> Duration {
-    cpu_limit.saturating_mul(8).max(Duration::from_secs(5))
+    cpu_limit.saturating_mul(8).max(Duration::from_secs(60))
 }
 
 #[derive(Debug, Clone, Copy)]

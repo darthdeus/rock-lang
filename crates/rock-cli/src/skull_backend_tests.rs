@@ -4883,9 +4883,7 @@ fn test_limit_names_hung_test_after_healthy_ones() {
     let file = dir.path().join("first.rock");
     let mut source = std::fs::read_to_string(&file).unwrap();
     source.push_str("@test inline(lua) fn slow_but_fine() = \"os.execute('sleep 0.3')\"\n");
-    // Without the watchdog this ends on its own after seven seconds and
-    // passes, so the TestFail match below fails.
-    source.push_str("@test inline(lua) fn hung_test() = \"local deadline = os.time() + 7; while os.time() < deadline do end\"\n");
+    source.push_str("@test inline(lua) fn hung_test() = \"while true do end\"\n");
     std::fs::write(file, source).unwrap();
     let result = super::skull_build_package_with_limit(dir.path().to_str().unwrap(), Duration::from_secs(1), 1, None);
     assert_first_test_started(&dir, "hung test was not bounded");
@@ -4973,7 +4971,7 @@ printf '__SKULL__\tTIME\tfirst_test\t1500.0\tpass\twatch-token\t0\n'
 fn test_limit_kills_a_blocked_test_at_the_wall_backstop() {
     let script = r#"
 printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
-exec sleep 30
+exec sleep 600
 "#;
     let run = wait_for_test_watchdog_fixture(script, Duration::from_millis(100));
     assert!(run.timed_out, "a blocked child must eventually be bounded: {run:?}");
