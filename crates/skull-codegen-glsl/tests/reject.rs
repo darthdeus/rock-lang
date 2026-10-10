@@ -89,6 +89,39 @@ fn reject_unmapped_inline_lua_call() {
     reject(src, &["uses_prim"], "no GLSL intrinsic mapping");
 }
 
+#[test]
+fn stdlib_log2_is_available_in_shader_forms() {
+    let src = r#"
+        @pure fn shader_log2(x: float) -> float { return log2(x) }
+    "#;
+    let glsl = emit(src, &["shader_log2"])
+        .unwrap_or_else(|msg| panic!("stdlib log2 should have a GLSL form: {msg}"));
+    assert!(glsl.contains("log2(x)"), "GLSL should use the log2 intrinsic: {glsl}");
+}
+
+#[test]
+fn omitted_default_argument_is_available_in_shader_forms() {
+    let src = r#"
+        @pure fn with_default(x: float, offset: float = 0.25) -> float {
+            return x + offset
+        }
+        @pure fn shader_default(x: float) -> float { return with_default(x) }
+    "#;
+    let glsl = emit(src, &["shader_default"])
+        .unwrap_or_else(|msg| panic!("omitted source default should lower for GLSL: {msg}"));
+    let caller = glsl
+        .split("float shader_default_float(float x) {")
+        .nth(1)
+        .expect("the shader root must be emitted")
+        .split('}')
+        .next()
+        .expect("the shader root body must be closed");
+    assert!(
+        caller.contains("with_default_float_float(x,") && !caller.contains("null"),
+        "omitted source argument should produce a concrete GLSL argument: {caller}"
+    );
+}
+
 // `match` lowers to `Term::Branch` chains (NOT `Term::Switch`, which lowering
 // never produces), so a tier-0 int `match` is accepted and structured -- see
 // `golden::match_int_ladder`. A match on a non-tier-0 scrutinee still rejects at
