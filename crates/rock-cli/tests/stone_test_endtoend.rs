@@ -9,14 +9,19 @@
 //! a debouncer + LuaJIT). When this file's count grows past ~10, gate it
 //! to nextest `-P full` like `game_snapshot_tests`.
 
-use rock_host::lua_runner::run_lua_code;
+use rock_host::lua_runner::{run_lua_code_with_timeout, LuaRun};
 use std::time::Duration;
 use crate::stone_harness::StoneHarness;
 
 const QUIESCENT: Duration = Duration::from_millis(400);
 // The event must arrive before the quiet-period clock starts. Allow a loaded
 // host's compiler and watcher processes to run, with nextest as the outer cap.
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
+const SETTLE_TIMEOUT: Duration = test_utils::HANG_BACKSTOP;
+
+// `run_lua_code` kills the script after 1.8 s of wall time.
+fn run_lua(script: &str) -> Result<LuaRun, rock_core::CompilerError> {
+    run_lua_code_with_timeout(script, Some(test_utils::HANG_BACKSTOP))
+}
 
 /// Validates the global-type-change-forces-restart fix from `73e642336`
 /// through the real watcher path. The unit tests in
@@ -124,7 +129,7 @@ fn incremental_recompile_lua_runs_correctly_under_hot_reload() {
         after = after_lua,
     );
 
-    let out = run_lua_code(&script).unwrap_or_else(|e| {
+    let out = run_lua(&script).unwrap_or_else(|e| {
         panic!("LuaJIT failed on watcher output:\n{}", e);
     });
     assert!(
@@ -219,7 +224,7 @@ fn a_body_edit_reaches_its_caller_even_with_callee_binding_requested() {
         before = before_lua,
         after = after_lua,
     );
-    let out = run_lua_code(&script).unwrap_or_else(|e| {
+    let out = run_lua(&script).unwrap_or_else(|e| {
         panic!("LuaJIT failed on watcher output:\n{}", e);
     });
     assert!(
@@ -259,7 +264,7 @@ fn caller_body_edit_preserves_cross_module_generic_callback_abi() {
          assert(_G.SCORE == 2)\n\
          print('PASS')\n"
     );
-    let out = run_lua_code(&script).expect("run watcher output under LuaJIT");
+    let out = run_lua(&script).expect("run watcher output under LuaJIT");
     assert!(out.success && out.stdout.trim() == "PASS",
         "a caller edit must apply without changing the unchanged callback ABI:\n{}", out.combined());
 }

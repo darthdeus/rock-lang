@@ -9,7 +9,7 @@ use std::time::Duration;
 const QUIESCENT: Duration = Duration::from_millis(400);
 // The event must arrive before the quiet-period clock starts. Allow a loaded
 // host's compiler and watcher processes to run, with nextest as the outer cap.
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
+const SETTLE_TIMEOUT: Duration = test_utils::HANG_BACKSTOP;
 
 #[test]
 fn embedded_file_edit_triggers_reload_with_new_bytes() {
