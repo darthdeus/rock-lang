@@ -56,6 +56,55 @@ fn run_frame_with(envs: &[(&str, String)]) -> (String, bool) {
 }
 
 #[test]
+fn rock_perf_forwards_production_error_and_warning_severity_tags() {
+    let _spawn_budget = SpawnBudget::for_test(120);
+    let output = tempfile::tempdir().expect("perf output");
+    let result = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args([
+            "perf",
+            "crates/rock-cli/test-data/perf-watchdog",
+            "--frames",
+            "3",
+            "--warmup-seconds",
+            "0",
+            "--format",
+            "json",
+        ])
+        .arg("--output")
+        .arg(output.path())
+        .env_remove("STONE_HOT_RELOAD")
+        .env("STONE_LOG", "info")
+        .env("ROCK_FRAME_TIMEOUT_SECS", "120")
+        .env("PERF_TEST_LOG_SEVERITIES", "1")
+        .output_with_deadline()
+        .expect("spawn rock perf");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    assert!(result.status.success(), "perf run failed:\n{text}");
+    assert!(
+        text.lines().any(|line| {
+            line.contains("ERROR]")
+                && line.contains("[PERF_TEST]")
+                && line.contains("production failure severity probe")
+        }),
+        "rock perf must forward the production ERROR record with its level:\n{text}"
+    );
+    assert!(
+        text.lines().any(|line| {
+            line.contains("WARN ]")
+                && line.contains("[PERF_TEST]")
+                && line.contains("production caution severity probe")
+        }),
+        "rock perf must forward the production WARN record with its level:\n{text}"
+    );
+}
+
+#[test]
 fn a_repeating_caught_frame_error_fails_once_with_its_total() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let (text, ok) = run_frame(Some(2));

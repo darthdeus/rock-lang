@@ -1,6 +1,10 @@
 @init
 fn perf_test_startup() {
     stone_delay(get_env_int("PERF_TEST_STARTUP_MS", 0))
+    if get_env_int("PERF_TEST_LOG_SEVERITIES", 0) > 0 {
+        log_error("PERF_TEST", "production failure severity probe")
+        log_warn("PERF_TEST", "production caution severity probe")
+    }
 }
 
 fn main() {
