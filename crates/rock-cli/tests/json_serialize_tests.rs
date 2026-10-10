@@ -21,6 +21,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
+
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -28,13 +30,14 @@ fn workspace_root() -> &'static Path {
 }
 
 fn dump_match3_state() -> serde_json::Value {
+    let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let output = Command::new(rock_bin)
         .args(["frame", "games/match3", "-n", "1", "--dump-state"])
         .env("ROCK_TEST_SEED", "42")
         .env("STONE_TOOL_KEY_PROBE", "1")
         .current_dir(workspace_root())
-        .output()
+        .output_with_deadline()
         .expect("failed to spawn rock frame");
     assert!(
         output.status.success(),

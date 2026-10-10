@@ -7834,8 +7834,9 @@ mod tests {
         std::hint::black_box(&ballast);
         assert_eq!(measured, None, "a child on the runner's address space was measured as its own");
 
-        let mut small = std::process::Command::new("sleep").arg("5").spawn().expect("spawn sleep");
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // Killed below; it must outlive the wait for its own exec.
+        let mut small = std::process::Command::new("sleep").arg("3600").spawn().expect("spawn sleep");
+        let deadline = std::time::Instant::now() + test_utils::HANG_BACKSTOP;
         let measured = loop {
             if let Some(mb) = process_memory_mb(small.id()) {
                 break Some(mb);
@@ -8362,6 +8363,16 @@ mod tests {
         pool: impl FnOnce(&PoolWidth, &(dyn Fn(usize) -> Result<usize> + Sync)) -> Vec<(usize, Result<usize>)> + Send,
     ) {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        // Ordered by events, not sleeps: tasks beside the lane hold until it
+        // ends, the lane ends once the narrowed pool is full, and after it
+        // three tasks must be live together. A missing widening leaves that
+        // barrier at two until the hang backstop, which every wait shares.
+        let deadline = std::time::Instant::now() + test_utils::HANG_BACKSTOP;
+        let wait_for = |done: &dyn Fn() -> bool| {
+            while !done() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
         let live = AtomicUsize::new(0);
         let peak_beside_lane = AtomicUsize::new(0);
         let peak_after_lane = AtomicUsize::new(0);
@@ -8370,10 +8381,11 @@ mod tests {
             let now = live.fetch_add(1, Ordering::SeqCst) + 1;
             if lane_done.load(Ordering::SeqCst) {
                 peak_after_lane.fetch_max(now, Ordering::SeqCst);
+                wait_for(&|| peak_after_lane.load(Ordering::SeqCst) >= 3);
             } else {
                 peak_beside_lane.fetch_max(now, Ordering::SeqCst);
+                wait_for(&|| lane_done.load(Ordering::SeqCst));
             }
-            std::thread::sleep(std::time::Duration::from_millis(4));
             live.fetch_sub(1, Ordering::SeqCst);
             Ok::<usize, anyhow::Error>(i)
         };
@@ -8382,15 +8394,18 @@ mod tests {
             true,
             |width| pool(width, &task),
             || {
+                wait_for(&|| live.load(Ordering::SeqCst) >= 2);
+                // A pool that ignored the lane's slot would start a third
+                // task in this window.
                 std::thread::sleep(std::time::Duration::from_millis(40));
                 lane_done.store(true, Ordering::SeqCst);
             },
         );
         assert_eq!(pool.len(), 60, "every task exactly once");
-        assert!(
-            peak_beside_lane.load(Ordering::SeqCst) <= 2,
-            "the lane holds one of three jobs while it runs, peak {}",
-            peak_beside_lane.load(Ordering::SeqCst)
+        assert_eq!(
+            peak_beside_lane.load(Ordering::SeqCst),
+            2,
+            "the lane holds one of three jobs while it runs"
         );
         assert_eq!(
             peak_after_lane.load(Ordering::SeqCst),

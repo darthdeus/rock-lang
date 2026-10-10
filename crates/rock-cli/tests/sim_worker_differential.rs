@@ -2888,16 +2888,19 @@ fn a_subset_refuses_a_name_it_cannot_measure() {
 /// fail whichever one happens to be running when their sum crosses it.
 #[test]
 fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
-    // Each entry sleeps 4s; three of them plus boot cannot fit in 12s, while
-    // every single entry fits with room to spare.
+    // Each entry sleeps 4s: eight of them cannot fit in 30s even without
+    // boot, while a single entry has 26s of slack for a loaded host.
     if isolated_environment_test(
         "the_wall_clock_deadline_is_per_entry_not_per_worker",
-        "ROCK_SIM_TIMEOUT_SECS", Some(std::ffi::OsStr::new("12")),
+        "ROCK_SIM_TIMEOUT_SECS", Some(std::ffi::OsStr::new("30")),
     ) { return; }
 
-    let records = run_worker_suite(Backend::Skull, "testbed", rock(), &vec!["testbed::b2_slow_entry".to_string(); 3])
+    let records = run_worker_suite(Backend::Skull, "testbed", rock(), &vec!["testbed::b2_slow_entry".to_string(); 8])
         .expect("the suite call itself must not error");
-    assert_eq!(records.len(), 3);
+    assert_eq!(records.len(), 8);
+    for (i, (record, crossed)) in records.iter().enumerate().skip(1) {
+        assert!(crossed, "entry {i} must follow its predecessor in the same worker: {record:?}");
+    }
     let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
     for (i, record) in records.iter().enumerate() {
         assert!(
@@ -3247,7 +3250,6 @@ fn await_worker_admission(children: &mut [WorkerLoadChild], traces: &[std::path:
 #[cfg(unix)]
 #[test]
 fn an_admission_caller_that_exits_early_fails_with_its_stderr() {
-    use std::time::{Duration, Instant};
     let scratch = tempfile::tempdir().expect("early exit fixture");
     let child = std::process::Command::new("sh")
         .args(["-c", "echo early-exit-marker >&2; exit 3"])
@@ -3256,14 +3258,13 @@ fn an_admission_caller_that_exits_early_fails_with_its_stderr() {
     let mut children = vec![WorkerLoadChild(Some(child))];
     let traces = vec![scratch.path().join("trace.log")];
     let waits = vec![scratch.path().join("wait.log")];
-    let started = Instant::now();
     let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        await_worker_admission(&mut children, &traces, &waits, Duration::from_secs(20));
+        await_worker_admission(&mut children, &traces, &waits, test_utils::HANG_BACKSTOP);
     })).expect_err("a caller that exits before admission must fail the wait");
     let message = failure.downcast_ref::<String>().cloned()
         .or_else(|| failure.downcast_ref::<&str>().map(|text| text.to_string()))
         .unwrap_or_default();
-    assert!(started.elapsed() < Duration::from_secs(10),
+    assert!(message.contains("an admission caller exited before admission"),
         "an exited caller must fail the wait at once, not at its deadline: {message}");
     assert!(message.contains("early-exit-marker"), "the caller's stderr must surface: {message}");
 }

@@ -14,39 +14,27 @@ use rock_cli::FileWatcher;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
-// Quiescence-based: wait up to HARD_DEADLINE for the first event, then
-// keep collecting until QUIESCENCE elapses with no new arrivals. Old
-// version unconditionally slept the full 3s ceiling on every call,
-// adding ~3s per test for no coverage gain (the assertions only care
-// about whether specific events appeared or didn't appear, not about
-// a fixed-window absence).
-const HARD_DEADLINE: Duration = Duration::from_secs(3);
+// Event-led: wait for the event the test expects, keeping every event that
+// arrives before it, then collect trailers until QUIESCENCE passes quietly.
+// Events arrive in write order, so a suppressed path written before the
+// awaited one would already be in the result. HANG_BACKSTOP only bounds a
+// lost event.
 const QUIESCENCE: Duration = Duration::from_millis(500);
 
-fn drain(rx: &std::sync::mpsc::Receiver<rock_cli::FileChangeEvent>) -> Vec<rock_cli::FileChangeEvent> {
+fn drain_until(
+    rx: &std::sync::mpsc::Receiver<rock_cli::FileChangeEvent>,
+    expected: impl Fn(&rock_cli::FileChangeEvent) -> bool,
+) -> Vec<rock_cli::FileChangeEvent> {
     let mut got = Vec::new();
-    let hard = Instant::now() + HARD_DEADLINE;
-
-    // Block up to the hard deadline waiting for the first event. If
-    // nothing arrives, return empty -- assertions handle the "expected
-    // but missing" failure mode.
-    let first_wait = hard.saturating_duration_since(Instant::now());
-    match rx.recv_timeout(first_wait) {
-        Ok(ev) => got.push(ev),
-        Err(_) => return got,
-    }
-
-    // Drain follow-ons with a quiescence window. 500ms is well above
-    // the 5ms file_watcher debounce, so a correctly-suppressed event
-    // can't sneak in after we return. The hard deadline still bounds
-    // pathological event storms.
-    loop {
-        let now = Instant::now();
-        if now >= hard {
-            break;
+    let hard = Instant::now() + test_utils::HANG_BACKSTOP;
+    while !got.iter().any(&expected) {
+        match rx.recv_timeout(hard.saturating_duration_since(Instant::now())) {
+            Ok(ev) => got.push(ev),
+            Err(_) => return got,
         }
-        let remaining = hard.saturating_duration_since(now).min(QUIESCENCE);
-        match rx.recv_timeout(remaining) {
+    }
+    while Instant::now() < hard {
+        match rx.recv_timeout(QUIESCENCE) {
             Ok(ev) => got.push(ev),
             Err(_) => break,
         }
@@ -71,7 +59,7 @@ fn source_change_reported_when_project_root_has_tmp_component() {
     std::thread::sleep(Duration::from_millis(300));
     std::fs::write(root.join("a.rock"), b"fn main() { let x = 1 }\n").unwrap();
 
-    let got = drain(&rx);
+    let got = drain_until(&rx, |e| e.paths.iter().any(|p| p.ends_with("a.rock")));
     assert!(
         got.iter()
             .any(|e| e.paths.iter().any(|p| p.ends_with("a.rock"))),
@@ -104,7 +92,7 @@ fn project_relative_tmp_dir_is_still_scratch() {
     // Manual restart signal: must get through.
     std::fs::write(root.join("tmp").join("restart.txt"), b"1\n").unwrap();
 
-    let got = drain(&rx);
+    let got = drain_until(&rx, |e| e.is_restart_trigger);
     assert!(
         got.iter().any(|e| e.is_restart_trigger),
         "project tmp/restart.txt must still trigger; events={got:?}"

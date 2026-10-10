@@ -107,7 +107,7 @@ fn compile_slot_wait_is_its_own_phase() {
         .env("ROCK_COMPILE_CLASS", "batch").env("ROCK_COMPILE_SLOT_DIR", &slots)
         .env("STONE_LOG", "info").env("ROCK_LOG_COLOR", "never")
         .stdout(std::process::Stdio::null()).stderr(std::fs::File::create(&log).unwrap()).spawn().unwrap());
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
     loop {
         let stderr = std::fs::read_to_string(&log).unwrap();
         if stderr.contains("[COMPILE] waiting for a compile slot") { break }
@@ -120,7 +120,7 @@ fn compile_slot_wait_is_its_own_phase() {
     std::thread::sleep(Duration::from_millis(300));
     let held_for = observed.elapsed();
     drop(held);
-    let status = child.0.wait_timeout(Duration::from_secs(30)).unwrap()
+    let status = child.0.wait_timeout(test_utils::HANG_BACKSTOP).unwrap()
         .expect("compile did not finish after releasing its slot");
     assert!(status.success(), "{}", std::fs::read_to_string(&log).unwrap());
     let record: Value = serde_json::from_str(std::fs::read_to_string(stats).unwrap().trim()).unwrap();

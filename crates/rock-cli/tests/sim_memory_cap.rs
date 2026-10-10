@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
-use std::time::{Duration, Instant};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -22,7 +21,6 @@ fn workspace_root() -> PathBuf {
 fn a_sim_over_its_memory_cap_is_killed_and_named() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
-    let started = Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["sim", "crates/rock-cli/test-data/sim-memory-cap", "memory_cap_stops_a_runaway"])
         .current_dir(&root)
@@ -30,7 +28,6 @@ fn a_sim_over_its_memory_cap_is_killed_and_named() {
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
         .output_with_deadline()
         .expect("run rock sim");
-    let elapsed = started.elapsed();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -43,5 +40,4 @@ fn a_sim_over_its_memory_cap_is_killed_and_named() {
         "the failure must name the cap:\n{combined}"
     );
     assert!(!combined.contains("timed out after"), "the cap, not the watchdog, must stop it:\n{combined}");
-    assert!(elapsed < Duration::from_secs(90), "the cap must act before the watchdog: {elapsed:?}");
 }

@@ -33,7 +33,7 @@ fn run_lua_file(script: &str) -> std::io::Result<std::process::Output> {
         .output()
 }
 
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(15);
+const SETTLE_TIMEOUT: Duration = test_utils::HANG_BACKSTOP;
 
 /// Path to the workspace's `stone/` directory, used as the dependency
 /// in seed `stick.toml`. Resolves at test runtime so the seed isn't

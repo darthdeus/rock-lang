@@ -39,6 +39,7 @@ smallvec = { workspace = true }
 rock-host = { path = "../rock-host" }
 skull-graph = { path = "../skull-graph", features = ["test-hooks"] }
 tempfile = "3.0"
+test-utils = { path = "../test-utils" }
 # The updater's tests drive real incremental inference rather than inventing a
 # reinferred-body set: `UpdateResult::reinferred` is exactly the population
 # `InstanceGraph::update_bodies` takes.

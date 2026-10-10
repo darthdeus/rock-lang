@@ -269,7 +269,7 @@ mod allocator_tests {
                 unsafe { std::env::set_var("ROCK_LUAJIT", &proxy) };
                 let expected = std::env::var("ROCK_THP_TEST_RUNTIME_EXPECT").unwrap();
                 let out = rock_host::lua_runner::run_lua_code_with_timeout_and_env(
-                    "", Some(std::time::Duration::from_secs(10)),
+                    "", Some(test_utils::HANG_BACKSTOP),
                     &[("ROCK_THP_TEST_ROLE", "runtime"), ("ROCK_THP_TEST_EXPECT", &expected)],
                 ).expect("stdin Lua runtime witness");
                 assert!(out.success, "stdin Lua runtime: {}", out.combined());

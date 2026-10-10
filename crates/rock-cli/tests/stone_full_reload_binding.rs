@@ -2,9 +2,13 @@
 
 use rock_cli::game_runtime::{GameCompiler, SkullGameCompiler};
 use rock_cli::skull_backend::{SkullReload, SkullStone};
-use rock_host::lua_runner::run_lua_code;
+use rock_host::lua_runner::{run_lua_code_with_timeout, LuaRun};
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+fn run_lua(script: &str) -> Result<LuaRun, rock_core::CompilerError> {
+    run_lua_code_with_timeout(script, Some(test_utils::HANG_BACKSTOP))
+}
 
 /// No `fn main`: emission is reachability-driven from `@nomangle bump`, and a
 /// chunk with no entry point runs standalone under LuaJIT below.
@@ -129,7 +133,7 @@ fn a_body_edit_reaches_its_caller_through_the_overlay() {
              os.exit(1)\n\
          end\n"
     );
-    let out = run_lua_code(&script).unwrap_or_else(|e| panic!("LuaJIT failed:\n{e}"));
+    let out = run_lua(&script).unwrap_or_else(|e| panic!("LuaJIT failed:\n{e}"));
     assert!(
         out.stdout.trim().starts_with("PASS"),
         "a body edit must reach its caller through the overlay:\n{}",
@@ -151,7 +155,7 @@ fn a_bound_body_edit_publishes_an_overlay_that_preserves_live_state() {
     let script = format!(
         "{before}\nbump()\n{overlay}\nbump()\nassert(SCORE == 11)\nprint('PASS')\n"
     );
-    let out = run_lua_code(&script).expect("loaded overlay");
+    let out = run_lua(&script).expect("loaded overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }

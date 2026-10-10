@@ -406,7 +406,7 @@ mod tests {
     fn supervisor_death_cleans_up_running_child() {
         let compiled = supervisor_fixture("signal(SIGALRM, SIG_IGN); kill(getppid(), SIGKILL); for (;;) {}", 1);
         let dir = compiled._dir.path();
-        let run = run_supervisor(&compiled.binary, dir, None, Duration::from_secs(3), None);
+        let run = run_supervisor(&compiled.binary, dir, None, test_utils::HANG_BACKSTOP, None);
         let gone = child_is_gone(child_pid(dir));
         assert!(run.unwrap_err().contains("supervisor exited"));
         assert!(gone, "child outlived dead supervisor");

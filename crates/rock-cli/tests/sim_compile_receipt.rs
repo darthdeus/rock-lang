@@ -608,7 +608,7 @@ fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
     };
     let mut a = spawn("a");
     let mut b = spawn("b");
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
     let both_missed = loop {
         if ["a", "b"].iter().all(|label| {
             std::fs::read_to_string(dir.path().join(format!("{label}.err")))

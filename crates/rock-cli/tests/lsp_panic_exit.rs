@@ -51,7 +51,7 @@ fn panicking_handler_exits_process_not_wedge() {
 
     // The process must exit on its own. Poll rather than block forever so a
     // wedge (the bug) fails as a timeout instead of hanging the suite.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
     loop {
         if let Some(status) = child.try_wait().expect("try_wait") {
             assert!(
@@ -62,7 +62,7 @@ fn panicking_handler_exits_process_not_wedge() {
         }
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("server did not exit within 5s after a handler panic -- it wedged");
+            panic!("server did not exit within {:?} after a handler panic -- it wedged", test_utils::HANG_BACKSTOP);
         }
         std::thread::sleep(Duration::from_millis(50));
     }

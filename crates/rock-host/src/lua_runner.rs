@@ -351,7 +351,7 @@ mod tests {
                 let run = run_lua_code_with_timeout_at(
                     &probe,
                     "",
-                    Some(std::time::Duration::from_secs(10)),
+                    Some(test_utils::HANG_BACKSTOP),
                     &[("LD_PRELOAD", SENTINEL)],
                 )
                 .expect("probe child runs");
@@ -364,7 +364,7 @@ mod tests {
                 let bare = run_lua_code_with_timeout_at(
                     &probe,
                     "",
-                    Some(std::time::Duration::from_secs(10)),
+                    Some(test_utils::HANG_BACKSTOP),
                     &[],
                 )
                 .expect("bare probe child runs");
@@ -394,7 +394,7 @@ mod tests {
         let mut code = "local = 1\n".to_string();
         code.push_str(&"-- valid filler\n".repeat(1_000_000));
 
-        let run = run_lua_code_with_timeout(&code, Some(Duration::from_secs(5)))
+        let run = run_lua_code_with_timeout(&code, Some(test_utils::HANG_BACKSTOP))
             .expect("LuaJIT load errors are child results, not runner failures");
 
         assert!(!run.success, "invalid Lua unexpectedly loaded: {}", run.combined());
@@ -428,7 +428,7 @@ mod tests {
         let mut code = "ignored by child\n".to_string();
         code.push_str(&"-- valid filler\n".repeat(1_000_000));
 
-        let error = run_lua_code_with_timeout_at(&child_path, &code, Some(Duration::from_secs(5)), &[])
+        let error = run_lua_code_with_timeout_at(&child_path, &code, Some(test_utils::HANG_BACKSTOP), &[])
             .expect_err("a child with no diagnostic must not swallow the broken pipe");
 
         assert!(

@@ -17,6 +17,9 @@ workspace = true
 # Mirrors rock-semantic's `sequential` feature.
 sequential = []
 
+[dev-dependencies]
+test-utils = { path = "../test-utils" }
+
 [dependencies]
 rock-core = { path = "../rock-core" }
 anyhow = { workspace = true }

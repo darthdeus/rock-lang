@@ -100,17 +100,24 @@ impl HeavyCommandExt for Command {
             return Err(io::Error::new(io::ErrorKind::TimedOut,
                 format!("spawn {label} refused: spawn budget is zero before spawn; phase=spawn")));
         }
-        // Preserve shorter explicit execution limits; leave defaults alone.
-        // One second inside the execution budget, so the child's own watchdog
-        // reports first instead of racing the outer phase cap.
+        // Preserve shorter explicit execution limits. One second inside the
+        // execution budget, so the child's own watchdog reports first instead
+        // of racing the outer phase cap.
         let cap = budget.as_secs().saturating_sub(1);
         if cap > 0 {
             for key in ["ROCK_FRAME_TIMEOUT_SECS", "ROCK_SIM_TIMEOUT_SECS"] {
-                let requested = self.get_envs().find(|(name, _)| *name == key)
+                let explicit = self.get_envs().find(|(name, _)| *name == key);
+                let requested = explicit
                     .and_then(|(_, value)| value).and_then(|value| value.to_str())
                     .and_then(|value| value.parse::<u64>().ok());
                 if let Some(seconds) = requested {
                     self.env(key, seconds.min(cap).to_string());
+                } else if key == "ROCK_FRAME_TIMEOUT_SECS" && explicit.is_none()
+                    && std::env::var_os(key).is_none()
+                {
+                    // The frame watchdog's 5 s default is an interactive hang
+                    // check; under a budget the budget is the hang detector.
+                    self.env(key, cap.to_string());
                 }
             }
         }
@@ -486,6 +493,7 @@ impl Drop for BudgetedChild {
 mod tests {
     use super::*;
     use std::time::Instant;
+    use test_utils::HANG_BACKSTOP;
 
     /// Scheduling slack for upper bounds on how fast a cap fires. These tests
     /// prove that a cap fires and names its phase, not how promptly a loaded
@@ -503,10 +511,10 @@ mod tests {
     fn spawn_helper() {
         match std::env::var("HEAVY_SPAWN_HELPER").as_deref() {
             Ok("sleep") => std::thread::sleep(Duration::from_secs(2)),
-            Ok("execute_3s") => {
+            Ok("execute_11s") => {
                 let file = std::env::var_os("ROCK_SPAWN_PHASE_FILE").expect("phase file env");
                 std::fs::write(file, "execution").unwrap();
-                std::thread::sleep(Duration::from_secs(3));
+                std::thread::sleep(Duration::from_secs(11));
             }
             Ok("descendant") => {
                 let mut command = Command::new("sleep");
@@ -549,7 +557,7 @@ mod tests {
 
     #[test]
     fn spawn_drains_both_pipes_while_waiting() {
-        let _budget = SpawnBudget::new(Duration::from_secs(5));
+        let _budget = SpawnBudget::new(HANG_BACKSTOP);
         let out = child("flood").output_with_deadline().unwrap();
         assert!(out.status.success());
         assert!(out.stdout.len() >= 256 * 1024);
@@ -566,18 +574,17 @@ mod tests {
 
     #[test]
     fn sequential_spawns_each_get_a_fresh_execution_budget() {
-        // Two 3 s executions under a 5 s budget: a shared deadline would kill
-        // the second, but per-spawn caps grant each its own budget. The 2 s
-        // left over is startup slack, which load can only spend in the spawn
-        // phase.
-        let _budget = SpawnBudget::new(Duration::from_secs(5));
-        assert!(child("execute_3s").output_with_deadline().unwrap().status.success());
-        assert!(child("execute_3s").output_with_deadline().unwrap().status.success());
+        // Two 11 s executions under a 20 s budget: a shared deadline would kill
+        // the second, but per-spawn caps grant each its own budget. Each child
+        // has 20 s to start and 9 s to exit after its sleep.
+        let _budget = SpawnBudget::new(Duration::from_secs(20));
+        assert!(child("execute_11s").output_with_deadline().unwrap().status.success());
+        assert!(child("execute_11s").output_with_deadline().unwrap().status.success());
     }
 
     #[test]
     fn spawn_budget_is_restored_after_an_assertion_unwinds() {
-        let _outer = SpawnBudget::new(Duration::from_secs(5));
+        let _outer = SpawnBudget::new(HANG_BACKSTOP);
         assert!(std::panic::catch_unwind(|| {
             let _inner = SpawnBudget::new(Duration::ZERO);
             panic!("intentional fixture failure");
@@ -593,7 +600,7 @@ mod tests {
             let _budget = SpawnBudget::new(Duration::from_secs(5));
             let _child = child("descendant").env("HEAVY_DESCENDANT_PID", &pid_file)
                 .spawn_with_deadline().unwrap();
-            let deadline = Instant::now() + LOAD_MARGIN;
+            let deadline = Instant::now() + HANG_BACKSTOP;
             while !pid_file.exists() {
                 assert!(Instant::now() < deadline, "helper never spawned its child");
                 std::thread::sleep(Duration::from_millis(10));
@@ -601,7 +608,7 @@ mod tests {
             panic!("intentional live fixture failure");
         });
         let pid = std::fs::read_to_string(pid_file).unwrap();
-        let gone = wait_gone(&pid, LOAD_MARGIN);
+        let gone = wait_gone(&pid, HANG_BACKSTOP);
         if !gone {
             assert!(Command::new("kill").args(["-KILL", pid.trim()]).status().unwrap().success());
         }
@@ -627,7 +634,7 @@ mod tests {
         let _budget = SpawnBudget::new(Duration::from_secs(120));
         let mut pending = child("descendant").env("HEAVY_DESCENDANT_PID", &pid_file)
             .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn_with_deadline().unwrap();
-        let deadline = Instant::now() + LOAD_MARGIN;
+        let deadline = Instant::now() + HANG_BACKSTOP;
         while !pid_file.exists() {
             assert!(Instant::now() < deadline, "helper never spawned its child");
             std::thread::sleep(Duration::from_millis(10));
@@ -636,7 +643,7 @@ mod tests {
         pending.budget = Duration::from_millis(250);
         let result = pending.wait_with_output();
         let pid = std::fs::read_to_string(pid_file).expect("helper reached descendant spawn");
-        let gone = wait_gone(&pid, LOAD_MARGIN);
+        let gone = wait_gone(&pid, HANG_BACKSTOP);
         if !gone {
             assert!(Command::new("kill").args(["-KILL", pid.trim()]).status().unwrap().success());
         }
@@ -707,7 +714,7 @@ mod tests {
     }
 
     fn await_slot_wait(pending: &BudgetedChild) {
-        let ready_deadline = Instant::now() + LOAD_MARGIN;
+        let ready_deadline = Instant::now() + HANG_BACKSTOP;
         while read_spawn_phase(pending.phase.path()).as_deref() != Some("slot-wait") {
             assert!(Instant::now() < ready_deadline, "compiler never reached the held slot");
             std::thread::sleep(Duration::from_millis(10));

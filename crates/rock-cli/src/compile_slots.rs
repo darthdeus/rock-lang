@@ -640,7 +640,7 @@ pub(crate) fn finish_slot_waiter<T>(
     worker: std::thread::JoinHandle<T>,
     waiting: std::sync::mpsc::Receiver<()>,
 ) -> (T, Duration) {
-    let observed = waiting.recv_timeout(Duration::from_secs(30));
+    let observed = waiting.recv_timeout(test_utils::HANG_BACKSTOP);
     let started = Instant::now();
     if observed.is_ok() {
         std::thread::sleep(Duration::from_millis(300));
@@ -755,7 +755,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
                 drop(slot);
             });
-            waiting.recv_timeout(Duration::from_secs(10)).expect("waiter never queued");
+            waiting.recv_timeout(test_utils::HANG_BACKSTOP).expect("waiter never queued");
             workers.push(worker);
         }
         drop(held);
@@ -778,7 +778,7 @@ mod tests {
                 sender.send(small).unwrap();
             });
         }
-        let mut small = taken.recv_timeout(Duration::from_secs(10)).expect("four small compiles did not fit together");
+        let mut small = taken.recv_timeout(test_utils::HANG_BACKSTOP).expect("four small compiles did not fit together");
         assert_eq!(held_files(dir.path()).len(), 4, "four small compiles hold the pool at once");
         let (waiter, waiting) = {
             let config = config.clone();
@@ -804,7 +804,7 @@ mod tests {
                 drop(slot);
             });
             // The small request fits beside the holder, but the large one is ahead.
-            waiting.recv_timeout(Duration::from_secs(10)).expect("waiter never queued");
+            waiting.recv_timeout(test_utils::HANG_BACKSTOP).expect("waiter never queued");
             workers.push(worker);
         }
         std::thread::sleep(Duration::from_millis(300));
@@ -961,7 +961,7 @@ mod tests {
         let config = config(Path::new(&dir), 1, CompileClass::Batch);
         let _slot = if std::env::var_os(CHILD_MODE_ENV).is_some_and(|mode| mode == "queue") {
             let (_worker, waiting) = spawn_slot_waiter(move || acquire_with(&config, "child"));
-            waiting.recv_timeout(Duration::from_secs(30)).unwrap();
+            waiting.recv_timeout(test_utils::HANG_BACKSTOP).unwrap();
             None
         } else {
             Some(acquire_with(&config, "child").unwrap())
@@ -998,8 +998,13 @@ mod tests {
         assert!(holder.contains(&format!("pid={}", child.id())), "{holder}");
         child.kill().unwrap();
         child.wait().unwrap();
-        let next = acquire_with(&config(dir.path(), 1, CompileClass::Batch), "next").unwrap();
-        assert!(next.acquisition().waited < Duration::from_secs(1), "{:?}", next.acquisition());
+        let config = config(dir.path(), 1, CompileClass::Batch);
+        let (next, waiting) = spawn_slot_waiter(move || acquire_with(&config, "next"));
+        // The observer's sender drops when the acquiring thread ends: a free
+        // slot is taken on the first scan, without ever reporting contention.
+        assert!(matches!(waiting.recv_timeout(test_utils::HANG_BACKSTOP), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
+            "the next compile waited behind the dead holder's slot");
+        let _next = next.join().unwrap().unwrap();
         assert_eq!(held_files(dir.path()), ["held-000000000002"], "the dead holder's file is removed");
     }
 
@@ -1017,9 +1022,9 @@ mod tests {
             let slot = acquire_with(&config, "after the dead waiter");
             sender.send(slot.map(|slot| slot.acquisition().clone())).unwrap();
         });
-        waiting.recv_timeout(Duration::from_secs(10)).expect("the next waiter never queued");
+        waiting.recv_timeout(test_utils::HANG_BACKSTOP).expect("the next waiter never queued");
         drop(held);
-        let acquisition = admitted.recv_timeout(Duration::from_secs(10))
+        let acquisition = admitted.recv_timeout(test_utils::HANG_BACKSTOP)
             .expect("a dead waiter's ticket blocked the queue").unwrap();
         assert_eq!(acquisition.slot.as_deref(), Some("held-000000000003"));
         assert!(queued_tickets(dir.path()).is_empty(), "{:?}", queued_tickets(dir.path()));

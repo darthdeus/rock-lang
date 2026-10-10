@@ -2025,6 +2025,11 @@ mod watch_reload_tests {
     use std::path::PathBuf;
     use std::sync::mpsc::{channel, Receiver};
     use std::time::{Duration, Instant};
+    use test_utils::HANG_BACKSTOP;
+
+    fn run_lua(code: &str) -> Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
+        rock_host::lua_runner::run_lua_code_with_timeout(code, Some(HANG_BACKSTOP))
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -2088,13 +2093,13 @@ mod watch_reload_tests {
             assert!(before == std::fs::read_to_string(&self.main).unwrap(), "body edit must preserve main.lua");
             let after = std::fs::read_to_string(self.main.with_file_name("incremental.lua")).expect("body-edit overlay");
             let script = format!("HOT_RELOAD = false\n{before}\nbump()\nHOT_RELOAD = true\n{after}\nHOT_RELOAD = false\nbump()\nassert(SCORE == 11, tostring(SCORE))\nprint('WATCH_RELOAD_PASS')\n");
-            let output = rock_host::lua_runner::run_lua_code(&script).expect("run reloaded Lua");
+            let output = run_lua(&script).expect("run reloaded Lua");
             assert!(output.stdout.contains("WATCH_RELOAD_PASS"), "{}", output.combined());
         }
     }
 
     fn receive_path(rx: &Receiver<FileChangeEvent>, expected: &PathBuf) -> FileChangeEvent {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + HANG_BACKSTOP;
         while let Ok(event) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             if event.paths.contains(expected) {
                 return event;
@@ -2108,7 +2113,8 @@ mod watch_reload_tests {
     // both happen arbitrarily late under load. Rewrite `path` until it is
     // reported, so the wait covers a lost first write.
     fn write_until_reported(rx: &Receiver<FileChangeEvent>, path: &PathBuf, text: &str) -> FileChangeEvent {
-        for _ in 0..8 {
+        let deadline = Instant::now() + HANG_BACKSTOP;
+        while Instant::now() < deadline {
             std::fs::write(path, text).unwrap();
             let attempt_end = Instant::now() + Duration::from_millis(1500);
             while let Ok(event) = rx.recv_timeout(attempt_end.saturating_duration_since(Instant::now())) {
@@ -2249,7 +2255,7 @@ mod watch_reload_tests {
             compiler.compile(&changes.changed_paths, false).unwrap();
             compiler.canonicalize_for_restart().unwrap();
             let lua = std::fs::read_to_string(&main).unwrap();
-            let output = rock_host::lua_runner::run_lua_code(&format!("{lua}\nprint(banner())")).unwrap();
+            let output = run_lua(&format!("{lua}\nprint(banner())")).unwrap();
             assert_eq!(output.stdout.trim(), text, "{}", output.combined());
         }
 
@@ -2270,7 +2276,7 @@ mod watch_reload_tests {
         compiler.compile(&changes.changed_paths, false).unwrap();
         compiler.canonicalize_for_restart().unwrap();
         let lua = std::fs::read_to_string(main).unwrap();
-        let output = rock_host::lua_runner::run_lua_code(&format!("{lua}\nprint(banner())")).unwrap();
+        let output = run_lua(&format!("{lua}\nprint(banner())")).unwrap();
         assert_eq!(output.stdout.trim(), "watch-refreshed", "{}", output.combined());
     }
 
@@ -2302,7 +2308,7 @@ mod watch_reload_tests {
         assert!(before == std::fs::read_to_string(&fixture.main).unwrap(), "body edit must preserve main.lua");
         let after = std::fs::read_to_string(fixture.main.with_file_name("incremental.lua")).expect("dependency body-edit overlay");
         let script = format!("HOT_RELOAD = false\n{before}\nassert(library_banner() == 7)\nHOT_RELOAD = true\n{after}\nHOT_RELOAD = false\nprint(library_banner())");
-        let output = rock_host::lua_runner::run_lua_code(&script).unwrap();
+        let output = run_lua(&script).unwrap();
         assert_eq!(output.stdout.trim(), "8", "{}", output.combined());
     }
 

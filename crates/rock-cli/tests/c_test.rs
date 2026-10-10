@@ -499,7 +499,7 @@ fn c_packages_beyond_the_pool_size_finish_under_one_compile_slot() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + test_utils::HANG_BACKSTOP;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() > deadline {
             child.kill().unwrap();

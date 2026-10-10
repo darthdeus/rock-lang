@@ -71,7 +71,7 @@ fn end_launcher_and_expect_child_gone(signal: libc::c_int) {
         libc::kill(helper.id() as i32, signal);
     }
     let _ = helper.wait();
-    let gone = wait_gone(child_pid, Duration::from_secs(5));
+    let gone = wait_gone(child_pid, test_utils::HANG_BACKSTOP);
     if !gone {
         unsafe {
             libc::kill(child_pid, libc::SIGKILL);

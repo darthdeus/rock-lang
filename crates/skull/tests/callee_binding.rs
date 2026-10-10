@@ -201,7 +201,7 @@ fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
         "{}\nlocal saved_top = saved()\nassert(top_int(3) == 33)\n{}\nassert(top_int(3) == 36)\nassert(saved_top(3) == 36)\nprint('PASS')\n",
         full.lua, overlay.lua,
     );
-    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
@@ -219,7 +219,7 @@ fn bound_overlay_cells_follow_session_activation() {
         "{}\nbump()\n{}\nbump()\nassert(COUNT == 3)\nlocal old = __rock_session_current()\nlocal fresh = __rock_session_new(old.__rock_schema_id)\n__rock_session_activate(fresh)\nCOUNT = 20\nbump()\nassert(COUNT == 22)\n__rock_session_activate(old)\nbump()\nassert(COUNT == 5)\nprint('PASS')\n",
         full.lua, overlay.lua,
     );
-    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
@@ -234,7 +234,7 @@ fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
     let ws2 = ws_with_stdlib(&v1.replace("{ n }", "{ if n == 0 { return 10 }\n top(n - 1) }"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
     let script = format!("{}\n{}\nassert(answer() == 10)\nprint('PASS')\n", full.lua, overlay.lua);
-    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded overlay");
+    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
@@ -287,7 +287,7 @@ print('PASS')
         full = skull_codegen_lua::lua_string(&full.lua),
         overlay = skull_codegen_lua::lua_string(&overlay.lua),
     );
-    let out = rock_host::lua_runner::run_lua_code(&script).expect("loaded bytecode overlays");
+    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded bytecode overlays");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }
