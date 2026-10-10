@@ -72,9 +72,8 @@ fn checked_visual_bank_schema() -> u64 {
         .expect("integer schema in checked visual bank")
 }
 
-fn production_sound_fixture_ogg() -> Vec<u8> {
-    std::fs::read(repo_root().join("mag/assets/sfx/doors/open_01.ogg"))
-        .expect("read production catalog sound fixture")
+fn sound_fixture_ogg() -> Vec<u8> {
+    include_bytes!("fixtures/tone.ogg").to_vec()
 }
 
 fn sound_dependency_keys(project: &Path) -> BTreeSet<String> {
@@ -142,7 +141,7 @@ fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
     )
     .unwrap();
     std::fs::create_dir_all(project.join("assets/sfx")).unwrap();
-    let fixture_ogg = production_sound_fixture_ogg();
+    let fixture_ogg = sound_fixture_ogg();
     std::fs::write(project.join("assets/sfx/fixture.ogg"), &fixture_ogg).unwrap();
 
     let output = Command::new(&sdk_rock)
@@ -899,7 +898,7 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
   }]
 }
 "#;
-    let fixture_ogg = production_sound_fixture_ogg();
+    let fixture_ogg = sound_fixture_ogg();
     write_sound_package_fixture(
         &project,
         sound_project,
@@ -920,7 +919,7 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
 
     let game_key = project.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
     let packaged_root = output.path().join("assets").join(&game_key);
-    let production_ogg = production_sound_fixture_ogg();
+    let production_ogg = sound_fixture_ogg();
     for key in sound_dependency_keys(&project) {
         assert_eq!(
             std::fs::read(packaged_root.join(&key)).unwrap(),
@@ -996,7 +995,7 @@ fn package_accepts_sound_dependencies_in_arbitrarily_named_asset_directories() {
 }}
 "#
     );
-    let fixture_ogg = production_sound_fixture_ogg();
+    let fixture_ogg = sound_fixture_ogg();
     let assets = keys.map(|key| (key, fixture_ogg.as_slice()));
     write_sound_package_fixture(&project, &sound_project, &assets);
 
@@ -1060,7 +1059,7 @@ fn packaged_sound_dependencies_survive_install_outside_source_tree() {
   "events": [{"id": "spell.fixture.cast", "steps": [{"layers": [{"sources": ["assets/sfx/installed.ogg"]}]}]}]
 }
 "#;
-    let fixture_ogg = production_sound_fixture_ogg();
+    let fixture_ogg = sound_fixture_ogg();
     write_sound_package_fixture(&project, sound_project, &[("assets/sfx/installed.ogg", &fixture_ogg)]);
     let accepted = Command::new(rock_bin())
         .current_dir(repo_root())
