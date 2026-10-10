@@ -1,5 +1,5 @@
 use bone_lints::{
-    lint_workspace, lint_workspace_with_census, Finding, LintOptions, HOST_RESOURCE_IN_GAME_MEMORY,
+    lint_workspace, Finding, LintOptions, HOST_RESOURCE_IN_GAME_MEMORY,
     HOST_RESOURCE_SUPPRESSION_CENSUS,
 };
 use bone_semantic::prelude::*;
@@ -49,42 +49,6 @@ fn a_handle_behind_a_struct_field_names_the_path() {
     let message = &found[0].error.message;
     assert!(message.contains("Slot.v"), "path must name the field: {message}");
     assert!(message.contains("[Slot]"), "path must name the container: {message}");
-}
-
-#[test]
-fn a_handle_reached_through_a_type_in_another_module_is_reported_in_the_consumer() {
-    let dependency = format!("{HANDLE}struct Slot {{ voice: Voice }}\n");
-    let consumer = "global LIVE: Slot? = null\nfn main() { print(\"{LIVE == null}\") }\n";
-    let dependency_file = Ustr::from("types/audio.rock");
-    let consumer_file = Ustr::from("game/main.rock");
-    let mut asts = [
-        skull_parser::parse_module_clean(&dependency, dependency_file).expect("parse dependency"),
-        skull_parser::parse_module_clean(consumer, consumer_file).expect("parse consumer"),
-    ];
-    let ws = semantic_pass(&mut asts).expect("clean multi-module program typechecks");
-    let warm = ws
-        .modules
-        .iter()
-        .filter(|module| module.file == dependency_file)
-        .map(|module| module.id)
-        .collect::<FxHashSet<_>>();
-    assert_eq!(warm.len(), 1, "the type declaration is a dependency module");
-    let mut sources = FxHashMap::default();
-    sources.insert(consumer_file, consumer);
-    let (found, census) = lint_workspace_with_census(
-        &ws,
-        &warm,
-        true,
-        &sources,
-        &LintOptions::default(),
-    );
-
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].lint, HOST_RESOURCE_IN_GAME_MEMORY);
-    assert_eq!(found[0].file(), consumer_file);
-    assert!(found[0].error.message.contains("Slot.voice"), "{}", found[0].error.message);
-    assert_eq!(census.type_dependent.requests, 1, "the per-module lint is inventoried");
-    assert_eq!(census.type_dependent.findings_derived, 1);
 }
 
 #[test]

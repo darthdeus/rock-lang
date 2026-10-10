@@ -315,7 +315,6 @@ pub struct LintCensus {
     pub unused_fn: LintFamilyCensus,
     pub backend_sibling: LintFamilyCensus,
     pub action_caller: LintFamilyCensus,
-    pub type_dependent: LintFamilyCensus,
 }
 
 impl LintCensus {
@@ -328,7 +327,6 @@ impl LintCensus {
             (&mut self.unused_fn, &other.unused_fn),
             (&mut self.backend_sibling, &other.backend_sibling),
             (&mut self.action_caller, &other.action_caller),
-            (&mut self.type_dependent, &other.type_dependent),
         ] {
             dst.requests += src.requests;
             dst.files_examined += src.files_examined;
@@ -1788,68 +1786,6 @@ impl IncrementalLintCache {
         }
     }
 
-    fn replace_type_dependent_findings(
-        &mut self,
-        ws: &Workspace,
-        warm: &FxHashSet<ModuleId>,
-        is_bin: bool,
-        sources: &FxHashMap<Ustr, &str>,
-        sel: &LintOptions,
-        stats: &mut LintCacheStats,
-    ) -> FxHashSet<Ustr> {
-        let Some(type_sel) = type_dependent_selection(sel) else {
-            return FxHashSet::default();
-        };
-        let started = self.timing_enabled.then(Instant::now);
-        let mut derived: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
-        for finding in lint_workspace_unsuppressed(ws, warm, is_bin, sources, &type_sel) {
-            if is_type_dependent_lint(finding.lint) {
-                derived.entry(finding.file()).or_default().push(finding);
-            }
-        }
-        stats.global_findings_derived += derived.values().map(Vec::len).sum::<usize>();
-
-        let mut files: FxHashSet<Ustr> = self
-            .global_raw
-            .iter()
-            .filter(|(_, findings)| findings.iter().any(|finding| is_type_dependent_lint(finding.lint)))
-            .map(|(&file, _)| file)
-            .collect();
-        files.extend(derived.keys().copied());
-        for &file in &files {
-            let mut raw = self.global_raw.remove(&file).unwrap_or_default();
-            raw.retain(|finding| !is_type_dependent_lint(finding.lint));
-            raw.extend(derived.remove(&file).unwrap_or_default());
-            if raw.is_empty() {
-                self.global.remove(&file);
-            } else {
-                if let Some(source) = sources.get(&file).copied() {
-                    let findings = filter_suppressed_findings_timed(raw.clone(), source, stats);
-                    if findings.is_empty() {
-                        self.global.remove(&file);
-                    } else {
-                        self.global.insert(file, findings);
-                    }
-                } else {
-                    self.global.remove(&file);
-                }
-                self.global_raw.insert(file, raw);
-            }
-        }
-        for &file in &files {
-            if let Some(findings) = self.global.get_mut(&file) {
-                sort_global_findings(findings);
-            }
-            if let Some(findings) = self.global_raw.get_mut(&file) {
-                sort_global_findings(findings);
-            }
-        }
-        if let Some(started) = started {
-            stats.global_lint_derivation_ns += started.elapsed().as_nanos();
-        }
-        files
-    }
-
     pub fn update(
         &mut self,
         ws: &Workspace,
@@ -2303,11 +2239,6 @@ impl IncrementalLintCache {
                 self.replace_sibling_findings(ws, sources, &invalidation, &mut stats);
             }
         }
-        if !change.changed_files.is_empty() {
-            dirty_output_files.extend(self.replace_type_dependent_findings(
-                ws, warm, is_bin, sources, sel, &mut stats,
-            ));
-        }
         if let Some(started) = global_findings_started {
             let suppression = stats
                 .suppression_filtering_ns
@@ -2585,36 +2516,7 @@ impl IncrementalLintCache {
 }
 
 fn is_global_lint(lint: &str) -> bool {
-    matches!(
-        lint,
-        UNUSED_FN
-            | BACKEND_SIBLING_MISMATCH
-            | ACTION_CALLERS
-            | METHOD_SYNTAX
-            | HOST_RESOURCE_IN_GAME_MEMORY
-            | HOST_RESOURCE_SUPPRESSION_CENSUS
-    )
-}
-
-fn is_type_dependent_lint(lint: &str) -> bool {
-    matches!(
-        lint,
-        METHOD_SYNTAX | HOST_RESOURCE_IN_GAME_MEMORY | HOST_RESOURCE_SUPPRESSION_CENSUS
-    )
-}
-
-fn type_dependent_selection(sel: &LintOptions) -> Option<LintOptions> {
-    let names = [METHOD_SYNTAX, HOST_RESOURCE_IN_GAME_MEMORY, HOST_RESOURCE_SUPPRESSION_CENSUS]
-        .into_iter()
-        .filter(|&lint| sel.enabled(lint))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if names.is_empty() {
-        return None;
-    }
-    let mut selected = sel.clone();
-    selected.only = Some(names);
-    Some(selected)
+    matches!(lint, UNUSED_FN | BACKEND_SIBLING_MISMATCH | ACTION_CALLERS)
 }
 
 fn cacheable_selection(sel: &LintOptions) -> bool {
@@ -2747,7 +2649,6 @@ enum CensusFamily {
     UnusedFn,
     BackendSibling,
     ActionCaller,
-    TypeDependent,
 }
 
 fn family_mut(census: &mut LintCensus, family: CensusFamily) -> &mut LintFamilyCensus {
@@ -2757,7 +2658,6 @@ fn family_mut(census: &mut LintCensus, family: CensusFamily) -> &mut LintFamilyC
         CensusFamily::UnusedFn => &mut census.unused_fn,
         CensusFamily::BackendSibling => &mut census.backend_sibling,
         CensusFamily::ActionCaller => &mut census.action_caller,
-        CensusFamily::TypeDependent => &mut census.type_dependent,
     }
 }
 
@@ -2843,19 +2743,12 @@ fn flat_findings_with(
         );
     }
     if sel.enabled(METHOD_SYNTAX) {
-        let started = std::time::Instant::now();
         let found = method_syntax_in_module(ws, module, types, src);
-        let found = filter_suppressed_census(found, src, census.as_deref_mut());
-        record_family(
-            census.as_deref_mut(),
-            CensusFamily::TypeDependent,
-            started.elapsed(),
-            1,
-            1,
-            module.bodies.len(),
-            found.len(),
+        out.extend(
+            filter_suppressed_census(found, src, census.as_deref_mut())
+                .iter()
+                .map(Finding::of),
         );
-        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(REDUNDANT_STATE_ANNOTATION) {
         let found = redundant_state_annotations_in_module(module);
@@ -2866,23 +2759,14 @@ fn flat_findings_with(
         );
     }
     if sel.enabled(HOST_RESOURCE_IN_GAME_MEMORY) {
-        let started = std::time::Instant::now();
         let found = host_resources_in_game_memory_in_module(ws, module);
-        let found = filter_suppressed_census(found, src, census.as_deref_mut());
-        record_family(
-            census.as_deref_mut(),
-            CensusFamily::TypeDependent,
-            started.elapsed(),
-            1,
-            1,
-            module.bodies.len(),
-            found.len(),
+        out.extend(
+            filter_suppressed_census(found, src, census.as_deref_mut())
+                .iter()
+                .map(Finding::of),
         );
-        out.extend(found.iter().map(Finding::of));
     }
     if sel.enabled(HOST_RESOURCE_SUPPRESSION_CENSUS) {
-        let started = std::time::Instant::now();
-        let findings_before = out.len();
         let lines: Vec<&str> = src.lines().collect();
         for found in host_resources_in_game_memory_in_module(ws, module) {
             let line = found.span.line_range.0;
@@ -2912,15 +2796,6 @@ fn flat_findings_with(
                 line,
             });
         }
-        record_family(
-            census.as_deref_mut(),
-            CensusFamily::TypeDependent,
-            started.elapsed(),
-            1,
-            1,
-            module.bodies.len(),
-            out.len() - findings_before,
-        );
     }
     if sel.enabled(RAW_INPUT_MIGRATION) {
         let found = raw_input_sites_in_module(module);
