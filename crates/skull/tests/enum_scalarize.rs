@@ -9,6 +9,44 @@
 //! (by-value pass). See `docs/skull-enum-value-types.md`.
 use crate::common::{emit_mir, emit_module, require_luajit};
 
+#[test]
+fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
+    use crate::common::{try_emit_module, ws_with_stdlib};
+    use bone_semantic::hir::VariantPayload;
+    use ustr::Ustr;
+
+    const SRC: &str = r#"
+enum Choice { A { left: int }, B { right: int } }
+enum Other { A { ghost: int } }
+fn read(choice: Choice) -> int {
+    return match choice {
+        Other::A { ghost } => ghost,
+        Choice::A { left } => left,
+        Choice::B { right } => right,
+    }
+}
+fn main() { print(read(Choice::A { left: 7 })) }
+"#;
+
+    let ws = ws_with_stdlib(SRC);
+    let enum_id = ws.enums_by_name[&Ustr::from("Choice")];
+    let choice = &ws.modules[enum_id.module.index()].enums[enum_id.def];
+    let variant = choice.variants.iter().find(|variant| variant.name == "A").unwrap();
+    let VariantPayload::Record(fields) = &variant.payload else {
+        panic!("Choice::A declaration must be a record variant");
+    };
+    assert!(
+        fields.iter().all(|field| field.name != Ustr::from("ghost")),
+        "the independent Choice::A declaration oracle unexpectedly contains ghost"
+    );
+
+    let emitted = try_emit_module(SRC);
+    assert!(
+        emitted.is_err(),
+        "lowering accepted Other::A::ghost against the widened Choice union; it must reject a field absent from Choice::A"
+    );
+}
+
 const SRC: &str = r#"
 enum BlendMode { Alpha, Additive, Multiply }
 value Cmd { z: int, blend: BlendMode }
