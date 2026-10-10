@@ -794,6 +794,22 @@ return
     );
 }
 
+#[test]
+fn nested_native_buffer_value_store_accepts_boxed_function_result() {
+    let src = "value Pair { x: int, y: int }\n\
+               value Outer { p: Pair, z: int }\n\
+               fn make_pair(n: int) -> Pair { Pair { x: n + 5, y: n * 3 } }\n\
+               fn replace_nested(b: NativeBuffer<Outer>, f: (int) -> Pair, n: int) {\n\
+                   b[0].p = f(n)\n\
+               }";
+    let dump = mir_std(src, "replace_nested");
+    assert_eq!(
+        dump.matches("store_index.NativeBufferLeaf").count(),
+        2,
+        "Pair's declared `x` and `y` leaves must both reach storage: {dump}"
+    );
+}
+
 // --- Phase 2.5 long tail: assignment targets ---
 
 #[test]

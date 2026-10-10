@@ -574,7 +574,7 @@ impl Builder<'_> {
         let leaves = if hit.len() == 1 && hit[0].address().path.as_str() == path {
             vec![self.lower_expr(value)?]
         } else {
-            let _sub = match self.value_aggregate_of(value) {
+            let sub = match self.value_aggregate_of(value) {
                 Some(n) => self.nominal_rep_shape(n, false)?,
                 None => None,
             }
@@ -584,7 +584,7 @@ impl Builder<'_> {
                 ))
             })?;
             let repr = self.lower_expr_repr(value)?;
-            self.repr_to_leaves_bundle(&repr)?
+            self.repr_to_storage_leaves(&repr, &sub, "nested native buffer field store")?
         };
         if leaves.len() != hit.len() {
             return Err(gap(format!(
