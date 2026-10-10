@@ -27,6 +27,39 @@ fn scratch(tag: &str) -> tempfile::TempDir {
 }
 
 #[test]
+fn test_child_from_temp_fixture_uses_the_worktree_root_without_ambient_root() {
+    let fixture = scratch("rock_root");
+    let project = fixture.path().join("project");
+    write(
+        &project.join("stick.toml"),
+        "[package]\nname = \"rock-root-fixture\"\ntype = \"lib\"\n\
+         [language]\nmodules = \"v1\"\nglobals = \"none\"\n\
+         [build.vars]\nGIT_SHA = \"test\"\n",
+    );
+    let expected = repo_root().to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    write(
+        &project.join("tests/rock_root.rock"),
+        &format!(
+            "@test\nfn child_uses_worktree_root() {{\n    assert_eq(env_var(\"ROCK_DIR\").unwrap(), \"{expected}\")\n}}\n"
+        ),
+    );
+
+    // This runs with an external CARGO_TARGET_DIR in the regression job. The
+    // executable path and fixture CWD then cannot identify the worktree.
+    let out = Command::new(rock_bin())
+        .current_dir(fixture.path())
+        .env_remove("ROCK_DIR")
+        .env("ROCK_TEST_VERBOSE", "1")
+        .args(["test"])
+        .arg(project.join("tests"))
+        .output()
+        .expect("run temp-fixture package test");
+    let output = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "temp-fixture package test failed:\n{output}");
+    assert!(output.contains("1/1 @tests passed"), "package test did not report its assertion:\n{output}");
+}
+
+#[test]
 fn scratch_invocations_do_not_replace_each_others_graph() {
     let first_fixture = scratch("concurrent_graph");
     let first = first_fixture.path();
