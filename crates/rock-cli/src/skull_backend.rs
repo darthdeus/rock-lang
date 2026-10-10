@@ -2989,19 +2989,185 @@ fn build_state_nobox_accessors(
 /// pair via `Command::env` (later wins). Same shape that drives the emitted
 /// `register_sim` registry, so the wire set the runner sees matches what the
 /// game can dispatch.
+/// The headless window sims that never read pixels boot in. 640x360 is 16:9
+/// like the 1920x1080 game default at a ninth of the pixels, so aspect-locked
+/// logic (camera framing, `gameplay_visible_world_width(1920/1080)`) is
+/// unaffected while scene render targets shrink roughly ninefold.
+pub const SIM_SMALL_WINDOW: &str = "640x360";
+
+/// Declared names of the engine's pixel readers: captures, canvas and window
+/// readback, frame streams and the analysis-capture bridge, plus the FFI roots
+/// sims may call directly and `sim_submit_guard`, which every guarded reader
+/// funnels through. Each name is unique workspace-wide (D-form methods desugar
+/// to bare names, so no method is listed: a sim reading probe bytes created
+/// its probe through `window_probe_new` in the same entry). A sim whose
+/// transitive callees name one of these keeps the game's window; anything else
+/// boots in [`SIM_SMALL_WINDOW`] unless it declares its own `STONE_WINDOW`.
+pub static SIM_PIXEL_ROOTS: &[&str] = &[
+    "take_screenshot",
+    "window_probe_new",
+    "read_canvas_pixel",
+    "canvas_read_pixels",
+    "canvas_read_region",
+    "canvas_read_rgba8",
+    "canvas_read_region_i32",
+    "frame_stream_begin",
+    "frame_stream_record",
+    "sim_submit_guard",
+    "stone_read_window_rect",
+    "stone_save_screenshot",
+    "stone_save_screenshot_sized",
+    "stone_read_canvas_pixel",
+    "stone_read_canvas_pixel_channel",
+    "analysis_capture_arm",
+    "analysis_capture_poll",
+    "analysis_scene_sources",
+    "analysis_packet_assemble",
+    "analysis_map_ids_to_output",
+    "analysis_capture_gpu_bytes",
+    "analysis_capture_scene_boundary",
+    "analysis_capture_full_boundary",
+];
+
+/// Callee edges of one body: resolved calls and protocol dispatch from its
+/// inference, plus function-valued references from a body scan (a named fn
+/// passed as a value lowers to `Expr::Global`, never a call). Mirrors
+/// `bone_lints`' edge walk; bodies without inference (extern decls, opaque
+/// bodies) are leaves, matched by name at their callers instead.
+fn sim_callee_edges(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
+    name_map: &std::collections::HashMap<
+        ustr::Ustr,
+        Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
+    >,
+) -> Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)> {
+    use bone_core::hir::{BodyOwner, Callee, Expr};
+    let owner = BodyOwner::Function(fid);
+    let mut out = Vec::new();
+    if let Some(bi) = ws.inference(mid).and_then(|inf| inf.per_fn.get(&owner)) {
+        out.extend(bi.resolved_overload_calls.values().copied());
+        out.extend(bi.implicit_iter_args.values().map(|w| w.func));
+        for info in bi.for_iter_protocol.values() {
+            if let Some(w) = &info.iter {
+                out.push(w.func);
+            }
+            sim_collect_bound_next(&info.next, &mut out);
+        }
+        for tree in bi.bound_call_trees.values() {
+            for bn in tree.next.values() {
+                sim_collect_bound_next(bn, &mut out);
+            }
+        }
+    }
+    if let Some(body) = ws.module(mid).bodies.get(&owner) {
+        for (_, expr) in body.expr_arena.iter() {
+            let name = match expr {
+                Expr::Global(n) | Expr::SiblingRef(n) => Some(n),
+                Expr::Call { callee: Callee::Unresolved { name, .. }, .. } => Some(name),
+                _ => None,
+            };
+            if let Some(fns) = name.map(|n| name_map.get(n)).flatten() {
+                out.extend(fns.iter().copied());
+            }
+        }
+    }
+    out
+}
+
+fn sim_collect_bound_next(
+    bn: &bone_core::workspace::BoundNext,
+    out: &mut Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
+) {
+    if let bone_core::workspace::BoundNext::Concrete { func, sub, .. } = bn {
+        out.push(*func);
+        for bn in sub.next.values() {
+            sim_collect_bound_next(bn, out);
+        }
+    }
+}
+
+/// True when the sim at `(mid, fid)` can read pixels: one of
+/// [`SIM_PIXEL_ROOTS`] is among its transitive callees (memoized across sims,
+/// so one compile walks the shared call graph once). A new sim that captures
+/// is classified by its own calls, never by a name list.
+fn sim_reads_pixels(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
+    memo: &mut std::collections::HashMap<
+        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
+        bool,
+    >,
+    visiting: &mut std::collections::HashSet<
+        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
+    >,
+    name_map: &std::collections::HashMap<
+        ustr::Ustr,
+        Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
+    >,
+) -> bool {
+    if let Some(&known) = memo.get(&(mid, fid)) {
+        return known;
+    }
+    if !visiting.insert((mid, fid)) {
+        return false;
+    }
+    let callee = &ws.module(mid).functions[fid];
+    let mut reads = SIM_PIXEL_ROOTS
+        .iter()
+        .any(|root| *root == skull_mir::mangle::declared_name(callee.name.as_str()));
+    if !reads {
+        for (callee_mid, callee_fid) in sim_callee_edges(ws, mid, fid, name_map) {
+            if sim_reads_pixels(ws, callee_mid, callee_fid, memo, visiting, name_map) {
+                reads = true;
+                break;
+            }
+        }
+    }
+    visiting.remove(&(mid, fid));
+    memo.insert((mid, fid), reads);
+    reads
+}
+
 fn collect_skull_sims(
     ws: &bone_semantic::inference::Workspace,
 ) -> Vec<(String, String, Vec<(String, String)>)> {
+    use bone_core::prelude::ModuleId;
     use bone_semantic::hir::AnnoValue;
 
     // The `@sim` walk + wire derivation is shared with skull's emitted registry
     // (`skull::mir_emit::collect_sim_fns`) so the runner's wire names match what
-    // the game registered. Here we additionally read each sim's `@sim_env`
+    // the game registered: same module filter, same `sim_wire_name`. It is
+    // spelled out here rather than reused so the walk also keeps each sim's
+    // `(ModuleId, Idx<Function>)`, which the small-window rule needs to read
+    // the sim's resolved calls. Here we additionally read each sim's `@sim_env`
     // pairs (a runner-only concern): `@sim_render` sugar first so an explicit
     // `@sim_env` can override.
-    skull::mir_emit::collect_sim_fns(ws)
-        .into_iter()
-        .map(|(file, f, wire)| {
+    let mut name_map: std::collections::HashMap<
+        ustr::Ustr,
+        Vec<(ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
+    > = std::collections::HashMap::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            name_map.entry(f.name).or_default().push((module.id, fid));
+        }
+    }
+    let mut pixel_memo = std::collections::HashMap::new();
+    let mut visiting = std::collections::HashSet::new();
+    let mut sims = Vec::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            let Some(wire) = skull_mir::lifecycle::sim_wire_name(f) else {
+                continue;
+            };
             let mut env_pairs = Vec::new();
             if f.annotations.iter().any(|a| a.is_builtin("sim_render")) {
                 env_pairs.push(("SIM_SKIP_RENDER".to_string(), "0".to_string()));
@@ -3018,9 +3184,23 @@ fn collect_skull_sims(
                 };
                 env_pairs.push((k.to_string(), v.to_string()));
             }
-            (wire, file.as_str().to_string(), env_pairs)
-        })
-        .collect()
+            // The small-window default goes first so any explicit `@sim_env`
+            // wins under last-wins, including an explicit empty (the game's
+            // own size). `STONE_WINDOW` already travels per entry, so a shared
+            // worker resizes for each entry like an explicit size today.
+            let explicit_window = env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW");
+            if !explicit_window
+                && !sim_reads_pixels(ws, module.id, fid, &mut pixel_memo, &mut visiting, &name_map)
+            {
+                env_pairs.insert(
+                    0,
+                    ("STONE_WINDOW".to_string(), SIM_SMALL_WINDOW.to_string()),
+                );
+            }
+            sims.push((wire.as_str().to_string(), module.file.as_str().to_string(), env_pairs));
+        }
+    }
+    sims
 }
 
 fn relative_sim_source_path(
@@ -3250,6 +3430,106 @@ mod sim_source_path_tests {
             std::fs::write(source_root.join(".git"), format!("gitdir: {gitdir}\n"))
                 .expect("write worktree git file");
             assert_eq!(source_root_for_sim_project(&project).unwrap(), source_root.canonicalize().unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod sim_small_window_tests {
+    use super::skull_compile_game_and_collect_sims;
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    fn fixture_env_by_wire() -> HashMap<String, Vec<(String, String)>> {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data/sim-small-window");
+        let out = tempfile::tempdir().expect("small-window output dir");
+        let main = out.path().join("main.lua");
+        let (_wires, env_by_wire, _sources, _stone) =
+            skull_compile_game_and_collect_sims(fixture.to_str().unwrap(), &main)
+                .expect("the small-window fixture must compile");
+        env_by_wire
+    }
+
+    fn env_by_wire() -> &'static HashMap<String, Vec<(String, String)>> {
+        static CACHE: OnceLock<HashMap<String, Vec<(String, String)>>> = OnceLock::new();
+        CACHE.get_or_init(fixture_env_by_wire)
+    }
+
+    /// The env of the sim declared as `short`: the collect key is the wire
+    /// name, which under modules v1 is the sim's DefKey.
+    fn env_for<'a>(
+        env_by_wire: &'a HashMap<String, Vec<(String, String)>>,
+        short: &str,
+    ) -> &'a Vec<(String, String)> {
+        let mut found = None;
+        for (wire, env) in env_by_wire {
+            let declared = wire.rsplit("::").next().unwrap_or(wire.as_str());
+            if declared == short {
+                assert!(found.is_none(), "two sims share the short name `{short}`");
+                found = Some(env);
+            }
+        }
+        found.unwrap_or_else(|| {
+            panic!(
+                "no sim named `{short}`; wires: {:?}",
+                env_by_wire.keys().collect::<Vec<_>>()
+            )
+        })
+    }
+
+    /// Effective STONE_WINDOW: last declaration wins, like the runner.
+    fn stone_window(env: &[(String, String)]) -> Option<&str> {
+        env.iter().rev().find(|(k, _)| k == "STONE_WINDOW").map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn sims_that_read_no_pixels_get_the_small_window() {
+        assert_eq!(
+            stone_window(env_for(env_by_wire(), "small_window_plain_sim")),
+            Some("640x360"),
+            "a sim that calls no pixel helper boots in the small window"
+        );
+    }
+
+    #[test]
+    fn sims_that_capture_keep_the_game_default() {
+        for short in ["small_window_pixel_reader", "small_window_indirect_reader"] {
+            assert_eq!(
+                stone_window(env_for(env_by_wire(), short)),
+                None,
+                "`{short}` reads pixels, so the harness must not override its window"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_window_size_wins_over_the_small_default() {
+        assert_eq!(
+            stone_window(env_for(env_by_wire(), "small_window_explicit_size")),
+            Some("800x600"),
+            "an explicit @sim_env STONE_WINDOW wins"
+        );
+    }
+
+    #[test]
+    fn every_pixel_root_name_resolves_in_a_stone_workspace() {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data/sim-small-window");
+        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), true)
+            .expect("the small-window fixture must compile");
+        let mut names = std::collections::HashSet::new();
+        for module in project.workspace().modules.iter() {
+            for (_fid, f) in module.functions.iter() {
+                let declared = f.name.as_str().rsplit("::").next().unwrap_or(f.name.as_str());
+                names.insert(declared.to_string());
+            }
+        }
+        for root in super::SIM_PIXEL_ROOTS {
+            assert!(
+                names.contains(*root),
+                "pixel root `{root}` resolves to no function; the set drifted from the engine"
+            );
         }
     }
 }

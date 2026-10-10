@@ -1,0 +1,34 @@
+// Fixture for the small-window rule: the harness gives sims that never read
+// pixels a small window, while sims that capture keep the game's default and
+// an explicit `@sim_env("STONE_WINDOW", ...)` always wins. Compile-only: the
+// test asserts the collected env, it never runs these sims.
+fn small_window_capture_helper() {
+    take_screenshot("tmp/sim-small-window-helper.png")
+}
+
+@sim
+co fn small_window_plain_sim() -> Coroutine<Wait> {
+    sim_expect(true, "a sim that reads no pixels runs")
+    stop_sim()
+}
+
+@sim
+co fn small_window_pixel_reader() -> Coroutine<Wait> {
+    take_screenshot("tmp/sim-small-window-direct.png")
+    sim_expect(true, "a sim that captures keeps its window")
+    stop_sim()
+}
+
+@sim
+co fn small_window_indirect_reader() -> Coroutine<Wait> {
+    small_window_capture_helper()
+    sim_expect(true, "a sim that captures through a helper keeps its window")
+    stop_sim()
+}
+
+@sim_env("STONE_WINDOW", "800x600")
+@sim
+co fn small_window_explicit_size() -> Coroutine<Wait> {
+    sim_expect(true, "an explicit size wins over the small default")
+    stop_sim()
+}

@@ -1,0 +1,18 @@
+[package]
+name = "sim-small-window"
+version = "0.1.0"
+type = "bin"
+
+[language]
+modules = "v1"
+
+[dependencies]
+stone = { path = "../../../../stone" }
+stone-core = { path = "../../../../stone-core" }
+
+[build.vars]
+GIT_SHA = "sim-small-window"
+BUILD_UNIX = "0"
+BUILD_DATE = "test"
+CHANNEL = { builtin = "channel" }
+PLATFORM = { builtin = "platform" }
