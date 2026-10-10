@@ -1352,8 +1352,7 @@ fn run_emitted_tests(
     let (tests, files) = (selected_tests.as_slice(), selected_files.as_slice());
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
-    // Shards are separate processes over one program file; test `i` goes to
-    // shard `i % shards`, which balances counts and spreads files' slow tests.
+    // A stable key keeps existing tests in place when declarations are inserted.
     let token = run_token();
     let shards = resolve_test_shards(shards, tests.len(), lua.len(),
         std::env::var_os("ROCK_TEST_SHARDS").is_some());
@@ -1367,9 +1366,13 @@ fn run_emitted_tests(
     if release_memory {
         crate::allocator::release_freed_memory();
     }
-    let shards = shards.clamp(1, tests.len());
-    let assignment: Vec<Vec<usize>> =
-        (0..shards).map(|shard| (shard..tests.len()).step_by(shards).collect()).collect();
+    let requested_shards = shards.clamp(1, tests.len());
+    let mut assignment: Vec<Vec<usize>> = (0..requested_shards).map(|_| Vec::new()).collect();
+    for (index, test) in tests.iter().enumerate() {
+        assignment[stable_test_shard(&test.name, requested_shards)].push(index);
+    }
+    assignment.retain(|indices| !indices.is_empty());
+    let shards = assignment.len();
     let runs: Vec<Result<crate::common::ProcessResult>> = std::thread::scope(|scope| {
         let handles: Vec<_> = assignment.iter().map(|indices| {
             let selection = (shards > 1).then(|| {
@@ -1829,6 +1832,13 @@ fn test_shard_count_from(value: Option<&str>, cores: usize) -> Result<usize> {
         },
         None => Ok(cores.clamp(1, 2)),
     }
+}
+
+fn stable_test_shard(name: &str, shards: usize) -> usize {
+    let hash = name.as_bytes().iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    (hash % shards as u64) as usize
 }
 
 fn resolve_test_shards(shards: usize, tests: usize, program_bytes: usize, overridden: bool) -> usize {
@@ -2693,23 +2703,15 @@ fn build_rock_state_metadata(
     let package_map = crate::unified_compile::build_package_map(spec);
     let mut metadata: BTreeMap<String, String> = BTreeMap::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        let module_path = m.file.as_str();
-        // Longest-prefix match so nested packages resolve to the deepest one.
-        let mut matched: Option<&str> = None;
-        let mut best_len = 0usize;
-        for (pkg_name, pkg_path) in &package_map {
-            let pkg_str = pkg_path.to_string_lossy();
-            if module_path.starts_with(pkg_str.as_ref()) && pkg_str.len() > best_len {
-                best_len = pkg_str.len();
-                matched = Some(pkg_name);
-            }
-        }
+        let package = package_map.as_ref().and_then(|(graph, names)| {
+            let owner = graph.package_of_file(std::path::Path::new(m.file.as_str()))?;
+            names.get(&owner).cloned()
+        });
         for (_gid, g) in m.globals.iter() {
             let identity = skull_mir::state_schema::global_identity(m.file, g.name);
-            let package = matched.map(str::to_string);
             let description = skull::type_desc_lua(ws, g.ty);
             let fields = [
-                package.map(|p| format!("package={p:?}")),
+                package.clone().map(|p| format!("package={p:?}")),
                 description.map(|d| format!("description={d}")),
             ]
             .into_iter()

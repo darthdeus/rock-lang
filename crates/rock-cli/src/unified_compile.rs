@@ -97,25 +97,25 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
     }
 }
 
-/// Build the package map (package_name, absolute_path) used by StateSchema
-/// metadata grouping, from the one package graph. The root package comes
-/// first, then each dependency in graph load order; transitive packages the
-/// root does not name directly are appended under their own names.
+/// Build the package graph and its legacy StateSchema labels. Module ownership
+/// is resolved by the graph; labels preserve the pre-graph metadata spelling.
 ///
 /// The names intentionally preserve the strings the pre-graph loader
 /// emitted: the root's manifest name lowercased and dependency keys as
 /// written, because these strings are embedded in emitted StateSchema
 /// metadata and legacy artifacts must stay byte-identical through M4 (the
 /// v1 package identity replaces them; see docs/unfuck-backlog.md).
-/// Returns an empty Vec if there is no stick.toml or no dependencies.
-pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
+/// Returns `None` when the source has no stick.toml package graph.
+pub fn build_package_map(
+    source_spec: &SourceSpec,
+) -> Option<(PackageGraph, std::collections::HashMap<PackageId, String>)> {
     let project_dir = match source_spec {
         SourceSpec::Directory(dir) => dir.clone(),
         SourceSpec::Files(files) => {
             if let Some(f) = files.first() {
                 f.parent().unwrap_or(f).to_path_buf()
             } else {
-                return Vec::new();
+                return None;
             }
         }
     };
@@ -127,14 +127,14 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
     // earlier and already propagated any real failures.
     let (config_path, _stick_config) = match StickConfig::find_from_dir(&project_dir) {
         Ok(Some(pair)) => pair,
-        Ok(None) => return Vec::new(),
+        Ok(None) => return None,
         Err(e) => {
             log::warn!(target: "COMPILE",
                 "build_package_map: stick.toml lookup failed: {}. \
                  StateSchema package metadata will be incomplete.",
                 e
             );
-            return Vec::new();
+            return None;
         }
     };
 
@@ -147,13 +147,15 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
                  StateSchema package metadata will be incomplete.",
                 e
             );
-            return Vec::new();
+            return None;
         }
     };
 
     let root_node = graph.package(graph.root());
     // Legacy metadata spelled the root's name lowercased; see doc comment.
-    let mut map = vec![(root_node.manifest_name.to_lowercase(), root_node.root.clone())];
+    let mut map = std::collections::HashMap::from([(
+        graph.root(), root_node.manifest_name.to_lowercase(),
+    )]);
 
     let mut mapped: Vec<PackageId> = Vec::new();
     for edge in &root_node.dependencies {
@@ -162,7 +164,7 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
         }
         mapped.push(edge.target);
         // Dependency keys as written, pre-graph spelling (see doc comment).
-        map.push((edge.declared_key.clone(), graph.package(edge.target).root.clone()));
+        map.insert(edge.target, edge.declared_key.clone());
     }
     // Transitive packages have no root-edge name; name them by their own
     // manifest name so their globals still group instead of reading as
@@ -173,8 +175,8 @@ pub fn build_package_map(source_spec: &SourceSpec) -> Vec<(String, PathBuf)> {
         }
         mapped.push(*id);
         let node = graph.package(*id);
-        map.push((node.manifest_name.to_lowercase(), node.root.clone()));
+        map.insert(*id, node.manifest_name.to_lowercase());
     }
 
-    map
+    Some((graph, map))
 }
