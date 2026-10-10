@@ -50,16 +50,21 @@ pub fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
 }
 
 /// Max over 32x32-pixel blocks of the per-block mean absolute channel
-/// delta, normalized to [0, 1]. 0.0 = bit-identical, 1.0 = max possible
-/// delta in some block. A whole-frame mean let a sprite-sized defect hide
-/// behind an unchanged background while the tolerance stayed fixed, so the
-/// oracle is the worst region, not the average pixel: a half-tile shift of
-/// one tile fails the default `image_snapshot` tol where the mean passed.
+/// delta, normalized to [0, 1]. 0.0 = no above-floor difference (frames may
+/// still differ by 1 LSB per channel), 1.0 = max possible delta in some
+/// block. A whole-frame mean let a sprite-sized defect hide behind an
+/// unchanged background while the tolerance stayed fixed, so the oracle is
+/// the worst region, not the average pixel: a half-tile shift of one tile
+/// fails the default `image_snapshot` tol where the mean passed.
 /// Partial edge blocks average over their own pixels; no pixel is excluded.
-/// Per-channel deltas of 1 or less count as zero: that is the RGBA8
-/// quantization floor (rounding vs truncation across GL implementations),
-/// invisible by construction, and committed cross-machine goldens otherwise
-/// fail on it. Deltas above the floor keep their full magnitude.
+/// Per-channel deltas of 1 or less count as zero: a one-LSB noise budget,
+/// not a proven cause. Cross-machine reruns of committed goldens differ by
+/// exactly 1 in a small fraction of channels (match3 boot: 8.6% at 1, 29
+/// samples at 2; spark boot: 0.3% at 1, none above), consistent with
+/// rounding-vs-truncation across GL implementations, but one LSB can also
+/// be a real change and this contract intentionally permits it. Deltas
+/// above the floor keep their full magnitude. Writer recommendation for the
+/// still-open AUTHOR DECISION `SNAPSHOT_DIFF_ORACLE`; see the backlog entry.
 pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
     let (bw, bh, b) = decode_png_rgba8(baseline)?;
     let (aw, ah, a) = decode_png_rgba8(actual)?;
@@ -256,8 +261,8 @@ mod tests {
     /// visible to a region) instead of trusting the oracle under test.
     /// Only `window` (x0, y0, size) differs between `base` and `shifted`.
     /// The mean counts every LSB (that is the old oracle's quantity); the block
-    /// scan zeroes per-channel deltas of 1 or less (the new oracle's rounding
-    /// floor), so the fixture proves a VISIBLE regional signal, not ±1 noise.
+    /// scan zeroes per-channel deltas of 1 or less (the new oracle's one-LSB
+    /// deadband), so the fixture proves a VISIBLE regional signal, not ±1 noise.
     fn independent_means(
         base: &[u8],
         shifted: &[u8],
