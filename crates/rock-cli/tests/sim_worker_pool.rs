@@ -690,6 +690,8 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     const RELOAD: &str = "testbed::reload_probe";
     let dir = tempfile::tempdir().expect("trace tempdir");
     let trace_path = dir.path().join("lifecycle.log");
+    let barrier_dir = dir.path().join("reload-lane-barrier");
+    std::fs::create_dir(&barrier_dir).expect("reload lane barrier dir");
     let mut args = vec!["sim", "testbed", RELOAD];
     args.extend_from_slice(&EIGHT);
     args.extend_from_slice(&["--workers", "-j", "2"]);
@@ -698,6 +700,7 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
         .env("ROCK_SIM_LIFECYCLE_LOG", &trace_path)
+        .env("ROCK_SIM_RELOAD_LANE_TEST_BARRIER", &barrier_dir)
         .env("ROCK_SKULL_CALLEE_BINDING", "upvalue")
         .env_remove("SIM_SKIP_RENDER");
     // Room for both lanes whatever the host's card is doing.
@@ -717,32 +720,29 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     );
 
     let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
-    let mut live: HashSet<&str> = HashSet::new();
-    let mut reload_live = false;
     let mut saw_reload = false;
-    let mut overlapped = false;
+    let mut runner_events = Vec::new();
     for line in trace.lines() {
         let (event, name) = line.split_once('\t').expect("lifecycle event");
         match (event, name == RELOAD) {
             ("proc_start" | "proc_end", _) => {}
+            ("reload_lane_dispatched" | "pool_finished", _) => {
+                runner_events.push(event);
+            }
             ("start", true) => {
-                overlapped |= !live.is_empty();
                 saw_reload = true;
-                reload_live = true;
             }
-            ("start", false) => {
-                overlapped |= reload_live;
-                live.insert(name);
-            }
-            ("end", true) => reload_live = false,
-            ("end", false) => {
-                live.remove(name);
-            }
+            ("start", false) => {}
+            ("end", _) => {}
             _ => unreachable!(),
         }
     }
     assert!(saw_reload, "the reload child never ran\n{trace}");
-    assert!(overlapped, "the reload lane waited for the pool to drain\n{trace}");
+    assert_eq!(
+        runner_events,
+        ["reload_lane_dispatched", "pool_finished"],
+        "the runner must dispatch the reload lane before the pool can finish; the test barrier holds the pool until dispatch\n{trace}"
+    );
 }
 
 /// Result PLACEMENT survives the pool. Naming one sim twice is two entries with

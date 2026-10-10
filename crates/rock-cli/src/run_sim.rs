@@ -2151,8 +2151,27 @@ where
         return (pool(&PoolWidth::fixed(jobs)), lane());
     }
     let width = PoolWidth::starting_at(jobs, jobs.saturating_sub(1));
+    // The test gate holds the pool until lane dispatch, so a drain barrier deadlocks there.
+    let test_barrier = std::env::var_os("ROCK_SIM_RELOAD_LANE_TEST_BARRIER")
+        .map(PathBuf::from);
     std::thread::scope(|scope| {
-        let pool = scope.spawn(|| pool(&width));
+        let pool = scope.spawn(|| {
+            if let Some(dir) = &test_barrier {
+                while !dir.join("lane_dispatched").exists() {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            let result = pool(&width);
+            if test_barrier.is_some() {
+                record_sim_lifecycle("pool_finished", "");
+            }
+            result
+        });
+        if let Some(dir) = &test_barrier {
+            record_sim_lifecycle("reload_lane_dispatched", "");
+            std::fs::write(dir.join("lane_dispatched"), b"")
+                .expect("write reload lane test barrier");
+        }
         let lane = lane();
         width.widen_to_jobs();
         let pool = pool.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
