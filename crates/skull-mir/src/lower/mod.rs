@@ -3366,8 +3366,12 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
         if !f.is_extern {
             continue;
         }
-        let tys = f.param_decls.iter().map(|p| p.ty).chain(f.return_ty);
-        for ty in tys {
+        let tys = f
+            .param_decls
+            .iter()
+            .map(|p| (p.ty, false))
+            .chain(f.return_ty.map(|ty| (ty, true)));
+        for (ty, is_return) in tys {
             if matches!(static_ty(ws, ty), Some(TypeExpr::App { ctor: TypeCtor::Nominal(_), .. })) {
                 let normalized = crate::monoty::convert_decl(
                     ws,
@@ -3387,8 +3391,13 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
                     }
                     Ok(None) => {}
                     Err(reason) => {
+                        let context = if is_return {
+                            format!("extern `{}` returns {reason}", f.name)
+                        } else {
+                            format!("extern `{}` has a parameter type {reason}", f.name)
+                        };
                         return Some((format!(
-                            "extern type could not be normalized through newtypes: {reason}"
+                            "{context}, which has no C representation. Declare a concrete type."
                         ), f.name_span));
                     }
                 }

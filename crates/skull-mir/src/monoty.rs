@@ -422,17 +422,30 @@ pub enum NewtypeResolutionError {
 impl std::fmt::Display for NewtypeResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Conversion(reason) => write!(f, "type conversion failed ({})", reason.bucket()),
-            Self::Cycle(name) => write!(f, "newtype `{name}` represents itself"),
-            Self::MissingDefinition(name) => write!(f, "newtype `{name}` has no definition"),
+            Self::Conversion(MonoTyReason::UnboundGeneric(name)) => {
+                write!(f, "the unbound generic parameter `{name}`")
+            }
+            Self::Conversion(MonoTyReason::DepthLimit) => {
+                f.write_str("a type that does not bottom out")
+            }
+            Self::Conversion(MonoTyReason::RecoveryError) => {
+                f.write_str("a type inference could not recover")
+            }
+            Self::Conversion(reason) => {
+                write!(f, "a type the compiler cannot normalize ({})", reason.bucket())
+            }
+            Self::Cycle(_) => f.write_str("a newtype whose representation contains itself"),
+            Self::MissingDefinition(name) => {
+                write!(f, "a newtype `{name}` whose definition is missing")
+            }
             Self::ArityMismatch { name, actual, expected } => write!(
                 f,
-                "newtype `{name}` has {actual} argument(s), but its definition takes {expected}"
+                "`{name}` applied to {actual} argument(s) where its declaration takes {expected}"
             ),
             Self::InvalidGeneric(name) => {
-                write!(f, "newtype `{name}` declares a non-generic parameter")
+                write!(f, "`{name}` declares a parameter that is not a generic")
             }
-            Self::StepLimit => f.write_str("newtype chain exceeds the normalization limit"),
+            Self::StepLimit => f.write_str("an alias chain that does not bottom out"),
         }
     }
 }
