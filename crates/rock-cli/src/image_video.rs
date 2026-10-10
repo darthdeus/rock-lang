@@ -193,3 +193,156 @@ pub fn ffmpeg_ssim(a: &str, b: &str) -> Result<f64> {
     }
     bail!("ffmpeg ssim: no `All:` score in output:\n{}", stderr);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Match3 production tile geometry: `TILE_SIZE` in games/match3/main.rock.
+    /// The trap shifts one tile-sized window of real board pixels by half a tile.
+    const TILE_PX: u32 = 64;
+    const HALF_TILE_PX: u32 = 32;
+    /// Production default `image_snapshot` tolerance: the one-argument macro in
+    /// stone/engine/sim.rock passes 0.001.
+    const DEFAULT_TOL: f64 = 0.001;
+    /// Oracle block pitch: half a match3 tile, so a sprite-sized defect always
+    /// covers a large fraction of some block instead of diluting across the frame.
+    const BLOCK_PX: u32 = 32;
+
+    fn match3_boot_golden() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../games/match3/tests/sims/smoke.snap/boot.png")
+    }
+
+    fn write_rgba_png(path: &Path, w: u32, h: u32, px: &[u8]) {
+        let file = std::fs::File::create(path).expect("create test png");
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .expect("png header")
+            .write_image_data(px)
+            .expect("png pixels");
+    }
+
+    /// The test's own loops over raw pixels: whole-frame mean absolute channel
+    /// delta plus the max over origin-aligned 32px blocks. Independent of
+    /// `image_diff`; pins the fixture to the stated trap (hidden from the mean,
+    /// visible to a region) instead of trusting the oracle under test.
+    /// Only `window` (x0, y0, size) differs between `base` and `shifted`.
+    fn independent_means(
+        base: &[u8],
+        shifted: &[u8],
+        w: u32,
+        x0: u32,
+        y0: u32,
+        size: u32,
+    ) -> (f64, f64) {
+        let h = (base.len() / 4 / w as usize) as u32;
+        let mut frame_total: u64 = 0;
+        let mut blocks = std::collections::HashMap::new();
+        for dy in 0..size {
+            for dx in 0..size {
+                let x = x0 + dx;
+                let y = y0 + dy;
+                let o = ((y * w + x) * 4) as usize;
+                let mut px_total: u64 = 0;
+                for c in 0..4 {
+                    px_total += (base[o + c] as i32 - shifted[o + c] as i32).unsigned_abs() as u64;
+                }
+                frame_total += px_total;
+                *blocks.entry((x / BLOCK_PX, y / BLOCK_PX)).or_insert(0u64) += px_total;
+            }
+        }
+        let frame_mean = frame_total as f64 / (w as u64 * h as u64 * 4 * 255) as f64;
+        let mut block_max: f64 = 0.0;
+        for ((bx, by), total) in blocks {
+            let bw = (BLOCK_PX.min(w - bx * BLOCK_PX)) as u64;
+            let bh = (BLOCK_PX.min(h - by * BLOCK_PX)) as u64;
+            block_max = block_max.max(total as f64 / (bw * bh * 4 * 255) as f64);
+        }
+        (frame_mean, block_max)
+    }
+
+    /// A half-tile shift of a tile-sized region of production output must fail
+    /// the default snapshot tolerance. The whole-frame mean hides it (RED on the
+    /// mean oracle); a regional oracle sees the shifted block (GREEN).
+    #[test]
+    fn half_tile_shift_of_one_tile_fails_default_tol() {
+        let golden = match3_boot_golden();
+        let (w, h, base) = decode_png_rgba8(&golden).expect("decode production golden");
+        assert!(w >= TILE_PX && h >= TILE_PX, "golden holds a tile: {w}x{h}");
+
+        // First window (deterministic scan) whose shift hides in the frame mean
+        // yet shows in some block. Outside the window the delta is zero, so the
+        // independent mean below is the whole-frame mean of the pair.
+        let mut trap: Option<(u32, u32, Vec<u8>, f64, f64)> = None;
+        'scan: for y0 in (0..=h - TILE_PX).step_by(8) {
+            for x0 in (0..=w - TILE_PX).step_by(8) {
+                let mut shifted = base.clone();
+                for dy in 0..TILE_PX {
+                    for dx in 0..TILE_PX {
+                        let sx = x0 + (dx + HALF_TILE_PX) % TILE_PX;
+                        let sy = y0 + (dy + HALF_TILE_PX) % TILE_PX;
+                        let s = ((sy * w + sx) * 4) as usize;
+                        let d = (((y0 + dy) * w + x0 + dx) * 4) as usize;
+                        shifted[d..d + 4].copy_from_slice(&base[s..s + 4]);
+                    }
+                }
+                let (mean, block) = independent_means(&base, &shifted, w, x0, y0, TILE_PX);
+                if mean <= DEFAULT_TOL && block > DEFAULT_TOL {
+                    trap = Some((x0, y0, shifted, mean, block));
+                    break 'scan;
+                }
+            }
+        }
+        let (x0, y0, shifted, mean, block) = trap.expect(
+            "golden must hold a tile whose half-tile shift hides in the mean but shows in a block",
+        );
+
+        let dir = tempfile::Builder::new()
+            .prefix("rock-image-oracle-")
+            .tempdir()
+            .expect("tempdir");
+        let shifted_path = dir.path().join("shifted.png");
+        write_rgba_png(&shifted_path, w, h, &shifted);
+
+        let diff = image_diff(&golden, &shifted_path).expect("diff");
+        assert!(
+            diff > DEFAULT_TOL,
+            "window ({x0},{y0}): independent frame mean {mean:.6} hides the shift, \
+             independent block max {block:.6} sees it; oracle said {diff:.6}"
+        );
+    }
+
+    /// Control: identical frames diff exactly zero, so the regional oracle adds
+    /// no false positives on clean reruns.
+    #[test]
+    fn identical_frames_diff_zero() {
+        let golden = match3_boot_golden();
+        let diff = image_diff(&golden, &golden).expect("diff");
+        assert_eq!(diff, 0.0, "identical frames must diff exactly zero");
+    }
+
+    /// Control: dimension mismatches stay hard errors, and the test PNG writer
+    /// round-trips through the production decoder.
+    #[test]
+    fn dim_mismatch_stays_an_error() {
+        let golden = match3_boot_golden();
+        let (w, h, base) = decode_png_rgba8(&golden).expect("decode production golden");
+        let dir = tempfile::Builder::new()
+            .prefix("rock-image-oracle-")
+            .tempdir()
+            .expect("tempdir");
+        let same = dir.path().join("same.png");
+        write_rgba_png(&same, w, h, &base);
+        let (_, _, back) = decode_png_rgba8(&same).expect("decode written png");
+        assert_eq!(back, base, "test writer must round-trip through production decode");
+        let tiny = dir.path().join("tiny.png");
+        write_rgba_png(&tiny, 1, 1, &[0, 0, 0, 255]);
+        assert!(
+            image_diff(&golden, &tiny).is_err(),
+            "a size change must stay a hard error, not a diff"
+        );
+    }
+}
