@@ -114,6 +114,8 @@ mod fire_asset_archive;
 mod c_test;
 #[path = "c_run_gate.rs"]
 mod c_run_gate;
+#[path = "flat_element_ref_backends.rs"]
+mod flat_element_ref_backends;
 #[path = "json_serialize_tests.rs"]
 mod json_serialize_tests;
 #[path = "lint_cli.rs"]
