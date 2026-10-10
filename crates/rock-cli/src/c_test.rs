@@ -67,7 +67,14 @@ pub struct CSuiteSummary {
     pub tests_skipped: usize,
     pub unit_failures: usize,
     pub skip_reasons: Vec<(String, usize)>,
+    pub skipped: Vec<(String, String)>,
     pub required_failures: Vec<String>,
+}
+
+/// One shape for every skipped-test line: the verbose per-test listing and
+/// the ordinary summary print the same `SKIP name: reason` text.
+fn format_skip(name: &str, reason: &str) -> String {
+    format!("SKIP {name}: {reason}")
 }
 
 #[derive(Debug)]
@@ -230,6 +237,9 @@ pub fn c_test(paths: &[String], required_tests: &[String], show_passing: bool) -
         for (reason, count) in &summary.skip_reasons {
             println!("  {:>5}  {}", count.to_string().yellow(), reason);
         }
+        for (name, reason) in &summary.skipped {
+            println!("  {}", format_skip(name, reason));
+        }
     }
     if !summary.required_failures.is_empty() {
         println!("\n{}", "=== required test failures (c) ===".bold());
@@ -267,9 +277,10 @@ fn c_test_run_with_required_tests(
         tests_skipped: 0,
         unit_failures: 0,
         skip_reasons: Vec::new(),
+        skipped: Vec::new(),
         required_failures: Vec::new(),
     };
-    let mut all_skip_reasons = Vec::new();
+    let mut all_skips: Vec<(String, String)> = Vec::new();
     let mut required_gate = RequiredTestGate::new(required_tests);
     let engine_builds = std::sync::Mutex::new(CEngineBuilds::default());
     let units = files.iter().chain(&package_dirs).collect::<Vec<_>>();
@@ -315,7 +326,7 @@ fn c_test_run_with_required_tests(
             while let Some((outcome, required)) = finished.remove(&next) {
                 record_unit(
                     &mut summary,
-                    &mut all_skip_reasons,
+                    &mut all_skips,
                     short_path(units[next]),
                     outcome,
                     print,
@@ -325,7 +336,7 @@ fn c_test_run_with_required_tests(
                     if print && show_passing {
                         match &outcome {
                             RequiredTestOutcome::Passed => println!("  PASS {name}"),
-                            RequiredTestOutcome::Skipped(reason) => println!("  SKIP {name}: {reason}"),
+                            RequiredTestOutcome::Skipped(reason) => println!("  {}", format_skip(&name, reason)),
                             RequiredTestOutcome::Failed(detail) => println!("  FAIL {name}: {detail}"),
                         }
                     }
@@ -335,14 +346,15 @@ fn c_test_run_with_required_tests(
             }
         }
     });
-    summary.skip_reasons = reason_histogram(all_skip_reasons.iter().map(String::as_str));
+    summary.skip_reasons = reason_histogram(all_skips.iter().map(|(_, reason)| reason.as_str()));
+    summary.skipped = all_skips;
     summary.required_failures = required_gate.finish();
     Ok(summary)
 }
 
 fn record_unit(
     summary: &mut CSuiteSummary,
-    all_skip_reasons: &mut Vec<String>,
+    all_skips: &mut Vec<(String, String)>,
     label: String,
     outcome: CUnitOutcome,
     print: bool,
@@ -358,7 +370,7 @@ fn record_unit(
             summary.tests_passed += passed;
             summary.tests_failed += fails.len();
             summary.tests_skipped += skips.len();
-            all_skip_reasons.extend(skips.iter().map(|(_, reason)| reason.clone()));
+            all_skips.extend(skips.iter().cloned());
             if print && passed + fails.len() + skips.len() > 0 {
                 let status = if fails.is_empty() {
                     "ok".green()
