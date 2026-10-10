@@ -414,17 +414,11 @@ enum ExternRet {
     AsIs,
 }
 
-/// Hard backstop on the alias walk. Termination is decided by the visited set,
-/// which compares INTERNED instantiations; this only bounds a chain that keeps
-/// producing genuinely new ones.
-const MAX_ALIAS_STEPS: usize = 256;
-
 fn extern_ret(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
 ) -> Result<ExternRet, CompilerError> {
-    use bone_semantic::hir::TypeExpr;
-    use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason};
+    use skull_mir::monoty::{MonoCtor, MonoSubst, MonoTy, MonoTyReason};
 
     let Some(ret) = f.return_ty else { return Ok(ExternRet::None) };
     let unrealizable = |what: &str| {
@@ -453,80 +447,26 @@ fn extern_ret(
         }
     };
 
-    // ONE normalization oracle, shared with monomorphization
-    // (`skull_mir::monoty`). It is total, interning, and resolves a declared
-    // generic through the substitution -- so a newtype APPLICATION composes for
-    // free: each argument is converted in the environment it was written in and
-    // becomes a closed `MonoTyId`, which is exactly what a flat substitution can
-    // then carry into the next alias.
-    //
-    // `Outer<T>(Pair<Pair<T>>)` at `Outer<int>` is the shape that needs it: the
-    // argument handed to the inner `Pair` still mentions `Outer`'s `T`, and it is
-    // already `int` here because it was converted before being bound.
-    let mut arena = MonoArena::new();
-    let mut subst = MonoSubst::default();
-    let mut cur = arena.convert_decl(ws, ret, &subst).map_err(describe)?;
-
-    // The visited key is the interned instantiation itself. Interning is
-    // injective within one arena, so a repeat IS a cycle -- no separate summary
-    // to get wrong, and no reliance on the step bound.
-    let mut visited: Vec<MonoTyId> = Vec::new();
-
-    for _ in 0..MAX_ALIAS_STEPS {
-        let (name, params) = match arena.get(cur) {
-            MonoTy::Int => return Ok(ExternRet::Int),
-            MonoTy::Uint => return Ok(ExternRet::Uint),
-            MonoTy::Bool => return Ok(ExternRet::Bool),
-            MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
-            _ => return Ok(ExternRet::AsIs),
+    let ty = skull_mir::monoty::convert_decl(ws, ret, &MonoSubst::default()).map_err(describe)?;
+    let ty = skull_mir::monoty::resolve_newtype_chain(ws, ty).map_err(|reason| {
+        let detail = match reason {
+            skull_mir::monoty::NewtypeResolutionError::Conversion(reason) => {
+                return describe(reason);
+            }
+            other => other.to_string(),
         };
-        if crate::is_value_struct(ws, name) {
-            return Ok(ExternRet::ValueStruct(name.as_str().to_string()));
-        }
-        let Some(nid) = ws.newtypes_by_name.get(&name).copied() else {
-            return Ok(ExternRet::AsIs);
-        };
-        if visited.contains(&cur) {
-            return Err(unrealizable("a newtype whose representation contains itself"));
-        }
-        visited.push(cur);
+        unrealizable(&format!("a newtype representation ({detail})"))
+    })?;
 
-        // Fail-closed internal invariants, neither reachable from source: bone
-        // refuses an arity mismatch itself ("Generic type `Two` expects 2 type
-        // argument(s), found 1", verified against the real compiler), and a
-        // newtype the workspace names but cannot produce is the registry
-        // disagreeing with the arena. Stated rather than assumed, because
-        // zipping a mismatched pair would silently drop or invent a binding.
-        let owner = ws
-            .modules
-            .get(nid.module.index())
-            .filter(|m| (nid.def.into_raw().into_u32() as usize) < m.newtypes.len())
-            .ok_or_else(|| unrealizable("a newtype whose definition is missing"))?;
-        let def = &owner.newtypes[nid.def];
-        if def.generics.len() != params.len() {
-            return Err(unrealizable(&format!(
-                "`{name}` applied to {} argument(s) where its declaration takes {}",
-                params.len(),
-                def.generics.len()
-            )));
+    Ok(match ty {
+        MonoTy::Int => ExternRet::Int,
+        MonoTy::Uint => ExternRet::Uint,
+        MonoTy::Bool => ExternRet::Bool,
+        MonoTy::App { ctor: MonoCtor::Nominal(name), .. } if crate::is_value_struct(ws, name) => {
+            ExternRet::ValueStruct(name.as_str().to_string())
         }
-
-        let mut next = MonoSubst::default();
-        for (g, a) in def.generics.iter().zip(params) {
-            let (TypeExpr::Generic(var, _) | TypeExpr::Infer(var, _)) =
-                skull_mir::monoty::TyEnv::Decl.decl_node(ws, *g).map_err(describe)?
-            else {
-                return Err(unrealizable(&format!(
-                    "`{name}` declares a parameter that is not a generic"
-                )));
-            };
-            next.insert(var, a);
-        }
-        let wrapped = def.wrapped;
-        subst = next;
-        cur = arena.convert_decl(ws, wrapped, &subst).map_err(describe)?;
-    }
-    Err(unrealizable("an alias chain that does not bottom out"))
+        _ => ExternRet::AsIs,
+    })
 }
 
 /// O(1) container lengths and a dependency total folded by the existing

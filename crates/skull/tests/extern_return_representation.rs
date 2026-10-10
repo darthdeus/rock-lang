@@ -75,8 +75,7 @@ fn a_newtype_return_cannot_smuggle_a_gc_value_across_extern() {
         r#"
 value Bag { items: [int] }
 newtype Wrap<T>(T)
-newtype BagAlias(Wrap<Bag>)
-extern(ffi, "m") fn ret_bag() -> BagAlias
+extern(ffi, "m") fn ret_bag() -> Wrap<Wrap<Bag>>
 fn main() { print("x") }
 "#,
     );
@@ -89,8 +88,7 @@ fn main() { print("x") }
         r#"
 value Point { x: int, y: float }
 newtype Wrap<T>(T)
-newtype PointAlias(Wrap<Point>)
-extern(ffi, "m") fn ret_point() -> PointAlias
+extern(ffi, "m") fn ret_point() -> Wrap<Wrap<Point>>
 fn main() { print("x") }
 "#,
     );

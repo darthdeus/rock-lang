@@ -375,6 +375,8 @@ impl MonoTy {
 pub enum MonoTyReason {
     /// `BuiltinTy::Error` -- inference recovery poison. An invalid program.
     RecoveryError,
+    /// `BuiltinTy::F32` -- a field's storage type, which no value has.
+    StorageOnly,
     /// An inference variable with no substitution: inference did not finish.
     UnresolvedInfer(Ustr),
     /// A declared generic absent from the enclosing substitution. Expected in
@@ -397,6 +399,7 @@ impl MonoTyReason {
     pub fn bucket(&self) -> &'static str {
         match self {
             Self::RecoveryError => "recovery-error",
+            Self::StorageOnly => "storage-only",
             Self::UnresolvedInfer(_) => "unresolved-infer",
             Self::UnboundGeneric(_) => "unbound-generic",
             Self::NoNode => "no-node",
@@ -404,6 +407,95 @@ impl MonoTyReason {
             Self::NotADeclarationType => "not-a-declaration-type",
         }
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum NewtypeResolutionError {
+    Conversion(MonoTyReason),
+    Cycle(Ustr),
+    MissingDefinition(Ustr),
+    ArityMismatch { name: Ustr, actual: usize, expected: usize },
+    InvalidGeneric(Ustr),
+    StepLimit,
+}
+
+impl std::fmt::Display for NewtypeResolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conversion(reason) => write!(f, "type conversion failed ({})", reason.bucket()),
+            Self::Cycle(name) => write!(f, "newtype `{name}` represents itself"),
+            Self::MissingDefinition(name) => write!(f, "newtype `{name}` has no definition"),
+            Self::ArityMismatch { name, actual, expected } => write!(
+                f,
+                "newtype `{name}` has {actual} argument(s), but its definition takes {expected}"
+            ),
+            Self::InvalidGeneric(name) => {
+                write!(f, "newtype `{name}` declares a non-generic parameter")
+            }
+            Self::StepLimit => f.write_str("newtype chain exceeds the normalization limit"),
+        }
+    }
+}
+
+/// Resolve the declared representation through newtypes using interned type
+/// instantiations as the cycle key. Generic arguments are converted in their
+/// current environment before they are bound into the next declaration.
+pub fn resolve_newtype_chain(
+    ws: &Workspace,
+    ty: MonoTy,
+) -> Result<MonoTy, NewtypeResolutionError> {
+    use bone_semantic::hir::TypeExpr;
+
+    const MAX_STEPS: usize = 256;
+
+    let mut arena = MonoArena::new();
+    let mut current = arena.intern(ty);
+    let mut visited: Vec<MonoTyId> = Vec::new();
+
+    for _ in 0..MAX_STEPS {
+        let (name, params) = match arena.get(current) {
+            MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
+            _ => return Ok(arena.get(current).clone()),
+        };
+        let Some(nid) = ws.newtypes_by_name.get(&name).copied() else {
+            return Ok(arena.get(current).clone());
+        };
+        if visited.contains(&current) {
+            return Err(NewtypeResolutionError::Cycle(name));
+        }
+        visited.push(current);
+
+        let owner = ws
+            .modules
+            .get(nid.module.index())
+            .filter(|module| (nid.def.into_raw().into_u32() as usize) < module.newtypes.len())
+            .ok_or_else(|| NewtypeResolutionError::MissingDefinition(name))?;
+        let def = &owner.newtypes[nid.def];
+        if def.generics.len() != params.len() {
+            return Err(NewtypeResolutionError::ArityMismatch {
+                name,
+                actual: params.len(),
+                expected: def.generics.len(),
+            });
+        }
+
+        let mut subst = MonoSubst::default();
+        for (generic, arg) in def.generics.iter().zip(params) {
+            let (TypeExpr::Generic(var, _) | TypeExpr::Infer(var, _)) =
+                TyEnv::Decl
+                    .decl_node(ws, *generic)
+                    .map_err(NewtypeResolutionError::Conversion)?
+            else {
+                return Err(NewtypeResolutionError::InvalidGeneric(name));
+            };
+            subst.insert(var, arg);
+        }
+        current = arena
+            .convert_decl(ws, def.wrapped, &subst)
+            .map_err(NewtypeResolutionError::Conversion)?;
+    }
+
+    Err(NewtypeResolutionError::StepLimit)
 }
 
 /// A cyclic `Infer` chain would otherwise recurse forever. Not a type-depth
@@ -420,12 +512,8 @@ pub type MonoSubst = FxHashMap<VarId, MonoTy>;
 /// A BODY has an inference arena for `TyId::Local` and solved substitutions for
 /// `TypeExpr::Infer`. A DECLARATION has neither: a signature's types live in
 /// their own module's arena, so either shape reaching [`MonoArena::convert_in`]
-/// from a declaration is compiler state disagreeing with itself.
-///
-/// This is what lets one converter serve both. The alternative -- a second
-/// normalization walk for declaration types -- is how the extern-return
-/// classifier in `skull::mir_emit` started, and it grew its own partial
-/// substitution and its own cycle key before converging back here.
+/// from a declaration is compiler state disagreeing with itself. Declared
+/// newtype resolution uses this converter for each instantiated step as well.
 #[derive(Clone, Copy)]
 pub enum TyEnv<'a> {
     Body(&'a BodyInference),
@@ -922,6 +1010,7 @@ fn convert_at<S: std::hash::BuildHasher>(
             BuiltinTy::Unit => MonoTy::Unit,
             BuiltinTy::Never => MonoTy::Never,
             BuiltinTy::Error => return Err(MonoTyReason::RecoveryError),
+            BuiltinTy::F32 => return Err(MonoTyReason::StorageOnly),
         },
         TypeExpr::Infer(var, name) => {
             // An unbound var the CALLER can answer. A struct's field default is

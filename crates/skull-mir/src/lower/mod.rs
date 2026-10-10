@@ -3342,37 +3342,15 @@ fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
         )
 }
 
-fn gc_value_under_newtypes(ws: &Workspace, mut ty: MonoTy) -> Option<Ustr> {
-    let mut visited = HashSet::new();
-    loop {
-        let MonoTy::App { ctor: MonoCtor::Nominal(name), params } = &ty else {
-            return None;
-        };
-        if nominal_is_gc_value(ws, *name) {
-            return Some(*name);
-        }
-        let nid = *ws.newtypes_by_name.get(name)?;
-        if !visited.insert(*name) {
-            return None;
-        }
-        let def = &ws.module(nid.module).newtypes[nid.def];
-        if params.len() != def.generics.len() {
-            return None;
-        }
-        let subst = def
-            .generics
-            .iter()
-            .zip(params)
-            .filter_map(|(generic, param)| match crate::lower::shape::static_ty(ws, *generic)? {
-                TypeExpr::Generic(var, _) => Some((var, param.clone())),
-                _ => None,
-            })
-            .collect::<rustc_hash::FxHashMap<_, _>>();
-        if subst.len() != def.generics.len() {
-            return None;
-        }
-        ty = crate::monoty::convert_decl(ws, def.wrapped, &subst).ok()?;
-    }
+fn gc_value_under_newtypes(
+    ws: &Workspace,
+    ty: MonoTy,
+) -> Result<Option<Ustr>, crate::monoty::NewtypeResolutionError> {
+    let ty = crate::monoty::resolve_newtype_chain(ws, ty)?;
+    let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = ty else {
+        return Ok(None);
+    };
+    Ok(nominal_is_gc_value(ws, name).then_some(name))
 }
 
 /// Reject a GC-carrying value struct used at a genuine C boundary (an `extern`
@@ -3390,16 +3368,30 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
         }
         let tys = f.param_decls.iter().map(|p| p.ty).chain(f.return_ty);
         for ty in tys {
-            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(_), .. }) = static_ty(ws, ty)
-                && let Ok(ty) = crate::monoty::convert_decl(ws, ty, &rustc_hash::FxHashMap::default())
-                && let Some(n) = gc_value_under_newtypes(ws, ty)
-            {
-                return Some((format!(
-                    "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
-                     cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
-                     value struct (fields int/float/bool or nested FFI-clean value structs), \
-                     or pass the fields individually."
-                ), f.name_span));
+            if matches!(static_ty(ws, ty), Some(TypeExpr::App { ctor: TypeCtor::Nominal(_), .. })) {
+                let normalized = crate::monoty::convert_decl(
+                    ws,
+                    ty,
+                    &rustc_hash::FxHashMap::default(),
+                )
+                .map_err(|reason| crate::monoty::NewtypeResolutionError::Conversion(reason))
+                .and_then(|ty| gc_value_under_newtypes(ws, ty));
+                match normalized {
+                    Ok(Some(n)) => {
+                        return Some((format!(
+                            "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
+                             cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
+                             value struct (fields int/float/bool or nested FFI-clean value structs), \
+                             or pass the fields individually."
+                        ), f.name_span));
+                    }
+                    Ok(None) => {}
+                    Err(reason) => {
+                        return Some((format!(
+                            "extern type could not be normalized through newtypes: {reason}"
+                        ), f.name_span));
+                    }
+                }
             }
         }
     }
