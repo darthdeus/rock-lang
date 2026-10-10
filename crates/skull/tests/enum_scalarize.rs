@@ -16,19 +16,26 @@ fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
     use ustr::Ustr;
 
     const SRC: &str = r#"
-enum Choice { A { left: int }, B { right: int } }
+enum Choice { A { left: int, shared: int }, B { right: string, shared: string } }
 enum Other { A { ghost: int } }
 fn read(choice: Choice) -> int {
     return match choice {
         Other::A { ghost } => ghost,
         Choice::A { left } => left,
-        Choice::B { right } => right,
+        Choice::B { right } => right.len(),
     }
 }
-fn main() { print(read(Choice::A { left: 7 })) }
+fn main() { print(read(Choice::A { left: 7, shared: 13 })) }
 "#;
 
     let ws = ws_with_stdlib(SRC);
+    assert!(
+        skull_mir::lower::EnumPlan::for_name(&ws, Ustr::from("Choice"))
+            .unwrap()
+            .flat()
+            .is_some(),
+        "the fixture must use Choice's widened flat-enum representation"
+    );
     let enum_id = ws.enums_by_name[&Ustr::from("Choice")];
     let choice = &ws.modules[enum_id.module.index()].enums[enum_id.def];
     let variant = choice.variants.iter().find(|variant| variant.name == "A").unwrap();
