@@ -310,7 +310,7 @@ impl Builder<'_> {
                                 self.materialize_embed(parent, rpf.name, cname)?
                             }
                         }
-                        _ => self.scrut_named(scrut, rpf.name, cdata),
+                        _ => self.scrut_named(scrut, rpf.name, cdata)?,
                     };
                     let fv = match self.body.pattern_arena[rpf.pat] {
                         Pattern::Bind(b)
@@ -623,23 +623,31 @@ impl Builder<'_> {
     /// The scrutinee's named (record) payload `field`: threaded cells hold it
     /// directly; a flat field reads the parent's `{prefix}__<field>` slot; a cdata
     /// enum reads its `_<field>` C slot; a table enum reads the field key directly.
-    pub(crate) fn scrut_named(&mut self, scrut: &Scrut, field: Ustr, cdata: bool) -> Idx<Inst> {
+    pub(crate) fn scrut_named(
+        &mut self,
+        scrut: &Scrut,
+        field: Ustr,
+        cdata: bool,
+    ) -> Result<Idx<Inst>, CompilerError> {
         match scrut {
-            Scrut::Cells { named, .. } => {
-                named.iter().find(|(n, _)| *n == field).map(|(_, v)| *v).unwrap_or_else(|| {
-                    self.emit_cur(Inst::Const(Lit::Nil))
-                })
-            }
+            Scrut::Cells { named, shape, .. } => named
+                .iter()
+                .find(|(n, _)| *n == field)
+                .map(|(_, v)| *v)
+                .ok_or_else(|| gap(format!(
+                    "record field `{field}` is absent from flat enum `{}`",
+                    shape.name
+                ))),
             Scrut::Flat { parent, prefix, .. } => {
-                self.emit_cur(Inst::Field { base: *parent, field: flat_named_slot(*prefix, field) })
+                Ok(self.emit_cur(Inst::Field { base: *parent, field: flat_named_slot(*prefix, field) }))
             }
             Scrut::Val(v) => {
                 let f = if cdata { slot_name(field.as_str()) } else { field };
-                self.emit_cur(Inst::Field { base: *v, field: f })
+                Ok(self.emit_cur(Inst::Field { base: *v, field: f }))
             }
             Scrut::Tuple(_) => {
                 let value = self.scrut_value(scrut);
-                self.emit_cur(Inst::Field { base: value, field })
+                Ok(self.emit_cur(Inst::Field { base: value, field }))
             }
         }
     }
