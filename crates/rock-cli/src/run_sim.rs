@@ -3422,17 +3422,17 @@ fn run_specs_worker_mode(
             let lane_entry_ids = entry_ids.map(|ids| {
                 lane.iter().map(|&i| ids[i]).collect::<Vec<_>>()
             });
-            let results = run_specs_recovering(
+            let results = run_specs_recovering(RecoverConfig {
                 project,
                 output,
                 env_by_wire,
-                &lane_specs,
+                entry_specs: &lane_specs,
                 update_snapshots,
-                false,
+                record_manifest: false,
                 recorder,
-                lane_entry_ids.as_deref(),
-                None,
-            )?;
+                entry_ids: lane_entry_ids.as_deref(),
+                stone: None,
+            })?;
             if results.len() != lane.len() {
                 return Err(anyhow!(
                     "worker lane returned {} results for {} specs",
@@ -3506,17 +3506,17 @@ fn run_specs_worker_mode(
                 lane_chained.iter().map(|i| specs[*i].clone()).collect();
             let lane_entry_ids: Option<Vec<u64>> = entry_ids
                 .map(|ids| lane_chained.iter().map(|i| ids[*i]).collect());
-            let results = run_specs_recovering(
+            let results = run_specs_recovering(RecoverConfig {
                 project,
-                lane_output,
+                output: lane_output,
                 env_by_wire,
-                &lane_specs,
+                entry_specs: &lane_specs,
                 update_snapshots,
-                false,
+                record_manifest: false,
                 recorder,
-                lane_entry_ids.as_deref(),
-                Some(&mut *lane_stone),
-            )?;
+                entry_ids: lane_entry_ids.as_deref(),
+                stone: Some(&mut *lane_stone),
+            })?;
             if results.len() != lane_chained.len() {
                 return Err(anyhow!(
                     "reload lane returned {} results for {} entries",
@@ -5238,6 +5238,22 @@ impl Drop for AdmittedWorker {
     }
 }
 
+/// Inputs for one worker-child execution: the queued entries plus the run's
+/// reporting and session options. Named fields, not positionals, so a
+/// swapped boolean cannot silently change what a run records.
+struct WorkerConfig<'a> {
+    project: &'a str,
+    parts: &'a [WorkerPart],
+    quiet: bool,
+    buffered: bool,
+    update_snapshots: bool,
+    output: &'a str,
+    recording: bool,
+    census_warmup_frames: Option<usize>,
+    stone: Option<&'a mut crate::skull_backend::SkullStone>,
+    recorder: Option<&'a SimRunRecorder>,
+}
+
 /// Spawn ONE luajit process that runs `parts` in order and demux its side
 /// channel into one summary per part.
 ///
@@ -5247,18 +5263,19 @@ impl Drop for AdmittedWorker {
 /// at boot and restoring that image at every entry boundary
 /// (`sim_worker_restore_boot`); the native half B3 owes is what the remaining
 /// differential sentinels pin.
-fn run_worker(
-    project: &str,
-    parts: &[WorkerPart],
-    quiet: bool,
-    buffered: bool,
-    update_snapshots: bool,
-    output: &str,
-    recording: bool,
-    census_warmup_frames: Option<usize>,
-    stone: Option<&mut crate::skull_backend::SkullStone>,
-    recorder: Option<&SimRunRecorder>,
-) -> Result<Vec<SimSummary>> {
+fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
+    let WorkerConfig {
+        project,
+        parts,
+        quiet,
+        buffered,
+        update_snapshots,
+        output,
+        recording,
+        census_warmup_frames,
+        stone,
+        recorder,
+    } = config;
     let Some(first) = parts.first() else {
         return Err(anyhow!("worker got an empty entry queue"));
     };
@@ -6096,18 +6113,18 @@ fn run_one_sim(
         occurrence_id: occurrence_id.unwrap_or(0),
         part_index,
     };
-    let mut summaries = run_worker(
+    let mut summaries = run_worker(WorkerConfig {
         project,
-        std::slice::from_ref(&part),
+        parts: std::slice::from_ref(&part),
         quiet,
         buffered,
         update_snapshots,
         output,
-        false,
+        recording: false,
         census_warmup_frames,
         stone,
         recorder,
-    )?;
+    })?;
     Ok(summaries.remove(0))
 }
 
@@ -6212,22 +6229,33 @@ fn run_entries(
     // Not quiet, but buffered: nothing is written live (several entries share
     // one stream), and every diagnostic is retained into its record instead.
     let summaries = match grouping {
-        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None, None, None)?,
+        Grouping::Shared => run_worker(WorkerConfig {
+            project,
+            parts: &parts,
+            quiet: false,
+            buffered: true,
+            update_snapshots: false,
+            output,
+            recording: true,
+            census_warmup_frames: None,
+            stone: None,
+            recorder: None,
+        })?,
         Grouping::PerPart => {
             let mut out = Vec::with_capacity(parts.len());
             for part in &parts {
-                out.extend(run_worker(
+                out.extend(run_worker(WorkerConfig {
                     project,
-                    std::slice::from_ref(part),
-                    false,
-                    true,
-                    false,
+                    parts: std::slice::from_ref(part),
+                    quiet: false,
+                    buffered: true,
+                    update_snapshots: false,
                     output,
-                    true,
-                    None,
-                    None,
-                    None,
-                )?);
+                    recording: true,
+                    census_warmup_frames: None,
+                    stone: None,
+                    recorder: None,
+                })?);
             }
             out
         }
@@ -6255,6 +6283,21 @@ struct SpecPlan {
     parts: Vec<WorkerPart>,
 }
 
+/// Inputs for running entry specs through worker children with recovery:
+/// the specs plus the run's reporting and session options. Named fields,
+/// not positionals, so a swapped boolean cannot silently change recovery.
+struct RecoverConfig<'a> {
+    project: &'a str,
+    output: &'a str,
+    env_by_wire: &'a HashMap<String, Vec<(String, String)>>,
+    entry_specs: &'a [String],
+    update_snapshots: bool,
+    record_manifest: bool,
+    recorder: Option<&'a SimRunRecorder>,
+    entry_ids: Option<&'a [u64]>,
+    stone: Option<&'a mut crate::skull_backend::SkullStone>,
+}
+
 /// Run `entry_specs` in ONE boot-checkpoint worker, with failure containment:
 /// when the worker dies (crash, kill, timeout), the entry it died inside keeps
 /// its failure record and every UNSTARTED entry reruns in a fresh worker of
@@ -6267,17 +6310,18 @@ struct SpecPlan {
 /// reload lane: those entries drive `apply_edit` mid-sim, so the worker that
 /// serves them has to hold the session the edits are published through. Every
 /// other lane passes `None` and cannot reload.
-fn run_specs_recovering(
-    project: &str,
-    output: &str,
-    env_by_wire: &HashMap<String, Vec<(String, String)>>,
-    entry_specs: &[String],
-    update_snapshots: bool,
-    record_manifest: bool,
-    recorder: Option<&SimRunRecorder>,
-    entry_ids: Option<&[u64]>,
-    mut stone: Option<&mut crate::skull_backend::SkullStone>,
-) -> Result<Vec<(String, SimSummary, bool)>> {
+fn run_specs_recovering(config: RecoverConfig<'_>) -> Result<Vec<(String, SimSummary, bool)>> {
+    let RecoverConfig {
+        project,
+        output,
+        env_by_wire,
+        entry_specs,
+        update_snapshots,
+        record_manifest,
+        recorder,
+        entry_ids,
+        mut stone,
+    } = config;
     let mut plans = Vec::with_capacity(entry_specs.len());
     for (entry_index, spec) in entry_specs.iter().enumerate() {
         let artifacts = SimArtifacts::with_manifest(record_manifest)?;
@@ -6324,19 +6368,18 @@ fn run_specs_recovering(
                 if plans.len() - base == 1 { "y" } else { "ies" }
             );
         }
-        let summaries =
-            run_worker(
-                project,
-                &parts,
-                false,
-                true,
-                update_snapshots,
-                output,
-                record_manifest,
-                None,
-                stone.as_deref_mut(),
-                recorder,
-            )?;
+        let summaries = run_worker(WorkerConfig {
+            project,
+            parts: &parts,
+            quiet: false,
+            buffered: true,
+            update_snapshots,
+            output,
+            recording: record_manifest,
+            census_warmup_frames: None,
+            stone: stone.as_deref_mut(),
+            recorder,
+        })?;
 
         // Reassemble per spec and decide how far this round got. Specs whose
         // parts all started are final; the first spec with an unstarted part is
@@ -6520,7 +6563,17 @@ fn run_worker_arm(
 
     for members in groups {
         let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
-        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true, None, None, None)?;
+        let results = run_specs_recovering(RecoverConfig {
+            project,
+            output,
+            env_by_wire,
+            entry_specs: &specs,
+            update_snapshots: false,
+            record_manifest: true,
+            recorder: None,
+            entry_ids: None,
+            stone: None,
+        })?;
         if results.len() != members.len() {
             return Err(anyhow!(
                 "worker group returned {} results for {} specs",
@@ -6871,7 +6924,17 @@ pub fn run_worker_suite(
         "child_execution",
         &project_path,
         Some(Path::new(&output)),
-        || run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true, None, None, None),
+        || run_specs_recovering(RecoverConfig {
+            project: &project,
+            output: &output,
+            env_by_wire: &env_by_wire,
+            entry_specs,
+            update_snapshots: false,
+            record_manifest: true,
+            recorder: None,
+            entry_ids: None,
+            stone: None,
+        }),
     )?;
     Ok(results
         .into_iter()
@@ -9327,6 +9390,60 @@ mod tests {
                 part_index: 0,
             })
             .collect()
+    }
+
+    #[test]
+    fn worker_config_construction_reads_each_option_by_name() {
+        let parts = worker_parts(&["a"]);
+        let config = WorkerConfig {
+            project: "game",
+            parts: &parts,
+            quiet: true,
+            buffered: true,
+            update_snapshots: true,
+            output: "out",
+            recording: true,
+            census_warmup_frames: Some(3),
+            stone: None,
+            recorder: None,
+        };
+        assert_eq!(config.project, "game");
+        assert_eq!(config.parts.len(), 1);
+        assert!(config.quiet);
+        assert!(config.buffered);
+        assert!(config.update_snapshots);
+        assert_eq!(config.output, "out");
+        assert!(config.recording);
+        assert_eq!(config.census_warmup_frames, Some(3));
+        assert!(config.stone.is_none());
+        assert!(config.recorder.is_none());
+    }
+
+    #[test]
+    fn recover_config_construction_reads_each_option_by_name() {
+        let env: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        let specs = ["a".to_string()];
+        let ids = [7u64];
+        let config = RecoverConfig {
+            project: "game",
+            output: "out",
+            env_by_wire: &env,
+            entry_specs: &specs,
+            update_snapshots: true,
+            record_manifest: true,
+            recorder: None,
+            entry_ids: Some(&ids),
+            stone: None,
+        };
+        assert_eq!(config.project, "game");
+        assert_eq!(config.output, "out");
+        assert!(config.env_by_wire.is_empty());
+        assert_eq!(config.entry_specs.len(), 1);
+        assert!(config.update_snapshots);
+        assert!(config.record_manifest);
+        assert!(config.recorder.is_none());
+        assert_eq!(config.entry_ids, Some(&[7u64][..]));
+        assert!(config.stone.is_none());
     }
 
     fn lines(raw: &[&str]) -> Vec<String> {
