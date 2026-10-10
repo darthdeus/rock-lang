@@ -154,9 +154,13 @@ impl Builder<'_> {
         // `mote_value_noise` site, which then selected the wrong callee.
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
-        let out = self
-            .lower_expr_repr_inner(e)
-            .and_then(|value| self.value_bundle_for_expr(e, value));
+        let out = match self.flat_ref_read(e) {
+            Ok(Some(read)) => Ok(read),
+            Ok(None) => self
+                .lower_expr_repr_inner(e)
+                .and_then(|value| self.value_bundle_for_expr(e, value)),
+            Err(err) => Err(err),
+        };
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         out
@@ -177,6 +181,9 @@ impl Builder<'_> {
     }
 
     fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
+        if let Some(read) = self.flat_ref_read(e)? {
+            return Ok(read.into_value());
+        }
         // Probed ahead of the match rather than in a guard: the wire-shape oracle
         // is fallible, and a guard cannot propagate.
         if let Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs } = self.body.expr_arena[e] {

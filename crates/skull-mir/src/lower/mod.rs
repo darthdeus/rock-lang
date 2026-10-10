@@ -359,6 +359,8 @@ pub use dispatch::{
 mod embed;
 mod expr;
 mod flat;
+mod flat_ref;
+use flat_ref::{FlatArgCapture, FlatCallOut, FlatRefKey, FlatStorage, FlatVariants, FlatVariantsHandle};
 mod format;
 pub use format::{format_tree, FmtNode, FmtPayload, FmtVariant};
 mod interp;
@@ -1650,12 +1652,21 @@ fn lower_body(
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
         presence_only: None,
+        flat_ref_binds: HashMap::new(),
+        flat_ref_cells: HashMap::new(),
+        flat_scan_lets: HashMap::new(),
+        flat_ret: None,
+        flat_variants: FlatVariants::for_root(subject.clone()),
+        flat_arg_captures: Vec::new(),
     };
+    b.flat_ret = b.own_flat_return(&subject)?;
     b.lower_params()?;
     b.fill_param_defaults()?;
     let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
     b.copy_ref_borrowed_params(&params)?;
     b.lower_root()?;
+    let variants = b.flat_variants.borrow_mut().take_funcs();
+    b.f.nested_fns.extend(variants);
     let stats = b.lower_attribution.into_inner();
     Ok(finish_lower_attribution(b.f, stats))
 }
@@ -2225,6 +2236,21 @@ struct Builder<'a> {
     /// ([`Builder::nullable_place_value_of`]). Exact node, never a subtree -- a
     /// nested read that feeds a real whole-value use still copies.
     presence_only: Option<Idx<Expr>>,
+    /// `ref` bindings to a flat-stored container element (a flat variant's
+    /// `ref` params and `let`s of a flat place), with the storage they address
+    /// ([`flat_ref`]).
+    flat_ref_binds: HashMap<u32, FlatRefKey>,
+    /// The `(vec, slot)` cells of each [`Self::flat_ref_binds`] entry.
+    flat_ref_cells: HashMap<u32, (Idx<Cell>, Idx<Cell>)>,
+    /// `ref` lets of a body scanned for its flat return, by initializer.
+    flat_scan_lets: HashMap<u32, Idx<Expr>>,
+    /// Set when this body's `ref` result addresses a flat element: a return
+    /// is `vec, slot`.
+    flat_ret: Option<FlatRefKey>,
+    /// The flat variants of the emitted root this builder lowers into.
+    flat_variants: FlatVariantsHandle,
+    /// Innermost-last flat arguments of the calls being lowered.
+    flat_arg_captures: Vec<FlatArgCapture>,
 }
 
 impl<'a> Builder<'a> {
@@ -2285,6 +2311,12 @@ impl<'a> Builder<'a> {
             nested_fn_globals: HashMap::new(),
             nested_fn_counters: HashMap::new(),
             presence_only: None,
+            flat_ref_binds: HashMap::new(),
+            flat_ref_cells: HashMap::new(),
+            flat_scan_lets: HashMap::new(),
+            flat_ret: None,
+            flat_variants: FlatVariantsHandle::default(),
+            flat_arg_captures: Vec::new(),
         }
     }
 }
@@ -2930,6 +2962,9 @@ impl Builder<'_> {
                 )
             })
         {
+            if self.flat_ret.is_some() {
+                return self.flat_return_leaves(e);
+            }
             return Ok(vec![self.lower_ref_borrow(e)?]);
         }
         if let Some(shape) = self.result_shape() {
@@ -3163,6 +3198,7 @@ impl Builder<'_> {
         self.inf
             .and_then(|inf| inf.ref_call_args.get(&call))
             .is_some_and(|args| args.contains(&arg))
+            || self.is_flat_ref_call_arg(arg)
     }
 
     pub(crate) fn arg_values_for_call_slot(

@@ -14,8 +14,6 @@ mod allocation_report;
 
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
-#[path = "arena_borrow_flat_element_reject.rs"]
-mod arena_borrow_flat_element_reject;
 #[path = "flat_element_ref_mutation.rs"]
 mod flat_element_ref_mutation;
 #[path = "arena_column_oracle.rs"]

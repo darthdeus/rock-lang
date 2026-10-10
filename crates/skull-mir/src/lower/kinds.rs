@@ -6,6 +6,25 @@ use crate::monoty::MonoTy;
 use std::rc::Rc;
 
 impl Builder<'_> {
+    pub(crate) fn container_plan_for_type(
+        &self,
+        ty: &MonoTy,
+        family: ContainerFamily,
+    ) -> Result<ContainerPlan, CompilerError> {
+        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), family, ty)
+            .map(|plan| {
+                if self.scx.row_value_containers {
+                    plan.into_row_storage()
+                } else {
+                    plan
+                }
+            })
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })
+    }
+
     pub(crate) fn container_plan_for(
         &self,
         e: Idx<Expr>,
@@ -15,12 +34,7 @@ impl Builder<'_> {
         if !ContainerPlan::matches_type(family, &ty) {
             return Ok(None);
         }
-        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), family, &ty)
-            .map(Some)
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })
+        self.container_plan_for_type(&ty, family).map(Some)
     }
 
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
@@ -58,12 +72,76 @@ impl Builder<'_> {
             _ => return Ok(None),
         };
         let arena = self.scx.rep_arena();
-        let plan = ContainerPlan::for_type(self.ws, self.scx.target, &arena, family, &concrete)
+        let plan = self.container_plan_for_type(&concrete, family)?;
+        if !plan.is_leaf_addressed() {
+            return Ok(None);
+        }
+        Ok(plan.ffi_element_name(&arena))
+    }
+
+    /// The concrete `value`-struct element of `e`'s `NativeBuffer<E>` /
+    /// `FlatVec<E>` TYPE, independent of the container's storage
+    /// representation. [`Self::nb_value_elem`] answers the representation-gated
+    /// question element access and literal leaf views need; the `@vertex_expand`
+    /// expander consumes this one, because the vertex layout is derived from the
+    /// element's C leaf layout whether the container stores rows, columns, or
+    /// leaf views.
+    pub(crate) fn nb_type_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
+        let Some(concrete) = self.concrete_expr_ty(e) else { return Ok(None) };
+        let element = match concrete.peel_nullable().0 {
+            MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                params,
+            } if matches!(name.as_str(), "NativeBuffer" | "FlatVec") => params.first(),
+            _ => return Ok(None),
+        };
+        let Some(element) = element else { return Ok(None) };
+        let (payload, nullable) = element.peel_nullable();
+        if nullable {
+            return Ok(None);
+        }
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            ..
+        } = payload
+        else {
+            return Ok(None);
+        };
+        let Some(&sid) = self.ws.struct_by_name.get(&name) else {
+            return Ok(None);
+        };
+        if !has_value_plan(&self.ws.modules[sid.module.index()].structs[sid.def]) {
+            return Ok(None);
+        }
+        let arena = self.scx.rep_arena();
+        let rep = arena
+            .plan_container_element(self.ws, self.scx.target, &payload)
             .map_err(|error| match error.span.or(self.cur_span) {
                 Some(span) => CompilerError::new_with_label(span, error.message),
                 None => CompilerError::new_no_location(error.message),
             })?;
-        Ok(plan.ffi_element_name(&arena))
+        Ok(arena.value_shape(rep).map(|shape| shape.name))
+    }
+
+    /// Whether `e` is a Vec, Map or Arena whose elements have no per-element
+    /// table (column or strided storage).
+    pub(crate) fn flat_stored_container(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
+        match self.concrete_ty(e)? {
+            Some(ty) => self.flat_stored_container_type(&ty),
+            None => Ok(false),
+        }
+    }
+
+    /// [`Self::flat_stored_container`] for a container type.
+    pub(crate) fn flat_stored_container_type(&self, ty: &MonoTy) -> Result<bool, CompilerError> {
+        for family in [ContainerFamily::Vec, ContainerFamily::Map, ContainerFamily::Arena] {
+            if ContainerPlan::matches_type(family, ty) {
+                let plan = self.container_plan_for_type(ty, family)?;
+                let arena = self.scx.rep_arena();
+                return Ok(plan.column_elem(&arena).is_some() || plan.strided_elem(&arena).is_some());
+            }
+        }
+        Ok(false)
     }
 
     /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
@@ -117,12 +195,8 @@ impl Builder<'_> {
         if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
             return Ok(None);
         }
-        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), ContainerFamily::Vec, ty)
+        self.container_plan_for_type(ty, ContainerFamily::Vec)
             .map(|plan| plan.column_elem(&self.scx.rep_arena()))
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })
     }
 
     pub(crate) fn vec_strided_elem_of(
@@ -141,18 +215,8 @@ impl Builder<'_> {
         if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
             return Ok(None);
         }
-        ContainerPlan::for_type(
-            self.ws,
-            self.scx.target,
-            &self.scx.rep_arena(),
-            ContainerFamily::Vec,
-            ty,
-        )
-        .map(|plan| plan.strided_elem(&self.scx.rep_arena()))
-        .map_err(|error| match error.span.or(self.cur_span) {
-            Some(span) => CompilerError::new_with_label(span, error.message),
-            None => CompilerError::new_no_location(error.message),
-        })
+        self.container_plan_for_type(ty, ContainerFamily::Vec)
+            .map(|plan| plan.strided_elem(&self.scx.rep_arena()))
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the
@@ -352,6 +416,12 @@ impl Builder<'_> {
         self.inf
             .and_then(|i| i.binding_types.get(name).copied())
             .or(self.body.binding_arena[name].declared_ty)
+    }
+
+    pub(crate) fn binding_is_ref(&self, name: Idx<BindingInfo>) -> bool {
+        self.binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .is_some_and(|ty| matches!(ty.as_ref(), MonoTy::App { ctor: MonoCtor::Ref, .. }))
     }
 
     /// [`Self::coerced`] against a `let`/assignment target binding's type.

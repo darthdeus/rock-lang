@@ -90,7 +90,8 @@ impl Builder<'_> {
             return Ok(());
         }
         for &arg in args {
-            if self.is_explicit_materialize_call(arg) {
+            // A flat element `ref` passes its container and slot, never a box.
+            if self.is_explicit_materialize_call(arg) || self.is_flat_ref_call_arg(arg) {
                 continue;
             }
             if let Some(ty) = self.concrete_expr_ty(arg) {

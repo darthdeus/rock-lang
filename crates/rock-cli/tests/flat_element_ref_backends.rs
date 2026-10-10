@@ -10,6 +10,7 @@ const TESTS: &[&str] = &[
     "fer_vec_nested_field_arg_writes_the_element",
     "fer_vec_deep_prefix_args_write_the_element",
     "fer_vec_ref_param_passed_on_writes_the_element",
+    "fer_increments_through_ref_and_index_write_the_element",
     "fer_map_whole_element_arg_writes_the_element",
     "fer_map_nested_field_arg_writes_the_element",
     "fer_arena_borrow_writes_the_element",

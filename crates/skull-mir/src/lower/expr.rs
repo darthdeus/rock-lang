@@ -150,6 +150,9 @@ impl Builder<'_> {
     }
 
     fn lower_expr_inner(&mut self, e: Idx<Expr>, condition: bool) -> Result<Idx<Inst>, CompilerError> {
+        if let Some(read) = self.flat_ref_read(e)? {
+            return self.pack(read.into_value());
+        }
         match self.body.expr_arena[e].clone() {
             Expr::Unit | Expr::Null => Ok(self.emit_cur(Inst::Const(Lit::Nil))),
             Expr::Int(i) => {
@@ -245,6 +248,7 @@ impl Builder<'_> {
                 if let Some(instance) = self
                     .concrete_callee_for_site_op(e, crate::site::SiteOp::FnValue)?
                 {
+                    self.reject_flat_return_outside_direct_call(e, &instance)?;
                     // Foreign, inline and intrinsic values remain explicit
                     // backend boundaries; only a compiler-owned Rock body
                     // gets a logical CodeIdentity.
@@ -591,6 +595,7 @@ impl Builder<'_> {
                 // enclosing value-struct result never applies (a lambda is
                 // called through a boxed fn-value). Save/restore around the body.
                 let saved_ret_rep = self.ret_rep.take();
+                let saved_flat_ret = self.flat_ret.take();
                 // Isolate the defer state, like `lower_nested_fn`. A lambda body
                 // is its OWN fn scope: bone desugars `() => e` to a block with
                 // `return e`, so the body's return runs `run_all_defers` -- which
@@ -626,6 +631,7 @@ impl Builder<'_> {
                     self.in_defer_body = saved_in_defer;
                     self.defer_mode = saved_mode;
                     self.ret_rep = saved_ret_rep;
+                    self.flat_ret = saved_flat_ret;
                     self.cur = saved;
                     let id = self.emit_cur(Inst::Lambda {
                         params: param_cells,
@@ -649,6 +655,7 @@ impl Builder<'_> {
                     self.in_defer_body = saved_in_defer;
                     self.defer_mode = saved_mode;
                     self.ret_rep = saved_ret_rep;
+                    self.flat_ret = saved_flat_ret;
                     self.cur = saved;
                     let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });
                     self.f.lambda_abi_fingerprints.insert(
@@ -685,6 +692,7 @@ impl Builder<'_> {
                 self.in_defer_body = saved_in_defer;
                 self.defer_mode = saved_mode;
                 self.ret_rep = saved_ret_rep;
+                self.flat_ret = saved_flat_ret;
                 self.cur = saved;
                 let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });
                 self.f.lambda_abi_fingerprints.insert(
@@ -854,6 +862,19 @@ impl Builder<'_> {
     /// [`Cell::borrowed`]. Marked whatever the borrowed type is: a borrowed
     /// struct can still reach a `value` field that is written through the alias.
     pub(crate) fn lower_ref_borrow(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        if let Some(vec) = self.capture_flat_ref_arg(e)? {
+            return Ok(vec);
+        }
+        if let Some(key) = self.classify_flat_ref(e)? {
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "a `ref` to a flat-stored `{}` element can be passed to a `ref` parameter of \
+                     a function, bound with `let` or returned; it has no table to alias here",
+                    key.elem.name
+                ),
+            ));
+        }
         self.check_ref_holder(e)?;
         let place = self.lower_place_base(e)?;
         let mut cur = place;
@@ -891,16 +912,14 @@ impl Builder<'_> {
             _ => None,
         };
         match self.body.expr_arena[e].clone() {
-            // Element stores and leaf places of flat storage are decomposed
-            // before this; what reaches here is a borrow of the whole element or
-            // a struct inside it (a `ref` argument or `let`). A known Lua gap, not
-            // policy: C runs these. Fix options: docs/unfuck-backlog.md.
+            // Element stores, leaf places and `ref` borrows of flat storage are
+            // decomposed before this ([`flat_ref`]); a flat element has no
+            // table to name as a place.
             Expr::Index { base, .. } if self.flat_stored_container(base)? => {
                 Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
-                    "the Lua backend does not yet support a `ref` borrow of a container element \
-                     stored as flat columns or rows (it has no table to alias); copy it out, \
-                     modify it and store it back"
+                    "this container element is stored as flat columns or rows and has no table \
+                     to use as a place; read or write its fields, or pass it to a `ref` parameter"
                         .to_string(),
                 ))
             }
@@ -1091,6 +1110,16 @@ impl Builder<'_> {
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: v });
             }
+            // Rebinding a `ref` binding makes it a local value, which a binding
+            // to a flat element (a vec and a slot) cannot become.
+            Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[target],
+                    "cannot reassign a `ref` to a flat-stored container element on the Lua \
+                     backend; assign its fields, or copy it into a local first"
+                        .to_string(),
+                ));
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -1135,11 +1164,15 @@ impl Builder<'_> {
                 // write lands directly in the leaf columns under the dotted path.
                 let (root, path, nested) =
                     self.flat_field_path(base, field)?.unwrap_or((base, field, None));
-                if let Some((vec, idx, elem)) = self.column_index_place(root)? {
-                    return self.column_leaf_store(vec, idx, elem, path, nested.as_ref(), value);
-                }
-                if let Some((vec, idx, elem)) = self.strided_index_place(root)? {
-                    return self.strided_leaf_store(vec, idx, elem, path, nested.as_ref(), value);
+                if let Some((vec, idx, elem, storage)) = self.flat_root_place(root)? {
+                    return match storage {
+                        FlatStorage::Columns => {
+                            self.column_leaf_store(vec, idx, elem, path, nested.as_ref(), value)
+                        }
+                        FlatStorage::Strided => {
+                            self.strided_leaf_store(vec, idx, elem, path, nested.as_ref(), value)
+                        }
+                    };
                 }
                 // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
                 // leaf-addressed NativeBuffer: there is no element slot to take a
@@ -1402,6 +1435,11 @@ impl Builder<'_> {
                     self.nb_leaf_store(buf, checked, &place, new_v);
                     return Ok(());
                 }
+                if let Some((vec, slot, elem, storage, path)) = self.flat_leaf_rmw_place(base, field)? {
+                    let cur = self.flat_leaf_load(vec, slot, elem, storage, path)?;
+                    let new_v = self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
+                    return self.flat_leaf_store(vec, slot, elem, storage, path, new_v);
+                }
                 let (pbase, key) = self.physical_field(base, field)?;
                 let b = self.lower_place_base(pbase)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field: key });
@@ -1549,6 +1587,12 @@ impl Builder<'_> {
                     let old = self.nb_leaf_load(buf, checked, &place);
                     let new = bump(self, old);
                     self.nb_leaf_store(buf, checked, &place, new);
+                    return Ok(if postfix { old } else { new });
+                }
+                if let Some((vec, slot, elem, storage, path)) = self.flat_leaf_rmw_place(base, field)? {
+                    let old = self.flat_leaf_load(vec, slot, elem, storage, path)?;
+                    let new = bump(self, old);
+                    self.flat_leaf_store(vec, slot, elem, storage, path, new)?;
                     return Ok(if postfix { old } else { new });
                 }
                 let (pbase, key) = self.physical_field(base, field)?;

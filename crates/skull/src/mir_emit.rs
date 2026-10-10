@@ -3704,6 +3704,10 @@ pub(crate) fn emit_nested_fns(
         times.counted_loop += tl.elapsed();
         times.counted_loop_work |= nf.blocks.len() > counted_before;
         collect_callee_frefs(nf, deps);
+        // A flat variant's text is another declaration's body.
+        if let Some(source) = nf.flat_variant_source {
+            deps.insert(source);
+        }
         statics.extend(nf.statics.iter().cloned());
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();

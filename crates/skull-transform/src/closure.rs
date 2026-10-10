@@ -494,6 +494,7 @@ pub fn convert_closures_framed(
             closure_env_plans: mf.closure_env_plans.clone(),
             fn_value_symbols: mf.fn_value_symbols.clone(),
             hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
+            flat_variant_source: None,
             // The owner table comes across with the entries that index it;
             // cloning one without the other would repoint every site.
             site_owners: mf.site_owners.clone(),

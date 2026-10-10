@@ -187,6 +187,12 @@ impl PartialEq for ColumnElem {
 
 impl Eq for ColumnElem {}
 
+impl std::hash::Hash for ColumnElem {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.name, self.nullable, self.nobox).hash(state);
+    }
+}
+
 impl ColumnElem {
     pub(crate) fn planned(
         name: Ustr,
@@ -1284,6 +1290,10 @@ pub struct MirFunc {
     /// declaration's, which is what separates them from
     /// [`Self::fn_value_symbols`].
     pub hoisted_fn_globals: Vec<Ustr>,
+    /// Set on a hoisted flat-element `ref` variant: the declaration whose body
+    /// it re-lowers with leaf-addressed `ref` parameters. The enclosing chunk's
+    /// text then contains that body, so it is a dependency of the chunk.
+    pub flat_variant_source: Option<FuncRef>,
     /// The owner instances [`Self::call_sites`] refers to, interned. Index 0 is
     /// this body's own owner when it has one; inlining appends the spliced
     /// callee's owner and remaps its entries, so a body holds one entry per
@@ -1366,6 +1376,7 @@ impl MirFunc {
             closure_env_plans: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
+            flat_variant_source: None,
             site_owners: Vec::new(),
         }
     }

@@ -125,6 +125,9 @@ impl Builder<'_> {
                     None
                 };
                 if let Some(v) = null_side {
+                    if let Some(test) = self.flat_ref_presence(v, op)? {
+                        return Ok(test);
+                    }
                     // A `V?` place read here is read for its PRESENCE: the copy
                     // such a read otherwise takes would allocate a cdata per nil
                     // test (`mouse_screen`'s `sim_mouse_override`, every frame).

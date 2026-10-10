@@ -371,17 +371,6 @@ impl Builder<'_> {
                 }
             }
         }
-        if let Callee::Unresolved { name, .. } = callee {
-            if self.borrows_flat_arena_element(e, name)? {
-                return Err(CompilerError::new_with_label(
-                    self.body.expr_spans[e],
-                    "the Lua backend does not yet support `borrow` on an arena whose `value` \
-                     elements are stored as flat columns or rows (they have no table to alias); \
-                     declare the element a `struct` to borrow it"
-                        .to_string(),
-                ));
-            }
-        }
         // `tostring` of an enum, value record or handle is the structural
         // rendering, never the backend's own rendering of its representation.
         if let Some((arg, _)) = self.dispatch().tostring_route(e) {
@@ -1014,42 +1003,24 @@ impl Builder<'_> {
             && !callee.generics.is_empty()
             && !callee.annotations.iter().any(|a| a.is_builtin("scalar_abi"));
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
-        if !dc.plan.uses_scalar_abi() {
-            self.reject_nobox_boxed_call_args(func, arg_idxs)?;
-            self.reject_column_container_opaque_slots(
-                e,
-                &dc.callee_inst,
-            )?;
-            let has_tuple_storage = dc
-                .plan
-                .representation()
-                .params()
-                .iter()
-                .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
-            let args = if has_tuple_storage {
-                let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
-                self.scalar_call_args(e, func, arg_idxs, any_named, &opaque)?
-            } else if any_named {
-                self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
-            } else {
-                let mut args: Vec<Idx<Inst>> = arg_idxs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &a)| {
-                        let t = self
-                            .concrete_callee_param_ty(e, &dc.callee_inst, i)?
-                            .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
-                        if self.is_ref_call_arg(e, a) {
-                            self.lower_ref_borrow(a)
-                        } else {
-                            let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
-                            Ok(self.coerced_mono(v, a, t.as_ref()))
-                        }
-                    })
-                    .collect::<Result<_, CompilerError>>()?;
-                args.extend(self.trailing_default_args(func, arg_idxs.len(), None)?);
-                args
+        // A flat-stored element passed to a `ref` parameter, or a `ref` result
+        // addressing one, takes the flat-variant ABI (`flat_ref`). Only a
+        // direct call's own site has a flat plan.
+        if matches!(self.cur_op, crate::site::SiteOp::DirectCall)
+            && let Some(plan) = self.flat_call_plan(e)?
+        {
+            return match self.lower_flat_call(e, func, arg_idxs, any_named, &dc, &plan, ret_tuple)? {
+                FlatCallOut::Value(value) => Ok(value),
+                FlatCallOut::Flat(_) => Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "this call returns a `ref` to a flat-stored container element; pass it to a \
+                     `ref` parameter, bind it with `let`, read its fields or compare it with null"
+                        .to_string(),
+                )),
             };
+        }
+        if !dc.plan.uses_scalar_abi() {
+            let args = self.direct_call_args(e, func, arg_idxs, any_named, &dc)?;
             // Above the tuple early return: the exemption is a property of the
             // CALLEE, so making it arity-dependent would be a guarantee hole the
             // day a `@gpu_only` intrinsic returns a tuple.
@@ -1061,14 +1032,7 @@ impl Builder<'_> {
             self.record_call(call, func, &dc)?;
             return Ok(ValueRepr::Scalar(call));
         }
-        let param_shapes = dc.plan.param_shapes();
-        let args = self.scalar_call_args(
-            e,
-            func,
-            arg_idxs,
-            any_named,
-            &param_shapes,
-        )?;
+        let args = self.direct_call_args(e, func, arg_idxs, any_named, &dc)?;
         let ret_shape = dc.plan.ret_shape();
         match ret_shape {
             Some(shape) => {
@@ -1090,6 +1054,58 @@ impl Builder<'_> {
                 }
             },
         }
+    }
+
+    /// The argument list of a direct call under `dc`'s ABI: boxed, or splatted
+    /// to leaves for a scalar-ABI callee. A `ref` argument is its borrow.
+    pub(crate) fn direct_call_args(
+        &mut self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+        any_named: bool,
+        dc: &DirectCall,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        if dc.plan.uses_scalar_abi() {
+            let param_shapes = dc.plan.param_shapes();
+            return self.scalar_call_args(e, func, arg_idxs, any_named, &param_shapes);
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        self.reject_nobox_boxed_call_args(func, arg_idxs)?;
+        self.reject_column_container_opaque_slots(
+            e,
+            &dc.callee_inst,
+        )?;
+        let has_tuple_storage = dc
+            .plan
+            .representation()
+            .params()
+            .iter()
+            .any(|&id| matches!(dc.plan.rep_plan(id).layout(), RepLayout::Tuple { .. }));
+        Ok(if has_tuple_storage {
+            let opaque = vec![RetSlot::Opaque; callee.param_decls.len()];
+            self.scalar_call_args(e, func, arg_idxs, any_named, &opaque)?
+        } else if any_named {
+            self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
+        } else {
+            let mut args: Vec<Idx<Inst>> = arg_idxs
+                .iter()
+                .enumerate()
+                .map(|(i, &a)| {
+                    let t = self
+                        .concrete_callee_param_ty(e, &dc.callee_inst, i)?
+                        .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
+                    if self.is_ref_call_arg(e, a) {
+                        self.lower_ref_borrow(a)
+                    } else {
+                        let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
+                        Ok(self.coerced_mono(v, a, t.as_ref()))
+                    }
+                })
+                .collect::<Result<_, CompilerError>>()?;
+            args.extend(self.trailing_default_args(func, arg_idxs.len(), None)?);
+            args
+        })
     }
 
     /// A direct call to a tuple-returning fn under the multi-return ABI: the
@@ -1250,6 +1266,7 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let dc = self.plan_direct_call(e, func)?;
+        self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
         if !dc.plan.uses_scalar_abi() {
             let mut argv = vec![recv];
             for &a in arg_idxs {

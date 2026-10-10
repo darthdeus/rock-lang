@@ -159,7 +159,7 @@ impl Builder<'_> {
         }
     }
 
-    fn strided_slot_index(
+    pub(crate) fn strided_slot_index(
         &mut self,
         checked: Idx<Inst>,
         stride: usize,
@@ -1398,15 +1398,23 @@ impl Builder<'_> {
             segs.push(f);
             cur = b;
         }
-        let Expr::Index { base: container, .. } = self.body.expr_arena[cur] else {
-            return Ok(None);
-        };
-        let elem = match self.vec_column_elem_of(container)? {
-            Some(elem) => Some(elem),
-            None => match self.vec_strided_elem_of(container)? {
+        let elem = if let Expr::Index { base: container, .. } = self.body.expr_arena[cur] {
+            match self.vec_column_elem_of(container)? {
                 Some(elem) => Some(elem),
-                None => self.map_column_value_of(container)?,
-            },
+                None => match self.vec_strided_elem_of(container)? {
+                    Some(elem) => Some(elem),
+                    None => self.map_column_value_of(container)?,
+                },
+            }
+        } else {
+            // A flat `ref` binding or call addresses the element or a nested
+            // value inside it; its path leads the chain.
+            self.flat_ref_root_key(cur)?.map(|key| {
+                if !key.prefix.is_empty() {
+                    segs.extend(key.prefix.as_str().rsplit('.').map(Ustr::from));
+                }
+                key.elem
+            })
         };
         let Some(elem) = elem else {
             return Ok(None);

@@ -253,6 +253,12 @@ impl Builder<'_> {
             nested_fn_globals: self.nested_fn_globals.clone(),
             nested_fn_counters: HashMap::new(),
             presence_only: None,
+            flat_ref_binds: HashMap::new(),
+            flat_ref_cells: HashMap::new(),
+            flat_scan_lets: HashMap::new(),
+            flat_ret: None,
+            flat_variants: self.flat_variants.clone(),
+            flat_arg_captures: Vec::new(),
         };
 
         child.f.abi_representation = Some(abi.representation.clone());
@@ -317,6 +323,9 @@ impl Builder<'_> {
             self.cur_span = self.body.statement_spans.get(sidx).copied();
             match self.body.statement_arena[sidx].clone() {
                 Statement::Let { name, value } => {
+                    if self.lower_flat_let(name, value)? {
+                        continue;
+                    }
                     if self.binding_is_ref(name) { self.check_ref_holder(value)?; }
                     // Scalar values live in leaf cells, matching the call ABI
                     // instead of relying on later SROA.
