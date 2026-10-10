@@ -4,6 +4,17 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use sysinfo::{Pid, System};
 
+/// File a budgeting parent (the rock-cli test harness) names for this
+/// process to report its current phase in, so each phase gets its own cap.
+pub const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";
+
+pub fn report_spawn_phase(phase: &str) {
+    let Some(path) = std::env::var_os(SPAWN_PHASE_FILE_ENV) else { return };
+    if let Err(error) = fs_err::write(&path, phase) {
+        warn!(target: "CLI", "cannot record spawn phase {phase} at {}: {error}", std::path::Path::new(&path).display());
+    }
+}
+
 // Global list to track active child processes for cleanup on exit
 static ACTIVE_CHILDREN: Lazy<Arc<Mutex<Vec<u32>>>> = Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
 

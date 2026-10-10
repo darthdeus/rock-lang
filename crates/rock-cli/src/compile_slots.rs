@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 pub(crate) const SLOT_DIR_ENV: &str = "ROCK_COMPILE_SLOT_DIR";
 pub(crate) const SLOTS_ENV: &str = "ROCK_COMPILE_SLOTS";
 pub(crate) const CLASS_ENV: &str = "ROCK_COMPILE_CLASS";
-pub(crate) const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";
+pub(crate) use rock_host::process_management::{report_spawn_phase, SPAWN_PHASE_FILE_ENV};
 
 const AUTHOR_SLOT: &str = "author-0";
 const HELD_PREFIX: &str = "held-";
@@ -35,12 +35,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Measured peaks kept per package; the reservation covers the largest.
 const PEAK_SAMPLES: usize = 8;
 
-pub(crate) fn report_spawn_phase(phase: &str) {
-    let Some(path) = std::env::var_os(SPAWN_PHASE_FILE_ENV) else { return };
-    if let Err(error) = fs_err::write(&path, phase) {
-        log::warn!(target: "CLI", "cannot record spawn phase {phase} at {}: {error}", Path::new(&path).display());
-    }
-}
 /// Planned peak of one full mag compile (measured 4.3-5.4 GB).
 const COMPILE_PEAK_MIB: u64 = 4608;
 

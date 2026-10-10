@@ -4,7 +4,8 @@
 //! fresh per-phase caps derived from that budget instead of sharing one
 //! absolute deadline. A slow-but-progressing spawn under load passes: the
 //! slot wait survives while the compile queue moves, compiles get a generous
-//! cap, and execution gets the full budget from when it starts. A hang still
+//! cap, an engine build gets the hang backstop, and execution gets the full
+//! budget from when it starts. A hang still
 //! fails, named with the phase it died in, within its phase cap.
 
 use std::cell::Cell;
@@ -204,6 +205,7 @@ enum PhaseBucket {
     SlotWait,
     CacheWait,
     Compile,
+    EngineBuild,
     Execution,
     OutputDrain,
     Unknown,
@@ -215,6 +217,7 @@ fn bucket_for(phase: &str) -> PhaseBucket {
         "slot-wait" => PhaseBucket::SlotWait,
         "cache-wait" => PhaseBucket::CacheWait,
         "compile-prepare" | "compile" => PhaseBucket::Compile,
+        "engine-build" => PhaseBucket::EngineBuild,
         "runtime-prepare" | "execution" => PhaseBucket::Execution,
         _ => PhaseBucket::Unknown,
     }
@@ -227,6 +230,7 @@ impl PhaseBucket {
             PhaseBucket::SlotWait => "slot-wait",
             PhaseBucket::CacheWait => "cache-wait",
             PhaseBucket::Compile => "compile",
+            PhaseBucket::EngineBuild => "engine-build",
             PhaseBucket::Execution => "execution",
             PhaseBucket::OutputDrain => "output-drain",
             PhaseBucket::Unknown => "unknown phase",
@@ -238,6 +242,11 @@ impl PhaseBucket {
             PhaseBucket::Spawn | PhaseBucket::Execution | PhaseBucket::Unknown => budget,
             PhaseBucket::SlotWait => budget.saturating_mul(SLOT_OVERALL_MULTIPLE),
             PhaseBucket::CacheWait | PhaseBucket::Compile => budget.saturating_mul(COMPILE_MULTIPLE),
+            // A cold cargo build of the engine scales with host load, not
+            // with the test; only a hang should stop it. `rock test` builds
+            // libstone after compiling and runs its tests in this bucket, so
+            // it never gets less than the compile cap.
+            PhaseBucket::EngineBuild => test_utils::HANG_BACKSTOP.max(budget.saturating_mul(COMPILE_MULTIPLE)),
             PhaseBucket::OutputDrain => DRAIN_CAP,
         }
     }
@@ -292,7 +301,7 @@ struct WaitState {
     current: PhaseBucket,
     /// One timer per bucket, started at first observation and never reset:
     /// flapping between phases must not extend any cap.
-    started: [Option<Instant>; 7],
+    started: [Option<Instant>; 8],
     slot_progress_at: Instant,
     queue: Option<Vec<(String, Vec<u8>)>>,
     slot_dir: Option<PathBuf>,
@@ -300,7 +309,7 @@ struct WaitState {
 
 impl WaitState {
     fn new(spawned_at: Instant, slot_dir: Option<PathBuf>) -> Self {
-        let mut started = [None; 7];
+        let mut started = [None; 8];
         started[PhaseBucket::Spawn as usize] = Some(spawned_at);
         Self { current: PhaseBucket::Spawn, started, slot_progress_at: Instant::now(), queue: None, slot_dir }
     }
@@ -516,6 +525,11 @@ mod tests {
                 std::fs::write(file, "execution").unwrap();
                 std::thread::sleep(Duration::from_secs(11));
             }
+            Ok("engine_build_12s") => {
+                let file = std::env::var_os("ROCK_SPAWN_PHASE_FILE").expect("phase file env");
+                std::fs::write(file, "engine-build").unwrap();
+                std::thread::sleep(Duration::from_secs(12));
+            }
             Ok("descendant") => {
                 let mut command = Command::new("sleep");
                 command.arg("60");
@@ -652,10 +666,19 @@ mod tests {
     }
 
     fn assert_hang_reports_phase_within(phase: &str, budget: Duration, cap: Duration) {
-        let _budget = SpawnBudget::new(budget);
+        let _budget = SpawnBudget::new(HANG_BACKSTOP);
+        let mut pending = child(&format!("hang_in:{phase}")).stdin(Stdio::null())
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn_with_deadline().unwrap();
+        // The helper's own start belongs to the spawn cap, not to the phase
+        // under test: apply the short budget once the child is in the phase.
+        let deadline = Instant::now() + HANG_BACKSTOP;
+        while read_spawn_phase(pending.phase.path()).as_deref() != Some(phase) {
+            assert!(Instant::now() < deadline, "helper never reported {phase}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pending.budget = budget;
         let start = Instant::now();
-        let error = child(&format!("hang_in:{phase}")).output_with_deadline()
-            .expect_err("a hung child must time out");
+        let error = pending.wait_with_output().expect_err("a hung child must time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains(&format!("phase={phase}")), "{error}");
         assert!(start.elapsed() >= cap, "hang in {phase} died before its cap: {:?}", start.elapsed());
@@ -675,6 +698,16 @@ mod tests {
     #[test]
     fn cache_wait_hang_reports_the_cache_wait_phase_within_its_cap() {
         assert_hang_reports_phase_within("cache-wait", Duration::from_millis(250), Duration::from_millis(500));
+    }
+
+    /// An engine build is a cargo build: a cold one under load outlasts any
+    /// multiple of a test's budget while it progresses.
+    #[test]
+    fn an_engine_build_outlasting_the_compile_cap_is_not_a_hang() {
+        let _budget = SpawnBudget::new(Duration::from_secs(5));
+        let output = child("engine_build_12s").output_with_deadline()
+            .expect("an engine build past twice the budget must not time out");
+        assert!(output.status.success(), "{output:?}");
     }
 
     #[test]

@@ -573,6 +573,27 @@ mod tests {
         assert_eq!(loaded.libs.len(), 1);
         validate_receipt_lib(&root_path, &loaded.libs[0]).expect("loaded identity remains valid");
     }
+
+    // A budgeting parent caps compile work by phase; a cold engine build
+    // billed to `spawn` was cut off under load.
+    #[test]
+    fn an_engine_build_reports_its_phase_before_cargo_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let phase = dir.path().join("phase");
+        // SAFETY: nextest runs each test in its own process. Restored below.
+        let prev = std::env::var_os(crate::process_management::SPAWN_PHASE_FILE_ENV);
+        unsafe { std::env::set_var(crate::process_management::SPAWN_PHASE_FILE_ENV, &phase) };
+        // An unknown flag makes cargo fail before it touches any lock.
+        let built = cargo_build_and_stage_lib("phase probe", &["--rock-phase-probe-unknown-flag"], "x", "phase_probe");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(crate::process_management::SPAWN_PHASE_FILE_ENV, v),
+                None => std::env::remove_var(crate::process_management::SPAWN_PHASE_FILE_ENV),
+            }
+        }
+        assert!(built.is_err(), "cargo must reject the probe flag");
+        assert_eq!(fs_err::read_to_string(&phase).ok().as_deref(), Some("engine-build"));
+    }
 }
 
 /// Build a cargo crate and stage its cdylib into tmp/ under the given name.
@@ -590,6 +611,7 @@ fn cargo_build_and_stage_lib(
     if validate_receipted_lib(dst_stem)? {
         return Ok(());
     }
+    crate::process_management::report_spawn_phase("engine-build");
     run_cargo(cargo_args, &format!("Failed to build {}", display_name))?;
     stage_cdylib(src_stem, dst_stem)
 }
