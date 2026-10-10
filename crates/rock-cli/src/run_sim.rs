@@ -589,6 +589,20 @@ struct PreparedSims {
     stone: Option<crate::skull_backend::SkullStone>,
 }
 
+/// Resolve the receipt's workspace-relative sim sources against this
+/// invocation's source root for baseline lookup. Timings keep the relative
+/// keys (stable across machines); the runner needs on-disk paths.
+fn resolve_sim_sources(
+    project_path: &Path,
+    relative: &HashMap<String, String>,
+) -> Result<HashMap<String, PathBuf>> {
+    let root = crate::skull_backend::source_root_for_sim_project(project_path)?;
+    Ok(relative
+        .iter()
+        .map(|(wire, rel)| (wire.clone(), root.join(rel)))
+        .collect())
+}
+
 fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -1423,6 +1437,7 @@ fn do_run_sim_opts_recorded(
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
 
+    let sim_sources = resolve_sim_sources(&project_path, &prepared.source_files)?;
     let (display_name, summary) = run_named_entry(
         &project,
         sim_name,
@@ -1431,6 +1446,7 @@ fn do_run_sim_opts_recorded(
         update_snapshots,
         &output,
         &prepared.env_by_wire,
+        &sim_sources,
         prepared.stone.as_mut(),
         None,
         Some(&recorder),
@@ -1564,6 +1580,7 @@ fn run_named_entry(
     update_snapshots: bool,
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    source_files: &HashMap<String, PathBuf>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
     census_warmup_frames: Option<usize>,
     recorder: Option<&SimRunRecorder>,
@@ -1612,7 +1629,6 @@ fn run_named_entry(
             None
         };
         let part_summary = run_one_sim(
-            project,
             part,
             quiet,
             buffered,
@@ -1620,6 +1636,7 @@ fn run_named_entry(
             &out_path,
             output,
             &env_pairs,
+            source_files.get(*part).cloned(),
             lane,
             census_warmup_frames,
             recorder,
@@ -1784,6 +1801,7 @@ fn do_run_named_sims_recorded(
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
     let source_files = prepared.source_files;
+    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     let names = &resolve_sim_specs(&wire_names, names)?;
     emit_bytecode_image(Path::new(&output));
     let entry_ids = recorder.plan_entries(names);
@@ -1834,6 +1852,7 @@ fn do_run_named_sims_recorded(
             &output,
             &env_by_wire,
             names,
+            &sim_sources,
             quiet,
             update_snapshots,
             Some(effective_jobs),
@@ -1906,6 +1925,7 @@ fn do_run_named_sims_recorded(
             update_snapshots,
             entry_output,
             &env_by_wire,
+            &sim_sources,
             stone,
             None,
             Some(recorder),
@@ -2345,6 +2365,7 @@ fn do_run_all_sims_recorded(
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
     let source_files = prepared.source_files;
+    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
     if wire_names.is_empty() {
@@ -2402,6 +2423,7 @@ fn do_run_all_sims_recorded(
             &output,
             &env_by_wire,
             &wire_names,
+            &sim_sources,
             quiet,
             update_snapshots,
             jobs,
@@ -2504,6 +2526,7 @@ fn do_run_all_sims_recorded(
             update_snapshots,
             entry_output,
             &env_by_wire,
+            &sim_sources,
             stone,
             None,
             Some(recorder),
@@ -2734,8 +2757,9 @@ pub fn do_run_allocation_census(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, _source_files, stone) =
+    let (wire_names, env_by_wire, source_files, stone) =
         compile_sims(backend, project_path.clone(), PathBuf::from(&output))?;
+    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     emit_bytecode_image(Path::new(&output));
     sim_spawn_barrier();
 
@@ -2780,6 +2804,7 @@ pub fn do_run_allocation_census(
             false,
             entry_output,
             &env_by_wire,
+            &sim_sources,
             stone,
             Some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
             None,
@@ -2997,13 +3022,14 @@ pub fn do_run_allocation_sites(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, _source_files, stone) = compile_sims_with_allocation(
+    let (wire_names, env_by_wire, source_files, stone) = compile_sims_with_allocation(
         backend,
-        project_path,
+        project_path.clone(),
         PathBuf::from(&output),
         Some(&manifest_path),
         &[],
     )?;
+    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     let artifact_fingerprint = stone.artifact_fingerprint().to_string();
     drop(stone);
     let generated_lua_path = artifact_dir.join("main.lua");
@@ -3050,6 +3076,7 @@ pub fn do_run_allocation_sites(
             false,
             &output,
             &instrumented_env,
+            &sim_sources,
             None,
             None,
             None,
@@ -3232,6 +3259,7 @@ fn run_specs_worker_mode(
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     specs: &[String],
+    source_files: &HashMap<String, PathBuf>,
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
@@ -3423,10 +3451,10 @@ fn run_specs_worker_mode(
                 lane.iter().map(|&i| ids[i]).collect::<Vec<_>>()
             });
             let results = run_specs_recovering(RecoverConfig {
-                project,
                 output,
                 env_by_wire,
                 entry_specs: &lane_specs,
+                source_files,
                 update_snapshots,
                 record_manifest: false,
                 recorder,
@@ -3455,6 +3483,7 @@ fn run_specs_worker_mode(
                 update_snapshots,
                 output,
                 env_by_wire,
+                source_files,
                 None,
                 None,
                 recorder,
@@ -3494,6 +3523,7 @@ fn run_specs_worker_mode(
                 update_snapshots,
                 lane_output,
                 env_by_wire,
+                source_files,
                 Some(&mut *lane_stone),
                 None,
                 recorder,
@@ -3507,10 +3537,10 @@ fn run_specs_worker_mode(
             let lane_entry_ids: Option<Vec<u64>> = entry_ids
                 .map(|ids| lane_chained.iter().map(|i| ids[*i]).collect());
             let results = run_specs_recovering(RecoverConfig {
-                project,
                 output: lane_output,
                 env_by_wire,
                 entry_specs: &lane_specs,
+                source_files,
                 update_snapshots,
                 record_manifest: false,
                 recorder,
@@ -4753,6 +4783,9 @@ struct WorkerPart {
     env: Vec<(String, String)>,
     occurrence_id: u64,
     part_index: usize,
+    /// On-disk source from the compiled wire -> source mapping, for snapshot
+    /// baseline lookup. `None` only when the wire missed the registry.
+    source_file: Option<PathBuf>,
 }
 
 /// CPU timing accumulated by the child for one closed entry. The values are
@@ -5242,7 +5275,6 @@ impl Drop for AdmittedWorker {
 /// reporting and session options. Named fields, not positionals, so a
 /// swapped boolean cannot silently change what a run records.
 struct WorkerConfig<'a> {
-    project: &'a str,
     parts: &'a [WorkerPart],
     quiet: bool,
     buffered: bool,
@@ -5265,7 +5297,6 @@ struct WorkerConfig<'a> {
 /// differential sentinels pin.
 fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
     let WorkerConfig {
-        project,
         parts,
         quiet,
         buffered,
@@ -5996,16 +6027,10 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
             }
         }
 
-        match find_sim_source(project, &part.name) {
+        match snapshot_source_for(part) {
             Ok(source) => process_snapshots(&mut summary, &snap_dir_for(&source), update_snapshots),
             Err(reason) if !summary.snapshots.is_empty() || !summary.image_snapshots.is_empty() => {
-                summary.errors.push(SiteMessage {
-                    message: format!(
-                        "could not locate .rock source for sim `{}` ({reason}) -- snapshot ops cannot resolve baseline dir",
-                        part.name
-                    ),
-                    site: String::new(),
-                });
+                summary.errors.push(SiteMessage { message: reason, site: String::new() });
             }
             Err(_) => {}
         }
@@ -6091,7 +6116,6 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
 /// `out_path` is the shared `OUT` env value across all parts in a
 /// multi-start chain.
 fn run_one_sim(
-    project: &str,
     sim_part: &str,
     quiet: bool,
     buffered: bool,
@@ -6099,6 +6123,7 @@ fn run_one_sim(
     out_path: &Path,
     output: &str,
     env_pairs: &[(String, String)],
+    source_file: Option<PathBuf>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
     census_warmup_frames: Option<usize>,
     recorder: Option<&SimRunRecorder>,
@@ -6112,9 +6137,9 @@ fn run_one_sim(
         env: env_pairs.to_vec(),
         occurrence_id: occurrence_id.unwrap_or(0),
         part_index,
+        source_file,
     };
     let mut summaries = run_worker(WorkerConfig {
-        project,
         parts: std::slice::from_ref(&part),
         quiet,
         buffered,
@@ -6196,10 +6221,10 @@ fn describe_worker_end(
 }
 
 fn run_entries(
-    project: &str,
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     entry_specs: &[String],
+    source_files: &HashMap<String, PathBuf>,
     grouping: Grouping,
 ) -> Result<Vec<crate::sim_record::SimRecord>> {
     let mut artifacts = Vec::with_capacity(entry_specs.len());
@@ -6221,6 +6246,7 @@ fn run_entries(
                 env,
                 occurrence_id: 0,
                 part_index: parts.len(),
+                source_file: source_files.get(name).cloned(),
             });
         }
         artifacts.push(entry_artifacts);
@@ -6230,7 +6256,6 @@ fn run_entries(
     // one stream), and every diagnostic is retained into its record instead.
     let summaries = match grouping {
         Grouping::Shared => run_worker(WorkerConfig {
-            project,
             parts: &parts,
             quiet: false,
             buffered: true,
@@ -6245,7 +6270,6 @@ fn run_entries(
             let mut out = Vec::with_capacity(parts.len());
             for part in &parts {
                 out.extend(run_worker(WorkerConfig {
-                    project,
                     parts: std::slice::from_ref(part),
                     quiet: false,
                     buffered: true,
@@ -6287,10 +6311,12 @@ struct SpecPlan {
 /// the specs plus the run's reporting and session options. Named fields,
 /// not positionals, so a swapped boolean cannot silently change recovery.
 struct RecoverConfig<'a> {
-    project: &'a str,
     output: &'a str,
     env_by_wire: &'a HashMap<String, Vec<(String, String)>>,
     entry_specs: &'a [String],
+    /// Compiled wire -> on-disk source, resolved for this invocation; each
+    /// queued part carries its file for snapshot baseline lookup.
+    source_files: &'a HashMap<String, PathBuf>,
     update_snapshots: bool,
     record_manifest: bool,
     recorder: Option<&'a SimRunRecorder>,
@@ -6312,10 +6338,10 @@ struct RecoverConfig<'a> {
 /// other lane passes `None` and cannot reload.
 fn run_specs_recovering(config: RecoverConfig<'_>) -> Result<Vec<(String, SimSummary, bool)>> {
     let RecoverConfig {
-        project,
         output,
         env_by_wire,
         entry_specs,
+        source_files,
         update_snapshots,
         record_manifest,
         recorder,
@@ -6345,6 +6371,7 @@ fn run_specs_recovering(config: RecoverConfig<'_>) -> Result<Vec<(String, SimSum
                     env,
                     occurrence_id: occurrence_id,
                     part_index,
+                    source_file: source_files.get(*name).cloned(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -6369,7 +6396,6 @@ fn run_specs_recovering(config: RecoverConfig<'_>) -> Result<Vec<(String, SimSum
             );
         }
         let summaries = run_worker(WorkerConfig {
-            project,
             parts: &parts,
             quiet: false,
             buffered: true,
@@ -6553,10 +6579,10 @@ fn fixed_shuffle(n: usize) -> Vec<usize> {
 /// Results are carried by INDEX, never by spec spelling: a corpus may name the
 /// same sim twice and those are two entries with two results.
 fn run_worker_arm(
-    project: &str,
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     ordered: &[String],
+    source_files: &HashMap<String, PathBuf>,
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
     let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
     let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
@@ -6564,10 +6590,10 @@ fn run_worker_arm(
     for members in groups {
         let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
         let results = run_specs_recovering(RecoverConfig {
-            project,
             output,
             env_by_wire,
             entry_specs: &specs,
+            source_files,
             update_snapshots: false,
             record_manifest: true,
             recorder: None,
@@ -6591,10 +6617,10 @@ fn run_worker_arm(
     for (i, reason) in isolated {
         println!("[multi-order]   isolated: {} -- {reason}", ordered[i]);
         let mut records = run_entries(
-            project,
             output,
             env_by_wire,
             std::slice::from_ref(&ordered[i]),
+            source_files,
             Grouping::PerPart,
         )?;
         out[i] = Some((records.remove(0), false));
@@ -6746,9 +6772,11 @@ pub fn run_multi_order_gate(
 
     let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let prepared = prepare_sims_out_of_process(backend, project_path, PathBuf::from(&output), rock_exe, &[])?;
+    let prepared = prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), rock_exe, &[])?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
+    let source_files = prepared.source_files;
+    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     // Hot-reload sims are out of the corpus, and not because they are awkward:
     // they mutate the ONE `incremental.lua` overlay, which the suite runner
     // serializes behind an exclusive lane holding the compile session. This gate
@@ -6780,7 +6808,7 @@ pub fn run_multi_order_gate(
     }
 
     println!("[multi-order] {n} sims; reference arm (one fresh process per sim)");
-    let reference = run_entries(&project, &output, &env_by_wire, &wire_names, Grouping::PerPart)?;
+    let reference = run_entries(&output, &env_by_wire, &wire_names, &sim_sources, Grouping::PerPart)?;
     let reference_at: HashMap<&str, &crate::sim_record::SimRecord> =
         wire_names.iter().map(String::as_str).zip(reference.iter()).collect();
 
@@ -6798,7 +6826,7 @@ pub fn run_multi_order_gate(
     for (label, order) in &arms {
         println!("[multi-order] {label} arm");
         let ordered: Vec<String> = order.iter().map(|&i| wire_names[i].clone()).collect();
-        let records = run_worker_arm(&project, &output, &env_by_wire, &ordered)?;
+        let records = run_worker_arm(&output, &env_by_wire, &ordered, &sim_sources)?;
         for (pos, (record, crossed)) in records.iter().enumerate() {
             let name = &ordered[pos];
             let Some(expected) = reference_at.get(name.as_str()) else {
@@ -6918,6 +6946,8 @@ pub fn run_worker_suite(
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), rock_exe, &[])?;
     let env_by_wire = prepared.env_by_wire;
+    let source_files = prepared.source_files;
+    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
 
     let results = timed_sim_compile_phase(
         "run_worker_suite",
@@ -6925,10 +6955,10 @@ pub fn run_worker_suite(
         &project_path,
         Some(Path::new(&output)),
         || run_specs_recovering(RecoverConfig {
-            project: &project,
             output: &output,
             env_by_wire: &env_by_wire,
             entry_specs,
+            source_files: &sim_sources,
             update_snapshots: false,
             record_manifest: true,
             recorder: None,
@@ -6988,6 +7018,8 @@ pub fn run_differential(
     let output = out_dir.path().to_string_lossy().into_owned();
     let prepared = prepare_sims_out_of_process(backend, project_path.clone(), PathBuf::from(&output), rock_exe, &[])?;
     let env_by_wire = prepared.env_by_wire;
+    let source_files = prepared.source_files;
+    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
 
     let isolated = timed_sim_compile_phase(
         "run_differential",
@@ -6996,10 +7028,10 @@ pub fn run_differential(
         Some(Path::new(&output)),
         || {
             run_entries(
-                &project,
                 &output,
                 &env_by_wire,
                 std::slice::from_ref(&plan.target),
+                &sim_sources,
                 Grouping::PerPart,
             )
         },
@@ -7013,7 +7045,7 @@ pub fn run_differential(
         "child_execution_worker",
         &project_path,
         Some(Path::new(&output)),
-        || run_entries(&project, &output, &env_by_wire, &worker_specs, Grouping::Shared),
+        || run_entries(&output, &env_by_wire, &worker_specs, &sim_sources, Grouping::Shared),
     )?;
     let worker = worker.remove(worker.len() - 1);
 
@@ -7138,44 +7170,16 @@ fn print_progress(rest: &str) {
     eprintln!("{prefix}{body}");
 }
 
-/// Whether `src` declares an `@sim` coroutine named `sim_name`.
-/// Matches the current decl shape `co fn <sim_name>(`.
-fn src_declares_sim(src: &str, sim_name: &str) -> bool {
-    let needle = format!("co fn {sim_name}(");
-    src.contains(&needle)
-}
-
-/// Locate the .rock file containing the `@sim` decl for `sim_name` by
-/// scanning `<project>/tests/sims/*.rock`. A v1 wire name is a DefKey, and the
-/// source declares only its last segment; two modules may declare that segment
-/// in different files, which this scan cannot tell apart, so that is an error.
-fn find_sim_source(project: &str, sim_name: &str) -> Result<PathBuf, String> {
-    let declared = sim_name.rsplit("::").next().unwrap_or(sim_name);
-    let sims_dir = PathBuf::from(project).join("tests").join("sims");
-    let entries = std::fs::read_dir(&sims_dir)
-        .map_err(|error| format!("cannot read {}: {error}", sims_dir.display()))?;
-    let mut found = Vec::new();
-    for ent in entries.flatten() {
-        let path = ent.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rock") {
-            continue;
-        }
-        let Ok(src) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if src_declares_sim(&src, declared) {
-            found.push(path);
-        }
-    }
-    found.sort();
-    match found.len() {
-        0 => Err(format!("no file in {} declares `co fn {declared}(`", sims_dir.display())),
-        1 => Ok(found.remove(0)),
-        _ => Err(format!(
-            "`co fn {declared}(` is declared in {}",
-            found.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
-        )),
-    }
+/// The on-disk source for a part's snapshot baselines, from the compiled
+/// wire -> source mapping the part carries -- never a source-text scan, so
+/// same-named sims in different files resolve in their own files.
+fn snapshot_source_for(part: &WorkerPart) -> Result<PathBuf, String> {
+    part.source_file.clone().ok_or_else(|| {
+        format!(
+            "sim `{}` has no compiled source file; snapshot ops cannot resolve a baseline dir",
+            part.name
+        )
+    })
 }
 
 /// `foo/bar/baz.rock` -> `foo/bar/baz.snap`. Carries over the .sim
@@ -9249,6 +9253,7 @@ mod tests {
             ]),
             occurrence_id: 0,
             part_index: 0,
+            source_file: None,
         };
         assert_eq!(
             per_entry_env_pairs(&part("a", "/tmp/one")),
@@ -9267,6 +9272,7 @@ mod tests {
             env: env(&[("ROOT", "/fixed")]),
             occurrence_id: 0,
             part_index: 0,
+            source_file: None,
         };
         assert!(per_entry_env_pairs(&plain).is_empty(), "no declaration publishes nothing");
     }
@@ -9290,6 +9296,7 @@ mod tests {
             env: e,
             occurrence_id: 0,
             part_index: 0,
+            source_file: None,
         };
         assert_eq!(
             per_entry_env_pairs(&part),
@@ -9388,6 +9395,7 @@ mod tests {
                 env: Vec::new(),
                 occurrence_id: 0,
                 part_index: 0,
+                source_file: None,
             })
             .collect()
     }
@@ -9396,7 +9404,6 @@ mod tests {
     fn worker_config_construction_reads_each_option_by_name() {
         let parts = worker_parts(&["a"]);
         let config = WorkerConfig {
-            project: "game",
             parts: &parts,
             quiet: true,
             buffered: true,
@@ -9407,7 +9414,6 @@ mod tests {
             stone: None,
             recorder: None,
         };
-        assert_eq!(config.project, "game");
         assert_eq!(config.parts.len(), 1);
         assert!(config.quiet);
         assert!(config.buffered);
@@ -9424,21 +9430,22 @@ mod tests {
         let env: HashMap<String, Vec<(String, String)>> = HashMap::new();
         let specs = ["a".to_string()];
         let ids = [7u64];
+        let sources: HashMap<String, PathBuf> = HashMap::new();
         let config = RecoverConfig {
-            project: "game",
             output: "out",
             env_by_wire: &env,
             entry_specs: &specs,
+            source_files: &sources,
             update_snapshots: true,
             record_manifest: true,
             recorder: None,
             entry_ids: Some(&ids),
             stone: None,
         };
-        assert_eq!(config.project, "game");
         assert_eq!(config.output, "out");
         assert!(config.env_by_wire.is_empty());
         assert_eq!(config.entry_specs.len(), 1);
+        assert!(config.source_files.is_empty());
         assert!(config.update_snapshots);
         assert!(config.record_manifest);
         assert!(config.recorder.is_none());
@@ -9893,6 +9900,7 @@ mod tests {
             env,
             occurrence_id: 0,
             part_index: 0,
+            source_file: None,
         };
         let line = entry_plan_line(&part("game::boots", Vec::new())).unwrap();
         let fields: Vec<&str> = line.split('\t').collect();
@@ -9977,7 +9985,7 @@ mod tests {
         let ids = recorder.plan_entries(&specs(&["gpu_only"]));
         let env = wires(&[("gpu_only", &[("SIM_BACKEND", "wgpu")])]);
         let (_, summary) = run_named_entry("testbed", "gpu_only", true, false, false,
-            "", &env, None, None, Some(&recorder), Some(ids[0])).unwrap();
+            "", &env, &HashMap::new(), None, None, Some(&recorder), Some(ids[0])).unwrap();
         assert!(entry_excluded(&summary));
         recorder.finish(true, None);
         let records: Vec<serde_json::Value> = std::fs::read_to_string(recorder.events_path().unwrap())
@@ -10117,27 +10125,42 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
     }
 
     #[test]
-    fn src_declares_sim_matches_co_fn_decl() {
-        // Real shape: `co fn smoke() -> Coroutine<Wait> { ... }`.
-        // Regression: prior needle `co {name}(` missed every sim.
-        let src = "@sim_render\n@sim\nco fn smoke() -> Coroutine<Wait> {\n}\n";
-        assert!(src_declares_sim(src, "smoke"));
-        assert!(!src_declares_sim(src, "other"));
+    fn resolve_sim_sources_keeps_same_named_sims_in_their_own_files() {
+        // Two modules declare the same trailing segment; the receipt's
+        // per-wire entries disambiguate where a decl-segment scan errored.
+        let root = tempfile::tempdir().unwrap();
+        let proj = root.path().join("proj");
+        let sims = proj.join("tests").join("sims");
+        std::fs::create_dir_all(&sims).unwrap();
+        std::fs::create_dir_all(root.path().join(".git")).unwrap();
+        std::fs::write(root.path().join(".git").join("HEAD"), "ref: refs/heads/master\n").unwrap();
+        std::fs::write(sims.join("a.rock"), "@sim\nco fn only() -> Coroutine<Wait> {\n}\n").unwrap();
+        std::fs::write(sims.join("b.rock"), "mod b;\n@sim\nco fn only() -> Coroutine<Wait> {\n}\n").unwrap();
+        let relative: HashMap<String, String> = [
+            ("game::only".to_string(), "proj/tests/sims/a.rock".to_string()),
+            ("game::b::only".to_string(), "proj/tests/sims/b.rock".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let resolved = resolve_sim_sources(&proj, &relative).unwrap();
+        let canonical = |name: &str| sims.join(name).canonicalize().unwrap();
+        assert_eq!(resolved["game::only"], canonical("a.rock"));
+        assert_eq!(resolved["game::b::only"], canonical("b.rock"));
     }
 
     #[test]
-    fn find_sim_source_reads_the_declared_segment_of_a_v1_wire_name() {
-        let project = tempfile::tempdir().unwrap();
-        let sims = project.path().join("tests").join("sims");
-        std::fs::create_dir_all(&sims).unwrap();
-        std::fs::write(sims.join("a.rock"), "@sim\nco fn only() -> Coroutine<Wait> {\n}\nco fn twice() -> Coroutine<Wait> {\n}\n").unwrap();
-        std::fs::write(sims.join("b.rock"), "mod b;\n@sim\nco fn twice() -> Coroutine<Wait> {\n}\n").unwrap();
-        let project = project.path().to_str().unwrap();
-        assert_eq!(find_sim_source(project, "game::only").unwrap(), sims.join("a.rock"));
-        assert_eq!(find_sim_source(project, "only").unwrap(), sims.join("a.rock"));
-        let error = find_sim_source(project, "game::b::twice").unwrap_err();
-        assert!(error.contains("a.rock") && error.contains("b.rock"), "{error}");
-        assert!(find_sim_source(project, "game::missing").is_err());
+    fn snapshot_source_for_reports_a_wire_missing_from_the_registry() {
+        let part = WorkerPart {
+            name: "game::missing".to_string(),
+            out_dir: PathBuf::from("/tmp/out"),
+            frame_budget: 60,
+            env: Vec::new(),
+            occurrence_id: 0,
+            part_index: 0,
+            source_file: None,
+        };
+        let error = snapshot_source_for(&part).unwrap_err();
+        assert!(error.contains("game::missing"), "{error}");
     }
 
     #[test]
@@ -10152,15 +10175,6 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
             "at smoke:10: diff 0.006 > tol 0.001"
         );
         assert_eq!(prefix_with_site("", "msg"), "msg");
-    }
-
-    #[test]
-    fn src_declares_sim_does_not_match_substring_or_call_site() {
-        // `co fn smoke_alt(` must not match `smoke`. Plain calls to the
-        // sim name (e.g. `smoke()` from another fn) must not match either.
-        let src = "co fn smoke_alt() -> Coroutine<Wait> {\n  smoke()\n}\n";
-        assert!(!src_declares_sim(src, "smoke"));
-        assert!(src_declares_sim(src, "smoke_alt"));
     }
 
     #[test]

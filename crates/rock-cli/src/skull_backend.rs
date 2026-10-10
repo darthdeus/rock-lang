@@ -3394,7 +3394,7 @@ fn relative_sim_source_path(
     Ok(normalized)
 }
 
-fn source_root_for_sim_project(project_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+pub(crate) fn source_root_for_sim_project(project_dir: &std::path::Path) -> Result<std::path::PathBuf> {
     let project_dir = project_dir
         .canonicalize()
         .with_context(|| format!("canonicalize sim project {}", project_dir.display()))?;
