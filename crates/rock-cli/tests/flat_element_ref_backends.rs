@@ -28,8 +28,20 @@ fn run_on(backend: Option<&str>) {
         cmd.args(["--backend", backend]);
     }
     cmd.arg("tests/flat_element_ref.rock");
-    for name in TESTS {
-        cmd.args(["--require-test", name]);
+    // `--require-test` is C-only; the Lua runner names each result in its
+    // timings file instead.
+    let timings = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("flat_element_ref.timings.jsonl");
+    match backend {
+        Some(_) => {
+            for name in TESTS {
+                cmd.args(["--require-test", name]);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(&timings);
+            cmd.env("ROCK_TEST_TIMINGS", &timings);
+        }
     }
     let output = cmd.current_dir(root).output().expect("run rock test");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -41,6 +53,16 @@ fn run_on(backend: Option<&str>) {
     );
     let passed = format!("{n}/{n} @tests passed (0 failed", n = TESTS.len());
     assert!(stdout.contains(&passed), "{label}: expected `{passed}`:\n{stdout}");
+    if backend.is_none() {
+        let lines = std::fs::read_to_string(&timings).expect("read Lua test timings");
+        for name in TESTS {
+            let quoted = format!("\"name\":\"{name}\"");
+            assert!(
+                lines.lines().any(|l| l.contains(&quoted) && l.contains("\"status\":\"pass\"")),
+                "lua: `{name}` did not pass:\n{lines}"
+            );
+        }
+    }
 }
 
 #[test]
