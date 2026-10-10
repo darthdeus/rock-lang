@@ -94,13 +94,21 @@ fn web_remove_file_reports_missing_paths() {
     }
     let json = run(
         "__ROCK_WEB_FILES.present = 'ok';\n\
+         out.present_before = stone_file_exists_status('present');\n\
+         out.present_in_store_before = Object.prototype.hasOwnProperty.call(__ROCK_WEB_FILES, 'present');\n\
          out.missing = stone_remove_file('missing');\n\
+         out.missing_after = stone_file_exists_status('missing');\n\
          out.present = stone_remove_file('present');\n\
-         out.present_after = stone_file_exists('present');",
+         out.present_after = stone_file_exists_status('present');\n\
+         out.present_in_store_after = Object.prototype.hasOwnProperty.call(__ROCK_WEB_FILES, 'present');",
     );
+    assert!(json.contains("\"present_before\":1"), "a stored file must have the found status: {json}");
+    assert!(json.contains("\"present_in_store_before\":true"), "the independent backing store must contain the test file: {json}");
     assert!(json.contains("\"missing\":false"), "missing web files must report failure: {json}");
+    assert!(json.contains("\"missing_after\":0"), "a missing path must have the absent status: {json}");
     assert!(json.contains("\"present\":true"), "present web files must report success: {json}");
-    assert!(json.contains("\"present_after\":false"), "successful removal must delete the file: {json}");
+    assert!(json.contains("\"present_after\":0"), "a removed file must have the absent status: {json}");
+    assert!(json.contains("\"present_in_store_after\":false"), "successful removal must delete the backing entry: {json}");
 }
 
 #[test]
