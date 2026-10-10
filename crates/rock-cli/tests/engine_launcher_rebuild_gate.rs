@@ -80,21 +80,17 @@ fn a_no_change_game_command_does_not_relink_the_engine_cdylibs() {
     // The harness exports CARGO_MANIFEST_DIR, CARGO_PKG_NAME etc. at runtime.
     // ring's build script reruns on them, so building with them set would
     // leave ring (and stone-rs) to rebuild on the user's next plain-shell
-    // command. Build as that shell does.
+    // command. Build as that shell does. Production `run_cargo` strips the
+    // harness set for nested builds; this still covers the `rock.sh` leg,
+    // which inherits this process's environment directly.
     let saved: Vec<_> = std::env::vars_os()
         .filter(|(name, _)| {
             let name = name.to_string_lossy();
-            name.starts_with("CARGO_PKG_")
-                || [
-                    "CARGO_MANIFEST_DIR",
-                    "CARGO_MANIFEST_PATH",
-                    "CARGO_CRATE_NAME",
-                    "CARGO_PRIMARY_PACKAGE",
-                    "CARGO_TARGET_TMPDIR",
-                    "CARGO_TARGET_DIR",
-                    "ROCK_ENGINE_BUILD_RECEIPT",
-                ]
-                .contains(&name.as_ref())
+            name.starts_with(rock_host::engine_build::CARGO_HARNESS_ENV_PREFIX)
+                || rock_host::engine_build::CARGO_HARNESS_ENV_VARS.contains(&name.as_ref())
+                // This gate builds against the shared target with no receipt;
+                // production keeps honoring both.
+                || ["CARGO_TARGET_DIR", "ROCK_ENGINE_BUILD_RECEIPT"].contains(&name.as_ref())
         })
         .collect();
     for (name, _) in &saved {
