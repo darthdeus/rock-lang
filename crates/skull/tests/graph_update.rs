@@ -187,6 +187,24 @@ fn other() -> int { return 7 }
 "#;
 
 #[test]
+fn incremental_update_preserves_graph_verification_configuration() {
+    let before = std::env::var_os("ROCK_GRAPH_VERIFY");
+    let mut case = Case::new(
+        "fn main() { print(\"{chain_a()} {other()}\") }\n",
+        CHAIN_LIB,
+    );
+
+    case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+    case.assert_matches_fresh("subtree deletion");
+
+    assert_eq!(
+        std::env::var_os("ROCK_GRAPH_VERIFY"),
+        before,
+        "an incremental test changed the process verification configuration"
+    );
+}
+
+#[test]
 fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
     let mut case = Case::new(
         "fn main() { print(\"{chain_a()} {other()}\") }\n",
