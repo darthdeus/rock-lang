@@ -13,6 +13,7 @@
 //!   cargo test -p rock-cli --test rock_cli_heavy engine_build_scope_gate:: \
 //!     -- --ignored --nocapture --test-threads=1
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -327,4 +328,105 @@ fn receipt_bound_raw_staging_preserves_the_engine_library() {
     assert!(error.to_string().contains("its staged library changed"), "{error:#}");
     assert_eq!(fs_err::read(&engine).unwrap(), b"replaced staged engine");
     fixture_root.close().expect("remove private engine root and Cargo target");
+}
+
+/// A gate build must not bake the test harness's Cargo environment into
+/// dependency fingerprints.
+///
+/// `cargo test` exports `CARGO_PKG_NAME`, `CARGO_MANIFEST_DIR` and friends
+/// into the test process; `ring`'s build script tracks exactly those via
+/// `cargo:rerun-if-env-changed`. A `build_libstone` that inherits them bakes
+/// the harness values into fingerprints, and the next plain-shell build sees
+/// `EnvVarChanged` and rebuilds `ring`/`rustls`/`ureq`/`stone-rs` back.
+///
+/// Real-mechanism gate: build through production with a harness environment,
+/// then run the plain-shell rebuild (same selection, same scratch target, no
+/// harness variables) and require cargo to report no `ring` rebuild. The
+/// scratch target survives across runs so only the first pays the dependency
+/// build; the verdict is independent of prior state either way.
+#[test]
+#[ignore = "builds stone-rs into a stable scratch target; run deliberately"]
+fn engine_gate_builds_do_not_inherit_the_test_harness_cargo_environment() {
+    if isolated_test("engine_gate_builds_do_not_inherit_the_test_harness_cargo_environment") { return; }
+    let root = private_engine_root("gate-env");
+    let home = std::env::var_os("HOME").expect("HOME");
+    let scratch = PathBuf::from(home).join("tmp/rock-engine-gate-env-target");
+    fs_err::create_dir_all(scratch.join("debug")).expect("create stable scratch target");
+
+    // What `cargo test` exports at runtime (cf. engine_launcher_rebuild_gate),
+    // set to distinctive values so a leak shows as a fingerprint change.
+    let harness: &[(&str, &str)] = &[
+        ("CARGO_MANIFEST_DIR", "/tmp/rock-harness-sim/manifest-dir"),
+        ("CARGO_MANIFEST_PATH", "/tmp/rock-harness-sim/manifest-dir/Cargo.toml"),
+        ("CARGO_MANIFEST_LINKS", "harness-sim"),
+        ("CARGO_CRATE_NAME", "harness_sim"),
+        ("CARGO_PRIMARY_PACKAGE", "harness-sim"),
+        ("CARGO_TARGET_TMPDIR", "/tmp/rock-harness-sim/target-tmpdir"),
+        ("CARGO_PKG_NAME", "harness-sim"),
+        ("CARGO_PKG_VERSION", "9.9.9-harness"),
+        ("CARGO_PKG_VERSION_MAJOR", "9"),
+        ("CARGO_PKG_VERSION_MINOR", "9"),
+        ("CARGO_PKG_VERSION_PATCH", "9"),
+        ("CARGO_PKG_VERSION_PRE", "harness"),
+    ];
+    for (name, _) in harness {
+        eprintln!("ambient {name}={:?}", std::env::var_os(name));
+    }
+
+    let saved: Vec<(OsString, Option<OsString>)> = harness.iter()
+        .map(|(name, _)| (OsString::from(name), std::env::var_os(name)))
+        .collect();
+    let prev_target = std::env::var_os("CARGO_TARGET_DIR");
+    let prev_receipt = std::env::var_os("ROCK_ENGINE_BUILD_RECEIPT");
+    unsafe {
+        for (name, value) in harness {
+            std::env::set_var(name, value);
+        }
+        std::env::set_var("CARGO_TARGET_DIR", &scratch);
+        std::env::remove_var("ROCK_ENGINE_BUILD_RECEIPT");
+    }
+
+    let build = rock_host::engine_build::build_libstone();
+
+    // Restore before any assertion: target, receipt and harness state are
+    // process-shared under `cargo test`.
+    unsafe {
+        for (name, value) in &saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        match &prev_target {
+            Some(value) => std::env::set_var("CARGO_TARGET_DIR", value),
+            None => std::env::remove_var("CARGO_TARGET_DIR"),
+        }
+        if let Some(value) = &prev_receipt {
+            std::env::set_var("ROCK_ENGINE_BUILD_RECEIPT", value);
+        }
+    }
+    for (name, value) in &saved {
+        assert_eq!(std::env::var_os(name), *value, "harness var {name:?} was not restored");
+    }
+    build.expect("build_libstone with a harness environment should succeed");
+
+    let mut verify = Command::new("cargo");
+    verify.args(["build", "-p", "stone-rs"]).current_dir(&root).env("CARGO_TARGET_DIR", &scratch);
+    for (name, _) in harness {
+        verify.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("CARGO_PKG_") {
+            verify.env_remove(name);
+        }
+    }
+    let verify = verify.output().expect("plain-shell cargo build");
+    let stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(verify.status.success(), "plain-shell rebuild failed\n{stderr}");
+    assert!(stderr.contains("Finished"), "plain-shell rebuild never finished\n{stderr}");
+    assert!(
+        !stderr.contains("Compiling ring"),
+        "build_libstone baked the harness environment into fingerprints: \
+         the next plain-shell build rebuilds ring\n{stderr}"
+    );
 }
