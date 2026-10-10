@@ -737,6 +737,9 @@ impl<T: Clone + PartialEq> Agreed<T> {
 
 #[derive(Clone)]
 pub struct InstanceGraph {
+    // Capture the environment switch at build time; retained graphs must not
+    // change verification behavior when a sibling mutates process state.
+    verify_whole_graph: bool,
     /// **The build's one arena, SHARED rather than owned.**
     ///
     /// A retained graph and the emission that consumes it both mint and read
@@ -1566,6 +1569,7 @@ pub fn build_in(
     let t_build = std::time::Instant::now();
     let intern_before = interner.stats();
     let mut g = InstanceGraph::empty_in(interner);
+    g.verify_whole_graph = std::env::var_os("ROCK_GRAPH_VERIFY").is_some();
     let t = std::time::Instant::now();
     g.seed_roots(ws, canonical_roots(ws, roots, perturb));
     let pending = g.always_emitted_owners(ws);
@@ -1741,11 +1745,13 @@ impl InstanceGraph {
     pub fn release_records(&mut self) {
         let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
         empty.run_stats = self.run_stats;
+        empty.verify_whole_graph = self.verify_whole_graph;
         *self = empty;
     }
 
     fn empty_in(interner: std::sync::Arc<MonoInterner>) -> Self {
         InstanceGraph {
+            verify_whole_graph: false,
         interner,
         contributions: BTreeMap::new(),
         lost: BTreeSet::new(),
@@ -2804,12 +2810,9 @@ impl InstanceGraph {
             broad_scans,
         } =
             if incremental { self.stranded(&lost) } else { Prune::default() };
-        if std::env::var("ROCK_GRAPH_VERIFY").is_ok() {
-            // Both claims against one whole-graph reachability walk, on demand:
-            // that the delta found everything, and that a fresh build had
-            // nothing to find. The compact fixtures run with it on, so a region
-            // the delta failed to reach is a failure there rather than a stale
-            // instance nobody looks at.
+        if self.verify_whole_graph {
+            // Check that the affected-region prune agrees with whole-graph
+            // reachability for graphs built with verification enabled.
             let wholesale = self.unreachable_wholesale();
             assert_eq!(
                 pruned, wholesale,
