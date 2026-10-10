@@ -3220,17 +3220,15 @@ fn lint_workspace_inner(
             &types,
             census.as_deref_mut(),
         );
-        let type_dependent_elapsed = census
-            .as_deref()
-            .map(|census| census.type_dependent.elapsed_ns.saturating_sub(type_dependent_before))
-            .unwrap_or(0);
-        let flat_elapsed = t_flat
-            .elapsed()
-            .saturating_sub(std::time::Duration::from_nanos(type_dependent_elapsed as u64));
         record_family(
             census.as_deref_mut(),
             CensusFamily::Flat,
-            flat_elapsed,
+            t_flat.elapsed().saturating_sub(std::time::Duration::from_nanos(
+                census
+                    .as_deref()
+                    .map(|census| census.type_dependent.elapsed_ns.saturating_sub(type_dependent_before))
+                    .unwrap_or(0) as u64,
+            )),
             1,
             1,
             module.bodies.len(),
