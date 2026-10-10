@@ -56,6 +56,10 @@ pub fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
 /// oracle is the worst region, not the average pixel: a half-tile shift of
 /// one tile fails the default `image_snapshot` tol where the mean passed.
 /// Partial edge blocks average over their own pixels; no pixel is excluded.
+/// Per-channel deltas of 1 or less count as zero: that is the RGBA8
+/// quantization floor (rounding vs truncation across GL implementations),
+/// invisible by construction, and committed cross-machine goldens otherwise
+/// fail on it. Deltas above the floor keep their full magnitude.
 pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
     let (bw, bh, b) = decode_png_rgba8(baseline)?;
     let (aw, ah, a) = decode_png_rgba8(actual)?;
@@ -81,7 +85,8 @@ pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
                 let o = (y * bw + x0) as usize * 4;
                 let n = (x1 - x0) as usize * 4;
                 for (pb, pa) in b[o..o + n].iter().zip(a[o..o + n].iter()) {
-                    total += (*pb as i32 - *pa as i32).unsigned_abs() as u64;
+                    let d = (*pb as i32 - *pa as i32).unsigned_abs() as u64;
+                    total += if d <= 1 { 0 } else { d };
                 }
             }
             let max = (x1 - x0) as u64 * (y1 - y0) as u64 * 4 * 255;
@@ -250,6 +255,9 @@ mod tests {
     /// `image_diff`; pins the fixture to the stated trap (hidden from the mean,
     /// visible to a region) instead of trusting the oracle under test.
     /// Only `window` (x0, y0, size) differs between `base` and `shifted`.
+    /// The mean counts every LSB (that is the old oracle's quantity); the block
+    /// scan zeroes per-channel deltas of 1 or less (the new oracle's rounding
+    /// floor), so the fixture proves a VISIBLE regional signal, not ±1 noise.
     fn independent_means(
         base: &[u8],
         shifted: &[u8],
@@ -267,11 +275,15 @@ mod tests {
                 let y = y0 + dy;
                 let o = ((y * w + x) * 4) as usize;
                 let mut px_total: u64 = 0;
+                let mut px_visible: u64 = 0;
                 for c in 0..4 {
-                    px_total += (base[o + c] as i32 - shifted[o + c] as i32).unsigned_abs() as u64;
+                    let d =
+                        (base[o + c] as i32 - shifted[o + c] as i32).unsigned_abs() as u64;
+                    px_total += d;
+                    px_visible += if d <= 1 { 0 } else { d };
                 }
                 frame_total += px_total;
-                *blocks.entry((x / BLOCK_PX, y / BLOCK_PX)).or_insert(0u64) += px_total;
+                *blocks.entry((x / BLOCK_PX, y / BLOCK_PX)).or_insert(0u64) += px_visible;
             }
         }
         let frame_mean = frame_total as f64 / (w as u64 * h as u64 * 4 * 255) as f64;
