@@ -2995,12 +2995,27 @@ fn build_state_nobox_accessors(
 /// unaffected while scene render targets shrink roughly ninefold.
 pub const SIM_SMALL_WINDOW: &str = "640x360";
 
-/// Declared names of the engine's pixel readers: captures, canvas and window
-/// readback, frame streams and the analysis-capture bridge, plus the FFI roots
-/// sims may call directly and `sim_submit_guard`, which every guarded reader
-/// funnels through. Each name is unique workspace-wide (D-form methods desugar
-/// to bare names, so no method is listed: a sim reading probe bytes created
-/// its probe through `window_probe_new` in the same entry). A sim whose
+/// Declared-name prefixes of the engine's async pixel-readback family and its
+/// FFI: every `pixel_readback_*` wrapper and `stone_pixel_readback_*` call,
+/// present and future. The family is large, uniformly prefixed, and (unlike
+/// the guarded readers) calls no shared funnel, so a prefix covers its growth;
+/// over-matching stays on the safe side (a lifecycle call keeps the window).
+pub static SIM_PIXEL_PREFIXES: &[&str] = &["pixel_readback", "stone_pixel_readback"];
+
+/// True when the declared callee name reads pixels: an exact root or a
+/// readback-family prefix.
+fn sim_name_reads_pixels(declared: &str) -> bool {
+    SIM_PIXEL_ROOTS.iter().any(|root| *root == declared)
+        || SIM_PIXEL_PREFIXES.iter().any(|prefix| declared.starts_with(prefix))
+}
+
+/// Declared names of the engine's pixel readers: captures, canvas, window and
+/// depth readback, frame streams and the analysis-capture bridge, plus the FFI
+/// roots sims may call directly and `sim_submit_guard`, which every guarded
+/// reader funnels through. Each name is unique workspace-wide (D-form methods
+/// desugar to bare names, so no method is listed: a sim reading probe bytes
+/// created its probe through `window_probe_new` in the same entry). The async
+/// readback family is covered by [`SIM_PIXEL_PREFIXES`]. A sim whose
 /// transitive callees name one of these keeps the game's window; anything else
 /// boots in [`SIM_SMALL_WINDOW`] unless it declares its own `STONE_WINDOW`.
 pub static SIM_PIXEL_ROOTS: &[&str] = &[
@@ -3019,6 +3034,8 @@ pub static SIM_PIXEL_ROOTS: &[&str] = &[
     "stone_save_screenshot_sized",
     "stone_read_canvas_pixel",
     "stone_read_canvas_pixel_channel",
+    "read_depth_pixel",
+    "stone_read_depth_pixel",
     "analysis_capture_arm",
     "analysis_capture_poll",
     "analysis_scene_sources",
@@ -3115,9 +3132,7 @@ fn sim_reads_pixels(
         return false;
     }
     let callee = &ws.module(mid).functions[fid];
-    let mut reads = SIM_PIXEL_ROOTS
-        .iter()
-        .any(|root| *root == skull_mir::mangle::declared_name(callee.name.as_str()));
+    let mut reads = sim_name_reads_pixels(skull_mir::mangle::declared_name(callee.name.as_str()));
     if !reads {
         for (callee_mid, callee_fid) in sim_callee_edges(ws, mid, fid, name_map) {
             if sim_reads_pixels(ws, callee_mid, callee_fid, memo, visiting, name_map) {
@@ -3184,10 +3199,11 @@ fn collect_skull_sims(
                 };
                 env_pairs.push((k.to_string(), v.to_string()));
             }
-            // The small-window default goes first so any explicit `@sim_env`
-            // wins under last-wins, including an explicit empty (the game's
-            // own size). `STONE_WINDOW` already travels per entry, so a shared
-            // worker resizes for each entry like an explicit size today.
+            // Skipped when the sim declares any `STONE_WINDOW` (an explicit
+            // empty keeps the game's own size); prepended so the pair order
+            // reads default-first. `STONE_WINDOW` already travels per entry,
+            // so a shared worker resizes for each entry like an explicit size
+            // today.
             let explicit_window = env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW");
             if !explicit_window
                 && !sim_reads_pixels(ws, module.id, fid, &mut pixel_memo, &mut visiting, &name_map)
@@ -3494,7 +3510,11 @@ mod sim_small_window_tests {
 
     #[test]
     fn sims_that_capture_keep_the_game_default() {
-        for short in ["small_window_pixel_reader", "small_window_indirect_reader"] {
+        for short in [
+            "small_window_pixel_reader",
+            "small_window_indirect_reader",
+            "small_window_readback_reader",
+        ] {
             assert_eq!(
                 stone_window(env_for(env_by_wire(), short)),
                 None,
@@ -3529,6 +3549,12 @@ mod sim_small_window_tests {
             assert!(
                 names.contains(*root),
                 "pixel root `{root}` resolves to no function; the set drifted from the engine"
+            );
+        }
+        for prefix in super::SIM_PIXEL_PREFIXES {
+            assert!(
+                names.iter().any(|n| n.starts_with(prefix)),
+                "pixel prefix `{prefix}` matches no function; the set drifted from the engine"
             );
         }
     }

@@ -26,6 +26,13 @@ co fn small_window_indirect_reader() -> Coroutine<Wait> {
     stop_sim()
 }
 
+@sim
+co fn small_window_readback_reader() -> Coroutine<Wait> {
+    let slot = pixel_readback_new()
+    sim_expect(pixel_readback_in_flight(slot) >= 0, "a sim that polls readback keeps its window")
+    stop_sim()
+}
+
 @sim_env("STONE_WINDOW", "800x600")
 @sim
 co fn small_window_explicit_size() -> Coroutine<Wait> {
