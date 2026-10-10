@@ -870,6 +870,10 @@ impl CommandContext {
                 self.args.itch,
             );
         }
+        if self.args.command == CliCommand::AssetCheck {
+            let project = self.get_project_dir_or_current()?;
+            return crate::asset_preflight::check_project(Path::new(&project));
+        }
         if self.args.command == CliCommand::Package {
             let project = self.get_project_dir_or_current()?;
             return crate::package::run_package(&project, self.args.output.as_deref());

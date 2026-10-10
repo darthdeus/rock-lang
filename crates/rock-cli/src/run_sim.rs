@@ -988,6 +988,7 @@ fn prepare_sims(
     project_path: PathBuf,
     output_path: PathBuf,
 ) -> Result<PreparedSims> {
+    crate::asset_preflight::check_sim_project(&project_path)?;
     let selection = child_sim_selection()?;
     let Some(root) = std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV)
         .filter(|value| !value.is_empty())
@@ -1086,6 +1087,7 @@ fn prepare_sims_out_of_process(
     rock_exe: &Path,
     selection: &[String],
 ) -> Result<PreparedSims> {
+    crate::asset_preflight::check_sim_project(&project_path)?;
     crate::compile_slots::report_spawn_phase("compile-prepare");
     if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
         return prepare_sims(backend, project_path, output_path);

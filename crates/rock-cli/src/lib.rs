@@ -59,6 +59,7 @@ pub mod live_project;
 #[cfg(feature = "backend-js")]
 pub mod web;
 pub mod package;
+pub mod asset_preflight;
 mod sound_inspect;
 pub mod zip_writer;
 mod test_protocol;
@@ -341,6 +342,8 @@ pub enum CliCommand {
     /// `rock sound-inspect <game>` -- compile the game's declared sound
     /// project and open its runtime bank in the independent inspector.
     SoundInspect,
+    /// Check declared runtime assets without compiling or starting the game.
+    AssetCheck,
     /// `rock docs-index <dir|file>... --output <file>` — generate a
     /// deterministic declaration/signature index from Rock source.
     DocsIndex,
@@ -401,6 +404,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Web,
             Self::Package,
             Self::SoundInspect,
+            Self::AssetCheck,
             Self::DocsIndex,
             Self::SdkCheck,
             Self::EngineBuildReceipt,
@@ -465,6 +469,7 @@ impl CliCommand {
             Self::Web => "web",
             Self::Package => "package",
             Self::SoundInspect => "sound-inspect",
+            Self::AssetCheck => "asset-check",
             Self::DocsIndex => "docs-index",
             Self::SdkCheck => "sdk-check",
             Self::EngineBuildReceipt => "engine-build-receipt",

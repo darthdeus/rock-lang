@@ -919,11 +919,11 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
 
     let game_key = project.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
     let packaged_root = output.path().join("assets").join(&game_key);
-    let production_ogg = sound_fixture_ogg();
+    let source_ogg = sound_fixture_ogg();
     for key in sound_dependency_keys(&project) {
         assert_eq!(
             std::fs::read(packaged_root.join(&key)).unwrap(),
-            production_ogg,
+            source_ogg,
             "staged sound dependency differs from source: {key}"
         );
     }
