@@ -2723,7 +2723,7 @@ function __sw_file_get(path) {
   if (path in __ROCK_WEB_ASSETS) return __ROCK_WEB_ASSETS[path];
   return undefined;
 }
-function stone_file_exists(path) { return __sw_file_get(path) !== undefined; }
+function stone_file_exists_status(path) { return __sw_file_get(path) !== undefined ? 1 : 0; }
 function stone_file_size(path) {
   var c = __sw_file_get(path);
   return c === undefined ? -1 : (c.byteLength !== undefined ? c.byteLength : c.length);
