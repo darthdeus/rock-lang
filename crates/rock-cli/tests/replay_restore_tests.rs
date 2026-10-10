@@ -581,12 +581,26 @@ fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::
 
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.
 fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
+    run_replay_dump_with_input_isolation(game, frames, log, env, false)
+}
+
+fn run_replay_dump_with_input_isolation(
+    game: &str,
+    frames: u32,
+    log: &str,
+    env: &[(&str, &str)],
+    isolate_ambient_input: bool,
+) -> serde_json::Value {
     let scratch = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args([
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command.args([
             "frame", game, "-n", &frames.to_string(), "--replay", log,
             "--dump-state", "--output", &scratch.path().to_string_lossy(),
-        ])
+        ]);
+    if isolate_ambient_input {
+        remove_ambient_physical_input(&mut command);
+    }
+    let out = command
         .envs(env.iter().copied())
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
@@ -601,6 +615,20 @@ fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
 /// test can prove a rewind happened without a supervisor relaunch.
 fn run_record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
     let observed = run_record_dump_observed(game, frames, log, env);
+    assert_record_run_succeeded(observed)
+}
+
+fn run_record_dump_without_ambient_input(
+    game: &str,
+    frames: u32,
+    log: &str,
+    env: &[(&str, &str)],
+) -> serde_json::Value {
+    let observed = run_record_dump_observed_with_input_isolation(game, frames, log, env, true);
+    assert_record_run_succeeded(observed)
+}
+
+fn assert_record_run_succeeded(observed: ObservedRecordRun) -> serde_json::Value {
     assert!(
         observed.status_success,
         "live record failed: {}",
@@ -621,13 +649,27 @@ fn run_record_dump_observed(
     log: &str,
     env: &[(&str, &str)],
 ) -> ObservedRecordRun {
+    run_record_dump_observed_with_input_isolation(game, frames, log, env, false)
+}
+
+fn run_record_dump_observed_with_input_isolation(
+    game: &str,
+    frames: u32,
+    log: &str,
+    env: &[(&str, &str)],
+    isolate_ambient_input: bool,
+) -> ObservedRecordRun {
     let scratch = tempfile::tempdir().unwrap();
     let frames_s = frames.to_string();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args([
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command.args([
             "frame", game, "-n", &frames_s, "--record", log,
             "--dump-state", "--output", &scratch.path().to_string_lossy(),
-        ])
+        ]);
+    if isolate_ambient_input {
+        remove_ambient_physical_input(&mut command);
+    }
+    let out = command
         .envs(env.iter().copied())
         .env("ROCK_FRAME_TIMEOUT_SECS", REPLAY_PHASE_TIMEOUT_SECS)
         .current_dir(workspace_root())
@@ -643,6 +685,14 @@ fn run_record_dump_observed(
         status_success: out.status.success(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         state,
+    }
+}
+
+fn remove_ambient_physical_input(command: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("STONE_PHYSICAL_") {
+            command.env_remove(name);
+        }
     }
 }
 
@@ -3705,7 +3755,7 @@ fn replay_of_a_log_with_a_midrun_resize_matches_recording() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("resize.replay").to_string_lossy().into_owned();
-    let recorded = run_record_dump(
+    let recorded = run_record_dump_without_ambient_input(
         game,
         60,
         &log_s,
@@ -3736,7 +3786,7 @@ fn replay_of_a_log_with_a_midrun_resize_matches_recording() {
     assert_eq!(recorded["stone"]["DRAWABLE_SIZE"]["x"], 1000);
     assert_eq!(recorded["stone"]["DRAWABLE_SIZE"]["y"], 700);
 
-    let replayed = run_replay_dump(game, 70, &log_s, &[]);
+    let replayed = run_replay_dump_with_input_isolation(game, 70, &log_s, &[], true);
     assert_eq!(
         current_tick(&replayed),
         current_tick(&recorded),
