@@ -356,6 +356,146 @@ mod tests {
         assert_eq!(diff, 0.0, "identical frames must diff exactly zero");
     }
 
+    /// Control: per-channel deltas of exactly +1/-1 across full and partial
+    /// blocks diff exactly zero. The pair is NOT bit-identical (asserted on
+    /// the decoded bytes), so 0.0 means "no above-floor difference".
+    #[test]
+    fn deadband_plus_minus_one_counts_as_zero() {
+        // 40x40 spans full 32px blocks plus partial edge blocks in both
+        // dims, so the deadband is pinned on both block shapes at once.
+        let (w, h) = (40u32, 40u32);
+        let mut base = vec![0u8; (w * h * 4) as usize];
+        for px in base.chunks_exact_mut(4) {
+            px.copy_from_slice(&[128, 128, 128, 128]);
+        }
+        let mut shifted = base.clone();
+        for (i, px) in shifted.chunks_exact_mut(4).enumerate() {
+            let x = i as u32 % w;
+            let y = i as u32 / w;
+            px[0] += 1; // R always +1
+            px[1] -= 1; // G always -1
+            if (x + y) % 2 == 0 {
+                px[2] += 1; // B mixed sign by checkerboard
+            } else {
+                px[2] -= 1;
+            }
+            match i % 3 {
+                0 => {} // A keeps some channels at 0
+                1 => px[3] += 1,
+                _ => px[3] -= 1,
+            }
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("rock-image-oracle-")
+            .tempdir()
+            .expect("tempdir");
+        let base_path = dir.path().join("base.png");
+        let shifted_path = dir.path().join("shifted.png");
+        write_rgba_png(&base_path, w, h, &base);
+        write_rgba_png(&shifted_path, w, h, &shifted);
+        let (_, _, back) = decode_png_rgba8(&shifted_path).expect("decode shifted");
+        assert_ne!(back, base, "pair must differ, or the zero below is vacuous");
+        let diff = image_diff(&base_path, &shifted_path).expect("diff");
+        assert_eq!(diff, 0.0, "every channel within +-1 must count as zero");
+    }
+
+    /// Control: per-channel deltas of exactly +2/-2 keep their full
+    /// magnitude. A uniform +-2 shift over exactly one full block diffs
+    /// 2/255, above the default snapshot tol: a wider deadband would read
+    /// 0.0 and a floor subtraction or halving would read 1/255.
+    #[test]
+    fn deadband_plus_minus_two_keeps_full_magnitude() {
+        // Exactly one full 32px block: magnitude without partial-block
+        // interaction (that rule has its own control below).
+        let (w, h) = (BLOCK_PX, BLOCK_PX);
+        let mut base = vec![0u8; (w * h * 4) as usize];
+        for px in base.chunks_exact_mut(4) {
+            px.copy_from_slice(&[128, 128, 128, 128]);
+        }
+        let mut shifted = base.clone();
+        for px in shifted.chunks_exact_mut(4) {
+            px[0] += 2;
+            px[1] -= 2;
+            px[2] += 2;
+            px[3] -= 2;
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("rock-image-oracle-")
+            .tempdir()
+            .expect("tempdir");
+        let base_path = dir.path().join("base.png");
+        let shifted_path = dir.path().join("shifted.png");
+        write_rgba_png(&base_path, w, h, &base);
+        write_rgba_png(&shifted_path, w, h, &shifted);
+        let diff = image_diff(&base_path, &shifted_path).expect("diff");
+        let expected = 2.0 / 255.0;
+        assert!(
+            (diff - expected).abs() < 1e-12,
+            "uniform +-2 must diff exactly 2/255, oracle said {diff:.6}"
+        );
+        assert!(
+            diff > DEFAULT_TOL,
+            "a uniform +-2 shift must fail the default snapshot tol"
+        );
+    }
+
+    /// Control: a partial edge block averages over its own pixels. A
+    /// saturated 8x8 partial corner diffs 1/4: a full-block denominator
+    /// would read 1/64 and a whole-frame mean 1/100.
+    #[test]
+    fn partial_edge_block_uses_own_pixel_count() {
+        // 40x40: blocks are 32+8 per dim, so the far corner is an 8x8
+        // partial block in both dims.
+        let (w, h) = (40u32, 40u32);
+        let mut base = vec![0u8; (w * h * 4) as usize];
+        for px in base.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        let mut shifted = base.clone();
+        for y in 32..40 {
+            for x in 32..40 {
+                shifted[((y * w + x) * 4) as usize] = 255;
+            }
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("rock-image-oracle-")
+            .tempdir()
+            .expect("tempdir");
+        let base_path = dir.path().join("base.png");
+        let shifted_path = dir.path().join("shifted.png");
+        write_rgba_png(&base_path, w, h, &base);
+        write_rgba_png(&shifted_path, w, h, &shifted);
+        let diff = image_diff(&base_path, &shifted_path).expect("diff");
+        assert!(
+            (diff - 0.25).abs() < 1e-12,
+            "saturated 8x8 partial corner must diff 1/4 over its own pixels, \
+             oracle said {diff:.6}"
+        );
+        // Strip case: 48x32 holds a 16x32 partial strip; a mid-gray strip
+        // diffs 128/(4*255) = 32/255 over its own pixels.
+        let (w2, h2) = (48u32, 32u32);
+        let mut base2 = vec![0u8; (w2 * h2 * 4) as usize];
+        for px in base2.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0, 0, 0, 255]);
+        }
+        let mut shifted2 = base2.clone();
+        for y in 0..32 {
+            for x in 32..48 {
+                shifted2[((y * w2 + x) * 4 + 1) as usize] = 128;
+            }
+        }
+        let base2_path = dir.path().join("base2.png");
+        let shifted2_path = dir.path().join("shifted2.png");
+        write_rgba_png(&base2_path, w2, h2, &base2);
+        write_rgba_png(&shifted2_path, w2, h2, &shifted2);
+        let diff2 = image_diff(&base2_path, &shifted2_path).expect("diff");
+        let expected2 = 32.0 / 255.0;
+        assert!(
+            (diff2 - expected2).abs() < 1e-12,
+            "mid-gray 16x32 partial strip must diff 32/255, oracle said {diff2:.6}"
+        );
+    }
+
     /// Control: dimension mismatches stay hard errors, and the test PNG writer
     /// round-trips through the production decoder.
     #[test]
