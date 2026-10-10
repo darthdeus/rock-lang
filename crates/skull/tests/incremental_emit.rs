@@ -1388,3 +1388,57 @@ fn fingerprint_code_rows_survive_rollback() {
         assert_eq!(overlay.artifact_fingerprint, fresh.artifact_fingerprint);
     }
 }
+
+#[test]
+fn flat_ref_callee_body_overlay_updates_the_live_variant() {
+    crate::common::require_luajit();
+    let v1 = r#"
+value Cell { v: int }
+global xs: [Cell] = []
+fn apply(c: ref Cell, delta: int) -> int { c.v += delta
+return c.v }
+@nomangle fn seed() { xs.push(Cell { v: 10 }) }
+@nomangle fn snapshot() -> int { return xs[0].v }
+@nomangle fn tick(delta: int) -> bool {
+    let before = xs[0].v
+    let seen = apply(xs[0], delta)
+    return seen != before && xs[0].v == seen
+}
+"#;
+    let v2 = v1.replace("c.v += delta", "c.v -= delta");
+    let ws1 = ws_with_stdlib(v1);
+    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "apply")]);
+    let run = format!(
+        "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
+        full.lua, overlay.lua,
+    );
+    assert_eq!(crate::common::run_luajit(&run, "flat_ref_body_overlay"), "ok");
+}
+
+#[test]
+fn flat_ref_signature_change_refuses_an_overlay() {
+    let v1 = r#"
+value Cell { v: int }
+value Outer { cell: Cell, w: int }
+fn apply(c: ref Cell) -> int { c.v += 1
+return c.v }
+@nomangle fn tick() -> int {
+    let xs: [Cell] = []
+    xs.push(Cell { v: 10 })
+    return apply(xs[0])
+}
+"#;
+    let v2 = v1.replace("let xs: [Cell] = []", "let xs: [Outer] = []")
+        .replace("xs.push(Cell { v: 10 })", "xs.push(Outer { cell: Cell { v: 10 }, w: 20 })")
+        .replace("apply(xs[0])", "apply(xs[0].cell)");
+    let ws1 = ws_with_stdlib(v1);
+    let (_, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    let ws2 = ws_with_stdlib(&v2);
+    let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "tick")]) {
+        Ok(_) => panic!("changing a flat variant's element/prefix must request restart"),
+        Err(err) => err,
+    };
+    assert!(err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"), "{}", err.message);
+}

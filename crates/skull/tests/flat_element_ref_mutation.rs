@@ -183,3 +183,34 @@ fn main() {
     );
     assert_eq!(out, "false\ttrue", "the borrow of a missing key must raise: {out}");
 }
+
+
+/// PINNED BUG: recursive ref returns mistake an in-progress scan for boxed
+/// storage. This passes today because the bug exists; C runs this program.
+/// When emission succeeds, replace the error assertion with a Lua execution
+/// asserting the printed production container/ref readback is `true`.
+#[test]
+fn recursive_flat_ref_return_rejection_sentinel() {
+    let source = r#"
+value Cell { v: int }
+fn descend(c: ref Cell, n: int) -> ref Cell {
+    if n == 0 { return c }
+    return descend(c, n - 1)
+}
+fn bump(c: ref Cell) -> int { c.v += 1
+return c.v }
+fn main() {
+    let xs: [Cell] = []
+    xs.push(Cell { v: 10 })
+    let before = xs[0].v
+    let seen = bump(descend(xs[0], 12))
+    print("{seen != before && xs[0].v == seen}")
+}
+"#;
+    let err = match try_emit_module(source) {
+        Ok(_) => panic!("recursive flat ref return now emits; flip the sentinel to runtime readback"),
+        Err(err) => err,
+    };
+    assert!(err.message.contains("descend") && err.message.contains("differently stored reference"), "{err:?}");
+    assert!(!err.labels.is_empty(), "the rejection must carry a source span: {err:?}");
+}
