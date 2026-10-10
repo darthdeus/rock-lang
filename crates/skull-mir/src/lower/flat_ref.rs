@@ -831,7 +831,19 @@ impl<'a> Builder<'a> {
         let mut mf = MirFunc::new(hoisted);
         mf.rep_arena = Some(self.scx.rep_arena());
         mf.flat_variant_source = Some(inst.func);
-        let call_abi = format!("{}|flat {:?}", dc.plan.logical_fingerprint(), plan.sig);
+        let flat_abi = plan.sig.iter().map(|key| match key {
+            None => "boxed".to_string(),
+            Some(key) => format!(
+                "elem={};nullable={};nobox={};storage={:?};prefix={};{}",
+                key.elem.name,
+                key.elem.nullable,
+                key.elem.is_nobox(),
+                key.storage,
+                key.prefix,
+                abi::rep_logical_fingerprint(&self.scx.rep_arena(), key.elem.representation()),
+            ),
+        }).collect::<Vec<_>>().join(",");
+        let call_abi = format!("{}|flat [{flat_abi}]", dc.plan.logical_fingerprint());
         mf.code_identity = Some(identity.clone());
         mf.code_abi_fingerprint = Some(call_abi.clone());
         mf.code_compatibility = Some(crate::code_identity::CodeCompatibility {

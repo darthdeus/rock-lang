@@ -1442,3 +1442,24 @@ return c.v }
     };
     assert!(err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"), "{}", err.message);
 }
+
+#[test]
+fn flat_ref_abi_uses_logical_layout() {
+    let ws = ws_with_stdlib(r#"
+value Cell { v: int }
+fn bump(c: ref Cell) -> int { c.v += 1
+return c.v }
+fn sample() -> int {
+    let xs: [Cell] = []
+    xs.push(Cell { v: 10 })
+    return bump(xs[0])
+}
+"#);
+    let (full, _) = emit_full(&ws, skull::user_module_id(&ws).unwrap()).unwrap();
+    let flat_abis: Vec<_> = full.code_artifact.entries.iter()
+        .map(|(_, entry)| entry.compatibility.call_abi.as_str())
+        .filter(|abi| abi.contains("|flat "))
+        .collect();
+    assert!(!flat_abis.is_empty(), "the production artifact must contain a flat variant");
+    assert!(flat_abis.iter().all(|abi| !abi.contains("RepId")), "call ABI must not contain build-scoped arena handles: {flat_abis:?}");
+}

@@ -2562,7 +2562,7 @@ impl BackendFnAbiPlan {
             .then(|| self.param_shapes().iter().map(RetSlot::slot_count).collect())
     }
 }
-fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
+pub(crate) fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
     let plan = arena.get(id);
     let layout = match plan.layout() {
         RepLayout::Opaque => "opaque".to_string(),
