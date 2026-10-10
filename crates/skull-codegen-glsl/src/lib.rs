@@ -468,6 +468,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("tan", 1, "tan($1)"),
     ("sqrt", 1, "sqrt($1)"),
     ("exp", 1, "exp($1)"),
+    ("log2", 1, "log2($1)"),
     ("abs", 1, "abs($1)"),
     ("floor", 1, "floor($1)"),
     ("ceil", 1, "ceil($1)"),
@@ -1828,6 +1829,14 @@ impl FnEmit<'_> {
                     cur = t;
                 }
                 Term::Branch { cond, then_bb, else_bb } => {
+                    // Direct shader calls materialize literal defaults at the
+                    // call site. The MIR nil guard is only for dynamic callers
+                    // on Lua/JS, so the typed GLSL callee always takes its
+                    // non-omitted path.
+                    if self.f.param_default_guards.contains_key(&cond) {
+                        cur = else_bb;
+                        continue;
+                    }
                     // A folded short-circuit / ternary diamond emits nothing here --
                     // its expression renders at the result cell's one use. Skip to
                     // the join (ipdom); both arms are absorbed.
