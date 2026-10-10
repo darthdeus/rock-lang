@@ -1106,6 +1106,9 @@ fn prepare_sims_out_of_process(
     if std::env::var_os(SIM_COMPILE_RECEIPT_DIR_ENV).is_some_and(|value| !value.is_empty()) {
         return prepare_sims(backend, project_path, output_path);
     }
+    // Above the cache branch, so a cache-hit run still sweeps: the stale
+    // roots it removes are from cache-bypassed runs, not from the cache.
+    sweep_stale_sim_receipt_roots(Path::new("tmp"));
     let project_path = project_path.canonicalize().with_context(|| {
         format!("canonicalize sim project {}", project_path.display())
     })?;
@@ -1113,8 +1116,11 @@ fn prepare_sims_out_of_process(
         return sim_compile_cache::prepare(backend, &project_path, &output_path, &cache, rock_exe, selection);
     }
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
+    // Pid-keyed so the next run can tell a concurrent live compile (pid
+    // alive: keep) from a killed runner's leftover (pid dead: sweep).
+    let receipt_prefix = format!("{SIM_RECEIPT_PREFIX}{}-", std::process::id());
     let root = tempfile::Builder::new()
-        .prefix("sim-receipt-")
+        .prefix(&receipt_prefix)
         .tempdir_in("tmp")
         .context("creating sim compile receipt directory")?;
     compile_receipt_in_child(backend, &project_path, rock_exe, root.path(), selection)?;
@@ -1124,6 +1130,59 @@ fn prepare_sims_out_of_process(
         &output_path,
         None,
     )
+}
+
+const SIM_RECEIPT_PREFIX: &str = "sim-receipt-";
+
+/// Roots without a parseable runner pid predate pid-keying; only age can
+/// judge them, and no live compile runs this long.
+const STALE_RECEIPT_GRACE: Duration = Duration::from_secs(6 * 60 * 60);
+
+fn receipt_runner_pid(name: &str) -> Option<u32> {
+    name.strip_prefix(SIM_RECEIPT_PREFIX)?.split('-').next()?.parse().ok()
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else { return false };
+    // `kill(pid, 0)` performs no signal; EPERM still means the process
+    // exists (another user's), so only a clean error means dead.
+    unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    // No portable liveness probe: keep pid-keyed roots (the safe direction)
+    // and let the age grace reclaim them.
+    true
+}
+
+/// Remove `sim-receipt-*` roots whose runner is gone. A SIGKILLed runner
+/// skips its receipt tempdir's drop (~160 MB per mag run); the next run
+/// reclaims it here. Best-effort: every decision errs toward keeping, and a
+/// removal failure is a diagnostic, never a run failure.
+fn sweep_stale_sim_receipt_roots(tmp: &Path) {
+    let Ok(read) = std::fs::read_dir(tmp) else { return };
+    for entry in read.filter_map(|entry| entry.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(SIM_RECEIPT_PREFIX) || !entry.path().is_dir() {
+            continue;
+        }
+        let pid = receipt_runner_pid(&name);
+        if pid.is_some_and(pid_alive) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .is_some_and(|mtime| mtime.elapsed().unwrap_or(Duration::ZERO) > STALE_RECEIPT_GRACE);
+        if pid.is_some() || old {
+            if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+                log::info!(target: "SIM", "sim receipt sweep: cannot remove {}: {error}", entry.path().display());
+            }
+        }
+    }
 }
 
 /// Compile `project` in a child `rock_exe sim --list` that publishes its receipt
@@ -1137,8 +1196,10 @@ fn compile_receipt_in_child(
     selection: &[String],
 ) -> Result<()> {
     crate::compile_slots::report_spawn_phase("compile");
-    let status = std::process::Command::new(rock_exe)
-        .args(compile_child_invocation_args())
+    // Bound like a worker: a SIGKILLed runner must not leave the compile
+    // running unparented (and publishing into a root nobody consumes).
+    let mut cmd = std::process::Command::new(rock_exe);
+    cmd.args(compile_child_invocation_args())
         .arg("sim")
         .arg("--list")
         .arg("--backend")
@@ -1148,9 +1209,13 @@ fn compile_receipt_in_child(
         .env(SIM_COMPILE_RECEIPT_PREPARE_ENV, "1")
         .env(SIM_COMPILE_SELECTION_ENV, serde_json::to_string(&normalized_sim_selection(selection))?)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .status()
+        .stdout(Stdio::null());
+    let mut child = crate::child_lifetime::spawn_bound_child(&mut cmd)
         .with_context(|| format!("spawning the sim compile `{} sim --list`", rock_exe.display()))?;
+    let status = child
+        .wait()
+        .with_context(|| format!("waiting for the sim compile `{} sim --list`", rock_exe.display()))?;
+    crate::child_lifetime::release_bound_child(child.id());
     if !status.success() {
         return Err(anyhow!(
             "cannot compile project {}: the sim compile process exited with {status}",
@@ -5257,17 +5322,25 @@ impl std::ops::DerefMut for AdmittedWorker {
 
 impl Drop for AdmittedWorker {
     fn drop(&mut self) {
-        match self.child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => {}
-            Err(error) => log::warn!(target: "SIM", "sim worker cleanup status: {error}"),
+        let needs_reap = match self.child.try_wait() {
+            Ok(Some(_)) => false,
+            Ok(None) => true,
+            Err(error) => {
+                log::warn!(target: "SIM", "sim worker cleanup status: {error}");
+                true
+            }
+        };
+        if needs_reap {
+            if let Err(error) = self.child.kill() {
+                log::warn!(target: "SIM", "sim worker cleanup kill: {error}");
+            }
+            if let Err(error) = self.child.wait() {
+                log::warn!(target: "SIM", "sim worker cleanup reap: {error}");
+            }
         }
-        if let Err(error) = self.child.kill() {
-            log::warn!(target: "SIM", "sim worker cleanup kill: {error}");
-        }
-        if let Err(error) = self.child.wait() {
-            log::warn!(target: "SIM", "sim worker cleanup reap: {error}");
-        }
+        // Idempotent: the wait loop already released on its exits; this
+        // covers early `?` returns between spawn and reap.
+        crate::child_lifetime::release_bound_child(self.child.id());
     }
 }
 
@@ -5505,7 +5578,10 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
         })
         .unwrap_or(0);
     crate::compile_slots::report_spawn_phase("execution");
-    let child = match cmd.spawn() {
+    // Bound: on Linux the child dies with a SIGKILLed runner instead of
+    // orphaning (parent-death signal); everywhere else TERM/INT/HUP are
+    // forwarded. Released once reaped below, and in `Drop` for early exits.
+    let child = match crate::child_lifetime::spawn_bound_child(&mut cmd) {
         Ok(child) => child,
         Err(error) => {
             if let Some(recorder) = recorder {
@@ -5557,6 +5633,10 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
             .collect::<Vec<_>>();
         let mut first_entry_seen = false;
         let mut deadline_guard = DeadlineGuard::for_parts(parts);
+        // The open entry's own lines, for its live checkpoint verdict: the
+        // same `from_stderr` parse the post-run summary uses, so the two
+        // verdicts cannot drift apart in what they count.
+        let mut checkpoint_lines: Vec<String> = Vec::new();
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
@@ -5577,6 +5657,7 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
                 if let Some(recorder) = recorder.as_ref() {
                     match boundary {
                         Some(EnvelopeStep::Started(seq)) => {
+                            checkpoint_lines.clear();
                             if let Some((occurrence_id, name, part)) = entry_meta.get(seq) {
                                 if !first_entry_seen {
                                     first_entry_seen = true;
@@ -5617,7 +5698,19 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
                                     frame_timing.map(EntryFrameTiming::value),
                                     boundary_timing.map(EntryBoundaryTiming::value),
                                 );
+                                let checkpoint =
+                                    SimSummary::from_stderr(&checkpoint_lines.join("\n"));
+                                recorder.entry_checkpoint(
+                                    worker_attempt,
+                                    *occurrence_id,
+                                    name,
+                                    *part,
+                                    verdict_word(&checkpoint),
+                                );
                             }
+                        }
+                        Some(EnvelopeStep::Op(_)) => {
+                            checkpoint_lines.push(line.clone());
                         }
                         _ => {}
                     }
@@ -5833,6 +5926,9 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
             }
         }
     };
+    // Every loop exit reaped the child; release its bound slot now so a
+    // later TERM cannot be forwarded to a reused pid.
+    crate::child_lifetime::release_bound_child(process_id);
     if let Some(recorder) = recorder {
         #[cfg(unix)]
         let signal = status.signal();
@@ -7964,6 +8060,31 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("source file for `probe` is missing or invalid"));
+    }
+
+    #[test]
+    fn receipt_sweep_reclaims_dead_pid_roots_and_keeps_live_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `u32::MAX` converts to no unix pid: dead on every platform the
+        // liveness probe runs on.
+        let dead = tmp.path().join(format!("sim-receipt-{}-stale", u32::MAX));
+        let live = tmp.path().join(format!("sim-receipt-{}-running", std::process::id()));
+        let legacy = tmp.path().join("sim-receipt-nopid");
+        let other = tmp.path().join("sim-output-keep");
+        for dir in [&dead, &live, &legacy, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        // A published receipt does not spare a dead runner's root: the
+        // tempdir is one-run-owned, never shared.
+        std::fs::write(dead.join("receipt.json"), "{}").unwrap();
+        sweep_stale_sim_receipt_roots(tmp.path());
+        assert!(live.is_dir(), "a concurrent live compile keeps its root");
+        assert!(legacy.is_dir(), "an unparseable fresh root keeps the safe direction");
+        assert!(other.is_dir(), "outside the prefix nothing is touched");
+        #[cfg(unix)]
+        assert!(!dead.exists(), "a dead runner's root is reclaimed");
+        #[cfg(not(unix))]
+        assert!(dead.is_dir(), "without a liveness probe the safe direction keeps");
     }
 
     fn corpus() -> Vec<String> {

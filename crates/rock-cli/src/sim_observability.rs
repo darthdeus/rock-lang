@@ -349,6 +349,32 @@ impl SimRunRecorder {
         );
     }
 
+    /// The live verdict of one entry at envelope close, from the child's own
+    /// ops so far. Unlike `entry_result` this is written while the worker
+    /// still runs, so a killed run keeps every completed entry's verdict.
+    /// Provisional: runner-side post-checks (snapshot compare, artifact
+    /// checks) run after the worker exits and can still fail the final
+    /// result. Never marks the entry complete; only `entry_result` does.
+    pub fn entry_checkpoint(
+        &self,
+        worker_id: u64,
+        occurrence_id: u64,
+        name: &str,
+        part: usize,
+        verdict: &str,
+    ) {
+        self.event(
+            "entry_checkpoint",
+            json!({
+                "worker_attempt": worker_id,
+                "occurrence_id": occurrence_id,
+                "name": name,
+                "part": part,
+                "verdict": verdict,
+            }),
+        );
+    }
+
     pub fn entry_result(
         &self,
         occurrence_id: u64,
@@ -648,5 +674,29 @@ mod tests {
         let a = SimRunRecorder::begin_at(root.path(), "p", "a", false, None, "single");
         let b = SimRunRecorder::begin_at(root.path(), "p", "b", false, None, "single");
         assert_ne!(a.events_path(), b.events_path());
+    }
+
+    #[test]
+    fn entry_checkpoint_records_a_live_verdict_without_completing() {
+        let root = tempfile::tempdir().expect("history root");
+        let recorder = SimRunRecorder::begin_at(root.path(), "p", "a", false, None, "single");
+        let ids = recorder.plan_entries(&["a".to_string()]);
+        recorder.entry_checkpoint(1, ids[0], "a", 0, "PASS");
+        recorder.finish(true, None);
+        let events: Vec<Value> = std::fs::read_to_string(recorder.events_path().unwrap())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let checkpoint = events
+            .iter()
+            .find(|event| event["event"] == "entry_checkpoint")
+            .expect("checkpoint event");
+        assert_eq!(checkpoint["schema_version"].as_u64(), Some(1));
+        assert_eq!(checkpoint["name"].as_str(), Some("a"));
+        assert_eq!(checkpoint["verdict"].as_str(), Some("PASS"));
+        assert_eq!(checkpoint["occurrence_id"].as_u64(), Some(ids[0]));
+        let end = events.iter().find(|event| event["event"] == "run_end").expect("run end");
+        assert_eq!(end["finalized_entries"].as_u64(), Some(0), "a checkpoint is not a result");
     }
 }
