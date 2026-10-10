@@ -204,6 +204,41 @@ mod tests {
     }
 
     #[test]
+    fn unreachable_arm_is_not_an_exit_path() {
+        // An exhaustive `match` as an expression: both arms store one result
+        // cell and jump to a real join, while the dead default arm is a
+        // REACHABLE `Unreachable` block (forward shape: 0 -> {1, 2};
+        // 2 -> {3, 4-unreachable}; 1 and 3 -> 5; 5 returns). The dead arm must
+        // not count as an exit path: the outer branch keeps the real join, and
+        // the last test's ipdom is its LIVE arm -- the walker then skips that
+        // provably-redundant test and falls through to the arm (sound because
+        // bone proved the default unreachable, so the outer `else` already
+        // implies the last condition). Counting the dead arm instead collapses
+        // both branches to the virtual exit, both arms absorb the continuation,
+        // and the join double-walks into `unstructured control flow`. (The JS
+        // T6 rule; `diverged_arm` above is the control: a `Return` arm still
+        // collapses.)
+        let f = mk(
+            6,
+            vec![
+                Term::Branch { cond: cond(), then_bb: bi(1), else_bb: bi(2) },
+                Term::Goto(bi(5)),
+                Term::Branch { cond: cond(), then_bb: bi(3), else_bb: bi(4) },
+                Term::Goto(bi(5)),
+                Term::Unreachable,
+                Term::Return(vec![]),
+            ],
+        );
+        let s = analyze(&f);
+        assert_eq!(s.ipdom(bi(0)), Some(bi(5)));
+        assert_eq!(s.ipdom(bi(1)), Some(bi(5)));
+        assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
+        assert_eq!(s.ipdom(bi(3)), Some(bi(5)));
+        assert_eq!(s.ipdom(bi(5)), None); // virtual exit
+        assert!(s.loops.is_empty());
+    }
+
+    #[test]
     fn nested_loop() {
         // 0 -> 1(outer header) -> {2(inner header), 6(exit,return)}
         // 2 -> {3, 5}; 3 -> 4; 4 -> 2(inner back edge); 5 -> 1(outer back edge)

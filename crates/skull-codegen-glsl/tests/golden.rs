@@ -599,6 +599,37 @@ fn match_int_ladder() {
     );
 }
 
+/// An exhaustive boolean `match` as an EXPRESSION: both arms store one result
+/// cell and a real join continues (`return x + 1`). The arm-test chain's dead
+/// end is a REACHABLE `Term::Unreachable`, which must not count as an exit
+/// path for post-dominance -- else the join's ipdom collapses to the virtual
+/// exit, both arms absorb the continuation, and the join double-walks into
+/// `unstructured control flow`. (JS fixed this in T6; GLSL kept the old
+/// `Return | Unreachable` rule and rejects this shape.)
+/// Oracle: source semantics -- the arm literals (10/20), their patterns
+/// (true/false), and the join arithmetic (+ 1) -- plus the source's own
+/// control shape: two arms, one join, one return. `match_int_ladder` above is
+/// the control: its wildcard tail is unreachable, so it structured even before.
+#[test]
+fn exhaustive_bool_match_expression_structures() {
+    let src = r#"@pure fn f(b: bool) -> int {
+        let x = match b { true => 10, false => 20 }
+        return x + 1
+    }"#;
+    let glsl = emit(src, &["f"]).expect("an exhaustive bool match with a real join must structure");
+    // Each pattern guards its own arm's literal, and the join follows both.
+    let t = glsl.find("true").expect("the true pattern must survive");
+    let arm10 = glsl.find("= 10;").expect("the true arm must survive");
+    let f = glsl.find("false").expect("the false pattern must survive");
+    let arm20 = glsl.find("= 20;").expect("the false arm must survive");
+    let ret = glsl.find("return").expect("the join must survive");
+    assert!(
+        t < arm10 && arm10 < f && f < arm20 && arm20 < ret,
+        "each pattern must guard its own arm ahead of the join; got:\n{glsl}"
+    );
+    assert_eq!(glsl.matches("return").count(), 1, "the join must be walked once; got:\n{glsl}");
+}
+
 /// A `match` EXPRESSION ladder: the inner diamond stores the same single-use
 /// result cell as the outer arm, so folding it to a ternary would suppress the
 /// outer arm's store and silently drop the `n == 1` case (emitting an empty

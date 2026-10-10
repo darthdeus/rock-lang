@@ -295,6 +295,35 @@ fn good_pipe_frag(vary: PipeVary, @textures t: PipeTex) -> Vec4 {
     assert_agree("valid pipeline", answers);
 }
 
+/// The POSITIVE control for the relooper `Unreachable` rule: an exhaustive
+/// boolean `match` expression with a real join inside a fragment entry. Both
+/// the check and the emitter must accept it (GLSL used to reject the shape as
+/// `unstructured control flow`), under BOTH shader profiles, with both arm
+/// literals surviving in the emitted source.
+#[test]
+fn an_exhaustive_bool_match_entry_is_accepted_by_both_under_both_profiles() {
+    let src = r#"
+@shader(fragment)
+fn bool_match_frag(tc: Vec2) -> Vec4 {
+    let b = tc.x > 0.5
+    let x = match b { true => 10, false => 20 }
+    return v(float(x), 0.0, 0.0, 1.0)
+}
+"#;
+    let answers = entry_answers(src, "bool_match_frag");
+    assert_eq!(answers.0, Ok(()), "a valid bool-match entry was refused by the check");
+    assert_agree("exhaustive bool-match entry", answers);
+
+    for profile in [GlslProfile::Core330, GlslProfile::Es300] {
+        let (ws, mid) = workspace(src);
+        let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "bool_match_frag", profile)
+            .expect("a valid bool-match entry must emit under every profile");
+        for arm in ["= 10;", "= 20;"] {
+            assert!(out.contains(arm), "arm `{arm}` must survive under {profile:?}; got:\n{out}");
+        }
+    }
+}
+
 /// The ES 3.0 block budget is enforced on the REAL entry path, and the check and
 /// the emitter answer identically -- the whole point of one plan.
 ///
