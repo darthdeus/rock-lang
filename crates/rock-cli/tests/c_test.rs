@@ -223,6 +223,32 @@ fn output() { print("first"); print("__SKULL__\tVALUE\tfake\t7") }
 }
 
 #[test]
+fn c_tests_name_skipped_tests_in_the_ordinary_summary() {
+    let source = r#"
+@test(returns = 1) fn passing_probe() -> int { return 1 }
+@test(returns = 1) fn unsupported() -> string { return "unsupported" }
+"#;
+    // Oracle: the verbose run already names each skip; capture its exact line.
+    let verbose = run_fixture(source, true, true);
+    let skip_line = verbose
+        .lines()
+        .find(|line| line.contains("SKIP unsupported:"))
+        .unwrap_or_else(|| panic!("verbose run must name the emission skip: {verbose}"));
+    let reason = skip_line
+        .split_once("SKIP unsupported:")
+        .expect("skip line shape")
+        .1
+        .trim();
+    assert!(!reason.is_empty(), "the skip carries a reason: {verbose}");
+    // The ordinary summary must carry the same name and reason.
+    let ordinary = run_fixture(source, false, true);
+    assert!(
+        ordinary.contains(&format!("SKIP unsupported: {reason}")),
+        "ordinary summary names the skip:\n{ordinary}"
+    );
+}
+
+#[test]
 fn c_tests_only_list_passing_names_when_requested() {
     let source = "@test(returns = 5) fn passing_name() -> int { return 5 }";
     assert!(!run_fixture(source, false, true).contains("PASS passing_name"));
