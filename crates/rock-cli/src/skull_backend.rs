@@ -1266,7 +1266,7 @@ fn skull_build(
         }
     };
     let files = vec![file.to_owned(); tests.len()];
-    run_emitted_tests(lua, &tests, &files, std::time::Duration::from_secs(15), 1, filter, false)
+    run_emitted_tests(lua, &tests, &files, TEST_CPU_LIMIT, 1, filter, false)
 }
 
 /// `Some(count)` when `file` declares `@test` fns and EVERY one carries
@@ -1373,13 +1373,10 @@ fn run_emitted_tests(
     }
     assignment.retain(|indices| !indices.is_empty());
     let shards = assignment.len();
-    let runs: Vec<Result<crate::common::ProcessResult>> = std::thread::scope(|scope| {
+    let runs: Vec<Result<Vec<ShardRun>>> = std::thread::scope(|scope| {
         let handles: Vec<_> = assignment.iter().map(|indices| {
-            let selection = (shards > 1).then(|| {
-                indices.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(",")
-            });
             let (script, token) = (script.path(), token.clone());
-            scope.spawn(move || run_test_program(script, limit, token, indices.len(), selection.as_deref()))
+            scope.spawn(move || run_shard(script, limit, token, indices, shards > 1))
         }).collect();
         handles.into_iter()
             .map(|handle| handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("test shard thread panicked"))))
@@ -1395,19 +1392,31 @@ fn run_emitted_tests(
     let mut fails = Vec::new();
     let mut diagnostics = Vec::new();
     let mut timings = Vec::new();
-    for (shard, (indices, run)) in assignment.iter().zip(runs).enumerate() {
-        // The harness `pcall`s each test, so an ordinary assertion failure is a
-        // FAIL marker and the process still exits 0. A non-zero status means
-        // the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
-        // after that point never ran. A truncated run still reports what it got.
+    let mut segments = Vec::new();
+    for (shard, run) in runs.into_iter().enumerate() {
         let run = run.map_err(|e| SkullFailure {
             reason: "test run errored (skull bug)".to_string(),
             rendered: e.to_string(),
         })?;
+        for (process, segment) in run.into_iter().enumerate() {
+            let label = if process == 0 {
+                format!("shard {}/{shards}: ", shard + 1)
+            } else {
+                format!("shard {}/{shards} process {}: ", shard + 1, process + 1)
+            };
+            segments.push((label, segment));
+        }
+    }
+    for (label, ShardRun { indices, run }) in segments {
+        let indices = indices.as_slice();
+        // The harness `pcall`s each test, so an ordinary assertion failure is a
+        // FAIL marker and the process still exits 0. A non-zero status means
+        // the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
+        // after that point never ran in this process. A truncated run still
+        // reports what it got; `run_shard` reruns the tests after a stopped one.
         let stdout = String::from_utf8_lossy(&run.output.stdout);
         let stderr = String::from_utf8_lossy(&run.output.stderr);
         let died = !run.output.status.success();
-        let label = format!("shard {}/{shards}: ", shard + 1);
 
         // No result lines and no test started => the module didn't even load
         // (a skull bug), not a test failure.
@@ -1521,6 +1530,56 @@ fn run_emitted_tests(
         Ok(SkullOutcome::Pass { tests: passed, skipped, timings })
     } else {
         Ok(SkullOutcome::TestFail { passed, fails, skipped, timings, diagnostics })
+    }
+}
+
+/// Child CPU time one `@test` (or program loading) may use: a hang backstop,
+/// not a speed bound. A loaded host inflates a test's CPU time (memory
+/// reclaim, E-cores, busy SMT siblings): the slowest `mag` test used 21 s on
+/// host-a at load 70 with little free memory, and 16 s under an all-core
+/// busy-loop burner.
+const TEST_CPU_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// One test process of a shard and the tests it was given.
+struct ShardRun {
+    indices: Vec<usize>,
+    run: crate::common::ProcessResult,
+}
+
+/// Processes a shard may start after the first. A stopped test is charged by
+/// name and the tests after it run in a fresh process; the cap bounds a
+/// defect that stops every test to a few process starts and budgets.
+const SHARD_RESTARTS: usize = 3;
+
+/// Run one shard's tests. When the process stops while a test runs (watchdog,
+/// crash, early exit), that test keeps the stopped run and the tests after it
+/// rerun in a fresh process, so one stopped test never takes the rest of the
+/// shard with it. `select` passes the indices even for a whole-program run.
+fn run_shard(
+    script: &std::path::Path,
+    limit: std::time::Duration,
+    token: String,
+    indices: &[usize],
+    select: bool,
+) -> Result<Vec<ShardRun>> {
+    let mut runs = Vec::new();
+    let mut rest = indices;
+    loop {
+        let selection = (select || !runs.is_empty()).then(|| {
+            rest.iter().map(|i| (i + 1).to_string()).collect::<Vec<_>>().join(",")
+        });
+        let run = run_test_program(script, limit, token.clone(), rest.len(), selection.as_deref())?;
+        // A test still running when the process ended is the one that stopped it.
+        let resume_at = run.running_test
+            .filter(|_| runs.len() < SHARD_RESTARTS)
+            .map(|position| position + 1)
+            .filter(|&next| next < rest.len());
+        let Some(next) = resume_at else {
+            runs.push(ShardRun { indices: rest.to_vec(), run });
+            return Ok(runs);
+        };
+        runs.push(ShardRun { indices: rest[..next].to_vec(), run });
+        rest = &rest[next..];
     }
 }
 
@@ -1726,7 +1785,7 @@ fn skull_build_package(
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
-    skull_build_package_with_limit(dir, std::time::Duration::from_secs(15), shards, filter)
+    skull_build_package_with_limit(dir, TEST_CPU_LIMIT, shards, filter)
 }
 
 fn skull_build_package_with_limit(
