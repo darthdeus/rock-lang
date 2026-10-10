@@ -74,7 +74,8 @@ fn a_newtype_return_cannot_smuggle_a_gc_value_across_extern() {
     let err = reject(
         r#"
 value Bag { items: [int] }
-newtype BagAlias(Bag)
+newtype Wrap<T>(T)
+newtype BagAlias(Wrap<Bag>)
 extern(ffi, "m") fn ret_bag() -> BagAlias
 fn main() { print("x") }
 "#,
@@ -87,7 +88,8 @@ fn main() { print("x") }
     let ffi_clean = crate::common::try_emit_module(
         r#"
 value Point { x: int, y: float }
-newtype PointAlias(Point)
+newtype Wrap<T>(T)
+newtype PointAlias(Wrap<Point>)
 extern(ffi, "m") fn ret_point() -> PointAlias
 fn main() { print("x") }
 "#,
