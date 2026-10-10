@@ -3390,7 +3390,8 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
         }
         let tys = f.param_decls.iter().map(|p| p.ty).chain(f.return_ty);
         for ty in tys {
-            if let Ok(ty) = crate::monoty::convert_decl(ws, ty, &rustc_hash::FxHashMap::default())
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(_), .. }) = static_ty(ws, ty)
+                && let Ok(ty) = crate::monoty::convert_decl(ws, ty, &rustc_hash::FxHashMap::default())
                 && let Some(n) = gc_value_under_newtypes(ws, ty)
             {
                 return Some((format!(
