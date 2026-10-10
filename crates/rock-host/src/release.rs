@@ -511,6 +511,99 @@ mod tests {
     use super::*;
     use crate::stick::StickConfig;
 
+    #[derive(serde::Deserialize)]
+    struct ReleaseAssetOracle {
+        release: ReleaseAssetRootsOracle,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ReleaseAssetRootsOracle {
+        assets: Vec<String>,
+        predefined_levels: Vec<String>,
+    }
+
+    fn independent_release_keys(project: &Path, game_key: &str, config: &str) -> Vec<String> {
+        let parsed: ReleaseAssetOracle = basic_toml::from_str(config).unwrap();
+        let roots = parsed
+            .release
+            .assets
+            .into_iter()
+            .chain(parsed.release.predefined_levels);
+        let mut keys = BTreeMap::new();
+        for root in roots {
+            let source = project.join(root);
+            if source.is_file() {
+                let relative = source.strip_prefix(project).unwrap();
+                keys.insert(
+                    format!("{game_key}/{}", relative.to_string_lossy().replace('\\', "/")),
+                    (),
+                );
+            } else if source.is_dir() {
+                for entry in walkdir::WalkDir::new(source).into_iter().filter_map(Result::ok) {
+                    if entry.file_type().is_file() {
+                        let relative = entry.path().strip_prefix(project).unwrap();
+                        keys.insert(
+                            format!("{game_key}/{}", relative.to_string_lossy().replace('\\', "/")),
+                            (),
+                        );
+                    }
+                }
+            }
+        }
+        keys.into_keys().collect()
+    }
+
+    #[test]
+    fn configured_predefined_levels_match_native_web_and_packaged_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("games/configured-levels");
+        std::fs::create_dir_all(project.join("assets")).unwrap();
+        std::fs::create_dir_all(project.join("levels")).unwrap();
+        std::fs::write(project.join("assets/ui.txt"), "ui").unwrap();
+        std::fs::write(project.join("levels/index.json"), "catalog").unwrap();
+        std::fs::write(project.join("levels/crypt.json"), "level").unwrap();
+        std::fs::write(project.join("levels/editor.json"), "editor-only").unwrap();
+        std::fs::write(project.join("level.txt"), "legacy").unwrap();
+        let config_text = concat!(
+            "[package]\nname = \"configured-levels\"\n",
+            "[release]\nassets = [\"assets\"]\n",
+            "predefined_levels = [\"levels/index.json\", \"levels/crypt.json\"]\n",
+        );
+        let config = StickConfig::new_from_str(config_text)
+            .expect("release configuration must parse named predefined levels");
+        let expected = independent_release_keys(&project, "games/configured-levels", config_text);
+
+        let native = select_assets_with_overlays(
+            &project,
+            "games/configured-levels",
+            Some(&config),
+            root.path(),
+            false,
+            &[],
+        )
+        .unwrap();
+        let web = select_assets_with_overlays(
+            &project,
+            "games/configured-levels",
+            Some(&config),
+            root.path(),
+            true,
+            &[],
+        )
+        .unwrap();
+        let keys = |selection: &AssetSelection| {
+            selection.assets.iter().map(|asset| asset.key.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&native), expected, "native selector follows configured release roots");
+        assert_eq!(keys(&web), expected, "web selector follows configured release roots");
+
+        let staged = stage_assets(&native, &root.path().join("package/assets")).unwrap();
+        assert_eq!(staged.keys, expected, "packaged keys follow the same configured roots");
+        assert!(staged.keys.iter().any(|key| key.ends_with("levels/crypt.json")));
+        assert!(!staged.keys.iter().any(|key| key.ends_with("level.txt")));
+        assert!(!staged.keys.iter().any(|key| key.ends_with("levels/editor.json")));
+    }
+
     #[test]
     fn selection_and_staging_share_game_engine_and_fallback_assets() {
         let root = tempfile::tempdir().unwrap();
