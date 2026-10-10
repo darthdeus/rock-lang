@@ -3716,6 +3716,17 @@ fn replay_of_a_log_with_a_midrun_resize_matches_recording() {
             ("STONE_RESIZE_H", "700"),
         ],
     );
+    let recorded_scancode_rows = replay_lines(&log_s)
+        .iter()
+        .filter(|line| line.starts_with("a "))
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .filter(|scancodes| *scancodes != "-")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        recorded_scancode_rows.is_empty(),
+        "resize recording must not include ambient scancode input: {recorded_scancode_rows:?}"
+    );
     assert!(
         replay_lines(&log_s).iter().any(|l| l.starts_with("r ")),
         "the fixture must actually carry a resize line"
