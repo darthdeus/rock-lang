@@ -69,6 +69,35 @@ fn reject(src: &str) -> String {
     format!("{err:?}")
 }
 
+#[test]
+fn a_newtype_return_cannot_smuggle_a_gc_value_across_extern() {
+    let err = reject(
+        r#"
+value Bag { items: [int] }
+newtype BagAlias(Bag)
+extern(ffi, "m") fn ret_bag() -> BagAlias
+fn main() { print("x") }
+"#,
+    );
+    assert!(
+        err.contains("Bag") && err.contains("GC-carrying `value` struct"),
+        "the resolved return layout is a GC-carrying Bag and must be rejected, got:\n{err}"
+    );
+
+    let ffi_clean = crate::common::try_emit_module(
+        r#"
+value Point { x: int, y: float }
+newtype PointAlias(Point)
+extern(ffi, "m") fn ret_point() -> PointAlias
+fn main() { print("x") }
+"#,
+    );
+    assert!(
+        ffi_clean.is_ok(),
+        "an FFI-clean value layout remains legal through its newtype: {ffi_clean:?}"
+    );
+}
+
 /// Both sides, which is what makes either one evidence: the declarations whose C
 /// representation can arrive boxed are coerced, and the ones that cannot are
 /// left alone rather than paying for a conversion that means nothing.
