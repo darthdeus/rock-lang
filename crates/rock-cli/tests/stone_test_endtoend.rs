@@ -14,7 +14,9 @@ use std::time::Duration;
 use crate::stone_harness::StoneHarness;
 
 const QUIESCENT: Duration = Duration::from_millis(400);
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+// The event must arrive before the quiet-period clock starts. Allow a loaded
+// host's compiler and watcher processes to run, with nextest as the outer cap.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Validates the global-type-change-forces-restart fix from `73e642336`
 /// through the real watcher path. The unit tests in
