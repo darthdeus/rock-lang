@@ -741,10 +741,16 @@ impl<'a> Builder<'a> {
                 dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
             return Ok(FlatCallOut::Value(self.rebuild_from_leaves(&shape, &leaves, &mut 0)));
         }
-        if ret_tuple.is_some() {
-            return Err(self.gap_here(
-                "a tuple-returning callee with a flat-stored element `ref` argument",
-            ));
+        if let Some(shape) = &ret_tuple {
+            let dests: Vec<Idx<Cell>> = self
+                .tuple_opaque_slot_types(e, shape)
+                .into_iter()
+                .map(|ty| self.f.new_cell_typed(None, ty))
+                .collect();
+            self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+            let loads: Vec<Idx<Inst>> =
+                dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            return Ok(FlatCallOut::Value(self.tuple_result(shape, &loads)));
         }
         Ok(FlatCallOut::Value(ValueRepr::Scalar(
             self.emit_cur(Inst::CallValue { callee, args: argv }),
