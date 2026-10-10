@@ -46,11 +46,16 @@ pub(crate) fn analyze(f: &MirFunc) -> Structure {
 }
 
 /// Immediate post-dominators: dominators on the reversed CFG rooted at a virtual
-/// exit (node `n`) that every `Return`/`Unreachable` block flows into.
+/// exit (node `n`) that every `Return` block flows into. `Unreachable` blocks do
+/// NOT connect to the exit: they mark control the compiler proved never runs (an
+/// exhaustive-`match` default, code after a diverging call), so counting them as
+/// an exit path would defeat post-dominance of the REAL join -- an exhaustive
+/// boolean match's `if/else` chain would then double-walk its join block and
+/// reject as unstructured control flow. (Same rule as the JS relooper.)
 fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Block>>> {
     let exit = n;
     let nn = n + 1;
-    // Reverse graph: edge b->s becomes s->b; every terminal block gets an edge
+    // Reverse graph: edge b->s becomes s->b; every `Return` block gets an edge
     // from the virtual exit.
     let mut rev_adj = vec![Vec::new(); nn];
     let mut rev_preds = vec![Vec::new(); nn];
@@ -60,8 +65,7 @@ fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Bloc
         }
         // Reverse predecessors of b are its forward successors.
         rev_preds[b].extend_from_slice(&succ[b]);
-        let terminal = matches!(f.blocks[bi(b)].term, Term::Return(_) | Term::Unreachable);
-        if terminal {
+        if matches!(f.blocks[bi(b)].term, Term::Return(_)) {
             rev_adj[exit].push(b);
             rev_preds[b].push(exit);
         }
