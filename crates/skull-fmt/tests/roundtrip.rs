@@ -68,14 +68,12 @@ fn comment_multiset(src: &str) -> std::collections::HashMap<String, usize> {
 /// Multiset of `@name` markers, counted off the TOKENS rather than the text so
 /// an `@` inside a string or an `inline(lua)` body cannot be mistaken for one.
 /// Covers every position at once -- item, fn parameter, struct and
-/// record-variant field, and the statement-level `@global_write` -- which is
-/// what makes it a guard on positions nobody has added yet, and what lets it
-/// see a marker the PARSER drops rather than only one the printer forgets.
+/// record-variant field -- which makes it a guard on positions nobody has
+/// added yet, and lets it see a marker the PARSER drops rather than only one the printer forgets.
 ///
 /// Idempotency cannot see a dropped marker: the stripped form reparses and
 /// re-formats to itself, so both sides agree and the gate stays green. That is
-/// exactly how `@global_write` and every parameter annotation were being
-/// deleted silently.
+/// how parameter annotations can be deleted silently.
 ///
 /// `@` is ALSO the `wait_for` condition operator (`yield wait_for 5000 @ {
 /// cond }`), so the sigil is identified by what precedes it rather than by the
@@ -151,7 +149,6 @@ fn real_sources_keep_every_annotation_marker() {
     // it is meant to protect. Assert the population, not just the absence of a
     // difference: a zero here would make every arm below vacuous.
     let mut total: usize = 0;
-    let mut global_writes: usize = 0;
     let mut fails = Vec::new();
     for f in &files {
         let short = f.strip_prefix(repo_root()).unwrap_or(f).display();
@@ -161,7 +158,6 @@ fn real_sources_keep_every_annotation_marker() {
         let src_a = annotation_multiset(&src);
         let out_a = annotation_multiset(&out);
         total += src_a.values().sum::<usize>();
-        global_writes += src_a.get("global_write").copied().unwrap_or(0);
 
         for (name, n) in &src_a {
             let got = out_a.get(name).copied().unwrap_or(0);
@@ -179,10 +175,6 @@ fn real_sources_keep_every_annotation_marker() {
 
     assert!(fails.is_empty(), "{} annotation drift(s):\n{}", fails.len(), fails.join("\n"));
     assert!(total > 500, "corpus carries only {total} annotations -- the guard is vacuous");
-    assert!(
-        global_writes > 0,
-        "corpus carries no `@global_write` -- the statement-flag arm proves nothing"
-    );
 }
 
 #[test]
@@ -242,6 +234,16 @@ fn real_sources_are_idempotent_reparse_and_keep_comments() {
         files.len(),
         fails.join("\n")
     );
+}
+
+#[test]
+fn nullable_function_returning_nullable_value_keeps_its_outer_parens() {
+    let source = "struct Hooks {\n    callback: (() -> Vec2?)? = null,\n}\n";
+    let formatted = skull_fmt::format_code(source);
+    let ast = skull_parser::parse_module_clean(&formatted, "<roundtrip>".into())
+        .expect("formatted nullable callback must parse");
+    assert!(ast.recovery_errors.is_empty(), "{formatted}");
+    assert!(formatted.contains("(() -> Vec2?)?"), "{formatted}");
 }
 
 #[test]

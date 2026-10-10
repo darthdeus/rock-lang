@@ -579,18 +579,6 @@ mod tests {
     }
 
     #[test]
-    fn global_write_marker_is_recorded() {
-        let src = "fn f() {\n@global_write X = 1\n}";
-        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        let block = match &ast.items[0].kind {
-            ItemKind::Function(f) => f.body.rock_block().unwrap(),
-            _ => unreachable!(),
-        };
-        let stmt = ast.blocks[block].statements[0];
-        assert!(ast.stmts[stmt].is_global_write, "@global_write flag lost");
-    }
-
-    #[test]
     fn format_spec_is_invisible_to_the_sexp_oracle() {
         // The captured spec must NEVER leak into the s-expr — a spec-bearing
         // interpolation renders byte-identically to its spec-less form, so
@@ -759,14 +747,12 @@ mod tests {
     fn keyword_spans_and_dropped_fields_are_captured() {
         // Data rock carries that the s-expr can't show — must survive parse.
         let ast = parse_module(
-            "@guarded global G: int = 0\nfn f() {\nfor x: int in xs {\nreturn x\n}\n}",
+            "global G: int = 0\nfn f() {\nfor x: int in xs {\nreturn x\n}\n}",
             Ustr::from("t.rock"),
         )
         .expect("parse failed");
 
-        // `@guarded` folds into GlobalDef.is_guarded (+ keyword_span on `global`).
         let ItemKind::Global(g) = &ast.items[0].kind else { panic!("expected global") };
-        assert!(g.is_guarded, "@guarded flag dropped");
         assert!(g.keyword_span.is_some(), "global keyword_span dropped");
 
         // fn keyword_span, the `for x: T in` element type, and `return` keyword_span.
@@ -935,13 +921,6 @@ mod tests {
             "guard @ work()",
             "(block (call guard (lambda () None (block (call work)))))",
         );
-    }
-
-    #[test]
-    fn global_write_marker() {
-        // `@global_write` is consumed; the inner assignment renders normally.
-        check("@global_write dt = delta", "(block (= dt delta))");
-        check("@global_write time += d", "(block (+= time d))");
     }
 
     #[test]
@@ -1167,8 +1146,6 @@ mod tests {
             item_sexp("@pure operator +(a: int, b: int) -> int { a + b }"),
             "(@pure) (@inline) (fn __op_add ((a int) (b int)) int (block (+ a b)))"
         );
-        // `@guarded` is consumed into a flag, not rendered.
-        assert_eq!(item_sexp("@guarded global N: int = 0"), "(global N int 0)");
     }
 
     #[test]
@@ -1238,18 +1215,6 @@ mod tests {
         // Operators (bp >= 15) fold into the argument: `foo(a + b)`, matching
         // rock's `arg_min_bp = 15`.
         check("foo a + b", "(block (call foo (+ a b)))");
-    }
-
-    #[test]
-    fn at_global_write_not_glued_across_newline() {
-        // The `@` of a fresh-line `@global_write` must not bind as an
-        // `expr @ lambda` operator on the previous statement.
-        let src = "fn f() {\n    x = current\n    @global_write y = next\n}";
-        let ast = parse_module(src, Ustr::from("test.rock")).unwrap();
-        let ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!()
-        };
-        assert_eq!(ast.block_sexp(f.body.rock_block().unwrap()), "(block (= x current) (= y next))");
     }
 
     #[test]

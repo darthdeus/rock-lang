@@ -274,7 +274,6 @@ impl<'a> Printer<'a> {
             if !item.annotations.is_empty() {
                 parts.extend(item_visibility(item.vis.as_ref()));
             }
-            parts.extend(self.item_global_write(item));
             for anno in &item.annotations {
                 parts.push(self.annotation(anno));
                 parts.push(Doc::text(" "));
@@ -298,7 +297,6 @@ impl<'a> Printer<'a> {
             ItemKind::Function(_) | ItemKind::Global(_) | ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(_)
         );
         let mut parts = if structural { item_visibility(item.vis.as_ref()) } else { Vec::new() };
-        parts.extend(self.item_global_write(item));
         let decl_line = self.item_decl_line(item);
         let annos = &item.annotations;
         for (i, anno) in annos.iter().enumerate() {
@@ -354,19 +352,6 @@ impl<'a> Printer<'a> {
         let mut doc = Doc::concat(parts);
         doc = self.with_trailing_comment(doc, item.span, 'N');
         doc
-    }
-
-    /// An item-level `@global_write`. The parser consumes it into a flag rather
-    /// than the annotation list (`Item.is_global_write`), so it has no span to
-    /// place and is normalized: emitted first, on its own line, whatever order
-    /// or line the author wrote it on. Stable under re-formatting because the
-    /// flag round-trips.
-    fn item_global_write(&self, item: &Item) -> Vec<Doc> {
-        if item.is_global_write {
-            vec![Doc::text("@global_write"), hardline()]
-        } else {
-            Vec::new()
-        }
     }
 
     /// Annotations in a NON-ITEM position (a fn parameter, a struct or
@@ -464,9 +449,6 @@ impl<'a> Printer<'a> {
 
     fn global(&self, g: &GlobalDef) -> Doc {
         let mut parts = Vec::new();
-        if g.is_guarded {
-            parts.push(Doc::text("@guarded "));
-        }
         parts.push(Doc::text(if g.is_const { "const " } else { "global " }));
         parts.push(Doc::text(kw(g.name.name)));
         if let Some(ty) = g.ty {
@@ -1277,18 +1259,7 @@ impl<'a> Printer<'a> {
                 };
             }
         }
-        // `@global_write` is a FLAG on the statement, not an entry in an
-        // annotation list, so it has to be re-emitted from that flag. Only on
-        // the structural path -- the statement's span covers the prefix
-        // (`parser.rs`, `parse_statement`), so a verbatim slice already has it.
-        self.maybe_verbatim_line(span, || {
-            let doc = self.stmt_structural(s);
-            if self.ast.s(&s).is_global_write {
-                Doc::concat([Doc::text("@global_write "), doc])
-            } else {
-                doc
-            }
-        })
+        self.maybe_verbatim_line(span, || self.stmt_structural(s))
     }
 
     fn stmt_structural(&self, s: Idx<StatementData>) -> Doc {

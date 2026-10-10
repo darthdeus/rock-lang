@@ -298,3 +298,5 @@ mod valid_type_identity;
 mod vec_value_columns;
 #[path = "vertex_plan.rs"]
 mod vertex_plan;
+#[path = "removed_global_markers.rs"]
+mod removed_global_markers;

@@ -110,7 +110,7 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
         },
         StatementKind::Comment(c) => StatementKind::Comment(c),
     };
-    ast.stmts.alloc(StatementData { span: data.span, kind, is_global_write: data.is_global_write })
+    ast.stmts.alloc(StatementData { span: data.span, kind })
 }
 
 fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
@@ -312,6 +312,8 @@ fn clone_type_kind(ast: &mut Ast, kind: TypeExprKind) -> TypeExprKind {
         | TypeExprKind::Int
         | TypeExprKind::Uint
         | TypeExprKind::Float
+        | TypeExprKind::F64
+        | TypeExprKind::F32
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
         | TypeExprKind::Ident(_)

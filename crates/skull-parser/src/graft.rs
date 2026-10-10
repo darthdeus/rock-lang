@@ -45,7 +45,6 @@ pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
             ty: g.ty.map(|t| graft_type(src, dst, t)),
             value: g.value.map(|e| graft_expr(src, dst, e)),
             is_const: g.is_const,
-            is_guarded: g.is_guarded,
         }),
         // Comment / directive / nested invocation don't appear in macro_items.
         other => other.clone(),
@@ -55,7 +54,6 @@ pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
         annotations: item.annotations.clone(),
         vis: item.vis.clone(),
         kind,
-        is_global_write: item.is_global_write,
     }
 }
 
@@ -159,7 +157,6 @@ pub(crate) fn graft_type(src: &Ast, dst: &mut Ast, t: Idx<TypeExprData>) -> Idx<
 fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
     let data = &src.stmts[s];
     let span = data.span;
-    let is_global_write = data.is_global_write;
     let kind = match &data.kind {
         StatementKind::Expression(e) => StatementKind::Expression(graft_expr(src, dst, *e)),
         StatementKind::Use(u) => StatementKind::Use(u.clone()),
@@ -234,7 +231,7 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
         },
         StatementKind::Comment(c) => StatementKind::Comment(*c),
     };
-    dst.stmts.alloc(StatementData { span, kind, is_global_write })
+    dst.stmts.alloc(StatementData { span, kind })
 }
 
 fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
@@ -448,6 +445,8 @@ fn graft_type_kind(src: &Ast, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKin
         | TypeExprKind::Int
         | TypeExprKind::Uint
         | TypeExprKind::Float
+        | TypeExprKind::F64
+        | TypeExprKind::F32
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)
         | TypeExprKind::Ident(_)

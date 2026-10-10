@@ -375,11 +375,6 @@ pub struct BlockData {
 pub struct StatementData {
     pub span: Span,
     pub kind: StatementKind,
-    /// True if the statement was prefixed with `@global_write` in source.
-    /// Set only on assignment-form statements; mirrors rock's
-    /// `Statement.is_global_write` (a `@guarded`-global write marker). Absent
-    /// from the s-expr, so invisible to the cook oracle.
-    pub is_global_write: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -521,6 +516,10 @@ pub enum TypeExprKind {
     Int,
     Uint,
     Float,
+    /// `f64`: the explicit wide spelling of `float`, the same type.
+    F64,
+    /// `f32`: narrow float storage, legal only as a field type.
+    F32,
     Bool,
     Ref(Idx<TypeExprData>),
     Ident(Ident),
@@ -723,8 +722,6 @@ pub struct GlobalDef {
     pub ty: Option<Idx<TypeExprData>>,
     pub value: Option<Idx<ExprData>>,
     pub is_const: bool,
-    /// `@guarded global ..` — requires `@global_write` on every rebind.
-    pub is_guarded: bool,
 }
 
 /// `#if "cond"` / `#elseif "cond"` / `#else` / `#end` — each a standalone item.
@@ -844,15 +841,6 @@ pub struct Item {
     pub kind: ItemKind,
     /// Declared visibility (modules-v1). `None` = not written.
     pub vis: Option<Visibility>,
-    /// True if the item was prefixed with `@global_write`. Consumed into a flag
-    /// the way `@guarded` is (`GlobalDef.is_guarded`) rather than left in
-    /// `annotations`, so it does not render as an ordinary annotation.
-    ///
-    /// Nothing enforces it at this position yet -- the marker is author intent
-    /// ("the writes in this body are sanctioned"), and the statement-level form
-    /// is the one bone reads. Recorded so the formatter can round-trip it
-    /// instead of deleting it.
-    pub is_global_write: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1008,7 +996,6 @@ impl Ast {
         self.stmts.alloc(StatementData {
             span,
             kind,
-            is_global_write: false,
         })
     }
 

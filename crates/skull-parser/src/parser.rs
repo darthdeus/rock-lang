@@ -595,7 +595,7 @@ impl<'a> Parser<'a> {
     fn skip_comments_as_items(&mut self) {
         while let TokenKind::Comment(text) = self.kind() {
             let span = self.span();
-            self.ast.items.push(Item { annotations: Vec::new(), vis: None, is_global_write: false,
+            self.ast.items.push(Item { annotations: Vec::new(), vis: None,
                 span,
                 kind: ItemKind::Comment(text),
             });
@@ -853,7 +853,6 @@ impl<'a> Parser<'a> {
         Ok(Item {
             annotations: Vec::new(),
             vis: vis.clone(),
-            is_global_write: false,
             span,
             kind: ItemKind::Module(ModBlock { span, name, vis, items }),
         })
@@ -899,7 +898,6 @@ impl<'a> Parser<'a> {
             return Ok(Item {
                 annotations: Vec::new(),
                 vis: mods.vis,
-                is_global_write: false,
                 span: decl.span,
                 kind: ItemKind::Use(decl),
             });
@@ -917,21 +915,9 @@ impl<'a> Parser<'a> {
             return self.parse_mod_block(item_start, mods.vis, name);
         }
         let mut annotations = self.parse_item_annotations()?;
-        // rock consumes `@guarded` / `@global_write` into flags (Global.is_guarded
-        // etc.) and drops them from the annotation list — mirror that so they
-        // don't render.
-        let is_guarded = annotations.iter().any(|a| a.name.name.as_str() == "guarded");
-        let is_global_write = annotations.iter().any(|a| a.name.name.as_str() == "global_write");
-        annotations.retain(|a| !matches!(a.name.name.as_str(), "guarded" | "global_write"));
         self.last_was_operator = false;
         let mut item = self.parse_item_inner()?;
-        item.is_global_write = is_global_write;
         item.vis = mods.vis;
-        if is_guarded {
-            if let ItemKind::Global(g) = &mut item.kind {
-                g.is_guarded = true;
-            }
-        }
         // rock injects `@inline` on block-bodied operator overloads (no source
         // form) unless one is already present — replicate it so the A/B matches.
         if self.last_was_operator
@@ -1051,7 +1037,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(), vis: None, is_global_write: false,
+            annotations: Vec::new(), vis: None,
             span,
             kind: ItemKind::MacroInvocation { name, args, sigil },
         })
@@ -1615,7 +1601,7 @@ impl<'a> Parser<'a> {
             );
             self.ast.macro_param_refs.extend(refs);
         }
-        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false,
+        Ok(Item { annotations: Vec::new(), vis: None,
             span,
             kind: ItemKind::Function(FunctionDef {
                 span,
@@ -1745,6 +1731,8 @@ impl<'a> Parser<'a> {
                 "int" => TypeExprKind::Int,
                 "uint" => TypeExprKind::Uint,
                 "float" => TypeExprKind::Float,
+                "f64" => TypeExprKind::F64,
+                "f32" => TypeExprKind::F32,
                 "bool" => TypeExprKind::Bool,
                 _ => TypeExprKind::Ident(ident.clone()),
             };
@@ -1828,7 +1816,7 @@ impl<'a> Parser<'a> {
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(), vis: None, is_global_write: false,
+            annotations: Vec::new(), vis: None,
             span,
             kind: ItemKind::Struct(StructDef {
                 span,
@@ -1935,7 +1923,7 @@ impl<'a> Parser<'a> {
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
+        Ok(Item { annotations: Vec::new(), vis: None, span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
     }
 
     /// `newtype Name<gen>(WrappedType)`.
@@ -1955,7 +1943,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
+        Ok(Item { annotations: Vec::new(), vis: None, span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
     }
 
     /// `deco init Name[(params)] { body }` — the `init` category keyword is
@@ -1976,7 +1964,7 @@ impl<'a> Parser<'a> {
         };
         let body = self.parse_block()?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
+        Ok(Item { annotations: Vec::new(), vis: None, span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
     }
 
     /// `global|const Name [: T] [= value]`.
@@ -1995,9 +1983,7 @@ impl<'a> Parser<'a> {
             None
         };
         let span = self.span_from(start);
-        // `is_guarded` is set by `parse_item` from a leading `@guarded` (the
-        // annotation is consumed there before it reaches the item).
-        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const, is_guarded: false }) })
+        Ok(Item { annotations: Vec::new(), vis: None, span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const }) })
     }
 
     /// `#if cond` / `#elseif cond` / `#else` / `#end` (cond is a bare ident).
@@ -2018,7 +2004,7 @@ impl<'a> Parser<'a> {
             _ => CompilerDirective::End,
         };
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), vis: None, is_global_write: false, span, kind: ItemKind::CompilerDirective(directive) })
+        Ok(Item { annotations: Vec::new(), vis: None, span, kind: ItemKind::CompilerDirective(directive) })
     }
 
     fn directive_condition(&mut self) -> Ustr {
@@ -2161,6 +2147,8 @@ impl<'a> Parser<'a> {
                     "int" => TypeExprKind::Int,
                     "uint" => TypeExprKind::Uint,
                     "float" => TypeExprKind::Float,
+                    "f64" => TypeExprKind::F64,
+                    "f32" => TypeExprKind::F32,
                     "bool" => TypeExprKind::Bool,
                     "ref" => TypeExprKind::Ref(self.parse_type()?),
                     _ => {
@@ -2301,24 +2289,6 @@ impl<'a> Parser<'a> {
     fn parse_statement(&mut self) -> PResult<Idx<StatementData>> {
         let start = self.span();
 
-        // `@global_write X = ..` prefix marks a guarded-global write. The flag
-        // is semantic-only and absent from the s-expr; we record it on the
-        // inner (assignment) statement so bone can enforce guarded-global writes.
-        if self.kind() == TokenKind::At
-            && matches!(self.peek_kind(), TokenKind::Ident(n) if n.as_str() == "global_write")
-        {
-            self.advance(); // `@`
-            self.advance(); // `global_write`
-            let stmt = self.parse_statement()?;
-            self.ast.stmts[stmt].is_global_write = true;
-            // Span the whole `@global_write ..` (rock includes the annotation
-            // prefix in the statement span); the inner parse anchored at the
-            // assignment.
-            let span = self.merge_spans(start, self.ast.stmts[stmt].span);
-            self.ast.stmts[stmt].span = span;
-            return Ok(stmt);
-        }
-
         // Contextual lifecycle-hook keywords: `on_resume`/`on_killed`/
         // `on_hot_reload` followed by `{` are statement-form hook blocks.
         // Elsewhere the same idents stay regular (the stdlib `on_hot_reload(f)`
@@ -2377,6 +2347,11 @@ impl<'a> Parser<'a> {
         }
         if self.kind() == TokenKind::Fn {
             return self.parse_nested_fn(start);
+        }
+        if self.kind() == TokenKind::At {
+            if let TokenKind::Ident(name) = self.peek_kind() {
+                return Err(self.err(format!("unknown annotation `@{name}` on a statement")));
+            }
         }
 
         match self.kind() {
@@ -4192,8 +4167,8 @@ impl<'a> Parser<'a> {
         // when the token after the comment continues the expression.
         while matches!(self.kind(), TokenKind::Comment(_)) {
             let next = self.peek_kind();
-            // A fresh-line expression-starter after the comment (`@` decorator /
-            // `@global_write`, a unary `-`, ...) begins a NEW statement/item, not
+            // A fresh-line expression-starter after the comment (an annotation,
+            // a unary `-`, ...) begins a NEW statement/item, not
             // a continuation of this expression -- the postfix/infix loop breaks
             // on it via `op_starts_expr && newline_breaks`, so stop here too and
             // leave the standalone comment for the item/statement loop to capture
@@ -4263,8 +4238,7 @@ fn op_starts_expr(op: TokenKind) -> bool {
             | TokenKind::MinusMinus
             | TokenKind::OpenParen
             | TokenKind::OpenSquare
-            // `@` on a fresh line starts a new statement (`@global_write X = ..`,
-            // or the next item's annotation), never an `expr @ lambda` glued to
+            // `@` on a fresh line starts an annotation, never an `expr @ lambda` glued to
             // the previous line. All real `@`-operator uses are same-line.
             | TokenKind::At
     )

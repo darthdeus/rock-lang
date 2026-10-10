@@ -3213,7 +3213,7 @@ impl BoneWorkspace {
                 prev_kind,
                 Some(rock_tokenizer::TokenKind::Dot) | Some(rock_tokenizer::TokenKind::QuestionDot)
             );
-            // A GLUED `@ident` is an annotation (`@guarded`, `@global_write`)
+            // A GLUED `@ident` is an annotation
             // when the HIR doesn't claim the ident; the `@` trailing-lambda
             // operator's operand is an expression the HIR does claim, and is
             // conventionally spaced anyway.
@@ -3458,7 +3458,7 @@ fn classify_token(
                 })
             })
             // A glued `@ident` the HIR didn't claim: statement/item-level
-            // annotations (`@guarded`, `@global_write`) that never reach hir.
+            // annotations that never reach hir.
             .or_else(|| is_annotation.then_some((TT_DECORATOR, 0)))
             // A named-argument label (`f(width: 3)`): an ident the HIR doesn't
             // claim, directly followed by `:`. It names a PARAMETER -- classify

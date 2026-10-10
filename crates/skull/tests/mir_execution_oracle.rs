@@ -109,7 +109,6 @@ fn runner_footer(tests: &[skull::SkullTest]) -> String {
 /// does not replicate. Reported as KNOWN (non-fatal), not MISMATCH — so the
 /// mismatch count tracks real skull problems. Each must be justified:
 ///
-/// - `licm_global_write_across_call_sentinel`: the documented LICM sentinel.
 /// - `strings_comprehensive::integer_width_basic`: rock's FIRST `string.format`
 ///   width call in a process fails to pad (`"{x:5}"` -> "42" not "   42"; a
 ///   warmup format call fixes it — verified against the live `rock` process).
@@ -117,8 +116,7 @@ fn runner_footer(tests: &[skull::SkullTest]) -> String {
 fn is_known_divergence(file: &str, test: &str) -> bool {
     matches!(
         (file, test),
-        ("licm_global_write_across_call_sentinel.rock", _)
-            | ("strings_comprehensive.rock", "integer_width_basic")
+        ("strings_comprehensive.rock", "integer_width_basic")
     )
 }
 
