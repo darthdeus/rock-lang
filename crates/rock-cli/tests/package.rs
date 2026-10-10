@@ -9,27 +9,25 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
-fn state_metadata_uses_package_graph_owners_for_prefix_overlapping_roots() {
+fn state_metadata_uses_package_graph_owners_when_sibling_prefixes_nested_dependency() {
     let scratch = tempfile::tempdir().expect("overlapping package fixture");
     let project = scratch.path().join("app");
-    let dependency = scratch.path().join("app-lib");
+    let dependency = project.join("lib");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(&dependency).unwrap();
     std::fs::write(
         project.join("stick.toml"),
-        format!(
-            "[package]\nname = \"rootfixture\"\ntype = \"bin\"\n[dependencies]\nlib_alias = {{ path = \"{}\" }}\n",
-            dependency.display()
-        ),
+        "[package]\nname = \"rootfixture\"\ntype = \"bin\"\n[language]\nmodules = \"v1\"\n[dependencies]\nlib_alias = { path = \"lib\" }\n",
     )
     .unwrap();
     std::fs::write(
         dependency.join("stick.toml"),
-        "[package]\nname = \"library\"\ntype = \"lib\"\n",
+        "[package]\nname = \"library\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
     )
     .unwrap();
-    std::fs::write(project.join("main.rock"), "global ROOT_MARK: int = 1\nfn main() {}\n").unwrap();
-    std::fs::write(dependency.join("lib.rock"), "global DEP_MARK: int = 2\n").unwrap();
+    std::fs::write(project.join("main.rock"), "mod self;\nglobal ROOT_MARK: int = 1\nfn main() {}\n").unwrap();
+    std::fs::write(dependency.join("lib.rock"), "mod self;\nglobal DEP_MARK: int = 2\n").unwrap();
+    std::fs::write(project.join("library.rock"), "mod self;\nglobal SIBLING_MARK: int = 3\n").unwrap();
 
     let graph = rock_cli::PackageGraph::build(&project).expect("build production package graph");
     let root_owner = graph.package_of_file(&project.join("main.rock")).expect("root owner");
@@ -55,8 +53,10 @@ fn state_metadata_uses_package_graph_owners_for_prefix_overlapping_roots() {
     }
     let root_metadata = metadata_entry(metadata, "ROOT_MARK");
     let dependency_metadata = metadata_entry(metadata, "DEP_MARK");
+    let sibling_metadata = metadata_entry(metadata, "SIBLING_MARK");
     assert!(root_metadata.contains(&format!("package={root_label:?}")), "root ownership disagrees with PackageGraph:\n{root_metadata}");
     assert!(dependency_metadata.contains(&format!("package={dependency_label:?}")), "dependency ownership disagrees with PackageGraph:\n{dependency_metadata}");
+    assert!(sibling_metadata.contains(&format!("package={root_label:?}")), "sibling path-prefix ownership disagrees with PackageGraph:\n{sibling_metadata}");
 }
 
 fn rock_bin() -> PathBuf {
