@@ -18,14 +18,14 @@ fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
     const SRC: &str = r#"
 enum Choice { A { left: int, shared: int }, B { right: string, shared: string } }
 enum Other { A { ghost: int } }
-fn read(choice: Choice) -> int {
-    return match choice {
+fn read() -> int {
+    return match (Choice::A { left: 7, shared: 13 }) {
         Other::A { ghost } => ghost,
         Choice::A { left } => left,
         Choice::B { right } => right.len(),
     }
 }
-fn main() { print(read(Choice::A { left: 7, shared: 13 })) }
+fn main() { print(read()) }
 "#;
 
     let ws = ws_with_stdlib(SRC);
