@@ -18,3 +18,11 @@ co fn other_snapshot_baseline() -> Coroutine<Wait> {
     snapshot("other_value", 7)
     stop_sim()
 }
+
+@sim
+co fn shared_snapshot_probe() -> Coroutine<Wait> {
+    start_game "sim-v1-names"
+    await frame(2)
+    snapshot("other_shared_value", 13)
+    stop_sim()
+}

@@ -75,3 +75,17 @@ fn named_sims_narrow_jobs_to_their_entries_before_the_budget() {
     assert!(stderr.contains("--jobs 64 exceeds the RAM budget of"), "{stderr}");
     assert!(!dir.path().join("cache").exists(), "rejection happened after compilation");
 }
+
+#[test]
+fn named_sims_within_the_narrowed_budget_print_a_plan_despite_an_over_budget_request() {
+    // One named entry narrows --jobs 1000 to a single lane, which fits every
+    // host's budgets (RAM and the faked one-lane GPU budget), so a plan
+    // prints. That 1000 is over budget here is pinned by the sibling refusal
+    // test on the same fixture and host: without narrowing this refuses.
+    let (_dir, mut command) = fixture();
+    let output = command.args(["jobs_probe"]).args(["--plan", "--jobs", OVER_RAM]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "a narrowed-within-budget request must plan: {stderr}");
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["jobs"], 1);
+}

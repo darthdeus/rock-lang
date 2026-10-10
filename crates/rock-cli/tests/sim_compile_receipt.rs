@@ -1,5 +1,9 @@
 use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
+use crate::kill_harness::{children_of, cmdline, RunnerGuard};
 
 fn list_sims(
     rock: &std::path::Path,
@@ -844,4 +848,117 @@ fn pinned_rock_copies_survive_concurrent_spawns() {
             });
         }
     });
+}
+
+/// One-run `tmp/sim-receipt-*` roots under `tmp`, sorted.
+#[cfg(target_os = "linux")]
+fn receipt_roots(tmp: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<_> = std::fs::read_dir(tmp)
+        .map(|read| {
+            read.filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| {
+                    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("sim-receipt-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    roots.sort();
+    roots
+}
+
+#[cfg(target_os = "linux")]
+fn tree_has(root: &std::path::Path, name: &str) -> bool {
+    let Ok(read) = std::fs::read_dir(root) else { return false };
+    for entry in read.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        if path.file_name().is_some_and(|file| file == name) {
+            return true;
+        }
+        if path.is_dir() && tree_has(&path, name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// A runner SIGKILLed mid-compile leaves no orphaned compile child, and the
+/// next run sweeps its receipt root instead of leaking it.
+///
+/// Linux-only (see the mid-run kill test). The run works in a scratch
+/// directory so its `tmp/` is isolated from concurrently running suites.
+#[cfg(target_os = "linux")]
+#[test]
+fn killed_compile_is_reaped_and_its_receipt_swept_by_the_next_run() {
+    let _spawn_budget = SpawnBudget::for_test(240);
+    let dir = tempfile::tempdir().expect("scratch");
+    let fixture = workspace_root().join("crates/rock-cli/test-data/sim-v1-names");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command
+        .arg("sim")
+        .arg(&fixture)
+        .current_dir(dir.path())
+        .env("ROCK_DIR", workspace_root())
+        .env("ROCK_SIM_COMPILE_CACHE", "0")
+        .env("ROCK_SIM_LOG_DIR", dir.path().join("history"))
+        .env("ROCK_SIM_TIMEOUT_SECS", "300")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::fs::File::create(dir.path().join("runner.out")).expect("stdout log"))
+        .stderr(std::fs::File::create(dir.path().join("runner.err")).expect("stderr log"));
+    let mut runner = RunnerGuard::spawn(command);
+
+    // Wait for the compile child: a direct child whose argv runs `sim --list`.
+    // Killing on first sighting has the widest margin (the child then
+    // compiles for seconds), and the no-publish guard below fails loudly if
+    // the window ever collapses instead of passing vacuously.
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let compile_pid = loop {
+        let found = children_of(runner.id()).into_iter().find(|pid| {
+            let argv = cmdline(*pid);
+            argv.iter().zip(argv.iter().skip(1)).any(|(a, b)| a == "sim" && b == "--list")
+        });
+        if let Some(pid) = found {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "runner never spawned its compile child");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let tmp = dir.path().join("tmp");
+    let stale = receipt_roots(&tmp);
+    assert_eq!(stale.len(), 1, "one live receipt root");
+    assert!(!tree_has(&stale[0], "receipt.json"), "the kill lands before publish, not after");
+    runner.kill_runner();
+    // The bound compile child dies with the runner instead of finishing: no
+    // receipt may ever be published into the stale root. Liveness alone
+    // cannot prove the binding (an orphan finishes compiling within seconds
+    // and exits), so the publish is the signal, watched past any compile.
+    let publish_deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < publish_deadline {
+        assert!(
+            !tree_has(&stale[0], "receipt.json"),
+            "orphaned compile child {compile_pid} published after its runner died"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(stale[0].is_dir(), "the killed run skips cleanup (setup proof)");
+
+    // The next run succeeds and sweeps the stale root; its own root is
+    // removed on its clean exit, so none remain.
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("sim")
+        .arg(&fixture)
+        .arg("unique_short_name")
+        .current_dir(dir.path())
+        .env("ROCK_DIR", workspace_root())
+        .env("ROCK_SIM_COMPILE_CACHE", "0")
+        .env("ROCK_SIM_LOG_DIR", dir.path().join("history"))
+        .env("ROCK_SIM_TIMEOUT_SECS", "300")
+        .output_with_deadline()
+        .expect("rerun after kill");
+    assert!(
+        output.status.success(),
+        "the next run must succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!stale[0].exists(), "the next run sweeps the stale receipt root");
+    assert!(receipt_roots(&tmp).is_empty(), "no receipt roots remain");
 }

@@ -109,3 +109,106 @@ fn a_v1_sim_snapshot_finds_its_baseline_beside_the_declaring_file() {
         "the snapshot must be compared against tests/sims/other.snap:\n{combined}"
     );
 }
+
+/// The fixture files whose text declares `co fn <short>(`, sorted. An
+/// anti-vacuity guard, not the oracle: it proves the fixture keeps the shape
+/// a source-text scan cannot resolve (no match, or a match in two files), so
+/// a passing run below must have used the compiled wire -> source mapping.
+fn files_declaring(short: &str) -> Vec<String> {
+    let sims = workspace_root().join("crates/rock-cli/test-data/sim-v1-names/tests/sims");
+    let needle = format!("co fn {short}(");
+    let mut entries: Vec<_> = std::fs::read_dir(&sims)
+        .expect("read fixture sims dir")
+        .map(|entry| entry.expect("sims dir entry").path())
+        .collect();
+    entries.sort();
+    let mut found = Vec::new();
+    for path in entries {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rock") {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).expect("read fixture sim source");
+        if src.contains(&needle) {
+            found.push(path.file_name().expect("file name").to_string_lossy().into_owned());
+        }
+    }
+    found
+}
+
+/// The compiler's own wire -> source registry for the fixture, read from a
+/// freshly prepared receipt: the oracle for where each sim was declared.
+fn receipt_registry() -> std::collections::HashMap<String, String> {
+    let dir = tempfile::tempdir().expect("receipt scratch");
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("sim")
+        .arg("--list")
+        .arg(FIXTURE)
+        .current_dir(workspace_root())
+        .env("ROCK_SIM_COMPILE_RECEIPT_DIR", dir.path().join("receipts"))
+        .env("ROCK_SIM_COMPILE_RECEIPT_PREPARE", "1")
+        .env("ROCK_SIM_TIMEOUT_SECS", "120")
+        .output_with_deadline()
+        .expect("prepare fixture receipt");
+    assert!(
+        out.status.success(),
+        "receipt preparation failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let project_receipt = std::fs::read_dir(dir.path().join("receipts"))
+        .expect("read receipt root")
+        .next()
+        .expect("one project receipt")
+        .expect("read project receipt")
+        .path();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project_receipt.join("receipt.json")).expect("read receipt manifest"),
+    )
+    .expect("parse receipt manifest");
+    manifest["registry"]
+        .as_array()
+        .expect("receipt registry")
+        .iter()
+        .map(|entry| {
+            (
+                entry["wire_name"].as_str().expect("wire name").to_string(),
+                entry["source_file"].as_str().expect("source file").to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn same_named_v1_sims_in_different_files_resolve_their_own_snapshot_baselines() {
+    let _spawn_budget = SpawnBudget::for_test(180);
+    // Oracle: production's registry maps each qualified wire to its own file.
+    let registry = receipt_registry();
+    for (wire, file) in [
+        ("sim_v1_names::shared_snapshot_probe", "tests/sims/root.rock"),
+        ("sim_v1_names::other::shared_snapshot_probe", "tests/sims/other.rock"),
+    ] {
+        let source = registry.get(wire).unwrap_or_else(|| panic!("{wire} missing from {registry:?}"));
+        assert!(
+            source.ends_with(file),
+            "{wire} must be recorded beside {file}, registry says {source}"
+        );
+    }
+    // Guard: both files declare the same short name, so a source-text scan
+    // reports ambiguity and no passing run below could have used one.
+    assert_eq!(files_declaring("shared_snapshot_probe"), ["other.rock", "root.rock"]);
+    // Each qualified name runs green against its own file's baseline (11 and
+    // 13 differ, so a cross-wired lookup mismatches instead of passing).
+    for (name, verdict) in [
+        (
+            "sim_v1_names::shared_snapshot_probe",
+            "[sim] sim_v1_names::shared_snapshot_probe: PASS (1/1 expects passed)",
+        ),
+        (
+            "sim_v1_names::other::shared_snapshot_probe",
+            "[sim] sim_v1_names::other::shared_snapshot_probe: PASS (1/1 expects passed)",
+        ),
+    ] {
+        let (out, combined) = rock_sim(&[name]);
+        assert!(out.status.success(), "{name} must find its own baseline:\n{combined}");
+        assert!(combined.contains(verdict), "{name} must compare its snapshot:\n{combined}");
+    }
+}

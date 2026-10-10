@@ -13,3 +13,24 @@ co fn shared_short_name() -> Coroutine<Wait> {
     sim_expect(true, "root ran")
     stop_sim()
 }
+
+@sim
+co fn shared_snapshot_probe() -> Coroutine<Wait> {
+    start_game "sim-v1-names"
+    await frame(2)
+    snapshot("root_shared_value", 11)
+    stop_sim()
+}
+
+@sim_env("FRAME_COUNT", "4000000")
+@sim
+co fn kill_window_slow() -> Coroutine<Wait> {
+    // A kill window, not a workload: runner kills and wall budgets always
+    // end this sim early, so it must merely outlast them. Three million
+    // frames run 21s even at the observed 7us floor (7-40s typical), past
+    // the 8s budget probe and the 10s orphan watch with margin.
+    start_game "sim-v1-names"
+    await frame(3000000)
+    sim_expect(true, "survived the kill window")
+    stop_sim()
+}
