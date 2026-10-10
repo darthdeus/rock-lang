@@ -55,58 +55,70 @@ fn run_frame_with(envs: &[(&str, String)]) -> (String, bool) {
     (text, out.status.success())
 }
 
+fn assert_perf_forwards_production_severity_headers(multiline: bool) {
+    let _spawn_budget = SpawnBudget::for_test(120);
+    for color in ["never", "always"] {
+        let output = tempfile::tempdir().expect("severity output");
+        let run = |operation: &str| {
+            let mut command = Command::new(rock_bin());
+            command.current_dir(repo_root())
+                .args([operation, "crates/rock-cli/test-data/perf-watchdog"]);
+            if operation == "frame" {
+                command.args(["-n", "3"]);
+            } else {
+                command.args(["--frames", "3", "--warmup-seconds", "0", "--format", "json"]);
+            }
+            let result = command
+                .arg("--output")
+                .arg(output.path().join(operation))
+                .env_remove("STONE_HOT_RELOAD")
+                .env("STONE_LOG", "info")
+                .env("ROCK_LOG_COLOR", color)
+                .env("ROCK_FRAME_TIMEOUT_SECS", "120")
+                .env("PERF_TEST_LOG_SEVERITIES", if multiline { "2" } else { "1" })
+                .output_with_deadline()
+                .expect("spawn severity run");
+            let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+            assert!(result.status.success(), "{operation} {color} failed:\n{stderr}");
+            stderr
+        };
+        let frame = run("frame");
+        let perf = run("perf");
+        // The unfiltered frame command is the oracle: both children emit
+        // through rock_log, but only perf applies the shared record parser.
+        for (tag, sgr) in [("ERROR]", "\x1b[1;31m"), ("WARN ]", "\x1b[33m")] {
+            let mut lines = frame.lines();
+            let header = lines.find(|line| line.contains(tag) && line.contains("[PERF_TEST]"))
+                .unwrap_or_else(|| panic!("frame omitted {tag}:\n{frame}"));
+            if color == "always" {
+                assert!(header.starts_with(sgr), "production color for {tag}: {header:?}");
+                if multiline {
+                    assert!(!header.ends_with("\x1b[0m"), "reset must follow continuation: {header:?}");
+                    let continuation = lines.next().expect("production continuation");
+                    assert!(continuation.ends_with("\x1b[0m"), "production reset: {continuation:?}");
+                } else {
+                    assert!(header.ends_with("\x1b[0m"), "production reset: {header:?}");
+                }
+            }
+            // Ignore only elapsed time; level, category and payload come
+            // directly from the production output rather than the fixture.
+            let suffix = &header[header.find(tag).unwrap()..];
+            assert!(perf.lines().any(|line| {
+                line.find(tag).is_some_and(|start| &line[start..] == suffix)
+                    && (color != "always" || line.starts_with(sgr))
+            }), "perf {color} dropped production {tag} header {header:?}:\n{perf}");
+        }
+    }
+}
+
 #[test]
 fn rock_perf_forwards_production_error_and_warning_severity_tags() {
-    let _spawn_budget = SpawnBudget::for_test(120);
-    let output = tempfile::tempdir().expect("perf output");
-    let result = Command::new(rock_bin())
-        .current_dir(repo_root())
-        .args([
-            "perf",
-            "crates/rock-cli/test-data/perf-watchdog",
-            "--frames",
-            "3",
-            "--warmup-seconds",
-            "0",
-            "--format",
-            "json",
-        ])
-        .arg("--output")
-        .arg(output.path())
-        .env_remove("STONE_HOT_RELOAD")
-        .env("STONE_LOG", "info")
-        .env("ROCK_LOG_COLOR", "always")
-        .env("ROCK_FRAME_TIMEOUT_SECS", "120")
-        .env("PERF_TEST_LOG_SEVERITIES", "1")
-        .output_with_deadline()
-        .expect("spawn rock perf");
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
+    assert_perf_forwards_production_severity_headers(false);
+}
 
-    assert!(result.status.success(), "perf run failed:\n{text}");
-    assert!(
-        text.lines().any(|line| {
-            line.contains("\x1b[1;31m[")
-                && line.contains("ERROR]")
-                && line.contains("[PERF_TEST]")
-                && line.contains("production failure severity probe")
-                && line.ends_with("\x1b[0m")
-        }),
-        "rock perf must forward the production ERROR record with its level:\n{text}"
-    );
-    assert!(
-        text.lines().any(|line| {
-            line.contains("\x1b[33m[")
-                && line.contains("WARN ]")
-                && line.contains("[PERF_TEST]")
-                && line.contains("production caution severity probe")
-                && line.ends_with("\x1b[0m")
-        }),
-        "rock perf must forward the production WARN record with its level:\n{text}"
-    );
+#[test]
+fn rock_perf_forwards_production_multiline_error_and_warning_severity_tags() {
+    assert_perf_forwards_production_severity_headers(true);
 }
 
 #[test]

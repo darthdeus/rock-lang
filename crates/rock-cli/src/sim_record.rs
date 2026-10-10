@@ -346,10 +346,12 @@ struct ParsedLogRecord<'a> {
 }
 
 fn parse_log_record(line: &str) -> Option<ParsedLogRecord<'_>> {
+    // emit wraps the whole message; multiline headers have no reset until
+    // the last continuation line, while callers can pass individual lines.
     let (line, color_level) = if let Some(line) = line.strip_prefix("\x1b[1;31m") {
-        (line.strip_suffix("\x1b[0m")?, Some("ERROR"))
+        (line.strip_suffix("\x1b[0m").unwrap_or(line), Some("ERROR"))
     } else if let Some(line) = line.strip_prefix("\x1b[33m") {
-        (line.strip_suffix("\x1b[0m")?, Some("WARN "))
+        (line.strip_suffix("\x1b[0m").unwrap_or(line), Some("WARN "))
     } else {
         (line, None)
     };
@@ -567,6 +569,46 @@ mod tests {
         assert!(!is_error_or_warning_log_record(
             "\x1b[33m[   1.296s ERROR] [PERF_TEST] wrong color\x1b[0m"
         ));
+    }
+
+    #[test]
+    fn production_multiline_logger_helper() {
+        if std::env::var_os("ROCK_PARSER_LOG_HELPER").is_none() {
+            return;
+        }
+        rock_log::init();
+        for level in [log::Level::Error, log::Level::Warn, log::Level::Info] {
+            log::log!(target: "PARSER_TEST", level, "diagnostic header\ndiagnostic continuation");
+        }
+    }
+
+    #[test]
+    fn shared_parser_accepts_production_colored_multiline_output() {
+        // Isolate logger configuration and record tables in the helper process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["sim_record::tests::production_multiline_logger_helper", "--exact", "--nocapture"])
+            .env("ROCK_PARSER_LOG_HELPER", "1")
+            .env("ROCK_LOG_COLOR", "always")
+            .env("STONE_LOG", "info")
+            .output()
+            .expect("production logger helper");
+        assert!(output.status.success(), "logger helper failed: {output:?}");
+        let emitted = String::from_utf8(output.stderr).unwrap();
+        let lines: Vec<_> = emitted.lines().collect();
+        let levels = [log::Level::Error, log::Level::Warn, log::Level::Info];
+        assert_eq!(lines.len(), levels.len() * 2, "incomplete logger output: {emitted:?}");
+        for (record, level) in lines.chunks_exact(2).zip(levels) {
+            let header = record[0];
+            let parsed = parse_log_record(header)
+                .unwrap_or_else(|| panic!("production header rejected: {header:?}"));
+            assert_eq!(parsed.level.trim_end(), level.as_str());
+            let body = header.split_once("] ").expect("production stamp separator").1;
+            assert_eq!(strip_log_stamp(header), (body, false));
+            assert_eq!(is_error_or_warning_log_record(header), level <= log::Level::Warn);
+            let complete = record.join("\n");
+            let body = complete.split_once("] ").unwrap().1;
+            assert_eq!(strip_log_stamp(&complete), (body.trim_end_matches("\x1b[0m"), false));
+        }
     }
 
     /// The stamp is parsed, not sniffed. Everything here merely RESEMBLES one,
