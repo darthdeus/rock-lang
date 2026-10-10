@@ -23,7 +23,7 @@ fn configured_check(project: &Path, mag_sim_only: bool) -> Result<()> {
 fn content_keys(value: &serde_json::Value, keys: &mut std::collections::BTreeMap<String, bool>) {
     match value {
         serde_json::Value::String(key) if loose_runtime_path(key) => {
-            keys.entry(key.clone()).or_insert(false);
+            keys.entry(key.clone()).or_insert(true);
         }
         serde_json::Value::Array(values) => {
             for value in values { content_keys(value, keys); }
@@ -59,7 +59,10 @@ fn check_with_roots(
         for event in sound.events {
             for step in event.steps {
                 for layer in step.layers {
-                    for key in layer.sources { keys.entry(key).or_insert(false); }
+                    for key in layer.sources {
+                        let overlay_only = loose_runtime_path(&key);
+                        keys.entry(key).or_insert(overlay_only);
+                    }
                 }
             }
         }
@@ -92,7 +95,7 @@ fn check_with_roots(
                     let code = line.split("//").next().unwrap_or_default();
                     for capture in pattern.captures_iter(code) {
                         let key = &capture[1];
-                        if loose_runtime_path(key) { keys.entry(key.to_owned()).or_insert(false); }
+                        if loose_runtime_path(key) { keys.entry(key.to_owned()).or_insert(true); }
                     }
                 }
             }
@@ -105,7 +108,7 @@ fn check_with_roots(
         let available = found.is_some_and(|asset| !overlay_only ||
             overlays.iter().any(|root| asset.source.starts_with(root)));
         if !available {
-            missing.push(format!("  {key}{}", if overlay_only { " (declared overlay asset)" } else { " (sound/content reference)" }));
+            missing.push(format!("  {key}{}", if overlay_only { " (required overlay asset)" } else { " (sound/content reference)" }));
         }
     }
     if !missing.is_empty() {
@@ -153,6 +156,8 @@ mod tests {
         let project = sound_core::parse_project(&std::fs::read_to_string(tmp.path().join("sound_project.json")).unwrap()).unwrap();
         let key = &project.events[0].steps[0].layers[0].sources[0];
         std::fs::remove_file(tmp.path().join("store").join(key)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(key).parent().unwrap()).unwrap();
+        std::fs::write(tmp.path().join(key), b"source fallback").unwrap();
         let error = check_with_roots(tmp.path(), Some(&config), &[tmp.path().join("store")]).unwrap_err().to_string();
         assert!(error.contains(key), "{error}");
     }
@@ -163,6 +168,8 @@ mod tests {
         let catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(tmp.path().join("content.json")).unwrap()).unwrap();
         let key = catalog["image"].as_str().unwrap();
         std::fs::remove_file(tmp.path().join("store").join(key)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(key).parent().unwrap()).unwrap();
+        std::fs::write(tmp.path().join(key), b"source fallback").unwrap();
         let error = check_with_roots(tmp.path(), Some(&config), &[tmp.path().join("store")]).unwrap_err().to_string();
         assert!(error.contains(key), "{error}");
     }
@@ -175,6 +182,8 @@ mod tests {
         std::fs::write(tmp.path().join("content.rock"), format!("const IMAGE: string = \"{key}\"\n")).unwrap();
         std::fs::remove_file(tmp.path().join("content.json")).unwrap();
         std::fs::remove_file(tmp.path().join("store").join(key)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(key).parent().unwrap()).unwrap();
+        std::fs::write(tmp.path().join(key), b"source fallback").unwrap();
         let error = check_with_roots(tmp.path(), Some(&config), &[tmp.path().join("store")]).unwrap_err().to_string();
         assert!(error.contains(key), "{error}");
     }
