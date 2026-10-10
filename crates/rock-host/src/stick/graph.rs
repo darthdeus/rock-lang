@@ -388,8 +388,16 @@ impl PackageGraph {
     }
 
     /// The package whose root contains `path`, deepest first on nesting.
-    /// Paths must be canonicalized (source loading canonicalizes already).
+    /// Resolve filesystem aliases before comparing against canonical roots.
+    /// An unresolvable path has no owner.
     pub fn package_of_file(&self, path: &Path) -> Option<PackageId> {
+        let path = match fs_err::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) => {
+                log::debug!("cannot resolve package owner for {}: {error}", path.display());
+                return None;
+            }
+        };
         let mut best: Option<(PackageId, usize)> = None;
         for node in &self.packages {
             if path.starts_with(&node.root) {
@@ -646,6 +654,33 @@ mod tests {
 
         let err = PackageGraph::build(&root).expect_err("mixed ownership overlap must reject");
         assert!(err.to_string().contains("inner-v1"), "error names the nested package: {err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn package_of_file_resolves_symlinked_paths_before_selecting_owner() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("app");
+        let inner = root.join("lib");
+        write_manifest(&inner, "inner", "\n[language]\nmodules = \"v1\"\n");
+        write_manifest(&root, "app", "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"lib\" }\n");
+        fs::write(root.join("main.rock"), "fn main() {}\n").expect("root source");
+        fs::write(root.join("library.rock"), "fn sibling() {}\n").expect("sibling source");
+        fs::write(inner.join("lib.rock"), "fn inner() {}\n").expect("dependency source");
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).expect("symlinked package root");
+        std::os::unix::fs::symlink(inner.join("lib.rock"), root.join("linked.rock"))
+            .expect("symlink into dependency");
+
+        let graph = PackageGraph::build(&alias).expect("graph through symlink");
+        let root_id = graph.root();
+        let inner_id = graph.package(root_id).dependencies[0].target;
+        for path in [alias.join("main.rock"), alias.join("library.rock")] {
+            assert_eq!(graph.package_of_file(&path), Some(root_id), "{}", path.display());
+        }
+        for path in [alias.join("lib/lib.rock"), alias.join("linked.rock")] {
+            assert_eq!(graph.package_of_file(&path), Some(inner_id), "{}", path.display());
+        }
     }
 
     #[test]
