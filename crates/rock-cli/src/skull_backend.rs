@@ -2989,11 +2989,14 @@ fn build_state_nobox_accessors(
 /// pair via `Command::env` (later wins). Same shape that drives the emitted
 /// `register_sim` registry, so the wire set the runner sees matches what the
 /// game can dispatch.
-/// The headless window sims that never read pixels boot in. 640x360 is 16:9
-/// like the 1920x1080 game default at a ninth of the pixels, so aspect-locked
-/// logic (camera framing, `gameplay_visible_world_width(1920/1080)`) is
-/// unaffected while scene render targets shrink roughly ninefold.
-pub const SIM_SMALL_WINDOW: &str = "640x360";
+/// The headless window sims that never read pixels boot in. 320x180 is 16:9
+/// like the 1920x1080 game default at a thirty-sixth of the pixels, so
+/// aspect-locked logic (camera framing,
+/// `gameplay_visible_world_width(1920/1080)`) is unaffected while scene render
+/// targets shrink to a few megabytes. Four capture sims already run this size
+/// by explicit choice (`frame_stream_capture`, `low_fps_nudge`,
+/// `meme_capture_sound`), so it is a blessed sim size, not a new extreme.
+pub const SIM_SMALL_WINDOW: &str = "320x180";
 
 /// Declared-name prefixes of the engine's async pixel-readback family and its
 /// FFI: every `pixel_readback_*` wrapper and `stone_pixel_readback_*` call,
@@ -3503,7 +3506,7 @@ mod sim_small_window_tests {
     fn sims_that_read_no_pixels_get_the_small_window() {
         assert_eq!(
             stone_window(env_for(env_by_wire(), "small_window_plain_sim")),
-            Some("640x360"),
+            Some("320x180"),
             "a sim that calls no pixel helper boots in the small window"
         );
     }
