@@ -2167,16 +2167,20 @@ where
             }
             result
         });
-        if let Some(dir) = &test_barrier {
-            record_sim_lifecycle("reload_lane_dispatched", "");
-            std::fs::write(dir.join("lane_dispatched"), b"")
-                .expect("write reload lane test barrier");
-        }
-        let lane = lane();
+        let lane = dispatch_reload_lane(lane, test_barrier.as_deref());
         width.widen_to_jobs();
         let pool = pool.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         (pool, lane)
     })
+}
+
+fn dispatch_reload_lane<B>(lane: impl FnOnce() -> B, test_barrier: Option<&Path>) -> B {
+    if let Some(dir) = test_barrier {
+        record_sim_lifecycle("reload_lane_dispatched", "");
+        std::fs::write(dir.join("lane_dispatched"), b"")
+            .expect("write reload lane test barrier");
+    }
+    lane()
 }
 
 /// Each reload entry at `indices`, one at a time through the lane's session.
