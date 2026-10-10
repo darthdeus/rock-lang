@@ -594,9 +594,9 @@ fn run_replay_dump_with_input_isolation(
     let scratch = tempfile::tempdir().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
     command.args([
-            "frame", game, "-n", &frames.to_string(), "--replay", log,
-            "--dump-state", "--output", &scratch.path().to_string_lossy(),
-        ]);
+        "frame", game, "-n", &frames.to_string(), "--replay", log,
+        "--dump-state", "--output", &scratch.path().to_string_lossy(),
+    ]);
     if isolate_ambient_input {
         remove_ambient_physical_input(&mut command);
     }
@@ -663,9 +663,9 @@ fn run_record_dump_observed_with_input_isolation(
     let frames_s = frames.to_string();
     let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
     command.args([
-            "frame", game, "-n", &frames_s, "--record", log,
-            "--dump-state", "--output", &scratch.path().to_string_lossy(),
-        ]);
+        "frame", game, "-n", &frames_s, "--record", log,
+        "--dump-state", "--output", &scratch.path().to_string_lossy(),
+    ]);
     if isolate_ambient_input {
         remove_ambient_physical_input(&mut command);
     }
