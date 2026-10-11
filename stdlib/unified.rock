@@ -2992,6 +2992,15 @@ fn Map<K, V>.len(map) -> int {
     count
 }
 
+// First-entry test: unlike `len`, this stops at the first entry instead of
+// walking the whole spine, on either representation.
+fn Map<K, V>.is_empty(map) -> bool {
+    for (_, _) in map {
+        return false
+    }
+    return true
+}
+
 
 fn Map<K, V>.clear(map) {
     for (k, v) in map {
