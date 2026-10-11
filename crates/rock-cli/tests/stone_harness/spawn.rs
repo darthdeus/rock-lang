@@ -498,6 +498,57 @@ impl Drop for BudgetedChild {
     }
 }
 
+/// Copy `source` to `destination` in a single-threaded `cp` child, adopting
+/// the source's permission bits. Use for every file the test will execute.
+///
+/// Copying an executable with `std::fs::copy` while other threads spawn is
+/// racy on Linux: a clone made during the copy inherits the copy's write fd,
+/// so the copier's close is not the last fput and the kernel drops the
+/// inode's write count only when that child drains. An exec landing in that
+/// window fails with ETXTBSY ("Text file busy"). Temp-name-plus-rename does
+/// not help (same inode), and O_CLOEXEC is already set (it acts at exec,
+/// after the check). A `cp` child holds the write fd in its own fd table and
+/// is waited for, so the write count is zero before this returns.
+pub fn copy_executable(source: &Path, destination: &Path) {
+    run_cp(source, destination);
+    let permissions = std::fs::metadata(source)
+        .expect("read copied executable permissions")
+        .permissions();
+    std::fs::set_permissions(destination, permissions)
+        .expect("preserve copied executable permissions");
+}
+
+/// Replace the bytes of an executed file, keeping its permission bits. The
+/// new content is staged under a temp name (never executed) and moved into
+/// place by a `cp` child, so no write fd to the executed inode ever exists
+/// in this multithreaded process; see [`copy_executable`].
+pub fn overwrite_executable(destination: &Path, bytes: &[u8]) {
+    let permissions = std::fs::metadata(destination)
+        .expect("read executed file permissions")
+        .permissions();
+    let staged = destination.with_added_extension("staged");
+    std::fs::write(&staged, bytes).expect("stage executable replacement");
+    run_cp(&staged, destination);
+    std::fs::set_permissions(destination, permissions)
+        .expect("preserve executed file permissions");
+}
+
+fn run_cp(source: &Path, destination: &Path) {
+    let status = Command::new("cp")
+        .arg(source)
+        .arg(destination)
+        .status()
+        .unwrap_or_else(|error| {
+            panic!("spawn cp {} -> {}: {error}", source.display(), destination.display())
+        });
+    assert!(
+        status.success(),
+        "cp {} -> {} failed: {status}",
+        source.display(),
+        destination.display()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -113,7 +113,7 @@ fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
     std::os::unix::fs::symlink(repo_root().join("stone"), sdk.path().join("stone")).unwrap();
     std::os::unix::fs::symlink(repo_root().join("stdlib"), sdk.path().join("stdlib")).unwrap();
     let sdk_rock = sdk.path().join("bin/rock");
-    std::fs::copy(rock_bin(), &sdk_rock).expect("copy release-layout executable");
+    crate::stone_harness::copy_executable(&rock_bin(), &sdk_rock);
     let mut permissions = std::fs::metadata(&sdk_rock).unwrap().permissions();
     permissions.set_mode(permissions.mode() | 0o111);
     std::fs::set_permissions(&sdk_rock, permissions).unwrap();

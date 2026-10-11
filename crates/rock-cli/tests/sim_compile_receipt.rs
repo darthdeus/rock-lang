@@ -339,12 +339,7 @@ struct CacheRun<'a> {
 }
 
 fn copy_rock_executable(source: &std::path::Path, destination: &std::path::Path) {
-    let permissions = std::fs::metadata(source)
-        .expect("read rock executable permissions")
-        .permissions();
-    std::fs::copy(source, destination).expect("copy rock executable");
-    std::fs::set_permissions(destination, permissions)
-        .expect("preserve rock executable permissions");
+    crate::stone_harness::copy_executable(source, destination);
 }
 
 fn pinned_rock(tempdir: &std::path::Path) -> std::path::PathBuf {
@@ -528,7 +523,7 @@ fn sim_compile_cache_reuses_identical_inputs_and_recompiles_when_any_key_input_c
     {
         let mut bytes = std::fs::read(&compiler).expect("read rock copy");
         bytes.push(0);
-        std::fs::write(&compiler, bytes).expect("change rock copy");
+        crate::stone_harness::overwrite_executable(&compiler, &bytes);
     }
     assert_ne!(
         std::fs::read(&rock).expect("read pinned rock"),
@@ -800,4 +795,46 @@ fn sim_compile_receipt_v1_entry_point_and_short_name_selection_run() {
     std::fs::write(manifest, text).unwrap();
     let run = CacheRun { rock: &rock, project: &project, cache: &cache, scratch: dir.path() };
     assert!(run.compiled("v1", "cache_probe", &[], &[]));
+}
+
+/// Pinning the rock executable while other threads spawn must not fail the
+/// spawn with "Text file busy". A clone made during an in-process copy
+/// inherits the copy's write fd, so the copier's close is not the last fput
+/// and the kernel drops the write count only when that child drains; an exec
+/// landing in that window fails with ETXTBSY. Every pinned copy must spawn
+/// and report the same version as a direct run.
+#[test]
+fn pinned_rock_copies_survive_concurrent_spawns() {
+    let _spawn_budget = SpawnBudget::for_test(120);
+    let direct = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .arg("--version")
+        .output_with_deadline()
+        .expect("direct rock --version oracle");
+    assert!(
+        direct.status.success(),
+        "direct rock --version failed:\n{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    let budget = SpawnBudget::budget();
+    std::thread::scope(|scope| {
+        for _ in 0..32 {
+            scope.spawn(|| {
+                let _spawn_budget = SpawnBudget::enter(budget);
+                for _ in 0..12 {
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    let rock = pinned_rock(dir.path());
+                    let output = Command::new(&rock)
+                        .arg("--version")
+                        .output_with_deadline()
+                        .expect("spawn pinned rock --version");
+                    assert!(
+                        output.status.success(),
+                        "pinned rock --version failed:\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert_eq!(output.stdout, direct.stdout, "pinned copy reports its version");
+                }
+            });
+        }
+    });
 }
