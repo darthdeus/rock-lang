@@ -32,18 +32,15 @@ class WindowCompilationTest(fixtures.RuntimePerfCompareTest):
         import json
         return json.loads(result.stdout)
 
-    def test_quiet_windows_compare_allocation(self):
-        report = self.report(self.arms())
-        self.assertTrue(report["allocation_comparison"]["comparable"])
-        self.assertEqual(report["metrics"]["memory.gc_window.gross_request_kb_per_frame"]["direction"],
-                         "candidate-higher")
+    def test_quiet_jit_windows_are_still_diagnostic(self):
+        self.assert_unresolved(self.arms())
 
     def assert_unresolved(self, docs):
         report = self.report(docs)
         self.assertFalse(report["allocation_comparison"]["comparable"])
         for name, row in report["metrics"].items():
             if name.startswith("memory.gc_window.") and "jit_trace" not in name:
-                self.assertEqual(row["direction"], "unresolved-jit", name)
+                self.assertEqual(row["direction"], "diagnostic-jit", name)
         self.assertEqual(report["metrics"]["frame_ms.effective_cpu.mean"]["direction"],
                          "candidate-higher")
         return report
@@ -85,14 +82,8 @@ class WindowCompilationTest(fixtures.RuntimePerfCompareTest):
             gc["gross_request_kb_per_frame"] = mutator + internal
         return docs
 
-    def test_mutator_split_compares_during_compilation_and_flush(self):
-        report = self.report(self.split_arms())
-        self.assertTrue(report["allocation_comparison"]["comparable"])
-        self.assertEqual(report["allocation_comparison"]["direction"], "candidate-lower")
-        self.assertEqual(report["metrics"]["memory.gc_window.allocation_split.mutator.request_kb_per_frame"]["direction"],
-                         "candidate-lower")
-        self.assertEqual(report["metrics"]["memory.gc_window.gross_request_kb_per_frame"]["direction"],
-                         "candidate-higher")
+    def test_mutator_split_is_diagnostic_during_compilation_and_flush(self):
+        self.assert_unresolved(self.split_arms())
 
     def test_one_missing_split_keeps_compiling_windows_unresolved(self):
         docs = self.split_arms()
