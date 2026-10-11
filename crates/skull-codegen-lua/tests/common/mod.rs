@@ -9,6 +9,8 @@ use skull_mir::monoty::MonoInterner;
 /// Panic unless `luajit` runs. Execution-oracle tests call this up front
 /// instead of skipping when the binary is absent: a host without luajit must
 /// report red for tests that never ran, never green.
+// The `emit` target's execution oracles call this; `coverage` shares this file but never executes.
+#[allow(dead_code)]
 pub fn require_luajit() {
     if std::process::Command::new("luajit").arg("-v").output().is_err() {
         panic!("luajit is required for this execution test but was not found on PATH");
