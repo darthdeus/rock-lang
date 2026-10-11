@@ -2999,16 +2999,22 @@ fn build_state_nobox_accessors(
 pub const SIM_SMALL_WINDOW: &str = "320x180";
 
 /// Declared-name prefixes of the engine's async pixel-readback family and its
-/// FFI: every `pixel_readback_*` wrapper and `stone_pixel_readback_*` call,
-/// present and future. The family is large, uniformly prefixed, and (unlike
-/// the guarded readers) calls no shared funnel, so a prefix covers its growth;
-/// over-matching stays on the safe side (a lifecycle call keeps the window).
-pub static SIM_PIXEL_PREFIXES: &[&str] = &["pixel_readback", "stone_pixel_readback"];
+/// FFI, plus the imgui test-geometry family: every `pixel_readback_*` wrapper,
+/// `stone_pixel_readback_*` call, and `imgui_test_*` UI automation helper
+/// (scroll/click/drag by presented position), present and future. The families
+/// are large, uniformly prefixed, and call no shared funnel, so a prefix
+/// covers their growth; over-matching stays on the safe side (a lifecycle call
+/// keeps the window). The imgui family reads presented geometry (item rects,
+/// visibility) rather than pixels, but that geometry is window-derived exactly
+/// like a readback: the seam proof showed a palette-click sim failing at every
+/// size below 1080p while its siblings pass at 320x180.
+pub static SIM_PIXEL_PREFIXES: &[&str] = &["pixel_readback", "stone_pixel_readback", "imgui_test_"];
 
-/// True when the declared callee name reads pixels: an exact root or a
-/// readback-family prefix.
+/// True when the declared callee name reads pixels: an exact root, a MAG
+/// hover-pick reader, or a readback-family prefix.
 fn sim_name_reads_pixels(declared: &str) -> bool {
     SIM_PIXEL_ROOTS.iter().any(|root| *root == declared)
+        || SIM_MAG_PICK_ROOTS.iter().any(|root| *root == declared)
         || SIM_PIXEL_PREFIXES.iter().any(|prefix| declared.starts_with(prefix))
 }
 
@@ -3018,9 +3024,10 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
 /// reader funnels through. Each name is unique workspace-wide (D-form methods
 /// desugar to bare names, so no method is listed: a sim reading probe bytes
 /// created its probe through `window_probe_new` in the same entry). The async
-/// readback family is covered by [`SIM_PIXEL_PREFIXES`]. A sim whose
-/// transitive callees name one of these keeps the game's window; anything else
-/// boots in [`SIM_SMALL_WINDOW`] unless it declares its own `STONE_WINDOW`.
+/// readback and imgui test-geometry families are covered by
+/// [`SIM_PIXEL_PREFIXES`]. A sim whose transitive callees name one of these
+/// keeps the game's window; anything else boots in [`SIM_SMALL_WINDOW`]
+/// unless it declares its own `STONE_WINDOW`.
 pub static SIM_PIXEL_ROOTS: &[&str] = &[
     "take_screenshot",
     "window_probe_new",
@@ -3047,6 +3054,20 @@ pub static SIM_PIXEL_ROOTS: &[&str] = &[
     "analysis_capture_gpu_bytes",
     "analysis_capture_scene_boundary",
     "analysis_capture_full_boundary",
+];
+
+/// MAG's hover-pick readers (mag/click.rock): picking reads the ID buffer (a
+/// readback the engine performs per frame), and sims reach the answer through
+/// these globals readers (`hover_name_target` funnels through
+/// `current_click_target`; the engine hover updaters funnel through
+/// `read_canvas_pixel`). Listed separately from [`SIM_PIXEL_ROOTS`] because
+/// they resolve in MAG's workspace, not in stone's; the matcher consults both.
+pub static SIM_MAG_PICK_ROOTS: &[&str] = &[
+    "pick_at_cursor",
+    "pick_from_id",
+    "current_click_target",
+    "pick_selection_count",
+    "pick_selection_id",
 ];
 
 /// Callee edges of one body: resolved calls and protocol dispatch from its
@@ -3517,6 +3538,8 @@ mod sim_small_window_tests {
             "small_window_pixel_reader",
             "small_window_indirect_reader",
             "small_window_readback_reader",
+            "small_window_ui_reader",
+            "small_window_pick_reader",
         ] {
             assert_eq!(
                 stone_window(env_for(env_by_wire(), short)),
@@ -3558,6 +3581,26 @@ mod sim_small_window_tests {
             assert!(
                 names.iter().any(|n| n.starts_with(prefix)),
                 "pixel prefix `{prefix}` matches no function; the set drifted from the engine"
+            );
+        }
+    }
+
+    #[test]
+    fn mag_pick_root_names_resolve_in_mag() {
+        let mag = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag");
+        let project = crate::live_project::LiveProject::init(mag.to_str().unwrap(), true)
+            .expect("mag must compile");
+        let mut names = std::collections::HashSet::new();
+        for module in project.workspace().modules.iter() {
+            for (_fid, f) in module.functions.iter() {
+                let declared = f.name.as_str().rsplit("::").next().unwrap_or(f.name.as_str());
+                names.insert(declared.to_string());
+            }
+        }
+        for root in super::SIM_MAG_PICK_ROOTS {
+            assert!(
+                names.contains(*root),
+                "pick root `{root}` resolves to no MAG function; the set drifted from the game"
             );
         }
     }

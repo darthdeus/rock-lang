@@ -33,6 +33,29 @@ co fn small_window_readback_reader() -> Coroutine<Wait> {
     stop_sim()
 }
 
+@sim
+co fn small_window_ui_reader() -> Coroutine<Wait> {
+    let _center = imgui_test_item_center("editor/palette/view/roofs")
+    sim_expect(true, "a sim that reads UI geometry keeps its window")
+    stop_sim()
+}
+
+// Local stand-ins for MAG's hover-pick readers (mag/click.rock): the harness
+// matches callee names, so a sim calling these classifies as a pick reader.
+fn pick_at_cursor() -> int { return 0 }
+fn pick_from_id(id: int) -> int { return id }
+fn current_click_target() -> int { return 0 }
+fn pick_selection_count() -> int { return 0 }
+fn pick_selection_id() -> int { return 0 }
+
+@sim
+co fn small_window_pick_reader() -> Coroutine<Wait> {
+    let _target = pick_at_cursor() + pick_from_id(0) + current_click_target()
+        + pick_selection_count() + pick_selection_id()
+    sim_expect(true, "a sim that reads hover picking keeps its window")
+    stop_sim()
+}
+
 @sim_env("STONE_WINDOW", "800x600")
 @sim
 co fn small_window_explicit_size() -> Coroutine<Wait> {
