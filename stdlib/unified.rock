@@ -2408,12 +2408,74 @@ const EPSILON: float = 0.0000001
 // Inspect function for debugging — pretty-prints any value.
 // cycle_detect=true (default) tracks visited tables to detect cycles.
 // precision=-1 (default) means no float precision formatting.
+// Positional leaf index -> declared field name for a flat-enum box, or nil
+// when the layout is anything but an exact walk. A value payload widens into
+// the box's positional slots, so leaf naming walks the variant's DECLARED
+// positions: a `nom` slot whose type is a flat leaf-record (a value tier with
+// no nominal-typed field) expands to that record's fields, every other slot
+// consumes exactly one leaf. Nested values, GC structs (one nested table, not
+// widened), duplicate names, and leaf-count mismatches all fall back to the
+// established `[i]` rendering rather than risk a mislabeled field.
 // Module-level recursive helper. Hoisted out of `inspect` so each call
 // doesn't allocate a fresh pair of upvalue-capturing closures
 // (`_itbl` / `format_value`) — that closure construction tripped
 // LuaJIT's FNEW abort on every table-shaped inspect call. State that
 // the old closures captured (`visited`, `precision`) is now passed
 // explicitly. See docs/jit-fnew-codegen-investigation.md.
+@nomangle inline(lua) fn __rock_enum_payload_names(keys: any, pos: any) -> any = """
+    local types = _G.__ROCK_TYPE_TABLE
+    local n = 0
+    local numeric = 0
+    local seen = {}
+    for _, k in ipairs(keys) do
+        if type(k) == "number" then
+            if k ~= math.floor(k) or k < 1 then return nil end
+            numeric = numeric + 1
+            if k > n then n = k end
+        else
+            seen[k] = true
+        end
+    end
+    if numeric ~= n or n == 0 then return nil end
+    local names = {}
+    local d, c = 1, 1
+    while c <= n do
+        local fields = nil
+        local pd = pos[d]
+        if pd and pd.k == "nom" and type(pd.name) == "string" then
+            local entry = types and types[pd.name]
+            if entry and (entry.kind == "c_struct" or entry.kind == "value_table")
+                    and entry.fields and #entry.fields > 0 then
+                local flat = true
+                for j = 1, #entry.fields do
+                    local f = entry.fields[j]
+                    if type(f.name) ~= "string" or (type(f.type) == "string" and types[f.type]) then
+                        flat = false
+                        break
+                    end
+                end
+                if flat then fields = entry.fields end
+            end
+        end
+        if fields then
+            for j = 1, #fields do
+                if c > n then return nil end
+                if seen[fields[j].name] then return nil end
+                seen[fields[j].name] = true
+                names[c] = fields[j].name
+                c = c + 1
+            end
+        else
+            c = c + 1
+        end
+        d = d + 1
+    end
+    for k, _ in pairs(pos) do
+        if type(k) == "number" and k >= d then return nil end
+    end
+    if next(names) == nil then return nil end
+    return names
+"""
 @nomangle inline(lua) fn __rock_inspect_value(v: any, indent: string, path: string, visited: any, precision: int) -> string = """
     local vt = type(v)
     if vt == "string" then
@@ -2518,6 +2580,15 @@ const EPSILON: float = 0.0000001
                 end
             end
         end
+        -- A flat-enum box widens value payloads into positional slots; name
+        -- the leaves from the variant descriptor when the walk is exact.
+        local payload_names = nil
+        if t.__variant and decl and decl.variant_desc then
+            local vd = decl.variant_desc[t.__variant]
+            if vd and vd.pos then
+                payload_names = __rock_enum_payload_names(keys, vd.pos)
+            end
+        end
         table.sort(keys, __rock_inspect_key_lt)
 
         local variant = t.__variant
@@ -2542,10 +2613,11 @@ const EPSILON: float = 0.0000001
             -- Compact single-line
             local parts = {}
             for i, k in ipairs(keys) do
-                local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+                local dk = (payload_names and payload_names[k]) or k
+                local key_str = type(dk) == "string" and dk or ("[" .. tostring(dk) .. "]")
                 local v = t[k]
                 if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
-                parts[i] = key_str .. " = " .. __rock_inspect_value(v, indent, path .. "." .. tostring(k), visited, precision)
+                parts[i] = key_str .. " = " .. __rock_inspect_value(v, indent, path .. "." .. tostring(dk), visited, precision)
             end
             if header ~= "" then
                 result = header .. " { " .. table.concat(parts, ", ") .. " }"
@@ -2556,10 +2628,11 @@ const EPSILON: float = 0.0000001
             -- Multi-line
             local lines = {}
             for _, k in ipairs(keys) do
-                local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+                local dk = (payload_names and payload_names[k]) or k
+                local key_str = type(dk) == "string" and dk or ("[" .. tostring(dk) .. "]")
                 local v = t[k]
                 if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
-                lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(v, indent .. "  ", path .. "." .. tostring(k), visited, precision)
+                lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(v, indent .. "  ", path .. "." .. tostring(dk), visited, precision)
             end
             local body = table.concat(lines, ",\n")
             if header ~= "" then
