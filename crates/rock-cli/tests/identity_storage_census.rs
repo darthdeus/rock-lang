@@ -32,7 +32,7 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 303 | 217 | 7 | 0 | 2051 | 566 | 83 | 1732 | 45 | 5004 |
+| mag | exempt | 303 | 217 | 7 | 0 | 2053 | 566 | 83 | 1734 | 45 | 5008 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 2 |
 | mag_content | exempt | 7 | 7 | 2 | 0 | 89 | 5 | 0 | 0 | 0 | 110 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
@@ -68,7 +68,6 @@ Exempt module sites:
 NOT fully analyzed:
 - tests/c_mag_runtime_data: 5 other semantic errors
 - tests/c_native_boot_codec: 2 other semantic errors
-- tools/mag-encounter-worker: 1 other semantic errors
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
 - tests/newtype_generic_unification_reject_wrong_shape.rock: 1 other semantic errors
 - tests/test_utils.rock: Cannot run test-util files directly. Test utilities are meant to be used by test files.
