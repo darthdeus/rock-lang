@@ -247,6 +247,95 @@ fn lua_emits_the_complete_state_image_plan_next_to_the_schema() {
 }
 
 #[test]
+fn module_memory_header_platform_reaches_state_schema_metadata() {
+    use bone_semantic::hir::StateMetadata;
+    use skull_mir::state_schema::StateKind;
+
+    let header = emit_mir(
+        "@memory(platform)\nglobal TICKS: int = 0\nfn main() { TICKS = TICKS + 1 }\n",
+    );
+    let entry = header
+        .state_schema
+        .entries
+        .iter()
+        .find(|entry| entry.kind == StateKind::Global && entry.identity.ends_with("::TICKS"))
+        .expect("header fixture global in StateSchema");
+
+    // Oracle 1: the class table lowering builds the unit default from.
+    let platform = StateMetadata::for_memory_class(skull_parser::MemoryClass::Platform);
+    assert_eq!(
+        entry.metadata,
+        Some(platform),
+        "a header-only platform global must carry the platform triple: {entry:?}"
+    );
+    assert_ne!(
+        entry.metadata,
+        Some(StateMetadata::default()),
+        "the header must move the global off the game default: {entry:?}"
+    );
+
+    // Oracle 2: the same triple spelled as an explicit per-declaration
+    // annotation takes the annotation-lowering path, not the header default.
+    let explicit = emit_mir(
+        "@state(ownership=host_projection, world=exclude, realization=rebuild_host_projection)\nglobal TICKS: int = 0\nfn main() { TICKS = TICKS + 1 }\n",
+    );
+    let explicit_entry = explicit
+        .state_schema
+        .entries
+        .iter()
+        .find(|entry| entry.kind == StateKind::Global && entry.identity.ends_with("::TICKS"))
+        .expect("explicit fixture global in StateSchema");
+    assert_eq!(
+        entry.metadata, explicit_entry.metadata,
+        "header and explicit annotation must resolve to the same metadata"
+    );
+
+    // HostProjection over a storage-free declared type skips the storage scan.
+    assert!(
+        entry.storage_free,
+        "a platform int global must be storage-free: {entry:?}"
+    );
+
+    // Publication fidelity: the Lua image plan must carry the policies the
+    // schema computes, read back from the plan rather than restated here.
+    let plan = StateImagePlan::from_schema(&header.state_schema).expect("image plan");
+    let plan_entry = plan
+        .entries()
+        .iter()
+        .find(|entry| entry.identity.ends_with("::TICKS"))
+        .expect("header fixture global in StateImagePlan");
+    assert_eq!(
+        plan_entry.kind,
+        skull_mir::state_image::ImageEntryKind::HostProjection,
+        "a platform global must image as a host projection"
+    );
+    let marker = format!("identity={:?}", plan_entry.identity);
+    let start = header
+        .lua
+        .find(&marker)
+        .expect("fixture entry in emitted image plan");
+    let emitted = header.lua[start..]
+        .split("}},")
+        .next()
+        .expect("complete emitted entry");
+    for (key, value) in [
+        ("kind", plan_entry.kind.as_str()),
+        ("capture_policy", plan_entry.capture_policy.as_str()),
+        (
+            "realization_policy",
+            plan_entry.realization_policy.as_str(),
+        ),
+        ("world_policy", plan_entry.world_policy.as_str()),
+    ] {
+        assert!(
+            emitted.contains(&format!("{key}={value:?}")),
+            "emitted image plan omitted {key} for {}: {emitted}",
+            plan_entry.identity
+        );
+    }
+}
+
+#[test]
 fn explicit_global_state_ownership_reaches_both_image_backends() {
     let source = r#"
 @state(ownership=host_projection, world=exclude, realization=font)
