@@ -451,12 +451,12 @@ mod tests {
                 fflush(stdout);
                 {}
             "#, if fail { "abort();" } else { "" });
-            let compiled = supervisor_fixture(&body, C_NATIVE_TEST_TIMEOUT.as_secs());
+            let compiled = supervisor_fixture(&body, test_utils::HANG_BACKSTOP.as_secs());
             let dir = compiled._dir.path();
-            let run = run_supervisor(&compiled.binary, dir, None, C_NATIVE_TEST_TIMEOUT + Duration::from_secs(5), None);
+            let run = run_supervisor(&compiled.binary, dir, None, test_utils::HANG_BACKSTOP, None);
+            assert!(run.is_ok(), "{run:?}");
             let output = fs_err::read_to_string(dir.join("0.out")).unwrap();
             let root = output.lines().nth(1).expect("native scratch path");
-            assert!(run.is_ok(), "{run:?}");
             assert!(std::path::Path::new(root).is_absolute(), "{output}");
             assert!(roots.insert(root.to_owned()), "scratch roots were reused");
             assert!(!std::path::Path::new(root).exists(), "scratch survived: {root}");
