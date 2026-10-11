@@ -2370,6 +2370,7 @@ inline(lua) fn table_copy(tbl: any) -> any = """
     for k, v in pairs(tbl) do
         copy[k] = v
     end
+    setmetatable(copy, getmetatable(tbl))
     return copy
 """
 
