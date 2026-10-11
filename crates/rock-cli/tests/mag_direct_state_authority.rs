@@ -1213,7 +1213,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 29, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 27, "WorldState field census changed: {fields:?}");
     assert!(digest.contains("for space_handle in world.spaces"));
     assert!(digest.contains("let space = space_handle.get().unwrap()"));
     for field in fields {
@@ -1278,7 +1278,6 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "WorldPlayerActionKind::FrameTarget", "WorldPlayerActionKind::FrameMovement",
             "world_player_actions_dispatch(world.root,"][..]),
         ("mag_tick_rows_pickup", &[][..]),
-        ("mag_tick_ratcatcher_and_guards", &[][..]),
         ("mag_tick_spawners", &[][..]),
         ("mag_tick_player_recovery", &[][..]),
         ("mag_tick_player_actions_harvest_hazards", &[
@@ -1297,7 +1296,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         .expect("read package expedition schedule");
     let schedule_tick = rock_function_body(&schedule, "pub fn world_expedition_schedule_tick<W>(");
     let mut previous = 0;
-    for (index, stage) in ["actor_pre_mob", "actors", "rows_pickup", "ratcatcher_and_guards",
+    for (index, stage) in ["actor_pre_mob", "actors", "rows_pickup",
         "spawners", "player_recovery", "doors", "player_actions_harvest_hazards", "death_cull",
         "corpses_respawns", "wisp_sacrifice"].iter().enumerate() {
         let marker = format!("{stage}(context)");
