@@ -164,6 +164,20 @@ co fn small_window_scene_capacity_reader() -> Coroutine<Wait> {
     stop_sim()
 }
 
+@sim
+co fn small_window_drawable_reader() -> Coroutine<Wait> {
+    let w = drawable_size().x
+    sim_expect(w >= 0, "shared drawable helpers alone stay small; absolute asserts take explicit sizes")
+    stop_sim()
+}
+
+@sim
+co fn small_window_drawable_ffi_reader() -> Coroutine<Wait> {
+    let (w, h) = stone_get_drawable_size()
+    sim_expect(w + h >= 0, "shared drawable FFI alone stays small; absolute asserts take explicit sizes")
+    stop_sim()
+}
+
 @sim_env("STONE_WINDOW", "800x600")
 @sim
 co fn small_window_explicit_size() -> Coroutine<Wait> {

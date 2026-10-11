@@ -3114,9 +3114,12 @@ pub static SIM_MAG_PICK_ROOTS: &[&str] = &[
 /// boots 6 bloom levels at 1280x720 but 4 at 320x180, so a sim asserting a
 /// level count or a capacity panics or fails small. A sim whose transitive
 /// bodies reference one of these keeps the game's window, like a pixel reader.
-/// Matched by declared (bare) name; liveness and ownership queries
-/// (`canvas_is_live`, `new_canvas`, `destroy_canvas`) do not match and stay
-/// small.
+/// Matched by declared (bare) name. The drawable size is matched by call
+/// (`drawable_size`, `stone_get_drawable_size` in [`SIM_PIXEL_ROOTS`]), not by
+/// its `DRAWABLE_SIZE` global, which shared helpers read: matching the global
+/// keeps hundreds of sims that never query the size. Liveness and ownership
+/// queries (`canvas_is_live`, `new_canvas`, `destroy_canvas`) do not match and
+/// stay small.
 pub static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
 
 /// Callee edges of one body: resolved calls and protocol dispatch from its
@@ -3640,6 +3643,8 @@ mod sim_small_window_tests {
             "small_window_canvas_owner",
             "small_window_native_reader",
             "small_window_active_reader",
+            "small_window_drawable_reader",
+            "small_window_drawable_ffi_reader",
         ] {
             assert_eq!(
                 stone_window(env_for(env_by_wire(), short)),
