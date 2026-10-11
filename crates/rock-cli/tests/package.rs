@@ -593,6 +593,68 @@ fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
 }
 
 #[test]
+fn package_overlay_shadow_prefers_admitted_and_keeps_worktree_fallback() {
+    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let project = fixture_root.path().join("overlay-shadow");
+    let overlay = tempfile::tempdir().expect("overlay fixture");
+    let output = tempfile::tempdir().expect("package output");
+    std::fs::create_dir_all(project.join("assets")).unwrap();
+    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        concat!(
+            "[package]\nname = \"overlay-shadow\"\n",
+            "[release]\nassets = [\"assets\"]\n",
+            "overlay_assets = [\"assets/admitted.png\"]\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("assets/visual_bank.json"),
+        format!(
+            "{{\"schema_version\":{},\"plan_fingerprint\":\"sha256:{}\",\"dependencies\":[]}}\n",
+            checked_visual_bank_schema(),
+            "0".repeat(64),
+        ),
+    )
+    .unwrap();
+    std::fs::write(project.join("assets/admitted.png"), b"worktree-admitted").unwrap();
+    std::fs::write(project.join("assets/fallback.png"), b"worktree-fallback").unwrap();
+    let overlay_assets = overlay.path().join("assets");
+    std::fs::create_dir_all(&overlay_assets).unwrap();
+    std::fs::write(overlay_assets.join("admitted.png"), b"overlay-admitted").unwrap();
+    std::fs::write(overlay_assets.join("fallback.png"), b"overlay-unadmitted").unwrap();
+
+    let packaged = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .env("ROCK_ASSET_OVERLAYS", overlay.path())
+        .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
+        .output()
+        .expect("spawn package");
+    assert!(
+        packaged.status.success(),
+        "shadowed overlay package failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&packaged.stdout),
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+
+    let game_key = project.strip_prefix(repo_root()).unwrap().to_string_lossy().replace('\\', "/");
+    let packaged_assets = output.path().join("assets").join(game_key).join("assets");
+    assert_eq!(
+        std::fs::read(packaged_assets.join("admitted.png"))
+            .expect("admitted overlay key must stage"),
+        b"overlay-admitted",
+        "admitted overlay key must stage overlay bytes over the worktree fallback"
+    );
+    assert_eq!(
+        std::fs::read(packaged_assets.join("fallback.png"))
+            .expect("declared worktree file must stage despite an unadmitted overlay shadow"),
+        b"worktree-fallback",
+        "unadmitted overlay shadow must not drop the declared worktree file"
+    );
+}
+
+#[test]
 fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
     let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
     let project = fixture_root.path().join("worktree-visual-bank");

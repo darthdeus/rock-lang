@@ -176,19 +176,26 @@ pub fn select_assets_with_overlays(
         )?;
     }
 
-    for overlay in overlays.iter().rev() {
-        let source = overlay.join("assets");
-        if !source.exists() {
-            continue;
+    // A game with a compiled worktree visual bank admits overlay files
+    // exactly: sound and visual dependencies plus declared loose assets, each
+    // resolved directly by key. Walking the whole shared overlay tree here
+    // only to discard it in narrowing wastes tens of seconds on slow overlay
+    // disks. Bankless games keep the legacy whole-overlay staging.
+    if !project_dir.join("assets/visual_bank.json").is_file() {
+        for overlay in overlays.iter().rev() {
+            let source = overlay.join("assets");
+            if !source.exists() {
+                continue;
+            }
+            add_path(
+                &mut by_key,
+                game_key,
+                &source,
+                overlay,
+                &source,
+                true,
+            )?;
         }
-        add_path(
-            &mut by_key,
-            game_key,
-            &source,
-            overlay,
-            &source,
-            true,
-        )?;
     }
 
     for relative_root in ["stone/engine/shaders", "stone/assets"] {
@@ -314,14 +321,9 @@ mod worktree_bank_tests {
     }
 }
 
-pub fn include_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
-    if selection.assets.iter().any(|existing| existing.key == asset.key) {
-        return;
-    }
-    selection.assets.push(asset);
-    selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
-}
-
+/// Insert an overlay-first-resolved asset, overwriting any worktree-selected
+/// same-key entry. Bank inserts leave the selection unsorted; the caller sorts
+/// once after all of them instead of paying a sort per insertion.
 pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
     if let Some(existing) = selection
         .assets
@@ -332,7 +334,6 @@ pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset
     } else {
         selection.assets.push(asset);
     }
-    selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
 }
 
 fn is_runtime_data_asset(relative: &Path) -> bool {

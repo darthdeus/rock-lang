@@ -385,6 +385,7 @@ fn compile_declared_asset_banks(
         overlays,
         &mut selection,
     )?;
+    selection.assets.sort_by(|left, right| left.key.cmp(&right.key));
     narrow_asset_overlay_selection(
         &mut selection,
         overlays,
@@ -421,7 +422,7 @@ fn include_declared_overlay_assets(
             );
         }
         dependencies.push(asset.key.clone());
-        rock_host::release::include_release_asset(selection, asset);
+        rock_host::release::replace_release_asset(selection, asset);
     }
     dependencies.sort();
     dependencies.dedup();
@@ -521,7 +522,7 @@ fn compile_sound_project(
             dependency.clone(),
             sound_metadata_cached(project_dir, &asset.source, &source_bytes)?,
         );
-        rock_host::release::include_release_asset(selection, asset);
+        rock_host::release::replace_release_asset(selection, asset);
         dependencies.push(format!("{game_key}/{dependency}"));
     }
     dependencies.sort();
@@ -605,7 +606,7 @@ fn compile_visual_bank(
             dependency,
         )?
         .ok_or_else(|| anyhow::anyhow!("package: visual dependency is not stageable: {dependency}"))?;
-        rock_host::release::include_release_asset(selection, asset);
+        rock_host::release::replace_release_asset(selection, asset);
         dependencies.push(format!("{game_key}/{dependency}"));
         if let Some((_, original)) = dependency
             .strip_prefix("assets/.eat/")
