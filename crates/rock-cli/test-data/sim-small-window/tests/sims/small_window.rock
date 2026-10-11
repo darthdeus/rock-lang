@@ -114,7 +114,7 @@ co fn small_window_capacity_reader() -> Coroutine<Wait> {
 co fn small_window_active_reader() -> Coroutine<Wait> {
     let c = new_canvas(16.0, 16.0, "rgba8")
     let a = canvas_active(c)
-    sim_expect(a.x >= 0, "a sim that reads the active rect keeps its window")
+    sim_expect(a.x >= 0, "the active rect of a fixed-size canvas alone stays small")
     destroy_canvas(c)
     stop_sim()
 }
@@ -137,7 +137,7 @@ co fn small_window_ensure_reader() -> Coroutine<Wait> {
 co fn small_window_native_reader() -> Coroutine<Wait> {
     let c = new_canvas(16.0, 16.0, "rgba8")
     let live = canvas_is_live(c)
-    sim_expect(live, "a sim that asks the native canvas registry keeps its window")
+    sim_expect(live, "liveness of a fixed-size canvas alone stays small")
     destroy_canvas(c)
     stop_sim()
 }
@@ -147,6 +147,20 @@ co fn small_window_canvas_owner() -> Coroutine<Wait> {
     let c = new_canvas(16.0, 16.0, "rgba8")
     destroy_canvas(c)
     sim_expect(true, "owning a fixed-size canvas alone stays small")
+    stop_sim()
+}
+
+@sim
+co fn small_window_bloom_reader() -> Coroutine<Wait> {
+    let n = BLOOM_LEVELS.len()
+    sim_expect(n >= 0, "a sim that reads the bloom pyramid keeps its window")
+    stop_sim()
+}
+
+@sim
+co fn small_window_scene_capacity_reader() -> Coroutine<Wait> {
+    let w = SCENE_CAPACITY.x
+    sim_expect(w >= 0, "a sim that reads the scene capacity keeps its window")
     stop_sim()
 }
 

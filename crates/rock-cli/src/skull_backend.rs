@@ -2999,34 +2999,20 @@ fn build_state_nobox_accessors(
 pub const SIM_SMALL_WINDOW: &str = "320x180";
 
 /// Declared-name prefixes of the engine's async pixel-readback family and its
-/// FFI, the imgui test-geometry and synthetic-input families, and the native
-/// canvas storage and Rock active-rect families: every `pixel_readback_*`
-/// wrapper, `stone_pixel_readback_*` call, `imgui_test_*` UI automation helper
-/// (scroll/click/drag by presented position), `imgui_inject_*` synthetic input
-/// call (mouse buttons, text), `stone_canvas_*` native storage query
-/// (capacity, boot, active, existence, report), and `canvas_active*` Rock
-/// active-rect reader, present and future. The families are large, uniformly
-/// prefixed, and call no shared funnel, so a prefix covers their growth;
-/// over-matching stays on the safe side (a lifecycle call keeps the window).
-/// The imgui families read or drive presented geometry (item rects, visibility,
-/// widget input) rather than pixels, but that geometry is window-derived
-/// exactly like a readback: the seam proof showed a palette-click sim failing
-/// at every size below 1080p while its siblings pass at 320x180, and the full
-/// proof showed a synthetic-mouse toggle sim failing 6/20 at 320x180. The
-/// canvas families read render-target capacity, which follows the window:
-/// testbed boots 6 bloom levels at 1280x720 but 4 at 320x180, so a pyramid
-/// seed asserting 6 panics small. `canvas_is_live` funnels through
-/// `stone_canvas_exists`, so native-liveness queries keep the window too;
-/// creation and destruction (`new_canvas`, `destroy_canvas`) do not match and
-/// stay small.
-pub static SIM_PIXEL_PREFIXES: &[&str] = &[
-    "pixel_readback",
-    "stone_pixel_readback",
-    "imgui_test_",
-    "imgui_inject_",
-    "stone_canvas_",
-    "canvas_active",
-];
+/// FFI, plus the imgui test-geometry and synthetic-input families: every
+/// `pixel_readback_*` wrapper, `stone_pixel_readback_*` call, `imgui_test_*`
+/// UI automation helper (scroll/click/drag by presented position), and
+/// `imgui_inject_*` synthetic input call (mouse buttons, text), present and
+/// future. The families are large, uniformly prefixed, and call no shared
+/// funnel, so a prefix covers their growth; over-matching stays on the safe
+/// side (a lifecycle call keeps the window). The imgui families read or drive
+/// presented geometry (item rects, visibility, widget input) rather than
+/// pixels, but that geometry is window-derived exactly like a readback: the
+/// seam proof showed a palette-click sim failing at every size below 1080p
+/// while its siblings pass at 320x180, and the full proof showed a
+/// synthetic-mouse toggle sim failing 6/20 at 320x180.
+pub static SIM_PIXEL_PREFIXES: &[&str] =
+    &["pixel_readback", "stone_pixel_readback", "imgui_test_", "imgui_inject_"];
 
 /// True when the declared callee name reads pixels: an exact root, a MAG
 /// hover-pick reader, or a readback-family prefix.
@@ -3047,14 +3033,20 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
 /// census (`imgui_bodies_with_prefix`, `imgui_body_ran`, `imgui_total_vtx_count`;
 /// a prop grid draws zero cards at 320x180), the synthetic mouse position
 /// (`imgui_set_mouse_pos`, the non-inject-prefixed half of the input pair),
-/// and the render-target capacity readers (`pyramid_active_step` derives
-/// pyramid geometry from the capacity; `ensure_scene_capacity` re-specifies
-/// the target set). Each name is unique workspace-wide (D-form methods desugar
-/// to bare names, so no method is listed: a sim reading probe bytes created
-/// its probe through `window_probe_new` in the same entry). The async
-/// readback, imgui test-geometry, imgui synthetic-input, native canvas
-/// storage and Rock active-rect families are covered by
-/// [`SIM_PIXEL_PREFIXES`]. A sim whose transitive callees name one of these
+/// and the render-target capacity readers: the native storage queries
+/// (`stone_canvas_capacity_*`, `stone_canvas_boot_*`, `stone_canvas_active_*`,
+/// `stone_canvas_bound_as_target`), the pyramid step (`pyramid_active_step`
+/// derives pyramid geometry from the capacity), and the capacity
+/// re-specification (`ensure_scene_capacity`). Existence and the Rock
+/// active-rect readers are deliberately not listed: `canvas_is_live` funnels
+/// through `stone_canvas_exists`, and `canvas_active` is called by shared
+/// helpers, so matching either keeps hundreds of sims that own fixed-size
+/// canvases. Each name is unique workspace-wide (D-form methods desugar to
+/// bare names, so no method is listed: a sim reading probe bytes created its
+/// probe through `window_probe_new` in the same entry). The async readback,
+/// imgui test-geometry and imgui synthetic-input families are covered by
+/// [`SIM_PIXEL_PREFIXES`]; the scene capacity globals are covered by
+/// [`SIM_CAPACITY_GLOBALS`]. A sim whose transitive callees name one of these
 /// keeps the game's window; anything else boots in [`SIM_SMALL_WINDOW`]
 /// unless it declares its own `STONE_WINDOW`.
 pub static SIM_PIXEL_ROOTS: &[&str] = &[
@@ -3092,6 +3084,14 @@ pub static SIM_PIXEL_ROOTS: &[&str] = &[
     "imgui_bodies_with_prefix",
     "pyramid_active_step",
     "ensure_scene_capacity",
+    "stone_canvas_capacity_w",
+    "stone_canvas_capacity_h",
+    "stone_canvas_boot_w",
+    "stone_canvas_boot_h",
+    "stone_canvas_active_w",
+    "stone_canvas_active_h",
+    "stone_canvas_active_is_creation",
+    "stone_canvas_bound_as_target",
 ];
 
 /// MAG's hover-pick readers (mag/click.rock): picking reads the ID buffer (a
@@ -3107,6 +3107,17 @@ pub static SIM_MAG_PICK_ROOTS: &[&str] = &[
     "pick_selection_count",
     "pick_selection_id",
 ];
+
+/// Declared names of the scene capacity globals: the bloom pyramid levels and
+/// the capacity the scene target set was built for
+/// (`stone/engine/rendering/draw.rock`). Both follow the boot window: testbed
+/// boots 6 bloom levels at 1280x720 but 4 at 320x180, so a sim asserting a
+/// level count or a capacity panics or fails small. A sim whose transitive
+/// bodies reference one of these keeps the game's window, like a pixel reader.
+/// Matched by declared (bare) name; liveness and ownership queries
+/// (`canvas_is_live`, `new_canvas`, `destroy_canvas`) do not match and stay
+/// small.
+pub static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
 
 /// Callee edges of one body: resolved calls and protocol dispatch from its
 /// inference, plus function-valued references from a body scan (a named fn
@@ -3208,6 +3219,65 @@ fn sim_reads_pixels(
     reads
 }
 
+/// True when the sim at `(mid, fid)` references a scene capacity global: one
+/// of [`SIM_CAPACITY_GLOBALS`] is named by its transitive bodies (memoized
+/// like [`sim_reads_pixels`]). Data globals lower to `Expr::Global` exactly
+/// like function-valued references; a name that resolves to no function is a
+/// data reference and is matched by declared (bare) name.
+fn sim_reads_capacity(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
+    memo: &mut std::collections::HashMap<
+        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
+        bool,
+    >,
+    visiting: &mut std::collections::HashSet<
+        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
+    >,
+    name_map: &std::collections::HashMap<
+        ustr::Ustr,
+        Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
+    >,
+) -> bool {
+    use bone_core::hir::{BodyOwner, Expr};
+    if let Some(&known) = memo.get(&(mid, fid)) {
+        return known;
+    }
+    if !visiting.insert((mid, fid)) {
+        return false;
+    }
+    let mut reads = false;
+    if let Some(body) = ws.module(mid).bodies.get(&BodyOwner::Function(fid)) {
+        for (_, expr) in body.expr_arena.iter() {
+            let name = match expr {
+                Expr::Global(n) | Expr::SiblingRef(n) => Some(n),
+                _ => None,
+            };
+            let Some(name) = name else { continue };
+            if name_map.contains_key(name) {
+                continue;
+            }
+            let declared = name.as_str().rsplit("::").next().unwrap_or(name.as_str());
+            if SIM_CAPACITY_GLOBALS.iter().any(|root| *root == declared) {
+                reads = true;
+                break;
+            }
+        }
+    }
+    if !reads {
+        for (callee_mid, callee_fid) in sim_callee_edges(ws, mid, fid, name_map) {
+            if sim_reads_capacity(ws, callee_mid, callee_fid, memo, visiting, name_map) {
+                reads = true;
+                break;
+            }
+        }
+    }
+    visiting.remove(&(mid, fid));
+    memo.insert((mid, fid), reads);
+    reads
+}
+
 fn collect_skull_sims(
     ws: &bone_semantic::inference::Workspace,
 ) -> Vec<(String, String, Vec<(String, String)>)> {
@@ -3235,6 +3305,7 @@ fn collect_skull_sims(
         }
     }
     let mut pixel_memo = std::collections::HashMap::new();
+    let mut capacity_memo = std::collections::HashMap::new();
     let mut visiting = std::collections::HashSet::new();
     let mut sims = Vec::new();
     for module in ws.modules.iter() {
@@ -3269,6 +3340,7 @@ fn collect_skull_sims(
             let explicit_window = env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW");
             if !explicit_window
                 && !sim_reads_pixels(ws, module.id, fid, &mut pixel_memo, &mut visiting, &name_map)
+                && !sim_reads_capacity(ws, module.id, fid, &mut capacity_memo, &mut visiting, &name_map)
             {
                 env_pairs.insert(
                     0,
@@ -3563,7 +3635,12 @@ mod sim_small_window_tests {
 
     #[test]
     fn sims_that_read_no_pixels_get_the_small_window() {
-        for short in ["small_window_plain_sim", "small_window_canvas_owner"] {
+        for short in [
+            "small_window_plain_sim",
+            "small_window_canvas_owner",
+            "small_window_native_reader",
+            "small_window_active_reader",
+        ] {
             assert_eq!(
                 stone_window(env_for(env_by_wire(), short)),
                 Some("320x180"),
@@ -3587,10 +3664,10 @@ mod sim_small_window_tests {
             "small_window_view_reader",
             "small_window_geometry_reader",
             "small_window_capacity_reader",
-            "small_window_active_reader",
             "small_window_pyramid_reader",
             "small_window_ensure_reader",
-            "small_window_native_reader",
+            "small_window_bloom_reader",
+            "small_window_scene_capacity_reader",
         ] {
             assert_eq!(
                 stone_window(env_for(env_by_wire(), short)),
@@ -3632,6 +3709,27 @@ mod sim_small_window_tests {
             assert!(
                 names.iter().any(|n| n.starts_with(prefix)),
                 "pixel prefix `{prefix}` matches no function; the set drifted from the engine"
+            );
+        }
+    }
+
+    #[test]
+    fn every_capacity_global_name_resolves_in_a_stone_workspace() {
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data/sim-small-window");
+        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), true)
+            .expect("the small-window fixture must compile");
+        let mut names = std::collections::HashSet::new();
+        for module in project.workspace().modules.iter() {
+            for (_gid, g) in module.globals.iter() {
+                let declared = g.name.as_str().rsplit("::").next().unwrap_or(g.name.as_str());
+                names.insert(declared.to_string());
+            }
+        }
+        for root in super::SIM_CAPACITY_GLOBALS {
+            assert!(
+                names.contains(*root),
+                "capacity global `{root}` resolves to no global; the set drifted from the engine"
             );
         }
     }
