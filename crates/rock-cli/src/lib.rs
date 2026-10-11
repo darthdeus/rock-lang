@@ -1043,7 +1043,7 @@ impl Args {
             .arg(Arg::new("agent-access").long("agent-access").action(ArgAction::SetTrue)
                 .help("For `rock run <game>`: enable agent control at boot (MAG_AGENT_ACCESS=1) instead of from the editor's Agent Access window; with --agent-headless this is what `mag-cli launch` runs."))
             .arg(Arg::new("level").long("level").value_name("NAME")
-                .help("For `rock run <game>`: the catalog level the editor opens at boot (MAG_EDITOR_LEVEL). Refuses to open a different one if the name is unknown."))
+                .help("For `rock run <game>`: boot into the editor on this catalog level (MAG_EDITOR=1 MAG_BOOT_PLAYING=1 MAG_EDITOR_LEVEL), windowed unless --agent-headless. Refuses to open a different one if the name is unknown."))
             .arg(Arg::new("daemon-sock").long("daemon-sock").value_name("PATH")
                 .help("For `rock run <game>`: the agent daemon socket this game registers with (ROCK_AGENT_DAEMON_SOCK); default ~/tmp/rock-agent-daemon/daemon.sock."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
@@ -1187,9 +1187,13 @@ impl Args {
     /// flags are sugar that sets them in the launcher before the spawn.
     pub fn agent_launch_env(&self) -> Vec<(&'static str, String)> {
         let mut env = Vec::new();
-        if self.agent_headless {
+        // A level only opens in the editor of a playing boot; without both, a
+        // windowed `--level` launch stops at the main menu.
+        if self.agent_headless || self.level.is_some() {
             env.push(("MAG_EDITOR", "1".to_string()));
             env.push(("MAG_BOOT_PLAYING", "1".to_string()));
+        }
+        if self.agent_headless {
             env.push(("STONE_HEADLESS", "1".to_string()));
         }
         if self.agent_access {
@@ -1240,6 +1244,13 @@ mod arg_tests {
         };
         let plain = parse(&["rock", "run", "mag"]);
         assert!(plain.agent_launch_env().is_empty());
+        let windowed = parse(&["rock", "run", "mag", "--level", "courtyard-study"]);
+        let env = windowed.agent_launch_env();
+        for (key, value) in [("MAG_EDITOR", "1"), ("MAG_BOOT_PLAYING", "1"), ("MAG_EDITOR_LEVEL", "courtyard-study")] {
+            assert_eq!(env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str()), Some(value),
+                       "a windowed --level launch opens the editor on that level: {key}");
+        }
+        assert!(env.iter().all(|(k, _)| *k != "STONE_HEADLESS"), "--level alone keeps the window");
         let headless = parse(&["rock", "run", "mag", "--agent-headless"]);
         assert!(headless.agent_launch_env().iter().all(|(k, _)| *k != "MAG_AGENT_ACCESS"),
                 "headless alone leaves agent access off");
