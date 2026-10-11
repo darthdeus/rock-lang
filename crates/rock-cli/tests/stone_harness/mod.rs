@@ -10,6 +10,8 @@
 #![allow(dead_code)] // grows over phases B/C
 
 mod spawn;
+// The two test binaries use different harness subsets; neither uses all of it.
+#[allow(unused_imports)]
 pub use spawn::{copy_executable, overwrite_executable, HeavyCommandExt, SpawnBudget};
 
 use serde_json::{json, Value};
