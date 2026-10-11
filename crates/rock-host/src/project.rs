@@ -623,6 +623,8 @@ fn renderdoc_lib_sibling_of(exe: &Path) -> Option<PathBuf> {
 /// Append `lib` to an ambient `LD_PRELOAD` value (append, never clobber).
 /// A present-but-empty ambient value is the scrub signature (some parent
 /// already loaded the lib); it contributes no entry.
+// Linux production use (`apply_renderdoc_gate`) plus its unit test in `lua_runner`.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn join_preload(
     existing: Option<&std::ffi::OsStr>,
     lib: &std::ffi::OsStr,
