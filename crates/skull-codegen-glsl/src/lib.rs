@@ -577,6 +577,40 @@ pub fn renders_inline(f: &Function) -> bool {
         || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.iter().count() == 2)
 }
 
+/// The GLSL-side callable spellings the emitter renders, derived from
+/// [`GLSL_INTRINSICS`] so the reserved set can never drift from the table: a
+/// template's `ident(` callees plus bare-identifier templates. The spelling is
+/// what GLSL sees, not the Rock name -- `atan` from Rock `atan2`, `mix` from
+/// `lerp`, `textureSize` nested inside `texture_size`'s wrapper -- while
+/// Rock-side spellings with no emitted callee (`lerp`, `v`, `at`, `round`)
+/// stay unreserved, so existing shaders using them as locals do not churn.
+fn glsl_builtin_callables() -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (_, _, tmpl) in GLSL_INTRINSICS {
+        let bytes = tmpl.as_bytes();
+        for (i, _) in tmpl.match_indices('(') {
+            let mut start = i;
+            while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+                start -= 1;
+            }
+            if start < i {
+                let callee = &tmpl[start..i];
+                if !out.contains(&callee) {
+                    out.push(callee);
+                }
+            }
+        }
+        if !tmpl.is_empty()
+            && tmpl.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            && !tmpl.as_bytes()[0].is_ascii_digit()
+            && !out.contains(tmpl)
+        {
+            out.push(tmpl);
+        }
+    }
+    out
+}
+
 /// The graph sees HIR call obligations before scalar operators are lowered away,
 /// so it needs the concrete argument types to distinguish a vector infix from a
 /// scalar MIR instruction.
@@ -1175,9 +1209,12 @@ impl FnEmit<'_> {
     /// In entry mode the hoisted locals share the function scope with the
     /// program's bare globals, so a local named like a uniform lane (or an
     /// attribute, varying, sampler, array member or output) would shadow it
-    /// with no diagnostic. Global-reference cells (sampler/array params) claim
-    /// their exact spellings first -- they ARE the global -- and every other
-    /// cell dedups apart from the reserved globals as well as its siblings.
+    /// with no diagnostic. A local named like a GLSL builtin callable (`cos`,
+    /// `mix`, `float`, ...) breaks the builtin call the same way, in EVERY fn
+    /// -- helpers emit with an empty interface reserved set. Global-reference
+    /// cells (sampler/array params) claim their exact spellings first -- they
+    /// ARE the global -- and every other cell dedups apart from the reserved
+    /// globals, the builtin callables, and its siblings.
     fn assign_cell_names(&mut self) {
         let mut used: HashSet<String> = HashSet::default();
         let claim = |used: &mut HashSet<String>, base: String| -> String {
@@ -1200,6 +1237,7 @@ impl FnEmit<'_> {
             self.cell_name.insert(cid, name);
         }
         used.extend(self.reserved_names.iter().cloned());
+        used.extend(glsl_builtin_callables().into_iter().map(str::to_string));
         for (cid, cell) in self.f.cells.iter() {
             if self.cell_name.contains_key(&cid) {
                 continue;
