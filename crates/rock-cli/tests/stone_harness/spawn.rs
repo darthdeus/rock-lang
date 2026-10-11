@@ -9,7 +9,7 @@
 //! fails, named with the phase it died in, within its phase cap.
 
 use std::cell::Cell;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -132,10 +132,24 @@ impl HeavyCommandExt for Command {
             self.process_group(0);
         }
         let mut child = self.spawn()?;
-        let stdout = child.stdout.take().map(Drain::start);
-        let stderr = child.stderr.take().map(Drain::start);
-        Ok(BudgetedChild { child, budget, spawned_at: Instant::now(), slot_dir, label, phase, stdout, stderr, reaped: false })
+        let (stdout, stdout_log) = budgeted_pipe(child.stdout.take(), "out")?;
+        let (stderr, stderr_log) = budgeted_pipe(child.stderr.take(), "err")?;
+        Ok(BudgetedChild { child, budget, spawned_at: Instant::now(), slot_dir, label, phase,
+            stdout, stderr, stdout_log, stderr_log, reaped: false })
     }
+}
+
+/// A draining pipe plus the temp file it streams to. A child killed by the
+/// test runner (rather than by its phase cap) takes its in-memory capture
+/// with it; the streamed file survives for post-mortem attribution.
+fn budgeted_pipe<T: Read + Send + 'static>(
+    pipe: Option<T>,
+    stream: &str,
+) -> io::Result<(Option<Drain>, Option<tempfile::NamedTempFile>)> {
+    let Some(pipe) = pipe else { return Ok((None, None)); };
+    let log = tempfile::Builder::new().prefix(&format!("rock-spawn-{stream}-")).suffix(".log").tempfile()?;
+    let drain = Drain::start(pipe, log.reopen()?);
+    Ok((Some(drain), Some(log)))
 }
 
 /// The compile slot directory the child will wait on: its explicit override,
@@ -173,11 +187,12 @@ struct Drain {
 }
 
 impl Drain {
-    fn start(mut pipe: impl Read + Send + 'static) -> Self {
+    fn start(mut pipe: impl Read + Send + 'static, log: std::fs::File) -> Self {
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let output = bytes.clone();
         let reader = std::thread::spawn(move || {
             let mut chunk = [0u8; 8192];
+            let mut log = Some(log);
             loop {
                 let count = match pipe.read(&mut chunk) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -189,6 +204,14 @@ impl Drain {
                 };
                 if count == 0 { return Ok(()); }
                 output.lock().unwrap().extend_from_slice(&chunk[..count]);
+                // Memory first, then disk: an empty snapshot always means an
+                // empty file, so the keep decision never needs the file.
+                if let Some(file) = log.as_mut() {
+                    if let Err(error) = file.write_all(&chunk[..count]) {
+                        eprintln!("spawn pipe log failed: {error}");
+                        log = None;
+                    }
+                }
             }
         });
         Self { bytes, reader }
@@ -359,7 +382,57 @@ pub struct BudgetedChild {
     phase: tempfile::NamedTempFile,
     stdout: Option<Drain>,
     stderr: Option<Drain>,
+    stdout_log: Option<tempfile::NamedTempFile>,
+    stderr_log: Option<tempfile::NamedTempFile>,
     reaped: bool,
+}
+
+/// The kept-log report shared by the timeout error and the stderr line.
+fn kept_section(out: &Option<PathBuf>, err: &Option<PathBuf>) -> String {
+    let show = |kept: &Option<PathBuf>| kept.as_ref()
+        .map(|path| path.display().to_string()).unwrap_or_else(|| "(none)".to_string());
+    format!("child output kept at:\n  out: {}\n  err: {}", show(out), show(err))
+}
+
+/// (stdout log, stderr log) named by a timeout error, if it kept any.
+pub fn kept_log_paths(error: &str) -> (Option<PathBuf>, Option<PathBuf>) {
+    let mut lines = error.lines();
+    if !lines.any(|line| line == "child output kept at:") {
+        return (None, None);
+    }
+    let path = |line: Option<&str>, prefix: &str| {
+        line.and_then(|line| line.strip_prefix(prefix))
+            .filter(|path| *path != "(none)")
+            .map(PathBuf::from)
+    };
+    (path(lines.next(), "  out: "), path(lines.next(), "  err: "))
+}
+
+/// Remove the logs a timeout error kept. Tests that PROVE a timeout call
+/// this, so green runs leave nothing behind; unexpected timeouts keep their
+/// files for post-mortem.
+pub fn discard_kept_logs(error: &io::Error) {
+    let (out, err) = kept_log_paths(&error.to_string());
+    for path in out.into_iter().chain(err) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Persist a streamed log that captured output; empty and unpiped streams
+/// carry no diagnosis and their temp files delete themselves.
+fn keep_stream_log(drain: Option<&Drain>, log: Option<tempfile::NamedTempFile>) -> Option<PathBuf> {
+    let drain = drain?;
+    let log = log?;
+    if drain.snapshot().is_empty() {
+        return None;
+    }
+    match log.into_temp_path().keep() {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("spawn log keep failed: {error}");
+            None
+        }
+    }
 }
 
 impl BudgetedChild {
@@ -394,7 +467,8 @@ impl BudgetedChild {
                 self.stop()?;
                 self.child.wait()?;
                 self.reaped = true;
-                return Err(self.timeout(name, &breach));
+                let kept = self.keep_logs();
+                return Err(self.timeout(name, &breach, &kept));
             }
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -409,13 +483,34 @@ impl BudgetedChild {
             .map(|line| line.trim().to_string())
     }
 
-    fn timeout(&self, phase: &str, breach: &Breach) -> io::Error {
+    /// Persist each streamed log that captured output and name the kept
+    /// paths on the test's stderr, so a runner kill that takes this error
+    /// with it still leaves attributed files behind.
+    fn keep_logs(&mut self) -> (Option<PathBuf>, Option<PathBuf>) {
+        let kept = (
+            keep_stream_log(self.stdout.as_ref(), self.stdout_log.take()),
+            keep_stream_log(self.stderr.as_ref(), self.stderr_log.take()),
+        );
+        if kept.0.is_some() || kept.1.is_some() {
+            eprintln!("spawn {}: {}", self.label, kept_section(&kept.0, &kept.1));
+        }
+        kept
+    }
+
+    fn timeout(&self, phase: &str, breach: &Breach, kept: &(Option<PathBuf>, Option<PathBuf>)) -> io::Error {
         let stdout = self.stdout.as_ref().map(Drain::snapshot).unwrap_or_default();
         let stderr = self.stderr.as_ref().map(Drain::snapshot).unwrap_or_default();
-        io::Error::new(io::ErrorKind::TimedOut, format!(
-            "spawn {} exceeded its {} budget; phase={}\nstdout:\n{}\nstderr:\n{}",
-            self.label, breach.describe(), phase.trim(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr)
-        ))
+        let mut message = format!(
+            "spawn {} exceeded its {} budget; phase={}",
+            self.label, breach.describe(), phase.trim());
+        if kept.0.is_some() || kept.1.is_some() {
+            message.push('\n');
+            message.push_str(&kept_section(&kept.0, &kept.1));
+        }
+        message.push_str(&format!(
+            "\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr)));
+        io::Error::new(io::ErrorKind::TimedOut, message)
     }
 
     pub fn wait_with_output(mut self) -> io::Result<Output> {
@@ -427,12 +522,15 @@ impl BudgetedChild {
         {
             if Instant::now() >= drain_deadline {
                 self.stop()?;
+                let kept = self.keep_logs();
                 return Err(self.timeout("output-drain", &Breach {
                     bucket: PhaseBucket::OutputDrain, stall: false, elapsed: DRAIN_CAP, cap: DRAIN_CAP,
-                }));
+                }, &kept));
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        // The returned Output carries every byte, so the streamed files drop
+        // with their temp files: success keeps nothing behind.
         let finish = |drain: Option<Drain>| -> io::Result<Vec<u8>> {
             match drain {
                 None => Ok(Vec::new()),
@@ -494,6 +592,9 @@ impl Drop for BudgetedChild {
             if let Err(error) = self.stop().and_then(|_| self.child.wait().map(|_| ())) {
                 eprintln!("spawn {}: cleanup failed: {error}", self.label);
             }
+            // A fixture failure that abandons a live child keeps whatever it
+            // had streamed, so the teardown never discards the evidence.
+            let _ = self.keep_logs();
         }
     }
 }
@@ -560,6 +661,10 @@ mod tests {
     /// host runs the poll loop.
     const LOAD_MARGIN: Duration = Duration::from_secs(30);
 
+    /// Per-stream markers the print_and_hang helper flushes before hanging.
+    const OUT_MARKER: &str = "spawn-log-marker-out";
+    const ERR_MARKER: &str = "spawn-log-marker-err";
+
     fn child(action: &str) -> Command {
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args(["stone_harness::spawn::tests::spawn_helper", "--exact", "--nocapture"])
@@ -599,6 +704,16 @@ mod tests {
                 std::io::stdout().write_all(&data).unwrap();
                 std::io::stderr().write_all(&data).unwrap();
             }
+            Ok("print_and_hang") => {
+                use std::io::Write;
+                let file = std::env::var_os("ROCK_SPAWN_PHASE_FILE").expect("phase file env");
+                std::fs::write(file, "execution").unwrap();
+                println!("{OUT_MARKER}");
+                eprintln!("{ERR_MARKER}");
+                std::io::stdout().flush().unwrap();
+                std::io::stderr().flush().unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
             Ok(action) if action.starts_with("hang_in:") => {
                 let phase = action.trim_start_matches("hang_in:");
                 let file = std::env::var_os("ROCK_SPAWN_PHASE_FILE").expect("phase file env");
@@ -618,6 +733,7 @@ mod tests {
         assert!(error.to_string().contains("spawn_helper"), "{error}");
         assert!(error.to_string().contains("phase=spawn"), "{error}");
         assert!(start.elapsed() < Duration::from_millis(250) + LOAD_MARGIN, "spawn cap did not stop the child");
+        discard_kept_logs(&error);
     }
 
     #[test]
@@ -627,6 +743,117 @@ mod tests {
         assert!(out.status.success());
         assert!(out.stdout.len() >= 256 * 1024);
         assert!(out.stderr.len() >= 256 * 1024);
+    }
+
+    /// Removes kept log files when the test leaves, pass or fail, so a
+    /// failing assertion never litters the shared temp directory.
+    struct ScopedLogs(Vec<PathBuf>);
+
+    impl Drop for ScopedLogs {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// The drain threads stream pipe bytes to disk; they can lag the reaped
+    /// child by a poll interval, so wait for the marker instead of reading once.
+    fn await_log_marker(path: &Path, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if content.contains(marker) {
+                    return;
+                }
+            }
+            assert!(Instant::now() < deadline, "log {path:?} never streamed {marker}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn timed_out_spawn_keeps_its_streamed_output_in_named_logs() {
+        let _budget = SpawnBudget::new(HANG_BACKSTOP);
+        let mut pending = child("print_and_hang").stdin(Stdio::null())
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn_with_deadline().unwrap();
+        let deadline = Instant::now() + HANG_BACKSTOP;
+        while read_spawn_phase(pending.phase.path()).as_deref() != Some("execution") {
+            assert!(Instant::now() < deadline, "helper never reached execution");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pending.budget = Duration::from_millis(250);
+        let error = pending.wait_with_output().expect_err("a hung child must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let (Some(out_log), Some(err_log)) = kept_log_paths(&error.to_string()) else {
+            panic!("timeout names no kept logs: {error}");
+        };
+        assert_ne!(out_log, err_log, "streams share one log file: {error}");
+        let _cleanup = ScopedLogs(vec![out_log.clone(), err_log.clone()]);
+        await_log_marker(&out_log, OUT_MARKER);
+        await_log_marker(&err_log, ERR_MARKER);
+        let out = std::fs::read_to_string(&out_log).unwrap();
+        let err = std::fs::read_to_string(&err_log).unwrap();
+        assert!(out.contains(OUT_MARKER), "stdout log lacks its marker: {out:?}");
+        assert!(err.contains(ERR_MARKER), "stderr log lacks its marker: {err:?}");
+    }
+
+    #[test]
+    fn abandoned_spawn_keeps_what_it_had_streamed() {
+        let _budget = SpawnBudget::new(HANG_BACKSTOP);
+        let pending = child("print_and_hang").stdin(Stdio::null())
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn_with_deadline().unwrap();
+        let out_log = pending.stdout_log.as_ref().expect("piped stdout streams to a log")
+            .path().to_path_buf();
+        let err_log = pending.stderr_log.as_ref().expect("piped stderr streams to a log")
+            .path().to_path_buf();
+        // The markers reach disk while the child still sleeps: a runner kill
+        // at any point from here leaves attributed files behind.
+        await_log_marker(&out_log, OUT_MARKER);
+        await_log_marker(&err_log, ERR_MARKER);
+        drop(pending);
+        let _cleanup = ScopedLogs(vec![out_log.clone(), err_log.clone()]);
+        let out = std::fs::read_to_string(&out_log).unwrap();
+        let err = std::fs::read_to_string(&err_log).unwrap();
+        assert!(out.contains(OUT_MARKER), "kept stdout log lacks its marker: {out:?}");
+        assert!(err.contains(ERR_MARKER), "kept stderr log lacks its marker: {err:?}");
+    }
+
+    #[test]
+    fn successful_spawn_removes_its_streamed_logs() {
+        let _budget = SpawnBudget::new(HANG_BACKSTOP);
+        let pending = child("flood").stdin(Stdio::null())
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn_with_deadline().unwrap();
+        let out_log = pending.stdout_log.as_ref().expect("piped stdout streams to a log")
+            .path().to_path_buf();
+        let err_log = pending.stderr_log.as_ref().expect("piped stderr streams to a log")
+            .path().to_path_buf();
+        let out = pending.wait_with_output().unwrap();
+        assert!(out.status.success());
+        // The returned Output carries every byte; the streamed files were
+        // only insurance against a kill.
+        assert!(!out_log.exists(), "successful spawn left its stdout log");
+        assert!(!err_log.exists(), "successful spawn left its stderr log");
+    }
+
+    #[test]
+    fn reaped_direct_wait_leaves_no_logs_behind() {
+        let _budget = SpawnBudget::new(HANG_BACKSTOP);
+        let mut pending = child("print_and_hang").stdin(Stdio::null())
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn_with_deadline().unwrap();
+        let out_log = pending.stdout_log.as_ref().expect("piped stdout streams to a log")
+            .path().to_path_buf();
+        let err_log = pending.stderr_log.as_ref().expect("piped stderr streams to a log")
+            .path().to_path_buf();
+        // Non-empty files, so a keep would trigger: reaping must still
+        // auto-delete, since direct wait() discards output by design.
+        await_log_marker(&out_log, OUT_MARKER);
+        pending.kill().expect("stop the hanging child");
+        let status = pending.wait().expect("reap the killed child");
+        assert!(!status.success());
+        drop(pending);
+        assert!(!out_log.exists(), "reaped spawn left its stdout log");
+        assert!(!err_log.exists(), "reaped spawn left its stderr log");
     }
 
     #[test]
@@ -713,7 +940,9 @@ mod tests {
             assert!(Command::new("kill").args(["-KILL", pid.trim()]).status().unwrap().success());
         }
         assert!(gone, "descendant {pid} survived deadline cleanup");
-        assert_eq!(result.expect_err("descendant spawn must time out").kind(), io::ErrorKind::TimedOut);
+        let error = result.expect_err("descendant spawn must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        discard_kept_logs(&error);
     }
 
     fn assert_hang_reports_phase_within(phase: &str, budget: Duration, cap: Duration) {
@@ -734,6 +963,7 @@ mod tests {
         assert!(error.to_string().contains(&format!("phase={phase}")), "{error}");
         assert!(start.elapsed() >= cap, "hang in {phase} died before its cap: {:?}", start.elapsed());
         assert!(start.elapsed() < cap + LOAD_MARGIN, "hang in {phase} escaped its cap: {:?}", start.elapsed());
+        discard_kept_logs(&error);
     }
 
     #[test]
@@ -835,6 +1065,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("phase=slot-wait"), "{error}");
         assert!(error.to_string().contains("stalled"), "{error}");
+        discard_kept_logs(&error);
         drop(_budget);
         let _control_budget = SpawnBudget::new(Duration::from_secs(120));
         let control = slot_probe_command(&project, &slots).output_with_deadline().unwrap();
@@ -876,6 +1107,7 @@ mod tests {
             Err(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
                 assert!(!error.to_string().contains("phase=slot-wait"), "waiter stayed queued on a free slot: {error}");
+                discard_kept_logs(&error);
             }
         }
         drop(_budget);
