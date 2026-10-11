@@ -2999,16 +2999,20 @@ fn build_state_nobox_accessors(
 pub const SIM_SMALL_WINDOW: &str = "320x180";
 
 /// Declared-name prefixes of the engine's async pixel-readback family and its
-/// FFI, plus the imgui test-geometry family: every `pixel_readback_*` wrapper,
-/// `stone_pixel_readback_*` call, and `imgui_test_*` UI automation helper
-/// (scroll/click/drag by presented position), present and future. The families
-/// are large, uniformly prefixed, and call no shared funnel, so a prefix
-/// covers their growth; over-matching stays on the safe side (a lifecycle call
-/// keeps the window). The imgui family reads presented geometry (item rects,
-/// visibility) rather than pixels, but that geometry is window-derived exactly
-/// like a readback: the seam proof showed a palette-click sim failing at every
-/// size below 1080p while its siblings pass at 320x180.
-pub static SIM_PIXEL_PREFIXES: &[&str] = &["pixel_readback", "stone_pixel_readback", "imgui_test_"];
+/// FFI, plus the imgui test-geometry and synthetic-input families: every
+/// `pixel_readback_*` wrapper, `stone_pixel_readback_*` call, `imgui_test_*`
+/// UI automation helper (scroll/click/drag by presented position), and
+/// `imgui_inject_*` synthetic input call (mouse buttons, text), present and
+/// future. The families are large, uniformly prefixed, and call no shared
+/// funnel, so a prefix covers their growth; over-matching stays on the safe
+/// side (a lifecycle call keeps the window). The imgui families read or drive
+/// presented geometry (item rects, visibility, widget input) rather than
+/// pixels, but that geometry is window-derived exactly like a readback: the
+/// seam proof showed a palette-click sim failing at every size below 1080p
+/// while its siblings pass at 320x180, and the full proof showed a
+/// synthetic-mouse toggle sim failing 6/20 at 320x180.
+pub static SIM_PIXEL_PREFIXES: &[&str] =
+    &["pixel_readback", "stone_pixel_readback", "imgui_test_", "imgui_inject_"];
 
 /// True when the declared callee name reads pixels: an exact root, a MAG
 /// hover-pick reader, or a readback-family prefix.
@@ -3021,10 +3025,18 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
 /// Declared names of the engine's pixel readers: captures, canvas, window and
 /// depth readback, frame streams and the analysis-capture bridge, plus the FFI
 /// roots sims may call directly and `sim_submit_guard`, which every guarded
-/// reader funnels through. Each name is unique workspace-wide (D-form methods
-/// desugar to bare names, so no method is listed: a sim reading probe bytes
-/// created its probe through `window_probe_new` in the same entry). The async
-/// readback and imgui test-geometry families are covered by
+/// reader funnels through. The tail of the list reads presented-output-derived
+/// state rather than pixels, which the full proof showed is equally
+/// window-derived: the window size (`stone_get_window_size`, asserted 1280x800
+/// by an agent sim), the live view scale (`scene_scale` reads 64 at 1080p but
+/// 6.3 at 320x180; `resolve_view_for` resolves it), the presented UI geometry
+/// census (`imgui_bodies_with_prefix`, `imgui_body_ran`, `imgui_total_vtx_count`;
+/// a prop grid draws zero cards at 320x180), and the synthetic mouse position
+/// (`imgui_set_mouse_pos`, the non-inject-prefixed half of the input pair).
+/// Each name is unique workspace-wide (D-form methods desugar to bare names,
+/// so no method is listed: a sim reading probe bytes created its probe through
+/// `window_probe_new` in the same entry). The async readback, imgui
+/// test-geometry and imgui synthetic-input families are covered by
 /// [`SIM_PIXEL_PREFIXES`]. A sim whose transitive callees name one of these
 /// keeps the game's window; anything else boots in [`SIM_SMALL_WINDOW`]
 /// unless it declares its own `STONE_WINDOW`.
@@ -3054,6 +3066,13 @@ pub static SIM_PIXEL_ROOTS: &[&str] = &[
     "analysis_capture_gpu_bytes",
     "analysis_capture_scene_boundary",
     "analysis_capture_full_boundary",
+    "stone_get_window_size",
+    "imgui_set_mouse_pos",
+    "scene_scale",
+    "resolve_view_for",
+    "imgui_total_vtx_count",
+    "imgui_body_ran",
+    "imgui_bodies_with_prefix",
 ];
 
 /// MAG's hover-pick readers (mag/click.rock): picking reads the ID buffer (a
@@ -3540,6 +3559,12 @@ mod sim_small_window_tests {
             "small_window_readback_reader",
             "small_window_ui_reader",
             "small_window_pick_reader",
+            "small_window_window_reader",
+            "small_window_mouse_reader",
+            "small_window_inject_reader",
+            "small_window_scale_reader",
+            "small_window_view_reader",
+            "small_window_geometry_reader",
         ] {
             assert_eq!(
                 stone_window(env_for(env_by_wire(), short)),

@@ -56,6 +56,51 @@ co fn small_window_pick_reader() -> Coroutine<Wait> {
     stop_sim()
 }
 
+@sim
+co fn small_window_window_reader() -> Coroutine<Wait> {
+    let (w, h) = stone_get_window_size()
+    sim_expect(w + h > 0, "a sim that reads the window size keeps its window")
+    stop_sim()
+}
+
+@sim
+co fn small_window_mouse_reader() -> Coroutine<Wait> {
+    imgui_set_mouse_pos(10.0, 10.0)
+    sim_expect(true, "a sim that positions the synthetic mouse keeps its window")
+    stop_sim()
+}
+
+@sim
+co fn small_window_inject_reader() -> Coroutine<Wait> {
+    imgui_inject_left_mouse_down()
+    imgui_inject_left_mouse_up()
+    sim_expect(true, "a sim that injects UI input keeps its window")
+    stop_sim()
+}
+
+@sim
+co fn small_window_scale_reader() -> Coroutine<Wait> {
+    let s = scene_scale()
+    sim_expect(s >= 0.0, "a sim that reads the live view scale keeps its window")
+    stop_sim()
+}
+
+@sim
+co fn small_window_view_reader() -> Coroutine<Wait> {
+    let cam = Camera2D { center: v(0.0, 0.0), visible_world_width: 10.0 }
+    let _view = resolve_view_for(cam)
+    sim_expect(true, "a sim that resolves a view keeps its window")
+    stop_sim()
+}
+
+@sim
+co fn small_window_geometry_reader() -> Coroutine<Wait> {
+    let _n = imgui_bodies_with_prefix("editor/palette/prop/") + imgui_total_vtx_count()
+    let _ran = imgui_body_ran("editor/palette/prop/x")
+    sim_expect(true, "a sim that reads presented UI geometry keeps its window")
+    stop_sim()
+}
+
 @sim_env("STONE_WINDOW", "800x600")
 @sim
 co fn small_window_explicit_size() -> Coroutine<Wait> {
