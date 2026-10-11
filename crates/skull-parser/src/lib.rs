@@ -1404,10 +1404,6 @@ mod modules_grammar_tests {
         parse_module_clean_with_dialect(src, Ustr::from("test.rock"), Dialect::V1)
     }
 
-    fn parse_legacy(src: &str) -> Result<Ast, CompilerError> {
-        parse_module_clean(src, Ustr::from("test.rock"))
-    }
-
     fn body_first_expr(src: &str, dialect: Dialect) -> String {
         let ast = parse_module_with_dialect(src, Ustr::from("test.rock"), dialect)
             .expect("parse failed");
