@@ -2999,20 +2999,34 @@ fn build_state_nobox_accessors(
 pub const SIM_SMALL_WINDOW: &str = "320x180";
 
 /// Declared-name prefixes of the engine's async pixel-readback family and its
-/// FFI, plus the imgui test-geometry and synthetic-input families: every
-/// `pixel_readback_*` wrapper, `stone_pixel_readback_*` call, `imgui_test_*`
-/// UI automation helper (scroll/click/drag by presented position), and
-/// `imgui_inject_*` synthetic input call (mouse buttons, text), present and
-/// future. The families are large, uniformly prefixed, and call no shared
-/// funnel, so a prefix covers their growth; over-matching stays on the safe
-/// side (a lifecycle call keeps the window). The imgui families read or drive
-/// presented geometry (item rects, visibility, widget input) rather than
-/// pixels, but that geometry is window-derived exactly like a readback: the
-/// seam proof showed a palette-click sim failing at every size below 1080p
-/// while its siblings pass at 320x180, and the full proof showed a
-/// synthetic-mouse toggle sim failing 6/20 at 320x180.
-pub static SIM_PIXEL_PREFIXES: &[&str] =
-    &["pixel_readback", "stone_pixel_readback", "imgui_test_", "imgui_inject_"];
+/// FFI, the imgui test-geometry and synthetic-input families, and the native
+/// canvas storage and Rock active-rect families: every `pixel_readback_*`
+/// wrapper, `stone_pixel_readback_*` call, `imgui_test_*` UI automation helper
+/// (scroll/click/drag by presented position), `imgui_inject_*` synthetic input
+/// call (mouse buttons, text), `stone_canvas_*` native storage query
+/// (capacity, boot, active, existence, report), and `canvas_active*` Rock
+/// active-rect reader, present and future. The families are large, uniformly
+/// prefixed, and call no shared funnel, so a prefix covers their growth;
+/// over-matching stays on the safe side (a lifecycle call keeps the window).
+/// The imgui families read or drive presented geometry (item rects, visibility,
+/// widget input) rather than pixels, but that geometry is window-derived
+/// exactly like a readback: the seam proof showed a palette-click sim failing
+/// at every size below 1080p while its siblings pass at 320x180, and the full
+/// proof showed a synthetic-mouse toggle sim failing 6/20 at 320x180. The
+/// canvas families read render-target capacity, which follows the window:
+/// testbed boots 6 bloom levels at 1280x720 but 4 at 320x180, so a pyramid
+/// seed asserting 6 panics small. `canvas_is_live` funnels through
+/// `stone_canvas_exists`, so native-liveness queries keep the window too;
+/// creation and destruction (`new_canvas`, `destroy_canvas`) do not match and
+/// stay small.
+pub static SIM_PIXEL_PREFIXES: &[&str] = &[
+    "pixel_readback",
+    "stone_pixel_readback",
+    "imgui_test_",
+    "imgui_inject_",
+    "stone_canvas_",
+    "canvas_active",
+];
 
 /// True when the declared callee name reads pixels: an exact root, a MAG
 /// hover-pick reader, or a readback-family prefix.
@@ -3031,12 +3045,15 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
 /// by an agent sim), the live view scale (`scene_scale` reads 64 at 1080p but
 /// 6.3 at 320x180; `resolve_view_for` resolves it), the presented UI geometry
 /// census (`imgui_bodies_with_prefix`, `imgui_body_ran`, `imgui_total_vtx_count`;
-/// a prop grid draws zero cards at 320x180), and the synthetic mouse position
-/// (`imgui_set_mouse_pos`, the non-inject-prefixed half of the input pair).
-/// Each name is unique workspace-wide (D-form methods desugar to bare names,
-/// so no method is listed: a sim reading probe bytes created its probe through
-/// `window_probe_new` in the same entry). The async readback, imgui
-/// test-geometry and imgui synthetic-input families are covered by
+/// a prop grid draws zero cards at 320x180), the synthetic mouse position
+/// (`imgui_set_mouse_pos`, the non-inject-prefixed half of the input pair),
+/// and the render-target capacity readers (`pyramid_active_step` derives
+/// pyramid geometry from the capacity; `ensure_scene_capacity` re-specifies
+/// the target set). Each name is unique workspace-wide (D-form methods desugar
+/// to bare names, so no method is listed: a sim reading probe bytes created
+/// its probe through `window_probe_new` in the same entry). The async
+/// readback, imgui test-geometry, imgui synthetic-input, native canvas
+/// storage and Rock active-rect families are covered by
 /// [`SIM_PIXEL_PREFIXES`]. A sim whose transitive callees name one of these
 /// keeps the game's window; anything else boots in [`SIM_SMALL_WINDOW`]
 /// unless it declares its own `STONE_WINDOW`.
@@ -3073,6 +3090,8 @@ pub static SIM_PIXEL_ROOTS: &[&str] = &[
     "imgui_total_vtx_count",
     "imgui_body_ran",
     "imgui_bodies_with_prefix",
+    "pyramid_active_step",
+    "ensure_scene_capacity",
 ];
 
 /// MAG's hover-pick readers (mag/click.rock): picking reads the ID buffer (a
@@ -3544,11 +3563,13 @@ mod sim_small_window_tests {
 
     #[test]
     fn sims_that_read_no_pixels_get_the_small_window() {
-        assert_eq!(
-            stone_window(env_for(env_by_wire(), "small_window_plain_sim")),
-            Some("320x180"),
-            "a sim that calls no pixel helper boots in the small window"
-        );
+        for short in ["small_window_plain_sim", "small_window_canvas_owner"] {
+            assert_eq!(
+                stone_window(env_for(env_by_wire(), short)),
+                Some("320x180"),
+                "`{short}` calls no window-derived helper, so it boots in the small window"
+            );
+        }
     }
 
     #[test]
@@ -3565,11 +3586,16 @@ mod sim_small_window_tests {
             "small_window_scale_reader",
             "small_window_view_reader",
             "small_window_geometry_reader",
+            "small_window_capacity_reader",
+            "small_window_active_reader",
+            "small_window_pyramid_reader",
+            "small_window_ensure_reader",
+            "small_window_native_reader",
         ] {
             assert_eq!(
                 stone_window(env_for(env_by_wire(), short)),
                 None,
-                "`{short}` reads pixels, so the harness must not override its window"
+                "`{short}` reads window-derived state, so the harness must not override its window"
             );
         }
     }
