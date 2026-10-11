@@ -4,11 +4,15 @@
 //!
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
+// Every item here serves the Linux-only tests below.
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 #[cfg(target_os = "linux")]
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
+#[cfg(target_os = "linux")]
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
