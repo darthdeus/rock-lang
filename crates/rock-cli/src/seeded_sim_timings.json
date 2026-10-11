@@ -281,7 +281,7 @@
     "capture_cursor_rings_each_press": 1767,
     "capture_keeps_the_spell_ui_it_opts_into": 838,
     "caretaker_cupboard_interaction": 273,
-    "carried_key_unlock_is_not_saved_on_reload": 1030,
+    "carried_key_unlock_is_saved_on_reload": 1030,
     "carried_spell_page_dragged_onto_book_is_inserted": 422,
     "carried_stack_identity_survives_player_save_round_trip": 288,
     "cast_bar_scales_with_the_camera_like_the_cast_words": 695,
