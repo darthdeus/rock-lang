@@ -2172,6 +2172,11 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
             ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "58"),
             ("STONE_PHYSICAL_KEY_2", "return"),
             ("STONE_PHYSICAL_SCANCODE_2", "return"),
+            // Empty slots open character creation before the run can begin.
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT_3", "61"),
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_3", "62"),
+            ("STONE_PHYSICAL_MOUSE_X_3", "1259.5"),
+            ("STONE_PHYSICAL_MOUSE_Y_3", "792.5"),
         ],
     );
     assert_eq!(
