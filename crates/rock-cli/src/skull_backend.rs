@@ -3023,7 +3023,7 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
 }
 
 /// Declared names of the engine's pixel readers: captures, canvas, window and
-/// depth readback, frame streams and the analysis-capture bridge, plus the FFI
+/// depth readback and frame streams, plus the FFI
 /// roots sims may call directly and `sim_submit_guard`, which every guarded
 /// reader funnels through. The tail of the list reads presented-output-derived
 /// state rather than pixels, which the full proof showed is equally
@@ -3067,14 +3067,6 @@ pub static SIM_PIXEL_ROOTS: &[&str] = &[
     "stone_read_canvas_pixel_channel",
     "read_depth_pixel",
     "stone_read_depth_pixel",
-    "analysis_capture_arm",
-    "analysis_capture_poll",
-    "analysis_scene_sources",
-    "analysis_packet_assemble",
-    "analysis_map_ids_to_output",
-    "analysis_capture_gpu_bytes",
-    "analysis_capture_scene_boundary",
-    "analysis_capture_full_boundary",
     "stone_get_window_size",
     "imgui_set_mouse_pos",
     "scene_scale",
