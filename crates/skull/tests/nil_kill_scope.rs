@@ -134,7 +134,7 @@ fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
     let mut current: Option<String> = None;
     let mut declared: Vec<String> = Vec::new();
     let mut pending: Vec<(usize, String)> = Vec::new();
-    let mut flush = |current: &Option<String>, declared: &Vec<String>, pending: &mut Vec<(usize, String)>, out: &mut Vec<(String, usize, String)>| {
+    let flush = |current: &Option<String>, declared: &Vec<String>, pending: &mut Vec<(usize, String)>, out: &mut Vec<(String, usize, String)>| {
         let Some(name) = current else {
             pending.clear();
             return;
