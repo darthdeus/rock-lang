@@ -50,7 +50,7 @@ fn a_mag_demand_draw_does_not_reuse_a_predecessors_frame_stamp() {
         "mag",
         rock(),
         &[
-            "mag::paperdoll_interaction_image_and_figure".to_string(),
+            "mag::paperdoll_independent_wearables".to_string(),
             "mag::targeting_rings".to_string(),
         ],
     )
