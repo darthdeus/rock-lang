@@ -803,14 +803,18 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
     let binding_history = dir.path().join("bindings-history.jsonl");
     let layout_history = dir.path().join("layout-history.jsonl");
     std::fs::write(&settings, r#"{"privacy":{"analytics":1,"analytics_version":3}}"#).unwrap();
-    let recorded = run_frame_env("mag", FRAMES, &["--headless", "--record", log.to_str().unwrap(),
-        "--checkpoint-interval", "0"], &[
+    // All three children use the same isolated storage and boot configuration.
+    let fixture_env = [
         ("PERF_MODE", "1"), ("STONE_WINDOW", "1280x720"),
+        ("ROCK_TEST_TMP", dir.path().to_str().unwrap()),
         ("MAG_SETTINGS_PATH_OVERRIDE", settings.to_str().unwrap()),
         ("MAG_PROGRESS_PATH_OVERRIDE", progress.to_str().unwrap()),
         ("MAG_BINDINGS_PATH_OVERRIDE", bindings.to_str().unwrap()),
         ("MAG_BINDINGS_HISTORY_PATH_OVERRIDE", binding_history.to_str().unwrap()),
         ("MAG_LAYOUT_HISTORY_PATH_OVERRIDE", layout_history.to_str().unwrap()),
+    ];
+    let mut recording_env = fixture_env.to_vec();
+    recording_env.extend([
         ("STONE_PHYSICAL_MOUSE_PRESS_AT", "2"),
         ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "2"),
         ("STONE_PHYSICAL_KEY_PRESS_AT", "130"),
@@ -823,7 +827,14 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
         ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "141"),
         ("STONE_PHYSICAL_MOUSE_X_2", "640"),
         ("STONE_PHYSICAL_MOUSE_Y_2", "247"),
+        // The empty slot opens character creation; Begin submits its valid defaults.
+        ("STONE_PHYSICAL_MOUSE_PRESS_AT_3", "145"),
+        ("STONE_PHYSICAL_MOUSE_RELEASE_AT_3", "146"),
+        ("STONE_PHYSICAL_MOUSE_X_3", "840"),
+        ("STONE_PHYSICAL_MOUSE_Y_3", "528"),
     ]);
+    let recorded = run_frame_env("mag", FRAMES, &["--headless", "--record", log.to_str().unwrap(),
+        "--checkpoint-interval", "0"], &recording_env);
     assert_eq!(recorded["mag"]["MAG_RUN_STARTS"], 1,
         "fixture must enter gameplay: screen={} save_slots_open={} focus_scope={} first_focus_rect={} prep_ticks={} admission_ticks={} play_effects={}",
         recorded["mag"]["SCREEN"], recorded["mag"]["SAVE_SLOTS_OPEN"],
@@ -843,7 +854,7 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args(["replay-profile", "mag", log.to_str().unwrap(), "--range", &profile_range,
             "--runs", "2", "--output", output_dir.to_str().unwrap()])
-        .env("PERF_MODE", "1").env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .envs(fixture_env).env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root()).output_with_deadline().expect("profile MAG replay");
     assert!(output.status.success(), "MAG profiling failed: {}\n{}",
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -867,11 +878,14 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
             actual["image_upload_bytes"].as_u64().unwrap(),
         ], *image_work.get(&tick).unwrap_or(&[0,0,0]), "image work at tick {tick}");
     }
-    let rewound = run_frame_env("mag", FRAMES, &["--headless", "--replay", log.to_str().unwrap()], &[
+    let mut rewind_env = fixture_env.to_vec();
+    rewind_env.extend([
         ("STONE_KEYFRAME_INTERVAL", "30"),
         ("STONE_TIMELINE_SEEK_AT_FRAME", "150"),
         ("STONE_TIMELINE_SEEK_TO_TICK", "75"),
     ]);
+    let rewound = run_frame_env("mag", FRAMES, &["--headless", "--replay", log.to_str().unwrap()],
+        &rewind_env);
     assert_eq!(rewound["stone"]["current_tick"], 75);
     // Dump-state follows run_shutdown, which clears the admission flags.
     assert!(rewound["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_u64().unwrap() > 0);
