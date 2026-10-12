@@ -1727,8 +1727,6 @@
     "pristine_empty_spellbook_history_migrates_to_authored_panels": 435,
     "probe_horse_hover_cursor": 4712,
     "probe_window_move_builds_only_the_exposed_tiles": 3636,
-    "procedural_dungeon_generation_contracts": 339,
-    "procedural_dungeon_generation_preserves_game_rng": 349,
     "production_full_health_heal_still_records_zero_effect": 501,
     "production_ground_loot_uses_loot_origin": 419,
     "production_mob_basic_attack_uses_shared_body_damage": 456,
