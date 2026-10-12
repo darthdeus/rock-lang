@@ -305,7 +305,7 @@ fn main() { foo(3 / 4) }
 
 // The `./` hint also fires when the `/` is buried in the mismatched expression,
 // reached through arithmetic operators (`__op_mul`) rather than being the
-// top-level node (docs/float-division-plan.md Phase 4).
+// top-level node (docs/float-division-plan.md).
 #[test]
 fn float_div_deep_in_mul_subtree_hints_idiv() {
     let src = r#"
@@ -336,7 +336,7 @@ fn main() { let x: int = -(3 / 4) }
 
 // The hint's label points at the offending `/` subexpression, not the whole
 // mismatched expression, so the caret lands on `(3 / 4)` rather than the outer
-// `2.0 * (3 / 4)` (docs/float-division-plan.md Phase 4).
+// `2.0 * (3 / 4)` (docs/float-division-plan.md).
 #[test]
 fn float_div_hint_span_points_at_the_division() {
     let src = r#"
@@ -397,7 +397,7 @@ fn main() {
 // provisionally fixes `T=int` and the float arg widens `T` back to float) is
 // NOT a mismatch -- coerce widens it. The hint must defer to that: no error at
 // all. Regression for mag/particles.rock `min(1, (a/b)*1.6)` (a first cut fired
-// the hint before coerce got to widen). docs/float-division-plan.md Phase 4.
+// the hint before coerce got to widen). docs/float-division-plan.md.
 #[test]
 fn float_div_into_widening_numeric_var_is_not_an_error() {
     let src = r#"

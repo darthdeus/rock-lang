@@ -365,7 +365,7 @@ fn metric_recent(m: Metric, i: int) -> float {
 // `[Vec2]` (Lua-table cell) cost a value struct pays escaping into a Vec.
 //
 // Every op is `@inline` and specializes per element type at its call site (the
-// inliner's call-site specialization, docs/flatvec-plan.md P2): `buf[len] = v`
+// inliner's call-site specialization, docs/flatvec-plan.md): `buf[len] = v`
 // scalarizes and `native_buffer_alloc<T>` names the ctype inside the spliced body.
 // `T` MUST be an FFI-clean value struct -- a primitive or GC-carrying element is a
 // spanned emit-time error at the `flat_vec_new` call (use `native_buffer_int`/
@@ -385,7 +385,7 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 }
 
 // Grow to 2x (>= 4) capacity via a fresh alloc + a scalar element-copy loop; the
-// copy JIT-compiles at these sizes (docs/flatvec-plan.md P3 bench: scalar loop).
+// copy JIT-compiles at these sizes (docs/flatvec-plan.md bench: scalar loop).
 @inline fn FlatVec<T>.grow(fv) {
     let old = fv.buf
     let cap = old.len

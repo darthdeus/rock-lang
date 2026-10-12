@@ -1,4 +1,4 @@
-//! FlatVec<T> lowering-shape oracle (docs/flatvec-plan.md P3). The stdlib FlatVec
+//! FlatVec<T> lowering-shape oracle (docs/flatvec-plan.md). The stdlib FlatVec
 //! ops are `@inline` and specialize per element type at their call sites, so a
 //! push/read loop over `FlatVec<value>` must scalarize field-wise: NO per-push
 //! `<T>_ct(..)` box and NO boxed `__nb_checked_set` whole-value store. The
