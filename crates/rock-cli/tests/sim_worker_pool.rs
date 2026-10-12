@@ -38,17 +38,17 @@ fn renderer_excluded_entry_prints_one_verdict_beside_a_passing_sim() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let run = run_project_workers(
         "mag",
-        &["wgpu_water_packets", "teleport_pad_arrival_phases"],
+        &["menu_logo_reflection_wgpu_contract", "teleport_pad_arrival_phases"],
         "1",
     );
     let combined = run.combined();
     assert!(run.success, "{combined}");
     let exclusions: Vec<_> = combined.lines()
-        .filter(|line| line.contains("mag::wgpu_water_packets: EXCLUDED"))
+        .filter(|line| line.contains("mag::menu_logo_reflection_wgpu_contract: EXCLUDED"))
         .collect();
     assert_eq!(exclusions.len(), 1, "{combined}");
     assert_eq!(exclusions[0],
-        "[sim] mag::wgpu_water_packets: EXCLUDED (requires wgpu renderer (active is gl))");
+        "[sim] mag::menu_logo_reflection_wgpu_contract: EXCLUDED (requires wgpu renderer (active is gl))");
     assert_eq!(combined.lines()
         .filter(|line| line.starts_with("[sim] mag::teleport_pad_arrival_phases: PASS"))
         .count(), 1, "{combined}");
