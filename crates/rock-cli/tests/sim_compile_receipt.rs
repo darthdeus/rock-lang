@@ -803,8 +803,15 @@ fn sim_compile_receipt_v1_entry_point_and_short_name_selection_run() {
 /// and the kernel drops the write count only when that child drains; an exec
 /// landing in that window fails with ETXTBSY. Every pinned copy must spawn
 /// and report the same version as a direct run.
+///
+/// The race is Linux's, so Linux takes the full stress. macOS validates the
+/// signature of every new executable file on its first exec (about a second
+/// for the debug rock, serialized system-wide): there 384 copies cost 6-7
+/// minutes of a test thread, so a small smoke keeps only the copy-and-spawn
+/// contract.
 #[test]
 fn pinned_rock_copies_survive_concurrent_spawns() {
+    let (threads, copies_per_thread) = if cfg!(target_os = "linux") { (32, 12) } else { (4, 2) };
     let _spawn_budget = SpawnBudget::for_test(120);
     let direct = Command::new(env!("CARGO_BIN_EXE_rock"))
         .arg("--version")
@@ -817,10 +824,10 @@ fn pinned_rock_copies_survive_concurrent_spawns() {
     );
     let budget = SpawnBudget::budget();
     std::thread::scope(|scope| {
-        for _ in 0..32 {
+        for _ in 0..threads {
             scope.spawn(|| {
                 let _spawn_budget = SpawnBudget::enter(budget);
-                for _ in 0..12 {
+                for _ in 0..copies_per_thread {
                     let dir = tempfile::tempdir().expect("tempdir");
                     let rock = pinned_rock(dir.path());
                     let output = Command::new(&rock)
