@@ -775,7 +775,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for method in [
         "fn Player.summon_slot_pet(player",
         "fn Player.max_pets(player)",
-        "fn Player.summon_label_spans(player",
+        "fn Player.summon_label_spans_in(player",
         "fn Player.party_any_pet(player)",
         "fn Player.spell_pump_highlights_player(player)",
         "fn Player.spell_pump_outline(player",
