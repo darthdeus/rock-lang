@@ -832,8 +832,12 @@ fn mag_replay_profiles_through_admission_after_a_short_splash_tap() {
         recorded["mag"]["MAG_RUN_PREPARE_ADVANCE_TICKS"],
         recorded["mag"]["MAG_RUN_ADMISSION_TICKS"], recorded["__stone_diag"]["MAG_PLAY_EFFECT_COUNT"]);
     let wire = std::fs::read_to_string(&log).unwrap();
-    assert!(wire.lines().any(|line| line.starts_with("j ") && line.contains(" flow ")),
-        "the run must exercise actual flow publication");
+    // Flow publication lands at a fixed logical due tick, so it has no
+    // nondeterministic decision to record; admission is the remaining one.
+    assert!(wire.lines().any(|line| line.starts_with("j ") && line.contains(" admission ")),
+        "the run must record its admission job decision");
+    assert!(!wire.lines().any(|line| line.starts_with("j ") && line.contains(" flow ")),
+        "flow publication must not record a decision");
     let output_dir = dir.path().join("profile");
     let profile_range = format!("0-{}", FRAMES - 1);
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
