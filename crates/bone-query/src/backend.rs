@@ -3988,8 +3988,8 @@ pub(crate) fn callee_slot_is_field_of_in_scope(
     any.then_some(found)
 }
 
-/// Typed expected-type oracle for one completion request's arg slot
-/// (docs/assignable-plan.md). The callee's surviving overloads' params are
+/// Typed expected-type oracle for one completion request's arg slot.
+/// The callee's surviving overloads' params are
 /// instantiated ONCE per overload (fresh vars) in a scratch
 /// `Gamma::for_query` seeded from the cursor body's inference; candidate
 /// compatibility is bone's REAL `coerce` under trial, rolled back per

@@ -453,7 +453,7 @@ fn yield_inside_a_comment_gets_nothing() {
 // == Type-directed arg ranking (F2 corpus) ====================================
 // Cases where the RENDERED type strings differ but the types are call-compatible
 // (generics, nullable widening). Ranking runs bone's real `coerce` on TyIds
-// (`ExpectedArg`, docs/assignable-plan.md), so each case pins that a
+// (`ExpectedArg`), so each case pins that a
 // call-compatible candidate takes the expected-type bucket over an incompatible
 // decoy.
 

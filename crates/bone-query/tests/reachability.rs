@@ -2,8 +2,8 @@
 //! completion paths (`bone_query::reachability`). The integration behaviour
 //! (what completion offers) is in `completion_contexts.rs`; these pin the
 //! graph-search invariants directly: diamond fan-out, cycle termination, and
-//! the methods-with-args terminal-only rule. Design:
-//! `docs/completion-reachability-plan.md`.
+//! the methods-with-args terminal-only rule. See
+//! `crates/bone-query/src/reachability.rs`.
 
 use bone_query::reachability::ReachabilityIndex;
 use bone_semantic::prelude::*;

@@ -567,7 +567,7 @@ pub enum Inst {
         named: Vec<(Ustr, Idx<Inst>)>,
     },
     /// Re-materialize a boxed enum from a DYNAMIC tag + positional payload slots --
-    /// the inverse of field flattening (`docs/enum-allocation-report.md`). Used at a
+    /// the inverse of field flattening. Used at a
     /// whole-value-read boundary of a flattened enum field, where the variant is not
     /// statically known (it lives in a runtime `f__tag` slot). Emits
     /// `{__variant = <tag>, __ty = "<ty>", <positional...>, <named...>}`. Nil slots

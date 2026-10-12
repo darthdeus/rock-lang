@@ -2177,7 +2177,7 @@ pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr) -> bool {
 }
 
 /// The flatten shape of an enum that boxes today and is eligible to be inlined
-/// into a parent struct's Lua table (`docs/enum-allocation-report.md`). Eligible iff
+/// into a parent struct's Lua table. Eligible iff
 /// the enum has payload variants (not payload-free -> those are plain ints), is NOT
 /// cdata-eligible (those scalarize via `EnumCdataShape`), and every payload variant
 /// is `Unit` or `Tuple` (record payloads keep boxing for now). Closure / string /

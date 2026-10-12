@@ -1,4 +1,4 @@
-//! DEFER ON ERROR (docs/defer-on-error-plan.md): a Lua function whose body
+//! DEFER ON ERROR: a Lua function whose body
 //! registers an ordinary-fn `defer` enters itself through `__rock_defer_call`,
 //! which unwinds the registered cleanups when an error escapes and re-raises
 //! it. A function without `defer` carries none of that machinery.

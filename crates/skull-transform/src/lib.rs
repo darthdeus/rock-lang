@@ -3214,8 +3214,8 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
         }
     }
 
-    // 0b. Frame membership is liveness-based with ownership pins (P1 of
-    // docs/coroutine-frame-lambda-plan.md): root cells live at a resume point
+    // 0b. Frame membership is liveness-based with ownership pins (P1):
+    // root cells live at a resume point
     // become fields. Root cells captured by a live lambda or referenced by a
     // detached hook/defer stay fields even when the local CFG has no later use.
     // Built post-peel so hook lambdas are detached, pre-rewrite so `Yield`

@@ -12,8 +12,8 @@
 //! diamonds have 2^k) -- memoizing the reachable SET does not collapse that. So
 //! `reaches` is used as a PRUNING ORACLE: the query is a guided DFS that
 //! descends an edge only when its target still reaches `E`, with a simple-path
-//! cycle guard (no depth cap) and a UX result cap. Design:
-//! `docs/completion-reachability-plan.md`.
+//! cycle guard (no depth cap) and a UX result cap. Heuristic backlog:
+//! `docs/completion-v2-design.md`.
 
 use bone_core::modules::{FragmentScope, NsVisibility};
 use bone_semantic::prelude::*;

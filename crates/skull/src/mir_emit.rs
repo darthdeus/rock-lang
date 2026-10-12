@@ -3535,7 +3535,7 @@ fn emit_body_chunk_with_mutation(
     attribution.inline.cleanup_live_before += cleanup_before;
     attribution.inline.cleanup_live_after += cleanup_after;
     times.cleanup_work = cleanup_after != cleanup_before;
-    // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
+    // Shared closure conversion:
     // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
     // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
     // BEFORE FORL recovery (matching the JS pipeline) so a loop lifted into a

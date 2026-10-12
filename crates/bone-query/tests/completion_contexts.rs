@@ -390,7 +390,7 @@ fn ufcs_method_completion_reuses_existing_open_paren() {
     assert_ne!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
 }
 
-// -- One-shot field-ref method pre-fill (docs/fieldref-method-completion-plan.md).
+// -- One-shot field-ref method pre-fill.
 // A UFCS method with a `FieldRef<recv, V>` param fills the field arg at method-
 // selection time: `mob.kil` -> `mob.kill_co(.attack_co)`. The receiver is a
 // bare generic (`o: T`), so `ufcs_methods` never surfaces it -- these items are

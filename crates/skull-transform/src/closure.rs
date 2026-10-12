@@ -1,5 +1,5 @@
-//! Closure conversion as a shared MIR->MIR pass
-//! (`docs/closure-conversion-mir-plan.md` S1). Replaces the per-backend closure
+//! Closure conversion as a shared MIR->MIR pass.
+//! Replaces the per-backend closure
 //! machinery (codegen-lua's `HoistPlan`/`EnvCtx`; the JS T5/T7/T8c native-arrow
 //! path) with ONE transform: every `Inst::Lambda` becomes either a bare
 //! [`Inst::Global`] (capture-free) or an env-record [`Inst::MakeEnv`] (capturing),
@@ -51,8 +51,7 @@ fn frame_field(slot: u32) -> Ustr {
 /// slot per frame cell. Threaded in only when converting the STEP `MirFunc`
 /// (`emit_coroutine`); `None` for ordinary fns and the JS path (no coroutines).
 /// A captured frame cell collapses to a capture of `s` (D2), and a frame-cell
-/// access inside a hoisted lambda body materializes `e.c<S>.c<slot>` (D3 of
-/// `docs/coroutine-frame-lambda-plan.md`).
+/// access inside a hoisted lambda body materializes `e.c<S>.c<slot>` (D3).
 pub struct FrameInfo {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
@@ -179,7 +178,7 @@ pub fn convert_closures_framed(
     for &(k, sid) in &ordered {
         hoisted_name.insert(sid, Ustr::from(format!("{name_base}__lambda{k}").as_str()));
         let mut caps: Vec<Idx<Cell>> = own.captures[sid].iter().copied().collect();
-        // Frame partition (D2 + D4(b), docs/coroutine-frame-lambda-plan.md), ported
+        // Frame partition (D2 + D4(b)), ported
         // verbatim from `build_hoist_plan`: a captured FRAME cell either snapshots
         // by value at record creation (a provenance-tagged loop binding no lambda
         // writes -- per-iteration, the non-frame rule) or collapses to a capture of

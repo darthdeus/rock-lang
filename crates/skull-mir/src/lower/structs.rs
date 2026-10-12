@@ -33,7 +33,7 @@ impl Builder<'_> {
         // sharing ONE `value` Expr index; evaluate each distinct value-expr once
         // (correct eval count, and grouped fields share the same instance), in
         // source order. A flattened enum field evaluates to (tag, payload slots)
-        // instead of one boxed value (`docs/enum-allocation-report.md`).
+        // instead of one boxed value.
         let mut lit_box: Vec<(Ustr, Idx<Inst>)> = Vec::new();
         let mut lit_flat: Vec<(Ustr, FlatCells)> = Vec::new();
         let mut lit_embed: Vec<(Ustr, Vec<(Ustr, Idx<Inst>)>)> = Vec::new();
@@ -1263,7 +1263,7 @@ impl Builder<'_> {
         }))
     }
 
-    // --- enum field flattening (docs/enum-allocation-report.md) ---
+    // --- enum field flattening ---
 
     /// `Some(shape)` iff `base.field` is a flattenable enum field: `base` is a
     /// non-`value` struct and the field's declared type is a [`flat_enum_shape`]

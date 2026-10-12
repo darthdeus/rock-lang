@@ -164,7 +164,7 @@ pub fn emit_coroutine_with_artifact(
         ctx.mint_synthetic(advance);
     }
     let step_name = ctx.mint_synthetic(plan.step());
-    // S3 (docs/closure-conversion-mir-plan.md): route both the STEP and every
+    // S3: route both the STEP and every
     // detached region through the shared closure-conversion pass. Detached
     // regions become ordinary MirFuncs, so their own lambda parameters and
     // locals cannot accidentally be rendered as coroutine frame fields.

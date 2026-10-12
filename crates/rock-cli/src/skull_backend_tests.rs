@@ -2535,7 +2535,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    // -- frame-lambda hoist (docs/coroutine-frame-lambda-plan.md P2) ----------
+    // -- frame-lambda hoist ----------
     // These pin the reload/layout contract of P1's co-fn lambda hoist: a
     // capturing co-fn lambda is an env record whose `__fn` names a hoisted
     // top-level body emitted IN THE SAME CHUNK as the step (const-hoist

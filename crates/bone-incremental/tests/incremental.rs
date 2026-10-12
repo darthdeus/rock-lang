@@ -1,5 +1,5 @@
-// Incremental == fresh oracle for `bone_semantic::Session` (docs/bone-incremental-plan.md
-// "Testing"): apply an edit script to a session, batch `semantic_pass` the final
+// Incremental == fresh oracle for `bone_semantic::Session` (see
+// `docs/compiler-hygiene-lessons.md`): apply an edit script to a session, batch `semantic_pass` the final
 // texts, and assert the two workspaces are equivalent. The comparator itself is
 // validated batch-vs-batch below (equal programs compare equal, injected
 // divergences are detected) so a green oracle run is evidence, not vacuous.
@@ -885,10 +885,9 @@ fn oracle_broken_type_definer_cascades_to_dependent() {
     // Editing a.rock (Point's definition) to a broken state must propagate to
     // b.rock, which names `Point` in a SIGNATURE: the incremental session must
     // match a fresh batch build (the oracle), which means b.rock is re-LOWERED,
-    // not just re-inferred. This is the Phase 3 interface-change cascade
-    // (docs/bone-total-lowering-plan.md); until it lands, the narrow
-    // rebuild_interface re-infers b.rock against a stale signature and the oracle
-    // catches the divergence.
+    // not just re-inferred. This is the interface-change cascade; a narrow
+    // rebuild_interface would re-infer b.rock against a stale signature and the
+    // oracle would catch the divergence.
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
     h.assert_clean();
 

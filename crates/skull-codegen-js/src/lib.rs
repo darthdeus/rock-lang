@@ -217,7 +217,7 @@ function __map_next(m, k) {
 }
 "#;
 
-/// The uniform indirect-call dispatch helper (`docs/closure-conversion-mir-plan.md`):
+/// The uniform indirect-call dispatch helper:
 /// Rock values are reusable slot objects, and capturing records carry a slot
 /// plus their captures. Raw JS functions remain an explicit foreign boundary.
 pub const JS_CALL_HELPER: &str = r#"

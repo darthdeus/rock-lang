@@ -1,5 +1,5 @@
-//! Lowering error recovery. Lowering is a TOTAL function ("plan A",
-//! `docs/bone-total-lowering-plan.md`): an unresolved type name in ANY position
+//! Lowering error recovery. Lowering is a TOTAL function (see
+//! `docs/error-recovery-design.md`): an unresolved type name in ANY position
 //! -- body, signature, field, global -- resolves to `BuiltinTy::Error` and
 //! records a diagnostic; `semantic_pass` returns `Ok` with a coherent workspace,
 //! never aborting. This supersedes the earlier "plan C" boundary (recover

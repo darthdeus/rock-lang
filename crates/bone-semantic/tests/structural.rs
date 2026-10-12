@@ -555,7 +555,7 @@ fn nested_interpolation_does_not_leak_into_outer_parts() {
     );
 }
 
-// Phase 0 of docs/bone-incremental-plan.md: a type error in one body must
+// Phase 0 of incremental compilation: a type error in one body must
 // not abort checking of the others -- pass 4 collects errors per BodyOwner
 // instead of fail-fasting through `?`. A watch/LSP session has to keep
 // healthy bodies' inference warm while some bodies are broken.
@@ -788,7 +788,7 @@ fn good() -> int { return 3 }"#;
     );
 }
 
-// bone-inc phase 1 (docs/bone-incremental-plan.md): every item owns a Body
+// bone-inc phase 1: every item owns a Body
 // -- checkable content or not -- and Module.bodies must cover every
 // BodyOwner that pass 4 produces a result (or error) for. Since B7 the rule
 // is uniform: "body exists <=> item exists"; owners with nothing to check
@@ -1008,7 +1008,7 @@ fn f() -> int { return 3 }"#;
 // body-local storage (`Body.lowered_tys`, `TyId::Local`), so the module
 // arena must be IDENTICAL whether or not a body is annotated. This is the
 // property body-edit incremental updates stand on: a body edit cannot perturb
-// interface storage (docs/bone-incremental-plan.md step C).
+// interface storage.
 #[test]
 fn body_annotations_do_not_touch_module_ty_arena() {
     let ty_arena_len = |src: &str| {

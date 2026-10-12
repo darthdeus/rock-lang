@@ -280,8 +280,7 @@ pub(crate) struct CtCounts {
 /// the query and an arg value for its first param matches the rest. The
 /// candidate is `fn(arg)` -- the reachability idea one level up. v1 fills the
 /// arg from in-scope values of the param type and the type's enum UNIT variants
-/// (the motivating case); reach-path args and tuple/record payloads are TODO
-/// (`docs/completion-reachability-plan.md`).
+/// (the motivating case); reach-path args and tuple/record payloads are TODO.
 /// Whether a call-through arg value needs a payload snippet: a tuple variant
 /// (`Damage::Fire($..)`), a record variant (`Cfg { $.. }`), or none (a direct
 /// value, unit variant, or reach path).
@@ -1603,7 +1602,7 @@ fn build_member_items(
         }
         // Typed expected-arg session for the enclosing call, built against THIS
         // (variant) workspace so its Gamma resolves the member TyIds the
-        // candidates carry (docs/assignable-plan.md phase 2). `coerce` decides
+        // candidates carry. `coerce` decides
         // the member type-match, not a rendered-string `==`; the receiver-
         // filtered `.rendered` still feeds the string-keyed reach index. None
         // when not in an arg slot or the body has no cached inference -- then

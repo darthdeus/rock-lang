@@ -1,5 +1,5 @@
-//! Premise measurement for bone per-body eviction (Track 2,
-//! `docs/bone-incremental-plan.md`). NOT a correctness gate -- a throwaway
+//! Premise measurement for bone per-body eviction (Track 2).
+//! NOT a correctness gate -- a throwaway
 //! profiler. Reads a real game project off disk and warms the real stdlib, so
 //! it is `#[ignore]`'d; run explicitly:
 //!

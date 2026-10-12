@@ -2,7 +2,7 @@
 //! emit only that. Every backend wants this search and they differ only in the
 //! search PARAMETERS -- which roots, what counts as a leaf, whether a cycle is
 //! legal, and where the successor edges come from. The search itself lives here
-//! once; the parameters live in a [`ReachPolicy`]. Plan: `docs/global-dce-plan.md`.
+//! once; the parameters live in a [`ReachPolicy`].
 //!
 //! Not to be confused with function-local DCE (`skull_transform::dce`), which
 //! prunes instructions inside one body. This is the layer above: call-graph

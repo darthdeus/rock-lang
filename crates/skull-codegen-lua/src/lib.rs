@@ -1977,8 +1977,8 @@ pub fn emit_named_with_statics(
 /// slot is a DENSE per-frame ordinal (`slots`), NOT the raw cell-arena id:
 /// lambda-cell allocation bumps raw ids but never reorders the frame cells, so
 /// a slot -- and the layout stamp keyed on it -- is invariant under
-/// lambda-internal cell-count edits (the P2 finding in
-/// docs/coroutine-frame-lambda-plan.md). Lambdas are converted before emission;
+/// lambda-internal cell-count edits (the P2 finding).
+/// Lambdas are converted before emission;
 /// detached hook/defer regions are ordinary `MirFunc`s by the time they reach
 /// this printer.
 pub struct FrameCtx {
@@ -1999,8 +1999,8 @@ struct AllocationEmission<'a> {
 ///
 /// Closures no longer convert here: `skull_transform::convert_closures` (the
 /// shared MIR pass) has already rewritten every reachable `Inst::Lambda` into a
-/// `MakeEnv` record / bare `Global` + a hoisted sibling `MirFunc` before emission
-/// (S3, docs/closure-conversion-mir-plan.md). So this fn only renders the given
+/// `MakeEnv` record / bare `Global` + a hoisted sibling `MirFunc` before emission.
+/// So this fn only renders the given
 /// region.
 pub fn emit_named_framed(
     ws: &Workspace,

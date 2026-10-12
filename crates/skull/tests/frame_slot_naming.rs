@@ -1,4 +1,4 @@
-//! P2 finding fix (docs/coroutine-frame-lambda-plan.md): dense per-frame slot
+//! P2 finding fix: dense per-frame slot
 //! naming. A co fn's frame cells render as `s.c<slot>` where `<slot>` is a dense
 //! ordinal (0, 1, 2, ...) over the frame cells in raw-id order -- NOT the raw
 //! cell-arena id. Lambda-cell allocation bumps raw ids but never reorders the
