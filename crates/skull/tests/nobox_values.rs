@@ -2062,7 +2062,7 @@ fn a_functional_update_of_a_gc_tier_value_reads_nobox_fields_by_leaf() {
 // The same read off a BOXED GC-tier local (reassigned in a loop, so it lives in
 // one cell): the enum inside the `nobox` field is keyed by its leaves
 // (`lock.target.__tag`, ...), so reading the whole enum off `lock.target`
-// found nil. MAG's `scenario_world_hostile_target` has this shape.
+// found nil. A hostile-target lock read in MAG had this shape.
 const NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ: &str = r#"
 nobox value P { x: int, y: int }
 nobox value Id { a: int, b: int }

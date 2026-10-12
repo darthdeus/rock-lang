@@ -69,13 +69,13 @@ fn a_mag_movement_fixture_does_not_leave_a_kind_speed_override() {
         rock(),
         &[
             "mag::flow_budget_and_occupancy".to_string(),
-            "mag::live_and_scenario_movement_match_schedule_and_occupied_refusal".to_string(),
+            "mag::live_movement_schedule_and_occupied_refusal".to_string(),
         ],
     )
     .expect("the MAG pair must run");
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
-    assert!(records[1].1, "movement parity must follow the flow fixture in one worker");
+    assert!(records[1].1, "the movement schedule sim must follow the flow fixture in one worker");
     assert_eq!(records[1].0.verdict(), "PASS", "{:?}", records[1].0);
 }
 
