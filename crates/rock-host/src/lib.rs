@@ -4,7 +4,7 @@
 //! no business living in the legacy `rock` compiler crate: project discovery,
 //! the libstone/luajit launch recipe, process management.
 //! Leaf crate (no `rock-semantic`/`rock-codegen`/`rock` dep) so bone/skull can
-//! depend on it without the legacy pipeline. See `docs/cli-unification-plan.md`.
+//! depend on it without the legacy pipeline.
 
 pub mod art_vault;
 pub mod compilation_units;

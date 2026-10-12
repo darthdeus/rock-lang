@@ -1,8 +1,7 @@
 # rock-host: neutral CLI/runtime substrate shared by every backend
 # (rock=legacy, bone=typechecker, skull=codegen). A leaf crate by design —
 # it must NOT depend on rock-semantic / rock-codegen / rock, so the "new"
-# bone/skull path can use it without dragging in the legacy compiler. See
-# docs/cli-unification-plan.md (Phase B).
+# bone/skull path can use it without dragging in the legacy compiler.
 [package]
 name = "rock-host"
 version = "0.1.0"

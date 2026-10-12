@@ -62,7 +62,7 @@ before trusting them):
 
 - `docs/bone-backend-plan.md` -- current state, capability, open items (entry point).
 - `docs/bone-typechecker-architecture.md` -- architecture + how inference / stdlib loading work.
-- `docs/bone-hir-mir-plan.md`
+- `docs/bone-mir-design.md`
 
 ## Cross-arena copy invariant (learned the hard way)
 

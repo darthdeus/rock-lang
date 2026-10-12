@@ -2019,7 +2019,6 @@ inline(lua) fn table_new() -> any = """return {}"""
 // `loop unroll limit reached` in per-frame paths like vec_push /
 // vec_get). Marked `@inline inline(lua)` so codegen splices the body
 // at every call site instead of emitting + calling. See
-// docs/function-and-inlining-design.md and
 // docs/jit-fnew-codegen-investigation.md §"Fourth pass".
 @inline inline(lua) fn table_len(tbl: any) -> int = """
     return #tbl

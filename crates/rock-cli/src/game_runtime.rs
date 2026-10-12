@@ -3,7 +3,7 @@
 //! (produce the Lua the engine hot-reloads), behind which the watch loop,
 //! process lifecycle, engine/compiler rebuilds, and sims are all shared.
 //!
-//! Design + staging: `docs/game-runtime-plan.md`. This module currently holds
+//! This module currently holds
 //! the trait + its two impls; `do_stone_watch` (stone.rs) calls them in place
 //! of the old `match backend`. The watch loop itself folds in later (Stage 2a-ii
 //! / 2b) behind an injected event source + sink.
