@@ -1815,6 +1815,7 @@
     "presented_pixels": 936,
     "pristine_empty_spellbook_history_migrates_to_authored_panels": 435,
     "probe_horse_hover_cursor": 4712,
+    "probe_window_move_builds_only_the_exposed_tiles": 3636,
     "procedural_challenge_rejects_invalid_spec_without_transition": 292,
     "procedural_challenge_start_installs_and_enters_generated_asset": 379,
     "procedural_dungeon_generation_contracts": 339,
