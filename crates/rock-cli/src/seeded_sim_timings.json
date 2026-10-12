@@ -1554,7 +1554,6 @@
     "overhead_bars_use_world_depth": 524,
     "overworld_town_to_north_mire_towers_by_the_graveyard_seam": 578,
     "overworld_town_to_west_march_chapel_by_both_seams": 511,
-    "pad_input": 434,
     "painting_a_floor_changes_the_nav_terrain_cost": 1469,
     "paired_pad_arrivals_do_not_stack_travellers": 417,
     "paired_pads_follow_moves_and_refuse_blocked_exits": 147,
