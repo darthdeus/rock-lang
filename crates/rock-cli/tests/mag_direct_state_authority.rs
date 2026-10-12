@@ -626,7 +626,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "quest_tracker_scroll: float",
         "quest_giver_open_id: string",
         "quest_giver_confirm_id: string",
-        "quest_giver_open_npc: Entity<Mob>?",
+        "quest_giver_open_npc: InhabitantId?",
         "menu_open: bool",
         "combat_report_open: bool",
         "combat_report_details: bool",
