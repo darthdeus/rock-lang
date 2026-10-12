@@ -3,7 +3,7 @@
 //! perf pipeline against a small game for a short duration and validates
 //! the shape of the emitted JSON document.
 //!
-//! Schema: full uniform nest (docs/effective-fps-and-stats-plan.md). Every
+//! Schema: full uniform nest. Every
 //! series -- each `frame_ms` timing variant, each section's duration + alloc,
 //! each memory series -- serializes as the SAME block:
 //! `{mean, stddev, min, max, p50, p90, p99, n}`. There are no legacy flat

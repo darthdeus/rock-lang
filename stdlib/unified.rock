@@ -162,7 +162,6 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
 // evict and the raw per-frame signal for plots. Rolling totals keep mean and
 // variance out of the sorted-window scan; order statistics remain direct
 // lookups, so a reader can pull p99 every frame without perturbing the metric.
-// Design: docs/effective-fps-and-stats-plan.md.
 // ============================================================================
 
 value StatSummary {

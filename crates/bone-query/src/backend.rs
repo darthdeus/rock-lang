@@ -1689,7 +1689,7 @@ impl BoneWorkspace {
         // (the fall-through below) uses the live workspace directly.
         // The cursor classification, computed ONCE (CompletionCx: the AST
         // classifier over the munge ladder plus every context consultation;
-        // docs/cursor-context-plan.md + completion-v2-design.md M2b). The
+        // docs/completion-v2-design.md M2b). The
         // dispatch below tries the slots most-specific-first; a `recv.field`
         // even inside a struct-literal field value is member completion.
         let cx = classify(src, offset);

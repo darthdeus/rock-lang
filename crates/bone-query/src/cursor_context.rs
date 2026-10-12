@@ -1,5 +1,4 @@
-//! AST-based cursor classification for completion
-//! (docs/cursor-context-plan.md).
+//! AST-based cursor classification for completion.
 //!
 //! Parses the MUNGED buffer (skull-parser is total: best-effort tree +
 //! recovered errors) and answers "what is the cursor, structurally" from the
@@ -71,7 +70,7 @@ fn matching_brace(b: &[u8], open: usize) -> Option<usize> {
     None
 }
 
-/// Structural anchor for a UFCS call's receiver (docs/cursor-context-plan.md
+/// Structural anchor for a UFCS call's receiver (CursorAst
 /// flip 6): how to resolve the receiver's type without byte-rescanning.
 pub(crate) enum ReceiverAnchor {
     /// Receiver ends here; `type_at` on its last byte resolves it (variable /
