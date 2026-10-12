@@ -701,7 +701,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "cast_words: CastWords",
         "ritual_cast: BranchedRitualCast",
         "ritual_acquisition_event_seq: int",
-        "notoriety: PlayerNotoriety",
+        "law: PlayerLaw",
         "combat_latch: CombatLatchState",
         "summon_slots: [MobId?]",
         "cast_outline: PlayerCastOutline",
@@ -711,6 +711,15 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             1,
             "scene-owned Player must contain `{field}` exactly once"
         );
+    }
+    let law = fs::read_to_string(repo.join("mag-simulation/notoriety.rock"))
+        .expect("read simulation player law source");
+    let law_state = law.split_once("pub struct PlayerLaw {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body).expect("read PlayerLaw body");
+    for field in ["notoriety: PlayerNotoriety", "criminal_remaining: float"] {
+        assert_eq!(law_state.matches(field).count(), 1, "PlayerLaw must own `{field}` exactly once");
+        assert!(!player_state.contains(field), "Player must borrow the shared law instead of copying `{field}`");
     }
     let body = fs::read_to_string(repo.join("mag-simulation/player_body.rock"))
         .expect("read simulation player body source");
@@ -1213,7 +1222,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 27, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 26, "WorldState field census changed: {fields:?}");
     assert!(digest.contains("for space_handle in world.spaces"));
     assert!(digest.contains("let space = space_handle.get().unwrap()"));
     for field in fields {
@@ -1256,10 +1265,15 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     ] {
         assert!(prepare.contains(call), "tick preparation is missing authoritative call `{call}`");
     }
-    for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)",
-        "runtime.runner.unwrap().get().unwrap().actor_host = mag_tick_actor_host()", "world_tick_advance(tick, dt)"] {
+    for call in ["mag_world_tick_runner_in(world)", "world_tick_advance(tick, dt)"] {
         assert!(tick.contains(call), "canonical tick is missing runner delegation `{call}`");
     }
+    let host_runner = rock_function_body(&run, "fn mag_world_tick_runner_in(");
+    for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)",
+        "runtime.runner.unwrap().get().unwrap().actor_host = mag_tick_actor_host()"] {
+        assert!(host_runner.contains(call), "shared runner construction is missing delegation `{call}`");
+    }
+    assert!(!host_runner.contains("world_tick_advance("), "acquiring a runner must not advance another tick");
     let package_tick = fs::read_to_string(repo.join("mag-world/world_tick.rock"))
         .expect("read package tick runner");
     let advance = rock_function_body(&package_tick, "pub fn world_tick_advance<M, H>(");
@@ -1307,7 +1321,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     }
     for (phase, calls) in &phases {
         if *phase != "mag_tick_actor_pre_mob" {
-            assert!(tick.contains(phase), "canonical tick does not register phase `{phase}`");
+            assert!(host_runner.contains(phase), "shared runner does not register phase `{phase}`");
         }
         let body = rock_function_body(&run, &format!("fn {phase}("));
         for call in *calls {
