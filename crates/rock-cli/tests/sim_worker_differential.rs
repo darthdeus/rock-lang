@@ -1610,7 +1610,7 @@ fn an_entry_that_runs_the_games_shutdown_systems_keeps_its_worker() {
         rock(),
         &[
             "mag::telemetry_death_then_withdrawal_leaves_nothing".to_string(),
-            "mag::combat_report_empty_state_and_reset_lifecycle".to_string(),
+            "mag::combat_report_production_hierarchy".to_string(),
         ],
     )
     .expect("the suite call itself must not error: ineligibility is a scheduling fact");
