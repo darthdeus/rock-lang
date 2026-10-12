@@ -2945,7 +2945,7 @@ impl<'a> BlockWire<'a> {
             }
         }
         for (binding, p) in arrays {
-            w.names.push(symbol_of_key(p.block_name).as_str());
+            w.names.push(p.block_name.as_str());
             w.bindings.push(*binding as i64);
             w.sizes.push(p.size as i64);
             w.fingerprints.push(p.fingerprint() as i64);
@@ -3149,7 +3149,7 @@ fn validate_abi(
                  interface group claims"
             )));
         };
-        if plan.block_name != array_block_name(g.owner) {
+        if plan.block_name != g.block_name() {
             return Err(err(span, format!(
                 "internal: binding {b} holds array block `{}`, but the interface's group there \
                  is owned by `{}`",
@@ -3603,7 +3603,7 @@ impl ShaderAbiPlan {
         for g in &iface.array_groups {
             let b = Self::array_binding_of(g.stage);
             uniform_array_blocks
-                .push((b, uniform_array_block(array_block_name(g.owner), &g.members)?));
+                .push((b, uniform_array_block(g.block_name(), &g.members)?));
         }
         uniform_array_blocks.sort_by_key(|(b, _)| *b);
 
@@ -3686,16 +3686,6 @@ pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
 pub const UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS: u32 = 3;
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: u32 = 4;
-
-/// The GLSL block name for a stage's array block, minted from the stage entry.
-///
-/// Deterministic and per-STAGE: the two entries of a pipeline always have
-/// different names, so a program's two array blocks cannot collide with each
-/// other. A collision with a user's `@uniform` group name is possible and is
-/// rejected (`check_block_name_collisions`), never renamed around.
-fn array_block_name(entry: Ustr) -> Ustr {
-    Ustr::from(&format!("{}_Arrays", symbol_of_key(entry)))
-}
 
 /// **One stage's validated plan**: its lowered body, the emittable helpers it
 /// reaches in emission order, and the prelude flags those bodies imply.
@@ -4286,7 +4276,7 @@ fn classify_array_param(
 fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
     let mut s = format!(
         "layout(std140) uniform {} {{\n",
-        symbol_of_key(plan.block_name)
+        plan.block_name
     );
     for m in &plan.members {
         s.push_str(&format!("    {} {}[{}];\n", wire_glsl_ty(m.elem), m.name, m.capacity));
@@ -5030,7 +5020,7 @@ fn check_block_name_collisions<'a>(
         .map(|p| (p.plan.struct_name, p.name))
         .collect::<HashSet<_>>()
         .into_iter()
-        .chain(arrays.map(|p| (p.block_name, symbol_of_key(p.block_name))));
+        .chain(arrays.map(|p| (p.block_name, p.block_name)));
     for (logical, physical) in names {
         if !seen.insert(physical) {
             return Err(err(span, format!(

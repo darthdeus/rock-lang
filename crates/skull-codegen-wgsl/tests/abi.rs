@@ -113,8 +113,37 @@ fn fullscreen_uniform_arrays_keep_abi_order() {
     assert_eq!(plan.array_blocks[0].binding, 2, "array follows ordinary blocks");
     assert_eq!(plan.textures[0].texture_binding, 3, "textures follow both block classes");
     plan.validate(&iface, Span::default()).expect("projection validates");
-    let parsed = WgslAbi::parse(&plan.wire()).expect("fullscreen array ABI parses");
+    let parsed = WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("fullscreen array ABI parses");
     assert_eq!(parsed.array_blocks[0].binding, 2, "array binding reaches the runtime wire");
+}
+
+/// A non-root module's entry owns its array group under a qualified key. The
+/// runtime packs array values under the semantic interface's array name and
+/// stone-wgpu joins them to the WGSL block by `logical_name`, so the two wires
+/// must spell the group the same way.
+#[test]
+fn module_qualified_array_owner_reaches_the_runtime_wire() {
+    let mut iface = fixture();
+    iface.array_groups = vec![LogicalArrayGroup {
+        stage: ShaderStage::Fragment,
+        owner: Ustr::from("mag::ankh_overlay_frag"),
+        members: vec![decl("values", WireKind::F32, 1)],
+    }];
+
+    let plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("qualified array projection");
+    plan.validate(&iface, Span::default()).expect("projection validates");
+    let parsed = WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("qualified array ABI parses");
+    let semantic = iface.semantic_wire(true);
+    let semantic_names: Vec<&str> = semantic
+        .lines()
+        .filter_map(|line| line.strip_prefix("array "))
+        .map(|rest| rest.split(' ').nth(1).expect("array line names its group"))
+        .collect();
+    assert_eq!(
+        semantic_names,
+        vec![parsed.array_blocks[0].logical_name.as_str()],
+        "the runtime joins semantic array packets to WGSL blocks by this name"
+    );
 }
 
 #[test]
@@ -174,7 +203,7 @@ fn integer_texture_slots_are_sampler_free_and_keep_logical_order() {
     assert_eq!(plan.textures[1].slot, 1);
     assert_eq!(plan.textures[1].texture_binding, 3);
     assert_eq!(plan.textures[1].sampler_binding, Some(4));
-    let wire = plan.wire();
+    let wire = plan.wire().expect("WGSL ABI wire");
     assert!(wire.contains("texture 0 ids int 2 none f"));
     assert!(wire.contains("texture 1 scene float 3 4 f"));
     let parsed = WgslAbi::parse(&wire).expect("sampler-free integer wire parses");
@@ -243,7 +272,7 @@ fn explicit_abi_spells_type_symbols() {
     let shared = plan.to_shared_abi();
     assert_eq!(shared.vertex_inputs[0].struct_name, "Vertex");
     assert_eq!(shared.uniform_blocks[0].struct_name, "Params");
-    let parsed = WgslAbi::parse(&plan.wire()).expect("explicit ABI parses");
+    let parsed = WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("explicit ABI parses");
     assert_eq!(parsed.vertex_inputs[0].struct_name, "Vertex");
     assert_eq!(parsed.uniform_blocks[0].struct_name, "Params");
 }
@@ -288,7 +317,7 @@ fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
     );
     assert_eq!(block.size, 32);
 
-    let parsed = WgslAbi::parse(&plan.wire()).expect("Vec3 ABI wire");
+    let parsed = WgslAbi::parse(&plan.wire().expect("WGSL ABI wire")).expect("Vec3 ABI wire");
     assert_eq!(parsed.varyings[2].kind, WireKind::F32x3.code());
     assert_eq!(parsed.uniform_blocks[0].members[1].offset, 12);
 }
@@ -296,7 +325,7 @@ fn explicit_vec3_uses_one_location_and_keeps_uniform_fourth_lane() {
 #[test]
 fn abi_wire_is_deterministic_and_carries_physical_order() {
     let plan = WgslAbiPlan::wgsl(&fixture(), Span::default()).expect("WGSL projection");
-    let wire = plan.wire();
+    let wire = plan.wire().expect("WGSL ABI wire");
     assert!(wire.starts_with("WGSL_ABI_V4\nchecksum "));
     assert!(wire.contains("geometry fullscreen"));
     assert!(wire.contains("entries fullscreen_vertex fragment_main"));
@@ -314,7 +343,7 @@ fn abi_wire_is_deterministic_and_carries_physical_order() {
     let parsed = WgslAbi::parse(&wire).expect("compiler output uses the production parser");
     assert_eq!(parsed.fragment_outputs.len(), 1);
     assert_eq!(parsed.array_blocks.len(), 0);
-    assert_eq!(wire, plan.wire(), "the compiler wire must be deterministic");
+    assert_eq!(wire, plan.wire().expect("WGSL ABI wire"), "the compiler wire must be deterministic");
 }
 
 fn compute_fixture() -> ShaderInterfacePlan {
@@ -496,7 +525,7 @@ fn compute_abi_round_trips_resources_workgroup_and_builtin() {
     assert_eq!(plan.compute.as_ref().unwrap().resources[0].binding, 0);
     assert_eq!(plan.compute.as_ref().unwrap().resources[1].binding, 1);
     assert_eq!(plan.uniform_blocks[0].binding, 2);
-    let wire = plan.wire();
+    let wire = plan.wire().expect("WGSL ABI wire");
     assert!(wire.contains("artifact compute"));
     assert!(wire.contains("compute_entry saxpy_compute"));
     assert!(wire.contains("workgroup 64 1 1"));
@@ -506,7 +535,7 @@ fn compute_abi_round_trips_resources_workgroup_and_builtin() {
     let parsed = WgslAbi::parse(&wire).expect("compute ABI parser");
     assert_eq!(parsed.artifact, skull_wgsl_abi::WgslArtifactKind::Compute);
     assert_eq!(parsed.compute.unwrap().resources.len(), 2);
-    assert_eq!(wire, plan.wire(), "compute wire order is deterministic");
+    assert_eq!(wire, plan.wire().expect("WGSL ABI wire"), "compute wire order is deterministic");
 }
 
 #[test]

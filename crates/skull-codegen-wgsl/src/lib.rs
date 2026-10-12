@@ -16,7 +16,7 @@ use comfy_la_arena::Idx;
 use skull_codegen_shader::structure::{LoopRegion, Structure};
 use skull_codegen_shader::{ShaderArtifactPlan, ShaderPlannerPolicy};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
-use skull_mir::mangle::{declared_name, symbol_of_key, type_symbol};
+use skull_mir::mangle::{declared_name, type_symbol};
 use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use skull_mir::monoty::{MonoInterner, MonoTy};
 use skull_mir::shader_ir::{
@@ -1069,11 +1069,12 @@ impl WgslAbiPlan {
         }
     }
 
-    /// Serialize through the one shared producer/consumer wire owner.
-    pub fn wire(&self) -> String {
+    /// Serialize through the one shared producer/consumer wire owner, whose
+    /// checks are the runtime's.
+    pub fn wire(&self) -> Result<String, CompilerError> {
         self.to_shared_abi()
             .serialize()
-            .expect("validated WGSL ABI plan must serialize")
+            .map_err(|e| err(Span::default(), format!("WGSL ABI wire: {e}")))
     }
 }
 
@@ -1541,20 +1542,12 @@ fn layout_uniform_group(
     })
 }
 
-/// The WGSL block name for a stage's array block, minted from its owner exactly
-/// as the GLSL lane does -- one program's two stages cannot collide, and a clash
-/// with a user `@uniform` group is rejected by `identifier`/emission rather than
-/// renamed around.
-fn array_block_name(owner: Ustr) -> Ustr {
-    Ustr::from(&format!("{}_Arrays", symbol_of_key(owner)))
-}
-
 fn layout_array_group(
     group: &LogicalArrayGroup,
     binding: u32,
     span: Span,
 ) -> Result<WgslArrayBlock, CompilerError> {
-    let struct_name = array_block_name(group.owner);
+    let struct_name = group.block_name();
     identifier(struct_name, "uniform array block name", span)?;
     // One layout authority: capacities come from `@size(N)` in program text, and
     // this is where they are computed wide and rejected before narrowing.
@@ -1594,7 +1587,7 @@ fn layout_array_group(
     }
     Ok(WgslArrayBlock {
         stage: group.stage,
-        logical_name: group.owner,
+        logical_name: group.symbol(),
         struct_name,
         binding,
         size: plan.size,
@@ -2434,7 +2427,7 @@ fn emit_array_blocks(
     span: Span,
 ) -> Result<(), CompilerError> {
     for block in &abi.array_blocks {
-        let struct_name = symbol_of_key(block.struct_name);
+        let struct_name = block.struct_name;
         writeln!(out, "struct {} {{", struct_name).unwrap();
         for member in &block.members {
             let elem = array_element_type(member.elem).ok_or_else(|| {
@@ -2922,9 +2915,9 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
             ctor: TypeCtor::Nominal(name),
             ..
         } => match declared_name(name.as_str()) {
-            "Vec2" => Some(ValueKind::Vec2),
-            "Vec3" => Some(ValueKind::Vec3),
-            "Vec4" => Some(ValueKind::Vec4),
+            "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+            "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+            "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
             "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
@@ -2955,9 +2948,9 @@ fn value_kind_for_instance_type(
             ctor: skull_mir::monoty::MonoCtor::Nominal(name),
             ..
         } => match declared_name(name.as_str()) {
-            "Vec2" => Some(ValueKind::Vec2),
-            "Vec3" => Some(ValueKind::Vec3),
-            "Vec4" => Some(ValueKind::Vec4),
+            "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+            "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+            "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
             "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
@@ -3967,6 +3960,7 @@ impl<'a> FunctionEmitter<'a> {
                 | Inst::FloatToInt(_)
                 | Inst::IntToFloat(_)
                 | Inst::UintToFloat(_)
+                | Inst::FloatToF32(_)
                 | Inst::IntToUint(_)
                 | Inst::UintToInt(_)
                 | Inst::FloatToUint(_)
@@ -4192,7 +4186,7 @@ impl<'a> FunctionEmitter<'a> {
             | Inst::Not(_) => Ok(ValueKind::Bool),
             Inst::FloatToInt(_) => Ok(ValueKind::I32),
             Inst::IntToFloat(_) => Ok(ValueKind::F32),
-            Inst::UintToFloat(_) => Ok(ValueKind::F32),
+            Inst::UintToFloat(_) | Inst::FloatToF32(_) => Ok(ValueKind::F32),
             Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => {
                 Ok(ValueKind::U32)
             }
@@ -4741,6 +4735,8 @@ impl<'a> FunctionEmitter<'a> {
                 self.reject_compute_numeric_conversion("uint as float", *value)?;
                 Ok(format!("f32({})", self.render_val(*value)?))
             }
+            // Shader floats are already single precision.
+            Inst::FloatToF32(value) => self.render_val(*value),
             Inst::IntToUint(value) => {
                 self.reject_compute_numeric_conversion("int as uint", *value)?;
                 Ok(format!("u32({})", self.render_val(*value)?))
@@ -5170,7 +5166,7 @@ impl<'a> FunctionEmitter<'a> {
                 })?;
                 Ok(format!(
                     "u_{}.{}[{}]{}",
-                    symbol_of_key(block.struct_name),
+                    block.struct_name,
                     member.name,
                     self.render_val(args[1])?,
                     projection
@@ -5591,9 +5587,9 @@ fn struct_field_kind_by_name(ws: &Workspace, name: Ustr, field: Ustr) -> Option<
 
 fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
     match declared_name(name.as_str()) {
-        "Vec2" => Some(ValueKind::Vec2),
-        "Vec3" => Some(ValueKind::Vec3),
-        "Vec4" => Some(ValueKind::Vec4),
+        "Vec2" | "Vec2f" => Some(ValueKind::Vec2),
+        "Vec3" | "Vec3f" => Some(ValueKind::Vec3),
+        "Vec4" | "Vec4f" => Some(ValueKind::Vec4),
         "Bvec3" => Some(ValueKind::BVec3),
         "Mat4" => Some(ValueKind::Mat4),
         _ => Some(ValueKind::Struct(name)),

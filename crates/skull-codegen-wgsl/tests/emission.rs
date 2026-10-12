@@ -742,7 +742,7 @@ fn vec3_frag(vary: Vec3Vary) -> Vec4 {
         "Vec3 flat varyings must retain their one-location WGSL type:\n{}",
         artifact.source
     );
-    let parsed = skull_wgsl_abi::WgslAbi::parse(&artifact.abi.wire())
+    let parsed = skull_wgsl_abi::WgslAbi::parse(&artifact.abi.wire().expect("WGSL ABI wire"))
         .expect("the Vec3 varying must survive the runtime ABI wire");
     assert_eq!(parsed.varyings[2].kind, skull_mir::gpu_layout::WireKind::F32x3.code());
     naga_validate(&artifact.source);

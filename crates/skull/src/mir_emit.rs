@@ -5355,7 +5355,7 @@ fn shader_registration_lines(
                     )?;
                     Ok((
                         emission.source,
-                        emission.abi.wire(),
+                        emission.abi.wire()?,
                         neutral.interface.semantic_wire(true),
                         emission.dependencies,
                     ))
@@ -5381,7 +5381,7 @@ fn shader_registration_lines(
                     )?;
                     Ok((
                         emission.source,
-                        emission.abi.wire(),
+                        emission.abi.wire()?,
                         glsl.interface.semantic_wire(false),
                         emission.dependencies,
                     ))
@@ -5443,7 +5443,7 @@ fn shader_registration_lines(
                     bone_semantic::prelude::Span::default(),
                 )?;
                 dependencies.extend(emission.dependencies);
-                let wire = emission.abi.wire();
+                let wire = emission.abi.wire()?;
                 abi_wires.insert(entry.key.clone(), wire.clone());
                 let _ = writeln!(
                     out,

@@ -42,7 +42,7 @@ pub enum GlslProfile {
 
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use crate::instance::Instance;
-use crate::mangle::type_symbol;
+use crate::mangle::{symbol_of_key, type_symbol};
 use crate::mir::{FuncRef, Lit, MirFunc};
 use crate::monoty::MonoInterner;
 use bone_semantic::inference::Workspace;
@@ -452,6 +452,21 @@ pub struct LogicalArrayGroup {
     pub members: Vec<ArrayMemberDecl>,
 }
 
+impl LogicalArrayGroup {
+    /// The group's name in every artifact wire: the runtime joins the semantic
+    /// interface's array packets to a target's physical block by it.
+    pub fn symbol(&self) -> Ustr {
+        symbol_of_key(self.owner)
+    }
+
+    /// The physical block every target declares for the group. Per stage
+    /// entry, so a program's two array blocks cannot collide; a clash with a
+    /// user `@uniform` group is rejected by the target, never renamed around.
+    pub fn block_name(&self) -> Ustr {
+        Ustr::from(&format!("{}_Arrays", self.symbol()))
+    }
+}
+
 /// The program's `@textures` group: its samplers in the order the group
 /// declares them. ORDER is logical; the unit each one lands on is the target's
 /// answer, and it is COMPILER-assigned -- which is the whole difference from a
@@ -646,7 +661,7 @@ impl ShaderInterfacePlan {
 
         writeln!(out, "arrays {}", self.array_groups.len()).unwrap();
         for group in &self.array_groups {
-            writeln!(out, "array {} {} {}", group.stage.name(), group.owner, group.members.len()).unwrap();
+            writeln!(out, "array {} {} {}", group.stage.name(), group.symbol(), group.members.len()).unwrap();
             for member in &group.members {
                 writeln!(out, "array_member {} {} {}", member.name, member.elem.code(), member.capacity).unwrap();
             }

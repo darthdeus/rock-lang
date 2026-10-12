@@ -415,7 +415,7 @@ fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
         bone_semantic::prelude::Span::default(),
     )
     .expect("WGSL ABI");
-    assert!(!abi.wire().is_empty());
+    assert!(!abi.wire().expect("WGSL ABI wire").is_empty());
     assert!(!abi.fragment_outputs.is_empty());
 
     let mut missing = (*program_view.concrete_plans).clone();

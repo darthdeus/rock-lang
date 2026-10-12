@@ -479,7 +479,7 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
         "the reduction keeps both uniform-control-flow barriers"
     );
     assert!(emission.source.contains("fn"));
-    assert!(emission.abi.wire().starts_with("WGSL_ABI_V4\n"));
+    assert!(emission.abi.wire().expect("WGSL ABI wire").starts_with("WGSL_ABI_V4\n"));
 }
 
 #[test]
@@ -707,7 +707,7 @@ fn rect_loss_shaped_compute_keeps_root_helper_plan_and_naga_population() {
     )
     .expect("Naga validation of the compiler-authored control");
     assert!(emission.source.contains("@compute @workgroup_size(64, 1, 1)"));
-    assert!(emission.abi.wire().starts_with("WGSL_ABI_V4\n"));
+    assert!(emission.abi.wire().expect("WGSL ABI wire").starts_with("WGSL_ABI_V4\n"));
 }
 
 #[test]
@@ -851,7 +851,7 @@ fn saxpy_compute_emits_deterministic_wgsl_and_v4_abi() {
     assert!(emission.source.contains("var<storage, read> s_x: array<i32>"));
     assert!(emission.source.contains("var<storage, read_write> s_out: array<i32>"));
     assert!(emission.source.contains("s_out[i] = ((u_SaxpyParams.a * s_x[i]) + s_y[i])"));
-    let wire = abi.wire();
+    let wire = abi.wire().expect("WGSL ABI wire");
     assert!(wire.starts_with("WGSL_ABI_V4\n"));
 
     let mut wrong_symbol = abi.clone();
