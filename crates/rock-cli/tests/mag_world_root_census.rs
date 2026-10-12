@@ -543,11 +543,11 @@ struct World {
 }
 fn mag_simulation_tick(field: FieldCache, world: World) {
     let layout = world.root.spaces[0].get().unwrap()
-    field_query_near_dirty_terrain(v(0, 0), field)
-    field_query_near_dirty_terrain(v(0, 0), layout.field)
+    fixture_cache_or_space_query(v(0, 0), field)
+    fixture_cache_or_space_query(v(0, 0), layout.field)
 }
-fn field_query_near_dirty_terrain(ground: Vec2, field: FieldCache) { }
-fn field_query_near_dirty_terrain(ground: Vec2, space: SpaceId) { mag_world_state() }
+fn fixture_cache_or_space_query(ground: Vec2, field: FieldCache) { }
+fn fixture_cache_or_space_query(ground: Vec2, space: SpaceId) { mag_world_state() }
 "#;
     let path = repo_root().join("mag/fixture.rock");
     let functions = function_declarations(source, &path);
@@ -557,9 +557,9 @@ fn field_query_near_dirty_terrain(ground: Vec2, space: SpaceId) { mag_world_stat
 
     for argument in ["space", "unknown"] {
         let source = source.replace("field: FieldCache, world: World", "space: SpaceId")
-            .replace("field_query_near_dirty_terrain(v(0, 0), field)",
-                &format!("field_query_near_dirty_terrain(v(0, 0), {argument})"))
-            .replace("field_query_near_dirty_terrain(v(0, 0), layout.field)", "");
+            .replace("fixture_cache_or_space_query(v(0, 0), field)",
+                &format!("fixture_cache_or_space_query(v(0, 0), {argument})"))
+            .replace("fixture_cache_or_space_query(v(0, 0), layout.field)", "");
         let (counts, _) = census_from(&function_declarations(&source, &path));
         assert_eq!(counts["mag/fixture.rock"].world_state, 1,
             "SpaceId and unresolved calls must retain the ambient overload");

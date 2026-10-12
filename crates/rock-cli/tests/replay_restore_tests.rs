@@ -1106,7 +1106,6 @@ fn mag_seek_equivalence_state_names(
         "DUNGEON_RELIGHT_WALL_BATCHES",
         "DUNGEON_RELIGHT_FLOOR_BATCHES",
         "DUNGEON_RELIGHT_BUILDS",
-        "FIELD_CLOSED_DOOR_SCANS_TOTAL",
         "LIGHTING_BUILD_WORK_LAST_CALL",
         "LINT_OVERLAY_REFRESH_BUILDS",
     ] {
