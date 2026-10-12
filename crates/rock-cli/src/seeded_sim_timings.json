@@ -115,7 +115,6 @@
     "actor_query_scaling_workload": 1199,
     "actor_spatial_membership_is_current_within_the_frame": 1226,
     "actor_spatial_queries_ignore_distant_population": 615,
-    "actor_target_selection_avoids_per_call_heap_results": 2266,
     "adjacent_lighting_masks_share_borders_and_invalidate": 591,
     "adventure_supply_crate_blocks_its_ground_base": 328,
     "adventurer_acquires_with_the_player_elsewhere": 308,
