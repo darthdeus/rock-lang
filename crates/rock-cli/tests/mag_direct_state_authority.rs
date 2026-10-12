@@ -1288,7 +1288,8 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "player.apply_bandage_intent_in(world, ctx.intents.consumables)",
             "mag_capture_status_presentation(world)",
             "player.update_walls_in(world, dt)",
-            "active.update_ground_pickup(world)"][..]),
+            "world_ground_pickup_command(world.root,",
+            "WorldGroundPickupCommand::Player(WorldGroundPickupPlayer {"][..]),
         ("mag_tick_death_cull", &["cull_dead_mobs_in(ctx.world)"][..]),
         ("mag_tick_corpses_respawns", &["tick_corpses(ctx.world, ctx.dt)"][..]),
         ("mag_tick_wisp_sacrifice", &[
