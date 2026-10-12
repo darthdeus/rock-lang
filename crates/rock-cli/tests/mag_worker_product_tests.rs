@@ -80,23 +80,32 @@ fn mag_worker_boundary_restores_game_diagnostics() {
 
 #[test]
 fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
-    // The seed entry was ported to package tests and deleted; the probe keeps
-    // the queue's scene half.
+    // Package tests cover asset installation. This seed/probe pair keeps the
+    // live worker boundary: authored Scene roots and gameplay state must reset.
     let entries = vec![
+        "mag::boot_image_scene_registry_npcs_seed".to_string(),
         "mag::boot_image_scene_registry_npcs_probe".to_string(),
         "mag::spell_damages".to_string(),
     ];
     let worker = run_worker_suite(Backend::Skull, "mag", rock(), &entries)
         .expect("MAG BootImage product queue must run");
     assert_eq!(worker.len(), entries.len(), "one record per queued entry");
+    for (entry, (record, crossed)) in entries.iter().zip(&worker) {
+        eprintln!(
+            "BootImage {entry}: {} crossed={crossed} checks={} failures={}",
+            record.verdict(), record.expects_pass.len(), record.expects_fail.len()
+        );
+    }
     assert_eq!(
         worker.iter().filter(|(_, crossed)| *crossed).count(),
-        1,
-        "the successor entry must cross a live worker boundary"
+        entries.len() - 1,
+        "both successor entries must cross a live worker boundary"
     );
 
+    assert!(worker[1].1, "the NPC probe must cross the seed's live worker boundary");
+
     for (entry, (worker_record, _)) in entries.iter().zip(&worker) {
-        assert_eq!(worker_record.verdict(), "PASS", "worker entry `{entry}` failed");
+        assert_eq!(worker_record.verdict(), "PASS", "worker entry `{entry}` failed: {worker_record:?}");
         assert!(
             worker_record.errors.is_empty(),
             "worker entry `{entry}` emitted errors: {worker_record:?}"
