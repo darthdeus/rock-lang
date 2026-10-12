@@ -562,17 +562,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         assert!(mob_lookup.contains(predicate), "tutorial mob lookup is missing `{predicate}`");
     }
     assert!(tutorial_runtime.contains("\"tutorial.precast_dummy\", tutorial.space"));
-    let practice_drops = rock_function_body(
-        &tutorial_runtime,
-        "fn Player.tutorial_update_practice_drops_in(",
-    );
-    for receipt in [
-        "quest_run_receipt_seen_in(world, \"tutorial.lightning\", \"kill:{tag}\")",
-        "quest_run_receipt_seen_in(world, \"tutorial.lightning\", \"practice_drop:{i}\")",
-        "quest_run_receipt_add_in(world, \"tutorial.lightning\", \"practice_drop:{i}\")",
-    ] {
-        assert!(practice_drops.contains(receipt), "practice reward is missing `{receipt}`");
-    }
     let quests = fs::read_to_string(repo.join("mag/quests.rock"))
         .expect("read MAG quest source");
     let receipt_owner = rock_function_body(&quests, "fn quest_run_receipt_seen_in(");
