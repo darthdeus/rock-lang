@@ -1579,6 +1579,10 @@ fn mag_cast_seek_restores_scheduler_owner() {
     }
 
     let target = 12;
+    // The Task is stamped with the world clock tick. The fixture records
+    // 0.05 s frames and the fixed-step driver runs three 1/60 s world ticks
+    // per frame, so replay frame 12 ends on world tick 36.
+    let target_world_tick = target * 3;
     let common_env = [
         ("MAG_BOOT_PLAYING", "1"),
         ("MAG_REPLAY_CAST_SCHEDULER_PROBE", "1"),
@@ -1616,7 +1620,7 @@ fn mag_cast_seek_restores_scheduler_owner() {
         "ordinary arm must have live cast presentation children: {ordinary_probe}");
     assert!(ordinary_probe["MAG_CAST_PROBE_GLYPHS"].as_i64().is_some_and(|n| n > 0),
         "ordinary arm must have active cast presentation: {ordinary_probe}");
-    assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
+    assert_eq!(ordinary_probe["MAG_CAST_PROBE_TASK_FRAME"], target_world_tick,
         "ordinary casting Task must be pumped on the target tick: {ordinary_probe}");
     assert!(ordinary_probe["MAG_CAST_PROBE_MANA"].as_f64().is_some_and(|mana| mana > 0.0 && mana < 100.0),
         "ordinary cast must have spent mana: {ordinary_probe}");
@@ -1645,9 +1649,9 @@ fn mag_cast_seek_restores_scheduler_owner() {
         assert_eq!(sought_probe[key], ordinary_probe[key],
             "seek landing must reproduce ordinary casting state for {key}");
     }
-    // The cast task runs on the world clock, which the tick-10 keyframe
+    // The cast task runs on the world clock, which the frame-10 keyframe
     // restores; the target stamp shows it was pumped past that keyframe.
-    assert_eq!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"], target,
+    assert_eq!(sought_probe["MAG_CAST_PROBE_TASK_FRAME"], target_world_tick,
         "the restored task must be pumped after the seek, not left at its keyframe frame: {sought_probe}");
     // Keep the targeted scheduler probes above for diagnosis, then require the
     // same full semantic-state equivalence as the general MAG seek oracle.
