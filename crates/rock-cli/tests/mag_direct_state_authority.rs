@@ -1429,13 +1429,12 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         1,
         "the host must invoke the fixed-step driver exactly once per frame"
     );
-    assert_eq!(
-        update
-            .matches("if !world_frozen() {\n        mag_simulation_frame(world, MAG_FRAME_DRIVER, tick_intent, dt)\n        wisp_stage_presentation_in(world)\n    }")
-            .count(),
-        1,
-        "the host must admit the fixed-step driver exactly once per frame"
-    );
+    let frame = rock_function_body(&run, "fn mag_simulation_frame(");
+    let queue = frame.find("driver.presses.push(intent)").expect("pending command queue");
+    let freeze = frame.find("if world_frozen() { return }").expect("driver admission guard");
+    let advance = frame.find("mag_simulation_tick(world, command)").expect("fixed tick loop");
+    assert!(queue < freeze && freeze < advance,
+        "paused commands must enter the queue before simulation admission");
     let host_tick = update.find("mag_simulation_frame(world, MAG_FRAME_DRIVER, tick_intent, dt)").unwrap();
     let host_presenter = update.find("mag_present_status_effects(world)").unwrap();
     assert!(host_tick < host_presenter,
