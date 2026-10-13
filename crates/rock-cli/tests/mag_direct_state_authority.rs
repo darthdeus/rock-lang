@@ -1281,7 +1281,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     }
     let host_runner = rock_function_body(&run, "fn mag_world_tick_runner_in(");
     for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)",
-        "runtime.runner.unwrap().get().unwrap().actor_host = mag_tick_actor_host()"] {
+        "runtime.runner.unwrap().get().unwrap().actor_host = actors"] {
         assert!(host_runner.contains(call), "shared runner construction is missing delegation `{call}`");
     }
     assert!(!host_runner.contains("world_tick_advance("), "acquiring a runner must not advance another tick");
@@ -1292,8 +1292,11 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         < advance.find("world_expedition_schedule_tick(runner, runner.stages.unwrap())").unwrap(),
         "runner preparation must precede the ordered package schedule");
     let runner = rock_function_body(&package_tick, "pub fn world_tick_runner<M, H>(");
-    let actor_host = rock_function_body(&run, "fn mag_tick_actor_host(");
-    assert!(actor_host.contains("player_input:") && actor_host.contains("mag_tick_actor_pre_mob(r.host)"));
+    assert!(host_runner.contains("mag_actor_turn_host(")
+        && host_runner.contains("actors.player_input =")
+        && host_runner.contains("mag_tick_actor_pre_mob(r.host)"));
+    assert!(!run.contains("fn mag_tick_actor_host(") && !run.contains("fn mag_tick_actor_view("),
+        "the runner must use the one actor host constructor without a second adapter");
     for call in ["input(r)", "world_tick_actors(r)",
         "world_doors_update(r.root.get().unwrap(), r.host, r.door_host, player, r.dt)"] {
         assert!(runner.contains(call), "package runner is missing authoritative stage `{call}`");
