@@ -829,7 +829,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "state_subscribers: Map<string, [string]>",
         "region_subscribers: [string]",
         "dependents: Map<string, [string]>",
-        "location_observed: bool",
+        "last_region_place: Place?",
     ] {
         assert_eq!(
             quest_runtime.matches(field).count(),
