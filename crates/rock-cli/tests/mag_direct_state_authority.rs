@@ -1219,7 +1219,18 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 26, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 25, "WorldState field census changed: {fields:?}");
+    assert!(root_state.lines().any(|line| line.trim() == "walls: Arena<WallTile>,"),
+        "MagWorldRoot owns cast-wall rows");
+    assert!(!world_state.lines().any(|line| line.trim_start().starts_with("walls:")),
+        "WorldState must not duplicate the root's cast-wall arena");
+    let space_state = world.split_once("struct SpaceState {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body).expect("read SpaceState body");
+    for field in ["prop_collision_cells", "stair_ends", "travel_points", "travel_point_cells", "travel_points_dirty"] {
+        assert!(!space_state.lines().any(|line| line.trim_start().starts_with(&format!("{field}:"))),
+            "SpaceState must not duplicate the world's static {field}");
+    }
     assert!(digest.contains("for space_handle in world.spaces"));
     assert!(digest.contains("let space = space_handle.get().unwrap()"));
     for field in fields {
