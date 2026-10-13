@@ -615,21 +615,12 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let run_ui = fs::read_to_string(repo.join("mag/quest_ui.rock"))
         .expect("read MAG run UI source");
     for field in [
-        "bank_open: bool",
-        "shop_open: bool",
-        "inventory_open: bool",
-        "spells_open: bool",
-        "journal_open: bool",
-        "quest_log_open: bool",
-        "quest_tracker_open: bool",
         "quest_log_tab: string",
         "quest_log_scroll: float",
         "quest_tracker_scroll: float",
         "quest_giver_open_id: string",
         "quest_giver_confirm_id: string",
         "quest_giver_open_npc: InhabitantId?",
-        "menu_open: bool",
-        "combat_report_open: bool",
         "combat_report_details: bool",
         "combat_report_scroll: float",
         "combat_report_expanded: Map<string, bool>",
@@ -642,25 +633,20 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     }
     let panels = fs::read_to_string(repo.join("mag/panels.rock"))
         .expect("read MAG panel source");
-    assert!(
-        panels.contains("is_open: fn(RunUiState) -> bool"),
-        "panel openness must consume the typed run UI value"
-    );
-    assert_eq!(
-        panels.matches("let ui = MAG_RUN_UI").count(),
-        5,
-        "each panel scan must bind the run UI value once"
-    );
-    assert_eq!(
-        panels.matches(".is_open(ui)").count(),
-        5,
-        "every production panel scan must use its bound run UI value"
-    );
-    assert_eq!(
-        panels.matches("is_open: () => MAG_RUN_UI").count(),
-        0,
-        "panel definitions must not reload Session state per catalog entry"
-    );
+    let state = rock_function_body(&panels, "struct PanelState");
+    for field in ["open: bool", "chrome: Panel", "seq: int", "presence: UiPresence"] {
+        assert_eq!(state.matches(field).count(), 1,
+            "PanelState must own `{field}` exactly once");
+    }
+    assert_eq!(panels.matches("global PANEL_STATES:").count(), 1,
+        "windows must share one live state table");
+    assert!(panels.contains("fn panel_is_open("),
+        "panel scans must consume the window state policy");
+    for stale in ["is_open: fn(RunUiState)", "let ui = MAG_RUN_UI", "bank_open: bool",
+                  "journal_open: bool", "quest_tracker_open: bool"] {
+        assert!(!panels.contains(stale) && !run_ui.contains(stale),
+            "window state must not retain `{stale}`");
+    }
     let attach_player = rock_function_body(&world, "fn WorldState.attach_player(");
     assert!(
         attach_player.contains("entity.get().unwrap().entity = entity"),
@@ -1002,7 +988,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         );
     }
     assert_eq!(journal.matches("global journal_open: bool").count(), 0,
-        "journal visibility belongs to RunUiState");
+        "journal visibility belongs to the window state table");
     for cache in [
         "global JOURNAL_DRAW_ORDER: [int]",
         "global JOURNAL_DRAW_ROWS: Map<int, JournalDrawRow>",
