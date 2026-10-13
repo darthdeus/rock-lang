@@ -2990,10 +2990,10 @@ fn build_state_nobox_accessors(
 /// `register_sim` registry, so the wire set the runner sees matches what the
 /// game can dispatch.
 /// The headless window sims that never read pixels boot in. 320x180 is 16:9
-/// like the 1920x1080 game default at a thirty-sixth of the pixels, so
-/// aspect-locked logic (camera framing,
-/// `gameplay_visible_world_width(1920/1080)`) is unaffected while scene render
-/// targets shrink to a few megabytes. Four capture sims already run this size
+/// like the 1920x1080 game default at a thirty-sixth of the pixels, so scene
+/// render targets shrink to a few megabytes. A game's live window can have a
+/// different aspect: window-derived camera framing must refresh on resize
+/// before a worker entry runs. Four capture sims already run this size
 /// by explicit choice (`frame_stream_capture`, `low_fps_nudge`,
 /// `meme_capture_sound`), so it is a blessed sim size, not a new extreme.
 pub const SIM_SMALL_WINDOW: &str = "320x180";
