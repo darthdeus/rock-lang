@@ -2331,7 +2331,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         ],
     );
     assert_eq!(
-        settings_recorded["mag"]["SETTINGS_OPEN"].as_bool(),
+        settings_recorded["mag"]["PANEL_STATES"]["settings"]["open"].as_bool(),
         Some(true),
         "the menu recording fixture must activate Settings"
     );
@@ -2351,7 +2351,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         ],
     );
     assert_eq!(
-        settings_reference["mag"]["SETTINGS_OPEN"].as_bool(),
+        settings_reference["mag"]["PANEL_STATES"]["settings"]["open"].as_bool(),
         Some(true),
         "ordinary menu playback must activate Settings"
     );
@@ -2371,11 +2371,18 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         ],
     );
     assert_eq!(
-        settings_sought["mag"]["SETTINGS_OPEN"], settings_reference["mag"]["SETTINGS_OPEN"],
+        settings_sought["mag"]["PANEL_STATES"]["settings"]["open"],
+        settings_reference["mag"]["PANEL_STATES"]["settings"]["open"],
         "a cadence-keyframe seek must restore Mag's retained focus target"
     );
     assert_eq!(
-        settings_sought["mag"]["CREDITS_OPEN"], settings_reference["mag"]["CREDITS_OPEN"],
+        settings_reference["mag"]["PANEL_STATES"]["credits"]["open"].as_bool(),
+        Some(false),
+        "ordinary menu playback must leave Credits closed"
+    );
+    assert_eq!(
+        settings_sought["mag"]["PANEL_STATES"]["credits"]["open"],
+        settings_reference["mag"]["PANEL_STATES"]["credits"]["open"],
         "restored focus must not activate a different menu item"
     );
 }
@@ -2487,7 +2494,7 @@ fn mag_main_menu_seek_state_equivalence_survives_resimulation() {
         "replay screen={} starts={} slots={} chosen={} active_world={} pending={} requested={} failed={} fade_target={} diag={}",
         reference["mag"]["SCREEN"],
         reference["mag"]["MAG_RUN_STARTS"],
-        reference["mag"]["SAVE_SLOTS_OPEN"],
+        reference["mag"]["PANEL_STATES"]["save_slots"]["open"],
         reference["mag"]["SAVE_SLOT_CHOSEN"],
         reference["mag"]["MAG_ACTIVE_WORLD_ID"],
         reference["mag"]["MAG_RUN_ADMISSION_PENDING"],
@@ -3684,8 +3691,8 @@ fn literal_temporary_path_mag_product_smoke() {
     assert_eq!(diag["MAG_LITERAL_SMOKE_MENU"].as_i64(), Some(1), "{diag}");
     assert_eq!(diag["MAG_LITERAL_SMOKE_FIRST_START"].as_i64(), Some(1),
         "screen={} slots={} consent={} play_effect={} diag={diag}",
-        run.state["mag"]["SCREEN"], run.state["mag"]["SAVE_SLOTS_OPEN"],
-        run.state["mag"]["CONSENT_OPEN"], diag["MAG_PLAY_EFFECT_SCREEN"]);
+        run.state["mag"]["SCREEN"], run.state["mag"]["PANEL_STATES"]["save_slots"]["open"],
+        run.state["mag"]["TELEMETRY_CONSENT_PLAY_LATCHED"], diag["MAG_PLAY_EFFECT_SCREEN"]);
     assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "{diag}");
     assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(270), "the second scrub must start at the backward target: {diag}");
     assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(300), "the second scrub must move forward: {diag}");

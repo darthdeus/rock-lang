@@ -149,10 +149,10 @@ fn replay_uses_recorded_bindings_after_disk_changes() {
     assert!(clean_run.status.success(), "clean replay failed: {}", String::from_utf8_lossy(&clean_run.stderr));
     let clean_state: serde_json::Value = serde_json::from_slice(&clean_run.stdout).expect("clean replay state");
     let changed_spellbook_open =
-        &changed_state["mag"]["MAG_RUN_UI"]["spells_open"];
+        changed_state["mag"]["PANEL_STATES"]["spells"]["open"].as_bool();
     let clean_spellbook_open =
-        &clean_state["mag"]["MAG_RUN_UI"]["spells_open"];
-    assert_eq!(changed_spellbook_open, &serde_json::Value::Bool(true),
+        clean_state["mag"]["PANEL_STATES"]["spells"]["open"].as_bool();
+    assert_eq!(changed_spellbook_open, Some(true),
         "the recorded x binding must open the initially closed spell panel");
     assert_eq!(changed_spellbook_open, clean_spellbook_open,
         "changing disk bindings must not change replay behavior");
