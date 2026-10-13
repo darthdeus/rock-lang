@@ -932,9 +932,9 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         );
     }
     assert_eq!(
-        quests.matches(".quest_runtime = QuestRuntimeState {}").count(),
+        quests.matches(".quest_runtime = quest_runtime_for_catalog_reset(").count(),
         1,
-        "quest runtime reset must replace the complete domain exactly once"
+        "quest runtime reset must replace the domain through its library factory exactly once"
     );
     for stale_reset in [
         "player_gesture =",
