@@ -1273,7 +1273,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     ] {
         assert!(prepare.contains(call), "tick preparation is missing authoritative call `{call}`");
     }
-    for call in ["mag_world_tick_runner_in(world)", "world_tick_advance(tick, dt)"] {
+    for call in ["mag_world_tick_runner_in(world)", "world_tick_advance(tick, MAG_TICK_DT)"] {
         assert!(tick.contains(call), "canonical tick is missing runner delegation `{call}`");
     }
     let host_runner = rock_function_body(&run, "fn mag_world_tick_runner_in(");
@@ -1425,18 +1425,18 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "the host must present the sampled status state once"
     );
     assert_eq!(
-        update.matches("mag_simulation_tick(world, tick_intent, dt)").count(),
+        update.matches("mag_simulation_frame(world, MAG_FRAME_DRIVER, tick_intent, dt)").count(),
         1,
-        "the host must consume the canonical tick exactly once"
+        "the host must invoke the fixed-step driver exactly once per frame"
     );
     assert_eq!(
         update
-            .matches("if !world_frozen() {\n        mag_simulation_tick(world, tick_intent, dt)\n        wisp_stage_presentation_in(world)\n    }")
+            .matches("if !world_frozen() {\n        mag_simulation_frame(world, MAG_FRAME_DRIVER, tick_intent, dt)\n        wisp_stage_presentation_in(world)\n    }")
             .count(),
         1,
-        "the host must admit the canonical tick exactly once"
+        "the host must admit the fixed-step driver exactly once per frame"
     );
-    let host_tick = update.find("mag_simulation_tick(world, tick_intent, dt)").unwrap();
+    let host_tick = update.find("mag_simulation_frame(world, MAG_FRAME_DRIVER, tick_intent, dt)").unwrap();
     let host_presenter = update.find("mag_present_status_effects(world)").unwrap();
     assert!(host_tick < host_presenter,
         "the host must present the pre-contact sample after simulation returns");
@@ -1490,8 +1490,8 @@ fn mag_tick_intent_is_overwritten_before_the_live_tick_consumes_it() {
         .find("let tick_intent = if player_input { mag_tick_intent_from_input(player) } else { GRAPHICS_DETECT_IDLE_INTENT }")
         .expect("host input adapter call");
     let consume = update
-        .find("mag_simulation_tick(world, tick_intent, dt)")
-        .expect("canonical tick call");
+        .find("mag_simulation_frame(world, MAG_FRAME_DRIVER, tick_intent, dt)")
+        .expect("fixed-step driver call");
     assert!(fill < consume, "input must be filled before the live tick consumes it");
 }
 
