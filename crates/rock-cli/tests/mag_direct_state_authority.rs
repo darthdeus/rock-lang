@@ -688,7 +688,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "stop_ru: bool",
         "stride_hops: int",
         "loco_start_variant: PlayerStartVariant",
-        "cast_words: CastWords",
         "ritual_cast: BranchedRitualCast",
         "ritual_acquisition_event_seq: int",
         "law: PlayerLaw",
@@ -706,6 +705,18 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     assert_eq!(followers.matches("follower_slots: [mag_simulation::inhabitant::ActorLink?] = [null, null, null, null]").count(), 1,
         "world runtime must own the actor-reference follower slots once");
     assert!(!player_state.contains("follower_slots:"), "MAG must not duplicate follower slots");
+    for field in [
+        "cast_words: super::player_cast_words::WorldPlayerCastWords",
+        "shove: mag_simulation::ShovePressState",
+        "move_speed: float",
+        "step_speed: float",
+    ] {
+        assert_eq!(followers.matches(field).count(), 1,
+            "the world player controller must own `{field}` once");
+    }
+    for field in ["cast_words:", "shove_press:", "move_speed:", "move_step_speed:", "cast_co:"] {
+        assert!(!player_state.contains(field), "MAG must not duplicate the controller's `{field}`");
+    }
     let law = fs::read_to_string(repo.join("mag-simulation/notoriety.rock"))
         .expect("read simulation player law source");
     let law_state = law.split_once("pub struct PlayerLaw {")
