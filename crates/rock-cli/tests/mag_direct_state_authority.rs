@@ -777,8 +777,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         );
     }
     for method in [
-        "fn Player.summon_slot_pet(player",
-        "fn Player.max_pets(player)",
         "fn Player.summon_label_spans_in(player",
         "fn Player.party_any_pet(player)",
         "fn Player.spell_pump_highlights_player(player)",
@@ -791,6 +789,12 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
                 .contains(method)),
             "missing Player-owned receiver declaration `{method}`"
         );
+    }
+
+    let bonds = fs::read_to_string(repo.join("mag-world/actor_bond.rock"))
+        .expect("world bond source");
+    for declaration in ["pub fn world_bond_slot<", "pub fn world_bond_count<"] {
+        assert_eq!(bonds.matches(declaration).count(), 1, "world must own `{declaration}` once");
     }
 
     let main = fs::read_to_string(repo.join("mag/main.rock"))
