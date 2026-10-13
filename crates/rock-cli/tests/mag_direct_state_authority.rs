@@ -1060,7 +1060,10 @@ fn mag_player_queries_are_receiver_methods() {
         .parent()
         .and_then(Path::parent)
         .expect("rock workspace root");
-    let source = fs::read_to_string(repo.join("mag/player.rock")).expect("read MAG player source");
+    let source = ["mag/player.rock", "mag/player_draw.rock"]
+        .iter()
+        .map(|path| fs::read_to_string(repo.join(path)).expect("read MAG player source"))
+        .collect::<String>();
     let required = [
         "fn Player.is_paralyzed(player)",
         "fn Player.effective_armor(player)",
@@ -1342,7 +1345,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let player_slot = rock_function_body(&run, "fn mag_tick_actor_pre_mob(");
     assert_eq!(player_slot.matches("world_player_actions_dispatch(").count(), 1,
         "MAG must dispatch its player queue exactly once");
-    let combat = fs::read_to_string(repo.join("mag/combat.rock"))
+    let combat = fs::read_to_string(repo.join("mag/combat_player_cast.rock"))
         .expect("read MAG cast intent facade");
     let cast_facade = rock_function_body(&combat, "fn PlayerActor.update_casting_in(");
     assert!(cast_facade.contains("world_player_cast_intent_enqueue("),
