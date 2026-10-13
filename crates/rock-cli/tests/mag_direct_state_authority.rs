@@ -1298,12 +1298,14 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "player.update_walls_in(world, dt)",
             "world_ground_pickup_command(world.root,",
             "WorldGroundPickupCommand::Player(WorldGroundPickupPlayer {"][..]),
-        ("mag_tick_death_cull", &["cull_dead_mobs_in(ctx.world)"][..]),
-        ("mag_tick_corpses_respawns", &["tick_corpses(ctx.world, ctx.dt)"][..]),
         ("mag_tick_wisp_sacrifice", &[
             "active.player.tick_wisp_intent_in(ctx.world, ctx.dt)",
             "wisp_motes_tick_in(ctx.world, ctx.dt)"][..]),
     ];
+    assert!(host_runner.contains("corpse_present: (ctx, dt) => present_corpses(ctx.world, dt)"),
+        "shared runner must present corpses through the package corpse stage");
+    assert!(host_runner.contains("corpse_removed: (ctx) => save_mark_dirty_in(ctx.world)"),
+        "shared runner must mark saves dirty when the package retires a corpse");
     let schedule = fs::read_to_string(repo.join("mag-world/expedition_schedule.rock"))
         .expect("read package expedition schedule");
     let schedule_tick = rock_function_body(&schedule, "pub fn world_expedition_schedule_tick<W>(");
