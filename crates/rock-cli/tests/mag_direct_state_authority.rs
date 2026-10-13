@@ -340,6 +340,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "reset_potion_cooldown(".to_string(),
         "global bandage_slips:".to_string(),
         "global summon_slots:".to_string(),
+        "global follower_slots:".to_string(),
         "global outline_last_t:".to_string(),
         "global outline_last_color:".to_string(),
         "global spell_pump_outline_until:".to_string(),
@@ -692,7 +693,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "ritual_acquisition_event_seq: int",
         "law: PlayerLaw",
         "combat_latch: CombatLatchState",
-        "summon_slots: [MobId?]",
         "cast_outline: PlayerCastOutline",
     ] {
         assert_eq!(
@@ -701,6 +701,11 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "scene-owned Player must contain `{field}` exactly once"
         );
     }
+    let followers = fs::read_to_string(repo.join("mag-world/player_actions.rock"))
+        .expect("world player runtime source");
+    assert_eq!(followers.matches("follower_slots: [mag_simulation::inhabitant::ActorLink?] = [null, null, null, null]").count(), 1,
+        "world runtime must own the actor-reference follower slots once");
+    assert!(!player_state.contains("follower_slots:"), "MAG must not duplicate follower slots");
     let law = fs::read_to_string(repo.join("mag-simulation/notoriety.rock"))
         .expect("read simulation player law source");
     let law_state = law.split_once("pub struct PlayerLaw {")
@@ -739,7 +744,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for field in [
         "combat_latch: CombatLatchState = CombatLatchState {}",
         "combat: PlayerCombatState = PlayerCombatState {}",
-        "summon_slots: [MobId?] = [null, null, null, null]",
         "cast_outline: PlayerCastOutline = PlayerCastOutline {}",
     ] {
         assert_eq!(
