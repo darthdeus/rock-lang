@@ -1292,6 +1292,9 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         < advance.find("world_expedition_schedule_tick(runner, runner.stages.unwrap())").unwrap(),
         "runner preparation must precede the ordered package schedule");
     let runner = rock_function_body(&package_tick, "pub fn world_tick_runner<M, H>(");
+    let actor_source = fs::read_to_string(repo.join("mag/mobs_turn.rock"))
+        .expect("read MAG actor turn source");
+    let actor_host = rock_function_body(&actor_source, "fn mag_actor_turn_host<W>(");
     assert!(host_runner.contains("mag_actor_turn_host(")
         && host_runner.contains("actors.player_input =")
         && host_runner.contains("mag_tick_actor_pre_mob(r.host)"));
