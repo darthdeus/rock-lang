@@ -1,4 +1,4 @@
-//! Oracle for skull incremental codegen (`docs/skull-incremental-emit-plan.md`):
+//! Oracle for skull incremental codegen (`docs/skull-incremental-emit-split.md`):
 //! after re-emitting only the bodies a (simulated) edit re-inferred, the assembled
 //! Lua must be BYTE-IDENTICAL to a fresh full emit of the edited workspace. The
 //! interesting case is editing an INLINED callee — its callers' chunks contain its

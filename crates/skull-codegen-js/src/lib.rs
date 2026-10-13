@@ -573,7 +573,7 @@ function __rock_make_enum(variant, ty, kv) {
 /// therefore under-reports the shape, and an `embed` field is stored as flat
 /// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's
 /// `_G.__ROCK_TYPE_TABLE` lookup replaced by compile-time-emitted dispatch
-/// (`docs/runtime-globals-audit.md` S4.2b) -- no universal type table on JS.
+/// (`docs/feature-inventory.md` S4.2b) -- no universal type table on JS.
 pub const JS_INSPECT_RUNTIME: &str = r#"
 var __rock_inspect_ty = {};
 var __rock_col_mat = {};

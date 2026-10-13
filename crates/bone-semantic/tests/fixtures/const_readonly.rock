@@ -4,7 +4,7 @@
 //! code is meaningless (and would be silently clobbered on the next reload).
 //! Field/index writes THROUGH a const value are out of scope here (a separate
 //! decision). Mutable `global` writes are unrestricted.
-//! Design: docs/skull-const-hot-reload-plan.md.
+//!
 //!
 //! Compound assignment (`FOO += 1`) goes through the same check but desugars to
 //! a stdlib `__op_add` call this bare (no-stdlib) harness can't resolve, so it's

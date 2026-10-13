@@ -4208,7 +4208,7 @@ const RUNNER_OWNED_ENV_KEYS: &[&str] =
 /// frame rects, sheet indices and UVs are unchanged and only sampling
 /// resolution drops. A rendering mag worker holds 3.2 GB of RGBA8 texture
 /// pixels without it, which is what stops a second suite fitting in this
-/// machine's memory (`docs/sim-audits-2026-09-11/headless-vram-report.md`). A
+/// machine's memory. A
 /// sim whose assertion genuinely needs the file's own texels declares
 /// `@sim_env("STONE_IMAGE_MAX_SIDE", "0")`, which is a real boot difference and
 /// isolates it from the capped group. No production boot publishes it: `rock
@@ -4258,7 +4258,7 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
 /// per entry as well, and whatever it configures has to be reset per entry.
 /// `MAG_SCENE` is the recorded counter-example: read live, re-applied correctly
 /// at every entry, and still unshareable because two pieces of what its scene
-/// sets up survive the boundary (`docs/sim-boot-cost-analysis.md`, queue item 5).
+/// sets up survive the boundary.
 ///
 /// Symmetric to `SIM_WORKER_ISOLATED`, which is the opt-OUT declared the same
 /// way; both are properties of the fixture, stated at the fixture.
@@ -4533,8 +4533,7 @@ fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
 /// silhouettes and gameplay all the same; decoding mag's sheets for it costs
 /// about 6 s of CPU and 456 MB of driver allocation per rendering process, and
 /// the probe over all 132 non-manual rendering sims found only 22 that read
-/// texels at all (`docs/sim-audits-2026-09-11/headless-vram-report.md`, the
-/// 2026-09-12 section). Those 22 and the manual texel readers declare
+/// texels at all. Those 22 and the manual texel readers declare
 /// `@sim_env("STONE_ASSET_STUB", "0")`, which wins because `preset_env` is
 /// layered after this.
 ///

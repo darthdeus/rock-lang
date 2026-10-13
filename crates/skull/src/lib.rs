@@ -1511,7 +1511,7 @@ fn lua_key_read(table: &str, key: &str) -> String {
 /// Scalar payloads only (cut 1), so there is no inter-enum dependency; emitted
 /// BEFORE value structs so a future enum-typed value-struct field resolves. Name-
 /// sorted for deterministic output. Reflection is sacrificed: there is no
-/// `{__variant}` table -- see docs/skull-enum-increment2-plan.md.
+/// `{__variant}` table -- see `docs/skull-enum-value-types.md`.
 fn enum_cdata_defs(ws: &Workspace) -> String {
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -3156,8 +3156,8 @@ mod tests {
         let lua = emit(src);
         // `iv()` is a small straight-line callee (a scalarized value-struct ctor),
         // so the inline pass splices it into `run()` and the hot loop traces with
-        // no per-iter call frame -> no `= iv(` call survives. Splice mechanics +
-        // policy: `docs/skull-inlining-plan.md`.
+        // no per-iter call frame -> no `= iv(` call survives. Splice mechanics:
+        // `inline.rs` in `skull-transform`.
         assert!(
             !lua.contains("= iv("),
             "expected iv() inlined (no `= iv(` call), got:\n{lua}"

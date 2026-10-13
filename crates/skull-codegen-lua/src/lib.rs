@@ -16,7 +16,7 @@
 //! Naming: a value-producing inst `Idx<Inst>` renders as `v<raw>`, a cell as
 //! `c<raw>`, a block as `bb<raw>` — raw arena indices, so no renumbering pass and
 //! references are a direct index format. (Regalloc to fit luajit's 200-local cap
-//! is a later refinement; see `docs/skull-bone-mir-faithful-plan.md` Phase 5.)
+//! is a later refinement.)
 
 mod frame_limits;
 mod regalloc;

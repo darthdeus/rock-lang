@@ -26,7 +26,7 @@ pub struct Trivia {
     /// separately from `//` -- a block comment can sit inline anywhere and MUST
     /// round-trip verbatim in place (never converted to a `//` line comment, and
     /// never dropped). The formatter treats a construct that carries one as a
-    /// "preserve verbatim" trigger. `docs/skull-fmt-block-comment-plan.md`.
+    /// "preserve verbatim" trigger.
     block: BTreeMap<usize, BlockComment>,
 }
 

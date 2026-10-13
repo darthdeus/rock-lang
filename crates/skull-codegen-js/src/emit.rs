@@ -5425,7 +5425,7 @@ fn emit_inspect_ty(
 /// Per-type `__rock_col_mat` registry for every element type the program stores
 /// as columns: the JS half of luajit's `__rock_materialize_column_type`, which
 /// reads `_G.__ROCK_TYPE_TABLE` for the field walk. JS has no type table and is
-/// not getting one (`docs/runtime-globals-audit.md` S4.2b wants luajit's DELETED),
+/// not getting one (`docs/feature-inventory.md` S4.2b wants luajit's DELETED),
 /// and the element type is a compile-time fact at every column site anyway --
 /// that is exactly why `spec_key_has_target_storage` forces specialization for one.
 fn emit_col_mat(

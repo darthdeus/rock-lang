@@ -14,7 +14,7 @@
 //! Phase 1 is straight-line ONLY: control flow (`if`/`&&`/`??`/loops/`match`),
 //! coroutines, calls-to-`FuncRef`, and aggregates are not here yet — they
 //! `gap` (return a clear error) and land in later phases. The gate is the real
-//! corpus, not this comment; see `docs/skull-bone-mir-faithful-plan.md`.
+//! corpus, not this comment.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};

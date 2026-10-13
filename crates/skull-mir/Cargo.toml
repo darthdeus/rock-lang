@@ -9,7 +9,7 @@ edition = "2024"
 # instruction's `Idx<Inst>` IS its value, and control flow lives only in block
 # terminators. NO SSA, NO block params (that arrives later as an additive
 # mem2reg pass). Transforms live in `skull-transform`, codegen in
-# `skull-codegen-*`. Plan: docs/skull-bone-mir-faithful-plan.md.
+# `skull-codegen-*`.
 
 [dependencies]
 comfy-la-arena = { workspace = true }

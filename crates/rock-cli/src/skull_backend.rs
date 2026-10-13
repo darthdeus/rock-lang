@@ -2313,7 +2313,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
     // only the re-inferred chunks (+ their inline-dependent callers), reusing the
     // rest. An interface/structural change (signature, add/remove file) shifts
     // `Idx<Function>`, so the cache is rebuilt with a full emit. See
-    // `docs/skull-incremental-emit-plan.md`.
+    // `docs/skull-incremental-emit-split.md`.
     let mut session: Option<bone_incremental::session::Session> = None;
     let mut cache: Option<skull::mir_emit::SkullEmitCache> = None;
 

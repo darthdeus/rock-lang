@@ -6,8 +6,7 @@
 //! the global `print` (rock's `print` is `extern(lua)` -> the Lua global) to
 //! capture each `@test`'s stdout, then compares a `@test(output = "...")` to its
 //! declared output (a plain `@test` must merely run clean). This is what proves
-//! the new path is *correct*, not just that it emits
-//! (`docs/skull-bone-mir-faithful-plan.md` Phase 6).
+//! the new path is *correct*, not just that it emits.
 //!
 //! Ignored by default; run with:
 //!   cargo test -p skull --test mir_execution_oracle -- --ignored --nocapture

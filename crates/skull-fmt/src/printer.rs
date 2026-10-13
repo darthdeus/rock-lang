@@ -1022,7 +1022,7 @@ impl<'a> Printer<'a> {
     /// one-element-per-line: elements that shared a source line are sliced
     /// VERBATIM together, preserving the author's intra-row column alignment and
     /// field packing (the formatter is a layout-preserver here, not a
-    /// normalizer -- `docs/skull-fmt-layout-preservation-plan.md`). An element
+    /// normalizer -- see `docs/skull-fmt-plan.md`). An element
     /// that is itself multi-line recurses structurally (its pre-rendered `doc`)
     /// so nested levels re-indent correctly. Trailing comma: non-last rows
     /// always; last row source-derived. No interior-comment handling -- callers

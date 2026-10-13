@@ -204,7 +204,7 @@ pub(crate) fn struct_field_ty(
     substitute(gamma, field_ty, &subs, span).map_err(StructFieldError::from)
 }
 
-/// GLSL-style swizzle read on the float vec structs (docs/vec-swizzles-plan.md):
+/// GLSL-style swizzle read on the float vec structs (docs/agent-reference/language.md):
 /// one alphabet (`xyzw` | `rgba`), every component within the receiver's arity,
 /// at most 4 components. Result: len 1 -> float, len N -> VecN. Reached only on
 /// a real-field miss, so len-1 `x/y/z/w` never arrive here (`r/g/b/a` do).

@@ -8,7 +8,7 @@ edition = "2024"
 # printer never dispatches on operand types (the IR is already typed -- D8/P3);
 # it depends on `bone` ONLY to resolve a `Call`'s `FuncRef` to its `Function`
 # (mangling + extern/inline-lua emission shape -- bone-mir-design lines 160-164),
-# never to look up an operand's type. Plan: docs/skull-bone-mir-faithful-plan.md.
+# never to look up an operand's type.
 
 [dependencies]
 comfy-la-arena = { workspace = true }

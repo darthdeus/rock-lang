@@ -1268,7 +1268,7 @@ impl Builder<'_> {
     /// `Some(shape)` iff `base.field` is a flattenable enum field: `base` is a
     /// non-`value` struct and the field's declared type is a [`flat_enum_shape`]
     /// enum. Drives the construct/store/match/materialize rewrites.
-    /// A swizzle read (`v.yx`, `c.rgb` -- docs/vec-swizzles-plan.md): the base's
+    /// A swizzle read (`v.yx`, `c.rgb` -- docs/agent-reference/language.md): the base's
     /// inferred type is a float vec and `field` is a valid synthetic swizzle for
     /// it. Bone already accepted the read, so this only distinguishes swizzles
     /// from real fields (len-1 `x/y/z/w`) and non-vec bases.

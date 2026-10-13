@@ -1,7 +1,7 @@
 //! skull-parser: an arena-allocated reimplementation of Rock's surface
 //! AST + parser, built on `rock-tokenizer` (lexer) and `rock-core`
 //! (spans, diagnostics). Goal: A/B the arena allocation strategy against
-//! rock's `Box`-based parser. See `docs/skull-parser-plan.md`.
+//! rock's `Box`-based parser.
 
 pub mod ast;
 pub mod clone;
@@ -82,7 +82,6 @@ pub fn parse_module_clean_with_dialect(
 /// rest of the file. `line`/`column` are 0-based (rock-core `Span` convention).
 /// `dialect` is the owning file's, so re-parsing one item of a v1 file does not
 /// quietly read it as legacy.
-/// `docs/skull-incremental-parse-plan.md`.
 pub fn parse_one_item(
     source: &str,
     file: Ustr,
@@ -103,7 +102,7 @@ pub fn parse_one_item(
 
 /// Cook a single already-parsed module in place: run the syntax desugars only.
 /// Cross-module macro expansion is a separate whole-workspace step (`cook`)
-/// since macros resolve across files. See `docs/skull-desugar-macros-plan.md`.
+/// since macros resolve across files.
 pub fn cook_single(ast: &mut Ast) {
     desugar::desugar(ast);
 }

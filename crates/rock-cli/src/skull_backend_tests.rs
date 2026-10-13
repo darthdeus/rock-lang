@@ -912,7 +912,7 @@ mod overlay_runtime_tests {
 
     /// A `static` local's INITIALIZER edit hot-reloads through the overlay -- the
     /// static analog of `concrete_const_value_edit_runtime_eq` and the direct
-    /// regression for `docs/static-hot-reload-overlay-bug.md`. Unlike a const, a
+    /// regression for the static-local hot-reload overlay bug. Unlike a const, a
     /// static is lazy (inits on first reach) and name-keyed (its cell persists
     /// across reloads BY DESIGN), so the overlay must emit an UNGUARDED reset (nil
     /// the cell + clear its done-flag) for a static whose init key changed, or the

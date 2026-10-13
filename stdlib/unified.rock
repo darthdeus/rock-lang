@@ -1139,8 +1139,8 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 // (same scheme as Vec and every other value) -- `__rock_get_type` reads it,
 // `__op_eq`/inspect/serialize dispatch off it. No metatable: the old
 // `__ROCK_METATABLES` mechanism was a pure `__rock_type` tag with no
-// metamethods, redundant with `__ty`, and is gone
-// (docs/skull-vec-representation-divergence.md).
+// metamethods, redundant with `__ty`, and is gone.
+//
 @nomangle inline(lua) fn __rock_create_struct(typeName: string, fields: any) -> any = """
     local obj = fields or {}
     obj.__ty = typeName
@@ -1381,7 +1381,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // `__ty = "Vec"` tag and NO metatable, so every Vec has one representation
 // regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
 // it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
-// UFCS). See docs/skull-vec-representation-divergence.md.
+// UFCS).
 inline(lua) fn vec_new<T>() -> [T] = """
     return { _data = {}, len = 0, __ty = "Vec" }
 """
@@ -1877,8 +1877,8 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
 // Coroutine support functions
 // Global resume function for method call rewrite - will be overridden by coroutine object methods
 // Type parameters: Y = yield type, R = return type (returned via
-// `.result()`), N = resume-arg type (lands with resume-with-value
-// per docs/coroutine-resume-with-value-plan.md).
+// `.result()`), N = resume-arg type (lands with resume-with-value).
+//
 // `Coroutine<Y>` resolves to `Coroutine<Y, (), ()>` via PR-α
 // default-type-params + PR-A arity bump; `.resume()` shape stays
 // `Y?` regardless of R (D2a unit-elision), with the typed return

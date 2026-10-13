@@ -355,7 +355,7 @@ pub struct UserFile {
     /// one item (`try_incremental_body_edit`); the slow/full paths re-parse from
     /// it on demand. The AST is NOT persisted: the per-body HIR (`Module.bodies`)
     /// is the incremental store, so a stored AST would be a redundant second copy
-    /// that drifts. `docs/skull-incremental-parse-plan.md`.
+    /// that drifts.
     pub text: String,
     /// The macros this file defines (Functions with `is_macro`), captured at
     /// parse time. Kept so an interface edit can ask "did a macro change?"
@@ -972,6 +972,16 @@ impl Session {
     }
 
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
+        let result = self.update_file_bodies(path, text)?;
+        if result.tier != UpdateTier::NoChange {
+            // Whole-program: an edited callee can change an unchanged caller's
+            // verdict.
+            bone_semantic::relocation::check_relocation(&mut self.ws);
+        }
+        Ok(result)
+    }
+
+    fn update_file_bodies(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
         // Reset the work counters so callers can read EXACTLY how many bodies
         // this update re-inferred (check_module_incremental bumps it) and
         // re-lowered (the lowering passes bump it).
@@ -1870,7 +1880,7 @@ impl Session {
     /// whole-file reparse), feed it to the per-body lowerer, and patch the kept
     /// state. Returns `Ok(None)` to bail to the full-parse path for ANY edit that
     /// is not a clean single-Rock-body-interior change -- so this never produces a
-    /// wrong result, only ever skips work. `docs/skull-incremental-parse-plan.md`.
+    /// wrong result, only ever skips work.
     fn try_incremental_body_edit(
         &mut self,
         path: &str,

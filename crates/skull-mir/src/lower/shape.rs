@@ -2001,7 +2001,7 @@ pub fn bound_next_shape_from_concrete(
 /// iff some variant has an `i`th payload field, and its type must be IDENTICAL
 /// across every variant that has it (a per-position type conflict -> not eligible,
 /// table+SROA). A variant with fewer fields pads the unused slots. Reflection is
-/// sacrificed (no `{__variant}` table); see docs/skull-enum-increment2-plan.md.
+/// sacrificed (no `{__variant}` table); see `docs/skull-enum-value-types.md`.
 /// Record / ref payloads are NOT yet eligible (cut 2b+). Payload-free enums are
 /// plain ints (increment 1), not this.
 #[derive(Clone, Debug, PartialEq, Eq)]

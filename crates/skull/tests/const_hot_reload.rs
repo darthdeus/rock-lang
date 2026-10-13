@@ -1,6 +1,5 @@
 //! `const` globals re-initialize on hot reload, while mutable globals keep their
 //! live value in the active Session.
-//! Design: docs/skull-const-hot-reload-plan.md.
 use crate::common::ws_of;
 
 /// Compile `src` to a full skull Lua program (no stdlib -- int/empty-main only).

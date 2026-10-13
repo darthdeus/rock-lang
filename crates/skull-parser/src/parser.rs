@@ -373,7 +373,7 @@ impl<'a> Parser<'a> {
     /// absolute) and re-parses it here, feeding the result straight to the
     /// per-body lowerer -- no whole-module reparse, no shared-arena splice.
     /// Errors (a malformed body) propagate so the caller falls back to a full
-    /// reparse rather than installing a half-item. `docs/skull-incremental-parse-plan.md`.
+    /// reparse rather than installing a half-item.
     pub fn parse_single_item(mut self) -> PResult<Ast> {
         self.skip_comments_as_items();
         let item = self.parse_item()?;
