@@ -563,10 +563,10 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         assert!(mob_lookup.contains(predicate), "tutorial mob lookup is missing `{predicate}`");
     }
     assert!(tutorial_runtime.contains("\"tutorial.precast_dummy\", tutorial.space"));
-    let quests = fs::read_to_string(repo.join("mag/quests.rock"))
-        .expect("read MAG quest source");
-    let receipt_owner = rock_function_body(&quests, "fn quest_run_receipt_seen_in(");
-    assert!(receipt_owner.contains("quest_run(world.progress, id)"));
+    let commands = fs::read_to_string(repo.join("mag-world/quest_commands.rock"))
+        .expect("read world quest commands");
+    let receipt_owner = rock_function_body(&commands, "pub fn world_quest_run_receipt_seen(");
+    assert!(receipt_owner.contains("quest_run(progress, id)"));
     let quest_logic = fs::read_to_string(repo.join("mag-simulation/quest.rock"))
         .expect("read quest simulation source");
     let run_lookup = rock_function_body(&quest_logic, "pub fn quest_run(");
@@ -829,7 +829,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "state_subscribers: Map<string, [string]>",
         "region_subscribers: [string]",
         "dependents: Map<string, [string]>",
-        "last_region_place: Place?",
+        "location_observed: bool",
     ] {
         assert_eq!(
             quest_runtime.matches(field).count(),
