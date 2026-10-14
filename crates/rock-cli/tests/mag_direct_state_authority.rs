@@ -840,18 +840,30 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "QuestRuntimeState must contain `{field}` exactly once"
         );
     }
-    for method in [
-        "fn Player.is_murderer(player)",
-        "fn Player.clear_combat_latch(player)",
-        "fn Player.refresh_combat_latch(player)",
-        "fn Player.in_combat(player)",
-    ] {
+    for method in ["fn Player.is_murderer(player)"] {
         assert!(
             sources.iter().any(|source| fs::read_to_string(source)
                 .expect("read MAG source")
                 .contains(method)),
             "missing Player-owned receiver declaration `{method}`"
         );
+    }
+    for declaration in [
+        "pub fn combat_latch_clear(",
+        "pub fn combat_latch_refresh(",
+        "pub fn combat_latch_active(",
+    ] {
+        assert_eq!(combat_latch.matches(declaration).count(), 1,
+            "the package must own `{declaration}` exactly once");
+    }
+    for retired in [
+        "fn Player.clear_combat_latch(",
+        "fn Player.refresh_combat_latch(",
+        "fn Player.in_combat(",
+    ] {
+        assert!(!sources.iter().any(|source| fs::read_to_string(source)
+            .expect("read MAG source").contains(retired)),
+            "retired combat latch host wrapper remains: `{retired}`");
     }
     let feedback = fs::read_to_string(repo.join("mag/combat_text.rock"))
         .expect("read MAG feedback source");
@@ -1330,7 +1342,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         ("mag_tick_spawners", &[][..]),
         ("mag_tick_player_recovery", &[][..]),
         ("mag_tick_player_actions_harvest_hazards", &[
-            "player.update_player_statuses_in(world, dt)",
+            "mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,",
             "player.apply_bandage_intent_in(world, ctx.intents.consumables)",
             "mag_capture_status_presentation(world)",
             "player.update_walls_in(world, dt)",
@@ -1414,7 +1426,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     }
     let player_actions = rock_function_body(&run, "fn mag_tick_player_actions_harvest_hazards(");
     let status_owner = player_actions
-        .find("player.update_player_statuses_in(world, dt)")
+        .find("mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,")
         .expect("status owner in canonical tick");
     assert!(
         !player_actions.contains("mag_present_status_effects(world)"),
