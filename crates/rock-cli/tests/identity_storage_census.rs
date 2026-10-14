@@ -63,7 +63,7 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/query.rock:609 local-storage mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/query.rock:664 local-storage mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/query.rock:669 local-storage mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/walker.rock:23 container mag_simulation::nav::walker::NavProbe
+- mag_simulation::nav: mag-simulation/nav/walker.rock:21 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
 - tests/c_mag_runtime_data: 5 other semantic errors
