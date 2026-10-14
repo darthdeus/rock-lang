@@ -1037,8 +1037,10 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     );
 
     let save = fs::read_to_string(repo.join("mag/save.rock")).expect("read MAG save source");
+    let manifest = fs::read_to_string(repo.join("mag/save_manifest.rock"))
+        .expect("read MAG save manifest source");
     assert!(
-        save.contains("fn Player.progress_to_json(player, progress: ProgressState,"),
+        manifest.contains("fn Player.progress_to_json(player, progress: ProgressState,"),
         "save serialization must consume the typed progress domain explicitly"
     );
     let async_save = fs::read_to_string(repo.join("mag/save_async.rock"))
@@ -1054,20 +1056,22 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "the historical migration writer must stay retired");
     let conversion = fs::read_to_string(repo.join("mag/save_conversion.rock"))
         .expect("read MAG save conversion source");
-    let upgrade = fs::read_to_string(repo.join("mag/save_upgrade.rock"))
-        .expect("read MAG save upgrade source");
+    let player_save = fs::read_to_string(repo.join("mag/save_player.rock"))
+        .expect("read MAG player save source");
     assert!(conversion.contains("save_convert_document(world: WorldState,"),
         "conversion must consume the explicit world domain");
-    assert!(upgrade.contains("quest_save_stage_progress(world.progress,"),
+    assert!(manifest.contains("quest_save_stage_progress(world.progress,"),
         "upgraded serialization must consume the world's typed progress domain");
     let convert = save.find("let decoded = save_convert_document(world,")
         .expect("one detached conversion entry");
     let publish = save.find("let converted = save_upgrade_publish(world,")
         .expect("publish the validated conversion");
-    let apply = save.find("save_apply_player_in(player, world, player_load)")
+    let apply = save.find("save_load_player(world, attached, converted)")
         .expect("apply the current player plan");
     assert!(convert < publish && publish < apply,
         "conversion and publication must precede live apply");
+    assert!(player_save.contains("save_apply_player_in(player, world, converted.player_load)"),
+        "the player load step must apply the current player plan");
     for (line_number, line) in save.lines().enumerate() {
         if line.contains("save_progress(player") && !line.contains("fn Player.save_progress") {
             assert!(
