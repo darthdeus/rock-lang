@@ -252,11 +252,10 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
 
     let player = fs::read_to_string(repo.join("mag/player.rock"))
         .expect("read MAG player source");
-    assert_eq!(
-        player.matches("hazard_entry: HazardEntryState = HazardEntryState {}").count(),
-        1,
-        "Player must own its package hazard entry state"
-    );
+    assert!(!player.contains("hazard_entry:"), "MAG must not own hazard entry state");
+    let controller = fs::read_to_string(repo.join("mag-world/player_actions.rock"))
+        .expect("read world player controller");
+    assert!(controller.contains("hazard_entry: mag_simulation::HazardEntryState"));
     assert_eq!(
         hazards.matches("last_settled_place: Place? = null").count(),
         1,
@@ -496,18 +495,20 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for field in [
         "players: Arena<Player>",
         "player: Entity<Player>",
-        "wisp_motes: Arena<Mote>",
         "wisps: [MagicWisp]",
-        "wisp_scatter_t: float",
-        "wisp_rush_t: float",
-        "wisp_effectors: [MoteEffector]",
-        "wisp_mood: MoteMood",
         "tutorial: TutorialState",
     ] {
         assert!(world_state.contains(field), "WorldState is missing Scene-owned `{field}`");
     }
     assert!(world_state.contains("root: MagWorldRoot<Mob>"));
     assert!(!world_state.lines().any(|line| line.trim() == "tasks: CoroutinePoller,"));
+    for former in ["wisp_motes:", "wisp_scatter_t:", "wisp_rush_t:", "wisp_effectors:", "wisp_mood:", "sacrificial_shrine_pending:"] {
+        assert!(!world_state.contains(former), "MAG must not retain {former}");
+    }
+    let wisps = fs::read_to_string(repo.join("mag-world/player_wisps.rock")).expect("read world wisps");
+    for field in ["motes: Arena<Mote>", "handles: [Entity<Mote>]", "scatter: float", "rush: float", "targets: [WorldWispTarget]", "effectors: [MoteEffector]", "mood: MoteMood"] {
+        assert!(wisps.contains(field), "world owns wisp field {field}");
+    }
     let root = fs::read_to_string(repo.join("mag-world/world_root.rock"))
         .expect("read package world root");
     let root_state = root
@@ -671,7 +672,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "idle_ticks: int",
         "loco: LocoState",
         "stop_ru: bool",
-        "stride_hops: int",
         "loco_start_variant: PlayerStartVariant",
         "corpse_reach_ember_timer: float",
         "ritual_acquisition_event_seq: int",
@@ -1255,9 +1255,9 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 25, "WorldState field census changed: {fields:?}");
-    assert_eq!(world_state.matches("cast_binding: WorldCastBinding<Mob>?").count(), 1,
-        "WorldState owns one cached cast accessor binding");
+    assert_eq!(fields.len(), 18, "WorldState field census changed: {fields:?}");
+    assert!(!world_state.contains("cast_binding:"), "MAG must not own the cached cast binding");
+    assert!(root_state.contains("cast_binding: super::mob_cast_core::WorldCastBinding<M>"));
     assert!(root_state.lines().any(|line| line.trim() == "walls: Arena<WallTile>,"),
         "MagWorldRoot owns cast-wall rows");
     assert!(!world_state.lines().any(|line| line.trim_start().starts_with("walls:")),
@@ -1354,7 +1354,6 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "WorldPlayerActionKind::FrameTarget", "WorldPlayerActionKind::FrameMovement",
             "world_player_actions_dispatch(world.root,"][..]),
         ("mag_tick_spawners", &[][..]),
-        ("mag_tick_player_recovery", &[][..]),
         ("mag_tick_player_actions_harvest_hazards", &[
             "mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,",
             "player.apply_bandage_intent_in(world, ctx.intents.consumables)",
@@ -1362,9 +1361,6 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "player.update_walls_in(world, dt)",
             "world_ground_pickup_command(world.root,",
             "WorldGroundPickupCommand::Player(WorldGroundPickupPlayer {"][..]),
-        ("mag_tick_wisp_sacrifice", &[
-            "active.player.tick_wisp_intent_in(ctx.world, ctx.dt)",
-            "wisp_motes_tick_in(ctx.world, ctx.dt)"][..]),
     ];
     assert!(host_runner.contains("corpse_present: (ctx, dt) => present_corpses(ctx.world, dt)"),
         "shared runner must present corpses through the package corpse stage");
@@ -1456,15 +1452,13 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         status_owner < status_sample && status_sample < late_wall_contact,
         "status sampling must stay between its owner tick and late wall contact"
     );
-    let wisp_phase = rock_function_body(&run, "fn mag_tick_wisp_sacrifice(");
-    let wisp_intent = wisp_phase
-        .find("active.player.tick_wisp_intent_in(ctx.world, ctx.dt)")
-        .expect("authoritative wisp intent in canonical tick");
-    let wisp_tick = wisp_phase
-        .find("wisp_motes_tick_in(ctx.world, ctx.dt)")
-        .expect("authoritative wisp integration in canonical tick");
-    assert!(wisp_intent < wisp_tick,
-        "wisp effectors must be prepared before authoritative integration");
+    assert!(!run.contains("fn mag_tick_player_recovery(") && !run.contains("fn mag_tick_wisp_sacrifice("));
+    assert!(!host_runner.contains("player_recovery:") && !host_runner.contains("wisp_sacrifice:"));
+    assert!(runner.contains("world_recovery_tick(r, handle)"));
+    let wisp_intent = runner.find("world_wisp_intent_tick(r, actor)").expect("library wisp intent");
+    let wisp_tick = runner.find("world_wisp_motes_tick(root, r.dt)").expect("library mote integration");
+    let shrine = runner.find("world_shrine_tick(r, handle)").expect("library shrine command");
+    assert!(wisp_intent < wisp_tick && wisp_tick < shrine);
 
     let update = rock_function_body(&run, "fn mag_run_update()");
     assert_eq!(
