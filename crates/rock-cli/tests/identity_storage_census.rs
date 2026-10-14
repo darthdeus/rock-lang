@@ -37,7 +37,7 @@ const PINNED: &str = "\
 | mag_content | exempt | 4 | 5 | 2 | 0 | 66 | 2 | 0 | 0 | 0 | 79 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
-| mag_world | exempt | 150 | 29 | 2 | 0 | 436 | 72 | 0 | 0 | 0 | 689 |
+| mag_world | exempt | 150 | 29 | 2 | 0 | 440 | 72 | 0 | 0 | 0 | 693 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
@@ -60,9 +60,9 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/query.rock:164 container mag_simulation::nav::query::NavPlan
 - mag_simulation::nav: mag-simulation/nav/query.rock:170 field mag_simulation::nav::areas::NavAreas
 - mag_simulation::nav: mag-simulation/nav/query.rock:211 field mag_simulation::nav::heap::NavHeap
-- mag_simulation::nav: mag-simulation/nav/query.rock:633 local-storage mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/query.rock:688 local-storage mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/query.rock:693 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:660 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:715 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:720 local-storage mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/walker.rock:21 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
