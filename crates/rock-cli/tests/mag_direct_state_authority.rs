@@ -673,7 +673,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "stop_ru: bool",
         "stride_hops: int",
         "loco_start_variant: PlayerStartVariant",
-        "ritual_cast: BranchedRitualCast",
+        "corpse_reach_ember_timer: float",
         "ritual_acquisition_event_seq: int",
         "law: PlayerLaw",
         "combat_latch: CombatLatchState",
@@ -701,6 +701,9 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     assert!(!player_state.contains("follower_slots:"), "MAG must not duplicate follower slots");
     for field in [
         "cast_words: super::player_cast_words::WorldPlayerCastWords",
+        "ritual_cast: mag_simulation::BranchedRitualCast",
+        "corpse_targets: [Entity<mag_simulation::Corpse>]",
+        "runebook_cast_slot: int",
         "shove: mag_simulation::ShovePressState",
         "move_speed: float",
         "step_speed: float",
@@ -708,7 +711,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         assert_eq!(followers.matches(field).count(), 1,
             "the world player controller must own `{field}` once");
     }
-    for field in ["cast_words:", "shove_press:", "move_speed:", "move_step_speed:", "cast_co:"] {
+    for field in ["cast_words:", "ritual_cast:", "corpse_reach:", "runebook_cast_slot:", "shove_press:", "move_speed:", "move_step_speed:", "cast_co:"] {
         assert!(!player_state.contains(field), "MAG must not duplicate the controller's `{field}`");
     }
     let law = fs::read_to_string(repo.join("mag-simulation/notoriety.rock"))
@@ -735,7 +738,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let combat = fs::read_to_string(repo.join("mag-simulation/player_combat.rock"))
         .expect("read simulation player combat source");
     for field in [
-        "spell_state: SpellState", "cast_acceleration: PlayerCastAcceleration",
+        "cast: MobCastState", "cast_acceleration: PlayerCastAcceleration",
         "attack_target: MobId?", "attack_timer: float",
         "bandage_slips: int", "cast_equipment_damage_mult: float",
     ] {
@@ -1227,6 +1230,8 @@ fn mag_world_presentation_state_has_explicit_owners() {
         })
         .collect();
     assert_eq!(fields.len(), 25, "WorldState field census changed: {fields:?}");
+    assert_eq!(world_state.matches("cast_binding: WorldCastBinding<Mob>?").count(), 1,
+        "WorldState owns one cached cast accessor binding");
     assert!(root_state.lines().any(|line| line.trim() == "walls: Arena<WallTile>,"),
         "MagWorldRoot owns cast-wall rows");
     assert!(!world_state.lines().any(|line| line.trim_start().starts_with("walls:")),
