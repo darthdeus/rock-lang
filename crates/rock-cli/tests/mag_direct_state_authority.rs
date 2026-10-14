@@ -1124,7 +1124,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
     }
     assert!(teleport.contains("player.teleport_arrival.place = dest"));
     assert!(teleport.contains("player.teleport_arrival.remaining"));
-    assert!(teleport.contains("editor_presented_tile_center(player.teleport_arrival.place.space"));
+    assert!(teleport.contains("editor_presented_tile_center_in(mag_world_state(), player.teleport_arrival.place.space"));
     let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read run source");
     assert!(run.contains("player.update_teleport_arrival()"));
     let world = fs::read_to_string(repo.join("mag/world_levels.rock")).expect("read world source");
