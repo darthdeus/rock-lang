@@ -1169,7 +1169,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
     assert!(teleport.contains("player.teleport_arrival.place = dest"));
     assert!(teleport.contains("player.teleport_arrival.remaining"));
     assert!(teleport.contains("editor_presented_tile_center_in(mag_world_state(), player.teleport_arrival.place.space"));
-    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read run source");
+    let run = mag_run_sources(repo);
     assert!(run.contains("player.update_teleport_arrival()"));
     let world = fs::read_to_string(repo.join("mag/world_levels.rock")).expect("read world source");
     let presentation = fs::read_to_string(repo.join("mag/world_presentation.rock"))
@@ -1296,13 +1296,55 @@ fn mag_world_presentation_state_has_explicit_owners() {
     assert!(blood.contains("presentation.drop_particle_seq"));
 }
 
+fn mag_run_sources(repo: &Path) -> String {
+    let mut paths: Vec<_> = fs::read_dir(repo.join("mag")).expect("read MAG source directory")
+        .map(|entry| entry.expect("read MAG source entry").path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.ends_with(".rock") && (name == "run.rock"
+                || name.starts_with("run_") || name.starts_with("tick_wiring"))
+        }).collect();
+    paths.sort();
+    paths.into_iter().map(|path| fs::read_to_string(path).expect("read MAG run wiring"))
+        .collect::<Vec<_>>().join("\n")
+}
+
+fn rock_wiring_body(source: &str, signature: &str) -> String {
+    fn expand(source: &str, body: &str, depth: usize) -> String {
+        assert!(depth < 16, "cyclic MAG wiring helpers");
+        let mut expanded = body.to_string();
+        for line in source.lines() {
+            let Some(declaration) = line.strip_prefix("fn ") else { continue };
+            let name = declaration.split('(').next().unwrap();
+            if !name.starts_with("mag_tick_") && !name.starts_with("mag_run_update_") { continue }
+            let call = format!("{name}(");
+            let mut offset = 0;
+            while let Some(relative) = expanded[offset..].find(&call) {
+                let start = offset + relative;
+                let mut balance = 1;
+                let mut end = start + call.len();
+                while balance > 0 {
+                    match expanded.as_bytes()[end] { b'(' => balance += 1, b')' => balance -= 1, _ => {} }
+                    end += 1;
+                }
+                let nested = rock_function_body(source, &format!("fn {name}("));
+                let replacement = expand(source, nested, depth + 1);
+                expanded.replace_range(start..end, &replacement);
+                offset = start + replacement.len();
+            }
+        }
+        expanded
+    }
+    expand(source, rock_function_body(source, signature), 0)
+}
+
 #[test]
 fn mag_has_one_canonical_simulation_tick_boundary() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("rock workspace root");
-    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    let run = mag_run_sources(repo);
 
     assert_eq!(
         run.matches("fn mag_simulation_tick(").count(),
@@ -1310,7 +1352,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "MAG must define exactly one canonical simulation tick"
     );
     let tick = rock_function_body(&run, "fn mag_simulation_tick(");
-    let prepare = rock_function_body(&run, "fn mag_tick_prepare(");
+    let prepare = rock_wiring_body(&run, "fn mag_tick_prepare(");
     for call in [
         "coroutine_poller_update(world.root.tasks)",
         "world_tick_all(world)",
@@ -1321,7 +1363,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     for call in ["mag_world_tick_runner_in(world)", "world_tick_advance(tick, MAG_TICK_DT)"] {
         assert!(tick.contains(call), "canonical tick is missing runner delegation `{call}`");
     }
-    let host_runner = rock_function_body(&run, "fn mag_world_tick_runner_in(");
+    let host_runner = rock_wiring_body(&run, "fn mag_world_tick_runner_in(");
     for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)"] {
         assert!(host_runner.contains(call), "shared runner construction is missing delegation `{call}`");
     }
@@ -1391,12 +1433,12 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         if *phase != "mag_tick_actor_pre_mob" {
             assert!(host_runner.contains(phase), "shared runner does not register phase `{phase}`");
         }
-        let body = rock_function_body(&run, &format!("fn {phase}("));
+        let body = rock_wiring_body(&run, &format!("fn {phase}("));
         for call in *calls {
             assert!(body.contains(call), "phase `{phase}` is missing authoritative call `{call}`");
         }
     }
-    let player_slot = rock_function_body(&run, "fn mag_tick_actor_pre_mob(");
+    let player_slot = rock_wiring_body(&run, "fn mag_tick_actor_pre_mob(");
     assert_eq!(player_slot.matches("world_player_actions_dispatch(").count(), 1,
         "MAG must dispatch its player queue exactly once");
     let combat = fs::read_to_string(repo.join("mag/combat_player_cast.rock"))
@@ -1427,7 +1469,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "cast_glyphs_present(world)",
         "cast_hand_vfx_present(world)",
     ] {
-        for body in [prepare, advance, runner, actor_host] {
+        for body in [prepare.as_str(), advance, runner, actor_host] {
             assert!(!body.contains(presentation), "presentation call `{presentation}` must stay outside the runner");
         }
         assert!(
@@ -1435,14 +1477,14 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "presentation call `{presentation}` must remain outside the canonical tick"
         );
         for (phase, _) in phases {
-            let body = rock_function_body(&run, &format!("fn {phase}("));
+            let body = rock_wiring_body(&run, &format!("fn {phase}("));
             assert!(
                 !body.contains(presentation),
                 "presentation call `{presentation}` must remain outside phase `{phase}`"
             );
         }
     }
-    let player_actions = rock_function_body(&run, "fn mag_tick_player_actions_harvest_hazards(");
+    let player_actions = rock_wiring_body(&run, "fn mag_tick_player_actions_harvest_hazards(");
     let status_owner = player_actions
         .find("mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,")
         .expect("status owner in canonical tick");
@@ -1468,7 +1510,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let shrine = runner.find("world_shrine_tick(r, handle)").expect("library shrine command");
     assert!(wisp_intent < wisp_tick && wisp_tick < shrine);
 
-    let update = rock_function_body(&run, "fn mag_run_update()");
+    let update = rock_wiring_body(&run, "fn mag_run_update()");
     assert_eq!(
         update.matches("let tick_intent = if player_input { mag_tick_intent_from_input(player) } else { GRAPHICS_DETECT_IDLE_INTENT }").count(),
         1,
@@ -1533,13 +1575,13 @@ fn mag_tick_intent_is_overwritten_before_the_live_tick_consumes_it() {
         "the adapter must return the one overwritten record"
     );
 
-    let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
+    let run = mag_run_sources(repo);
     let tick = rock_function_body(&run, "fn mag_simulation_tick(");
     assert!(
         !tick.contains("MAG_TICK_INTENT"),
         "the canonical tick must consume its argument, not the host input buffer"
     );
-    let update = rock_function_body(&run, "fn mag_run_update()");
+    let update = rock_wiring_body(&run, "fn mag_run_update()");
     let fill = update
         .find("let tick_intent = if player_input { mag_tick_intent_from_input(player) } else { GRAPHICS_DETECT_IDLE_INTENT }")
         .expect("host input adapter call");
