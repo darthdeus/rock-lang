@@ -1046,10 +1046,24 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         2,
         "both persistence paths must pass the world that owns the progress domain"
     );
-    assert!(
-        save.contains("fn Player.save_progress_migration(player, progress: ProgressState,"),
-        "migration must forward an explicitly typed progress domain"
-    );
+    assert!(!save.contains("save_progress_migration("),
+        "the historical migration writer must stay retired");
+    let conversion = fs::read_to_string(repo.join("mag/save_conversion.rock"))
+        .expect("read MAG save conversion source");
+    let upgrade = fs::read_to_string(repo.join("mag/save_upgrade.rock"))
+        .expect("read MAG save upgrade source");
+    assert!(conversion.contains("save_convert_document(world: WorldState,"),
+        "conversion must consume the explicit world domain");
+    assert!(upgrade.contains("quest_save_stage_progress(world.progress,"),
+        "upgraded serialization must consume the world's typed progress domain");
+    let convert = save.find("let decoded = save_convert_document(world,")
+        .expect("one detached conversion entry");
+    let publish = save.find("let converted = save_upgrade_publish(world,")
+        .expect("publish the validated conversion");
+    let apply = save.find("save_apply_player_in(player, world, player_load)")
+        .expect("apply the current player plan");
+    assert!(convert < publish && publish < apply,
+        "conversion and publication must precede live apply");
     for (line_number, line) in save.lines().enumerate() {
         if line.contains("save_progress(player") && !line.contains("fn Player.save_progress") {
             assert!(
