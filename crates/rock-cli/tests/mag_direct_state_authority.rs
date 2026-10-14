@@ -202,6 +202,12 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         .expect("read WorldSpaceLayout body");
     assert_eq!(root_state.matches("spaces: [Entity<WorldSpaceLayout>]").count(), 1);
     assert_eq!(layout_state.matches("simulation: SpaceSimulationState").count(), 1);
+    assert_eq!(layout_state.matches("fire: super::environment_fire::WorldSpaceFire").count(), 1);
+    for field in ["grass_fires:", "grass_fire_next_tick:", "flammable_ignited_at:",
+        "flammable_sources:", "flammable_anchors:", "flammable_next_tick:"] {
+        assert!(!space_state.lines().any(|line| line.trim_start().starts_with(field)),
+            "MAG SpaceState must not retain world-owned fire field `{field}`");
+    }
     assert!(world.contains("root.spaces = layouts"));
     assert_eq!(root_state.matches("space_layouts: Arena<WorldSpaceLayout>").count(), 1);
     let build = rock_function_body(&world, "fn world_state_build(");
@@ -257,10 +263,17 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
 
     let player = fs::read_to_string(repo.join("mag/player.rock"))
         .expect("read MAG player source");
-    assert!(!player.contains("hazard_entry:"), "MAG must not own hazard entry state");
+    assert!(!player.contains("hazard_entry:"), "MAG must not own a second hazard entry state");
     let controller = fs::read_to_string(repo.join("mag-world/player_actions.rock"))
         .expect("read world player controller");
-    assert!(controller.contains("hazard_entry: mag_simulation::HazardEntryState"));
+    assert!(!controller.contains("hazard_entry:"), "player state must not duplicate actor entry state");
+    let actor_state = root
+        .split_once("pub struct WorldActor {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body)
+        .expect("read WorldActor body");
+    assert_eq!(actor_state.matches("environment_entry: mag_simulation::HazardEntryState").count(), 1,
+        "each world actor must own its package hazard entry state");
     assert_eq!(
         hazards.matches("last_settled_place: Place? = null").count(),
         1,
@@ -1436,7 +1449,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,",
             "player.apply_consumable_intent_in(world, ctx.intents.consumables)",
             "mag_capture_status_presentation(world)",
-            "player.update_walls_in(world, dt)",
+            "update_walls_in(world, dt)",
             "world_ground_pickup_command(world.root,",
             "WorldGroundPickupCommand::Player(WorldGroundPickupPlayer {"][..]),
     ];
@@ -1524,7 +1537,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         .find("mag_capture_status_presentation(world)")
         .expect("status sample in canonical tick");
     let late_wall_contact = player_actions
-        .find("player.update_walls_in(world, dt)")
+        .find("update_walls_in(world, dt)")
         .expect("late wall contact in canonical tick");
     assert!(
         status_owner < status_sample && status_sample < late_wall_contact,
