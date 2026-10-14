@@ -32,12 +32,12 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 289 | 223 | 6 | 0 | 1905 | 615 | 78 | 1492 | 17 | 4625 |
+| mag | exempt | 284 | 223 | 6 | 0 | 1904 | 616 | 78 | 1485 | 17 | 4613 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 2 |
 | mag_content | exempt | 4 | 5 | 2 | 0 | 66 | 2 | 0 | 0 | 0 | 79 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
-| mag_world | exempt | 148 | 29 | 2 | 0 | 437 | 62 | 1 | 0 | 0 | 679 |
+| mag_world | exempt | 153 | 29 | 2 | 0 | 435 | 67 | 1 | 0 | 0 | 687 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
@@ -66,6 +66,7 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/walker.rock:21 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
+- mag: 1 other semantic errors
 - tests/c_mag_runtime_data: 5 other semantic errors
 - tests/c_native_boot_codec: 2 other semantic errors
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
