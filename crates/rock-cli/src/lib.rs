@@ -38,6 +38,7 @@ pub mod sdk_check;
 pub mod common;
 mod compile_cmd;
 mod compile_slots;
+mod host_paths;
 mod package_test_sources;
 pub mod comptime;
 mod dispatcher;

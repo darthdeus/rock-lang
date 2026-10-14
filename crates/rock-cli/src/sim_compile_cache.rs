@@ -37,7 +37,7 @@ const STALE_STAGING: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// The cache root, or `None` when `ROCK_SIM_COMPILE_CACHE=0` turns it off or
 /// `rock_exe`, the compiler that keys and fills it, cannot be hashed.
-/// Defaults to `~/tmp/rock-sim-compile-cache` so worktrees share one bounded
+/// Defaults to the host work root's `tmp/rock-sim-compile-cache`, sharing one bounded
 /// store on disk rather than the small `/tmp`.
 pub(super) fn root(rock_exe: &Path) -> Result<Option<PathBuf>> {
     if std::env::var_os(CACHE_ENV).is_some_and(|value| value == "0")
@@ -51,7 +51,7 @@ pub(super) fn root(rock_exe: &Path) -> Result<Option<PathBuf>> {
     let home = std::env::var_os("HOME").filter(|value| !value.is_empty()).ok_or_else(|| {
         anyhow!("no HOME for the sim compile cache; set {CACHE_DIR_ENV} or {CACHE_ENV}=0")
     })?;
-    Ok(Some(PathBuf::from(home).join("tmp").join("rock-sim-compile-cache")))
+    Ok(Some(crate::host_paths::local_work_root(Path::new(&home))?.join("tmp").join("rock-sim-compile-cache")))
 }
 
 fn budget_bytes() -> Result<u64> {
@@ -267,6 +267,13 @@ fn evict_to_budget(root: &Path, budget: u64, keep: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_storage_sim_cache_default() {
+        crate::host_paths::assert_cache_default(
+            "run_sim::sim_compile_cache::tests::host_storage_sim_cache_default",
+            "rock-sim-compile-cache", || root(&std::env::current_exe().unwrap()));
+    }
     use std::fs::TryLockError;
     use std::io::Write;
 

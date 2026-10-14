@@ -153,7 +153,7 @@ fn cache_root() -> Result<Option<PathBuf>> {
     }
     let home = std::env::var_os("HOME").filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("no HOME for the frame compile cache; set {CACHE_DIR_ENV} or {CACHE_ENV}=0"))?;
-    Ok(Some(PathBuf::from(home).join("tmp").join("rock-frame-compile-cache").join("cache")))
+    Ok(Some(crate::host_paths::local_work_root(Path::new(&home))?.join("tmp").join("rock-frame-compile-cache").join("cache")))
 }
 
 fn budget_bytes() -> Result<u64> {
@@ -479,6 +479,13 @@ pub(super) fn compile_game_for_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_storage_frame_cache_default() {
+        crate::host_paths::assert_cache_default(
+            "stone::frame_compile_cache::tests::host_storage_frame_cache_default",
+            "rock-frame-compile-cache/cache", cache_root);
+    }
 
     static ERROR_FILE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
