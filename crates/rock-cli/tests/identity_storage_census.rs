@@ -66,7 +66,6 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/walker.rock:21 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
-- mag: 1 other semantic errors
 - tests/c_mag_runtime_data: 5 other semantic errors
 - tests/c_native_boot_codec: 2 other semantic errors
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
