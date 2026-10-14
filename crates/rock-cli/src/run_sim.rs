@@ -4195,8 +4195,21 @@ fn writes_live(buffered: bool) -> bool {
 /// runner publishes its own value for both after `preset_env`, so a declared one
 /// never reaches the child and cannot stand for a difference between two
 /// entries. Splitting a group on an inert value would isolate sims for nothing.
-const RUNNER_OWNED_ENV_KEYS: &[&str] =
-    &["FRAME_COUNT", "ROCK_DETERMINISTIC_IDS", "ROCK_MASK_WALL_CLOCK", "SIM_DT", "SIM_MANUAL", "STONE_FX_OFF", "STONE_WINDOW"];
+///
+/// `ROCK_SIM_TIMEOUT_SECS` is the entry's wall-clock budget (`timeout_for`):
+/// the wait loop republishes it at every accepted `entry_start`, so two
+/// entries that disagree on it share a boot exactly like two that disagree
+/// on `FRAME_COUNT`.
+const RUNNER_OWNED_ENV_KEYS: &[&str] = &[
+    "FRAME_COUNT",
+    "ROCK_DETERMINISTIC_IDS",
+    "ROCK_MASK_WALL_CLOCK",
+    "ROCK_SIM_TIMEOUT_SECS",
+    "SIM_DT",
+    "SIM_MANUAL",
+    "STONE_FX_OFF",
+    "STONE_WINDOW",
+];
 
 /// Fixed values the runner publishes to EVERY sim child, layered BEFORE
 /// `preset_env` so a declaration still wins.
@@ -9235,6 +9248,13 @@ mod tests {
         // even though it is also carried per entry.
         let f = env(&[("SIM_SKIP_RENDER", "0")]);
         assert_eq!(boot_signature(&f), f);
+        // The wall-clock budget is republished at every entry_start, so two
+        // entries that disagree on it (or where only one declares it) share
+        // a boot; otherwise the republishing would never be reached.
+        let t = env(&[("ROCK_SIM_TIMEOUT_SECS", "2")]);
+        let u = env(&[("ROCK_SIM_TIMEOUT_SECS", "1200")]);
+        assert_eq!(boot_signature(&t), boot_signature(&u), "the timeout is per entry");
+        assert_eq!(boot_signature(&t), env(&[]), "and an undeclared one shares too");
     }
 
     #[test]
@@ -10168,6 +10188,20 @@ mod tests {
         let mut died = SimSummary { saw_stop: true, ..SimSummary::default() };
         died.process_failure_code = Some(1);
         assert_eq!(verdict_word(&died), "FAIL");
+    }
+
+    #[test]
+    fn a_timeout_names_the_budget_that_fired() {
+        // The single-run message must state the entry's declared budget, not
+        // the process-wide default it overrode.
+        let mut summary = SimSummary { saw_stop: true, ..SimSummary::default() };
+        summary.timed_out = true;
+        summary.timeout_budget = Some(Duration::from_secs(2));
+        let error = sim_outcome(&summary, "declared_timeout_slow").unwrap_err().to_string();
+        assert!(
+            error.contains("sim `declared_timeout_slow` timed out after 2s"),
+            "the timeout must name the sim and its declared budget: {error}"
+        );
     }
 
     #[test]

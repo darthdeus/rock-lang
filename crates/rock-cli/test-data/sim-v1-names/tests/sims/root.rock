@@ -22,6 +22,28 @@ co fn shared_snapshot_probe() -> Coroutine<Wait> {
     stop_sim()
 }
 
+@sim_env("ROCK_SIM_TIMEOUT_SECS", "60")
+@sim
+co fn declared_long_fast() -> Coroutine<Wait> {
+    start_game "sim-v1-names"
+    await frame(2)
+    sim_expect(true, "ran")
+    stop_sim()
+}
+
+@sim_env("FRAME_COUNT", "4000000")
+@sim_env("ROCK_SIM_TIMEOUT_SECS", "2")
+@sim
+co fn declared_timeout_slow() -> Coroutine<Wait> {
+    // Same kill window as kill_window_slow, but the 2s wall budget is the
+    // sim's own declaration: a run under a long process-wide budget must
+    // still be killed at 2s and name that declared budget.
+    start_game "sim-v1-names"
+    await frame(3000000)
+    sim_expect(true, "survived the declared budget")
+    stop_sim()
+}
+
 @sim_env("FRAME_COUNT", "4000000")
 @sim
 co fn kill_window_slow() -> Coroutine<Wait> {

@@ -399,8 +399,7 @@ fn killed_mid_run_sweep_keeps_completed_verdicts_and_names_its_active_child() {
 
 /// A worker the runner kills over budget still records every entry it had
 /// completed: the completed verdicts are checkpointed, the over-budget entry
-/// keeps its timeout record. Pins landed behavior (green before this card);
-/// the mutation check proves the test guards it.
+/// keeps its timeout record and names the deadline in the visible error.
 #[test]
 fn over_budget_worker_still_records_its_completed_entries() {
     let _spawn_budget = SpawnBudget::for_test(180);
@@ -430,6 +429,10 @@ fn over_budget_worker_still_records_its_completed_entries() {
         "the runner must kill the over-budget worker:\n{combined}"
     );
     assert!(
+        combined.contains("sim `sim_v1_names::kill_window_slow` exceeded its 8s wall-clock entry budget"),
+        "the active sim must name its timeout budget, not just its killed process:\n{combined}"
+    );
+    assert!(
         combined.contains("[sim] 1/2 sims passed -- FAILED: sim_v1_names::kill_window_slow"),
         "the tally must name the over-budget sim:\n{combined}"
     );
@@ -451,4 +454,109 @@ fn over_budget_worker_still_records_its_completed_entries() {
     assert_eq!(of("worker_end").len(), 1);
     assert_eq!(of("worker_end")[0]["status"].as_str(), Some("timeout"));
     assert_eq!(records.last().and_then(|event| event["event"].as_str()), Some("run_end"));
+}
+
+/// A sim that declares its own short wall budget is killed at that budget
+/// even under a long process-wide budget, and the failure names the sim
+/// and the declared budget (not the process-wide number).
+#[test]
+fn declared_budget_kills_and_names_the_sim_at_its_declared_budget() {
+    let _spawn_budget = SpawnBudget::for_test(180);
+    let root = tempfile::tempdir().expect("record root");
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "sim",
+            "crates/rock-cli/test-data/sim-v1-names",
+            "declared_timeout_slow",
+            "--jobs",
+            "1",
+        ])
+        .current_dir(workspace_root())
+        .env("ROCK_SIM_LOG_DIR", root.path())
+        .env("ROCK_SIM_TIMEOUT_SECS", "300")
+        .output_with_deadline()
+        .expect("run declared-budget witness");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "the over-budget sim must fail:\n{combined}");
+    assert!(
+        combined.contains("runner_killed=true"),
+        "the runner must kill the over-budget worker:\n{combined}"
+    );
+    assert!(
+        combined.contains(
+            "sim `sim_v1_names::declared_timeout_slow` exceeded its 2s wall-clock entry budget"
+        ),
+        "the failure must name the sim and its declared 2s budget, not the 300s process-wide one:\n{combined}"
+    );
+    let records = events(root.path());
+    let results = records
+        .iter()
+        .filter(|event| event["event"] == "entry_result")
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1, "the single entry records a verdict");
+    assert_eq!(results[0]["verdict"].as_str(), Some("FAIL"));
+    assert_eq!(results[0]["timed_out"].as_bool(), Some(true));
+    let worker_ends = records
+        .iter()
+        .filter(|event| event["event"] == "worker_end")
+        .collect::<Vec<_>>();
+    assert_eq!(worker_ends.len(), 1);
+    assert_eq!(worker_ends[0]["status"].as_str(), Some("timeout"));
+}
+
+/// Two entries with different declared budgets share one worker, and the
+/// second entry runs on ITS budget: the first declares 60s and finishes
+/// fast, the second declares 2s and must be killed at 2s. If the budget
+/// were not republished at the second `entry_start`, the slow entry would
+/// inherit 60s, run its kill window to completion and pass.
+#[test]
+fn per_entry_budget_is_republished_at_each_entry_start() {
+    let _spawn_budget = SpawnBudget::for_test(180);
+    let root = tempfile::tempdir().expect("record root");
+    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "sim",
+            "crates/rock-cli/test-data/sim-v1-names",
+            "declared_long_fast",
+            "declared_timeout_slow",
+            "--jobs",
+            "1",
+        ])
+        .current_dir(workspace_root())
+        .env("ROCK_SIM_LOG_DIR", root.path())
+        .env("ROCK_SIM_TIMEOUT_SECS", "300")
+        .output_with_deadline()
+        .expect("run per-entry budget witness");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "the second entry must fail at its budget:\n{combined}");
+    assert!(
+        combined.contains(
+            "sim `sim_v1_names::declared_timeout_slow` exceeded its 2s wall-clock entry budget"
+        ),
+        "the second entry must be killed at its own 2s budget, not the first entry's 60s:\n{combined}"
+    );
+    let records = events(root.path());
+    let of = |name: &str| records.iter().filter(|event| event["event"] == name).collect::<Vec<_>>();
+    assert_eq!(of("worker_spawn").len(), 1, "both entries share one worker");
+    let results = of("entry_result");
+    assert_eq!(results.len(), 2, "both entries record verdicts");
+    let verdict = |id: u64| {
+        results
+            .iter()
+            .find(|event| event["occurrence_id"].as_u64() == Some(id))
+            .expect("verdict")
+    };
+    assert_eq!(verdict(1)["verdict"].as_str(), Some("PASS"));
+    assert_eq!(verdict(1)["timed_out"].as_bool(), Some(false));
+    assert_eq!(verdict(2)["verdict"].as_str(), Some("FAIL"));
+    assert_eq!(verdict(2)["timed_out"].as_bool(), Some(true));
+    assert_eq!(of("worker_end")[0]["status"].as_str(), Some("timeout"));
 }
