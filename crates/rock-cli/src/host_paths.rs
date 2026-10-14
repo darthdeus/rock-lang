@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-const WORK_ROOTS: &str = include_str!("../../../tools/host-work-roots.json");
+const WORK_ROOTS: &str = include_str!("host-work-roots.json");
 
 fn work_root(host: &str, home: &Path) -> Result<PathBuf> {
     let roots: std::collections::HashMap<String, PathBuf> = serde_json::from_str(WORK_ROOTS)
