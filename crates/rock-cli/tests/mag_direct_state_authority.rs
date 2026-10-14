@@ -459,8 +459,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         }
     }
     for (field, qualified, declaration) in [
-        ("potion_ready_at", "player.body.potion_ready_at", "potion_ready_at:"),
-        ("bandage_slips", "player.combat.bandage_slips", "bandage_slips:"),
+        ("potion_ready_at", "player.actor.player.unwrap().body.potion_ready_at", "potion_ready_at:"),
+        ("bandage_slips", "player.actor.player.unwrap().combat.bandage_slips", "bandage_slips:"),
         ("summon_slots", "player.summon_slots", "summon_slots:"),
     ] {
         for source in &sources {
@@ -558,7 +558,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "world.root.mobs",
         "place.space, space",
         "place.grid == g",
-        "mob.objective_tag == tag",
+        "mob.actor.objective_tag == tag",
     ] {
         assert!(mob_lookup.contains(predicate), "tutorial mob lookup is missing `{predicate}`");
     }
@@ -665,8 +665,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "Player must carry its generation-safe Scene identity for deferred work"
     );
     for field in [
-        "body: PlayerBody",
-        "combat: PlayerCombatState",
+        "actor: WorldActor",
         "gesture: PlayerGesture",
         "gesture_timer: float",
         "idle_ticks: int",
@@ -688,6 +687,15 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     }
     let followers = fs::read_to_string(repo.join("mag-world/player_actions.rock"))
         .expect("world player runtime source");
+    let controller = rock_function_body(&followers, "pub struct WorldPlayerState {");
+    for field in ["body: PlayerBody = PlayerBody {}", "combat: PlayerCombatState = PlayerCombatState {}",
+        "inventory: Inventory = Inventory {}"] {
+        assert_eq!(controller.matches(field).count(), 1,
+            "the authoritative player actor component must own `{field}` once");
+    }
+    for field in ["body:", "combat:", "inventory:"] {
+        assert!(!player_state.contains(field), "MAG must not duplicate actor-owned `{field}`");
+    }
     assert_eq!(followers.matches("follower_slots: [mag_simulation::inhabitant::ActorLink?] = [null, null, null, null]").count(), 1,
         "world runtime must own the actor-reference follower slots once");
     assert!(!player_state.contains("follower_slots:"), "MAG must not duplicate follower slots");
@@ -740,7 +748,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     );
     for field in [
         "combat_latch: CombatLatchState = CombatLatchState {}",
-        "combat: PlayerCombatState = PlayerCombatState {}",
         "cast_outline: PlayerCastOutline = PlayerCastOutline {}",
     ] {
         assert_eq!(
@@ -1277,8 +1284,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         assert!(tick.contains(call), "canonical tick is missing runner delegation `{call}`");
     }
     let host_runner = rock_function_body(&run, "fn mag_world_tick_runner_in(");
-    for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)",
-        "runtime.runner.unwrap().get().unwrap().actor_host = actors"] {
+    for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)"] {
         assert!(host_runner.contains(call), "shared runner construction is missing delegation `{call}`");
     }
     assert!(!host_runner.contains("world_tick_advance("), "acquiring a runner must not advance another tick");
@@ -1292,9 +1298,12 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let actor_source = fs::read_to_string(repo.join("mag/mobs_turn.rock"))
         .expect("read MAG actor turn source");
     let actor_host = rock_function_body(&actor_source, "fn mag_actor_turn_host<W>(");
-    assert!(host_runner.contains("mag_actor_turn_host(")
-        && host_runner.contains("actors.player_input =")
-        && host_runner.contains("mag_tick_actor_pre_mob(r.host)"));
+    assert!(tick.contains("mag_actor_turn_host(")
+        && tick.contains("actors.player_input =")
+        && tick.contains("mag_tick_actor_pre_mob(r.host)"));
+    assert!(tick.find("tick.actor_host = actors").unwrap()
+        < tick.find("world_tick_advance(tick, MAG_TICK_DT)").unwrap(),
+        "tick entry must install the canonical actor host before admission and advancement");
     assert!(!run.contains("fn mag_tick_actor_host(") && !run.contains("fn mag_tick_actor_view("),
         "the runner must use the one actor host constructor without a second adapter");
     for call in ["input(r)", "world_tick_actors(r)",
