@@ -45,6 +45,19 @@ fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<us
     })
 }
 
+/// The wall-clock budget one entry runs on: its own
+/// `@sim_env("ROCK_SIM_TIMEOUT_SECS", ...)`, or the process-wide
+/// `sim_timeout_secs()`. Rejects a value that is not a positive integer,
+/// like the frame budget -- a silently replaced bound guards nothing.
+fn timeout_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<Duration> {
+    let Some((_, raw)) = env_pairs.iter().rev().find(|(k, _)| k == "ROCK_SIM_TIMEOUT_SECS") else {
+        return Ok(Duration::from_secs(sim_timeout_secs()));
+    };
+    raw.parse::<u64>().ok().filter(|n| *n > 0).map(Duration::from_secs).ok_or_else(|| {
+        anyhow!("sim `{sim_name}` declares @sim_env(\"ROCK_SIM_TIMEOUT_SECS\", \"{raw}\"), which is not a positive integer")
+    })
+}
+
 fn sim_required_backend(env_pairs: &[(String, String)]) -> Option<&str> {
     for (k, v) in env_pairs {
         if k == "SIM_BACKEND"
@@ -80,7 +93,8 @@ fn active_sim_renderer(project_dir: &Path) -> &'static str {
 /// Per-child wall time rises sharply under `--jobs` (render-heavy mag sims have
 /// been measured taking 15 s for a single frame with four children live), and a
 /// value tuned for serial runs kills healthy children. Override with
-/// `ROCK_SIM_TIMEOUT_SECS` for a genuinely long-running sim.
+/// `ROCK_SIM_TIMEOUT_SECS` for a genuinely long-running sim, or per entry
+/// with `@sim_env("ROCK_SIM_TIMEOUT_SECS", ...)` (see `timeout_for`).
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 /// Resident-plus-swap ceiling for one sim child, in MB. A sim that loops
@@ -1537,7 +1551,7 @@ fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
         return Err(anyhow!(
             "sim `{sim_name}` timed out after {}s (wall clock, not its frame budget); \
              override with ROCK_SIM_TIMEOUT_SECS",
-            sim_timeout_secs()
+            summary.timeout_budget.map(|d| d.as_secs()).unwrap_or_else(sim_timeout_secs)
         ));
     }
     if let Some(code) = summary.process_failure_code {
@@ -4844,6 +4858,7 @@ struct WorkerPart {
     name: String,
     out_dir: PathBuf,
     frame_budget: usize,
+    timeout: Duration,
     env: Vec<(String, String)>,
     occurrence_id: u64,
     part_index: usize,
@@ -5613,6 +5628,11 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
     // entry opens, then each `entry_start`. The bound is a wedge detector for
     // ONE entry, so a queue of healthy entries must not accumulate against it.
     let deadline_anchor = Arc::new(Mutex::new(std::time::Instant::now()));
+    // The open entry's own wall-clock budget; the stderr thread republishes
+    // it at every accepted entry_start, beside the anchor reset.
+    let entry_timeout = Arc::new(Mutex::new(
+        parts.first().map(|p| p.timeout).unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
+    ));
     // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
     // (single-threaded) SkullStone and services them between try_wait polls.
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
@@ -5624,11 +5644,12 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
         let anchor = Arc::clone(&deadline_anchor);
+        let live_timeout = Arc::clone(&entry_timeout);
         let reload_completion_tx = reload_completion_tx;
         let recorder = recorder.cloned();
         let entry_meta = parts
             .iter()
-            .map(|part| (part.occurrence_id, part.name.clone(), part.part_index))
+            .map(|part| (part.occurrence_id, part.name.clone(), part.part_index, part.timeout))
             .collect::<Vec<_>>();
         let mut first_entry_seen = false;
         let mut deadline_guard = DeadlineGuard::for_parts(parts);
@@ -5650,14 +5671,17 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
                     Err(e) => return Some(format!("error reading game stderr: {e}")),
                 };
                 let boundary = deadline_guard.observe_boundary(&line);
-                if matches!(boundary, Some(EnvelopeStep::Started(_))) {
+                if let Some(EnvelopeStep::Started(seq)) = boundary {
                     *anchor.lock().unwrap() = std::time::Instant::now();
+                    if let Some((_, _, _, budget)) = entry_meta.get(seq) {
+                        *live_timeout.lock().unwrap() = *budget;
+                    }
                 }
                 if let Some(recorder) = recorder.as_ref() {
                     match boundary {
                         Some(EnvelopeStep::Started(seq)) => {
                             checkpoint_lines.clear();
-                            if let Some((occurrence_id, name, part)) = entry_meta.get(seq) {
+                            if let Some((occurrence_id, name, part, _)) = entry_meta.get(seq) {
                                 if !first_entry_seen {
                                     first_entry_seen = true;
                                     recorder.worker_first_entry(
@@ -5687,7 +5711,7 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
                             frame_timing,
                             boundary_timing,
                         )) => {
-                            if let Some((occurrence_id, name, part)) = entry_meta.get(seq) {
+                            if let Some((occurrence_id, name, part, _)) = entry_meta.get(seq) {
                                 recorder.entry_end(
                                     worker_attempt,
                                     *occurrence_id,
@@ -5777,7 +5801,6 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
         })
     };
 
-    let timeout = Duration::from_secs(sim_timeout_secs());
     let memory_cap_mb = sim_memory_cap_mb();
     let mut memory_error: Option<SiteMessage> = None;
     let mut runner_killed = false;
@@ -5807,7 +5830,7 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
             Some(s) => break (s, false),
             None => {
                 let since_anchor = deadline_anchor.lock().unwrap().elapsed();
-                if since_anchor > timeout {
+                if since_anchor > *entry_timeout.lock().unwrap() {
                     runner_killed = true;
                     let _ = child.kill();
                     let s = child.wait()?;
@@ -6041,7 +6064,7 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
     let worker_end = describe_worker_end(
         &status,
         timed_out,
-        timeout,
+        parts.get(blamed).map(|p| p.timeout).unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS)),
         runner_killed,
         memory_error.as_ref(),
         &collected,
@@ -6113,10 +6136,22 @@ fn run_worker(config: WorkerConfig<'_>) -> Result<Vec<SimSummary>> {
                 summary.reload_ledger = Some(reload_summary);
             }
             summary.timed_out = timed_out;
+            if timed_out {
+                summary.timeout_budget = Some(part.timeout);
+            }
             if !status.success() {
                 summary.process_failure_code = Some(status.code().unwrap_or(-1));
                 summary.errors.push(SiteMessage {
-                    message: format!("sim worker process ended with {status}; runner_killed={runner_killed}"),
+                    message: if timed_out {
+                        format!(
+                            "sim `{}` exceeded its {}s wall-clock entry budget; \
+                             worker ended with {status}; runner_killed={runner_killed}",
+                            part.name,
+                            part.timeout.as_secs()
+                        )
+                    } else {
+                        format!("sim worker process ended with {status}; runner_killed={runner_killed}")
+                    },
                     site: String::new(),
                 });
             }
@@ -6229,6 +6264,7 @@ fn run_one_sim(
         name: sim_part.to_string(),
         out_dir: out_path.to_path_buf(),
         frame_budget: frame_budget_for(sim_part, env_pairs)?,
+        timeout: timeout_for(sim_part, env_pairs)?,
         env: env_pairs.to_vec(),
         occurrence_id: occurrence_id.unwrap_or(0),
         part_index,
@@ -6338,6 +6374,7 @@ fn run_entries(
                 name: name.to_string(),
                 out_dir: entry_artifacts.path().to_path_buf(),
                 frame_budget: frame_budget_for(name, &env)?,
+                timeout: timeout_for(name, &env)?,
                 env,
                 occurrence_id: 0,
                 part_index: parts.len(),
@@ -6463,6 +6500,7 @@ fn run_specs_recovering(config: RecoverConfig<'_>) -> Result<Vec<(String, SimSum
                     name: name.to_string(),
                     out_dir: artifacts.path().to_path_buf(),
                     frame_budget: frame_budget_for(name, &env)?,
+                    timeout: timeout_for(name, &env)?,
                     env,
                     occurrence_id: occurrence_id,
                     part_index,
@@ -7582,6 +7620,9 @@ struct SimSummary {
     video_match_assertions: Vec<VideoMatchAssertion>,
     cleanup_paths: Vec<String>,
     timed_out: bool,
+    /// The wall-clock budget the timed-out entry ran under, when the runner
+    /// killed it: its declared budget or the process-wide default.
+    timeout_budget: Option<Duration>,
     process_failure_code: Option<i32>,
     /// Child diagnostics retained by a buffered (concurrent) run, emitted by
     /// the caller inside the record lock. Empty when the run wrote them live.
@@ -7646,6 +7687,9 @@ impl SimSummary {
         self.entry_diagnostics.push_str(&other.entry_diagnostics);
         self.artifacts.extend(other.artifacts);
         self.timed_out = self.timed_out || other.timed_out;
+        if other.timeout_budget.is_some() {
+            self.timeout_budget = other.timeout_budget;
+        }
         if other.process_failure_code.is_some() {
             self.process_failure_code = other.process_failure_code;
         }
@@ -9082,6 +9126,38 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_timeout_is_the_entrys_wall_budget() {
+        assert_eq!(
+            timeout_for("s", &env(&[])).expect("default"),
+            Duration::from_secs(sim_timeout_secs())
+        );
+        assert_eq!(
+            timeout_for("s", &env(&[("ROCK_SIM_TIMEOUT_SECS", "1200")])).expect("declared"),
+            Duration::from_secs(1200)
+        );
+        // Other keys are not budgets, and the last declaration wins.
+        assert_eq!(
+            timeout_for("s", &env(&[("FRAME_COUNT", "90")])).expect("default"),
+            Duration::from_secs(sim_timeout_secs())
+        );
+        assert_eq!(
+            timeout_for("s", &env(&[("ROCK_SIM_TIMEOUT_SECS", "90"), ("ROCK_SIM_TIMEOUT_SECS", "1200")]))
+                .expect("declared"),
+            Duration::from_secs(1200)
+        );
+    }
+
+    #[test]
+    fn an_unusable_timeout_is_rejected_not_defaulted() {
+        for bad in ["", "0", "-1", "abc", "1.5"] {
+            assert!(
+                timeout_for("s", &env(&[("ROCK_SIM_TIMEOUT_SECS", bad)])).is_err(),
+                "`ROCK_SIM_TIMEOUT_SECS={bad}` must reject rather than silently become the default"
+            );
+        }
+    }
+
+    #[test]
     fn an_unusable_frame_count_is_rejected_not_defaulted() {
         for bad in ["abc", "", "0", "-5", "12.5"] {
             assert!(
@@ -9366,6 +9442,7 @@ mod tests {
             name: name.to_string(),
             out_dir: PathBuf::from(out),
             frame_budget: 0,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             env: env(&[
                 ("SIM_WORKER_PER_ENTRY_ENV", "ROOT"),
                 ("ROOT", "$OUT/telemetry"),
@@ -9389,6 +9466,7 @@ mod tests {
             name: "plain".to_string(),
             out_dir: PathBuf::from("/tmp/three"),
             frame_budget: 0,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             env: env(&[("ROOT", "/fixed")]),
             occurrence_id: 0,
             part_index: 0,
@@ -9413,6 +9491,7 @@ mod tests {
             name: "p".to_string(),
             out_dir: PathBuf::from("/tmp/out"),
             frame_budget: 0,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             env: e,
             occurrence_id: 0,
             part_index: 0,
@@ -9512,6 +9591,7 @@ mod tests {
                 name: (*n).to_string(),
                 out_dir: PathBuf::from("/tmp/out"),
                 frame_budget: 600,
+                timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
                 env: Vec::new(),
                 occurrence_id: 0,
                 part_index: 0,
@@ -10017,6 +10097,7 @@ mod tests {
             name: name.to_string(),
             out_dir: PathBuf::from("/tmp/out"),
             frame_budget: 60,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             env,
             occurrence_id: 0,
             part_index: 0,
@@ -10274,6 +10355,7 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
             name: "game::missing".to_string(),
             out_dir: PathBuf::from("/tmp/out"),
             frame_budget: 60,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             env: Vec::new(),
             occurrence_id: 0,
             part_index: 0,
