@@ -5132,7 +5132,9 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
 
 fn sound_test_fixture() -> tempfile::TempDir {
     let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
-    let dir = tempfile::tempdir_in(workspace).expect("sound package");
+    let tmp = workspace.join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let dir = tempfile::tempdir_in(tmp).expect("sound package");
     std::fs::write(dir.path().join("stick.toml"),
         "[package]\nname = \"sound-tests\"\ntype = \"lib\"\n[sound]\nproject = \"sound_project.json\"\n").unwrap();
     std::fs::write(dir.path().join("sound_project.json"),
@@ -5198,7 +5200,9 @@ fn js_file_and_package_tests_regenerate_the_sound_bank() {
 #[test]
 fn c_package_tests_prepare_the_current_sound_bank() {
     let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
-    let dir = tempfile::tempdir_in(workspace).unwrap();
+    let tmp = workspace.join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let dir = tempfile::tempdir_in(tmp).unwrap();
     std::fs::write(dir.path().join("stick.toml"),
         "[package]\nname = \"sound-c-tests\"\ntype = \"lib\"\n[sound]\nproject = \"sound_project.json\"\n").unwrap();
     std::fs::write(dir.path().join("sound_project.json"), "invalid json").unwrap();

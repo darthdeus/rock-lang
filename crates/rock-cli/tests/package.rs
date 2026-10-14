@@ -493,7 +493,9 @@ fn package_excludes_unrelated_external_asset_overlays() {
 
 #[test]
 fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("loose-overlay-asset");
     let overlay = tempfile::tempdir().expect("overlay fixture");
     let output = tempfile::tempdir().expect("package output");
@@ -594,7 +596,9 @@ fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
 
 #[test]
 fn package_overlay_shadow_prefers_admitted_and_keeps_worktree_fallback() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("overlay-shadow");
     let overlay = tempfile::tempdir().expect("overlay fixture");
     let output = tempfile::tempdir().expect("package output");
@@ -656,7 +660,9 @@ fn package_overlay_shadow_prefers_admitted_and_keeps_worktree_fallback() {
 
 #[test]
 fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("worktree-visual-bank");
     let overlay = fixture_root.path().join("overlay");
     let output = fixture_root.path().join("package");
@@ -753,7 +759,9 @@ fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
 
 #[test]
 fn package_rejects_schema_one_visual_bank() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("previous-visual-bank-schema");
     let output = fixture_root.path().join("package");
     std::fs::create_dir_all(project.join("assets")).unwrap();
@@ -806,7 +814,9 @@ fn package_rejects_schema_one_visual_bank() {
 
 #[test]
 fn package_rejects_an_overlay_bank_when_the_worktree_bank_is_missing() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("missing-worktree-visual-bank");
     let overlay = fixture_root.path().join("overlay");
     let output = fixture_root.path().join("package");
@@ -868,7 +878,9 @@ fn write_sound_package_fixture(project: &Path, sound_project: &str, assets: &[(&
 
 #[test]
 fn package_rejects_missing_sound_dependency_before_staging() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("missing-dependency");
     let output = tempfile::tempdir().expect("package output");
     let sound_project = r#"{
@@ -896,7 +908,9 @@ fn package_rejects_missing_sound_dependency_before_staging() {
 
 #[test]
 fn package_rejects_absolute_and_traversal_sound_keys_before_staging() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     for (name, key) in [("absolute", "/machine/a.wav"), ("traversal", "assets/../a.wav")] {
         let project = fixture_root.path().join(name);
         let output = tempfile::tempdir().expect("package output");
@@ -923,7 +937,9 @@ fn package_rejects_absolute_and_traversal_sound_keys_before_staging() {
 
 #[test]
 fn package_rejects_obsolete_sound_schema_before_staging() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("obsolete-shape");
     let output = tempfile::tempdir().expect("package output");
     let obsolete = r#"{
@@ -946,7 +962,9 @@ fn package_rejects_obsolete_sound_schema_before_staging() {
 
 #[test]
 fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("valid-sound");
     let output = tempfile::tempdir().expect("package output");
     let sound_project = r#"{
@@ -1035,7 +1053,9 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
 
 #[test]
 fn package_accepts_sound_dependencies_in_arbitrarily_named_asset_directories() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("arbitrary-directories");
     let output = tempfile::tempdir().expect("package output");
     let keys = [
@@ -1088,7 +1108,9 @@ fn package_accepts_sound_dependencies_in_arbitrarily_named_asset_directories() {
 
 #[test]
 fn sound_package_failure_is_transactional_for_generated_output() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("transactional-sound");
     let output = tempfile::tempdir().expect("package output");
     std::fs::write(output.path().join("caller-sentinel"), b"keep me").unwrap();
@@ -1112,7 +1134,9 @@ fn sound_package_failure_is_transactional_for_generated_output() {
 
 #[test]
 fn packaged_sound_dependencies_survive_install_outside_source_tree() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("installed-sound");
     let output = tempfile::tempdir().expect("package output");
     let installed = tempfile::tempdir().expect("installed package");
@@ -1170,7 +1194,9 @@ fn packaged_sound_dependencies_survive_install_outside_source_tree() {
 /// covered by the resolver tests, not here.
 #[test]
 fn shipping_channel_excludes_a_channel_scoped_dependency_from_generated_code() {
-    let fixture_root = tempfile::tempdir_in(repo_root()).expect("package fixture");
+    let tmp = repo_root().join("tmp");
+    std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+    let fixture_root = tempfile::tempdir_in(tmp).expect("package fixture");
     let project = fixture_root.path().join("channel-gated");
     let dep = fixture_root.path().join("dev-bridge-lib");
     std::fs::create_dir_all(&project).unwrap();

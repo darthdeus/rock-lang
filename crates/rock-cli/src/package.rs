@@ -912,7 +912,9 @@ mod tests {
     #[test]
     fn development_bank_publishes_only_content_changes() {
         let workspace = rock_host::project::find_workspace_root(&std::env::current_dir().unwrap()).unwrap();
-        let fixture = tempfile::tempdir_in(workspace).unwrap();
+        let tmp = workspace.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+        let fixture = tempfile::tempdir_in(tmp).unwrap();
         std::fs::write(fixture.path().join("stick.toml"),
             "[package]\nname = \"stable-sound-dev\"\n[sound]\nproject = \"sound_project.json\"\n").unwrap();
         let project = fixture.path().join("sound_project.json");
@@ -961,7 +963,9 @@ mod tests {
             &std::env::current_dir().expect("current directory"),
         )
         .expect("workspace root");
-        let fixture = tempfile::tempdir_in(workspace).expect("sound fixture");
+        let tmp = workspace.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+        let fixture = tempfile::tempdir_in(tmp).expect("sound fixture");
         std::fs::write(
             fixture.path().join("stick.toml"),
             "[package]\nname = \"missing-sound-dev\"\n\n[sound]\nproject = \"sound_project.json\"\n",
@@ -993,7 +997,9 @@ mod tests {
             &std::env::current_dir().expect("current directory"),
         )
         .expect("workspace root");
-        let fixture = tempfile::tempdir_in(workspace).expect("visual fixture");
+        let tmp = workspace.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+        let fixture = tempfile::tempdir_in(tmp).expect("visual fixture");
         let overlay = fixture.path().join("overlay");
         std::fs::create_dir_all(fixture.path().join("assets")).unwrap();
         std::fs::create_dir_all(overlay.join("assets")).unwrap();
@@ -1036,7 +1042,9 @@ mod tests {
             &std::env::current_dir().expect("current directory"),
         )
         .expect("workspace root");
-        let fixture = tempfile::tempdir_in(workspace).expect("visual fixture");
+        let tmp = workspace.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("fixture scratch directory");
+        let fixture = tempfile::tempdir_in(tmp).expect("visual fixture");
         let overlay = fixture.path().join("overlay");
         let project_object = fixture
             .path()
