@@ -237,11 +237,15 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
     }
     let harvest = fs::read_to_string(repo.join("mag/harvest.rock"))
         .expect("read MAG harvest source");
-    assert_eq!(
-        harvest.matches("fn harvest_ready_key(g: IVec2)").count(),
-        1,
-        "per-Space harvest state must not pack SpaceId into local tile keys"
-    );
+    assert!(!harvest.contains("harvest_action_try_start("),
+        "MAG must present harvest results without deciding admission");
+    let harvest_rules = fs::read_to_string(repo.join("mag-world/player_harvest.rock"))
+        .expect("read world harvest rules");
+    let harvest_command = rock_function_body(&harvest_rules, "pub fn world_player_harvest_command<M>(");
+    assert!(harvest_command.contains("let simulation = root.spaces[index].get().unwrap().simulation")
+        && harvest_command.contains("harvest_action_try_start(simulation.harvest_ready_at,")
+        && harvest_command.contains("place.grid.y * SPACE_SIZE + place.grid.x, root.clock.now()"),
+        "world harvest must use its owning space's simulation and local tile key");
     let hazards = fs::read_to_string(repo.join("mag-simulation/hazards.rock"))
         .expect("read simulation hazards source");
     assert_eq!(
@@ -1356,7 +1360,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         ("mag_tick_spawners", &[][..]),
         ("mag_tick_player_actions_harvest_hazards", &[
             "mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,",
-            "player.apply_bandage_intent_in(world, ctx.intents.consumables)",
+            "player.apply_consumable_intent_in(world, ctx.intents.consumables)",
             "mag_capture_status_presentation(world)",
             "player.update_walls_in(world, dt)",
             "world_ground_pickup_command(world.root,",
