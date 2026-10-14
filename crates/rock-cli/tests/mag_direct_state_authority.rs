@@ -1279,7 +1279,6 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let prepare = rock_function_body(&run, "fn mag_tick_prepare(");
     for call in [
         "coroutine_poller_update(world.root.tasks)",
-        "flow_frame_reset()",
         "world_tick_all(world)",
         "player.apply_inventory_command_in(world, intents.inventory)",
     ] {
@@ -1296,6 +1295,9 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let package_tick = fs::read_to_string(repo.join("mag-world/world_tick.rock"))
         .expect("read package tick runner");
     let advance = rock_function_body(&package_tick, "pub fn world_tick_advance<M, H>(");
+    assert!(advance.find("root.flow_builds_this_tick = 0").unwrap()
+        < advance.find("prepare(runner.host, dt)").unwrap(),
+        "the world must reset its shared flow admission budget before host preparation");
     assert!(advance.find("prepare(runner.host, dt)").unwrap()
         < advance.find("world_expedition_schedule_tick(runner, runner.stages.unwrap())").unwrap(),
         "runner preparation must precede the ordered package schedule");
@@ -1315,11 +1317,16 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "world_doors_update(r.root.get().unwrap(), r.host, r.door_host, player, r.dt)"] {
         assert!(runner.contains(call), "package runner is missing authoritative stage `{call}`");
     }
+    assert!(!run.contains("fn mag_tick_rows_pickup(") && !host_runner.contains("rows_pickup:"),
+        "MAG must use the sole library rows/pickup stage");
+    let rows_pickup = rock_function_body(&package_tick, "pub fn world_tick_rows_pickup<M, H>(");
+    assert!(rows_pickup.contains("world_inhabitant_routes_update(root, runner, runner.routes.unwrap())")
+        && rows_pickup.contains("world_inhabitants_pickup(root, runner, runner.pickup.unwrap(), false)"));
+    assert!(!rows_pickup.contains("tick_host"));
     let phases = [
         ("mag_tick_actor_pre_mob", &["world_player_cast_intent_enqueue(queue, record, tick, ctx.intents.cast)",
             "WorldPlayerActionKind::FrameTarget", "WorldPlayerActionKind::FrameMovement",
             "world_player_actions_dispatch(world.root,"][..]),
-        ("mag_tick_rows_pickup", &[][..]),
         ("mag_tick_spawners", &[][..]),
         ("mag_tick_player_recovery", &[][..]),
         ("mag_tick_player_actions_harvest_hazards", &[
