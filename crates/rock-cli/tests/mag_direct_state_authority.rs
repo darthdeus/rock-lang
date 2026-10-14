@@ -1099,7 +1099,6 @@ fn mag_player_queries_are_receiver_methods() {
         "fn Player.effective_armor(player)",
         "fn Player.shaped_progress(player)",
         "fn Player.sprite(player)",
-        "fn Player.mana_per_sec(player)",
         "fn Player.tint(player)",
     ];
     for declaration in required {
@@ -1112,11 +1111,19 @@ fn mag_player_queries_are_receiver_methods() {
         "fn player_sprite()",
         "fn player_stamina_regen_per_sec()",
         "fn player_mana_per_sec()",
+        "fn Player.mana_per_sec(player)",
+        "fn Player.mana_per_sec_in(",
         "fn player_tint()",
     ];
     for declaration in forbidden {
-        assert!(!source.contains(declaration), "prefix-only Player query remains `{declaration}`");
+        assert!(!source.contains(declaration), "legacy Player query remains `{declaration}`");
     }
+    let vitals = fs::read_to_string(repo.join("mag-world/player_vitals.rock"))
+        .expect("read world player vitals");
+    let rate = rock_function_body(&vitals, "pub fn world_player_mana_per_sec<M>(");
+    assert!(rate.contains("player_body_mana_regen_per_sec(actor.player.unwrap().body,")
+        && rate.contains("world_wisp_gather(root, actor)"),
+        "the world mana reader must use the owned actor body and that root's wisps");
 }
 
 #[test]
