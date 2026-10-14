@@ -203,7 +203,7 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
     assert_eq!(root_state.matches("spaces: [Entity<WorldSpaceLayout>]").count(), 1);
     assert_eq!(layout_state.matches("simulation: SpaceSimulationState").count(), 1);
     assert_eq!(layout_state.matches("fire: super::environment_fire::WorldSpaceFire").count(), 1);
-    for field in ["grass_fires:", "grass_fire_next_tick:", "flammable_ignited_at:",
+    for field in ["grass_damage:", "grass_fires:", "grass_fire_next_tick:", "flammable_ignited_at:",
         "flammable_sources:", "flammable_anchors:", "flammable_next_tick:"] {
         assert!(!space_state.lines().any(|line| line.trim_start().starts_with(field)),
             "MAG SpaceState must not retain world-owned fire field `{field}`");
