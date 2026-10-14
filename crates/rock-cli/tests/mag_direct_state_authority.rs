@@ -1226,7 +1226,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 24, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 25, "WorldState field census changed: {fields:?}");
     assert!(root_state.lines().any(|line| line.trim() == "walls: Arena<WallTile>,"),
         "MagWorldRoot owns cast-wall rows");
     assert!(!world_state.lines().any(|line| line.trim_start().starts_with("walls:")),
