@@ -1443,9 +1443,6 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "WorldPlayerActionKind::FrameTarget", "WorldPlayerActionKind::FrameMovement",
             "world_player_actions_dispatch(world.root,"][..]),
         ("mag_tick_spawners", &[][..]),
-        ("mag_tick5b_dispatch", &[
-            "player.present_bandage_start_in(world, bandage)",
-            "mag_capture_status_presentation(world)"][..]),
     ];
     assert!(host_runner.contains("corpse_present: (ctx, dt) => present_corpses(ctx.world, dt)"),
         "shared runner must present corpses through the package corpse stage");
@@ -1695,4 +1692,32 @@ fn without_string_literals(line: &str) -> String {
         }
     }
     out
+}
+
+#[test]
+fn tick5b_slots_present_without_a_legacy_selector() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let run = mag_run_sources(repo);
+    let host = fs::read_to_string(repo.join("mag-world/world_tick.rock")).unwrap();
+    let schedule = fs::read_to_string(repo.join("mag-world/tick5b_schedule.rock")).unwrap();
+    assert!(!host.contains("player_actions_harvest_hazards: (fn"));
+    assert!(!schedule.contains("WorldTick5bStep"));
+    assert!(!run.contains("mag_tick5b_dispatch") && !run.contains("WorldTick5bStep"));
+    for slot in ["statuses", "quests", "gallery", "consumables", "summons", "fuses",
+        "regions", "ankh", "teleports", "harvest_hazards"] {
+        let source = fs::read_to_string(repo.join(format!("mag-world/tick5b_{slot}.rock"))).unwrap();
+        assert!(source.contains("present: (fn(H))?"), "{slot} owns its presentation binding");
+        assert!(source.contains("present("), "{slot} executes its binding synchronously");
+        assert!(run.contains(&format!("present: mag_tick5b_{slot}")), "{slot} binds its own consumer");
+        assert!(!source.contains("player_actions_harvest_hazards") && !source.contains("WorldTick5bStep"));
+    }
+    assert!(run.contains("player.present_bandage_start_in(world, bandage)"));
+    assert!(run.contains("mag_capture_status_presentation(world)"));
+    let harvest = fs::read_to_string(repo.join("mag/harvest.rock")).unwrap();
+    assert!(!harvest.contains("world_harvest_tick("));
+    let slot = fs::read_to_string(repo.join("mag-world/tick5b_harvest_hazards.rock")).unwrap();
+    assert!(slot.find("world_harvest_tick(").unwrap() < slot.find("WorldEnvironmentPhase::Traps").unwrap());
+    let statuses = fs::read_to_string(repo.join("mag-world/tick5b_statuses.rock")).unwrap();
+    let body = rock_function_body(&statuses, "pub fn world_tick5b_statuses<M, H>(");
+    assert!(body.find("present(host)").unwrap() < body.find("world_player_status_turn(").unwrap());
 }
