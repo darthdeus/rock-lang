@@ -1362,11 +1362,14 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "MAG must define exactly one canonical simulation tick"
     );
     let tick = rock_function_body(&run, "fn mag_simulation_tick(");
-    let prepare = rock_wiring_body(&run, "fn mag_tick_prepare(");
+    let prepare = fs::read_to_string(repo.join("mag-world/player_preparation.rock"))
+        .expect("read world player preparation source");
     for call in [
-        "coroutine_poller_update(world.root.tasks)",
-        "world_tick_all(world)",
-        "player.apply_inventory_command_in(world, intents.inventory)",
+        "world_player_inventory_command(root, handle, command)",
+        "world_player_vitals_tick(root, actor, delta, state.suspend_vitals)",
+        "world_player_checkpoint_retry(runner, handle)",
+        "world_player_deferred_travel(runner, handle, request)",
+        "simulation_space_advance(handle.get().unwrap().simulation)",
     ] {
         assert!(prepare.contains(call), "tick preparation is missing authoritative call `{call}`");
     }
@@ -1374,7 +1377,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         assert!(tick.contains(call), "canonical tick is missing runner delegation `{call}`");
     }
     let host_runner = rock_wiring_body(&run, "fn mag_world_tick_runner_in(");
-    for call in ["prepare: mag_tick_prepare", "world_tick_runner(runtime.rows, world.root, context, hooks, shells)"] {
+    for call in ["world_tick_runner(runtime.rows, world.root, context, hooks, shells)"] {
         assert!(host_runner.contains(call), "shared runner construction is missing delegation `{call}`");
     }
     assert!(!host_runner.contains("world_tick_advance("), "acquiring a runner must not advance another tick");
@@ -1382,11 +1385,23 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         .expect("read package tick runner");
     let advance = rock_function_body(&package_tick, "pub fn world_tick_advance<M, H>(");
     assert!(advance.find("root.flow_builds_this_tick = 0").unwrap()
-        < advance.find("prepare(runner.host, dt)").unwrap(),
-        "the world must reset its shared flow admission budget before host preparation");
-    assert!(advance.find("prepare(runner.host, dt)").unwrap()
+        < advance.find("super::player_preparation::world_player_prepare(runner, handle, dt)").unwrap(),
+        "the world must reset its shared flow admission budget before player preparation");
+    assert!(advance.find("super::player_preparation::world_player_prepare(runner, handle, dt)").unwrap()
         < advance.find("world_expedition_schedule_tick(runner, runner.stages.unwrap())").unwrap(),
         "runner preparation must precede the ordered package schedule");
+    assert!(!run.contains("mag_tick_prepare") && !package_tick.contains("tick_host.prepare"),
+        "player preparation must have no host rule override or forwarders");
+    let mut previous_prepare = 0;
+    for (index, call) in ["task_clock_advance(root.clock, dt)",
+        "super::player_preparation::world_player_prepare(runner, handle, dt)",
+        "coroutine_poller_update(root.tasks)",
+        "super::player_preparation::world_prepare_spaces(root)",
+        "world_expedition_schedule_tick(runner, runner.stages.unwrap())"].iter().enumerate() {
+        let position = advance.find(call).unwrap_or_else(|| panic!("missing preparation step {call}"));
+        assert!(index == 0 || previous_prepare < position, "world preparation changed stage order");
+        previous_prepare = position;
+    }
     let runner = rock_function_body(&package_tick, "pub fn world_tick_runner<M, H>(");
     let actor_source = fs::read_to_string(repo.join("mag/mobs_turn.rock"))
         .expect("read MAG actor turn source");
