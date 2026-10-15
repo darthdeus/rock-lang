@@ -1287,11 +1287,15 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 17, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 16, "WorldState field census changed: {fields:?}");
     assert!(!world_state.contains("recovery_reservoir:"), "the recovery clock state belongs to the root");
     assert!(root_state.contains("recovery_reservoir: mag_simulation::RecoveryReservoir"));
     assert!(!world_state.contains("cast_binding:"), "MAG must not own the cached cast binding");
     assert!(root_state.contains("cast_binding: super::mob_cast_core::WorldCastBinding<M>"));
+    assert!(root_state.lines().any(|line| line.trim() == "fuses: Arena<mag_simulation::Fuse>,"),
+        "MagWorldRoot owns delayed spell charges");
+    assert!(!world_state.lines().any(|line| line.trim_start().starts_with("fuses:")),
+        "WorldState must not duplicate the root's fuse arena");
     assert!(root_state.lines().any(|line| line.trim() == "walls: Arena<WallTile>,"),
         "MagWorldRoot owns cast-wall rows");
     assert!(!world_state.lines().any(|line| line.trim_start().starts_with("walls:")),
