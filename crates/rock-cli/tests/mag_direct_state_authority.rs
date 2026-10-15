@@ -673,7 +673,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "actor: WorldActor",
         "gesture: PlayerGesture",
         "gesture_timer: float",
-        "idle_ticks: int",
         "loco: LocoState",
         "stop_ru: bool",
         "loco_start_variant: PlayerStartVariant",
@@ -689,6 +688,10 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
             "scene-owned Player must contain `{field}` exactly once"
         );
     }
+    let preparation = fs::read_to_string(repo.join("mag-world/player_preparation.rock"))
+        .expect("read world player preparation source");
+    assert_eq!(preparation.matches("idle_ticks: int").count(), 1,
+        "the world player preparation must own the stationary stride counter once");
     let followers = fs::read_to_string(repo.join("mag-world/player_actions.rock"))
         .expect("world player runtime source");
     let controller = rock_function_body(&followers, "pub struct WorldPlayerState {");
@@ -697,7 +700,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         assert_eq!(controller.matches(field).count(), 1,
             "the authoritative player actor component must own `{field}` once");
     }
-    for field in ["body:", "combat:", "inventory:"] {
+    for field in ["body:", "combat:", "inventory:", "idle_ticks:"] {
         assert!(!player_state.contains(field), "MAG must not duplicate actor-owned `{field}`");
     }
     assert_eq!(followers.matches("follower_slots: [mag_simulation::inhabitant::ActorLink?] = [null, null, null, null]").count(), 1,
