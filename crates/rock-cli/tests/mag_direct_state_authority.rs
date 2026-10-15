@@ -1049,7 +1049,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let manifest = fs::read_to_string(repo.join("mag/save_manifest.rock"))
         .expect("read MAG save manifest source");
     assert!(
-        manifest.contains("fn Player.progress_to_json(player, progress: ProgressState,"),
+        manifest.contains("fn save_progress_metadata_in(world: WorldState, progress: ProgressState,"),
         "save serialization must consume the typed progress domain explicitly"
     );
     let async_save = fs::read_to_string(repo.join("mag/save_async.rock"))
@@ -1069,16 +1069,15 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         .expect("read MAG player save source");
     assert!(conversion.contains("save_convert_document(world: WorldState,"),
         "conversion must consume the explicit world domain");
-    assert!(manifest.contains("quest_save_stage_progress(world.root.progress,"),
-        "upgraded serialization must consume the world's typed progress domain");
+    assert!(!save.contains("save_upgrade_publish("),
+        "legacy upgrade publication must stay retired");
+    assert!(conversion.contains("if version != SAVE_VERSION"),
+        "the reader refuses historical save versions");
     let convert = save.find("let decoded = save_convert_document(world,")
-        .expect("one detached conversion entry");
-    let publish = save.find("let converted = save_upgrade_publish(world,")
-        .expect("publish the validated conversion");
+        .expect("one detached current document validation entry");
     let apply = save.find("save_load_player(world, attached, converted)")
         .expect("apply the current player plan");
-    assert!(convert < publish && publish < apply,
-        "conversion and publication must precede live apply");
+    assert!(convert < apply, "current document validation must precede live apply");
     assert!(player_save.contains("save_apply_player_in(player, world, converted.player_load)"),
         "the player load step must apply the current player plan");
     for (line_number, line) in save.lines().enumerate() {
