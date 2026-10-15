@@ -17,30 +17,10 @@ mod perf_json_format_test;
 mod perf_watchdog_gate;
 #[path = "quit_teardown_test.rs"]
 mod quit_teardown_test;
-#[path = "replay_desync_tests.rs"]
-mod replay_desync_tests;
-#[path = "replay_flight_tests.rs"]
-mod replay_flight_tests;
-#[path = "artifact_fingerprint_replay_tests.rs"]
-mod artifact_fingerprint_replay_tests;
-#[path = "replay_bindings_tests.rs"]
-mod replay_bindings_tests;
 #[path = "telemetry_isolation_tests.rs"]
 mod telemetry_isolation_tests;
 #[path = "action_layer_v2_landing_gaps.rs"]
 mod action_layer_v2_landing_gaps;
-#[path = "replay_restore_tests.rs"]
-mod replay_restore_tests;
-#[path = "replay_roundtrip_tests.rs"]
-mod replay_roundtrip_tests;
-#[path = "replay_bootstrap_tests.rs"]
-mod replay_bootstrap_tests;
-#[path = "replay_timeline_tests.rs"]
-mod replay_timeline_tests;
-#[path = "replay_window_tests.rs"]
-mod replay_window_tests;
-#[path = "replay_timing_tests.rs"]
-mod replay_timing_tests;
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
 #[path = "allocation_activation_gate.rs"]
@@ -104,3 +84,6 @@ mod engine_cdylib_target_dir_gate;
 
 #[path = "engine_launcher_rebuild_gate.rs"]
 mod engine_launcher_rebuild_gate;
+
+#[path = "state_image_tests.rs"]
+mod state_image_tests;

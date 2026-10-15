@@ -297,33 +297,6 @@ fn main() {{}}
     ));
 }
 
-#[test]
-fn replay_role_change_requires_structural_reload() {
-    let source = |role: &str| {
-        format!(
-            r#"
-            @lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
-            deco init late_draw(stage: int = 100, replay: string = "presentation") {{}}
-            @late_draw(replay="{role}") fn stateful() {{}}
-            fn main() {{}}
-            "#
-        )
-    };
-    let before = ws_with(&source("presentation"));
-    let after = ws_with(&source("state"));
-    let mid = function(&before, "main").module;
-    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
-        .expect("initial replay-role program");
-    let changed = function(&after, "stateful");
-    let reload = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(changed.module, BodyOwner::Function(changed.func))],
-    )
-    .expect("replay-role structural check");
-    assert!(matches!(reload, skull_codegen_js::emit::JsReload::FullRequired));
-}
 
 #[test]
 fn const_value_overlay_redefines_users_without_reinitializing_state() {

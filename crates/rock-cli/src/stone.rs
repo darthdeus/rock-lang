@@ -1,3 +1,6 @@
+const SESSION_USAGE_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+
 use crate::*;
 use std::process::{Child, Command, Stdio};
 
@@ -284,11 +287,9 @@ pub fn do_stone_watch(
     quiet: bool,
     app_args: &[String],
     backend: crate::Backend,
-    no_record: bool,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
     crate::skull_backend::ensure_renderer_feature(path)?;
-    let replay_source = replay_source_for(path)?;
 
     if !quiet {
         info!("Starting Stone development environment");
@@ -354,25 +355,10 @@ pub fn do_stone_watch(
         }
     };
 
-    // Always-on flight recorder (P3.5): record every `rock stone` session from
-    // boot into the per-user replay archive so any bug is already a file. The
-    // compiler-owned identity is refreshed before every process restart, so a
-    // successor cannot inherit an earlier Artifact label.
-    let mut flight = if initial_compilation_success {
-        let artifact_fingerprint = compiler.artifact_fingerprint()?;
-        flight_recorder_for(path, &artifact_fingerprint, no_record)?
-    } else {
-        None
-    };
-    if let Some(f) = &flight {
-        info!("Flight recorder: {} (build {})", f.record_path, f.build_id);
-    }
-
-    // Start the game process only if initial compilation succeeded
     let mut game_process = if initial_compilation_success {
         let build_id = compiler.artifact_fingerprint()?;
         Some(start_game_process(
-            &output_path, app_args, &build_id, &replay_source, flight.as_ref(), None,
+            &output_path, app_args, &build_id,
         )?)
     } else {
         None
@@ -574,14 +560,10 @@ pub fn do_stone_watch(
                 error!("fold before start failed: {} (start may load a stale main.lua)", e);
             }
             let artifact_fingerprint = compiler.artifact_fingerprint()?;
-            flight = flight_recorder_for(path, &artifact_fingerprint, no_record)?;
-            if let Some(f) = &flight {
-                info!("Flight recorder: {} (build {})", f.record_path, f.build_id);
-            }
             info!("First successful compilation! Starting game...");
             let build_id = artifact_fingerprint;
             game_process = Some(start_game_process(
-                &output_path, app_args, &build_id, &replay_source, flight.as_ref(), None,
+                &output_path, app_args, &build_id,
             )?);
             info!("Game started successfully");
         }
@@ -602,31 +584,8 @@ pub fn do_stone_watch(
                 if let Err(e) = compiler.canonicalize_for_restart() {
                     error!("fold before restart failed: {} (restart may load a stale main.lua)", e);
                 }
-                // In-session load: if the F7 picker requested a replay, relaunch
-                // into windowed playback of it (read-once) instead of the live game.
-                let replay_request = consume_replay_request();
-                if let Some(ref p) = replay_request {
-                    match p.loop_ab {
-                        Some((a, b)) => info!(
-                            "Loading replay {} with A-B loop [{a},{b}] (shape-edit restart); flight recorder off",
-                            p.path
-                        ),
-                        None => info!(
-                            "Loading replay {} (F7 picker); flight recorder off for this run",
-                            p.path
-                        ),
-                    }
-                }
-                let build_id = compiler.artifact_fingerprint()?;
-                if replay_request.is_none() {
-                    flight = flight_recorder_for(path, &build_id, no_record)?;
-                    if let Some(f) = &flight {
-                        info!("Flight recorder: {} (build {})", f.record_path, f.build_id);
-                    }
-                }
                 game_process = Some(start_game_process(
-                    &output_path, app_args, &build_id, &replay_source,
-                    flight.as_ref(), replay_request.as_ref(),
+                    &output_path, app_args, &compiler.artifact_fingerprint()?,
                 )?);
                 info!("Game process restarted");
             }
@@ -682,323 +641,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Flight recorder config: always-on record-from-boot for `rock stone`
-/// (docs/replay-scrub-plan.md P3.5). Each recording streams to a timestamped
-/// file in the per-user replay archive, with `last.replay` as a relative symlink.
-struct FlightRecorder {
-    record_path: String,
-    build_id: String,
-    source: String,
-    checkpoint_interval: usize,
-}
-
-const REPLAY_USAGE_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
-/// Live desync cadence for the always-on flight recorder.
-///
-/// A checkpoint canonically serializes and hashes every world-included global,
-/// and its cost grows with MAG's live world. A populated session measured a
-/// 2.0-second stall and 130 MiB heap spike at the former 3600-tick default.
-/// Always-on recording must not perturb ordinary play, so checkpoints default
-/// off. Set STONE_CHECKPOINT_INTERVAL to a positive tick cadence for a session
-/// whose replay needs a desync oracle.
-const FLIGHT_CHECKPOINT_INTERVAL: usize = 0;
-
-fn parse_checkpoint_interval(raw: Option<&str>) -> usize {
-    let Some(raw) = raw else { return FLIGHT_CHECKPOINT_INTERVAL };
-    match raw.trim().parse::<usize>() {
-        Ok(interval) => interval,
-        Err(error) => {
-            log::warn!(
-                target: "STONE",
-                "STONE_CHECKPOINT_INTERVAL is not a tick count ({error}); using {FLIGHT_CHECKPOINT_INTERVAL}"
-            );
-            FLIGHT_CHECKPOINT_INTERVAL
-        }
-    }
-}
-
-fn flight_checkpoint_interval() -> usize {
-    let raw = std::env::var("STONE_CHECKPOINT_INTERVAL").ok();
-    parse_checkpoint_interval(raw.as_deref())
-}
-
-fn replay_state_root() -> Option<std::path::PathBuf> {
-    if let Some(root) = std::env::var_os("STONE_REPLAY_ROOT") {
-        return Some(root.into());
-    }
-    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        return Some(std::path::PathBuf::from(root).join("stone").join("replays"));
-    }
-    std::env::var_os("HOME").map(|home| {
-        std::path::PathBuf::from(home)
-            .join(".local").join("state").join("stone").join("replays")
-    })
-}
-
-pub(crate) fn replay_source_for(game_path: &str) -> Result<String> {
-    let project = fs_err::canonicalize(game_path)?;
-    let source = rock_host::project::find_workspace_root(&project)
-        .and_then(|root| project.strip_prefix(root).ok().map(std::path::Path::to_path_buf))
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .unwrap_or(project);
-    Ok(source.components()
-        .map(|part| part.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/"))
-}
-
-fn replay_archive_name(source: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    let readable = source.rsplit('/').next().unwrap_or("game").chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
-        .collect::<String>();
-    let digest = Sha256::digest(source.as_bytes());
-    let id = digest[..4].iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    format!("{}-{id}", if readable.is_empty() { "game" } else { &readable })
-}
-
-fn replay_archive_dir(replay_root: &std::path::Path, source: &str) -> std::path::PathBuf {
-    let relative = std::path::Path::new(source);
-    let is_safe_relative = !relative.as_os_str().is_empty()
-        && relative.components().all(|part| matches!(part, std::path::Component::Normal(_)));
-    if is_safe_relative {
-        replay_root.join(relative)
-    } else {
-        replay_root.join("_external").join(replay_archive_name(source))
-    }
-}
-
-#[cfg(unix)]
-fn replace_last_replay_alias(dir: &std::path::Path, target: &std::ffi::OsStr) -> Result<()> {
-    use std::os::unix::fs::symlink;
-
-    let pending = dir.join(format!(".last.replay-{}", std::process::id()));
-    if pending.symlink_metadata().is_ok() {
-        std::fs::remove_file(&pending)?;
-    }
-    symlink(target, &pending)?;
-    std::fs::rename(pending, dir.join("last.replay"))?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn replace_last_replay_alias(dir: &std::path::Path, target: &std::ffi::OsStr) -> Result<()> {
-    use std::os::windows::fs::symlink_file;
-
-    let pending = dir.join(format!(".last.replay-{}", std::process::id()));
-    if pending.symlink_metadata().is_ok() {
-        std::fs::remove_file(&pending)?;
-    }
-    symlink_file(target, &pending)?;
-    std::fs::rename(pending, dir.join("last.replay"))?;
-    Ok(())
-}
-
-fn prepare_flight_recorder(
-    replay_root: &std::path::Path,
-    source: &str,
-    artifact_fingerprint: &str,
-    timestamp_ms: u128,
-    pid: u32,
-) -> Result<FlightRecorder> {
-    let dir = replay_archive_dir(replay_root, source);
-    std::fs::create_dir_all(&dir)?;
-
-    let mut suffix = 0usize;
-    let (record_path, filename) = loop {
-        let filename = if suffix == 0 {
-            format!("recording-{timestamp_ms}-{pid}.replay")
-        } else {
-            format!("recording-{timestamp_ms}-{pid}-{suffix}.replay")
-        };
-        let path = dir.join(&filename);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => break (path, filename),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => suffix += 1,
-            Err(error) => return Err(error.into()),
-        }
-    };
-
-    if let Err(error) = replace_last_replay_alias(&dir, std::ffi::OsStr::new(&filename)) {
-        let _ = std::fs::remove_file(&record_path);
-        return Err(error);
-    }
-
-    Ok(FlightRecorder {
-        record_path: record_path.to_string_lossy().into_owned(),
-        build_id: artifact_fingerprint.to_string(),
-        source: source.to_string(),
-        checkpoint_interval: flight_checkpoint_interval(),
-    })
-}
-
-fn replay_usage(dir: &std::path::Path) -> (u64, usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return (0, 0) };
-    entries.flatten().filter_map(|entry| {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("replay") {
-            return None;
-        }
-        let metadata = std::fs::symlink_metadata(path).ok()?;
-        metadata.file_type().is_file().then_some(metadata.len())
-    }).fold((0, 0), |(bytes, count), len| (bytes + len, count + 1))
-}
-
-fn replay_usage_warning(dir: &std::path::Path, bytes: u64, recordings: usize) -> Option<String> {
-    if bytes < REPLAY_USAGE_WARN_BYTES { return None }
-    let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    Some(format!(
-        "{} holds {gb:.1} GB across {recordings} recording(s); recordings are retained until you remove the ones you no longer need",
-        dir.display()
-    ))
-}
-
-/// Build the flight-recorder config for `rock stone`, or None when disabled.
-/// Opt-out via `--no-record` or STONE_NO_FLIGHT_RECORDER=1; a user-set
-/// STONE_RECORD in the environment wins (explicit recording elsewhere is
-/// respected).
-fn flight_recorder_for(
-    game_path: &str,
-    artifact_fingerprint: &str,
-    no_record: bool,
-) -> Result<Option<FlightRecorder>> {
-    if no_record {
-        return Ok(None);
-    }
-    if std::env::var("STONE_NO_FLIGHT_RECORDER").as_deref() == Ok("1") {
-        return Ok(None);
-    }
-    if std::env::var("STONE_RECORD").is_ok() {
-        return Ok(None);
-    }
-    if artifact_fingerprint.is_empty() || artifact_fingerprint == "dev" {
-        anyhow::bail!("cannot start flight recorder without a real Artifact fingerprint");
-    }
-    let Some(root) = replay_state_root() else {
-        log::warn!(target: "STONE", "flight recorder disabled: HOME/XDG_STATE_HOME is unavailable");
-        return Ok(None);
-    };
-    let source = match replay_source_for(game_path) {
-        Ok(source) => source,
-        Err(e) => {
-            log::warn!(target: "STONE", "flight recorder disabled: could not identify replay source: {e}");
-            return Ok(None);
-        }
-    };
-    let timestamp_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let flight = match prepare_flight_recorder(
-        &root, &source, artifact_fingerprint, timestamp_ms, std::process::id(),
-    ) {
-        Ok(flight) => flight,
-        Err(e) => {
-            log::warn!(target: "STONE", "flight recorder disabled: could not prepare replay archive: {e}");
-            return Ok(None);
-        }
-    };
-    let dir = std::path::Path::new(&flight.record_path).parent().unwrap_or(&root);
-    let (bytes, recordings) = replay_usage(dir);
-    if let Some(warning) = replay_usage_warning(dir, bytes, recordings) {
-        log::warn!(target: "STONE", "{warning}");
-    }
-    Ok(Some(flight))
-}
-
-/// Apply the flight-recorder env to a game-process command (both spawn branches).
-fn apply_flight_env(cmd: &mut Command, flight: Option<&FlightRecorder>) {
-    if let Some(f) = flight {
-        cmd.env("STONE_RECORD", &f.record_path)
-            .env("STONE_BUILD_ID", &f.build_id)
-            .env("STONE_REPLAY_SOURCE", &f.source)
-            .env("STONE_CHECKPOINT_INTERVAL", f.checkpoint_interval.to_string());
-    }
-}
-
-/// Env for a game-process spawn: a windowed replay of `replay` (in-session load
-/// from the F7 picker) OR the always-on flight recorder. Replaying and recording
-/// are mutually exclusive, so a load request suppresses the recorder for that
-/// run. Build-id (reused from the flight config -- same compiled lua) lets
-/// replay_init warn on a mismatch.
-/// A consumed in-session load request: a replay path, plus optional A-B loop
-/// markers (P6 shape-edit survival -- a full reload during a loop restarts the
-/// process and resumes the loop at A).
-#[derive(Debug, PartialEq)]
-struct ReplayRequest {
-    path: String,
-    loop_ab: Option<(i64, i64)>,
-}
-
-/// Parse a request line: `path` or `path\tloop\t<A>\t<B>`. A malformed loop
-/// suffix degrades to a plain replay (path only) rather than being dropped.
-fn parse_replay_request(raw: &str) -> ReplayRequest {
-    let mut parts = raw.split('\t');
-    let path = parts.next().unwrap_or("").to_string();
-    let loop_ab = match (parts.next(), parts.next(), parts.next()) {
-        (Some("loop"), Some(a), Some(b)) => match (a.parse::<i64>(), b.parse::<i64>()) {
-            (Ok(a), Ok(b)) => Some((a, b)),
-            _ => None,
-        },
-        _ => None,
-    };
-    ReplayRequest { path, loop_ab }
-}
-
-fn apply_run_env(cmd: &mut Command, flight: Option<&FlightRecorder>, replay: Option<&ReplayRequest>) {
-    match replay {
-        Some(req) => {
-            cmd.env("STONE_REPLAY", &req.path).env("STONE_REPLAY_WINDOW", "1");
-            if let Some((a, b)) = req.loop_ab {
-                cmd.env("STONE_LOOP_A", a.to_string()).env("STONE_LOOP_B", b.to_string());
-            }
-            if let Some(f) = flight {
-                cmd.env("STONE_BUILD_ID", &f.build_id)
-                    .env("STONE_REPLAY_SOURCE", &f.source);
-            }
-        }
-        None => apply_flight_env(cmd, flight),
-    }
-}
-
-/// Consume a pending in-session load request (the F7 picker's Play button, or a
-/// P6 loop shape-edit restart, writes `tmp/replay_request.txt` and touches
-/// `tmp/restart.txt`). Read-once: the file is removed so a later plain restart
-/// (code edit) does not re-enter replay mode.
-fn consume_replay_request() -> Option<ReplayRequest> {
-    consume_request_file(std::path::Path::new("tmp/replay_request.txt"))
-        .map(|raw| parse_replay_request(&raw))
-}
-
-/// Read-once request consumer: returns the trimmed contents and removes the
-/// file, or None if absent/empty. Split out so it is testable without the
-/// fixed `tmp/` path.
-fn consume_request_file(path: &std::path::Path) -> Option<String> {
-    let requested = std::fs::read_to_string(path).ok()?;
-    // Removal failure is load-bearing: if the file survives, every later restart
-    // (a plain code edit) silently re-enters replay mode. Surface it.
-    if let Err(e) = std::fs::remove_file(path) {
-        log::warn!(
-            target: "STONE",
-            "could not remove replay request {} ({e}); later restarts may re-enter replay mode",
-            path.display()
-        );
-    }
-    let trimmed = requested.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-/// Session output is never swept, so the only thing between the author and a
-/// full disk is this line. 2 GB is ~400 mag builds (5.3 MB each) -- a lot of
-/// sessions, and still small next to `target/`.
-const SESSION_USAGE_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
-/// Bytes under `root` and how many session directories they are spread over.
-/// An unreadable entry is skipped: this is a courtesy warning, and failing a
-/// stone launch over a stat error would be worse than under-reporting.
 fn session_usage(root: &std::path::Path) -> (u64, usize) {
     fn bytes_under(dir: &std::path::Path) -> u64 {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1048,15 +690,11 @@ fn report_session_usage() {
 }
 
 /// Start the game process with the correct library path and robust process
-/// management. `replay` Some => relaunch as a windowed replay (in-session load)
-/// instead of the flight-recorded live game.
+/// management.
 fn start_game_process(
     lua_file: &std::path::Path,
     app_args: &[String],
     build_id: &str,
-    replay_source: &str,
-    flight: Option<&FlightRecorder>,
-    replay: Option<&ReplayRequest>,
 ) -> Result<Child> {
 
     // Platform-specific process management for orphan prevention
@@ -1068,10 +706,7 @@ fn start_game_process(
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         // Only the stone watch loop enables the in-game hot-reload watcher.
         cmd.env("STONE_HOT_RELOAD", "1")
-            .env("STONE_BUILD_ID", build_id)
-            .env("STONE_REPLAY_SOURCE", replay_source);
-        // Flight recorder (or in-session replay load; P3.5).
-        apply_run_env(&mut cmd, flight, replay);
+            .env("STONE_BUILD_ID", build_id);
 
         // 1) Linux: Ensure the child gets PDEATHSIG (SIGTERM) if parent dies
         #[cfg(target_os = "linux")]
@@ -1154,10 +789,7 @@ fn start_game_process(
             cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
             // Only the stone watch loop enables the in-game hot-reload watcher.
             cmd.env("STONE_HOT_RELOAD", "1")
-                .env("STONE_BUILD_ID", build_id)
-                .env("STONE_REPLAY_SOURCE", replay_source);
-            // Flight recorder (or in-session replay load; P3.5).
-            apply_run_env(&mut cmd, flight, replay);
+                .env("STONE_BUILD_ID", build_id);
 
             let child = cmd.spawn()?;
 
@@ -1424,9 +1056,6 @@ pub fn do_one_frame(
     frames: usize,
     _headless: bool,
     dump_state: bool,
-    record: Option<&str>,
-    replay: Option<&str>,
-    checkpoint_interval: Option<usize>,
     app_args: &[String],
     requested_renderer: Option<RendererBackend>,
 ) -> Result<()> {
@@ -1438,7 +1067,6 @@ pub fn do_one_frame(
     )?;
     let lua_file = &compiled.lua_file;
     crate::compile_slots::report_spawn_phase("runtime-prepare");
-    let replay_source = replay_source_for(path)?;
 
     if frames == 1 {
         info!("Running stone for one frame...");
@@ -1453,21 +1081,8 @@ pub fn do_one_frame(
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1")  // No visible window for frame runs
         .env("ROCK_FRAME_WATCHDOG", "1")
-        .env("STONE_BUILD_ID", &compiled.artifact_fingerprint)
-        .env("STONE_REPLAY_SOURCE", replay_source);
+        .env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
     apply_headless_audio_env(&mut cmd);
-    // Replay record/playback (docs/replay-scrub-plan.md). The game process
-    // reads these env vars in stone/engine/replay.rock, same pattern as
-    // DUMP_STATE / SIM_DT.
-    if let Some(f) = record {
-        cmd.env("STONE_RECORD", f);
-    }
-    if let Some(f) = replay {
-        cmd.env("STONE_REPLAY", f);
-    }
-    if let Some(n) = checkpoint_interval {
-        cmd.env("STONE_CHECKPOINT_INTERVAL", n.to_string());
-    }
     if dump_state {
         cmd.env("DUMP_STATE", "1");
     }
@@ -1521,7 +1136,6 @@ pub fn do_one_frame(
     // A watchdog timeout means the run did NOT complete -- treat it as a failure
     // (nonzero exit), not a warning-and-exit-0. Exiting 0 on timeout is precisely
     // how a load-starved run once masqueraded as a clean-but-empty log
-    // (docs/replay-scrub-plan.md note 6).
     let timeout_secs = if process_result.timeout_phase == Some(crate::common::TimeoutPhase::Startup) {
         watchdog.startup.as_secs()
     } else {
@@ -1599,58 +1213,10 @@ fn frame_exit_result_with_progress(
     Ok(())
 }
 
-/// `rock replay <game> <file>` — windowed replay playback
-/// (docs/replay-scrub-plan.md P3.5). Compiles the game and runs it in a real
-/// window (NOT headless, NOT frame-capped), driven from the replay log; the
-/// runner freezes at the last recorded tick and keeps the window open with the
-/// timeline bar live (STONE_REPLAY_WINDOW=1). Interactive: waits until the
-/// developer closes the window. Unlike `rock frame --replay`, there is no
-/// screenshot, no FRAME_COUNT, and no wall-clock watchdog.
-pub fn do_replay_window(
-    backend: crate::Backend,
-    game: &str,
-    output: String,
-    replay_file: &str,
-    app_args: &[String],
-) -> Result<()> {
-    let compiled = compile_game_for_run(backend, game, &output)?;
-    let lua_file = &compiled.lua_file;
-    let replay_source = replay_source_for(game)?;
-
-    info!("Replaying {} in a window (close the window to exit)", replay_file);
-
-    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
-    if crate::headless_scope::inherits_headless() {
-        cmd = crate::headless_scope::headless_command(cmd);
-        apply_headless_audio_env(&mut cmd);
-    }
-    cmd.env("STONE_REPLAY", replay_file)
-        .env("STONE_REPLAY_WINDOW", "1")
-        .env("STONE_BUILD_ID", &compiled.artifact_fingerprint)
-        .env("STONE_REPLAY_SOURCE", replay_source)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    // Interactive: no timeout watchdog. Block until the game process exits
-    // (window closed / esc / quit). A test can bound the run by setting
-    // FRAME_COUNT (and STONE_HEADLESS) in the child env -- both are inherited.
-    let status = cmd.spawn()?.wait()?;
-    if !status.success() {
-        anyhow::bail!("replay exited with code: {:?}", status.code());
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_perf_env, apply_run_env, consume_request_file,
-        flight_recorder_for, frame_exit_result, frame_watchdog_config,
-        full_reload_requires_restart, parse_checkpoint_interval, prepare_flight_recorder,
-        replay_usage, replay_usage_warning, session_usage, session_usage_warning,
-        FlightRecorder, FLIGHT_CHECKPOINT_INTERVAL, REPLAY_USAGE_WARN_BYTES,
-        SESSION_USAGE_WARN_BYTES,
-    };
+    use super::{apply_perf_env, frame_exit_result, frame_watchdog_config, full_reload_requires_restart, session_usage, session_usage_warning, SESSION_USAGE_WARN_BYTES};
     use crate::watch::is_compiler_source;
     use std::time::Duration;
 
@@ -1760,20 +1326,6 @@ mod tests {
         assert_eq!(bytes, 300 + 700 + 24 + 2, "every byte under the root");
     }
 
-    /// `--no-record` disables the flight recorder outright: no config, and no
-    /// side effects either -- the replays dir must not be created (the check
-    /// runs before ensure_flight_dir).
-    #[test]
-    fn no_record_flag_disables_flight_recorder() {
-        let game = std::env::temp_dir().join("rock_no_record_flag_test_game");
-        let _ = std::fs::remove_dir_all(&game);
-        let flight = flight_recorder_for(game.to_str().unwrap(), "fp", true).unwrap();
-        assert!(flight.is_none(), "--no-record must disable the flight recorder");
-        assert!(
-            !game.join("replays").exists(),
-            "--no-record must not create the replays dir"
-        );
-    }
 
     /// A `rock frame` run exits nonzero on a watchdog timeout (the run did not
     /// complete) and on a nonzero child exit; only a clean zero-exit is Ok. The
@@ -1819,158 +1371,8 @@ mod tests {
         assert!(inactivity.contains("renderer=gl, completed/requested=1/240"), "{inactivity}");
     }
 
-    /// In-session load: the picker's request file is read once, returns the
-    /// path, and is removed so a later plain restart doesn't re-enter replay.
-    #[test]
-    fn consume_request_file_is_read_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let req = dir.path().join("replay_request.txt");
-        std::fs::write(&req, "  bitgun/replays/repro-42.replay\n").unwrap();
-        assert_eq!(
-            consume_request_file(&req).as_deref(),
-            Some("bitgun/replays/repro-42.replay"),
-            "trimmed path returned"
-        );
-        assert!(!req.exists(), "request file must be removed after consuming");
-        assert_eq!(consume_request_file(&req), None, "second read is empty");
-        // Empty/whitespace request is ignored (not a spurious replay mode).
-        std::fs::write(&req, "   \n").unwrap();
-        assert_eq!(consume_request_file(&req), None, "blank request -> None");
-    }
 
-    /// A load request spawns in windowed-replay mode (and suppresses the
-    /// recorder); no request keeps the flight recorder on.
-    #[test]
-    fn apply_run_env_picks_replay_over_flight() {
-        let flight = FlightRecorder {
-            record_path: "bitgun/replays/last.replay".into(),
-            build_id: "abc123".into(),
-            source: "bitgun".into(),
-            checkpoint_interval: FLIGHT_CHECKPOINT_INTERVAL,
-        };
-        let env_of = |replay: Option<&super::ReplayRequest>| -> std::collections::HashMap<String, String> {
-            let mut cmd = std::process::Command::new("true");
-            apply_run_env(&mut cmd, Some(&flight), replay);
-            cmd.get_envs()
-                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
-                .collect()
-        };
-        let plain = super::ReplayRequest { path: "bitgun/replays/repro-7.replay".into(), loop_ab: None };
-        let replaying = env_of(Some(&plain));
-        assert_eq!(replaying.get("STONE_REPLAY").map(String::as_str), Some("bitgun/replays/repro-7.replay"));
-        assert_eq!(replaying.get("STONE_REPLAY_WINDOW").map(String::as_str), Some("1"));
-        assert!(!replaying.contains_key("STONE_RECORD"), "replay run must not also record");
-        assert!(!replaying.contains_key("STONE_LOOP_A"), "a plain load carries no loop markers");
-        let recording = env_of(None);
-        assert_eq!(recording.get("STONE_RECORD").map(String::as_str), Some("bitgun/replays/last.replay"));
-        assert_eq!(recording.get("STONE_REPLAY_SOURCE").map(String::as_str), Some("bitgun"));
-        assert_eq!(
-            recording.get("STONE_CHECKPOINT_INTERVAL").map(String::as_str),
-            Some(FLIGHT_CHECKPOINT_INTERVAL.to_string().as_str()),
-            "a live recording must carry its desync cadence into the game process"
-        );
-        assert!(!recording.contains_key("STONE_REPLAY"), "live run must not be in replay mode");
 
-        // P6 shape-edit restart: a loop-carrying request sets STONE_LOOP_A/B so
-        // the relaunched process resumes the loop.
-        let looped = super::ReplayRequest {
-            path: "mag/replays/last.replay".into(),
-            loop_ab: Some((30, 90)),
-        };
-        let env = env_of(Some(&looped));
-        assert_eq!(env.get("STONE_LOOP_A").map(String::as_str), Some("30"));
-        assert_eq!(env.get("STONE_LOOP_B").map(String::as_str), Some("90"));
-    }
-
-    /// The request line parses `path` and the optional `\tloop\tA\tB` suffix; a
-    /// malformed loop suffix degrades to a plain replay rather than being dropped.
-    #[test]
-    fn parse_replay_request_reads_loop_markers() {
-        use super::{parse_replay_request, ReplayRequest};
-        assert_eq!(
-            parse_replay_request("mag/replays/last.replay"),
-            ReplayRequest { path: "mag/replays/last.replay".into(), loop_ab: None }
-        );
-        assert_eq!(
-            parse_replay_request("mag/replays/last.replay\tloop\t30\t90"),
-            ReplayRequest { path: "mag/replays/last.replay".into(), loop_ab: Some((30, 90)) }
-        );
-        assert_eq!(
-            parse_replay_request("p\tloop\tNaN\t90").loop_ab, None,
-            "malformed loop suffix -> plain replay"
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn flight_recordings_are_timestamped_and_last_is_only_an_alias() {
-        let state = tempfile::tempdir().unwrap();
-        let first = prepare_flight_recorder(
-            state.path(), "games/match3", "0123456789abcdef", 1_777_000_000_123, 41,
-        ).unwrap();
-        let first_path = std::path::Path::new(&first.record_path);
-        assert!(first_path.starts_with(state.path()), "recording belongs under external state: {}", first_path.display());
-        assert_eq!(
-            first_path.parent().unwrap(),
-            state.path().join("games").join("match3"),
-            "the logical source is also the human-readable archive path"
-        );
-        assert_eq!(
-            first_path.file_name().and_then(|name| name.to_str()),
-            Some("recording-1777000000123-41.replay")
-        );
-        assert_eq!(first.source, "games/match3");
-
-        let dir = first_path.parent().unwrap();
-        let last = dir.join("last.replay");
-        assert_eq!(
-            std::fs::read_link(&last).unwrap(),
-            first_path.file_name().unwrap(),
-            "last.replay must be a relative symlink to the timestamped recording"
-        );
-
-        let second = prepare_flight_recorder(
-            state.path(), "games/match3", "0123456789abcdef", 1_777_000_001_456, 41,
-        ).unwrap();
-        let second_path = std::path::Path::new(&second.record_path);
-        assert_ne!(first.record_path, second.record_path);
-        assert_eq!(std::fs::read_link(&last).unwrap(), second_path.file_name().unwrap());
-        assert_eq!(first_path.parent(), second_path.parent(), "one logical source owns one archive");
-    }
-
-    /// The flight recorder must not synchronously hash the whole world during
-    /// ordinary play. Desync checkpoints remain an explicit opt-in.
-    #[test]
-    fn flight_checkpoint_cadence_is_off_by_default_and_overridable() {
-        assert_eq!(parse_checkpoint_interval(None), FLIGHT_CHECKPOINT_INTERVAL);
-        assert_eq!(FLIGHT_CHECKPOINT_INTERVAL, 0, "ordinary play must not pay a periodic checkpoint stall");
-        assert_eq!(parse_checkpoint_interval(Some("0")), 0);
-        assert_eq!(parse_checkpoint_interval(Some(" 120 ")), 120);
-        assert_eq!(
-            parse_checkpoint_interval(Some("often")),
-            FLIGHT_CHECKPOINT_INTERVAL,
-            "an unparseable cadence falls back to the non-perturbing default"
-        );
-    }
-
-    #[test]
-    fn replay_usage_counts_recordings_without_double_counting_last() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.replay"), vec![b'a'; 300]).unwrap();
-        std::fs::write(dir.path().join("b.replay"), vec![b'b'; 700]).unwrap();
-        std::fs::write(dir.path().join("notes.txt"), vec![b'n'; 900]).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("b.replay", dir.path().join("last.replay")).unwrap();
-
-        let (bytes, recordings) = replay_usage(dir.path());
-        assert_eq!(recordings, 2);
-        assert_eq!(bytes, 1_000);
-        assert!(replay_usage_warning(dir.path(), REPLAY_USAGE_WARN_BYTES - 1, 99).is_none());
-        let warning = replay_usage_warning(dir.path(), REPLAY_USAGE_WARN_BYTES, recordings)
-            .expect("the archive warns at its budget");
-        assert!(warning.contains("2 recording(s)"), "{warning}");
-        assert!(warning.contains(&dir.path().display().to_string()), "{warning}");
-    }
 
     #[test]
     fn compiler_source_classification() {

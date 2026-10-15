@@ -95,12 +95,6 @@ mod shape_oracle;
 mod sample_game_c_build_vars;
 #[path = "release_mode_deleted.rs"]
 mod release_mode_deleted;
-#[path = "replay_report_tests.rs"]
-mod replay_report_tests;
-#[path = "replay_profile_tests.rs"]
-mod replay_profile_tests;
-#[path = "replay_profile_report_tests.rs"]
-mod replay_profile_report_tests;
 #[path = "package.rs"]
 mod package;
 

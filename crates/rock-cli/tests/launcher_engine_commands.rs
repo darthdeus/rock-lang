@@ -21,7 +21,7 @@ mod unix {
     }
 
     #[test]
-    fn replay_builds_the_cli_before_direct_exec() {
+    fn frame_builds_the_cli_before_direct_exec() {
         let fixture = tempfile::tempdir().expect("launcher fixture");
         let root = fixture.path();
         let bin = root.join("bin");
@@ -47,18 +47,18 @@ mod unix {
         );
         let status = Command::new("bash")
             .arg(workspace_root().join("rock.sh"))
-            .args(["replay", "mag", "mag/replays/last.replay"])
+            .args(["frame", "mag", "-n", "1"])
             .current_dir(root)
             .env("PATH", path)
             .env("CARGO_TARGET_DIR", root.join("target"))
             .env("ROCK_LAUNCH_TEST_LOG", &log)
             .status()
-            .expect("run rock.sh replay fixture");
+            .expect("run rock.sh frame fixture");
 
-        assert!(status.success(), "rock.sh replay fixture failed: {status}");
+        assert!(status.success(), "rock.sh frame fixture failed: {status}");
         assert_eq!(
             fs::read_to_string(log).expect("launcher log"),
-            "cargo:build --bin rock\nrock:replay mag mag/replays/last.replay\n"
+            "cargo:build --bin rock\ncargo:build -p rock-agent-daemon --bin rock-agent-daemon\nrock:frame mag -n 1\n"
         );
     }
 }

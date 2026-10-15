@@ -181,7 +181,6 @@ fn compute_inner(
         h.string(&entry.identity.logical_key(ws, interner));
         h.string(entry.diagnostic_name.as_str());
         h.i64(entry.stage);
-        h.string(entry.replay_role.tag());
         h.u64(entry.declaration_ordinal as u64);
         h.string(entry.qualification.tag());
         h.len(entry.qualification.dependencies().len());

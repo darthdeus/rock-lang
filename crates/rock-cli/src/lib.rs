@@ -47,7 +47,6 @@ mod file_watcher;
 pub mod game_runtime;
 mod formatting;
 mod completion_episodes;
-mod completion_replay;
 mod completion_sweep;
 mod iter_completion;
 mod iter_lsp;
@@ -78,9 +77,6 @@ mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
-mod replay_report;
-mod replay_profile;
-mod replay_profile_report;
 mod image_video;
 pub mod run_sim;
 mod headless_scope;
@@ -121,23 +117,6 @@ pub enum CliCommand {
     Fmt,
     Frame,
     Stone,
-    /// `rock replay <game> <file>` — windowed replay playback of a recorded
-    /// log (docs/replay-scrub-plan.md P3.5). Unlike `rock frame --replay`
-    /// (batch headless, exits at log end), this opens a window, plays the log,
-    /// and freezes at the last tick with the timeline bar live so the developer
-    /// can scrub. Do NOT overload `rock frame` -- its contract is batch headless.
-    Replay,
-    /// `rock replay-report <file>` — inspect recorded gameplay timing without
-    /// launching the game, rank slow observations and bursts, and print ranges
-    /// ready for replay-scoped profiling/allocation diagnostics.
-    ReplayReport,
-    /// `rock replay-profile <game> <file> --range A-B [--runs N]` — replay an
-    /// exact Artifact headlessly and emit one machine-readable row for every
-    /// measured observation plus a terminal row for each fresh-process run.
-    ReplayProfile,
-    /// `rock replay-profile-report <file.jsonl>` — join repeated exact-range
-    /// playback rows and rank repeatable, variable, and recorded-only work.
-    ReplayProfileReport,
     /// `rock stone-test <root>` — long-lived headless watch process driven
     /// over JSON-line stdio. Test infrastructure for incremental
     /// compilation / hot-reload assertions. See
@@ -287,12 +266,7 @@ pub enum CliCommand {
     /// byte-identity diffing across a refactor. The M0 gate of
     /// `docs/completion-v2-design.md`. See `completion_sweep::completion_sweep`.
     CompletionSweep,
-    /// `rock completion-replay <corpus.jsonl>...` -- re-rank recorded
-    /// completion accepts (nvim completion_log / ROCK_LSP_RECORD rows carrying
-    /// the full buffer) against the CURRENT ranker and report per-case ranks +
-    /// aggregate MRR. The M6 tuning oracle of `docs/completion-v2-design.md`.
-    /// See `completion_replay::completion_replay`.
-    CompletionReplay,
+
     /// `rock completion-episodes <log.jsonl>...` -- stitch completion-log rows
     /// into episodes of user struggle (accept / typed_out / abandoned; the
     /// final word at the anchor is ground truth) and print the tuning
@@ -371,8 +345,8 @@ impl clap::ValueEnum for CliCommand {
         &[
             Self::Compile, Self::CompileSingle, Self::Test,
             Self::TestCompile, Self::Run, Self::Watch, Self::Fmt, Self::Frame,
-            Self::Stone, Self::Replay, Self::ReplayReport, Self::ReplayProfile,
-            Self::ReplayProfileReport, Self::Perf,
+            Self::Stone,
+            Self::Perf,
             Self::Sim,
             Self::SimReport,
             Self::Completions,
@@ -396,7 +370,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterReinfer,
             Self::IterCompletion,
             Self::CompletionSweep,
-            Self::CompletionReplay,
+
             Self::CompletionEpisodes,
             Self::IterCascade,
             Self::BackendStats,
@@ -433,10 +407,6 @@ impl CliCommand {
             Self::Fmt => "fmt",
             Self::Frame => "frame",
             Self::Stone => "stone",
-            Self::Replay => "replay",
-            Self::ReplayReport => "replay-report",
-            Self::ReplayProfile => "replay-profile",
-            Self::ReplayProfileReport => "replay-profile-report",
             Self::StoneTest => "stone-test",
             Self::Perf => "perf",
             Self::Sim => "sim",
@@ -461,7 +431,6 @@ impl CliCommand {
             Self::IterReinfer => "iter-reinfer",
             Self::IterCompletion => "iter-completion",
             Self::CompletionSweep => "completion-sweep",
-            Self::CompletionReplay => "completion-replay",
             Self::CompletionEpisodes => "completion-episodes",
             Self::IterCascade => "iter-cascade",
             Self::BackendStats => "backend-stats",
@@ -564,7 +533,7 @@ impl Backend {
                 Test, Compile, CompileSingle, TestCompile, Run, Watch,
             ],
             Self::Skull => &[
-                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, ReplayProfile, Perf, Sim,
+                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim,
             ],
             Self::Js => &[Test, Run],
             Self::Glsl => &[Test],
@@ -663,18 +632,12 @@ pub struct Args {
     pub gc_window_start: usize,
     pub gc_window_mode: String,
     pub perf_format: String,
-    /// For replay reports: number of slow observations to rank.
+    /// For `rock sim-report`: number of slow observations to rank.
     pub top: usize,
-    /// For `rock replay-report`: observations of context around suggested ranges.
-    pub context: usize,
     /// For `rock sim-report`: the sim history root to read.
     pub sim_log_dir: Option<String>,
     /// For `rock sim-report`: compare this named entry across retained runs.
     pub sim_entry: Option<String>,
-    /// For `rock replay-profile`: inclusive observation range `A-B`.
-    pub replay_range: Option<String>,
-    /// For `rock replay-profile`: fresh-process repetitions of the range.
-    pub runs: usize,
     pub type_validation: bool,
     pub headless: bool,
     /// Build and run game commands against this renderer without changing the
@@ -719,21 +682,6 @@ pub struct Args {
     /// fresh-process reference. An arc checkpoint, not an iteration step.
     pub multi_order: bool,
 
-    /// For `rock frame`: record per-tick input + dt to this replay log
-    /// (docs/replay-scrub-plan.md). Mutually exclusive with `--replay`.
-    pub record: Option<String>,
-    /// For `rock frame`: drive the run from this replay log instead of live
-    /// input/wall-clock. Mutually exclusive with `--record`.
-    pub replay: Option<String>,
-
-    /// For `rock frame --record`: hash + checkpoint game state every N ticks
-    /// for desync detection (docs/replay-scrub-plan.md P2). Default 60; 0
-    /// disables checkpointing.
-    pub checkpoint_interval: Option<usize>,
-
-    /// For `rock stone`: disable the always-on flight recorder for this
-    /// session. Equivalent to STONE_NO_FLIGHT_RECORDER=1.
-    pub no_record: bool,
 
     /// For `rock completion-sweep`: keep every Nth derived probe position
     /// (1 = exhaustive). Controls corpus size vs coverage.
@@ -915,22 +863,14 @@ impl Args {
                 .value_parser(["stopped", "running"])
                 .help("`rock perf --gc-window` only: `stopped` pauses GC after a collection; gross requests still include JIT compilation; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
-                .help("Output format for `rock perf`, `rock replay-report`, `rock replay-profile-report`, `rock sim-report`, or `rock modules audit`: \"pretty\" (default) or \"json\"."))
+                .help("Output format for `rock perf`, `rock sim-report`, or `rock modules audit`: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("top").long("top").default_value("20")
                 .value_parser(clap::value_parser!(usize))
-                .help("For replay reports: rank this many slow observations (default 20)."))
-            .arg(Arg::new("context").long("context").default_value("2")
-                .value_parser(clap::value_parser!(usize))
-                .help("For `rock replay-report`: pad suggested observation ranges by this many frames (default 2)."))
+                .help("For `rock sim-report`: rank this many slow observations (default 20)."))
             .arg(Arg::new("sim-log-dir").long("sim-log-dir")
                 .help("For `rock sim-report`: the persistent sim history root to read (default: $ROCK_SIM_LOG_DIR, else .sim-runs). Read-only."))
             .arg(Arg::new("sim-entry").long("sim-entry")
                 .help("For `rock sim-report`: compare one named sim's entry envelope across every retained run instead of reporting one run."))
-            .arg(Arg::new("replay-range").long("range")
-                .help("For `rock replay-profile`: inclusive observation range A-B."))
-            .arg(Arg::new("runs").long("runs").default_value("1")
-                .value_parser(clap::value_parser!(usize))
-                .help("For `rock replay-profile`: number of fresh-process repetitions (default 1)."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
             .arg(Arg::new("headless").long("headless").action(ArgAction::SetTrue)
@@ -979,15 +919,6 @@ impl Args {
             .arg(Arg::new("multi-order").long("multi-order").action(ArgAction::SetTrue)
                 .conflicts_with_all(["isolated", "workers"])
                 .help("For `rock sim <project> [name...]`: the B4 corpus gate -- run the corpus in registry, reverse and one fixed shuffled order and compare every sim against its own fresh-process reference. With no names it runs the whole project and is an arc checkpoint (slow); with names it runs the same four arms over just those sims, which confirms an already-isolated divergence in seconds but cannot discover a new one."))
-            .arg(Arg::new("record").long("record").value_name("FILE")
-                .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
-            .arg(Arg::new("replay").long("replay").value_name("FILE")
-                .help("For `rock frame`: drive the run from replay log FILE instead of live input/wall-clock."))
-            .arg(Arg::new("checkpoint-interval").long("checkpoint-interval").value_name("N")
-                .value_parser(clap::value_parser!(usize))
-                .help("For `rock frame --record`: hash game state every N ticks for desync detection (default 60; 0 disables)."))
-            .arg(Arg::new("no-record").long("no-record").action(ArgAction::SetTrue)
-                .help("For `rock stone`: disable the always-on flight recorder for this session (same as STONE_NO_FLIGHT_RECORDER=1)."))
             .arg(Arg::new("stride").long("stride").default_value("10")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
@@ -1085,11 +1016,8 @@ impl Args {
             gc_window_mode: m.get_one::<String>("gc-window-mode").cloned().unwrap(),
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             top: *m.get_one::<usize>("top").unwrap(),
-            context: *m.get_one::<usize>("context").unwrap(),
             sim_log_dir: m.get_one::<String>("sim-log-dir").cloned(),
             sim_entry: m.get_one::<String>("sim-entry").cloned(),
-            replay_range: m.get_one::<String>("replay-range").cloned(),
-            runs: *m.get_one::<usize>("runs").unwrap(),
             type_validation: m.get_flag("type-validation"),
             headless: m.get_flag("headless"),
             renderer: m.get_one::<String>("renderer").map(|value| match value.as_str() {
@@ -1117,10 +1045,6 @@ impl Args {
             isolated: m.get_flag("isolated"),
             workers: m.get_flag("workers"),
             multi_order: m.get_flag("multi-order"),
-            record: m.get_one::<String>("record").cloned(),
-            replay: m.get_one::<String>("replay").cloned(),
-            checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),
-            no_record: m.get_flag("no-record"),
             stride: *m.get_one::<usize>("stride").unwrap(),
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
@@ -1265,14 +1189,6 @@ mod arg_tests {
         }
     }
 
-    #[test]
-    fn no_record_flag_parses_and_defaults_off() {
-        let parse = |argv: &[&str]| {
-            Args::from_matches(Args::command().try_get_matches_from(argv).expect("parse"))
-        };
-        assert!(parse(&["rock", "stone", "bitgun", "--no-record"]).no_record);
-        assert!(!parse(&["rock", "stone", "bitgun"]).no_record);
-    }
 
     #[test]
     fn sim_worker_help_names_the_current_default_and_force_spelling() {
@@ -1328,54 +1244,7 @@ mod arg_tests {
         );
     }
 
-    #[test]
-    fn replay_report_options_parse_without_a_game_argument() {
-        let args = Args::from_matches(
-            Args::command()
-                .try_get_matches_from([
-                    "rock", "replay-report", "session.replay",
-                    "--top", "7", "--context", "3", "--format", "json",
-                ])
-                .expect("parse"),
-        );
-        assert_eq!(args.command, super::CliCommand::ReplayReport);
-        assert_eq!(args.files, ["session.replay"]);
-        assert_eq!(args.top, 7);
-        assert_eq!(args.context, 3);
-        assert_eq!(args.perf_format, "json");
-    }
 
-    #[test]
-    fn replay_profile_range_and_repetitions_parse() {
-        let args = Args::from_matches(
-            Args::command()
-                .try_get_matches_from([
-                    "rock", "replay-profile", "mag", "session.replay",
-                    "--range", "20-40", "--runs", "3",
-                ])
-                .expect("parse"),
-        );
-        assert_eq!(args.command, super::CliCommand::ReplayProfile);
-        assert_eq!(args.files, ["mag", "session.replay"]);
-        assert_eq!(args.replay_range.as_deref(), Some("20-40"));
-        assert_eq!(args.runs, 3);
-    }
-
-    #[test]
-    fn replay_profile_report_options_parse_without_a_game_argument() {
-        let args = Args::from_matches(
-            Args::command()
-                .try_get_matches_from([
-                    "rock", "replay-profile-report", "profile.jsonl",
-                    "--top", "7", "--format", "json",
-                ])
-                .expect("parse"),
-        );
-        assert_eq!(args.command, super::CliCommand::ReplayProfileReport);
-        assert_eq!(args.files, ["profile.jsonl"]);
-        assert_eq!(args.top, 7);
-        assert_eq!(args.perf_format, "json");
-    }
 }
 
 #[cfg(test)]

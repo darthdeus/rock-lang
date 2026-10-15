@@ -19,9 +19,6 @@ const SERIALIZATION_STUBS: &str = r#"
 fn sim_mode_active() -> bool { return false }
 global SIM_FIXED_EPOCH: int = 0
 global time: float = 0
-fn replay_is_record() -> bool { return false }
-fn replay_is_replay() -> bool { return false }
-fn __replay_preboot_mode() -> int { return 0 }
 @nomangle inline(lua) fn os_getenv(name: string) -> string? = "return nil"
 "#;
 

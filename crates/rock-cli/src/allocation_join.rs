@@ -73,7 +73,6 @@ struct ActivationHit<'a> {
 struct Activation<'a> {
     frames: u64,
     frame_aware: bool,
-    observations: Option<&'a str>,
     hits: Vec<ActivationHit<'a>>,
 }
 
@@ -333,10 +332,9 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
 
 fn parse_activation(activation: &str) -> Result<Activation<'_>> {
     let mut lines = activation.lines();
-    let (frame_aware, observation_scoped) = match lines.next() {
-        Some("rock.allocation-activation.v1") => (false, false),
-        Some("rock.allocation-activation.v2") => (true, false),
-        Some("rock.allocation-activation.v3") => (true, true),
+    let frame_aware = match lines.next() {
+        Some("rock.allocation-activation.v1") => false,
+        Some("rock.allocation-activation.v2") => true,
         _ => anyhow::bail!("allocation activation has the wrong or missing format header"),
     };
     let frames = lines
@@ -347,30 +345,6 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
     if frames == 0 {
         anyhow::bail!("allocation activation frame denominator is zero");
     }
-    let observations = if observation_scoped {
-        let value = lines
-            .next()
-            .and_then(|line| line.strip_prefix("observations\t"))
-            .ok_or_else(|| anyhow::anyhow!("observation-scoped activation has no observation population"))?;
-        let mut previous = None;
-        let mut count = 0_u64;
-        for item in value.split(',') {
-            let observation = item.parse::<u64>()?;
-            if previous.is_some_and(|previous| observation <= previous) {
-                anyhow::bail!("activation observations are not strictly increasing");
-            }
-            previous = Some(observation);
-            count += 1;
-        }
-        if count == 0 || count > frames {
-            anyhow::bail!(
-                "activation records {count} distinct observations over {frames} selected frames"
-            );
-        }
-        Some(value)
-    } else {
-        None
-    };
     let declared = lines
         .next()
         .and_then(|line| line.strip_prefix("sites\t"))
@@ -437,7 +411,7 @@ fn parse_activation(activation: &str) -> Result<Activation<'_>> {
             hits.len()
         );
     }
-    Ok(Activation { frames, frame_aware, observations, hits })
+    Ok(Activation { frames, frame_aware, hits })
 }
 
 #[cfg(test)]
@@ -462,7 +436,6 @@ pub fn render_joined_report_with_jit(
     let activation = parse_activation(activation)?;
     let frames = activation.frames;
     let frame_aware = activation.frame_aware;
-    let observations = activation.observations;
     let mut hits = activation.hits;
     for hit in &hits {
         if !sites.contains_key(hit.id) {
@@ -518,9 +491,7 @@ pub fn render_joined_report_with_jit(
         }
     )?;
     writeln!(out, "frames\t{frames}")?;
-    if let Some(observations) = observations {
-        writeln!(out, "observations\t{observations}")?;
-    }
+
     writeln!(out, "filter\t{}", filter.as_str())?;
     writeln!(out, "active_sites\t{}", hits.len())?;
     let base_header = if frame_aware {
@@ -756,12 +727,6 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
 cccccccccccccccc	2	1	1	1	1
 "#;
 
-    const OBSERVATION_ACTIVATION: &str = r#"rock.allocation-activation.v3
-frames	3
-observations	329,330,331
-sites	1
-aaaaaaaaaaaaaaaa	11	11	3	5	0
-"#;
 
     const CLASSIFIED_MANIFEST: &str = r#"emitted allocation-capable Lua report: 1 bodies, 1 direct sites
 
@@ -802,14 +767,7 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
         assert_eq!(value("aggregate_fields"), "3");
     }
 
-    #[test]
-    fn join_retains_the_exact_replay_observation_population() {
-        let report = render_joined_report(MANIFEST, OBSERVATION_ACTIVATION, Some("update"), None)
-            .expect("joined observation-scoped activation report");
-        assert!(report.starts_with("rock.allocation-join.v12\n"));
-        assert!(report.contains("frames\t3\nobservations\t329,330,331\nfilter\tupdate\n"));
-        assert!(report.contains("3.6667\t11\t11\t3\t1.0000\t3.6667\t5\t0"));
-    }
+
 
     #[test]
     fn join_can_isolate_coroutine_resume_routes() {

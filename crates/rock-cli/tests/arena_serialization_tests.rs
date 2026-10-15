@@ -23,7 +23,7 @@ fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root")
 }
 
-fn record_and_dump_survivors_state(log: &str, scratch: &Path) -> serde_json::Value {
+fn dump_survivors_state(scratch: &Path) -> serde_json::Value {
     let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
             "frame",
@@ -31,10 +31,6 @@ fn record_and_dump_survivors_state(log: &str, scratch: &Path) -> serde_json::Val
             "-n",
             "30",
             "--dump-state",
-            "--record",
-            log,
-            "--checkpoint-interval",
-            "5",
             "--output",
             &scratch.to_string_lossy(),
         ])
@@ -53,13 +49,10 @@ fn record_and_dump_survivors_state(log: &str, scratch: &Path) -> serde_json::Val
 }
 
 #[test]
-fn arena_globals_project_as_live_rows_and_replay_deterministically() {
+fn arena_globals_project_as_live_rows() {
     let _spawn_budget = SpawnBudget::for_test(120);
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("arena.replay");
-    let log_s = log.to_string_lossy().into_owned();
     let scratch = tempfile::tempdir().unwrap();
-    let state = record_and_dump_survivors_state(&log_s, scratch.path());
+    let state = dump_survivors_state(scratch.path());
     let pkg = &state["survivors"];
 
     for name in ["MOBS", "PROJECTILES", "XP_GEMS"] {
@@ -94,44 +87,4 @@ fn arena_globals_project_as_live_rows_and_replay_deterministically() {
         assert!(r.is_object(), "MOBS[{i}] is a removed-slot hole, not a row: {r}");
     }
 
-    // This is the determinism arm, while the dump assertions above are the
-    // content oracle. Record and replay sharing the walker could otherwise
-    // agree after silently dropping every row.
-    let text = std::fs::read_to_string(&log).unwrap();
-    let hashed: Vec<&str> = text
-        .lines()
-        .filter_map(|l| l.strip_prefix("c "))
-        .filter_map(|rest| rest.split(' ').nth(1))
-        .collect();
-    assert!(
-        hashed.iter().any(|name| name.ends_with("::MOBS")),
-        "MOBS must be hashed by its logical StateSchema identity; hashed names: {hashed:?}"
-    );
-    assert!(
-        !hashed.iter().any(|name| name.contains("<bone-stdlib:arena.rock>::__ARENA_REGISTRY")),
-        "the physical Arena registry is not replay state; hashed names: {hashed:?}"
-    );
-
-    let scratch2 = tempfile::tempdir().unwrap();
-    let rep = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args([
-            "frame",
-            "games/survivors",
-            "-n",
-            "30",
-            "--replay",
-            &log_s,
-            "--output",
-            &scratch2.path().to_string_lossy(),
-        ])
-        .env("ROCK_TEST_SEED", "42")
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output_with_deadline()
-        .expect("spawn replay");
-    assert!(
-        rep.status.success(),
-        "replay diverged from its own recording: {}",
-        String::from_utf8_lossy(&rep.stderr)
-    );
 }

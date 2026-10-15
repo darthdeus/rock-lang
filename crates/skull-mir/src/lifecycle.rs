@@ -21,21 +21,6 @@ pub enum LifecycleQualification {
     OnChange { dependencies: Vec<LifecycleDependency> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LifecycleReplayRole {
-    Presentation,
-    State,
-}
-
-impl LifecycleReplayRole {
-    pub fn tag(&self) -> &'static str {
-        match self {
-            Self::Presentation => "presentation",
-            Self::State => "state",
-        }
-    }
-}
-
 impl LifecycleQualification {
     pub fn is_gated(&self) -> bool {
         matches!(self, Self::OnChange { .. })
@@ -57,7 +42,6 @@ pub struct LifecycleEntry {
     pub identity: CodeIdentity,
     pub diagnostic_name: Ustr,
     pub stage: i64,
-    pub replay_role: LifecycleReplayRole,
     pub declaration_ordinal: usize,
     pub qualification: LifecycleQualification,
     pub sim_wires: Vec<Ustr>,
@@ -93,7 +77,6 @@ impl LifecyclePlan {
                 || old.root_type != candidate.root_type
                 || old.identity != candidate.identity
                 || old.stage != candidate.stage
-                || old.replay_role != candidate.replay_role
                 || old.declaration_ordinal != candidate.declaration_ordinal
                 || old.sim_wires != candidate.sim_wires
                 || qualification_structure_changed(&old.qualification, &candidate.qualification)
@@ -217,75 +200,8 @@ fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -
     }
 }
 
-fn string_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -> Option<Ustr> {
-    match body.expr_arena[e] {
-        Expr::String(value) => Some(value),
-        _ => None,
-    }
-}
 
-fn lifecycle_replay_role(
-    ws: &Workspace,
-    dmid: ModuleId,
-    did: Idx<bone_semantic::hir::DecoratorDef>,
-    app: &bone_semantic::hir::Annotation,
-    replay_param: Option<Ustr>,
-) -> Result<LifecycleReplayRole, CompilerError> {
-    let Some(param_name) = replay_param else {
-        return Ok(LifecycleReplayRole::Presentation);
-    };
-    let deco = &ws.module(dmid).decorators[did];
-    let index = deco
-        .param_decls
-        .iter()
-        .position(|param| param.name == param_name)
-        .ok_or_else(|| {
-            CompilerError::new_with_label(
-                app.span,
-                format!(
-                    "lifecycle replay_param `{param_name}` is not a parameter of `{}`",
-                    deco.name
-                ),
-            )
-        })?;
-    let value = if let Some(arg) = app
-        .args
-        .iter()
-        .find(|arg| arg.name.as_ref().is_some_and(|name| name.name == param_name))
-    {
-        match arg.value {
-            AnnoValue::String(value) => value,
-            _ => {
-                return Err(CompilerError::new_with_label(
-                    app.span,
-                    format!("lifecycle replay role `{param_name}` must be a string literal"),
-                ));
-            }
-        }
-    } else {
-        let body = &ws.module(dmid).bodies[&BodyOwner::Decorator(did)];
-        let e = body.param_defaults.get(index).and_then(|e| *e).ok_or_else(|| {
-            CompilerError::new_with_label(
-                app.span,
-                format!("lifecycle replay role `{param_name}` has no default"),
-            )
-        })?;
-        string_expr(body, e).ok_or_else(|| {
-            CompilerError::new_with_label(
-                deco.span,
-                format!("lifecycle replay role default `{param_name}` must be a string literal"),
-            )
-        })?
-    };
-    match value.as_str() {
-        "presentation" => Ok(LifecycleReplayRole::Presentation),
-        "state" => Ok(LifecycleReplayRole::State),
-        _ => Err(CompilerError::new_with_label(
-            app.span,
-            format!("unsupported lifecycle replay role `{value}`; expected `presentation` or `state`"),
-        )),
-    }
-}
+
 
 fn global_identity(
     ws: &Workspace,
@@ -623,7 +539,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 ));
             }
             let stage_param = string_arg(meta, "stage_param");
-            let replay_param = string_arg(meta, "replay_param");
             let stage_index = match stage_param {
                 Some(name) => Some(
                     deco.param_decls
@@ -652,7 +567,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
             };
             roles.insert(
                 deco.def_key,
-                (module.id, did, phase, owner, stage_index, replay_param),
+                (module.id, did, phase, owner, stage_index),
             );
         }
     }
@@ -664,7 +579,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
         for (fid, f) in module.functions.iter() {
             for app in &f.annotations {
                 let app_key = app.resolved_name.unwrap_or(app.name.name);
-                let Some(&(dmid, did, phase, owner, stage_index, replay_param)) = roles.get(&app_key)
+                let Some(&(dmid, did, phase, owner, stage_index)) = roles.get(&app_key)
                 else {
                     continue;
                 };
@@ -809,7 +724,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                 } else {
                     0
                 };
-                let replay_role = lifecycle_replay_role(ws, dmid, did, app, replay_param)?;
                 let qualification = wire_qualification(ws, app, phase)?;
                 if qualification.is_gated() {
                     census.gated += 1;
@@ -824,7 +738,6 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     identity,
                     diagnostic_name: f.name,
                     stage,
-                    replay_role,
                     declaration_ordinal: ordinal,
                     qualification,
                     sim_wires: if is_frame_phase(phase) {
@@ -1266,47 +1179,5 @@ mod tests {
         assert!(is_frame_phase(Ustr::from("prepare")));
     }
 
-    #[test]
-    fn late_draw_replay_role_is_compiler_owned_and_structural() {
-        let ws = workspace(&[
-            (
-                "role.rock",
-                r#"
-                @lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
-                deco init late_draw(stage: int = 100, replay: string = "presentation") {}
-                @late_draw(replay="state") fn stateful() {}
-                @late_draw fn visual() {}
-                "#,
-            ),
-        ]);
-        let plan = collect(&ws).expect("late-draw replay roles");
-        assert_eq!(
-            plan.entries
-                .iter()
-                .map(|entry| (&entry.diagnostic_name, &entry.replay_role))
-                .collect::<Vec<_>>(),
-            vec![
-                (&Ustr::from("stateful"), &LifecycleReplayRole::State),
-                (&Ustr::from("visual"), &LifecycleReplayRole::Presentation),
-            ]
-        );
 
-        let mut changed = plan.clone();
-        changed.entries[0].replay_role = LifecycleReplayRole::Presentation;
-        assert!(plan.structure_changed(&changed));
-    }
-
-    #[test]
-    fn late_draw_replay_role_rejects_unknown_literals() {
-        let ws = workspace(&[(
-            "role.rock",
-            r#"
-            @lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
-            deco init late_draw(stage: int = 100, replay: string = "presentation") {}
-            @late_draw(replay="snapshot") fn invalid() {}
-            "#,
-        )]);
-        let error = collect(&ws).expect_err("unknown replay role must reject");
-        assert!(error.message.contains("unsupported lifecycle replay role `snapshot`"), "{error:?}");
-    }
 }

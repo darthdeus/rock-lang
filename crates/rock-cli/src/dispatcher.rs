@@ -316,9 +316,6 @@ impl CommandContext {
     fn handle_frame(&self) -> Result<()> {
         let file = self.get_game_file()?;
         let output = self.get_output_or_default("tmp")?;
-        if self.args.record.is_some() && self.args.replay.is_some() {
-            anyhow::bail!("--record and --replay are mutually exclusive");
-        }
         do_one_frame(
             self.args.backend,
             &file,
@@ -326,53 +323,11 @@ impl CommandContext {
             self.args.frames,
             self.args.headless,
             self.args.dump_state,
-            self.args.record.as_deref(),
-            self.args.replay.as_deref(),
-            self.args.checkpoint_interval,
             &self.args.app_args,
             self.args.renderer,
         )
     }
 
-    /// `rock replay <game> <file>` — windowed playback (docs/replay-scrub-plan.md
-    /// P3.5). Dedicated command, NOT `rock frame --replay` (batch headless): the
-    /// window stays open and freezes at the last tick with the timeline bar live.
-    fn handle_replay(&self) -> Result<()> {
-        if self.args.files.len() < 2 {
-            anyhow::bail!("usage: rock replay <game> <file.replay>");
-        }
-        let game = self.args.files[0].clone();
-        let replay_file = self.args.files[1].clone();
-        if !std::path::Path::new(&replay_file).exists() {
-            anyhow::bail!("replay log not found: {replay_file}");
-        }
-        let output = self.get_output_or_default("tmp")?;
-        do_replay_window(self.args.backend, &game, output, &replay_file, &self.args.app_args)
-    }
-
-    fn handle_replay_profile(&self) -> Result<()> {
-        if self.args.files.len() != 2 {
-            anyhow::bail!("usage: rock replay-profile <game> <file.replay> --range A-B [--runs N]");
-        }
-        let range = self.args.replay_range.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("rock replay-profile requires an inclusive --range A-B")
-        })?;
-        let game = self.resolve_project_arg(&self.args.files[0])?;
-        let replay_file = std::path::Path::new(&self.args.files[1]);
-        if !replay_file.exists() {
-            anyhow::bail!("replay log not found: {}", replay_file.display());
-        }
-        let output = self.get_output_or_default("tmp")?;
-        crate::replay_profile::run(
-            self.args.backend,
-            &game,
-            output,
-            replay_file,
-            range,
-            self.args.runs,
-            &self.args.app_args,
-        )
-    }
 
     /// `rock perf` on the skull backend.
     fn handle_perf(&self) -> Result<()> {
@@ -639,16 +594,8 @@ impl CommandContext {
                         "the C backend native frame runner does not support --dump-state"
                     );
                 }
-                if self.args.record.is_some() || self.args.replay.is_some() {
-                    anyhow::bail!(
-                        "the C backend native frame runner does not support --record or --replay"
-                    );
-                }
-                if self.args.checkpoint_interval.is_some() {
-                    anyhow::bail!(
-                        "the C backend native frame runner does not support --checkpoint-interval"
-                    );
-                }
+
+
                 let file = self.get_game_file()?;
                 crate::c_test::c_frame(
                     &file,
@@ -698,14 +645,11 @@ impl CommandContext {
                     self.args.quiet,
                     &self.args.app_args,
                     crate::Backend::Skull,
-                    self.args.no_record,
                 )
             }
             // frame/perf/sim are backend-parameterized: the compile + @sim
             // collection routes through skull, the spawn/profile/run half is shared.
             CliCommand::Frame => self.handle_frame(),
-            CliCommand::Replay => self.handle_replay(),
-            CliCommand::ReplayProfile => self.handle_replay_profile(),
             CliCommand::Perf => self.handle_perf(),
             CliCommand::Sim => self.handle_sim(),
             // See the bone fallthrough: the capability gate already rejected
@@ -807,17 +751,7 @@ impl CommandContext {
         if self.args.command == CliCommand::DocsIndex {
             return crate::docs_index::run(&self.args.files, self.args.output.as_deref());
         }
-        if self.args.command == CliCommand::ReplayReport {
-            if self.args.files.len() != 1 {
-                anyhow::bail!("usage: rock replay-report <file.replay> [--top N] [--context N] [--format pretty|json]");
-            }
-            return crate::replay_report::run(
-                std::path::Path::new(&self.args.files[0]),
-                self.args.top,
-                self.args.context,
-                &self.args.perf_format,
-            );
-        }
+
         if self.args.command == CliCommand::SimReport {
             if self.args.files.len() > 1 {
                 anyhow::bail!(
@@ -833,18 +767,7 @@ impl CommandContext {
                 &self.args.perf_format,
             );
         }
-        if self.args.command == CliCommand::ReplayProfileReport {
-            if self.args.files.len() != 1 {
-                anyhow::bail!(
-                    "usage: rock replay-profile-report <file.jsonl> [--top N] [--format pretty|json]"
-                );
-            }
-            return crate::replay_profile_report::run(
-                std::path::Path::new(&self.args.files[0]),
-                self.args.top,
-                &self.args.perf_format,
-            );
-        }
+
         // iter-compile is a bone-inference profiling loop; it ignores --backend
         // and runs its own pipeline, so dispatch it before the backend switch.
         if self.args.command == CliCommand::IterCompile {
@@ -996,12 +919,7 @@ impl CommandContext {
                 self.args.check,
             );
         }
-        // completion-replay re-ranks recorded accepts against the current
-        // ranker and reports MRR (docs/completion-v2-design.md M6);
-        // dispatched early like the other completion harnesses.
-        if self.args.command == CliCommand::CompletionReplay {
-            return crate::completion_replay::completion_replay(&self.args.files);
-        }
+
         // completion-episodes stitches log rows into episodes of user
         // struggle and prints the tuning metrics (docs/completion-episodes.md).
         if self.args.command == CliCommand::CompletionEpisodes {

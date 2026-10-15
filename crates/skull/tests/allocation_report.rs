@@ -342,7 +342,7 @@ fn render(a: int) -> string {
     );
     assert!(
         emit.lua
-            .contains("function __rock_allocation_activation_frame_begin(observation)"),
+            .contains("function __rock_allocation_activation_frame_begin()"),
         "the runtime must distinguish active frames from outside-frame hits",
     );
     assert!(

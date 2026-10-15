@@ -80,16 +80,11 @@ fn mag_run_readiness_predicate_has_no_replay_or_upload_side_effects() {
     }
 
     let transition = rock_function_body(&run, "fn run_admission_try_finish() {");
-    assert_eq!(
-        transition.matches("replay_job_ready(current_tick, \"admission\", 1,").count(),
-        1,
-        "one admission transition authority must record readiness exactly once per attempt"
-    );
-    assert_eq!(
-        run.matches("replay_job_ready(current_tick, \"admission\", 1,").count(),
-        1,
-        "admission replay publication must have one production call site"
-    );
+    assert_eq!(transition.matches("let native_ready = run_ready()").count(), 1,
+        "admission checks its production readiness once per attempt");
+    assert!(transition.contains("if !native_ready { return }"),
+        "an unfinished admission remains pending");
+    assert!(!run.contains("replay_job_ready"), "admission has no replay publication path");
 }
 
 #[test]

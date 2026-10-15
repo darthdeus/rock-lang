@@ -82,12 +82,12 @@ fn validate_one(
             no_args(anno)
         }
         "pure" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
-        | "frame_ref_source"
+        | "frame_ref_source" | "identity_erasure" | "relocates"
         | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand"
         | "uniform_values" | "scene_type_key"
         | "materialize" | "gpu_only"
-        | "scalar_abi" | "inline" | "sim"
+        | "scalar_abi" | "inline" | "sim" | "sim_entry"
         | "sim_render" | "shadow_root" => {
             at(anno, pos, AnnoPos::FnItem)?;
             no_args(anno)
@@ -285,19 +285,19 @@ fn validate_one(
             }
             Ok(())
         }
-        "flat" => {
+        "flat" | "identity_storage" => {
             at(anno, pos, AnnoPos::StructField)?;
             no_args(anno)
         }
         "lifecycle" => {
             at(anno, pos, AnnoPos::DecoItem)?;
-            const KEYS: &[&str] = &["phase", "owner", "stage_param", "replay_param"];
+            const KEYS: &[&str] = &["phase", "owner", "stage_param"];
             for arg in &anno.args {
                 let Some(key) = arg.name.as_ref() else {
-                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=, replay_param=");
+                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=");
                 };
                 if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_)) {
-                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param=, and optional replay_param=");
+                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param=");
                 }
             }
             let has = |name: &str| anno.args.iter().any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name));

@@ -16,7 +16,6 @@ pub fn run(project: &str) -> Result<()> {
         .current_dir(&target.root)
         .arg("stone")
         .arg(&inspector)
-        .arg("--no-record")
         .arg("--")
         .arg(&target.game_key)
         .env("GAME_SOURCE_DIR", &target.project)

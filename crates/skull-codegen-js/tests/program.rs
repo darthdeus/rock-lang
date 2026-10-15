@@ -153,24 +153,6 @@ fn emitted_js_has_no_shadow_effect_plan() {
     assert!(!js.contains("__ROCK_SHADOW_EFFECT_PLAN"), "JS must not publish the removed effect plan");
 }
 
-#[test]
-fn lifecycle_replay_roles_emit_in_js_and_match_lua() {
-    let ws = ws_with(r#"
-@lifecycle(phase="late_draw", owner="session", stage_param="stage", replay_param="replay")
-deco init late_draw(stage: int = 100, replay: string = "presentation") {}
-@late_draw(replay="state") fn stateful() {}
-@late_draw fn visual() {}
-fn main() {}
-"#);
-    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    let lua = skull::mir_emit::emit_full(&ws, mid).expect("Lua emit").0;
-    let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
-    assert_eq!(lua.lifecycle_plan, js.lifecycle_plan, "Lua and JS replay-role metadata drifted");
-    assert!(js.program.contains("name: \"stateful\", stage: 100, replay_role: \"state\""), "state replay role missing: {}", js.program);
-    assert!(js.program.contains("name: \"visual\", stage: 100, replay_role: \"presentation\""), "presentation replay role missing: {}", js.program);
-    assert!(js.lifecycle_plan.entries.iter().any(|entry| entry.replay_role.tag() == "state"));
-    assert!(js.lifecycle_plan.entries.iter().any(|entry| entry.replay_role.tag() == "presentation"));
-}
 
 #[test]
 fn lua_and_js_guard_frame_hooks_owned_by_a_sim_fixture_module() {

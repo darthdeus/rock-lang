@@ -520,59 +520,6 @@ pub fn count_host_projections(v: &serde_json::Value) -> usize {
     }
 }
 
-/// The replay row tags the format gained over time, with the version that
-/// introduced each. This mirrors the admission gates in `__replay_load`
-/// (`stone/engine/replay.rock`): a row BELOW its gate counts as malformed, not
-/// as an ignored unknown, and sixteen of them make the loader call the file
-/// corrupt and exit 4.
-const ROW_SINCE: &[(&str, u32)] = &[
-    ("p ", 9),
-    ("s ", 11),
-    ("i ", 12),
-    ("j ", 14),
-    ("a ", 15),
-    ("u ", 16),
-];
-
-/// Rewrite a log this build wrote into one a version-`to` reader accepts.
-///
-/// Rewriting only the header does not produce a legacy log: every row the
-/// format gained after `to` is still in the file, and the reader rejects the
-/// whole log as corrupt before it reaches whatever the fixture wanted to test.
-/// The header-only rewrites predate v15 and v16, which added a per-observation
-/// row each.
-///
-/// Covers v6 and up. Below v6 the `t` row itself has a different arity and
-/// below v5 the `env` grammar does, neither of which this rewrites.
-pub fn downgrade_replay(text: &str, to: u32) -> String {
-    assert!(
-        (6..rock_replay_protocol::REPLAY_VERSION).contains(&to),
-        "downgrade_replay covers v6..v{}, not v{to}",
-        rock_replay_protocol::REPLAY_VERSION - 1
-    );
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        if line == rock_replay_protocol::replay_header() {
-            out.push(format!("STONE_REPLAY {to}"));
-            continue;
-        }
-        if ROW_SINCE.iter().any(|(tag, since)| *since > to && line.starts_with(tag)) {
-            continue;
-        }
-        // v10 added the per-phase columns to a timing row; a v9 reader reads
-        // the total alone and counts a row carrying more as malformed.
-        if to == 9 {
-            if let Some(rest) = line.strip_prefix("p ") {
-                let f: Vec<&str> = rest.split_whitespace().collect();
-                out.push(format!("p {} {} {}", f[0], f[1], f[2]));
-                continue;
-            }
-        }
-        out.push(line.to_string());
-    }
-    out.join("\n") + "\n"
-}
-
 /// Drop the dump-state envelope keys and everything the engine names as
 /// non-reproducible, leaving a dump two runs of the same session must agree on.
 ///
