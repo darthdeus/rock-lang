@@ -1450,9 +1450,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         ("mag_tick5b_dispatch", &[
             "player.apply_consumable_intent_in(world, ctx.intents.consumables)",
             "mag_capture_status_presentation(world)",
-            "update_walls_in(ctx.world, ctx.dt)",
-            "world_ground_pickup_command(world.root,",
-            "WorldGroundPickupCommand::Player(WorldGroundPickupPlayer {"][..]),
+            "update_walls_in(ctx.world, ctx.dt)"][..]),
     ];
     assert!(host_runner.contains("corpse_present: (ctx, dt) => present_corpses(ctx.world, dt)"),
         "shared runner must present corpses through the package corpse stage");
@@ -1549,6 +1547,14 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         < statuses_tick.find("world_player_status_turn(").unwrap());
     assert!(!run.contains("world_player_status_turn("));
     assert!(!run.contains("fn mag_tick_player_statuses("));
+    let pickup = fs::read_to_string(repo.join("mag-world/tick5b_pickup.rock"))
+        .expect("read package pickup slot");
+    let pickup_tick = rock_function_body(&pickup, "pub fn world_tick5b_pickup<M, H>(");
+    assert_eq!(pickup_tick.matches("world_ground_pickup_command(").count(), 1);
+    assert!(pickup_tick.contains("runner.tick5b.actor.unwrap().get().unwrap()"));
+    assert!(pickup_tick.contains("movement: actor.movement"));
+    assert!(!pickup_tick.contains("player_actions_harvest_hazards"));
+    assert!(!run.contains("world_ground_pickup_command("));
     let status_entry = rock_function_body(&run, "fn mag_tick5b_statuses(");
     assert!(!status_entry.contains("world_custody_sentence_tick("));
     let sample = rock_function_body(&run, "fn mag_tick5b_capture_status(");
