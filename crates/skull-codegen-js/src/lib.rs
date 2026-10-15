@@ -2524,29 +2524,29 @@ function stone_load_font(path, pixelSize, faceMask) {
   return fid;
 }
 function __sw_font(fontId) { return (__SW.fonts || {})[fontId]; }
-function stone_reload_font(fontId, path, pixelSize) {
+function __sw_rebake_font(fontId, pixelSize, path) {
   var old = __sw_font(fontId);
   if (!old || pixelSize < 1) return false;
+  var resizing = path === undefined;
+  path = resizing ? old.sourcePath : path;
   // A rebake keeps the DECLARED faces: reload and resize change the source
   // bytes or the size, never what the family declared at load.
   var baked = __sw_bake_font(path, pixelSize, old.atlas, old.faceMask);
   if (!baked) return false;
+  if (resizing) {
+    baked.unitMetrics = old.unitMetrics;
+    baked.unitGlyphs = old.unitGlyphs;
+  }
   if (!__sw_refresh_font_instances(old, baked)) return false;
   __SW.fonts[fontId] = baked;
   console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
   return true;
 }
+function stone_reload_font(fontId, path, pixelSize) {
+  return __sw_rebake_font(fontId, pixelSize, path);
+}
 function stone_resize_font(fontId, pixelSize) {
-  var old = __sw_font(fontId);
-  if (!old || pixelSize < 1) return false;
-  var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas, old.faceMask);
-  if (!baked) return false;
-  baked.unitMetrics = old.unitMetrics;
-  baked.unitGlyphs = old.unitGlyphs;
-  if (!__sw_refresh_font_instances(old, baked)) return false;
-  __SW.fonts[fontId] = baked;
-  console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
-  return true;
+  return __sw_rebake_font(fontId, pixelSize);
 }
 // 0 when the font has no atlas, matching stone-rs. Returning the WHITE PIXEL's
 // handle instead made the atlas share an identity with it, so a font declaring
