@@ -913,16 +913,13 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let run = fs::read_to_string(repo.join("mag/run.rock")).expect("read MAG run source");
     let world_levels = fs::read_to_string(repo.join("mag/world_levels.rock"))
         .expect("read MAG world source");
-    for (constructed, domain) in [
-        ("progress: ProgressState { quest_rows: b.arena() },", "progress"),
-        ("quest_runtime: QuestRuntimeState {},", "quest runtime"),
-    ] {
-        assert_eq!(
-            world_levels.matches(constructed).count(),
-            1,
-            "each new world must construct its own {domain} domain exactly once"
-        );
-    }
+    let world_root = fs::read_to_string(repo.join("mag-world/world_root.rock"))
+        .expect("read world root source");
+    assert!(world_root.contains("progress: mag_simulation::ProgressState { quest_rows }"));
+    assert!(world_root.contains("quest_runtime: mag_simulation::QuestRuntimeState = mag_simulation::QuestRuntimeState {}"));
+    assert!(!world_levels.contains("    progress: ProgressState,"));
+    assert!(!world_levels.contains("    quest_runtime: QuestRuntimeState,"));
+    assert!(world_levels.contains("quest_rows: b.arena()"));
     for stale in ["ProgressState {", "quest_runtime_reset()"] {
         assert!(
             !run.contains(stale),
@@ -1077,7 +1074,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         .expect("read MAG player save source");
     assert!(conversion.contains("save_convert_document(world: WorldState,"),
         "conversion must consume the explicit world domain");
-    assert!(manifest.contains("quest_save_stage_progress(world.progress,"),
+    assert!(manifest.contains("quest_save_stage_progress(world.root.progress,"),
         "upgraded serialization must consume the world's typed progress domain");
     let convert = save.find("let decoded = save_convert_document(world,")
         .expect("one detached conversion entry");
@@ -1092,7 +1089,7 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     for (line_number, line) in save.lines().enumerate() {
         if line.contains("save_progress(player") && !line.contains("fn Player.save_progress") {
             assert!(
-                line.contains("save_progress(player, world.progress")
+                line.contains("save_progress(player, world.root.progress")
                     || line.contains("save_progress(player, progress,"),
                 "save caller at mag/save.rock:{} bypasses the progress domain: {line}",
                 line_number + 1
@@ -1287,7 +1284,7 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 16, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 14, "WorldState field census changed: {fields:?}");
     assert!(!world_state.contains("recovery_reservoir:"), "the recovery clock state belongs to the root");
     assert!(root_state.contains("recovery_reservoir: mag_simulation::RecoveryReservoir"));
     assert!(!world_state.contains("cast_binding:"), "MAG must not own the cached cast binding");
