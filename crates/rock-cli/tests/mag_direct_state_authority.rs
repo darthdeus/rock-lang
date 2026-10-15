@@ -1065,21 +1065,21 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "the historical migration writer must stay retired");
     let conversion = fs::read_to_string(repo.join("mag/save_conversion.rock"))
         .expect("read MAG save conversion source");
-    let player_save = fs::read_to_string(repo.join("mag/save_player.rock"))
-        .expect("read MAG player save source");
+    let checkpoint = fs::read_to_string(repo.join("mag-world/checkpoint.rock"))
+        .expect("read package checkpoint source");
     assert!(conversion.contains("save_convert_document(world: WorldState,"),
         "conversion must consume the explicit world domain");
     assert!(!save.contains("save_upgrade_publish("),
         "legacy upgrade publication must stay retired");
-    assert!(conversion.contains("if version != SAVE_VERSION"),
+    assert!(checkpoint.contains("if version != SAVE_VERSION"),
         "the reader refuses historical save versions");
-    let convert = save.find("let decoded = save_convert_document(world,")
+    let convert = save.find("let converted = save_convert_document(world,")
         .expect("one detached current document validation entry");
-    let apply = save.find("save_load_player(world, attached, converted)")
-        .expect("apply the current player plan");
+    let apply = save.find("world_checkpoint_restore(world.root, saved,")
+        .expect("publish the admitted package checkpoint");
     assert!(convert < apply, "current document validation must precede live apply");
-    assert!(player_save.contains("save_apply_player_in(player, world, converted.player_load)"),
-        "the player load step must apply the current player plan");
+    assert!(checkpoint.contains("checkpoint_player_restore(root, actor, saved.player_load)"),
+        "checkpoint publication must apply the admitted player plan");
     for (line_number, line) in save.lines().enumerate() {
         if line.contains("save_progress(player") && !line.contains("fn Player.save_progress") {
             assert!(
