@@ -34,7 +34,7 @@ const PINNED: &str = "\
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
 | mag | exempt | 244 | 221 | 6 | 0 | 1399 | 427 | 49 | 787 | 7 | 3140 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 2 |
-| mag_content | exempt | 5 | 5 | 2 | 0 | 66 | 2 | 0 | 0 | 0 | 80 |
+| mag_content | exempt | 5 | 5 | 2 | 0 | 48 | 0 | 0 | 0 | 0 | 60 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
 | mag_world | exempt | 192 | 38 | 3 | 0 | 439 | 96 | 4 | 0 | 2 | 774 |
