@@ -1438,11 +1438,17 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     assert!(rows_pickup.contains("world_inhabitant_routes_update(root, runner, runner.routes.unwrap())")
         && rows_pickup.contains("world_inhabitants_pickup(root, runner, runner.pickup.unwrap(), false)"));
     assert!(!rows_pickup.contains("tick_host"));
+    assert!(!host_runner.contains("spawners:") && !run.contains("fn mag_tick_spawners("),
+        "MAG must use the sole library spawner stage");
+    let spawners = rock_function_body(&package_tick, "pub fn world_tick_spawners<M, H>(");
+    assert!(runner.contains("world_tick_spawners(r)")
+        && spawners.contains("world_spawners_update(root)")
+        && spawners.contains("world_quest_population_observe(root,"),
+        "the library spawner stage must observe its population synchronously");
     let phases = [
         ("mag_tick_actor_pre_mob", &["world_player_cast_intent_enqueue(queue, record, tick, ctx.intents.cast)",
             "WorldPlayerActionKind::FrameTarget", "WorldPlayerActionKind::FrameMovement",
             "world_player_actions_dispatch(world.root,"][..]),
-        ("mag_tick_spawners", &[][..]),
     ];
     assert!(host_runner.contains("corpse_present: (ctx, dt) => present_corpses(ctx.world, dt)"),
         "shared runner must present corpses through the package corpse stage");
