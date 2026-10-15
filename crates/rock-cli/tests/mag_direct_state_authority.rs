@@ -687,7 +687,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "loco_start_variant: PlayerStartVariant",
         "corpse_reach_ember_timer: float",
         "ritual_acquisition_event_seq: int",
-        "law: PlayerLaw",
         "combat_latch: CombatLatchState",
         "cast_outline: PlayerCastOutline",
     ] {
@@ -705,11 +704,12 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         .expect("world player runtime source");
     let controller = rock_function_body(&followers, "pub struct WorldPlayerState {");
     for field in ["body: PlayerBody = PlayerBody {}", "combat: PlayerCombatState = PlayerCombatState {}",
-        "inventory: Inventory = Inventory {}"] {
+        "inventory: Inventory = Inventory {}",
+        "law: mag_simulation::PlayerLaw = mag_simulation::PlayerLaw {}"] {
         assert_eq!(controller.matches(field).count(), 1,
             "the authoritative player actor component must own `{field}` once");
     }
-    for field in ["body:", "combat:", "inventory:", "idle_ticks:"] {
+    for field in ["body:", "combat:", "inventory:", "idle_ticks:", "law:"] {
         assert!(!player_state.contains(field), "MAG must not duplicate actor-owned `{field}`");
     }
     assert_eq!(followers.matches("follower_slots: [mag_simulation::inhabitant::ActorLink?] = [null, null, null, null]").count(), 1,
