@@ -805,6 +805,15 @@ impl<'a> Printer<'a> {
         }) {
             return None;
         }
+        // Legacy parsing can split a qualified record into a value and a
+        // brace expression. Do not invent a separator the source never had.
+        if stmts.windows(2).any(|pair| {
+            let end = self.ast.s(&pair[0]).span.offset_range.1;
+            let start = self.ast.s(&pair[1]).span.offset_range.0;
+            self.slice_range(end, start).trim().is_empty()
+        }) {
+            return Some(self.raw(block.span));
+        }
         let inner = Doc::join(Doc::text("; "), stmts.iter().map(|s| self.stmt(*s)));
         Some(Doc::concat([Doc::text("{ "), inner, Doc::text(" }")]))
     }
@@ -1452,7 +1461,15 @@ impl<'a> Printer<'a> {
                 Doc::text(")"),
             ]),
             ExprKind::TypeAscription(x, ty) => {
-                Doc::concat([self.expr(*x), Doc::text(" :: "), self.type_expr(*ty)])
+                // Legacy parsing also represents lowercase module paths as
+                // ascriptions. Preserve tight separators rather than changing
+                // the spelling of a path into a spaced cast.
+                let gap = self.slice_range(
+                    self.ast.e(x).span.offset_range.1,
+                    self.ast.te(ty).span.offset_range.0,
+                );
+                let sep = if gap == "::" { "::" } else { " :: " };
+                Doc::concat([self.expr(*x), Doc::text(sep), self.type_expr(*ty)])
             }
             // The modules-v1 spelling round-trips as the parenthesized form:
             // an infix re-print would not re-parse in v1 sources.
