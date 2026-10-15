@@ -513,9 +513,9 @@ fn mag_world_restore_preserves_successor_boot_fonts() {
 fn mag_run_stop_preserves_successor_boot_assets() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let specs = [
-        "build_watermark_layout", "target_cycle_sim",
-        "build_watermark_layout", "target_cycle_sim",
-        "build_watermark_layout", "target_cycle_sim",
+        "telemetry_consent", "target_cycle_sim",
+        "telemetry_consent", "target_cycle_sim",
+        "telemetry_consent", "target_cycle_sim",
     ];
     let run = run_project_workers("mag", &specs, "1");
     assert!(run.success, "repeated run stops preserve successors:\n{}", run.combined());
@@ -563,7 +563,7 @@ fn entry_end_frame_counts(events: &[serde_json::Value]) -> Vec<(String, u64)> {
 #[test]
 fn shared_worker_records_each_entry_frame_count_before_restore() {
     let _spawn_budget = SpawnBudget::for_test(120);
-    let specs = ["build_watermark_layout", "target_cycle_sim"];
+    let specs = ["telemetry_consent", "target_cycle_sim"];
     let (run, history) = run_project_workers_with_history("mag", &specs, "1");
     assert!(run.success, "shared worker entries pass:\n{}", run.combined());
     assert_eq!(peak_procs(&run.trace), (1, 1), "the entries must share one worker:\n{}", run.trace);
