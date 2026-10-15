@@ -1328,7 +1328,8 @@ fn mag_run_sources(repo: &Path) -> String {
         .filter(|path| {
             let name = path.file_name().unwrap().to_string_lossy();
             name.ends_with(".rock") && (name == "run.rock"
-                || name.starts_with("run_") || name.starts_with("tick_wiring"))
+                || name.starts_with("run_") || name.starts_with("tick_wiring")
+                || name.starts_with("tick5b_"))
         }).collect();
     paths.sort();
     paths.into_iter().map(|path| fs::read_to_string(path).expect("read MAG run wiring"))
@@ -1445,11 +1446,10 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "WorldPlayerActionKind::FrameTarget", "WorldPlayerActionKind::FrameMovement",
             "world_player_actions_dispatch(world.root,"][..]),
         ("mag_tick_spawners", &[][..]),
-        ("mag_tick_player_actions_harvest_hazards", &[
-            "mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,",
+        ("mag_tick5b_dispatch", &[
             "player.apply_consumable_intent_in(world, ctx.intents.consumables)",
             "mag_capture_status_presentation(world)",
-            "update_walls_in(world, dt)",
+            "update_walls_in(ctx.world, ctx.dt)",
             "world_ground_pickup_command(world.root,",
             "WorldGroundPickupCommand::Player(WorldGroundPickupPlayer {"][..]),
     ];
@@ -1525,24 +1525,36 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             );
         }
     }
-    let player_actions = rock_wiring_body(&run, "fn mag_tick_player_actions_harvest_hazards(");
-    let status_owner = player_actions
-        .find("mag_world::world_status::world_player_status_turn(world.root, player.movable.actor_row(), dt,")
-        .expect("status owner in canonical tick");
-    assert!(
-        !player_actions.contains("mag_present_status_effects(world)"),
-        "simulation must not call the status presenter"
-    );
-    let status_sample = player_actions
-        .find("mag_capture_status_presentation(world)")
-        .expect("status sample in canonical tick");
-    let late_wall_contact = player_actions
-        .find("update_walls_in(world, dt)")
-        .expect("late wall contact in canonical tick");
-    assert!(
-        status_owner < status_sample && status_sample < late_wall_contact,
-        "status sampling must stay between its owner tick and late wall contact"
-    );
+    let actions = fs::read_to_string(repo.join("mag-world/tick5b_schedule.rock"))
+        .expect("read package player actions schedule");
+    let actions_tick = rock_function_body(&actions, "pub fn world_tick5b_schedule<M, H>(");
+    let mut previous = 0;
+    for (index, slot) in ["statuses", "quests", "gallery", "consumables", "summons",
+        "fuses", "capture_status", "walls", "regions", "ankh", "light", "teleports",
+        "pickup", "harvest_hazards"].iter().enumerate() {
+        let marker = format!("world_tick5b_{slot}(");
+        assert_eq!(actions_tick.matches(&marker).count(), 1, "one package invocation per slot");
+        let position = actions_tick.find(&marker).unwrap();
+        assert!(index == 0 || previous < position, "package changed action slot order");
+        previous = position;
+    }
+    assert_eq!(runner.matches("super::tick5b_schedule::world_tick5b_schedule(").count(), 1);
+    let statuses = fs::read_to_string(repo.join("mag-world/tick5b_statuses.rock"))
+        .expect("read package status slot");
+    let statuses_tick = rock_function_body(&statuses, "pub fn world_tick5b_statuses<M, H>(");
+    assert_eq!(statuses_tick.matches("world_custody_sentence_tick(").count(), 1);
+    assert_eq!(statuses_tick.matches("world_player_status_turn(").count(), 1);
+    assert!(statuses_tick.find("world_custody_sentence_tick(").unwrap()
+        < statuses_tick.find("world_player_status_turn(").unwrap());
+    assert!(!run.contains("world_player_status_turn("));
+    assert!(!run.contains("fn mag_tick_player_statuses("));
+    let status_entry = rock_function_body(&run, "fn mag_tick5b_statuses(");
+    assert!(!status_entry.contains("world_custody_sentence_tick("));
+    let sample = rock_function_body(&run, "fn mag_tick5b_capture_status(");
+    assert!(sample.contains("mag_capture_status_presentation(world)"));
+    assert!(!sample.contains("mag_present_status_effects(world)"));
+    let walls = rock_function_body(&run, "fn mag_tick5b_walls(");
+    assert!(walls.contains("update_walls_in(ctx.world, ctx.dt)"));
     assert!(!run.contains("fn mag_tick_player_recovery(") && !run.contains("fn mag_tick_wisp_sacrifice("));
     assert!(!host_runner.contains("player_recovery:") && !host_runner.contains("wisp_sacrifice:"));
     assert!(runner.contains("world_recovery_tick(r, handle)"));
