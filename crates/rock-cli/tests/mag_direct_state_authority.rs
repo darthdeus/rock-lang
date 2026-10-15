@@ -1450,8 +1450,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         ("mag_tick_spawners", &[][..]),
         ("mag_tick5b_dispatch", &[
             "player.present_bandage_start_in(world, bandage)",
-            "mag_capture_status_presentation(world)",
-            "update_walls_in(ctx.world, ctx.dt)"][..]),
+            "mag_capture_status_presentation(world)"][..]),
     ];
     assert!(host_runner.contains("corpse_present: (ctx, dt) => present_corpses(ctx.world, dt)"),
         "shared runner must present corpses through the package corpse stage");
@@ -1580,8 +1579,16 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     let sample = rock_function_body(&run, "fn mag_tick5b_capture_status(");
     assert!(sample.contains("mag_capture_status_presentation(world)"));
     assert!(!sample.contains("mag_present_status_effects(world)"));
-    let walls = rock_function_body(&run, "fn mag_tick5b_walls(");
-    assert!(walls.contains("update_walls_in(ctx.world, ctx.dt)"));
+    assert!(!run.contains("fn update_walls_in(") && !run.contains("fn mag_tick5b_walls("));
+    let walls = fs::read_to_string(repo.join("mag-world/tick5b_walls.rock"))
+        .expect("read world walls slot");
+    let walls_tick = rock_function_body(&walls, "pub fn world_tick5b_walls<M, H>(");
+    for call in ["wall_tick_lifetime(", "world_update_burning_flammables(",
+        "world_update_grass_fire(", "world_environment_apply("] {
+        assert!(walls_tick.contains(call), "world walls slot must execute {call}");
+    }
+    assert!(!walls.contains("player_actions_harvest_hazards") && !walls.contains("WorldTick5bStep::Walls"));
+    assert!(run.contains("present: mag_wall_present"));
     assert!(!run.contains("fn mag_tick_player_recovery(") && !run.contains("fn mag_tick_wisp_sacrifice("));
     assert!(!host_runner.contains("player_recovery:") && !host_runner.contains("wisp_sacrifice:"));
     assert!(runner.contains("world_recovery_tick(r, handle)"));
