@@ -209,9 +209,10 @@ fn mag_world_environment_state_is_owned_by_the_scene_graph() {
         "layouts.push(layout)", "spaces.push(space_states.insert(SpaceState {\n            layout,"] {
         assert!(build.contains(shared_handle), "world constructor must share layout handle `{shared_handle}`");
     }
-    let advance = rock_function_body(&world, "fn world_tick_all(");
-    for call in ["for space_handle in world.root.spaces", "let space = space_handle.get().unwrap()",
-        "simulation_space_advance(space.simulation)"] {
+    let preparation = fs::read_to_string(repo.join("mag-world/player_preparation.rock"))
+        .expect("read world preparation source");
+    let advance = rock_function_body(&preparation, "pub fn world_prepare_spaces<M>(");
+    for call in ["for handle in root.spaces", "simulation_space_advance(handle.get().unwrap().simulation)"] {
         assert!(advance.contains(call), "world tick must advance each root-owned layout: `{call}`");
     }
     let simulation = fs::read_to_string(repo.join("mag-simulation/world_space.rock"))
