@@ -1384,7 +1384,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
         "world_player_inventory_command(root, handle, command)",
         "world_player_vitals_tick(root, actor, delta, state.suspend_vitals)",
         "world_player_checkpoint_retry(runner, handle)",
-        "world_player_deferred_travel(runner, handle, request)",
+        "world_player_travel_resolve(runner, handle, request)",
         "simulation_space_advance(handle.get().unwrap().simulation)",
     ] {
         assert!(prepare.contains(call), "tick preparation is missing authoritative call `{call}`");
