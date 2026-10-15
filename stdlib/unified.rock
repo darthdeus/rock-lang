@@ -2744,8 +2744,7 @@ const EPSILON: float = 0.0000001
 // 32-bit gameplay RNG state (`__rock_rng_next`, seeded in skull's prelude) —
 // NotPure, intentionally no @pure. Two streams: authoritative gameplay
 // (`random*`) and presentation (`presentation_random*`). Each state is a single
-// serializable number, so replay/keyframe restore can round-trip them
-// (docs/replay-scrub-plan.md).
+// serializable number, so state-image restore can round-trip them.
 // A 32-bit draw / 2^32 gives a uniform [0, 1) double.
 inline(lua) fn random() -> float = """
     return __rock_rng_next() * (1.0 / 4294967296.0)

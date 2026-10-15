@@ -1003,8 +1003,8 @@ if not _G.__rock_rng_next then
     local state = __rock_bit.tobit(tonumber(s))
     store_rng_state(state)
   end
-  -- Whole RNG state is this one counter; get/set serialize it for replay
-  -- keyframe restore (docs/replay-scrub-plan.md). It is a plain 32-bit number.
+  -- Whole RNG state is this one counter; get/set serialize it for state-image
+  -- restore. It is a plain 32-bit number.
   _G.__rock_rng_state_get = function() return active_rng_state() end
   _G.__rock_rng_state_set = function(s)
     local state = __rock_bit.tobit(tonumber(s))
