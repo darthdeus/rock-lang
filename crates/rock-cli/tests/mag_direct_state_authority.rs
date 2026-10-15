@@ -1449,7 +1449,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
             "world_player_actions_dispatch(world.root,"][..]),
         ("mag_tick_spawners", &[][..]),
         ("mag_tick5b_dispatch", &[
-            "player.apply_consumable_intent_in(world, ctx.intents.consumables)",
+            "player.present_bandage_start_in(world, bandage)",
             "mag_capture_status_presentation(world)",
             "update_walls_in(ctx.world, ctx.dt)"][..]),
     ];
@@ -1556,6 +1556,18 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     assert!(pickup_tick.contains("movement: actor.movement"));
     assert!(!pickup_tick.contains("player_actions_harvest_hazards"));
     assert!(!run.contains("world_ground_pickup_command("));
+    let consumables = fs::read_to_string(repo.join("mag-world/tick5b_consumables.rock"))
+        .expect("read package consumables slot");
+    let consumables_tick = rock_function_body(&consumables, "pub fn world_tick5b_consumables<M, H>(");
+    assert_eq!(consumables_tick.matches("world_player_consumable_intent(").count(), 1);
+    assert_eq!(consumables_tick.matches("world_player_equip_archetype(").count(), 1);
+    assert!(consumables_tick.find("world_player_consumable_intent(").unwrap()
+        < consumables_tick.find("world_player_equip_archetype(").unwrap());
+    assert!(!run.contains("fn Player.apply_consumable_intent_in("));
+    assert!(!run.contains("fn Player.apply_equipment_intent_in("));
+    let consumables_entry = rock_function_body(&run, "fn mag_tick5b_consumables(");
+    assert!(!consumables_entry.contains("world_player_consumable_intent("));
+    assert!(!consumables_entry.contains("world_player_equip_archetype("));
     let status_entry = rock_function_body(&run, "fn mag_tick5b_statuses(");
     assert!(!status_entry.contains("world_custody_sentence_tick("));
     let fuses = fs::read_to_string(repo.join("mag-world/tick5b_fuses.rock"))
