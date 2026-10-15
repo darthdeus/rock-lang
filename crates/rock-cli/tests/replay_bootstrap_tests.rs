@@ -490,6 +490,15 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
     let settings = dir.path().join("settings.json");
     let replay = dir.path().join("all-bootstrap.replay");
     std::fs::write(&progress, known_progress_a()).expect("write progress A");
+
+    // Upgrade through production before recording so the journal is an
+    // existing input whose bytes can be checked across both processes.
+    let setup_owned = fixture_env("progress", &progress, &layout, &settings);
+    let _ = run_mag(1, None, None, &env_refs(&setup_owned));
+    let stamps = PathBuf::from(format!("{}.damage/stamps.journal", progress.display()));
+    let stamps_before_record = std::fs::read(&stamps).expect("read stamp journal A");
+    assert!(!stamps_before_record.is_empty(), "production must seed a journal");
+
     std::fs::write(&layout, b"").expect("write empty layout A");
     std::fs::write(&settings, br#"{"graphics":{"world_scale":0.75}}"#)
         .expect("write settings A");
@@ -501,13 +510,20 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
     let progress_after_record = std::fs::read(&progress).expect("recorded progress B");
     let layout_after_record = std::fs::read(&layout).expect("recorded layout B");
     let settings_after_record = std::fs::read(&settings).expect("recorded settings B");
+    assert_eq!(
+        std::fs::read(&stamps).expect("read journal after recording"),
+        stamps_before_record,
+        "recording must leave the bootstrap stamp journal byte-identical"
+    );
 
     let progress_mutated = b"mutated progress on disk".to_vec();
     let layout_mutated = b"mutated layout on disk\n".to_vec();
     let settings_mutated = br#"{"graphics":{"world_scale":2.0}}"#.to_vec();
+    let stamps_mutated = b"mutated stamp journal on disk".to_vec();
     std::fs::write(&progress, &progress_mutated).expect("mutate progress B");
     std::fs::write(&layout, &layout_mutated).expect("mutate layout B");
     std::fs::write(&settings, &settings_mutated).expect("mutate settings B");
+    std::fs::write(&stamps, &stamps_mutated).expect("mutate stamp journal B");
 
     let replayed = run_mag(3, None, Some(&replay), &env);
     assert_ne!(
@@ -573,6 +589,11 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
         settings_mutated,
         "playback must leave mutated settings byte-identical"
     );
+    assert_eq!(
+        std::fs::read(&stamps).expect("read mutated stamp journal"),
+        stamps_mutated,
+        "playback must leave the mutated stamp journal byte-identical"
+    );
     assert_ne!(
         progress_after_record, progress_mutated,
         "recording must exercise progress persistence"
@@ -587,17 +608,19 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
     );
 
     let text = std::fs::read_to_string(&replay).expect("read all-bootstrap replay");
-    assert_eq!(
-        text.lines().filter(|line| line.starts_with("boot ")).count(),
-        4,
-        "all four logical bootstrap inputs must be present exactly once\n{text}"
-    );
-    for key in [
+    let keys = [
         "6d61672f70726f67726573732e6a736f6e2f31",
+        "6d61672f70726f67726573732e7374616d7073",
         "6d61672f73657474696e67732e6a736f6e",
         "6d61672f7370656c6c626f6f6b2d6c61796f75742e6a736f6e6c",
         "6d61672f7370656c6c626f6f6b2d62696e64696e67732e6a736f6e6c",
-    ] {
+    ];
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("boot ")).count(),
+        keys.len(),
+        "all five logical bootstrap inputs must be present exactly once\n{text}"
+    );
+    for key in keys {
         assert_eq!(
             text.lines()
                 .filter(|line| line.starts_with(&format!("boot {key} ")))
@@ -606,6 +629,13 @@ fn record_mutate_all_bootstrap_files_then_replay_without_persistence_writes() {
             "bootstrap key {key} must have one wire entry\n{text}"
         );
     }
+    let stamps_hex: String = stamps_before_record.iter()
+        .map(|byte| format!("{byte:02x}")).collect();
+    let stamps_entry = format!("boot {} 1 {stamps_hex}", hex_bytes("mag/progress.stamps"));
+    assert!(
+        text.lines().any(|line| line == stamps_entry),
+        "recording must capture the exact present journal bytes\n{text}"
+    );
 }
 
 #[test]
