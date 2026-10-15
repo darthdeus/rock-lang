@@ -1274,7 +1274,9 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 18, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 17, "WorldState field census changed: {fields:?}");
+    assert!(!world_state.contains("recovery_reservoir:"), "the recovery clock state belongs to the root");
+    assert!(root_state.contains("recovery_reservoir: mag_simulation::RecoveryReservoir"));
     assert!(!world_state.contains("cast_binding:"), "MAG must not own the cached cast binding");
     assert!(root_state.contains("cast_binding: super::mob_cast_core::WorldCastBinding<M>"));
     assert!(root_state.lines().any(|line| line.trim() == "walls: Arena<WallTile>,"),
