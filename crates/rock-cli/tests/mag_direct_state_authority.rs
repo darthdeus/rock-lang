@@ -1343,7 +1343,8 @@ fn rock_wiring_body(source: &str, signature: &str) -> String {
         for line in source.lines() {
             let Some(declaration) = line.strip_prefix("fn ") else { continue };
             let name = declaration.split('(').next().unwrap();
-            if !name.starts_with("mag_tick_") && !name.starts_with("mag_run_update_") { continue }
+            if !name.starts_with("mag_tick_") && !name.starts_with("mag_tick5b_")
+                && !name.starts_with("mag_run_update_") { continue }
             let call = format!("{name}(");
             let mut offset = 0;
             while let Some(relative) = expanded[offset..].find(&call) {
