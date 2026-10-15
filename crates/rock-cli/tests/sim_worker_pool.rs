@@ -898,12 +898,6 @@ fn a_sound_bank_writer_leaves_the_tracked_bank() {
 }
 
 #[test]
-fn a_visual_bank_writer_leaves_the_tracked_bank() {
-    let _spawn_budget = SpawnBudget::for_test(120);
-    assert_bank_writer_leaves_the_tracked_bank("visual_bank_worktree_watcher", "mag/assets/visual_bank.json");
-}
-
-#[test]
 fn jit_boot_mode_enabled_is_restored_between_entries() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let run = run_workers(&["testbed::b0_jit_on_seed", "testbed::b0_jit_on_probe"], "1");

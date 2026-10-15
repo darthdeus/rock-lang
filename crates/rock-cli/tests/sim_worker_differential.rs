@@ -51,13 +51,13 @@ fn a_mag_demand_draw_does_not_reuse_a_predecessors_frame_stamp() {
         rock(),
         &[
             "mag::paperdoll_independent_wearables".to_string(),
-            "mag::targeting_rings".to_string(),
+            "mag::dungeon_exported_gray_contract".to_string(),
         ],
     )
     .expect("the MAG pair must run");
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].0.verdict(), "PASS", "{:?}", records[0].0);
-    assert!(records[1].1, "the targeting ring must follow the paperdoll in one worker");
+    assert!(records[1].1, "the canvas readback must follow the paperdoll in one worker");
     assert_eq!(records[1].0.verdict(), "PASS", "{:?}", records[1].0);
 }
 
