@@ -1561,6 +1561,13 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     assert!(!run.contains("world_ground_pickup_command("));
     let status_entry = rock_function_body(&run, "fn mag_tick5b_statuses(");
     assert!(!status_entry.contains("world_custody_sentence_tick("));
+    let fuses = fs::read_to_string(repo.join("mag-world/tick5b_fuses.rock"))
+        .expect("read package fuse slot");
+    let fuses_tick = rock_function_body(&fuses, "pub fn world_tick5b_fuses<M, H>(");
+    assert_eq!(fuses_tick.matches("world_fuses_step(").count(), 1);
+    let fuse_entry = rock_function_body(&run, "fn mag_tick5b_fuses(");
+    assert!(!fuse_entry.contains("world_fuses_step("));
+    assert!(fuse_entry.contains("mag_fuses_present_in(ctx.world, ctx.tick5b.unwrap().fuses.results)"));
     let sample = rock_function_body(&run, "fn mag_tick5b_capture_status(");
     assert!(sample.contains("mag_capture_status_presentation(world)"));
     assert!(!sample.contains("mag_present_status_effects(world)"));
