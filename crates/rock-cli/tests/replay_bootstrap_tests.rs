@@ -755,7 +755,7 @@ fn world_damage_snapshot_bootstrap_survives_deleted_live_blob_without_writes() {
         recorded["mag"]["SAVE_BOOT_LOADED"],
         true,
         "the current-schema snapshot fixture must load: {}",
-        recorded["mag"]["SAVE_DIAGNOSTICS"]
+        recorded["mag"]["SAVE_LAST_REJECTION"]
     );
     let recorded_snapshot = std::fs::read(&snapshot).expect("read recorded snapshot");
     let log = std::fs::read_to_string(&replay).expect("read world damage replay");
