@@ -37,7 +37,7 @@ const PINNED: &str = "\
 | mag_content | exempt | 5 | 5 | 2 | 0 | 48 | 0 | 0 | 0 | 0 | 60 |
 | mag_encounter_worker | exempt | 3 | 2 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 7 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
-| mag_world | exempt | 210 | 49 | 5 | 0 | 412 | 98 | 5 | 0 | 2 | 781 |
+| mag_world | exempt | 210 | 49 | 5 | 0 | 409 | 91 | 5 | 0 | 2 | 771 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
