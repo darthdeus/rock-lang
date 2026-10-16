@@ -850,8 +850,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         );
     }
 
-    let quests = fs::read_to_string(repo.join("mag/quests.rock"))
-        .expect("read MAG quest source");
+    let quests = fs::read_to_string(repo.join("mag-world/quest_commands.rock"))
+        .expect("read world quest commands source");
     let quest_state = fs::read_to_string(repo.join("mag-simulation/quest.rock"))
         .expect("read simulation quest source");
     let quest_runtime = rock_struct_body(&quest_state, "QuestRuntimeState");
