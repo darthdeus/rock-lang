@@ -3,7 +3,11 @@ use std::path::Path;
 use std::process::Command;
 
 pub fn command(program: impl AsRef<OsStr>) -> Command {
-    let mut command = Command::new(program);
+    let mut command = if program.as_ref() == OsStr::new(env!("CARGO_BIN_EXE_rock")) {
+        crate::command::rock_bin()
+    } else {
+        Command::new(program)
+    };
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;

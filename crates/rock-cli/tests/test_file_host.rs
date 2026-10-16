@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -66,7 +65,7 @@ fn cpu_host_has_no_window() {{
     assert(!stone_imgui_initialized(), "unit tests do not initialize ImGui")
 }}
 "#)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")
@@ -157,7 +156,7 @@ fn native_flow_loads_without_a_game_host() {
     }
 
     for package in [&provider, &bridge, &project] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        let output = crate::command::rock_bin()
             .arg("test").arg(package.join("tests"))
             .current_dir(&root)
             .env("ROCK_DIR", &runtime)

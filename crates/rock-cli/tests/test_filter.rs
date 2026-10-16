@@ -1,4 +1,3 @@
-use std::process::Command;
 
 fn package_fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("test filter package fixture");
@@ -26,7 +25,7 @@ fn package_fixture() -> tempfile::TempDir {
 #[test]
 fn environment_filter_runs_matching_package_tests_and_reports_skips() {
     let fixture = package_fixture();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test")
         .arg(fixture.path())
         .env("ROCK_TEST_FILTER", "combat_text_pipeline")
@@ -52,7 +51,7 @@ fn environment_filter_runs_matching_package_tests_and_reports_skips() {
 #[test]
 fn command_line_filter_overrides_environment_filter() {
     let fixture = package_fixture();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test")
         .arg("--filter")
         .arg("combat_text_pipeline")
@@ -76,7 +75,7 @@ fn command_line_filter_overrides_environment_filter() {
 #[test]
 fn command_line_filter_matches_package_test_source_path() {
     let fixture = package_fixture();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test")
         .arg("--filter")
         .arg("tests/combat_text.rock")
@@ -99,7 +98,7 @@ fn command_line_filter_matches_package_test_source_path() {
 #[test]
 fn filter_with_no_matches_exits_nonzero() {
     let fixture = package_fixture();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test")
         .arg(fixture.path())
         .env("ROCK_TEST_FILTER", "no_such_test")
@@ -121,7 +120,7 @@ fn filter_with_no_matches_exits_nonzero() {
 
 #[test]
 fn c_backend_rejects_test_filter_with_a_clear_error() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["test", "--backend", "c"])
         .env("ROCK_TEST_FILTER", "combat_text_pipeline")
         .output()

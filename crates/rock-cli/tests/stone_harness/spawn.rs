@@ -1017,7 +1017,7 @@ mod tests {
 
     fn slot_probe_command(project: &Path, slots: &Path) -> Command {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+        let mut command = crate::command::rock_bin();
         command.args(["sim", "--list"]).arg(project)
             .env("ROCK_COMPILE_SLOT_DIR", slots).env("ROCK_COMPILE_SLOTS", "1")
             .env("ROCK_COMPILE_CLASS", "batch").env("ROCK_SIM_COMPILE_CACHE", "0")

@@ -1,3 +1,5 @@
+mod command;
+
 // Inner-loop integration tests: one linked binary instead of one per file.
 
 mod stone_harness;

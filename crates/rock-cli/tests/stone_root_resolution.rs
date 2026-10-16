@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -8,10 +7,6 @@ fn root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
-}
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
 fn toml_path(path: &Path) -> String {
@@ -43,7 +38,7 @@ fn missing_stone_root_fails_at_the_asset_resolution_boundary() {
     .unwrap();
 
     let lua = project.join("main.lua");
-    let compile = Command::new(rock_bin())
+    let compile = crate::command::rock_bin()
         .current_dir(&repo)
         .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])
         .output()
@@ -108,7 +103,7 @@ fn package_tests_receive_the_injected_stone_root() {
     .unwrap();
     std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
 
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .current_dir(&repo)
         .args(["test", project.to_str().unwrap(), "--test-threads", "1"])
         .output()
@@ -125,7 +120,7 @@ fn package_tests_receive_the_injected_stone_root() {
 fn transitive_stone_dependency_injects_root_for_library_tests() {
     let repo = root();
     let library = repo.join("libs/idle-reference");
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .current_dir(&repo)
         .args(["test", library.to_str().unwrap(), "--test-threads", "1"])
         .output()
@@ -161,7 +156,7 @@ fn projects_without_stone_do_not_receive_an_invented_root() {
     std::fs::write(project.join("stone_ffi.rock"), "// legacy game marker\n").unwrap();
 
     let lua = project.join("main.lua");
-    let compile = Command::new(rock_bin())
+    let compile = crate::command::rock_bin()
         .current_dir(&repo)
         .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])
         .output()
@@ -214,7 +209,7 @@ fn check_test_asset_root(transitive: bool) {
          }}\n"
     )).unwrap();
     for backend in ["skull", "c"] {
-        let result = Command::new(rock_bin())
+        let result = crate::command::rock_bin()
             .current_dir(&repo)
             .arg("test").arg(project.join("tests"))
             .args(["--backend", backend])
@@ -250,7 +245,7 @@ fn stone_package_tests_self_provision_the_stone_root() {
     // success (stone::c_ui_text_art_cache_and_coverage is red for separate,
     // out-of-scope engine causes) nor failure.
     let repo = root();
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .current_dir(&repo)
         .args(["test", repo.join("stone").to_str().unwrap(), "--test-threads", "1"])
         .env_remove("STONE_SOURCE_DIR")

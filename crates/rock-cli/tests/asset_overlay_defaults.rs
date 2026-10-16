@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -8,10 +7,6 @@ fn root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
-}
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
 fn toml_path(path: &Path) -> String {
@@ -47,7 +42,7 @@ fn stick_asset_overlays_feed_native_preamble() {
     let (_scratch, project, overlay) = project_fixture("overlay-default-", "fn main() {}\n");
     std::fs::write(overlay.join("assets/sfx/configured.txt"), "configured").unwrap();
     let lua = project.join("main.lua");
-    let compile = Command::new(rock_bin())
+    let compile = crate::command::rock_bin()
         .current_dir(root())
         .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])
         .output()
@@ -83,7 +78,7 @@ fn native_preamble_clears_removed_stick_overlay_defaults() {
     )
     .unwrap();
     let lua = project.join("main.lua");
-    let compile = Command::new(rock_bin())
+    let compile = crate::command::rock_bin()
         .current_dir(root())
         .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])
         .output()
@@ -100,7 +95,7 @@ fn native_preamble_clears_removed_stick_overlay_defaults() {
 fn explicit_empty_overlay_environment_suppresses_stick_defaults_in_preamble() {
     let (_scratch, project, overlay) = project_fixture("overlay-default-env-", "fn main() {}\n");
     let lua = project.join("main.lua");
-    let compile = Command::new(rock_bin())
+    let compile = crate::command::rock_bin()
         .current_dir(root())
         .env("ROCK_ASSET_OVERLAYS", "")
         .args(["compile", project.to_str().unwrap(), "--output", lua.to_str().unwrap()])

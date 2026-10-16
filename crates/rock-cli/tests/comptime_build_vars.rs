@@ -6,10 +6,6 @@
 
 use std::process::Command;
 
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn node_available() -> bool {
     Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -53,7 +49,7 @@ fn project(tag: &str) -> std::path::PathBuf {
 }
 
 fn run(dir: &std::path::Path, extra: &[&str]) -> (String, String, bool) {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.arg("run").arg(dir);
     cmd.args(extra);
     let out = cmd.output().expect("spawn rock");
@@ -67,7 +63,7 @@ fn run(dir: &std::path::Path, extra: &[&str]) -> (String, String, bool) {
 const EXPECTED_DEV: &str = "hello-from-vars\ndev\nabc123\nembedded-data\n";
 
 fn run_cmd(args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(rock_bin()).args(args).output().expect("spawn rock");
+    let out = crate::command::rock_bin().args(args).output().expect("spawn rock");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),

@@ -1,4 +1,3 @@
-use std::process::Command;
 
 #[test]
 fn loose_directory_remains_a_valid_parse_corpus() {
@@ -6,7 +5,7 @@ fn loose_directory_remains_a_valid_parse_corpus() {
     std::fs::write(dir.path().join("a.rock"), "fn a() { }\n").unwrap();
     std::fs::write(dir.path().join("b.rock"), "fn b() { }\n").unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let result = crate::command::rock_bin()
         .args(["iter-parse", dir.path().to_str().unwrap(), "--iters", "1"])
         .output()
         .expect("spawn rock");
@@ -20,7 +19,7 @@ fn malformed_project_manifest_cannot_fall_back_to_a_flat_parse_corpus() {
     std::fs::write(dir.path().join("main.rock"), "fn main() { }\n").unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package\n").unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let result = crate::command::rock_bin()
         .args(["iter-parse", dir.path().to_str().unwrap(), "--iters", "1"])
         .output()
         .expect("spawn rock");
@@ -37,7 +36,7 @@ fn unreadable_source_cannot_disappear_from_the_parse_corpus() {
     std::fs::write(dir.path().join("main.rock"), "fn main() { }\n").unwrap();
     symlink(dir.path().join("missing"), dir.path().join("missing.rock")).unwrap();
 
-    let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let result = crate::command::rock_bin()
         .args(["iter-parse", dir.path().to_str().unwrap(), "--iters", "1"])
         .output()
         .expect("spawn rock");

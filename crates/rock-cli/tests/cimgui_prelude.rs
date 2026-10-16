@@ -358,7 +358,7 @@ fn global_initializer_observes_imgui_before_game_code() {
         "imgui must initialize before a game global initializer"
     );
 
-    let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let result = crate::command::rock_bin()
         .current_dir(&root)
         .args([
             "sim",

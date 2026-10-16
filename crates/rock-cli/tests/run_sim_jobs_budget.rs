@@ -10,7 +10,7 @@ fn fixture() -> (tempfile::TempDir, Command) {
         "[package]\nname = \"jobs-fixture\"\nversion = \"0.1.0\"\ntype = \"bin\"\n[dependencies]\nstone = {{ path = {:?} }}\n[build.vars]\nGIT_SHA = \"jobs\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = {{ builtin = \"channel\" }}\nPLATFORM = {{ builtin = \"platform\" }}\n", workspace.join("stone")
     )).unwrap();
     std::fs::write(project.join("main.rock"), "fn main() {}\n@sim\nco fn jobs_probe() -> Coroutine<Wait> { stop_sim() }\n").unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command.arg("sim").arg(&project).current_dir(workspace).env("ROCK_DIR", workspace)
         .env("ROCK_SIM_COMPILE_CACHE_DIR", dir.path().join("cache"));
     // Free GPU memory at the reserve: a free-GPU budget of one lane.

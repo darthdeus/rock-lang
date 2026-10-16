@@ -13,7 +13,7 @@ fn fixture() -> tempfile::TempDir {
 }
 
 fn command() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut cmd = crate::command::rock_bin();
     cmd.env("ROCK_NUM_THREADS", "4").env("ROCK_INVOCATION_LOG", "off")
         .env_remove("ROCK_TEST_FILTER").env_remove("ROCK_COMPILE_STATS")
         .env_remove("ROCK_SIM_COMPILE_RECEIPT_PREPARE")

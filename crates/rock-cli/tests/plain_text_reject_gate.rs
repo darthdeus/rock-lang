@@ -5,12 +5,7 @@
 //! are supplied. An empty call still validates every family handle, including
 //! a stale fallback.
 
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -23,7 +18,7 @@ fn repo_root() -> std::path::PathBuf {
 
 fn run_frame(subject: Option<&str>) -> (String, bool) {
     let out_dir = tempfile::tempdir().expect("tempdir");
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(["frame", "games/testbed", "-n", "3"])
         .arg("--output")

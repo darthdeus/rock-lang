@@ -6,7 +6,6 @@
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
@@ -21,7 +20,7 @@ fn workspace_root() -> PathBuf {
 fn rejected_reload_ends_the_child_without_waiting_for_the_watchdog() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args([
             "sim",
             "crates/rock-cli/test-data/reload-rejection",

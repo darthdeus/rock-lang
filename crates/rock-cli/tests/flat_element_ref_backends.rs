@@ -3,7 +3,6 @@
 //! `Arena.borrow`, `Entity.borrow`). Its in-program oracle is the value each
 //! mutator reads back through the `ref`; LuaJIT and C must both satisfy it.
 
-use std::process::Command;
 
 const TESTS: &[&str] = &[
     "fer_vec_whole_element_arg_writes_the_element",
@@ -24,7 +23,7 @@ const TESTS: &[&str] = &[
 
 fn run_on(backend: Option<&str>) {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut cmd = crate::command::rock_bin();
     cmd.arg("test");
     if let Some(backend) = backend {
         cmd.args(["--backend", backend]);

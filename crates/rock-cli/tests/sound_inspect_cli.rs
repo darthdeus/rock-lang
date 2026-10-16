@@ -1,12 +1,7 @@
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 #[test]
 fn help_exposes_the_game_bank_inspector() {
-    let output = Command::new(rock_bin())
+    let output = crate::command::rock_bin()
         .arg("--help")
         .output()
         .expect("failed to spawn rock");
@@ -24,7 +19,7 @@ fn sound_inspect_requires_a_declared_sound_project() {
         .parent()
         .and_then(std::path::Path::parent)
         .expect("workspace root");
-    let output = Command::new(rock_bin())
+    let output = crate::command::rock_bin()
         .current_dir(root)
         .args(["sound-inspect", "games/chess"])
         .output()

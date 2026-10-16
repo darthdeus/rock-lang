@@ -6,7 +6,6 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn repo_root() -> PathBuf {
@@ -18,7 +17,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn run_census(output: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+    crate::command::rock_bin()
         .current_dir(repo_root())
         .args([
             "sim",

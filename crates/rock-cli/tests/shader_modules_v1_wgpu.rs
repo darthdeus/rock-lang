@@ -1,11 +1,6 @@
 //! Modules-v1 shader emission through the WGPU-enabled `rock` binary.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -27,7 +22,7 @@ fn compile_fixture(name: &str) -> String {
     let output_dir = tempfile::tempdir().expect("temporary output directory");
     let output = output_dir.path().join("shader.lua");
     let package = staged.path();
-    let compiled = Command::new(rock_bin())
+    let compiled = crate::command::rock_bin()
         .args([
             "compile",
             package.to_str().expect("fixture path is UTF-8"),

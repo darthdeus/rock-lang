@@ -5,16 +5,9 @@
 //!
 //! `cargo nextest` builds the binary on demand via env! before running.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    // CARGO_BIN_EXE_<name> is set by cargo for binary integration tests.
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 #[test]
 fn completions_zsh_emits_compdef_block() {
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["completions", "zsh"])
         .output()
         .expect("failed to spawn rock");
@@ -33,7 +26,7 @@ fn completions_zsh_emits_compdef_block() {
 
 #[test]
 fn completions_bash_emits_complete_block() {
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["completions", "bash"])
         .output()
         .expect("failed to spawn rock");

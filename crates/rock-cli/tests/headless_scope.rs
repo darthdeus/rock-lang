@@ -8,7 +8,6 @@
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
-use std::process::Command;
 #[cfg(target_os = "linux")]
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
@@ -25,7 +24,7 @@ fn workspace_root() -> PathBuf {
 #[test]
 fn a_sim_worker_runs_in_the_headless_slice() {
     let _spawn_budget = SpawnBudget::for_test(120);
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args(["sim", "crates/rock-cli/test-data/headless-scope", "sim_worker_runs_in_the_sim_slice"])
         .current_dir(workspace_root())
         .env_remove("ROCK_HEADLESS_SCOPE")
@@ -41,7 +40,7 @@ fn a_sim_worker_runs_in_the_headless_slice() {
 
 #[cfg(target_os = "linux")]
 fn frame_cgroup(scope_env: Option<&str>) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut cmd = crate::command::rock_bin();
     cmd.args(["frame", "-n", "2", "crates/rock-cli/test-data/headless-scope", "--dump-state"])
         .current_dir(workspace_root())
         .env_remove("ROCK_HEADLESS_SCOPE");

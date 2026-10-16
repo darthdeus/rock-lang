@@ -7,7 +7,6 @@
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
-use std::process::Command;
 #[cfg(target_os = "linux")]
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
@@ -25,7 +24,7 @@ fn workspace_root() -> PathBuf {
 fn a_sim_over_its_memory_cap_is_killed_and_named() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args(["sim", "crates/rock-cli/test-data/sim-memory-cap", "memory_cap_stops_a_runaway"])
         .current_dir(&root)
         .env("ROCK_SIM_MEMORY_MB", "512")

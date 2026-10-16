@@ -5,10 +5,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 #[test]
 fn mag_web_build_carries_declared_identity() {
     let root = repo_root();
@@ -25,7 +21,7 @@ fn mag_web_build_carries_declared_identity() {
     .trim()
     .to_string();
     let web_dir = dir.path().join("web");
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(&root)
         .args(["web", "mag", "--out", web_dir.to_str().unwrap()])
         .output()

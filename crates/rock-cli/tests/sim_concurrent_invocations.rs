@@ -12,7 +12,6 @@
 //! victim is released and spawns.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
@@ -22,16 +21,6 @@ fn workspace_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("workspace root")
         .to_path_buf()
-}
-
-fn rock_bin() -> PathBuf {
-    // The test binary lives in target/<profile>/deps/; `rock` is two levels up.
-    let mut p = std::env::current_exe().expect("test exe");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join("rock")
 }
 
 /// A sim that exists in exactly one of the two projects, so a registry mixup
@@ -45,14 +34,14 @@ const OTHER_SIM: &str = "auto_move";
 fn concurrent_sim_invocations_do_not_share_compiled_output() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = workspace_root();
-    let rock = rock_bin();
+    let rock = PathBuf::from(env!("CARGO_BIN_EXE_rock"));
     assert!(rock.exists(), "rock binary not built at {}", rock.display());
 
     let gate_dir = tempfile::tempdir().expect("tempdir");
     let gate = gate_dir.path().join("release.gate");
 
     // Victim: compiles testbed, parks at the barrier, then spawns.
-    let victim = Command::new(&rock)
+    let victim = crate::command::rock(&rock)
         .current_dir(&root)
         .args(["sim", VICTIM_PROJECT, VICTIM_SIM])
         .env("ROCK_SIM_SPAWN_BARRIER", &gate)
@@ -64,7 +53,7 @@ fn concurrent_sim_invocations_do_not_share_compiled_output() {
 
     // While it parks, run the other project to completion. Its compile writes a
     // registry that does not contain VICTIM_SIM.
-    let other = Command::new(&rock)
+    let other = crate::command::rock(&rock)
         .current_dir(&root)
         .args(["sim", OTHER_PROJECT, OTHER_SIM])
         .env("ROCK_SIM_TIMEOUT_SECS", "60")

@@ -1,8 +1,3 @@
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 const STICK: &str = r#"
 [package]
@@ -43,7 +38,7 @@ fn project(tag: &str) -> std::path::PathBuf {
 }
 
 fn run(dir: &std::path::Path, extra: &[&str]) -> (String, String, bool) {
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .arg("run")
         .arg(dir)
         .args(extra)
@@ -93,7 +88,7 @@ fn var_flag_overrides_the_source() {
 #[test]
 fn rock_test_runs_a_build_vars_package() {
     let dir = project("pkg_test");
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["test", dir.to_str().unwrap()])
         .output()
         .expect("spawn rock");
@@ -119,7 +114,7 @@ fn single_file_inside_a_project_resolves_on_luajit() {
 #[test]
 fn iter_codegen_measures_a_build_vars_project() {
     let dir = project("iter_codegen");
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["iter-codegen", dir.to_str().unwrap(), "--iters", "1"])
         .output()
         .expect("spawn rock");

@@ -15,11 +15,6 @@
 //! `web_build_gate::web_shader_registration_carries_texture_slots`.
 
 use std::path::PathBuf;
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
@@ -116,7 +111,7 @@ fn both_shader_register_drivers_match_the_declared_arity() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let lua_out = dir.path().join("game.lua");
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["compile", "games/match3", "--output", lua_out.to_str().unwrap()])
         .status()
@@ -125,7 +120,7 @@ fn both_shader_register_drivers_match_the_declared_arity() {
     let lua = std::fs::read_to_string(&lua_out).unwrap();
 
     let web_dir = dir.path().join("web");
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["web", "games/match3", "--out", web_dir.to_str().unwrap()])
         .status()

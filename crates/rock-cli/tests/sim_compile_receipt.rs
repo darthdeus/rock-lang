@@ -12,7 +12,7 @@ fn list_sims(
     timing_log: &std::path::Path,
     prepare: bool,
 ) -> std::process::Output {
-    let mut command = Command::new(rock);
+    let mut command = crate::command::rock(rock);
     command
         .args(["sim", "--list", project])
         .env("ROCK_SIM_COMPILE_RECEIPT_DIR", receipt_dir)
@@ -156,7 +156,7 @@ fn sim_run_compiles_in_a_child_process_and_consumes_its_receipt() {
         .and_then(std::path::Path::parent)
         .expect("workspace root")
         .to_path_buf();
-    let output = Command::new(&rock)
+    let output = crate::command::rock(&rock)
         .args(["sim", "testbed", "testbed::co_join2_tuple"])
         .current_dir(&workspace)
         .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
@@ -207,7 +207,7 @@ fn sim_run_compile_child_keeps_the_invocations_selection() {
         ("--var", "UNDECLARED_SIM_VAR=1", "--var UNDECLARED_SIM_VAR is not declared"),
         ("--channel", "undeclared-channel", "channel \"undeclared-channel\" is not declared"),
     ] {
-        let output = Command::new(&rock)
+        let output = crate::command::rock(&rock)
             .args(["sim", "testbed", "testbed::co_join2_tuple", flag, value])
             .current_dir(&workspace)
             .env_remove("ROCK_SIM_COMPILE_RECEIPT_DIR")
@@ -360,7 +360,7 @@ impl CacheRun<'_> {
     /// Run the fixture's sim once and report whether that run compiled.
     fn compiled(&self, label: &str, sim: &str, args: &[&str], env: &[(&str, &str)]) -> bool {
         let timing_log = self.scratch.join(format!("{label}.jsonl"));
-        let mut command = Command::new(self.rock);
+        let mut command = crate::command::rock(self.rock);
         command
             .args(args)
             .arg("sim")
@@ -588,7 +588,7 @@ fn concurrent_cold_sim_cache_requests_compile_exactly_once() {
     slot.lock().unwrap();
     writeln!(slot, "{} test barrier", std::process::id()).unwrap();
     let spawn = |label: &str| {
-        Command::new(&rock)
+        crate::command::rock(&rock)
             .arg("sim").arg(&project).arg("cache_probe")
             .current_dir(workspace_root())
             .env("ROCK_DIR", workspace_root())
@@ -753,14 +753,14 @@ co fn dynamic_probe() -> Coroutine<Wait> {
     ).unwrap();
     assert_eq!(manifest["registry"].as_array().unwrap().len(), 3);
     let receipt_root = dir.path().join("dynamic-receipts");
-    let rejected = Command::new(&rock).args(["sim", "--list"]).arg(&project)
+    let rejected = crate::command::rock(&rock).args(["sim", "--list"]).arg(&project)
         .env("ROCK_SIM_COMPILE_RECEIPT_DIR", &receipt_root)
         .env("ROCK_SIM_COMPILE_RECEIPT_PREPARE", "1")
         .env("ROCK_SIM_COMPILE_SELECTION", "[\"dynamic_probe\"]")
         .output_with_deadline().unwrap();
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("cannot resolve dynamic SIMS access"));
-    let full = Command::new(&rock).args(["sim", "--list"]).arg(&project)
+    let full = crate::command::rock(&rock).args(["sim", "--list"]).arg(&project)
         .env("ROCK_SIM_COMPILE_RECEIPT_DIR", &receipt_root)
         .env("ROCK_SIM_COMPILE_RECEIPT_PREPARE", "1")
         .env_remove("ROCK_SIM_COMPILE_SELECTION")
@@ -817,7 +817,7 @@ fn sim_compile_receipt_v1_entry_point_and_short_name_selection_run() {
 fn pinned_rock_copies_survive_concurrent_spawns() {
     let (threads, copies_per_thread) = if cfg!(target_os = "linux") { (32, 12) } else { (4, 2) };
     let _spawn_budget = SpawnBudget::for_test(120);
-    let direct = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let direct = crate::command::rock_bin()
         .arg("--version")
         .output_with_deadline()
         .expect("direct rock --version oracle");
@@ -834,7 +834,7 @@ fn pinned_rock_copies_survive_concurrent_spawns() {
                 for _ in 0..copies_per_thread {
                     let dir = tempfile::tempdir().expect("tempdir");
                     let rock = pinned_rock(dir.path());
-                    let output = Command::new(&rock)
+                    let output = crate::command::rock(&rock)
                         .arg("--version")
                         .output_with_deadline()
                         .expect("spawn pinned rock --version");
@@ -892,7 +892,7 @@ fn killed_compile_is_reaped_and_its_receipt_swept_by_the_next_run() {
     let _spawn_budget = SpawnBudget::for_test(240);
     let dir = tempfile::tempdir().expect("scratch");
     let fixture = workspace_root().join("crates/rock-cli/test-data/sim-v1-names");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command
         .arg("sim")
         .arg(&fixture)
@@ -943,7 +943,7 @@ fn killed_compile_is_reaped_and_its_receipt_swept_by_the_next_run() {
 
     // The next run succeeds and sweeps the stale root; its own root is
     // removed on its clean exit, so none remain.
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("sim")
         .arg(&fixture)
         .arg("unique_short_name")

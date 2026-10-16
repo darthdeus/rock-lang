@@ -4,10 +4,9 @@
 //! `process::exit` on failure, which nothing below the binary can observe.
 
 use std::path::Path;
-use std::process::Command;
 
 fn run_test(dir: &Path, fixture: &Path, log_env: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+    crate::command::rock_bin()
         .args(["test", fixture.to_str().unwrap()])
         .current_dir(dir)
         .env("ROCK_INVOCATION_LOG", log_env)
@@ -89,7 +88,7 @@ fn invocation_log_off_writes_nothing() {
     assert!(out.status.success());
     // `off` is a switch, not a relative file name.
     assert!(!dir.path().join("off").exists());
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args(["test", pass.to_str().unwrap()])
         .current_dir(dir.path())
         .env("ROCK_INVOCATION_LOG", "off")
@@ -105,7 +104,7 @@ fn invocation_log_off_writes_nothing() {
 fn default_log_respects_xdg_state_home() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pass = fixture(dir.path(), false);
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args(["test", pass.to_str().unwrap()])
         .current_dir(dir.path())
         .env_remove("ROCK_INVOCATION_LOG")

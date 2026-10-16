@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -10,7 +9,7 @@ fn workspace_root() -> &'static Path {
 
 #[test]
 fn arena_free_slot_reuse_is_allocation_free() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["run", "benchmarks/arena-reuse-alloc.rock"])
         .current_dir(workspace_root())
         .output()

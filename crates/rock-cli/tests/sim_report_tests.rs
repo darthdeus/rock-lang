@@ -9,7 +9,6 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Newest-first resolution is by run id, so fixture ids keep the real
 /// `<unix-ms>-<pid>-<counter>` shape.
@@ -178,7 +177,7 @@ fn history() -> tempfile::TempDir {
 }
 
 fn report(root: &Path, args: &[&str]) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command.arg("sim-report").arg("--sim-log-dir").arg(root).args(args);
     let output = command.output().expect("run sim-report");
     assert!(
@@ -493,7 +492,7 @@ fn sim_report_compares_one_named_entry_across_retained_runs() {
 #[test]
 fn sim_report_rejects_an_unknown_run_id_without_touching_the_history() {
     let root = history();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("sim-report")
         .arg("--sim-log-dir")
         .arg(root.path())

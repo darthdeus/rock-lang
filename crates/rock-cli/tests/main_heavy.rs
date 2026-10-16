@@ -1,3 +1,5 @@
+mod command;
+
 // Game-spawning tests, excluded from the default nextest profile (see .config/nextest.toml).
 
 mod stone_harness;

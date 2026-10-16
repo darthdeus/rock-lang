@@ -13,16 +13,12 @@ use std::path::PathBuf;
 
 use crate::web_test_process;
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
 fn build_web(game: &str, out: &std::path::Path) {
-    let status = web_test_process::command(rock_bin())
+    let status = web_test_process::command(std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock")))
         .current_dir(repo_root())
         .args(["web", game, "--out", out.to_str().unwrap()])
         .status()
@@ -452,7 +448,7 @@ fn web_chrome_hot_reload_preserves_state() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let mut server = web_test_process::command(rock_bin())
+    let mut server = web_test_process::command(std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock")))
         .current_dir(repo_root())
         .args([
             "web",
@@ -550,7 +546,7 @@ fn web_chrome_single_file_boots_from_a_file_url() {
         return;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    let status = web_test_process::command(rock_bin())
+    let status = web_test_process::command(std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock")))
         .current_dir(repo_root())
         .args(["web", "games/chesslings", "--single-file", "--out",
                dir.path().join("index.html").to_str().unwrap()])

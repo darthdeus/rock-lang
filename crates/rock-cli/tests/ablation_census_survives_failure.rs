@@ -13,12 +13,6 @@
 //! Drives the real CLI, because the defect is in how the process exits and
 //! nothing below that layer can observe it.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn write_tmp(tag: &str, src: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("rock_ablation_census_{tag}"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -38,7 +32,7 @@ const BANNER: &str = "Stage-0e totality ablation";
 /// `/dev/null`, so the census -- which is on STDOUT, the same stream a
 /// `--output -` would take -- is read without the artifact mixed into it.
 fn compile(path: &std::path::Path, ablated: bool) -> (bool, String) {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.args([
         "compile",
         path.to_str().unwrap(),

@@ -13,12 +13,7 @@
 //! `stone/engine/state_image.rock` consumes at runtime -- so a test that passes
 //! proves the shipped plan, not a compiler-internal view of it.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
+use std::path::{Path};
 
 /// One `__ROCK_STATE_IMAGE_PLAN` entry, as the emitted Lua spells it.
 #[derive(Debug, PartialEq, Eq)]
@@ -100,7 +95,7 @@ fn compile(files: &[(&str, &str)]) -> Result<String, String> {
     let dir = tempfile::tempdir().expect("tempdir");
     write_package(dir.path(), files);
     let out = dir.path().join("out.lua");
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .arg("compile")
         .arg(dir.path())
         .arg("--output")
@@ -132,7 +127,7 @@ fn compile_diagnostics(files: &[(&str, &str)]) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     write_package(dir.path(), files);
     let out = dir.path().join("out.lua");
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .arg("compile")
         .arg(dir.path())
         .arg("--output")
@@ -156,7 +151,7 @@ fn compile_diagnostics(files: &[(&str, &str)]) -> String {
 fn lint_output(files: &[(&str, &str)], lint: &str) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     write_package(dir.path(), files);
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .arg("lint")
         .arg(dir.path())
         .arg(format!("--lints={lint}"))

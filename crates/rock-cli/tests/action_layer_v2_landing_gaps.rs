@@ -1,7 +1,6 @@
 //! Landing gaps that cross the Rock process boundary use the production sim.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
@@ -52,7 +51,7 @@ fn assert_sim_pass(name: &str, output: &std::process::Output) -> (usize, usize) 
 }
 
 fn run_sim(name: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+    crate::command::rock_bin()
         .args(["sim", "mag", name])
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
@@ -83,7 +82,7 @@ fn binding_changes_survive_a_fresh_process() {
     let cache = pref_root.path().join("cache");
 
     let run = |name: &str| {
-        Command::new(env!("CARGO_BIN_EXE_rock"))
+        crate::command::rock_bin()
             .args(["sim", "mag", name])
             .current_dir(&root)
             .env("ROCK_SIM_TIMEOUT_SECS", "120")

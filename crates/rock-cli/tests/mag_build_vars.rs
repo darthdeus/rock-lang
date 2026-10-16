@@ -5,12 +5,8 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn run_rock(args: &[&str]) -> std::process::Output {
-    Command::new(rock_bin())
+    crate::command::rock_bin()
         .current_dir(repo_root())
         .args(args)
         .output()
@@ -29,7 +25,7 @@ fn run_mag_without_host_key(
         args.extend(["--var", "TELEMETRY_TOKEN="]);
     }
     args.extend(["--output", &output_arg]);
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(args)
         .env("ROCK_TELEMETRY_HOST_CONFIG", dir.path().join("missing-host"))

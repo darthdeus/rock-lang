@@ -1,4 +1,3 @@
-use std::process::Command;
 
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -36,7 +35,7 @@ global effect_load: int = set_effect_marker()
 }
 
 fn run(dir: &std::path::Path) -> (bool, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test").arg(dir)
         .env("ROCK_TEST_VERBOSE", "1")
         .env_remove("ROCK_TEST_FILTER")
@@ -76,7 +75,7 @@ fn uncertain_scanning_logs_a_full_set_fallback_and_rejects_bad_source() {
 #[test]
 fn sim_listing_still_typechecks_the_full_sim_source_set() {
     let fixture = fixture();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["sim", "--list"]).arg(fixture.path())
         .output().unwrap();
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout),

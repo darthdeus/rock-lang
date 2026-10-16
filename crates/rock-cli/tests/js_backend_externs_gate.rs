@@ -6,10 +6,6 @@
 
 use std::process::Command;
 
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn node_available() -> bool {
     Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -33,7 +29,7 @@ fn main() {
 const EXPECTED: &str = "42,12\n";
 
 fn run(backend: Option<&str>, path: &std::path::Path) -> (String, bool) {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.args(["run", path.to_str().unwrap()]);
     if let Some(b) = backend {
         cmd.args(["--backend", b]);

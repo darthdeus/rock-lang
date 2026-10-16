@@ -1,11 +1,6 @@
 //! Desktop LuaJIT controls for run and emission. Each fixture remains a
 //! separate process so its output is the load-bearing native-backend contract.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 // Exercises: a registry global (SYSTEMS) populated by a `deco init` at module
 // load, two `@system`-applied fns (alpha with a literal `stage = 5`, beta
@@ -61,7 +56,7 @@ fn main() {
 const EXPECTED: &str = "derived=20\nalpha stage=5\nalpha\nbeta stage=100\nbeta\n1\n2\n";
 
 fn run(path: &std::path::Path) -> (String, bool) {
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["run", path.to_str().unwrap()])
         .output()
         .expect("spawn rock");
@@ -217,7 +212,7 @@ fn without_census(out: &str) -> String {
 }
 
 fn run_ablated(path: &std::path::Path) -> (String, bool) {
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["run", path.to_str().unwrap()])
         .env("ROCK_MONO_ABLATION", "1")
         .output()

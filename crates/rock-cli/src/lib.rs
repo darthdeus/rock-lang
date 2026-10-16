@@ -661,7 +661,7 @@ pub struct Args {
     pub dump_state: bool,
     pub update_snapshots: bool,
     /// For `rock sim`: how many sim children may run at once. `None` uses the
-    /// CPU/RAM/GPU budget in `run_sim::sim_job_budget`.
+    /// CPU/RAM/GPU budget in `run_sim::sim_job_budget`, capped by `ROCK_SIM_JOBS`.
     pub jobs: Option<usize>,
     pub jobs_force: bool,
     /// For `rock sim`: how many of those children may hold FULL-SIZE assets
@@ -904,7 +904,7 @@ impl Args {
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
             .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: run up to N sim children concurrently (default: CPU count bounded by total RAM at 3.6 GiB per lane and free GPU memory less a 6 GiB reserve at 2 GiB per lane; explicit N above the RAM budget requires --jobs-force; above only the free-GPU budget it runs at that budget with a warning; at most the core count; a named run narrows N to its name count first; 1 = serial). Applies to the whole-suite and multi-name forms."))
+                .help("For `rock sim`: run up to N sim children concurrently (default: CPU count capped by ROCK_SIM_JOBS when it is a positive integer; explicit -j overrides that environment cap; bounded by total RAM at 3.6 GiB per lane and free GPU memory less a 6 GiB reserve at 2 GiB per lane; explicit N above the RAM budget requires --jobs-force; above only the free-GPU budget it runs at that budget with a warning; at most the core count; a named run narrows N to its name count first; 1 = serial). Applies to the whole-suite and multi-name forms."))
             .arg(Arg::new("jobs-force").long("jobs-force").action(ArgAction::SetTrue)
                 .requires("jobs")
                 .help("For `rock sim`: run --jobs as asked above the RAM and free-GPU budgets (still bounded by CPU count)."))

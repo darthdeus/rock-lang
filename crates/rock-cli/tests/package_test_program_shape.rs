@@ -2,7 +2,6 @@
 //! reloaded, so it omits the reload-only Artifact binding plan and Session-cell
 //! joins; a game build of the same package keeps both.
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -55,7 +54,7 @@ fn package_test_program_omits_reload_only_state_a_game_build_keeps() {
     std::fs::write(project.join("main.rock"), MAIN).unwrap();
     std::fs::write(project.join("tests/shape.rock"), TEST).unwrap();
 
-    let test = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let test = crate::command::rock_bin()
         .arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")
@@ -67,7 +66,7 @@ fn package_test_program_omits_reload_only_state_a_game_build_keeps() {
     assert!(text.contains("1/1 @tests passed"), "expected one passing test:\n{text}");
 
     let lua = dir.path().join("game.lua");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .arg("compile").arg(&project).arg("--output").arg(&lua)
         .current_dir(root())
         .output().expect("compile fixture game");

@@ -8,11 +8,6 @@
 //! stay the CLI's generic error and clap's usage error.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -45,7 +40,7 @@ fn audit(project: &Path, extra: &[&str]) -> Run {
     let project = project.to_string_lossy().into_owned();
     let mut args = vec!["modules", "audit", project.as_str()];
     args.extend_from_slice(extra);
-    let out = Command::new(rock_bin()).args(&args).output().expect("spawn rock");
+    let out = crate::command::rock_bin().args(&args).output().expect("spawn rock");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),

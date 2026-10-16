@@ -7,7 +7,7 @@
 
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Output};
 
 const FIXTURE: &str = "crates/rock-cli/test-data/sim-world-entry";
 
@@ -20,7 +20,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn rock_sim(names: &[&str]) -> (Output, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .arg("sim")
         .arg(FIXTURE)
         .args(names)

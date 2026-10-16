@@ -6,11 +6,6 @@
 //! analysis failed.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rock_modules_fix_{tag}"));
@@ -37,7 +32,7 @@ struct Run {
 }
 
 fn rock(cwd: &Path, args: &[&str]) -> Run {
-    let out = Command::new(rock_bin()).current_dir(cwd).args(args).output().expect("spawn rock");
+    let out = crate::command::rock_bin().current_dir(cwd).args(args).output().expect("spawn rock");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),

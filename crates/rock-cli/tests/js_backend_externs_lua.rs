@@ -1,8 +1,3 @@
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 const GATE: &str = r#"
 inline(lua) fn plus_one(x: int) -> int = """return x + 1"""
@@ -32,7 +27,7 @@ fn run(src: &str, name: &str) -> (String, bool) {
     let dir = tempfile::tempdir().expect("fixture dir");
     let path = dir.path().join(name);
     std::fs::write(&path, src).expect("write fixture");
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["run", path.to_str().unwrap()])
         .output()
         .expect("spawn rock");

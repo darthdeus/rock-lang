@@ -1,7 +1,7 @@
-use std::process::{Command, Output};
+use std::process::{Output};
 
 fn rock(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+    crate::command::rock_bin()
         .args(args)
         .output()
         .expect("spawn rock")

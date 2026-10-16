@@ -14,16 +14,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
 fn rock_web(args: &[&str]) -> std::process::Output {
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(repo_root())
         .arg("web")
         .args(args)
@@ -113,7 +109,7 @@ fn directory_build_stages_external_asset_overlays() {
     let out_dir = tempfile::tempdir().expect("web output");
     let overlays = std::env::join_paths([overlay.path()]).unwrap();
 
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("ROCK_ASSET_OVERLAYS", overlays)
         .args([
@@ -269,7 +265,7 @@ fn watch_rejects_a_packaging_flag() {
     // rebuilding a base64 page per keystroke is not a dev loop. Reject rather
     // than silently ignoring one of the two.
     for flag in ["--single-file", "--itch"] {
-        let out = Command::new(rock_bin())
+        let out = crate::command::rock_bin()
             .current_dir(repo_root())
             .args(["web", "games/match3", "--watch", flag])
             .output()

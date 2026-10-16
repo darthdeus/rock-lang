@@ -4,12 +4,7 @@
 //! dependency therefore keeps its own policy while the root is compiled, and
 //! declaration annotations cannot turn a mutable global back on.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
+use std::path::{Path};
 
 fn manifest(name: &str, globals: Option<&str>, dependencies: Option<&str>) -> String {
     let language = match globals {
@@ -32,7 +27,7 @@ fn write_file(root: &Path, path: &str, contents: &str) {
 
 fn compile(root: &Path) -> Result<String, String> {
     let out = root.join("out.lua");
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .arg("compile")
         .arg(root)
         .arg("--output")

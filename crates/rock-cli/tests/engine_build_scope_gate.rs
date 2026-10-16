@@ -201,7 +201,7 @@ fn receipt_bound_c_consumers_preserve_and_validate_the_engine_library() {
     let root = fixture_root.path().to_path_buf();
     let fixture = tempfile::tempdir_in(root.join("tmp")).expect("C fixture directory");
     let receipt = fixture.path().join("receipt.json");
-    let prepared = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let prepared = crate::command::rock_bin()
         .args(["engine-build-receipt", "--output"])
         .arg(&receipt)
         .current_dir(&root)
@@ -244,7 +244,7 @@ fn main() {
         vec!["test".into(), project.join("tests").into_os_string(), "--backend".into(), "c".into()],
     ];
     for args in &commands {
-        let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+        let result = crate::command::rock_bin()
             .args(args).current_dir(&root)
             .env("ROCK_ENGINE_BUILD_RECEIPT", &receipt)
             .env("ROCK_TEST_VERBOSE", "1")
@@ -269,7 +269,7 @@ fn main() {
     // A receipt is also an integrity boundary for consumers that link stone_c.
     fs_err::write(&engine, b"replaced staged engine").expect("invalidate engine receipt");
     for args in &commands {
-        let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+        let result = crate::command::rock_bin()
             .args(args).current_dir(&root)
             .env("ROCK_ENGINE_BUILD_RECEIPT", &receipt)
             .env("ROCK_TEST_VERBOSE", "1")

@@ -15,7 +15,6 @@
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
 use std::path::Path;
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 // CARGO_MANIFEST_DIR is `<repo>/crates/rock-cli`; the rock process resolves its
@@ -38,7 +37,7 @@ fn frame_wipes_stale_overlay() {
     // Plant a stale sibling that the fresh-main write must remove.
     std::fs::write(&overlay, "print('STALE_OVERLAY_LOADED')\n").expect("plant overlay");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args(["frame", "-n", "2", "mag"])
         .arg("--output")
         .arg(output.path())

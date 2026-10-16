@@ -11,12 +11,6 @@
 //! the halves while the PNG read the hidden GL compatibility buffer is
 //! exactly the defect this gate exists to catch.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -31,7 +25,7 @@ fn repo_root() -> std::path::PathBuf {
 /// `workdir` via STONE_SCREENSHOT_PATH instead of racing other tests at the
 /// repo-root default. Returns combined stdout+stderr.
 fn run_capture(renderer: Option<&str>, workdir: &std::path::Path) -> String {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(["frame", "games/wgpu_renderer", "-n", "3"])
         .env("ROCK_FRAME_TIMEOUT_SECS", "120")

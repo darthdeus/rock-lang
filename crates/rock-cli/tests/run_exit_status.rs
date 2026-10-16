@@ -14,7 +14,7 @@
 use std::process::Command;
 
 fn rock() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+    crate::command::rock_bin()
 }
 
 fn write_source(name: &str, body: &str) -> std::path::PathBuf {

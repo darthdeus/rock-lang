@@ -7,7 +7,6 @@
 //! sites are pinned one by one.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -76,7 +75,7 @@ NOT fully analyzed:
 #[test]
 fn identity_storage_census_is_pinned_per_package_and_kind() {
     let root = repo_root();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .current_dir(&root)
         .env("ROCK_DIR", &root)
         .args(["identity-storage-census", "."])

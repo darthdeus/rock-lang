@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 const FIXTURE: &str = r#"
 global SHARED_COUNTER: int = 0
@@ -28,7 +27,7 @@ fn luajit_executor_keeps_shared_global_state() {
     let dir = tempfile::tempdir().expect("fixture dir");
     let file = dir.path().join("sentinel.rock");
     std::fs::write(&file, FIXTURE).expect("write fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["test", file.to_str().unwrap()])
         .current_dir(workspace_root())
         .output()

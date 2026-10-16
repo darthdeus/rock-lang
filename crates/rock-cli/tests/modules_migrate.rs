@@ -6,11 +6,6 @@
 //! the plan is blocked (nothing written); 4 an analysis failed.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -46,7 +41,7 @@ fn test_child_from_temp_fixture_uses_the_worktree_root_without_ambient_root() {
 
     // This runs with an external CARGO_TARGET_DIR in the regression job. The
     // executable path and fixture CWD then cannot identify the worktree.
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(fixture.path())
         .env_remove("ROCK_DIR")
         .env("ROCK_TEST_VERBOSE", "1")
@@ -90,7 +85,7 @@ struct Run {
 fn rock(cwd: &Path, args: &[&str]) -> Run {
     // The fixtures live in a temp dir, so without ROCK_DIR the binary falls
     // back to a fixed checkout path and checks against that tree's stdlib.
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(cwd)
         .env("ROCK_DIR", repo_root())
         .args(args)

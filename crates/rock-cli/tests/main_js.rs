@@ -1,3 +1,5 @@
+mod command;
+
 #[path = "web_test_process.rs"]
 mod web_test_process;
 

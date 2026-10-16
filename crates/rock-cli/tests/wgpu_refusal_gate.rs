@@ -19,12 +19,6 @@
 //! gate must retain the boot marker as an independent non-vacuity assertion:
 //! exit status alone does not prove that the measured process initialized.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -42,7 +36,7 @@ fn run_frame(probe: Option<&str>) -> (String, bool) {
 
 fn run_frame_with_driver(probe: Option<&str>, video_driver: Option<&str>) -> (String, bool) {
     let out_dir = tempfile::tempdir().expect("tempdir");
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(["frame", "games/wgpu_renderer", "-n", "3"])
         .arg("--output")

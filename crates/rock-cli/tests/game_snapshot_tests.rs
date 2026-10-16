@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
@@ -24,7 +23,7 @@ fn run_frame_dump(
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let scratch = tempfile::tempdir().expect("create scratch dir for --output");
     let scratch_path = scratch.path().to_string_lossy().into_owned();
-    let mut cmd = Command::new(rock_bin);
+    let mut cmd = crate::command::rock(rock_bin);
     cmd.args(["frame", game, "-n", &frames.to_string(), "--dump-state", "--output", &scratch_path])
         .env("ROCK_TEST_SEED", seed.to_string())
         .current_dir(workspace_root());
@@ -211,7 +210,7 @@ fn test_match3_seeded_random_board_alt_seed() {
 fn test_errored_coroutine_is_logged() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
-    let output = Command::new(rock_bin)
+    let output = crate::command::rock(rock_bin)
         .args(["sim", "testbed", "testbed::errored_co_logs"])
         .current_dir(workspace_root())
         .output_with_deadline()

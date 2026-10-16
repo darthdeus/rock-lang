@@ -13,13 +13,6 @@
 //! `compile` type-checks via the bone front end on the default (skull) backend
 //! and on `--backend bone`; a parse error must make it exit non-zero.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    // CARGO_BIN_EXE_<name> is set by cargo for binary integration tests.
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn write_tmp(tag: &str, src: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("rock_paren_repro_{tag}"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -33,7 +26,7 @@ const BAD: &str = "fn foo(x: int) -> int {\n    x\n}\n\nfn bar() {\n    foo(1))\
 const GOOD: &str = "fn foo(x: int) -> int {\n    x\n}\n\nfn bar() {\n    foo(1)\n}\n";
 
 fn compile_exit_ok(path: &std::path::Path, backend: Option<&str>) -> bool {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.args(["compile", path.to_str().unwrap()]);
     if let Some(b) = backend {
         cmd.args(["--backend", b]);

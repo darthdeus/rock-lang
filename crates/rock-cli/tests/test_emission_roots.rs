@@ -1,4 +1,3 @@
-use std::process::Command;
 
 #[test]
 fn package_tests_emit_only_reachable_functions_and_global_effects() {
@@ -44,7 +43,7 @@ input:close()
 }
 "#).unwrap();
     let program = dir.path().join("program.lua");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test").arg(&package)
         .env("ROCK_FIXTURE_PROGRAM", &program)
         .env("ROCK_TEST_SHARDS", "1")

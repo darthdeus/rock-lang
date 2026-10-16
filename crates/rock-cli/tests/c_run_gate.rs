@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn run(path: &std::path::Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+    crate::command::rock_bin()
         .args(["run", path.to_str().expect("utf8 path"), "--backend", "c"])
         .output()
         .expect("spawn rock")
@@ -13,7 +13,7 @@ fn workspace_root() -> std::path::PathBuf {
 
 #[test]
 fn c_optional_array_literals_are_required_native_tests() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "test", "--backend", "c",
             "tests/c_optional_array_literal_store.rock",
@@ -73,7 +73,7 @@ fn main() {
     );
     std::fs::write(&source_path, source).expect("write tool imgui fixture");
     let output = dir.path().join("tool-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 tool fixture"),
@@ -138,7 +138,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write combo imgui fixture");
     let output = dir.path().join("combo-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 combo fixture"),
@@ -200,7 +200,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write popup imgui fixture");
     let output = dir.path().join("popup-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 popup fixture"),
@@ -261,7 +261,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write menu item imgui fixture");
     let output = dir.path().join("menu-item-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 menu item fixture"),
@@ -318,7 +318,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write raw child imgui fixture");
     let output = dir.path().join("raw-child-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 raw child fixture"),
@@ -375,7 +375,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write window position imgui fixture");
     let output = dir.path().join("window-pos-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 window position fixture"),
@@ -432,7 +432,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write window imgui fixture");
     let output = dir.path().join("window-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 window fixture"),
@@ -493,7 +493,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write item hover imgui fixture");
     let output = dir.path().join("item-hover-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 item hover fixture"),
@@ -550,7 +550,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write tooltip imgui fixture");
     let output = dir.path().join("tooltip-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 tooltip fixture"),
@@ -636,7 +636,7 @@ fn main() {
 "###;
     std::fs::write(&source_path, source).expect("write image button imgui fixture");
     let output = dir.path().join("image-button-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 image button fixture"),
@@ -699,7 +699,7 @@ fn main() {
 "#;
     std::fs::write(&source_path, source).expect("write window rectangle imgui fixture");
     let output = dir.path().join("window-rect-imgui-consumer");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             source_path.to_str().expect("utf8 window rectangle fixture"),
@@ -753,7 +753,7 @@ fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
          fn main() { let message = echo(\"hi\"); print(message) }\n",
     )
     .expect("write program");
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args(["compile", "foo.rock", "--backend", "c"])
         .current_dir(dir.path())
         .output()
@@ -775,7 +775,7 @@ fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
     assert!(run.status.success(), "native binary failed: {run:?}");
     assert_eq!(run.stdout, b"hi\n");
 
-    let explicit_compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let explicit_compile = crate::command::rock_bin()
         .args([
             "compile",
             "foo.rock",
@@ -796,7 +796,7 @@ fn c_compile_keeps_artifacts_and_invalidates_stale_defaults() {
         "extern(lua) fn unsupported_runtime()\nfn main() { unsupported_runtime() }\n",
     )
     .expect("write unsupported program");
-    let failed_compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let failed_compile = crate::command::rock_bin()
         .args(["compile", "foo.rock", "--backend", "c"])
         .current_dir(dir.path())
         .output()
@@ -844,7 +844,7 @@ fn c_compile_and_run_load_project_dependencies() {
     )
     .expect("write game source");
 
-    let compile = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compile = crate::command::rock_bin()
         .args([
             "compile",
             game.to_str().expect("utf8 game path"),

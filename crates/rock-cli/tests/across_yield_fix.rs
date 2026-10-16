@@ -4,7 +4,6 @@
 //! world entry.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rock_across_yield_fix_{tag}"));
@@ -98,7 +97,7 @@ fn fix(root: &Path, files: &[&str], apply: bool) -> Run {
     if apply {
         args.push("--apply".to_string());
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_rock")).current_dir(root).args(&args).output().expect("spawn rock");
+    let out = crate::command::rock_bin().current_dir(root).args(&args).output().expect("spawn rock");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -213,7 +212,7 @@ fn census_lists_sites_with_their_binding() {
         "census",
         &[("sim", "@sim\nco fn simple() -> Coroutine<int> {\n    let player = MAG_ACTIVE_WORLD.unwrap().get().unwrap().player.get().unwrap()\n    await frame(1)\n    player.hp = 4\n}\n")],
     );
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .current_dir(root.parent().unwrap())
         .env("ROCK_IDENTITY_CENSUS_SITES", "across-yield")
         .args(["identity-storage-census", "."])

@@ -8,18 +8,13 @@
 //! source under that same id or every span lookup fails ("Unable to fetch
 //! source") and the snippet/labels are silently dropped.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 // Two INDEPENDENT type errors in separate fn bodies, with distinct type pairs
 // so each rendered error is identifiable by substring.
 const TWO_ERRORS: &str = "fn first_bad() -> int {\n    \"not an int\"\n}\n\nfn second_bad() -> int {\n    true\n}\n";
 
 fn compile_stderr(path: &std::path::Path, backend: Option<&str>) -> (bool, String) {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.args(["compile", path.to_str().unwrap()]);
     if let Some(b) = backend {
         cmd.args(["--backend", b]);

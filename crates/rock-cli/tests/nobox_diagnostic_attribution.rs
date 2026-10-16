@@ -11,11 +11,6 @@
 //! lowering, and normalization already moved this program's rejection out of
 //! stdlib onto the user's own ctor.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 // Interpolating a WHOLE tuple that carries a nobox value: that asks for one
 // runtime-typed value, so the element materializes with nowhere else to go.
@@ -43,7 +38,7 @@ fn compile_stderr(src: &str) -> String {
     .unwrap();
     let f = dir.join("a.rock");
     std::fs::write(&f, src).unwrap();
-    let out = Command::new(rock_bin()).args(["compile", f.to_str().unwrap()]).output().unwrap();
+    let out = crate::command::rock_bin().args(["compile", f.to_str().unwrap()]).output().unwrap();
     assert!(!out.status.success(), "the nobox guarantee must reject this program");
     String::from_utf8_lossy(&out.stderr).into_owned()
 }

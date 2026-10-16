@@ -1,3 +1,5 @@
+mod command;
+
 #[path = "engine_cdylib_freshness_gate.rs"]
 mod engine_cdylib_freshness_gate;
 #[path = "frame_watchdog_gate.rs"]

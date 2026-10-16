@@ -11,7 +11,6 @@
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> PathBuf {
@@ -67,7 +66,7 @@ co fn passes_after() -> Coroutine<Wait> {
 }
 "#).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_rock")).arg("sim").arg(&project)
+    let out = crate::command::rock_bin().arg("sim").arg(&project)
         .args(["raises_a_frame", "stops_on_first_resume", "passes_after"])
         .args(["--workers", "-j", "1"])
         .current_dir(workspace_root())

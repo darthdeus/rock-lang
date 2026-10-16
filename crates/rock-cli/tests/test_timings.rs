@@ -2,7 +2,6 @@
 //! output and, with `ROCK_TEST_TIMINGS=<path>`, one JSON line per test, so
 //! gate lanes can rank their slowest package tests.
 
-use std::process::Command;
 
 const PACKAGE: &[(&str, &str)] = &[
     ("stick.toml", "[package]\nname = \"timed-tests\"\ntype = \"lib\"\n"),
@@ -32,7 +31,7 @@ fn rock_test_records_wall_time_per_test() {
         std::fs::write(path, text).expect("package file");
     }
     let timings = dir.path().join("timings.jsonl");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .arg("test")
         .arg(dir.path())
         .env("ROCK_TEST_TIMINGS", &timings)

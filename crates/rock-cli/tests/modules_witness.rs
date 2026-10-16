@@ -3,11 +3,6 @@
 //! exposed. `modules_emit.rs` is the M4 sibling; this file is the M6 one.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rock_modules_witness_{tag}"));
@@ -24,7 +19,7 @@ fn write(path: &Path, body: &str) {
 }
 
 fn rock(args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(rock_bin()).args(args).output().expect("spawn rock");
+    let out = crate::command::rock_bin().args(args).output().expect("spawn rock");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),

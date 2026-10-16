@@ -2,7 +2,6 @@
 //! not touch the player's telemetry root: its choice is not the player's.
 
 use std::path::Path;
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
@@ -19,7 +18,7 @@ fn boot_mag(
     settings_override: Option<&Path>,
 ) {
     let scratch = tempfile::tempdir().expect("frame scratch");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command
         .args(["frame", "mag", "-n", "3", "--output", &scratch.path().to_string_lossy()])
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")

@@ -8,7 +8,6 @@
 //! `docs/mag-simulation-slice-results.md` section 3.3.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::sync::Mutex;
 
@@ -23,14 +22,13 @@ fn workspace_root() -> PathBuf {
 }
 
 fn run_sim(name: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+    crate::command::rock_bin()
         .args(["sim", "mag", name])
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "120")
         .output_with_deadline()
         .unwrap_or_else(|error| panic!("spawn {name}: {error}"))
 }
-
 
 fn assert_sim_pass(name: &str, output: &std::process::Output) {
     let text = format!(

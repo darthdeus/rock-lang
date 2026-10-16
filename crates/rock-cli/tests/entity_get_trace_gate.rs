@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -24,7 +23,7 @@ fn metric(stdout: &str, name: &str) -> u64 {
 // instructions to 186 without changing its snapshots.
 #[test]
 fn entity_get_keeps_row_reading_traces_small() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["run", "benchmarks/entity-get-trace.rock"])
         .current_dir(workspace_root())
         .output()

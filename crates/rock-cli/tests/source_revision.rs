@@ -5,10 +5,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn write_project(dir: &Path) {
     std::fs::write(
         dir.join("stick.toml"),
@@ -24,7 +20,7 @@ fn write_project(dir: &Path) {
 
 fn run(project: &Path, context_root: Option<&Path>, source_revision: Option<&str>) -> Output {
     let repo = repo_root();
-    let mut command = Command::new(rock_bin());
+    let mut command = crate::command::rock_bin();
     command
         .current_dir(&repo)
         .env("ROCK_DIR", &repo)

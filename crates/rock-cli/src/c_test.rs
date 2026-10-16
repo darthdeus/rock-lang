@@ -1296,6 +1296,36 @@ pub fn c_frame(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thread_budget_pool_probe() {
+        let Ok(expected) = std::env::var("ROCK_POOL_PROBE") else { return };
+        assert_eq!(super::test_pool().current_num_threads(), expected.parse::<usize>().unwrap());
+        let expected_request = std::env::var("ROCK_POOL_REQUEST").ok().map(|s| s.parse::<usize>().unwrap());
+        assert_eq!(super::requested_thread_count(), expected_request);
+    }
+
+    #[test]
+    fn thread_budget_sizes_the_c_pool() {
+        let available = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+        for (rock, rayon, expected, request) in [
+            (Some("2"), Some("3"), 2, Some("2")),
+            (None, Some("3"), 3, Some("3")),
+            (None, None, available, None),
+            (Some("0"), None, available, None),
+            (Some("invalid"), None, available, None),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["c_test::tests::thread_budget_pool_probe", "--exact", "--nocapture"])
+                .env_remove("ROCK_NUM_THREADS").env_remove("RAYON_NUM_THREADS")
+                .env_remove("ROCK_POOL_REQUEST").env("ROCK_POOL_PROBE", expected.to_string());
+            if let Some(value) = rock { child.env("ROCK_NUM_THREADS", value); }
+            if let Some(value) = rayon { child.env("RAYON_NUM_THREADS", value); }
+            if let Some(value) = request { child.env("ROCK_POOL_REQUEST", value); }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
     use std::time::{Duration, Instant};
 
     fn slot_probe_package(source: &str) -> tempfile::TempDir {

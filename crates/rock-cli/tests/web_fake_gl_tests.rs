@@ -14,16 +14,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
 fn build_web(game: &str, out: &std::path::Path) {
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["web", game, "--out", out.to_str().unwrap()])
         .status()

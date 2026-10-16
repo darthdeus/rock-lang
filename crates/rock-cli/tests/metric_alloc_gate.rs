@@ -7,7 +7,6 @@
 //! not the in-game gross Lua allocator request (which swings ~80 KB/frame run-to-run).
 
 use std::path::Path;
-use std::process::Command;
 
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -18,7 +17,7 @@ fn workspace_root() -> &'static Path {
 
 fn run_bench(backend: &str) -> String {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
-    let output = Command::new(rock_bin)
+    let output = crate::command::rock(rock_bin)
         .args([
             "run",
             "benchmarks/stats/metric_alloc.rock",

@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -10,16 +9,12 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 #[test]
 fn sample_game_c_compiles_with_stone_build_identity() {
     let root = repo_root();
     let output_dir = tempfile::tempdir().unwrap();
     let output = output_dir.path().join("sample_game_c.lua");
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .current_dir(&root)
         .args([
             "compile",

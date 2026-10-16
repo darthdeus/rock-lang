@@ -7,11 +7,6 @@
 //! `(N failed)` and exits 0 is the bug, and a run that exits 1 with everything
 //! passing would be just as wrong.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 /// Writes `src` into a fresh tempdir and runs `rock test` on it, returning
 /// (combined output, exit-status-success).
@@ -19,7 +14,7 @@ fn run_test(src: &str) -> (String, bool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("probe.rock");
     std::fs::write(&file, src).expect("write probe");
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.arg("test").arg(&file);
     let out = cmd.output().expect("spawn rock");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();

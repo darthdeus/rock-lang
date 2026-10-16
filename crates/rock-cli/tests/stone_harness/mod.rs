@@ -86,8 +86,7 @@ impl StoneHarness {
             std::fs::write(&full, content).unwrap();
         }
 
-        let exe = rock_binary_path();
-        let mut command = Command::new(&exe);
+        let mut command = crate::command::rock_bin();
         for (key, value) in env {
             command.env(key, value);
         }
@@ -477,23 +476,6 @@ fn parse_event(v: &Value) -> Event {
         }),
         _ => Event::Other(v.clone()),
     }
-}
-
-/// Resolve the path to the `rock` binary built by cargo. Mirrors how
-/// `game_snapshot_tests.rs` finds it.
-fn rock_binary_path() -> PathBuf {
-    // CARGO_BIN_EXE_<name> is set for integration tests of the same crate.
-    if let Some(p) = option_env!("CARGO_BIN_EXE_rock") {
-        return PathBuf::from(p);
-    }
-    // Fallback: target/debug/rock relative to the workspace.
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let mut p = PathBuf::from(manifest_dir);
-    p.pop(); // workspace root
-    p.push("target");
-    p.push("debug");
-    p.push("rock");
-    p
 }
 
 /// How many host-projection leaves a `--dump-state` dump carries.

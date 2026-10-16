@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -14,7 +13,7 @@ fn prelude_source() -> String {
 fn js_sibling_compiles_the_real_prelude_module() {
     let root = repo_root();
     for backend in ["skull", "js"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+        let output = crate::command::rock_bin()
             .current_dir(&root)
             .args(["test", "stone/engine/ui/imgui_prelude.rock", "--backend", backend])
             .output()
@@ -47,7 +46,7 @@ fn js_sibling_compiles_the_real_prelude_module() {
         "global OBSERVED: bool = __IMGUI_PRELUDE_READY\nfn main() { print(OBSERVED) }\n",
     )
     .expect("write JS initializer source");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .current_dir(&root)
         .args(["run", project.path().to_str().unwrap(), "--backend", "js"])
         .output()

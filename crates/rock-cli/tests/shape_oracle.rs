@@ -26,11 +26,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> PathBuf {
     // crates/rock-cli -> repo root
@@ -169,7 +164,7 @@ fn build_boxed_stdlib() -> PathBuf {
 }
 
 fn run_rock(args: &[&str], stdlib: StdlibVariant) -> (String, bool) {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(args)
         .env("ROCK_TEST_VERBOSE", "1");
@@ -584,10 +579,8 @@ const SEEDS: &[SeedCase] = &[
         file: "fn_value_off_field.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::LoudReject {
-            names: "survived lowering",
-        },
-        gap: Some("fn value called off a struct field (LIVE)"),
+        expect: Expect::Correct,
+        gap: None,
     },
     SeedCase {
         name: "fn_value_off_field_bound",
@@ -675,8 +668,8 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some(
-            "NEW: `rock_shader(<entry>)` in a FN BODY rejects under marking; the \
-             global-init form does not, and the fn is never taken by value",
+            "FIXED: `rock_shader(<entry>)` in a fn body accepts the compile-time \
+             entry name under marking without taking the fn by value",
         ),
     },
     SeedCase {
@@ -1501,10 +1494,8 @@ fn dangerous_triples() -> Vec<Shape> {
             }
         }
     }
-    // fn-value x field-call. The seed pair puts the discriminant on the CALL SHAPE
-    // (`h.cb(arg)` rejects, `let f = h.cb; f(arg)` runs), which says nothing about
-    // where the ARGUMENT came from -- so vary that: every repr, every nullability,
-    // both cell-shaped storages, and the productions that read out of a place.
+    // Fn-value x field-call. The fixed seed pair covers direct and bound calls;
+    // vary argument origins to guard both paths across representations.
     for repr in REPRS {
         for nullability in NULLABILITIES {
             for storage in [

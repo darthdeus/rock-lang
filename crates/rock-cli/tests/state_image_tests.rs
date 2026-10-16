@@ -1,7 +1,6 @@
 //! Ordinary WorldImage ownership and explicit restore contracts.
 
 use std::path::Path;
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 // Cold MAG assets need scheduling margin in the concurrent native fixture lane.
@@ -17,7 +16,7 @@ fn workspace_root() -> &'static Path {
 #[test]
 fn mag_world_state_has_no_host_resources() {
     let _spawn_budget = SpawnBudget::for_test(120);
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["lint", "mag", "--lints=host_resource_in_game_memory"])
         .current_dir(workspace_root())
         .output_with_deadline()
@@ -31,7 +30,7 @@ fn mag_world_state_has_no_host_resources() {
 #[test]
 fn bitgun_world_props_have_no_host_resources() {
     let _spawn_budget = SpawnBudget::for_test(120);
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["lint", "bitgun", "--lints=host_resource_in_game_memory"])
         .current_dir(workspace_root())
         .output_with_deadline()
@@ -413,7 +412,7 @@ fn skin_gallery_seed_is_platform_state_outside_world_image() {
 
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("testbed.lua");
-    let compiled = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let compiled = crate::command::rock_bin()
         .args(["compile", "games/testbed", "--output", &output.to_string_lossy()])
         .current_dir(workspace_root())
         .output_with_deadline()
@@ -501,7 +500,7 @@ fn stones_platform_class_does_not_swallow_its_explicit_session_globals() {
 /// --record nor --replay: ordinary play, the mode a shipped build runs in.
 fn run_plain_dump(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::Value {
     let scratch = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args([
             "frame", game, "-n", &frames.to_string(),
             "--dump-state", "--output", &scratch.path().to_string_lossy(),

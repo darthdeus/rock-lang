@@ -7,7 +7,7 @@
 //! process exits on its own within a few seconds rather than hanging.
 
 use std::io::{BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Stdio};
 use std::time::{Duration, Instant};
 
 fn frame(body: &str) -> String {
@@ -16,7 +16,7 @@ fn frame(body: &str) -> String {
 
 #[test]
 fn panicking_handler_exits_process_not_wedge() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let mut child = crate::command::rock_bin()
         .args(["lsp", "serve"])
         .env("ROCK_LSP_ALLOW_TEST_PANIC", "1")
         .env("ROCK_LSP_BACKEND", "bone")

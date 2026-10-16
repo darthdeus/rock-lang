@@ -10,12 +10,8 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn run_index(repo: &PathBuf, output: &std::path::Path) -> std::process::Output {
-    Command::new(rock_bin())
+    crate::command::rock_bin()
         .current_dir(repo)
         .args([
             "docs-index",
@@ -114,7 +110,7 @@ fn declaration_index_preserves_parameter_defaults() {
         "deco init marker(stage: int = 100, mode: string = \"presentation\") {}\n",
         "fn multiline(value: int = (\n    2 + // keep this comment\n    3\n)) {}\n",
     )).unwrap();
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .current_dir(&repo)
         .args(["docs-index", source.to_str().unwrap(), "--output", output.to_str().unwrap()])
         .output().expect("index default arguments");
@@ -153,7 +149,7 @@ fn declaration_index_parses_each_package_in_its_dialect() {
         std::fs::write(dir.join("lib.rock"), src).unwrap();
     }
     let output = scratch.path().join("dialects.json");
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .current_dir(&repo)
         .args(["docs-index", v1.to_str().unwrap(), legacy.to_str().unwrap(), "--output", output.to_str().unwrap()])
         .output()

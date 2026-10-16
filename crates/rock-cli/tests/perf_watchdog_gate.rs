@@ -1,7 +1,6 @@
 //! Perf startup and frame execution have separate budgets and diagnostics.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn repo_root() -> PathBuf {
@@ -10,7 +9,7 @@ fn repo_root() -> PathBuf {
 
 fn run_perf(timeout_secs: &str, startup_ms: &str, frame_ms: &str) -> (String, bool, Option<serde_json::Value>) {
     let output = tempfile::tempdir().expect("perf output");
-    let result = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let result = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["perf", "crates/rock-cli/test-data/perf-watchdog", "--frames", "3",
             "--warmup-seconds", "0", "--format", "json"])

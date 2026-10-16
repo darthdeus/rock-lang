@@ -14,7 +14,6 @@
 //! default nextest profile; runs under `-P full`.
 
 use std::path::Path;
-use std::process::Command;
 
 /// The REPO root, two levels up from `crates/rock-cli` -- `stick.toml` dependency
 /// paths and workspace discovery are both resolved against it. One `.parent()`
@@ -57,7 +56,7 @@ fn dump_source_project(pkg: &str, source: &str, frames: u32) -> serde_json::Valu
     std::fs::write(
         dir.path().join("stick.toml"),
         format!(
-            "[package]\nname = \"{pkg}\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+            "[package]\nname = \"{pkg}\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[build.vars]\nGIT_SHA = \"test\"\n\n\
              [dependencies]\nstone = {{ path = \"{}\" }}\n",
             stone.display()
         ),
@@ -76,7 +75,7 @@ fn dump_source_project(pkg: &str, source: &str, frames: u32) -> serde_json::Valu
     let frames = frames.to_string();
 
     let scratch = tempfile::tempdir().expect("scratch dir");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "frame",
             &dir.path().to_string_lossy(),
@@ -181,7 +180,7 @@ fn marked_global_snapshot_round_trips() {
         r#"global WITNESS: int = -1
 
 @update
-fn on_update(dt: float) {
+fn on_update() {
     if WITNESS == -1 {
         snapshot_take(1)
         SPOT = Probe { x: 99, y: 99 }
@@ -225,7 +224,7 @@ fn marked_global_keyframe_records_logical_name() {
 """
 
 @update
-fn on_update(dt: float) {
+fn on_update() {
     if KEYNAMES == "unset" {
         snapshot_take(1)
         KEYNAMES = __probe_keyframe_keys(1)
@@ -241,11 +240,12 @@ fn on_update(dt: float) {
         .split(',')
         .filter(|k| k.contains("SPOT"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        keys,
-        vec!["SPOT"],
+    // A legacy (non-module) global's StateSchema identity is
+    // `global:<file>::<name>`; the file is this run's temp `main.rock`.
+    assert!(
+        matches!(keys.as_slice(), [k] if k.starts_with("global:") && k.ends_with("/main.rock::SPOT")),
         "the keyframe must record the logical StateSchema identity, not physical leaves -- these \
-         keys are persisted into replay checkpoints and saves"
+         keys are persisted into replay checkpoints and saves. Got {keys:?}"
     );
 }
 
@@ -268,21 +268,27 @@ fn nested_and_gc_tier_nobox_globals_reflect_and_round_trip() {
         r#"value Leaf { v: int }
 nobox value Mid { inner: Leaf, m: int }
 nobox value Opt { inner: Leaf?, m: int }
+nobox value P { x: int, y: int }
+nobox value Anim { start: P, frames: int, step: int? }
 
 global NEST: Mid = Mid { inner: Leaf { v: 1 }, m: 2 }
 global ONUL: Opt = Opt { inner: Leaf { v: 5 }, m: 6 }
+global ANIM: Anim = Anim { start: P { x: 3, y: 4 }, frames: 7, step: null }
 global RT_NEST: int = -1
 global RT_ONUL: int = -1
+global RT_ANIM: int = -1
 
 @update
-fn on_update(dt: float) {
+fn on_update() {
     if RT_NEST == -1 {
         snapshot_take(1)
         NEST = Mid { inner: Leaf { v: 77 }, m: 88 }
         ONUL = Opt { inner: Leaf { v: 77 }, m: 88 }
+        ANIM = Anim { start: P { x: 77, y: 88 }, frames: 99, step: 5 }
         if snapshot_restore(1) {
             RT_NEST = materialize(NEST).m
             RT_ONUL = materialize(ONUL).m
+            RT_ANIM = materialize(ANIM).start.y
         }
     }
 }
@@ -299,9 +305,17 @@ fn on_update(dt: float) {
         Some(&serde_json::json!({ "__ty": "Opt", "inner": { "__ty": "Leaf", "v": 5 }, "m": 6 })),
         "a GC-tier nobox global must reflect logically (`_vt` tier). Dump: {pkg:#}"
     );
+    // The JSON dump walks a table's keys, so the nested field shows the dotted
+    // leaf keys its `_vt` box stores -- as a plain struct's `nobox` field does.
     assert_eq!(
-        (pkg.get("RT_NEST"), pkg.get("RT_ONUL")),
-        (Some(&serde_json::json!(2)), Some(&serde_json::json!(6))),
+        pkg.get("ANIM"),
+        Some(&serde_json::json!({ "__ty": "Anim", "start.x": 3, "start.y": 4, "frames": 7 })),
+        "a GC-tier nobox global with a nested nobox field must rebuild through \
+         `Anim_vt`. Dump: {pkg:#}"
+    );
+    assert_eq!(
+        (pkg.get("RT_NEST"), pkg.get("RT_ONUL"), pkg.get("RT_ANIM")),
+        (Some(&serde_json::json!(2)), Some(&serde_json::json!(6)), Some(&serde_json::json!(4))),
         "both tiers must survive snapshot take/restore through the accessors (88 \
          means the restore did not take). Dump: {pkg:#}"
     );
@@ -314,7 +328,7 @@ fn emit_project_lua(pkg: &str, source: &str) -> String {
     std::fs::write(
         dir.path().join("stick.toml"),
         format!(
-            "[package]\nname = \"{pkg}\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+            "[package]\nname = \"{pkg}\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n[build.vars]\nGIT_SHA = \"test\"\n\n\
              [dependencies]\nstone = {{ path = \"{}\" }}\n",
             stone.display()
         ),
@@ -329,7 +343,7 @@ fn emit_project_lua(pkg: &str, source: &str) -> String {
     )
     .expect("write main.rock");
     let out = tempfile::tempdir().expect("out dir");
-    let status = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let status = crate::command::rock_bin()
         .args([
             "frame",
             &dir.path().to_string_lossy(),

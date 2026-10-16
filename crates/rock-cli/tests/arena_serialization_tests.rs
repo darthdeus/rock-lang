@@ -16,7 +16,6 @@
 //! reporting on its subject.
 
 use std::path::Path;
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
@@ -24,7 +23,7 @@ fn workspace_root() -> &'static Path {
 }
 
 fn dump_survivors_state(scratch: &Path) -> serde_json::Value {
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .args([
             "frame",
             "games/survivors",

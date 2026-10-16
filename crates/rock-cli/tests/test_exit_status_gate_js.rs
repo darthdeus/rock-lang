@@ -1,9 +1,5 @@
 use std::process::Command;
 
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn node_available() -> bool {
     Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -12,7 +8,7 @@ fn run_test(src: &str) -> (String, bool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("probe.rock");
     std::fs::write(&file, src).expect("write probe");
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["test", file.to_str().unwrap(), "--backend", "js"])
         .output()
         .expect("spawn rock");

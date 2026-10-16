@@ -1,6 +1,5 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 use crate::stone_harness::{fake_free_gpu_mib, HeavyCommandExt, SpawnBudget};
@@ -33,7 +32,7 @@ fn events(root: &Path) -> Vec<Value> {
 fn ordinary_shared_worker_run_writes_validated_lifecycle() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "sim",
             "testbed",
@@ -77,7 +76,7 @@ fn ordinary_shared_worker_run_writes_validated_lifecycle() {
 fn single_name_preserves_requested_and_effective_mode_metadata() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command.args(["sim", "testbed", "testbed::co_join2_tuple", "--workers", "-j", "4"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
@@ -110,7 +109,7 @@ fn single_name_preserves_requested_and_effective_mode_metadata() {
 fn recovery_record_keeps_actual_worker_failure_and_occurrences() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "sim",
             "testbed",
@@ -170,7 +169,7 @@ fn recovery_record_keeps_actual_worker_failure_and_occurrences() {
 fn native_refusal_recovery_keeps_cause_and_responsible_entry() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "sim",
             "testbed",
@@ -212,7 +211,7 @@ fn native_refusal_recovery_keeps_cause_and_responsible_entry() {
 fn quiet_handled_error_still_writes_terminal_record() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["sim", "testbed", "no_such_sim", "--quiet"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
@@ -248,14 +247,14 @@ fn poll_events(root: &Path) -> Vec<Value> {
 fn concurrent_invocations_keep_independent_histories() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let root = tempfile::tempdir().expect("record root");
-    let first = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let first = crate::command::rock_bin()
         .args(["sim", "testbed", "testbed::co_join2_tuple"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
         .spawn_with_deadline()
         .expect("spawn first invocation");
-    let second = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let second = crate::command::rock_bin()
         .args(["sim", "testbed", "testbed::co_join3_tuple"])
         .current_dir(workspace_root())
         .env("ROCK_SIM_LOG_DIR", root.path())
@@ -303,7 +302,7 @@ fn killed_mid_run_sweep_keeps_completed_verdicts_and_names_its_active_child() {
     let _spawn_budget = SpawnBudget::for_test(240);
     let dir = tempfile::tempdir().expect("scratch");
     let log_dir = dir.path().join("history");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command
         .args([
             "sim",
@@ -404,7 +403,7 @@ fn killed_mid_run_sweep_keeps_completed_verdicts_and_names_its_active_child() {
 fn over_budget_worker_still_records_its_completed_entries() {
     let _spawn_budget = SpawnBudget::for_test(180);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "sim",
             "crates/rock-cli/test-data/sim-v1-names",
@@ -463,7 +462,7 @@ fn over_budget_worker_still_records_its_completed_entries() {
 fn declared_budget_kills_and_names_the_sim_at_its_declared_budget() {
     let _spawn_budget = SpawnBudget::for_test(180);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "sim",
             "crates/rock-cli/test-data/sim-v1-names",
@@ -517,7 +516,7 @@ fn declared_budget_kills_and_names_the_sim_at_its_declared_budget() {
 fn per_entry_budget_is_republished_at_each_entry_start() {
     let _spawn_budget = SpawnBudget::for_test(180);
     let root = tempfile::tempdir().expect("record root");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "sim",
             "crates/rock-cli/test-data/sim-v1-names",

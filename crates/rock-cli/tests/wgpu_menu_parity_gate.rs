@@ -5,10 +5,6 @@ use std::process::Command;
 
 use image::RgbaImage;
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -20,12 +16,12 @@ fn repo_root() -> PathBuf {
 
 fn rock_command() -> Command {
     if cfg!(target_os = "macos") {
-        let mut command = Command::new("caffeinate");
+        let mut command = crate::command::rock("caffeinate");
         command.args(["-du"]);
-        command.arg(rock_bin());
+        command.arg(std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock")));
         command
     } else {
-        Command::new(rock_bin())
+        crate::command::rock_bin()
     }
 }
 

@@ -2,7 +2,6 @@
 //! state, so a fixture whose `defer` restores state must restore it when an
 //! `assert` fails inside the fixture, or the next test sees the leaked state.
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -41,7 +40,7 @@ fn b_next_test_sees_the_fixture_restored() {
     assert_eq(fixture_mark(), 0)
 }
 "#).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")

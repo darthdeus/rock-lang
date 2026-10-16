@@ -3905,10 +3905,20 @@ fn entry_is_reload_lane(
 }
 
 /// CPU bound on sim concurrency. Memory bounds are applied by `sim_job_budget`.
-fn default_sim_jobs() -> usize {
+fn sim_cpu_count() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+/// Only the default lane count takes the environment cap; explicit jobs keep
+/// the physical CPU/RAM/GPU bounds independently of this preference. Invalid
+/// or zero caps leave the CPU default in charge.
+fn default_sim_jobs(cores: usize, env_cap: Option<&str>) -> usize {
+    env_cap.and_then(|value| value.parse::<usize>().ok())
+        .filter(|jobs| *jobs > 0)
+        .unwrap_or(cores)
+        .clamp(1, cores.max(1))
 }
 
 /// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
@@ -3948,14 +3958,15 @@ const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 pub(crate) fn resolve_jobs(requested: Option<usize>, lanes: Option<usize>, update_snapshots: bool, force: bool) -> Result<usize> {
     let requested = narrow_to_lanes(requested, lanes);
     let budget = sim_job_budget();
-    let jobs = resolve_jobs_with(requested, update_snapshots, default_sim_jobs(), budget, force)?;
+    let env_cap = std::env::var("ROCK_SIM_JOBS").ok();
+    let jobs = resolve_jobs_with(requested, update_snapshots, sim_cpu_count(), budget, force, env_cap.as_deref())?;
     if let Some(asked) = requested.filter(|_| !update_snapshots) {
         static WARNED: std::sync::Once = std::sync::Once::new();
         if force && jobs > budget.lanes() {
             WARNED.call_once(|| log::warn!(target: "SIM",
                 "--jobs {jobs} exceeds the default budget of {} lanes", budget.lanes()));
             FORCED_SIM_JOBS.fetch_max(jobs, std::sync::atomic::Ordering::Relaxed);
-        } else if !force && jobs < asked.min(default_sim_jobs()) {
+        } else if !force && jobs < asked.min(sim_cpu_count()) {
             WARNED.call_once(|| log::warn!(target: "SIM",
                 "--jobs {asked} exceeds the free-GPU budget of {} lanes; running {jobs}", budget.gpu));
         }
@@ -3990,7 +4001,7 @@ impl JobBudget {
 /// One above only the free-GPU budget runs at that budget instead
 /// (GPU_JOBS_CLAMP, `docs/gate-speed-plan.md`): free VRAM measures what else
 /// is running, and load costs lanes, not the run.
-fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: JobBudget, force: bool) -> Result<usize> {
+fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: usize, budget: JobBudget, force: bool, env_cap: Option<&str>) -> Result<usize> {
     if update_snapshots {
         if requested.is_some_and(|j| j > 1) {
             log::warn!(target: "SIM",
@@ -3999,7 +4010,7 @@ fn resolve_jobs_with(requested: Option<usize>, update_snapshots: bool, cores: us
         return Ok(1);
     }
     let jobs = match requested {
-        None => budget.lanes(),
+        None => budget.lanes().min(default_sim_jobs(cores, env_cap)),
         Some(jobs) if force => jobs,
         Some(jobs) if jobs > budget.ram => {
             anyhow::bail!("--jobs {jobs} exceeds the RAM budget of {} lanes; use --jobs-force to override", budget.ram);
@@ -4059,7 +4070,7 @@ fn total_system_memory_mib() -> Option<u64> {
 fn sim_job_budget() -> JobBudget {
     static BUDGET: std::sync::OnceLock<JobBudget> = std::sync::OnceLock::new();
     *BUDGET.get_or_init(|| {
-        let cores = default_sim_jobs();
+        let cores = sim_cpu_count();
         let total_ram = total_system_memory_mib();
         let free_vram = match free_gpu_memory_mib() {
             Ok(free) => Some(free),
@@ -4070,9 +4081,11 @@ fn sim_job_budget() -> JobBudget {
             }
         };
         let budget = memory_budgets(cores, total_ram, free_vram);
+        let env_cap = std::env::var("ROCK_SIM_JOBS").ok();
+        let default_jobs = budget.lanes().min(default_sim_jobs(cores, env_cap.as_deref()));
         log::info!(target: "SIM",
-            "default jobs {}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane ({} lanes), free GPU {free_vram:?} MiB less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane ({} lanes)",
-            budget.lanes(), budget.ram, budget.gpu);
+            "default jobs {default_jobs}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane ({} lanes), free GPU {free_vram:?} MiB less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane ({} lanes)",
+            budget.ram, budget.gpu);
         budget
     })
 }
@@ -8718,6 +8731,34 @@ mod tests {
         assert_eq!(got, (0..5).map(|i| (i, i * 2)).collect::<Vec<_>>());
     }
 
+    #[test]
+    fn sim_environment_cap_reaches_default_lane_resolution() {
+        const CHILD: &str = "ROCK_SIM_CAP_PROBE";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(resolve_jobs(None, None, false, false).unwrap(), 1);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["run_sim::tests::sim_environment_cap_reaches_default_lane_resolution", "--exact", "--nocapture"])
+            .env(CHILD, "1").env("ROCK_SIM_JOBS", "1")
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn sim_environment_caps_defaults_but_explicit_flags_win() {
+        let budget = JobBudget { ram: 10, gpu: 8 };
+        assert_eq!(resolve_jobs_with(None, false, 32, budget, false, Some("2")).unwrap(), 2);
+        assert_eq!(resolve_jobs_with(Some(6), false, 32, budget, false, Some("2")).unwrap(), 6);
+        assert_eq!(resolve_jobs_with(Some(12), false, 32, budget, true, Some("2")).unwrap(), 12);
+        assert!(resolve_jobs_with(Some(12), false, 32, budget, false, Some("2")).is_err());
+        assert_eq!(resolve_jobs_with(Some(6), true, 32, budget, true, Some("2")).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(None, false, 32, budget, false, Some("99")).unwrap(), budget.lanes());
+        for cap in [None, Some("0"), Some("invalid"), Some("-1"), Some("184467440737095516160")] {
+            assert_eq!(resolve_jobs_with(None, false, 32, budget, false, cap).unwrap(), budget.lanes());
+        }
+    }
+
     /// The job count is a safety bound, not a preference: it must never exceed
     /// what the machine can run, and `--update-snapshots` must pin to serial
     /// because it writes baseline files whose destinations are not proven
@@ -8726,42 +8767,42 @@ mod tests {
     fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         let (cores, budget) = (32, JobBudget { ram: 4, gpu: 4 });
 
-        assert_eq!(resolve_jobs_with(None, false, cores, budget, false).unwrap(), 4, "no request takes the memory budget");
-        assert_eq!(resolve_jobs_with(Some(1), false, cores, budget, false).unwrap(), 1);
-        let error = resolve_jobs_with(Some(10), false, cores, budget, false).unwrap_err();
+        assert_eq!(resolve_jobs_with(None, false, cores, budget, false, None).unwrap(), 4, "no request takes the memory budget");
+        assert_eq!(resolve_jobs_with(Some(1), false, cores, budget, false, None).unwrap(), 1);
+        let error = resolve_jobs_with(Some(10), false, cores, budget, false, None).unwrap_err();
         assert!(error.to_string().contains("RAM budget of 4"));
         assert!(error.to_string().contains("--jobs-force"));
-        assert_eq!(resolve_jobs_with(Some(4), false, cores, budget, false).unwrap(), 4);
-        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget, false).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(Some(4), false, cores, budget, false, None).unwrap(), 4);
+        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget, false, None).unwrap(), 1);
         // A forced request may exceed the budget, never the cores.
-        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget, true).unwrap(), 10);
-        assert_eq!(resolve_jobs_with(Some(usize::MAX), false, cores, budget, true).unwrap(), cores);
+        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget, true, None).unwrap(), 10);
+        assert_eq!(resolve_jobs_with(Some(usize::MAX), false, cores, budget, true, None).unwrap(), cores);
         // 0 is meaningless; clamp up rather than deadlock on an empty pool.
-        assert_eq!(resolve_jobs_with(Some(0), false, cores, budget, false).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(Some(0), false, cores, budget, false, None).unwrap(), 1);
         // --update-snapshots wins over ANY explicit request.
-        assert_eq!(resolve_jobs_with(None, true, cores, budget, true).unwrap(), 1);
-        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget, true).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(None, true, cores, budget, true, None).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(Some(8), true, cores, budget, true, None).unwrap(), 1);
     }
 
     #[test]
     fn a_request_above_only_the_free_gpu_budget_runs_at_that_budget() {
         let (cores, budget) = (32, JobBudget { ram: 10, gpu: 2 });
-        assert_eq!(resolve_jobs_with(Some(8), false, cores, budget, false).unwrap(), 2);
-        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget, false).unwrap(), 2);
-        let error = resolve_jobs_with(Some(11), false, cores, budget, false).unwrap_err();
+        assert_eq!(resolve_jobs_with(Some(8), false, cores, budget, false, None).unwrap(), 2);
+        assert_eq!(resolve_jobs_with(Some(10), false, cores, budget, false, None).unwrap(), 2);
+        let error = resolve_jobs_with(Some(11), false, cores, budget, false, None).unwrap_err();
         assert!(error.to_string().contains("--jobs 11 exceeds the RAM budget of 10"), "{error}");
         // Force still takes the request as asked.
-        assert_eq!(resolve_jobs_with(Some(8), false, cores, budget, true).unwrap(), 8);
-        assert_eq!(resolve_jobs_with(None, false, cores, budget, false).unwrap(), 2);
+        assert_eq!(resolve_jobs_with(Some(8), false, cores, budget, true, None).unwrap(), 8);
+        assert_eq!(resolve_jobs_with(None, false, cores, budget, false, None).unwrap(), 2);
     }
 
     #[test]
     fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
         let (cores, budget) = (32, JobBudget { ram: 1, gpu: 1 });
         // One name under a one-lane budget runs in its one lane.
-        assert_eq!(resolve_jobs_with(narrow_to_lanes(Some(4), Some(1)), false, cores, budget, false).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(narrow_to_lanes(Some(4), Some(1)), false, cores, budget, false, None).unwrap(), 1);
         // Two names still need two lanes, which the RAM budget refuses.
-        let error = resolve_jobs_with(narrow_to_lanes(Some(4), Some(2)), false, cores, budget, false).unwrap_err();
+        let error = resolve_jobs_with(narrow_to_lanes(Some(4), Some(2)), false, cores, budget, false, None).unwrap_err();
         assert!(error.to_string().contains("--jobs 2 exceeds"), "{error}");
         // Unknown lanes leave the request alone; no request stays no request.
         assert_eq!(narrow_to_lanes(Some(4), None), Some(4));
@@ -8786,9 +8827,9 @@ mod tests {
     fn default_jobs_fit_ram_and_gpu_budgets() {
         let studio = memory_budgets(14, Some(36 * 1024), None);
         assert_eq!(studio.lanes(), 10);
-        assert_eq!(resolve_jobs_with(None, false, 14, studio, false).unwrap(), 10);
-        assert_eq!(resolve_jobs_with(Some(14), false, 14, studio, true).unwrap(), 14);
-        assert_eq!(resolve_jobs_with(Some(14), true, 14, studio, true).unwrap(), 1);
+        assert_eq!(resolve_jobs_with(None, false, 14, studio, false, None).unwrap(), 10);
+        assert_eq!(resolve_jobs_with(Some(14), false, 14, studio, true, None).unwrap(), 14);
+        assert_eq!(resolve_jobs_with(Some(14), true, 14, studio, true, None).unwrap(), 1);
         assert_eq!(memory_budgets(32, Some(62 * 1024), Some(17851)).lanes(), 5);
         assert_eq!(memory_budgets(32, Some(62 * 1024), None).lanes(), 17);
         assert_eq!(memory_budgets(2, Some(36 * 1024), None).lanes(), 2);

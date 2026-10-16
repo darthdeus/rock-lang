@@ -5,11 +5,6 @@
 //! The single-root A1 fragment form and the fn-library form stay unchanged
 //! (covered by the skull-codegen-glsl goldens); here we pin the CLI wiring.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 /// A vertex+fragment pipeline source, mag-ui shaped.
 const PIPELINE_SRC: &str = r#"
@@ -45,7 +40,7 @@ fn two_root_form_emits_pipeline() {
     let out = dir.path().join("ui.glsl");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .args([
             "shader",
             src.to_str().unwrap(),
@@ -79,7 +74,7 @@ fn profile_300es_selected() {
     let out = dir.path().join("ui.glsl");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .args([
             "shader",
             src.to_str().unwrap(),
@@ -104,7 +99,7 @@ fn unknown_profile_rejects_listing_valid() {
     let src = dir.path().join("ui.rock");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(["shader", src.to_str().unwrap(), "ui_vert", "ui_frag", "--profile", "420core"])
         .output()
         .expect("spawn rock");
@@ -128,7 +123,7 @@ fn failed_emission_invalidates_the_previous_output() {
     .unwrap();
     std::fs::write(&output, "stale output").unwrap();
 
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .args([
             "shader",
             src.to_str().unwrap(),
@@ -149,7 +144,7 @@ fn output_cannot_alias_the_source() {
     let src = dir.path().join("ui.rock");
     std::fs::write(&src, PIPELINE_SRC).unwrap();
 
-    let result = Command::new(rock_bin())
+    let result = crate::command::rock_bin()
         .args([
             "shader",
             src.to_str().unwrap(),
@@ -170,7 +165,7 @@ fn output_cannot_alias_the_source() {
 
         let alias = dir.path().join("alias.glsl");
         symlink(&src, &alias).unwrap();
-        let result = Command::new(rock_bin())
+        let result = crate::command::rock_bin()
             .args([
                 "shader",
                 src.to_str().unwrap(),

@@ -1,4 +1,3 @@
-use std::process::Command;
 
 #[test]
 fn backend_stats_returns_the_timed_emit_failure() {
@@ -9,7 +8,7 @@ fn backend_stats_returns_the_timed_emit_failure() {
     )
     .expect("main.rock");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["backend-stats", dir.path().to_str().expect("utf-8 project path")])
         .output()
         .expect("run backend-stats");

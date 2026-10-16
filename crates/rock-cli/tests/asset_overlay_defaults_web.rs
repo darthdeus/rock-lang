@@ -10,10 +10,6 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn toml_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -60,7 +56,7 @@ fn stick_asset_overlays_stage_web_assets() {
     let (_scratch, project, overlay) = project_fixture("overlay-web-stage-", "fn main() {}\n");
     std::fs::write(overlay.join("assets/sfx/configured.txt"), "configured").unwrap();
     let web = project.join("web-out");
-    let build = Command::new(rock_bin())
+    let build = crate::command::rock_bin()
         .current_dir(root())
         .args(["web", project.to_str().unwrap(), "--out", web.to_str().unwrap()])
         .output()
@@ -105,7 +101,7 @@ fn web_directory_listing_executes_the_shared_contract() {
     )
     .unwrap();
     let out = project.join("web-out");
-    let build = Command::new(rock_bin())
+    let build = crate::command::rock_bin()
         .current_dir(root())
         .args(["web", project.to_str().unwrap(), "--out", out.to_str().unwrap()])
         .output()

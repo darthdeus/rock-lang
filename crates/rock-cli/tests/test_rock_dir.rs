@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -23,7 +22,7 @@ fn rock_dir_is_the_project_root() {{
     assert_eq(env_var("ROCK_DIR").unwrap(), "{}")
 }}
 "#, expected.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\""))).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command.arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1");

@@ -38,7 +38,7 @@ fn state_metadata_uses_package_graph_owners_when_sibling_prefixes_nested_depende
         .expect("dependency edge in package graph").declared_key.clone();
 
     let output_path = project.join("main.lua");
-    let output = Command::new(rock_bin())
+    let output = crate::command::rock_bin()
         .current_dir(scratch.path())
         .args(["compile", "app", "--output", "app/main.lua"])
         .output()
@@ -57,10 +57,6 @@ fn state_metadata_uses_package_graph_owners_when_sibling_prefixes_nested_depende
     assert!(root_metadata.contains(&format!("package={root_label:?}")), "root ownership disagrees with PackageGraph:\n{root_metadata}");
     assert!(dependency_metadata.contains(&format!("package={dependency_label:?}")), "dependency ownership disagrees with PackageGraph:\n{dependency_metadata}");
     assert!(sibling_metadata.contains(&format!("package={root_label:?}")), "sibling path-prefix ownership disagrees with PackageGraph:\n{sibling_metadata}");
-}
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
 fn checked_visual_bank_schema() -> u64 {
@@ -112,7 +108,7 @@ fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
     std::os::unix::fs::symlink(repo_root().join("stone"), sdk.path().join("stone")).unwrap();
     std::os::unix::fs::symlink(repo_root().join("stdlib"), sdk.path().join("stdlib")).unwrap();
     let sdk_rock = sdk.path().join("bin/rock");
-    crate::stone_harness::copy_executable(&rock_bin(), &sdk_rock);
+    crate::stone_harness::copy_executable(&std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock")), &sdk_rock);
     let mut permissions = std::fs::metadata(&sdk_rock).unwrap().permissions();
     permissions.set_mode(permissions.mode() | 0o111);
     std::fs::set_permissions(&sdk_rock, permissions).unwrap();
@@ -144,7 +140,7 @@ fn sdk_executable_can_discover_sound_project_in_separate_source_worktree() {
     let fixture_ogg = sound_fixture_ogg();
     std::fs::write(project.join("assets/sfx/fixture.ogg"), &fixture_ogg).unwrap();
 
-    let output = Command::new(&sdk_rock)
+    let output = crate::command::rock(&sdk_rock)
         .current_dir(&project)
         .env_remove("ROCK_DIR")
         .env_remove("ROCK_CONTEXT_ROOT")
@@ -185,7 +181,7 @@ fn content_revision(catalog: &Path) -> String {
 #[test]
 fn shipping_package_of_mag_excludes_the_agent_bridge() {
     let out_dir = tempfile::tempdir().expect("package output");
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(repo_root())
         .args([
             "package",
@@ -242,7 +238,7 @@ fn shipping_package_of_mag_excludes_the_agent_bridge() {
 fn package_manifest_is_the_secret_safe_metadata_boundary() {
     let out_dir = tempfile::tempdir().expect("package output");
     let secret = "package-known-secret-9f8d";
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(repo_root())
         .args([
             "package",
@@ -435,7 +431,7 @@ fn failed_package_does_not_leave_stale_top_level_artifacts() {
         std::fs::write(out_dir.path().join(name), bytes).unwrap();
     }
     let no_tools = tempfile::tempdir().expect("empty PATH");
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("PATH", no_tools.path())
         .args([
@@ -468,7 +464,7 @@ fn package_excludes_unrelated_external_asset_overlays() {
     assert!(canonical_overlay.is_dir(), "the MAG audio overlay is required for this package control");
     let overlays = std::env::join_paths([overlay.path(), canonical_overlay.as_path()]).unwrap();
 
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("ROCK_ASSET_OVERLAYS", overlays)
         .args([
@@ -534,7 +530,7 @@ fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
     )
     .unwrap();
 
-    let packaged = Command::new(rock_bin())
+    let packaged = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("ROCK_ASSET_OVERLAYS", overlay.path())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
@@ -570,7 +566,7 @@ fn package_stages_declared_loose_overlay_assets_and_excludes_neighbors() {
     )
     .unwrap();
     let rejected_output = tempfile::tempdir().expect("rejected package output");
-    let rejected = Command::new(rock_bin())
+    let rejected = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("ROCK_ASSET_OVERLAYS", overlay.path())
         .args([
@@ -629,7 +625,7 @@ fn package_overlay_shadow_prefers_admitted_and_keeps_worktree_fallback() {
     std::fs::write(overlay_assets.join("admitted.png"), b"overlay-admitted").unwrap();
     std::fs::write(overlay_assets.join("fallback.png"), b"overlay-unadmitted").unwrap();
 
-    let packaged = Command::new(rock_bin())
+    let packaged = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("ROCK_ASSET_OVERLAYS", overlay.path())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
@@ -703,7 +699,7 @@ fn package_stages_the_worktree_visual_bank_and_exact_shared_dependencies() {
     .unwrap();
 
     let overlays = std::env::join_paths([overlay.as_path()]).unwrap();
-    let packaged = Command::new(rock_bin())
+    let packaged = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("ROCK_ASSET_OVERLAYS", overlays)
         .args([
@@ -787,7 +783,7 @@ fn package_rejects_schema_one_visual_bank() {
     )
     .unwrap();
 
-    let packaged = Command::new(rock_bin())
+    let packaged = crate::command::rock_bin()
         .current_dir(repo_root())
         .args([
             "package",
@@ -839,7 +835,7 @@ fn package_rejects_an_overlay_bank_when_the_worktree_bank_is_missing() {
     .unwrap();
 
     let overlays = std::env::join_paths([overlay.as_path()]).unwrap();
-    let packaged = Command::new(rock_bin())
+    let packaged = crate::command::rock_bin()
         .current_dir(repo_root())
         .env("ROCK_ASSET_OVERLAYS", overlays)
         .args([
@@ -890,7 +886,7 @@ fn package_rejects_missing_sound_dependency_before_staging() {
 "#;
     write_sound_package_fixture(&project, sound_project, &[]);
 
-    let rejected = Command::new(rock_bin())
+    let rejected = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
         .output()
@@ -923,7 +919,7 @@ fn package_rejects_absolute_and_traversal_sound_keys_before_staging() {
         );
         write_sound_package_fixture(&project, &sound_project, &[]);
 
-        let rejected = Command::new(rock_bin())
+        let rejected = crate::command::rock_bin()
             .current_dir(repo_root())
             .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
             .output()
@@ -949,7 +945,7 @@ fn package_rejects_obsolete_sound_schema_before_staging() {
 "#;
     write_sound_package_fixture(&project, obsolete, &[]);
 
-    let rejected = Command::new(rock_bin())
+    let rejected = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
         .output()
@@ -985,7 +981,7 @@ fn package_stages_compiled_sound_bank_and_exact_manifest_dependencies() {
         &[("assets/sfx/a.ogg", &fixture_ogg), ("assets/sfx/b.ogg", &fixture_ogg)],
     );
 
-    let accepted = Command::new(rock_bin())
+    let accepted = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
         .output()
@@ -1081,7 +1077,7 @@ fn package_accepts_sound_dependencies_in_arbitrarily_named_asset_directories() {
     let assets = keys.map(|key| (key, fixture_ogg.as_slice()));
     write_sound_package_fixture(&project, &sound_project, &assets);
 
-    let accepted = Command::new(rock_bin())
+    let accepted = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
         .output()
@@ -1121,7 +1117,7 @@ fn sound_package_failure_is_transactional_for_generated_output() {
 "#;
     write_sound_package_fixture(&project, invalid, &[]);
 
-    let rejected = Command::new(rock_bin())
+    let rejected = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
         .output()
@@ -1147,7 +1143,7 @@ fn packaged_sound_dependencies_survive_install_outside_source_tree() {
 "#;
     let fixture_ogg = sound_fixture_ogg();
     write_sound_package_fixture(&project, sound_project, &[("assets/sfx/installed.ogg", &fixture_ogg)]);
-    let accepted = Command::new(rock_bin())
+    let accepted = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["package", project.to_str().unwrap(), "--output", output.path().to_str().unwrap()])
         .output()
@@ -1226,7 +1222,7 @@ fn shipping_channel_excludes_a_channel_scoped_dependency_from_generated_code() {
     let output_dir = tempfile::tempdir().expect("compile output");
     let compile = |channel: &str, file: &str| {
         let output = output_dir.path().join(file);
-        let result = Command::new(rock_bin())
+        let result = crate::command::rock_bin()
             .current_dir(repo_root())
             .args([
                 "compile",

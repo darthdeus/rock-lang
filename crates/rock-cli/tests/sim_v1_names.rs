@@ -7,7 +7,7 @@
 
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Output};
 
 const FIXTURE: &str = "crates/rock-cli/test-data/sim-v1-names";
 
@@ -20,7 +20,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn rock_sim(names: &[&str]) -> (Output, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .arg("sim")
         .arg(FIXTURE)
         .args(names)
@@ -139,7 +139,7 @@ fn files_declaring(short: &str) -> Vec<String> {
 /// freshly prepared receipt: the oracle for where each sim was declared.
 fn receipt_registry() -> std::collections::HashMap<String, String> {
     let dir = tempfile::tempdir().expect("receipt scratch");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .arg("sim")
         .arg("--list")
         .arg(FIXTURE)

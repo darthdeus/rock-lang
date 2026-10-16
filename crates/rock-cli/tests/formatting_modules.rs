@@ -1,12 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
+use std::path::{Path};
 
 fn run_fmt(cwd: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(rock_bin())
+    crate::command::rock_bin()
         .current_dir(cwd)
         .args(args)
         .output()

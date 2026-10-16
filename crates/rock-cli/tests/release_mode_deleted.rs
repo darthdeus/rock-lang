@@ -5,12 +5,6 @@
 //! Cargo's own `--release`, the `fire-release` profile and `[release].assets`
 //! in stick.toml are unrelated and stay.
 
-use std::process::Command;
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn tmp(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("rock_release_deleted_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -35,14 +29,14 @@ fn the_global_release_flag_is_rejected() {
 
     // Control: the same invocation without the flag succeeds, so a failure
     // below is the flag and not the fixture.
-    let ok = Command::new(rock_bin()).arg("run").arg(&src).output().expect("spawn rock");
+    let ok = crate::command::rock_bin().arg("run").arg(&src).output().expect("spawn rock");
     assert!(
         ok.status.success(),
         "control run failed: {}",
         String::from_utf8_lossy(&ok.stderr)
     );
 
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .arg("run")
         .arg(&src)
         .arg("--release")
@@ -67,7 +61,7 @@ fn emitted_programs_carry_no_release_global() {
     )
     .unwrap();
 
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .arg("compile")
         .arg(&src)
         .arg("--output")

@@ -15,7 +15,6 @@
 //! under `cargo nextest run -P full`. See .config/nextest.toml.
 
 use std::path::Path;
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn workspace_root() -> &'static Path {
@@ -30,7 +29,7 @@ fn workspace_root() -> &'static Path {
 fn quit_from_late_draw_exits_cleanly() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
-    let output = Command::new(rock_bin)
+    let output = crate::command::rock(rock_bin)
         .args(["frame", "demos/quit_from_late_draw", "-n", "30"])
         // Generous watchdog: init + a few frames on a HiDPI box under CI load.
         .env("ROCK_FRAME_TIMEOUT_SECS", "60")

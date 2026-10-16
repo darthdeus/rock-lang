@@ -19,7 +19,7 @@ fn c_rejection_report_preserves_artifacts_and_reports_independent_sites() {
     for artifact in ["tmp/probe", "tmp/probe.c"] {
         std::fs::write(dir.path().join(artifact), "existing artifact").unwrap();
     }
-    let run = |extra: &[&str]| Command::new(env!("CARGO_BIN_EXE_rock"))
+    let run = |extra: &[&str]| crate::command::rock_bin()
         .current_dir(dir.path())
         .args(["compile", "--backend", "c", "--all-rejections", source.to_str().unwrap(),
             "--rejections-out", report.to_str().unwrap()])
@@ -123,7 +123,7 @@ exec "$ROCK_TEST_REAL_CLANG" "$@"
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
         .expect("make shim executable");
     let count = dir.path().join("count");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["test", input.to_str().unwrap(), "--backend", "c"])
         .env(
             "PATH",
@@ -165,7 +165,7 @@ fn run_fixture(source: &str, show_passing: bool, expected_success: bool) -> Stri
     let dir = tempfile::tempdir().expect("fixture directory");
     let path = dir.path().join("isolation.rock");
     std::fs::write(&path, source).expect("write fixture");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command.args(["test", path.to_str().unwrap(), "--backend", "c"]);
     if show_passing {
         command.arg("--show-passing");
@@ -313,7 +313,7 @@ exec "$ROCK_TEST_REAL_CLANG" "$@"
 "#).expect("write shim");
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     let count = dir.path().join("count");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args([
             "test",
             source.to_str().unwrap(),
@@ -408,7 +408,7 @@ exec "$ROCK_TEST_REAL_CLANG" "$@"
 "#).unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     let count = dir.path().join("count");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["test", source.to_str().unwrap(), "--backend", "c", "--show-passing"])
         .env("PATH", format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap()))
         .env("ROCK_TEST_REAL_CLANG", String::from_utf8(clang.stdout).unwrap().trim())
@@ -489,7 +489,7 @@ fn c_packages_beyond_the_pool_size_finish_under_one_compile_slot() {
         std::fs::write(package.join("probe.rock"), "@test fn probe() { assert(1 + 1 == 2) }\n").unwrap();
     }
     let slots = tempfile::tempdir().expect("slot dir");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let mut child = crate::command::rock_bin()
         .args(["test", "--backend", "c", root.path().to_str().unwrap()])
         .env("ROCK_NUM_THREADS", "2")
         .env("ROCK_COMPILE_SLOTS", "1")

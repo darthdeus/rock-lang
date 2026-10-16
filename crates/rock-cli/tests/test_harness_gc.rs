@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +33,7 @@ end
 """
 @test(output = "{expected}") inline(lua) fn observe_collect() = "print(_G.__gc_collects)"
 "#)).unwrap();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut cmd = crate::command::rock_bin();
     cmd.arg("test").arg(dir.path()).current_dir(root())
         .env("ROCK_TEST_SHARDS", "1").env("ROCK_TEST_VERBOSE", "1")
         .env_remove("ROCK_TEST_FILTER").env_remove("ROCK_TEST_GC_COLLECT_MB");

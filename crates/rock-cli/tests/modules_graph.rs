@@ -8,7 +8,6 @@ use rock_host::stick::graph::PackageGraph;
 use rock_host::stick::StickConfig;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 fn write_package(dir: &Path, name: &str, body: &str, sources: &[&str]) {
     fs::create_dir_all(dir).expect("create package dir");
@@ -147,7 +146,7 @@ fn channel_source_group_has_one_owner_and_excludes_inactive_files() {
 
     let output = tmp.path().join("steam.lua");
     let compile = |channel: &str, output: &Path| {
-        Command::new(env!("CARGO_BIN_EXE_rock"))
+        crate::command::rock_bin()
             .args(["compile", root.to_str().unwrap(), "--channel", channel, "--output", output.to_str().unwrap()])
             .output().expect("spawn rock compile")
     };

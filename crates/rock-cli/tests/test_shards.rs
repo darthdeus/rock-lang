@@ -70,7 +70,7 @@ fn run_filtered(project: &Path, shards: Option<&str>, filter: Option<&str>) -> R
 fn run_filtered_with_verbose(project: &Path, shards: Option<&str>, filter: Option<&str>, verbose: bool) -> Run {
     let log = project.join("shard.log");
     let timings = project.join("timings.jsonl");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    let mut command = crate::command::rock_bin();
     command.arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_TIMINGS", &timings)

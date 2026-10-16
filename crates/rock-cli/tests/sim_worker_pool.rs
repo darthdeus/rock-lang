@@ -29,10 +29,6 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 /// A minimal stone project named `name` with an empty `tests/sims` directory.
 fn sim_fixture_project(root: &Path, name: &str) -> PathBuf {
     let project = root.join(name);
@@ -71,7 +67,7 @@ co fn boot_probe() -> Coroutine<Wait> {
 "#).unwrap();
     let formats = |label: &str, specs: &[&str]| -> Vec<String> {
         let capture = fixture.path().join(format!("{label}.txt"));
-        let out = Command::new(rock_bin()).arg("sim").arg(&project).args(specs)
+        let out = crate::command::rock_bin().arg("sim").arg(&project).args(specs)
             .args(["--isolated", "-j", "1"]).current_dir(workspace_root())
             .env("ROCK_FIXTURE_BOOT_FORMAT", &capture)
             .env("ROCK_SIM_LOG_DIR", fixture.path().join(label))
@@ -131,7 +127,7 @@ co fn slow() -> Coroutine<Wait> {
                 "name": name, "duration_ms": duration, "completed": true
             })).collect::<Vec<_>>()
         })).unwrap()).unwrap();
-        let out = Command::new(rock_bin()).arg("sim").arg(&project).args(specs)
+        let out = crate::command::rock_bin().arg("sim").arg(&project).args(specs)
             .args([mode, "-j", "4", "--jobs-force"]).current_dir(workspace_root())
             .env("ROCK_SIM_LOG_DIR", &history).env("ROCK_SIM_TIMEOUT_SECS", "60")
             .output_with_deadline().unwrap();
@@ -212,7 +208,7 @@ co fn runtime() -> Coroutine<Wait> {
 "#).unwrap();
     for mode in ["--isolated", "--workers"] {
         for names in [&[][..], &["planned", "runtime", "routine"][..], &["planned"][..]] {
-            let out = Command::new(rock_bin()).arg("sim").arg(&project).args(names)
+            let out = crate::command::rock_bin().arg("sim").arg(&project).args(names)
                 .args([mode, "-j", "1"])
                 .current_dir(workspace_root())
                 .env("ROCK_SIM_TIMEOUT_SECS", "180")
@@ -278,7 +274,7 @@ fn run_project_workers_with_history(project: &str, specs: &[&str], jobs: &str) -
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").expect("PATH")));
 
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .args(&args)
         .current_dir(workspace_root())
         .env("PATH", std::env::join_paths(paths).expect("PATH join"))
@@ -673,7 +669,7 @@ fn the_reload_lane_runs_beside_the_worker_pool_in_its_own_chunk() {
     let mut args = vec!["sim", "testbed", RELOAD];
     args.extend_from_slice(&EIGHT);
     args.extend_from_slice(&["--workers", "-j", "2"]);
-    let mut command = Command::new(rock_bin());
+    let mut command = crate::command::rock_bin();
     command.args(&args)
         .current_dir(workspace_root())
         .env("ROCK_SIM_TIMEOUT_SECS", "180")
@@ -792,7 +788,7 @@ co fn gallery() -> Coroutine<Wait> {
     for mode in ["--workers", "--isolated"] {
         let history = fixture.path().join(mode.trim_start_matches('-'));
         let run = |names: &[&str]| {
-            Command::new(rock_bin()).arg("sim").arg(&project).args(names)
+            crate::command::rock_bin().arg("sim").arg(&project).args(names)
                 .args([mode, "-j", "1"])
                 .current_dir(workspace_root())
                 .env("ROCK_SIM_TIMEOUT_SECS", "180")

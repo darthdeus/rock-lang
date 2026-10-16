@@ -13,12 +13,7 @@
 //! control run (same command, no injection) is what keeps this from passing for
 //! the wrong reason.
 
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -40,7 +35,7 @@ fn run_frame(force_error_at: Option<i32>) -> (String, bool) {
 
 fn run_frame_with(envs: &[(&str, String)]) -> (String, bool) {
     let out_dir = tempfile::tempdir().expect("tempdir");
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(["frame", "games/match3", "-n", "5"])
         .arg("--output")
@@ -60,7 +55,7 @@ fn assert_perf_forwards_production_severity_headers(multiline: bool) {
     for color in ["never", "always"] {
         let output = tempfile::tempdir().expect("severity output");
         let run = |operation: &str| {
-            let mut command = Command::new(rock_bin());
+            let mut command = crate::command::rock_bin();
             command.current_dir(repo_root())
                 .args([operation, "crates/rock-cli/test-data/perf-watchdog"]);
             if operation == "frame" {

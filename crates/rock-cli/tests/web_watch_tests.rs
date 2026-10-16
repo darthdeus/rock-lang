@@ -1,12 +1,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn reserve_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -135,7 +131,7 @@ fn watch_serves_sources_reloads_on_green_and_keeps_last_green_on_error() {
 
     let port = reserve_port();
     let stderr = std::fs::File::create(&stderr_path).unwrap();
-    let child = Command::new(rock_bin())
+    let child = crate::command::rock_bin()
         .args([
             "web",
             project.to_str().unwrap(),

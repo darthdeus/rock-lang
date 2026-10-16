@@ -7,7 +7,7 @@
 //! `lint_pass`.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Output};
 
 /// A project whose `main.rock` has one unused local and one dead function.
 fn project(dir: &Path) {
@@ -20,7 +20,7 @@ fn project(dir: &Path) {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock")).args(args).output().expect("spawn rock")
+    crate::command::rock_bin().args(args).output().expect("spawn rock")
 }
 
 fn stderr(out: &Output) -> String {

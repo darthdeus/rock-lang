@@ -8,11 +8,6 @@
 //! wrong in either the definition or the call site fails to execute.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 const STICK: &str = r#"
 [package]
@@ -163,7 +158,7 @@ provider = { path = "../provider" }
 }
 
 fn run(dir: &Path) -> (String, String, bool) {
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .arg("run")
         .arg(dir)
         .output()
@@ -196,7 +191,7 @@ fn colliding_module_digests_are_rejected() {
     std::fs::write(dir.join("main.rock"), COLLIDE_MAIN).unwrap();
     std::fs::write(dir.join("a.rock"), COLLIDE_A).unwrap();
     std::fs::write(dir.join("b.rock"), COLLIDE_B).unwrap();
-    let out = Command::new(rock_bin())
+    let out = crate::command::rock_bin()
         .arg("compile")
         .arg(&dir)
         .arg("--output")

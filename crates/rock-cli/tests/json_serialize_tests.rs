@@ -19,7 +19,6 @@
 // the heavier mag game.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
@@ -32,7 +31,7 @@ fn workspace_root() -> &'static Path {
 fn dump_match3_state() -> serde_json::Value {
     let _spawn_budget = SpawnBudget::for_test(120);
     let rock_bin = env!("CARGO_BIN_EXE_rock");
-    let output = Command::new(rock_bin)
+    let output = crate::command::rock(rock_bin)
         .args(["frame", "games/match3", "-n", "1", "--dump-state"])
         .env("ROCK_TEST_SEED", "42")
         .env("STONE_TOOL_KEY_PROBE", "1")
@@ -199,7 +198,7 @@ fn serializer_branch_coverage() {
 #[test]
 fn v1_payload_free_enum_field_serializes_its_variant_name() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/enum-json-v1");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .args(["test", fixture.to_str().expect("fixture path is UTF-8")])
         .env("ROCK_TEST_VERBOSE", "1")
         .current_dir(workspace_root())

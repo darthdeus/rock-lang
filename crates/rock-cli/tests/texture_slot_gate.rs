@@ -3,12 +3,7 @@
 //! The injection preserves the real texture bindings and suppresses only their
 //! filled stamps, so pixel output cannot make the failure pass accidentally.
 
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -21,7 +16,7 @@ fn repo_root() -> std::path::PathBuf {
 
 fn run_frame(force_unfilled: bool) -> (String, bool) {
     let out_dir = tempfile::tempdir().expect("tempdir");
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(["frame", "games/match3", "-n", "5"])
         .arg("--output")
@@ -43,7 +38,7 @@ fn run_sim(force_unfilled: bool) -> (String, bool) {
 }
 
 fn run_named_sim(name: &str, env: &[(&str, &str)]) -> (String, bool) {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(["sim", "bitgun", name])
         .env("ROCK_FRAME_TIMEOUT_SECS", "120");

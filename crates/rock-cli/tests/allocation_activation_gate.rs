@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 fn repo_root() -> PathBuf {
@@ -19,7 +18,7 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
     let manifest = scratch.path().join("activation.manifest.txt");
     let lua = scratch.path().join("main.lua");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["frame", "games/match3", "-n", "2", "--output"])
         .arg(&lua)
@@ -112,7 +111,7 @@ fn bounded_run_writes_activation_counts_joined_to_the_compiler_manifest() {
     let emitted = std::fs::read_to_string(&lua_artifact).expect("emitted Lua");
     assert!(emitted.lines().any(|line| line.starts_with("__rock_mk_")
         && line.contains(" return function(")), "default callee-bound emission is required");
-    let joined = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let joined = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["allocation-join"])
         .arg(&manifest)
@@ -182,7 +181,7 @@ fn sim_command_writes_one_frame_aware_join_per_selected_sim() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let scratch = tempfile::tempdir().expect("scratch");
     let heatmap = scratch.path().join("heatmap");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["sim", "--allocation-sites"])
         .arg(&heatmap)
@@ -231,7 +230,7 @@ fn sim_command_reports_a_child_that_never_loads() {
     let _spawn_budget = SpawnBudget::for_test(120);
     let scratch = tempfile::tempdir().expect("scratch");
     let heatmap = scratch.path().join("heatmap");
-    let output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let output = crate::command::rock_bin()
         .current_dir(repo_root())
         .args(["sim", "--allocation-sites"])
         .arg(&heatmap)

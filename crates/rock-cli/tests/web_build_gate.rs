@@ -5,10 +5,6 @@
 
 use std::process::Command;
 
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
-
 fn node_available() -> bool {
     Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -27,7 +23,7 @@ fn web_build_emits_files_and_runs() {
     )
     .unwrap();
 
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .args(["web", proj.to_str().unwrap(), "--out", out.to_str().unwrap()])
         .status()
         .expect("spawn rock web");
@@ -54,7 +50,7 @@ fn web_build_emits_files_and_runs() {
 fn chess_web_build_reaches_shared_runtime_mappings() {
     let dir = tempfile::tempdir().expect("create web build tempdir");
     let out = dir.path().join("chess-web");
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .args(["web", "games/chess", "--out", out.to_str().unwrap()])
         .status()
         .expect("spawn rock web");
@@ -125,7 +121,7 @@ fn main() { print("{SHADER_KEY}") }
     )
     .unwrap();
 
-    let status = Command::new(rock_bin())
+    let status = crate::command::rock_bin()
         .args(["web", proj.to_str().unwrap(), "--out", out.to_str().unwrap()])
         .status()
         .expect("spawn rock web");

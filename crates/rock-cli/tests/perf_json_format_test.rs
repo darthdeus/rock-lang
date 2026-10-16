@@ -10,7 +10,6 @@
 //! `frame_ms.{avg,p50,p99,max}` keys.
 
 use std::path::Path;
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 
 use serde_json::Value;
@@ -56,7 +55,7 @@ fn run_perf_json_window_with_sections(
     if let Some(mode) = gc_window_mode {
         args.extend(["--gc-window-mode".to_string(), mode.to_string()]);
     }
-    let mut command = Command::new(rock_bin);
+    let mut command = crate::command::rock(rock_bin);
     command.args(&args).current_dir(workspace_root());
     if detailed_sections {
         command.env("PERF_NO_SECTIONS", "0");

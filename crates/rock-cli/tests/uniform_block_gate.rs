@@ -12,12 +12,7 @@
 //! injection) is what keeps this from passing for the wrong reason: match3 fills
 //! every block it registers, so it must exit 0.
 
-use std::process::Command;
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
-
-fn rock_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,7 +27,7 @@ fn repo_root() -> std::path::PathBuf {
 /// injection. Returns (combined output, exit-status-success).
 fn run_frame(force_unfilled: bool) -> (String, bool) {
     let out_dir = tempfile::tempdir().expect("tempdir");
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root())
         .args(["frame", "games/match3", "-n", "5"])
         .arg("--output")
@@ -49,7 +44,7 @@ fn run_frame(force_unfilled: bool) -> (String, bool) {
 
 /// `rock sim testbed <name>`, optionally with the unfilled injection.
 fn run_sim(name: &str, force_unfilled: bool) -> (String, bool) {
-    let mut cmd = Command::new(rock_bin());
+    let mut cmd = crate::command::rock_bin();
     cmd.current_dir(repo_root()).args(["sim", "testbed", "-j", "1", name]);
     if force_unfilled {
         cmd.env("STONE_UNIFORM_BLOCK_FORCE_UNFILLED", "1");

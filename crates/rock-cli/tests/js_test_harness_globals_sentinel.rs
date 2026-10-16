@@ -14,7 +14,6 @@
 //! -- including one that "fixed" luajit to match a broken JS.
 
 use std::path::Path;
-use std::process::Command;
 
 /// Two globals derived from one shared counter. Nothing here is Arena-specific;
 /// the counter is the whole mechanism.
@@ -63,7 +62,7 @@ fn rock(cmd: &str, src: &str, args: &[&str]) -> (bool, String) {
     let dir = tempfile::tempdir().expect("fixture dir");
     let file = dir.path().join("sentinel.rock");
     std::fs::write(&file, src).expect("write fixture");
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out = crate::command::rock_bin()
         .arg(cmd)
         .arg(&file)
         .args(args)

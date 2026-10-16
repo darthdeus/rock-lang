@@ -119,7 +119,7 @@ fn run_rock_with_env(args: &[&str], parent_env: &[(&str, &str)]) -> String {
         .expect("workspace root")
         .to_path_buf();
 
-    let mut cmd = std::process::Command::new(&rock);
+    let mut cmd = crate::command::rock(&rock);
     cmd.current_dir(&root).args(args).envs(parent_env.iter().copied());
     let out = cmd.output().unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -1751,7 +1751,7 @@ fn a_duplicated_spec_runs_and_reports_twice_in_worker_mode() {
         .expect("workspace root")
         .to_path_buf();
 
-    let out = std::process::Command::new(&rock)
+    let out = crate::command::rock(&rock)
         .current_dir(&root)
         .args(["sim", "testbed", "testbed::b0_leak_probe", "testbed::b0_leak_probe", "--workers"])
         .output()
@@ -2800,7 +2800,7 @@ fn run_rock_status(args: &[&str]) -> (bool, String, String) {
         .expect("workspace root")
         .to_path_buf();
 
-    let out = std::process::Command::new(&rock)
+    let out = crate::command::rock(&rock)
         .current_dir(&root)
         .args(args)
         .output()
@@ -3167,7 +3167,7 @@ fn assert_worker_admission(default_namespace: bool) {
                 .env("ROCK_WORKER_LOAD_PROJECT", &project);
             command
         } else {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+            let mut command = crate::command::rock_bin();
             command.arg("sim").arg(&project).arg("probe");
             command
         };

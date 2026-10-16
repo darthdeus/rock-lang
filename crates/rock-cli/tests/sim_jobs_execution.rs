@@ -5,7 +5,7 @@
 
 use crate::stone_harness::{HeavyCommandExt, SpawnBudget};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Output};
 
 const FIXTURE: &str = "crates/rock-cli/test-data/sim-v1-names";
 
@@ -25,7 +25,7 @@ fn named_sims_within_the_narrowed_budget_run_despite_an_over_budget_request() {
     // still-over-budget-after-narrowing refusal in the sibling 64-entry test
     // there: together the three pin narrow-then-check for plan and execution.
     let _spawn_budget = SpawnBudget::for_test(180);
-    let out: Output = Command::new(env!("CARGO_BIN_EXE_rock"))
+    let out: Output = crate::command::rock_bin()
         .arg("sim")
         .arg(FIXTURE)
         .args(["unique_short_name", "other_snapshot_baseline", "--jobs", "1000"])

@@ -5,11 +5,6 @@
 //! inside a backend unit test.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn rock_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rock"))
-}
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -28,7 +23,7 @@ fn staged_fixture() -> tempfile::TempDir {
 fn compile(package: &Path) -> String {
     let output_dir = tempfile::tempdir().expect("temporary output directory");
     let output = output_dir.path().join("shader.lua");
-    let compiled = Command::new(rock_bin())
+    let compiled = crate::command::rock_bin()
         .args([
             "compile",
             package.to_str().expect("fixture path is UTF-8"),
