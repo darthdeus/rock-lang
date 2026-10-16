@@ -576,7 +576,11 @@ impl BudgetedChild {
             let result = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
             if result != 0 {
                 let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) { return Err(error); }
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    // A denied group signal must not bypass direct-child
+                    // cleanup or replace the phase timeout with EPERM.
+                    eprintln!("spawn {}: could not kill process group: {error}", self.label);
+                }
             }
         }
         if !self.reaped {
@@ -734,6 +738,56 @@ mod tests {
         assert!(error.to_string().contains("phase=spawn"), "{error}");
         assert!(start.elapsed() < Duration::from_millis(250) + LOAD_MARGIN, "spawn cap did not stop the child");
         discard_kept_logs(&error);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn group_kill_permission_error_preserves_timeout_and_reaps_child() {
+        const HELPER: &str = "ROCK_TEST_DENY_GROUP_KILL";
+        if std::env::var_os(HELPER).is_none() {
+            let _budget = SpawnBudget::for_test(10);
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["stone_harness::spawn::tests::group_kill_permission_error_preserves_timeout_and_reaps_child",
+                    "--exact", "--nocapture"])
+                .env(HELPER, "1")
+                .output_with_deadline().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"));
+            return;
+        }
+
+        // Isolate the irreversible filter in a helper process. Deny the real
+        // kill(-pgid) syscall while leaving direct-child cleanup available.
+        let instruction = |code, jt, jf, k| libc::sock_filter { code, jt, jf, k };
+        let filter = [
+            instruction((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0, 0, 0),
+            instruction((libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16, 0, 3, libc::SYS_kill as u32),
+            instruction((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0, 0, 16),
+            instruction((libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K) as u16, 0, 1, 0x8000_0000),
+            instruction((libc::BPF_RET | libc::BPF_K) as u16, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+            instruction((libc::BPF_RET | libc::BPF_K) as u16, 0, 0, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog { len: filter.len() as u16, filter: filter.as_ptr() as *mut _ };
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program), 0);
+        }
+        let _budget = SpawnBudget::for_test(1);
+        let mut pending = child("hang_in:execution")
+            .stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn_with_deadline().unwrap();
+        let error = pending.wait().expect_err("child must time out");
+        let reaped = pending.reaped;
+        // Also clean the child and retained logs when proving the broken arm.
+        if !pending.reaped {
+            pending.child.kill().unwrap();
+            pending.child.wait().unwrap();
+            pending.reaped = true;
+        }
+        discard_kept_logs(&error);
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(error.to_string().contains("phase=execution"), "{error}");
+        assert!(reaped, "timeout cleanup left the direct child unreaped");
     }
 
     #[test]
