@@ -687,7 +687,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "loco_start_variant: PlayerStartVariant",
         "corpse_reach_ember_timer: float",
         "ritual_acquisition_event_seq: int",
-        "combat_latch: CombatLatchState",
         "cast_outline: PlayerCastOutline",
     ] {
         assert_eq!(
@@ -703,6 +702,13 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let followers = fs::read_to_string(repo.join("mag-world/player_actions.rock"))
         .expect("world player runtime source");
     let controller = rock_function_body(&followers, "pub struct WorldPlayerState {");
+    assert_eq!(
+        controller.matches("combat_latch: mag_simulation::CombatLatchState = mag_simulation::CombatLatchState {}").count(),
+        1,
+        "the world player runtime must own and initialize the combat latch exactly once"
+    );
+    assert!(!player_state.contains("combat_latch:"),
+        "MAG Player must not duplicate the world player's combat latch");
     for field in ["body: PlayerBody = PlayerBody {}", "combat: PlayerCombatState = PlayerCombatState {}",
         "inventory: Inventory = Inventory {}",
         "law: mag_simulation::PlayerLaw = mag_simulation::PlayerLaw {}"] {
@@ -774,7 +780,6 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
         "PlayerCombatState must own the bandage heal-left rule"
     );
     for field in [
-        "combat_latch: CombatLatchState = CombatLatchState {}",
         "cast_outline: PlayerCastOutline = PlayerCastOutline {}",
     ] {
         assert_eq!(
