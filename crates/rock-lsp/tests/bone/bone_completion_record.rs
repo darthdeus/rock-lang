@@ -41,6 +41,21 @@ fn completion_items(ws: &mut LspWorkspace, path: &std::path::Path) -> Vec<Comple
 
 #[test]
 fn recording_round_trip_tags_items_and_writes_corpus_row() {
+    // The recorder is process-global; isolate the writer under libtest too.
+    const CHILD: &str = "ROCK_COMPLETION_RECORD_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().expect("libtest test name"),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("run isolated recorder test");
+        assert!(status.success(), "isolated recorder test failed: {status}");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
     std::fs::write(&path, SRC).unwrap();
@@ -112,8 +127,8 @@ fn recording_round_trip_tags_items_and_writes_corpus_row() {
 
 #[test]
 fn recording_off_leaves_items_untagged() {
-    // Runs in its own process under nextest (the sanctioned runner), so the
-    // recorder stays in its env-driven default (off: no ROCK_LSP_RECORD).
+    // The recording-on test runs in a child, leaving this process off even
+    // when libtest runs both tests concurrently or sequentially.
     assert!(
         std::env::var_os("ROCK_LSP_RECORD").is_none(),
         "test env must not set ROCK_LSP_RECORD"
