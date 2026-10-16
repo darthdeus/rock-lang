@@ -85,7 +85,7 @@ fn mag_bootimage_queue_isolates_scene_and_gameplay_entries() {
     let entries = vec![
         "mag::boot_image_scene_registry_npcs_seed".to_string(),
         "mag::boot_image_scene_registry_npcs_probe".to_string(),
-        "mag::combat_report".to_string(),
+        "mag::combat_report_production_hierarchy".to_string(),
     ];
     let worker = run_worker_suite(Backend::Skull, "mag", rock(), &entries)
         .expect("MAG BootImage product queue must run");
