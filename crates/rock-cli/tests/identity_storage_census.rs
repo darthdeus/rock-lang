@@ -32,12 +32,12 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 218 | 212 | 6 | 0 | 1082 | 302 | 44 | 630 | 5 | 2499 |
+| mag | exempt | 217 | 212 | 6 | 0 | 1085 | 309 | 44 | 630 | 5 | 2508 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 2 |
 | mag_content | exempt | 5 | 5 | 2 | 0 | 48 | 0 | 0 | 0 | 0 | 60 |
 | mag_encounter_worker | exempt | 3 | 2 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 7 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
-| mag_world | exempt | 209 | 49 | 5 | 0 | 399 | 98 | 5 | 0 | 1 | 766 |
+| mag_world | exempt | 209 | 49 | 5 | 0 | 411 | 98 | 5 | 0 | 1 | 778 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
