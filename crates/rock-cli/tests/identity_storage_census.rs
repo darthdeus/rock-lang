@@ -32,12 +32,12 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 226 | 212 | 6 | 0 | 1073 | 296 | 44 | 639 | 5 | 2501 |
+| mag | exempt | 223 | 212 | 6 | 0 | 1074 | 296 | 44 | 641 | 5 | 2501 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 2 |
 | mag_content | exempt | 5 | 5 | 2 | 0 | 48 | 0 | 0 | 0 | 0 | 60 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
-| mag_world | exempt | 203 | 47 | 5 | 0 | 393 | 84 | 5 | 0 | 1 | 738 |
+| mag_world | exempt | 203 | 48 | 5 | 0 | 395 | 84 | 5 | 0 | 1 | 741 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
@@ -68,7 +68,6 @@ Exempt module sites:
 NOT fully analyzed:
 - tests/c_mag_runtime_data: 5 other semantic errors
 - tests/c_native_boot_codec: 2 other semantic errors
-- tools/mag-encounter-worker: 1 other semantic errors
 - tests/newtype_generic_unification_reject_map_conflict.rock: 2 other semantic errors
 - tests/newtype_generic_unification_reject_wrong_shape.rock: 1 other semantic errors
 - tests/test_utils.rock: Cannot run test-util files directly. Test utilities are meant to be used by test files.
