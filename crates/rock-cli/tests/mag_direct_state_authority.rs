@@ -1291,7 +1291,11 @@ fn mag_world_presentation_state_has_explicit_owners() {
             line.split_once(':').map(|(field, _)| field.trim())
         })
         .collect();
-    assert_eq!(fields.len(), 14, "WorldState field census changed: {fields:?}");
+    assert_eq!(fields.len(), 13, "WorldState field census changed: {fields:?}");
+    assert!(!world_state.contains("mob_route_orders:"), "route orders belong to the world root");
+    assert!(root_state.lines().any(|line| line.trim()
+        == "route_orders: Arena<mag_simulation::MobRouteOrder>? = null,"),
+        "MagWorldRoot owns the authoritative route order arena");
     assert!(!world_state.contains("recovery_reservoir:"), "the recovery clock state belongs to the root");
     assert!(root_state.contains("recovery_reservoir: mag_simulation::RecoveryReservoir"));
     assert!(!world_state.contains("cast_binding:"), "MAG must not own the cached cast binding");
