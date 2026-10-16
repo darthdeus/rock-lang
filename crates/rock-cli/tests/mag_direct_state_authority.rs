@@ -735,10 +735,18 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     let law_state = law.split_once("pub struct PlayerLaw {")
         .and_then(|(_, rest)| rest.split_once("\n}"))
         .map(|(body, _)| body).expect("read PlayerLaw body");
-    for field in ["notoriety: PlayerNotoriety", "criminal_remaining: float"] {
+    for field in ["notoriety: PlayerNotoriety"] {
         assert_eq!(law_state.matches(field).count(), 1, "PlayerLaw must own `{field}` exactly once");
         assert!(!player_state.contains(field), "Player must borrow the shared law instead of copying `{field}`");
     }
+    assert!(!law_state.contains("criminal_remaining"), "case files replace the global criminal timer");
+    let custody = fs::read_to_string(repo.join("mag-world/death_progress.rock"))
+        .expect("read world custody source");
+    let custody_state = custody.split_once("pub struct GuardCustody {")
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map(|(body, _)| body).expect("read GuardCustody body");
+    assert_eq!(custody_state.matches("sentence_remaining: float").count(), 1,
+        "custody owns its independent sentence once");
     let body = fs::read_to_string(repo.join("mag-simulation/player_body.rock"))
         .expect("read simulation player body source");
     for field in [
