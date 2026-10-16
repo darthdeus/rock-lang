@@ -588,8 +588,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
     assert!(run_lookup.contains("entity.get()"));
     let doors = fs::read_to_string(repo.join("mag/doors.rock"))
         .expect("read MAG gate source");
-    let gate_lock = rock_function_body(&doors, "fn gate_locked_in(");
-    assert!(gate_lock.contains("world_gate_locked(world.root, gate, space)"));
+    assert!(!doors.contains("fn gate_locked_in("),
+        "gate lock queries call the library owner without a MAG forwarder");
     let package_doors = fs::read_to_string(repo.join("mag-world/world_doors.rock"))
         .expect("read package gate source");
     let gate_members = rock_function_body(&package_doors, "pub fn world_gate_locked<M>(");
@@ -1436,7 +1436,7 @@ fn mag_has_one_canonical_simulation_tick_boundary() {
     assert!(!run.contains("fn mag_tick_actor_host(") && !run.contains("fn mag_tick_actor_view("),
         "the runner must use the one actor host constructor without a second adapter");
     for call in ["input(r)", "world_tick_actors(r)",
-        "world_doors_update(r.root.get().unwrap(), r.host, r.door_host, player, r.dt)"] {
+        "world_doors_update(r.root.get().unwrap(), r.host, r.door_host, r.dt)"] {
         assert!(runner.contains(call), "package runner is missing authoritative stage `{call}`");
     }
     assert!(!run.contains("fn mag_tick_rows_pickup(") && !host_runner.contains("rows_pickup:"),
