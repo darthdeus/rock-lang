@@ -459,8 +459,8 @@ fn mag_uses_scene_owned_player_and_direct_session_state_without_an_ambient_acces
                     definitions[index].push(format!("{}:{}", source.display(), line_number + 1));
                 }
             }
-            if line.contains("() => render_pos(player.movable)")
-                || line.contains("() => player.movable.render_pos()")
+            if line.contains("() => render_pos_in(mag_world_state(), player.movable)")
+                || line.contains("() => render_pos_in(world, player.movable)")
             {
                 findings.push(format!(
                     "{}:{}: deferred callback captures raw Player",

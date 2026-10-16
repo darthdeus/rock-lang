@@ -380,7 +380,7 @@ fn web_chrome_screenshot_and_click_pick_mag() {
             // literal pixel: a hard-coded point silently becomes a test of the
             // current framing and goes stale whenever camera framing or present
             // scaling moves (it did -- Arc A's FrameView work invalidated the
-            // old 950,465). `render_pos + 1.5` is the sprite body rather than
+            // old 950,465). `render_pos_in + 1.5` is the sprite body rather than
             // the feet anchor, matching mag's own `player_body_probe_world`
             // test hook, and logical output units map to CSS through the canvas
             // element's rect so the expression holds at any devicePixelRatio.
@@ -390,7 +390,7 @@ fn web_chrome_screenshot_and_click_pick_mag() {
             // republishes the bank. Indexing the result (`rp[0]`/`rp[1]`) reads
             // undefined and the whole expression collapses to [null, null].
             "--click-expr",
-            "(function(){               var rpx=render_pos_Movable(__G.player.movable), rpy=__rock_ret1;               var sx=world_to_screen_Vec2(rpx,rpy+1.5), sy=__rock_ret1;               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+sx*(r.width/__SW.logicalW),                       r.top+sy*(r.height/__SW.logicalH)];})()",
+            "(function(){               var rpx=render_pos_in_WorldState_Movable(mag_world_state(), __G.player.movable), rpy=__rock_ret1;               var sx=world_to_screen_Vec2(rpx,rpy+1.5), sy=__rock_ret1;               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+sx*(r.width/__SW.logicalW),                       r.top+sy*(r.height/__SW.logicalH)];})()",
             // Ask the game's OWN accessor rather than a mirror global: this is
             // the same call `pick_at_cursor` makes, so it exercises the real
             // path (MRT id write -> PBO readback -> SELECTION -> ClickTarget)
