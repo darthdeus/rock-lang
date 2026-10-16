@@ -32,12 +32,12 @@ const PINNED: &str = "\
 | decorator_systems | exempt | 0 | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 2 |
 | idle_core | exempt | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
 | logo | exempt | 1 | 1 | 0 | 0 | 8 | 0 | 0 | 0 | 0 | 10 |
-| mag | exempt | 226 | 212 | 6 | 0 | 1070 | 296 | 43 | 638 | 5 | 2496 |
+| mag | exempt | 226 | 212 | 6 | 0 | 1073 | 296 | 44 | 639 | 5 | 2501 |
 | mag_ai | exempt | 0 | 0 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 2 |
 | mag_content | exempt | 5 | 5 | 2 | 0 | 48 | 0 | 0 | 0 | 0 | 60 |
 | mag_encounter_worker | exempt | 3 | 1 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 6 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
-| mag_world | exempt | 203 | 47 | 5 | 0 | 392 | 84 | 5 | 0 | 1 | 737 |
+| mag_world | exempt | 203 | 47 | 5 | 0 | 393 | 84 | 5 | 0 | 1 | 738 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
@@ -54,15 +54,15 @@ Exempt module sites:
 - mag_simulation::nav: mag-simulation/nav/areas.rock:43 field mag_simulation::nav::areas::NavWorkCounters
 - mag_simulation::nav: mag-simulation/nav/areas.rock:46 container mag_simulation::nav::areas::NavArea
 - mag_simulation::nav: mag-simulation/nav/areas.rock:50 container mag_simulation::nav::areas::NavAreaPair
-- mag_simulation::nav: mag-simulation/nav/graph.rock:304 field mag_simulation::nav::query::NavQuery
+- mag_simulation::nav: mag-simulation/nav/graph.rock:306 field mag_simulation::nav::query::NavQuery
 - mag_simulation::nav: mag-simulation/nav/query.rock:142 field FlatVec
 - mag_simulation::nav: mag-simulation/nav/query.rock:161 container mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/query.rock:164 container mag_simulation::nav::query::NavPlan
 - mag_simulation::nav: mag-simulation/nav/query.rock:170 field mag_simulation::nav::areas::NavAreas
 - mag_simulation::nav: mag-simulation/nav/query.rock:211 field mag_simulation::nav::heap::NavHeap
-- mag_simulation::nav: mag-simulation/nav/query.rock:660 local-storage mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/query.rock:715 local-storage mag_simulation::nav::query::NavGoalAttachment
-- mag_simulation::nav: mag-simulation/nav/query.rock:720 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:673 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:728 local-storage mag_simulation::nav::query::NavGoalAttachment
+- mag_simulation::nav: mag-simulation/nav/query.rock:733 local-storage mag_simulation::nav::query::NavGoalAttachment
 - mag_simulation::nav: mag-simulation/nav/walker.rock:21 container mag_simulation::nav::walker::NavProbe
 
 NOT fully analyzed:
