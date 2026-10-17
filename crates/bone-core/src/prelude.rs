@@ -131,7 +131,7 @@ pub struct NewtypeDef {
 }
 
 // ---------------------------------------------------------------------------
-// Parallelism shim. See `docs/...` -- `sequential` cargo feature swaps rayon's
+// Parallelism shim. `sequential` cargo feature swaps rayon's
 // `par_iter`/`into_par_iter`/`collect_vec_list` onto std iterators for a clean
 // single-threaded sampling profile; call sites stay unchanged.
 #[cfg(not(feature = "sequential"))]

@@ -798,7 +798,7 @@ fn coerce_impl(
     // both -- write-only contravariance in V would be sound but has no consumer).
     // Nothing coerces the other way, and the two single-capability formers are
     // INCOMPARABLE: `WriteFieldRef -> ReadFieldRef` is the whole-value extraction
-    // an embedded field must not offer. docs/field-refs-plan.md.
+    // an embedded field must not offer.
     if let (
         TypeExpr::App { ctor: TypeCtor::Nominal(fname), params: fp },
         TypeExpr::App { ctor: TypeCtor::Nominal(tname), params: tp },

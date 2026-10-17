@@ -92,9 +92,7 @@ pub enum TypeRef {
     /// Mirrors rustc's `TyKind::Error(ErrorGuaranteed)` and Roslyn's
     /// `ErrorTypeSymbol`. Unification or subtype checks against `Error`
     /// always succeed silently so a single failure doesn't cascade into
-    /// dozens of follow-on diagnostics. No public constructor: see
-    /// `docs/lsp-error-recovery-plan.md` §3.2 / §6 step 3 for the
-    /// roll-out.
+    /// dozens of follow-on diagnostics. No public constructor.
     ///
     /// Today this variant has *no constructors*. It exists to define the
     /// match arms that will become live in step 3, so adding the variant

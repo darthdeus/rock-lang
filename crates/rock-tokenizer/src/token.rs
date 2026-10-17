@@ -38,7 +38,7 @@ pub enum TokenKind {
     // Note: "wrap" and "init" are contextual keywords, recognized only in decorator context
     Deco,
 
-    // Macro definition keyword (declarative macros, see docs/macro-system-plan.md)
+    // Macro definition keyword (declarative macros)
     Macro,
 
     // Preprocessor directives

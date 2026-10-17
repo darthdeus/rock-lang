@@ -1,4 +1,4 @@
-//! Identity storage (docs/identity-storage-plan.md): a nominal `struct` has
+//! Identity storage: a nominal `struct` has
 //! identity and exists only as an Arena row or a Scene/Session root. Any other
 //! storage position must hold values or handles.
 //!
@@ -15,8 +15,7 @@ use crate::workspace::{BodyInference, Workspace};
 
 pub const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
 /// The Arena and Scene registries' erasure capability: a stdlib function whose
-/// body may erase an identity to `any` (docs/identity-storage-plan.md,
-/// IDENTITY ANY ERASURE).
+/// body may erase an identity to `any`.
 pub const IDENTITY_ERASURE_ANNOTATION: &str = "identity_erasure";
 
 /// How an identity reached the storage position that rejects it.

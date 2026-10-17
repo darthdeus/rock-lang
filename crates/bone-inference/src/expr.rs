@@ -791,7 +791,7 @@ pub fn infer_expr_used(
 
                 // Fn values carry no meaningful identity: a capture-free lambda
                 // is ONE shared hoisted fn, a capturing lambda a per-creation
-                // env record (docs/closure-env-records-plan.md), so `==` would
+                // env record, so `==` would
                 // compare representation artifacts. Null checks (`f != null`)
                 // are refinement, not identity -- exempt via `non_null_ty`
                 // being the literal-null case above.
@@ -2155,7 +2155,7 @@ pub(crate) fn check_expr(
                 // (`field_set`, `poll_co_field`), so neither can resolve against a
                 // `value` struct, whose fields are immutable. `ReadFieldRef`
                 // (read-only, `field_get`) allows it -- reading a value-struct
-                // field is fine. Lattice per docs/field-refs-plan.md.
+                // field is fine.
                 if is_field_ref || is_write_field_ref {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_value = resolve_struct(gamma, tn)
@@ -2174,7 +2174,7 @@ pub(crate) fn check_expr(
                 // NON-embed field also satisfies the readable formers. An
                 // embedded field has no whole value to hand out, and `FieldRef`
                 // coerces onward to `ReadFieldRef`, so it re-opens the same
-                // extraction (docs/scalarization-and-boxing-design.md S 6).
+                // extraction.
                 if is_field_ref || is_read_field_ref {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
@@ -2246,7 +2246,7 @@ pub(crate) fn check_expr(
     // re-bindable numeric var that coerce would widen, e.g. `min(1, x)`), and
     // the expression is (or contains, through arithmetic operators / unary
     // minus) a `/`, replace the bare unify error with a pointer at that `/`
-    // suggesting `./` (integer floor division) (docs/float-division-plan.md).
+    // suggesting `./` (integer floor division).
     if let Err(coerce_err) = coerce(gamma, aty, expected, span) {
         let exp_r = resolve(gamma, expected, span);
         let aty_r = resolve(gamma, aty, span);
@@ -2271,8 +2271,7 @@ pub(crate) fn check_expr(
         // `: T` annotation, `-> T` return, or param decl) so the reader sees
         // WHY this slot is `T`. Adds a label; keeps coerce's own message (its
         // specific ones, e.g. the null->`any` note, survive). Skip when the
-        // origin is unknown or coincides with the mismatch site itself
-        // (docs/error-quality-plan.md P1b).
+        // origin is unknown or coincides with the mismatch site itself.
         if let Some(origin) = gamma.span_of(expected).or_else(|| gamma.span_of(exp_r)) {
             if origin != span && !origin.is_empty() {
                 let exp_str = gamma.workspace.render(Some(&gamma.out), exp_r);

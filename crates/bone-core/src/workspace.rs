@@ -96,7 +96,7 @@ pub struct Workspace {
     /// additive and do not change legacy `x :: T` ascription parsing.
     pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyImports>,
 
-    /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
+    /// Resolved compile-time inputs, set by the
     /// host once per session build before emission. bone itself never reads them
     /// -- values don't affect types -- but they live here because every
     /// consumer (skull's `build_var`/`embed_string` expansion at MIR lowering,
@@ -136,7 +136,7 @@ pub struct ComptimeInputs {
 #[derive(Clone, Debug)]
 pub struct ComptimeVarValue {
     pub value: String,
-    /// Metadata hygiene, not confidentiality (docs/comptime-plan.md): hashed
+    /// Metadata hygiene, not confidentiality: hashed
     /// into cache keys, ALLOWED in the compiled program payload, and kept out
     /// of logs, diagnostics, manifests and cache metadata.
     pub secret: bool,
@@ -572,7 +572,7 @@ pub struct BodyInference {
     /// declaration order, keyed like `resolved_overload_calls`. Entries may
     /// still be inference vars at record time -- readers resolve through
     /// `substitutions` like `expr_types`. skull's inliner reads this to
-    /// specialize value-instantiated `@inline` splices (docs/flatvec-plan.md).
+    /// specialize value-instantiated `@inline` splices.
     pub call_generic_bindings: FxHashMap<Idx<Expr>, Vec<TyId>>,
     /// `for x in <coll>` over a user type: the resolved iter/next protocol for
     /// the desugar, keyed by the For's iter `Idx<Expr>`. Separate from
@@ -630,8 +630,7 @@ pub struct BodyInference {
 
     /// Every coercion `coerce` accepted into an `any` target: the span and the
     /// source type. A trial's rollback drops the ones it recorded. The
-    /// identity-storage body check reads them (docs/identity-storage-plan.md
-    /// IDENTITY ANY ERASURE).
+    /// identity-storage body check reads them.
     pub any_erasures: Vec<(Span, TyId)>,
 
     pub deps: FxHashSet<Ustr>,

@@ -37,10 +37,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Hang backstop for a test that waits on an event, a condition or a child.
-/// A test fails only for a defect or a hang, never because its host is busy
-/// (LOAD COSTS TIME, `docs/machine-coordination.md`): the wait ends on the
-/// event, and this bound only catches a hang on a loaded host. It sits inside
-/// nextest's 15-minute kill for the rock-cli binaries and the full profile.
+/// A test fails only for a defect or a hang, never because its host is busy:
+/// the wait ends on the event, and this bound only catches a hang on a loaded
+/// host. It sits inside nextest's 15-minute kill for the rock-cli binaries
+/// and the full profile.
 pub const HANG_BACKSTOP: Duration = Duration::from_secs(300);
 
 /// Parse `//^^^ msg` annotations out of source text.

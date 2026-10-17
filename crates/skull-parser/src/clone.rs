@@ -3,8 +3,7 @@
 //! Used by compound-assign's read copy of the lvalue (`a += b` -> `a = a + b`
 //! needs `a` in two distinct nodes). rock mutates `Box`-AST in place and
 //! re-mints `AstNodeId`s; skull has no node id (the `Idx` IS identity), so
-//! duplication = re-allocating every node with remapped child indices (the
-//! `reify` pattern from `bone/CLAUDE.md`).
+//! duplication = re-allocating every node with remapped child indices.
 //!
 //! `graft.rs` is the CROSS-arena twin (source `&Ast` -> dest `&mut Ast`), used
 //! by macro expansion to inline a template body into a caller. The two can't be

@@ -3326,8 +3326,8 @@ fn reject_inline_lua_if_forbidden(a: &Ast, f: &FunctionDef) -> Result<(), Compil
 }
 
 /// The default ownership of a `global` that says nothing itself: the file's
-/// `@memory(<class>)` header, else the owning package's `[language] memory`
-/// (`docs/state-ownership-plan.md` R2). `game` is today's behavior, so a
+/// `@memory(<class>)` header, else the owning package's `[language] memory`.
+/// `game` is today's behavior, so a
 /// package that declares nothing is unchanged.
 fn metadata_for_memory_class(class: skull_parser::MemoryClass) -> StateMetadata {
     StateMetadata::for_memory_class(class)

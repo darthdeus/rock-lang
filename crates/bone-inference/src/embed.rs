@@ -1,5 +1,4 @@
-//! Projection-only enforcement for `embed` fields
-//! (docs/scalarization-and-boxing-design.md S 6).
+//! Projection-only enforcement for `embed` fields.
 //!
 //! An embedded field's leaves live in the parent, so no aggregate object exists
 //! to hand out: the field may be PROJECTED (leaf reads, place writes,

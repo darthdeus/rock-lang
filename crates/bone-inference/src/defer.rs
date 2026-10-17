@@ -1,7 +1,7 @@
 use super::*;
 
-// Defer-to-use inference for unconstrained lambda params
-// (docs/lambda-defer-inference-design.md). An overload ambiguity (cost tie) or
+// Defer-to-use inference for unconstrained lambda params.
+// An overload ambiguity (cost tie) or
 // field-projection ambiguity whose operand is an unresolved lambda-param var
 // queues a pending constraint instead of erroring; when later unification pins
 // the var, the constraint re-resolves with full information. Strictly

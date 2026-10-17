@@ -1129,8 +1129,7 @@ pub struct StructDef {
 ///
 /// One declaration, on the type, with two consumers that used to keep their
 /// own lists: the `host_resource_in_game_memory` lint, which rejects such a
-/// type reachable from a `game`-memory global
-/// (`docs/state-ownership-plan.md` R4), and
+/// type reachable from a `game`-memory global, and
 /// `__stone_host_projection_class`, which reads `ledger_class` back out of
 /// `__ROCK_TYPE_TABLE` at runtime.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1153,9 +1152,8 @@ pub struct StructFieldDef {
     pub has_default: bool,
     pub annotations: Vec<Annotation>,
     /// `embed f: Foo` -- the field's leaves live in the parent, so it has no
-    /// independently storable aggregate: PROJECTION-ONLY at every use site
-    /// (docs/scalarization-and-boxing-design.md S 6). Enum record variants
-    /// cannot carry it -- always false there.
+    /// independently storable aggregate: PROJECTION-ONLY at every use site.
+    /// Enum record variants cannot carry it -- always false there.
     pub is_embed: bool,
     /// Getter visibility (spec 9/10). Default is public.
     pub read_vis: NsVisibility,
@@ -1310,10 +1308,10 @@ impl Default for StateMetadata {
 
 impl StateMetadata {
     /// What a memory class gives every `global` in its unit that says nothing
-    /// itself (`docs/state-ownership-plan.md` R2). ONE oracle: lowering builds
-    /// the unit default from this, and `redundant_state_annotation` asks
-    /// lowering rather than restating the table -- a second copy is free to
-    /// drift and would report a deletion the compiler does not agree with.
+    /// itself. ONE oracle: lowering builds the unit default from this, and
+    /// `redundant_state_annotation` asks lowering rather than restating the
+    /// table -- a second copy is free to drift and would report a deletion the
+    /// compiler does not agree with.
     pub fn for_memory_class(class: skull_parser::MemoryClass) -> Self {
         use skull_parser::MemoryClass;
         match class {

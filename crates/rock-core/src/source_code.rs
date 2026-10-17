@@ -3,10 +3,13 @@ use std::sync::LazyLock;
 
 use crate::prelude::*;
 
-/// The sentinel file name for spans/linecols with no real source location.
-/// Interned once: `Span::unknown()` is called on every error-free trial-unify
-/// path, and `"<unknown>".into()` re-hashes the ustr interner each time.
-static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr("<unknown>"));
+/// File name that stands in for a source position which does not exist.
+pub const UNKNOWN_FILE_NAME: &str = "<unknown>";
+
+/// `Span::unknown()` runs on every trial-unify path that ends up succeeding, so
+/// the sentinel name is interned here once instead of being hashed into the
+/// interner on each call.
+static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr(UNKNOWN_FILE_NAME));
 
 /// Source dialect of one file. Legacy is today's grammar and flat lookup;
 /// `V1` opts a package into the modules-v1 grammar (`::` paths, `mod`/`use`,
@@ -20,8 +23,8 @@ pub enum Dialect {
 }
 
 /// The memory class of a compilation unit: which store a `global` declared in
-/// it belongs to when the declaration says nothing itself
-/// (`docs/state-ownership-plan.md` R2). Selected per package by its stick.toml
+/// it belongs to when the declaration says nothing itself.
+/// Selected per package by its stick.toml
 /// (`[language] memory = "platform"`) and per module by a `@memory(<class>)`
 /// file header; a per-declaration `@state` still wins over both.
 ///
@@ -148,37 +151,38 @@ pub fn source_file_from_path_and_contents(
     }
 }
 
-/// Represents a region of source code.
-/// Spans are fundamental for error reporting, language server features (like completion, hover, go-to-definition),
-/// and mapping analysis results back to the original code.
+/// A region of source code.
+///
+/// Spans are what ties analysis results back to the text the user wrote: error
+/// reporting, completion, hover and go-to-definition all start from one.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Span {
-    /// The identifier for the source file (e.g., path or URI).
-    pub file: ustr::Ustr,
-    /// The start and end line numbers (0-based, inclusive on both ends —
-    /// a single-line token has `line_range.0 == line_range.1`).
+    /// Which source file the region belongs to (a path or another id path).
+    pub file: Ustr,
+    /// First and last line, zero-based and inclusive at both ends, so a
+    /// single-line span has `line_range.0 == line_range.1`.
     pub line_range: (usize, usize),
-    /// The start and end column numbers, 0-based, half-open `[start..end)`.
-    /// `col_range.1` is the column *after* the last character of the span,
-    /// matching `offset_range`'s semantics and LSP `Range.end`. A token
-    /// "abc" starting at col 5 has `col_range = (5, 8)`. This is what
-    /// `Tokenizer::end_span` produces and what `lsp_range_from_span`
-    /// relies on; do not treat `col_range.1` as inclusive.
+    /// First and one-past-last column, zero-based and half-open `[start..end)`.
+    /// `col_range.1` is therefore the column just past the last character of
+    /// the span, the same convention `offset_range` and LSP `Range.end` use:
+    /// a three-character token opening at column 5 has `col_range == (5, 8)`.
+    /// `Tokenizer::end_span` produces it that way and `lsp_range_from_span`
+    /// depends on it, so `col_range.1` is never inclusive.
     pub col_range: (usize, usize),
-    /// The start and end byte offsets (0-based, half-open range `[start..end)`).
-    /// This is the most precise representation of the span's extent: it indexes
-    /// `&str` directly (`Tokenizer::byte_offset` advances by `c.len_utf8()` per
-    /// char). Do NOT treat it as a char index -- that drifts past any earlier
-    /// multibyte char. See `docs/span-position-units.md`.
+    /// First and one-past-last byte, zero-based and half-open `[start..end)`.
+    /// The precise extent: these offsets index a `&str` directly, since
+    /// `Tokenizer::byte_offset` advances by `c.len_utf8()` per character.
+    /// They are byte counts, not character counts, and drift from character
+    /// positions as soon as a multibyte character appears earlier in the file.
     pub offset_range: (usize, usize),
 }
 
 impl Debug for Span {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.file == "<unknown>" {
+        if self.file == UNKNOWN_FILE_NAME {
             f.write_str("Span(unknown)")
         } else {
-            f.write_str(&format!("Span({})", self.file))
+            write!(f, "Span({})", self.file)
         }
     }
 }
@@ -200,22 +204,15 @@ impl Default for Span {
 
 impl Span {
     pub fn unknown() -> Self {
-        Self {
-            file: *UNKNOWN_FILE,
-            // file: "<unknown>".into(),  // slow path: flip to reproduce the
-            // ustr-interner lock contention (docs/bone-profiling.md).
-            line_range: (0, 0),
-            col_range: (0, 0),
-            offset_range: (0, 0),
-        }
+        Self::from_linecol(LineCol::unknown())
     }
 
-    /// Format as `"file:line"` for `__SITE__` and similar source-position
-    /// literals. 1-based line for user display.
+    /// `"file:line"` with a one-based line, for `__SITE__` and the like.
     pub fn format_site(&self) -> String {
         format!("{}:{}", self.file.as_str(), self.line_range.0 + 1)
     }
 
+    /// The zero-width span of one position.
     pub fn from_linecol(linecol: LineCol) -> Self {
         Self {
             file: linecol.file,
@@ -230,6 +227,7 @@ impl Span {
         panic!("{}", message.as_ref());
     }
 
+    /// The smallest span covering both, which must belong to one file.
     pub fn merge(&self, other: &Self) -> Self {
         assert_eq!(self.file, other.file);
         Self {
@@ -240,8 +238,9 @@ impl Span {
         }
     }
 
+    /// `self`, unless it is the unknown placeholder, in which case `other`.
     pub fn or(self, other: &Self) -> Self {
-        if self.file == "<unknown>" {
+        if self.file == UNKNOWN_FILE_NAME {
             *other
         } else {
             self
@@ -249,7 +248,7 @@ impl Span {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.offset_range.0 == self.offset_range.1
+        self.len() == 0
     }
 
     pub fn len(&self) -> usize {
@@ -258,94 +257,77 @@ impl Span {
     }
 
     pub fn start(&self) -> LineCol {
-        let line = self.line_range.0;
-        let col = self.col_range.0;
-        let offset = self.offset_range.0;
-        LineCol { file: self.file, line, col, offset }
-    }
-
-    pub fn end(&self) -> LineCol {
-        let line = self.line_range.1;
-        let col = self.col_range.1;
-        let offset = self.offset_range.1;
-        LineCol { file: self.file, line, col, offset }
-    }
-
-    pub fn contains_loc(&self, loc: &LineCol) -> bool {
-        let file_match = loc.file == self.file;
-        let loc_match = loc.offset >= self.offset_range.0 && loc.offset < self.offset_range.1;
-
-        // if !file_match && loc_match {
-        //     info!("File mismatch: {:?} != {:?}", loc.file, self.file);
-        // }
-
-        file_match && loc_match
-    }
-
-    /// Source text for ariadne's frame in the `print`/`write` debug
-    /// helpers. Empty for the `unknown` sentinel file or if the file
-    /// can't be read -- ariadne then renders without a source frame,
-    /// which is the right degraded behavior for a debug-print path
-    /// (panicking in a diagnostic printer would be worse).
-    fn report_source(&self) -> String {
-        if self.file == ustr::ustr("unknown") {
-            String::new()
-        } else {
-            fs_err::read_to_string(self.file.as_str()).unwrap_or_else(|_| String::new())
+        let (line, col, offset) = (self.line_range.0, self.col_range.0, self.offset_range.0);
+        LineCol {
+            file: self.file,
+            line,
+            col,
+            offset,
         }
     }
 
-    pub fn print(&self, message: impl AsRef<str>) {
-        let message = message.as_ref().to_string();
+    pub fn end(&self) -> LineCol {
+        let (line, col, offset) = (self.line_range.1, self.col_range.1, self.offset_range.1);
+        LineCol {
+            file: self.file,
+            line,
+            col,
+            offset,
+        }
+    }
 
+    /// Whether `loc` names a byte inside this span of the same file. The end
+    /// offset itself is outside, as for any half-open range.
+    pub fn contains_loc(&self, loc: &LineCol) -> bool {
+        let (first, last) = self.offset_range;
+        loc.file == self.file && first <= loc.offset && loc.offset < last
+    }
+
+    /// The file's text for the frame the debug printers draw. Empty when the
+    /// file is the nameless placeholder or cannot be read, so the frame is
+    /// simply left out: a debug printer that panicked while printing would be
+    /// worse than one that prints less.
+    fn report_source(&self) -> String {
+        if self.file == "unknown" {
+            return String::new();
+        }
+        fs_err::read_to_string(self.file.as_str()).unwrap_or_default()
+    }
+
+    /// An advice report with this span marked and `message` in both the header
+    /// and the label, which is what both debug printers emit.
+    fn debug_report(
+        &self,
+        message: &str,
+    ) -> ariadne::ReportBuilder<'static, (String, std::ops::Range<usize>)> {
         let mut report = make_report_builder(
             ariadne::ReportKind::Advice,
             self.file.to_string(),
             self.offset_range.0,
-            "".to_string(),
-            message.clone(),
+            String::new(),
+            message.to_string(),
         );
-
-        report.add_span_label(self, message);
-
-        let source = self.report_source();
-
+        report.add_span_label(self, message.to_string());
         report
+    }
+
+    pub fn print(&self, message: impl AsRef<str>) {
+        let message = message.as_ref();
+        let source = self.report_source();
+        self.debug_report(message)
             .finish()
-            .eprint((
-                self.file.to_string(),
-                ariadne::Source::from(source),
-            ))
+            .eprint((self.file.to_string(), ariadne::Source::from(source)))
             .unwrap();
     }
 
     pub fn write(&self, message: impl AsRef<str>, w: impl std::io::Write) {
-        let message = message.as_ref().to_string();
-
-        let mut report = make_report_builder(
-            ariadne::ReportKind::Advice,
-            self.file.to_string(),
-            self.offset_range.0,
-            "".to_string(),
-            message.clone(),
-        );
-
-        report.add_span_label(self, message);
-
+        let message = message.as_ref();
         let source = self.report_source();
-
-        report
+        self.debug_report(message)
             .finish()
-            .write(
-                (
-                    self.file.to_string(),
-                    ariadne::Source::from(source),
-                ),
-                w,
-            )
+            .write((self.file.to_string(), ariadne::Source::from(source)), w)
             .unwrap();
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -365,7 +347,7 @@ impl FileContents {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineCol {
-    pub file: ustr::Ustr,
+    pub file: Ustr,
     /// Zero-based line number.
     pub line: usize,
     /// Zero-based column, counted in characters from the start of the line.
@@ -378,7 +360,6 @@ impl LineCol {
     pub fn unknown() -> Self {
         Self {
             file: *UNKNOWN_FILE,
-            // file: "<unknown>".into(),
             line: 0,
             col: 0,
             offset: 0,

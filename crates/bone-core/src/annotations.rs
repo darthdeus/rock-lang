@@ -1,4 +1,4 @@
-//! Annotation registry + validation (docs/annotations-design.md).
+//! Annotation registry + validation.
 //!
 //! One table decides which annotation names are legal at which declaration
 //! positions and what arguments they take. Fail closed: a position with no
@@ -63,7 +63,7 @@ fn validate_one(
         if deco_names.contains(&resolved_name) {
             return at(anno, pos, AnnoPos::FnItem);
         }
-        comp_error!(anno.span, "unknown annotation `@{name}` (registry: docs/annotations-design.md)");
+        comp_error!(anno.span, "unknown annotation `@{name}`");
     }
     match name.as_str() {
         "test" => {
@@ -195,7 +195,7 @@ fn validate_one(
         // a GL object, a canvas, a shader, a mesh upload, a playing voice, an
         // FFI pointer. One declaration, on the type, is what makes both
         // consumers agree -- the compile-time rejection of such a type in game
-        // memory (`docs/state-ownership-plan.md` R4) and the runtime
+        // memory and the runtime
         // host-projection classification, which reads the flag out of
         // `__ROCK_TYPE_TABLE` instead of keeping its own list of names.
         //
@@ -230,8 +230,8 @@ fn validate_one(
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
         }
-        // The parameter-level REPRESENTATION contract
-        // (`docs/boundary-contracts.md` 2.4). `opaque` states that the body
+        // The parameter-level REPRESENTATION contract.
+        // `opaque` states that the body
         // makes no assumption about this parameter's physical form, so the
         // column-container rejection skips it. It names a KIND rather than
         // being nullary because the same slot is where a future `boxed` /
@@ -254,8 +254,7 @@ fn validate_one(
                 Some(k) if k.as_str() == "opaque" => Ok(()),
                 Some(k) => comp_error!(
                     anno.span,
-                    "unknown `@repr` kind `{k}` -- the only kind is `opaque` \
-                     (docs/boundary-contracts.md 2.4)"
+                    "unknown `@repr` kind `{k}` -- the only kind is `opaque`"
                 ),
                 None => comp_error!(
                     anno.span,
@@ -263,7 +262,7 @@ fn validate_one(
                 ),
             }
         }
-        // GLSL entry input roles (docs/shaders.md): the value-struct param they
+        // GLSL entry input roles: the value-struct param they
         // mark is per-vertex attribute data (`@attr`) or a uniform block
         // (`@uniform`). `@instance` is the per-instance attribute divisor.
         // `@textures` groups sampler params into one struct so the texture unit
@@ -353,7 +352,7 @@ fn validate_one(
         }
         _ if deco_names.contains(&name) => at(anno, pos, AnnoPos::FnItem),
         _ => {
-            comp_error!(anno.span, "unknown annotation `@{name}` (registry: docs/annotations-design.md)");
+            comp_error!(anno.span, "unknown annotation `@{name}`");
         }
     }
 }

@@ -1,5 +1,4 @@
-//! Proven-nonescaping closures (docs/identity-storage-plan.md S0b, **IDENTITY
-//! BORROW ACROSS SUSPENSION**): a closure may capture an identity borrow only
+//! Proven-nonescaping closures: a closure may capture an identity borrow only
 //! when it cannot outlive the call that receives it. Anything this analysis
 //! cannot prove is treated as escaping.
 //!

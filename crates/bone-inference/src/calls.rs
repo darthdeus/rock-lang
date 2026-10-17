@@ -204,7 +204,7 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
 
             // A full field ref carries both capabilities: `FieldRef<T, V>` fits a
             // `ReadFieldRef<T, V>` param (`field_get`) and a `WriteFieldRef<T, V>`
-            // one (`field_set`) -- docs/field-refs-plan.md. Scoring has to know it
+            // one (`field_set`). Scoring has to know it
             // too -- otherwise the coercion only survives the single-candidate
             // bypass in `check_call`, and a second decl of the name (a backend
             // sibling, an unrelated overload) makes every
@@ -1185,7 +1185,7 @@ pub(crate) fn resolve_named_call_with_generics(
 /// static-type check at the `==` site (bone-inference Eq arm); a `T`-typed
 /// wrapper (`fn same<T>(a: T, b: T) { a == b }`) erases the fn type and slips
 /// past it. Recording these indices lets the call site reject when such a `T`
-/// resolves to a fn type (docs/closure-env-records-plan.md, KNOWN HOLE).
+/// resolves to a fn type.
 ///
 /// A pure syntactic read of the callee's already-lowered body -- no inference
 /// state, so it is independent of the (parallel, cross-arena) inference order.
@@ -1773,7 +1773,7 @@ pub(crate) fn commit_selected_call(
     // not be instantiated with a fn type here. The direct ban lives at the `==`
     // site, but a `T`-typed wrapper erases the fn type past it; catch it once the
     // args have unified `subs` to the concrete types. fn identity is not
-    // meaningful (docs/closure-env-records-plan.md).
+    // meaningful.
     for idx in eq_compared_generic_indices(ws, callee_mid, callee_fn) {
         let inst = substitute(gamma, function.generics[idx], &subs, span)?;
         let inst = resolve(gamma, inst, span);
@@ -1787,8 +1787,8 @@ pub(crate) fn commit_selected_call(
         }
     }
 
-    // Persist the instantiation for skull's inliner call-site specialization
-    // (docs/flatvec-plan.md). After arg unification, so `subs` points at the
+    // Persist the instantiation for skull's inliner call-site specialization.
+    // After arg unification, so `subs` points at the
     // concrete types; a still-unbound var stays a var and readers resolve
     // through `substitutions` like `expr_types`.
     if !function.generics.is_empty() {

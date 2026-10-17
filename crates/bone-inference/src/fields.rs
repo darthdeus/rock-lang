@@ -204,7 +204,7 @@ pub(crate) fn struct_field_ty(
     substitute(gamma, field_ty, &subs, span).map_err(StructFieldError::from)
 }
 
-/// GLSL-style swizzle read on the float vec structs (docs/agent-reference/language.md):
+/// GLSL-style swizzle read on the float vec structs:
 /// one alphabet (`xyzw` | `rgba`), every component within the receiver's arity,
 /// at most 4 components. Result: len 1 -> float, len N -> VecN. Reached only on
 /// a real-field miss, so len-1 `x/y/z/w` never arrive here (`r/g/b/a` do).
@@ -307,7 +307,6 @@ fn ty_is_value_struct(gamma: &Gamma, ty: TyId) -> Option<Ustr> {
 /// (`Index`), or a global lives in mutable storage and its leaves are writable in
 /// place; one held directly as a value-typed local (`Var`) -- or a chain of value
 /// projections off one -- or produced by a call/literal is an immutable copy.
-/// docs/value-semantics-axes.md Mutability (place vs rvalue).
 fn value_field_write_is_place(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -361,12 +360,11 @@ fn expr_is_reachable_storage(c: BodyCtx, e: Idx<Expr>) -> bool {
 }
 
 /// Reject a write to a `value` struct's field UNLESS it targets a mutable place.
-/// Value structs are immutable *as values* (docs/value-types-design.md 1): a write
+/// Value structs are immutable *as values*: a write
 /// into a value LOCAL / rvalue (`let p = Pt{}; p.x = 5`) is a lost write on a copy
 /// and rejects. But a value that LIVES in mutable storage -- a field of a mutable
 /// struct (`mob.pos.x`), a container element (`buf[i].pos.x`), a global place
-/// (`CAST_ENV.value = x`) -- is writable in place (the mutable-place model,
-/// docs/value-semantics-axes.md; the brief's Phase B place/rvalue classification).
+/// (`CAST_ENV.value = x`) -- is writable in place.
 /// Fires from the assignment / compound-assign / inc-dec target when its BASE is a
 /// value-struct projection.
 pub(crate) fn reject_value_struct_field_write(

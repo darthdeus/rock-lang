@@ -68,7 +68,7 @@ pub(crate) fn fn_has_anno(f: &Function, name: &str) -> bool {
 /// operators) so a genuinely-pure body passes. This is the genuine-side-effect
 /// subset of rock-optimizations/src/purity.rs; rock's conservative "accepted
 /// limitations" (heap struct/array literal, match-bind, ...) are deliberately
-/// NOT flagged -- documented divergence, see docs/parked/unfuck.md.
+/// NOT flagged.
 /// A `static` initializer runs ONCE, not per call, so it may not read an
 /// enclosing param/local or a sibling static -- that would silently snapshot
 /// the first reaching call's values. A `Var` whose declaration span is

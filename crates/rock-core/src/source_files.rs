@@ -63,7 +63,7 @@ impl SourceFiles {
     /// owning package root (sims live in `<pkg>/tests/sims/`, unit tests in
     /// `<pkg>/tests/`). Game builds (`rock run/stone/frame/perf/compile <game>`)
     /// use this so a compile error in a sim/test can't break the running game.
-    /// Test/sim/lint/lsp paths use the full set. See `docs/sim-layering.md`.
+    /// Test/sim/lint/lsp paths use the full set.
     pub fn production_only(&self, project_root: &Path) -> Result<SourceFiles, CompilerError> {
         let mut files = Vec::with_capacity(self.files.len());
         for source in &self.files {
