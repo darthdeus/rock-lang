@@ -1,12 +1,33 @@
 [workspace]
 resolver = "2"
-members = ["crates/la-arena", "crates/lsp-server-manual", "crates/lsp-types-manual", "crates/lsp-serde-test"]
+members = [
+    "crates/la-arena",
+    "crates/lsp-serde-test",
+    "crates/lsp-server-manual",
+    "crates/lsp-types-manual",
+    "crates/rock-core",
+    "crates/rock-log",
+    "crates/rock-tokenizer",
+    "crates/skull-wgsl-abi",
+    "crates/test-utils",
+]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+anyhow = "1.0"
+ariadne = "0.4.1"
+atomic_refcell = "0.1.13"
+colored = "2.0"
+fs-err = "3.1"
+itertools = "0.13.0"
+once_cell = "1.20"
+ordered-float = { version = "5.0.0" }
+rustc-hash = "2.1.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+ustr = "1.0.0"
 clap = { version = "4.5.20", default-features = false, features = ["std", "help", "usage", "error-context"] }
 log = "0.4.22"
 rand = "0.9.3"

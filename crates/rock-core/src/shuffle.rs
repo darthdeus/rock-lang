@@ -3,7 +3,7 @@
 //!
 //! Cross-module name lookups, overload tables, and other indices walk
 //! `FxHashMap` in iteration order. When two top-level symbols collide on
-//! a name (canonical case: `mag` had a `global target_cycle` and a sim
+//! a name (canonical case: a game had a `global target_cycle` and a test
 //! `co fn target_cycle()`), whichever the iterator yields first wins,
 //! and the answer leaks the absolute path of the project (because
 //! `ModuleId` carries the file path as a `Ustr`, which feeds the hash).

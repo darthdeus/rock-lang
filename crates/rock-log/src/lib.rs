@@ -1,4 +1,4 @@
-//! The one logging backend. See `docs/logging-architecture.md`.
+//! The one logging backend.
 //!
 //! Single `STONE_LOG` parser, single level, single format
 //! (`[CATEGORY] msg`), single stream (stderr). Every Rust crate logs
