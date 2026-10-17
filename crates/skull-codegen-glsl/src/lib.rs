@@ -1258,16 +1258,33 @@ impl FnEmit<'_> {
             self.f.blocks[b].term.uses_each(&mut |v| *uses.entry(v).or_default() += 1);
         }
         let mut trivial = HashMap::default();
-        for (iid, inst) in self.f.insts.iter() {
-            if !matches!(inst, Inst::Call { .. }) || uses.get(&iid).copied().unwrap_or(0) < 2 {
+        let mut pending: Vec<_> = uses
+            .iter()
+            .filter(|(_, count)| **count > 1)
+            .map(|(&v, _)| v)
+            .collect();
+        let mut repeated = HashSet::default();
+        let mut retained = HashSet::default();
+        while let Some(iid) = pending.pop() {
+            if !repeated.insert(iid) {
                 continue;
             }
-            if !matches!(
-                self.ty_of(iid)?,
-                GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 | GlslTy::Bvec3
-            )
-                || self.trivial_value(iid, &mut trivial)
+            if matches!(self.f.insts[iid], Inst::Call { .. })
+                && matches!(
+                    self.ty_of(iid)?,
+                    GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 | GlslTy::Bvec3
+                )
+                && !self.trivial_value(iid, &mut trivial)
             {
+                retained.insert(iid);
+                continue;
+            }
+            // Inlining a shared component repeats its source too. A retained
+            // call stops propagation: its arguments render only in its binding.
+            self.rendered_uses_each(iid, &mut |v| pending.push(v));
+        }
+        for (iid, _) in self.f.insts.iter() {
+            if !retained.contains(&iid) {
                 continue;
             }
             let name = claim(&mut used, "call_result".to_string());
@@ -1293,25 +1310,27 @@ impl FnEmit<'_> {
         Ok(())
     }
 
+    fn rendered_uses_each(&self, iid: Idx<Inst>, push: &mut impl FnMut(Idx<Inst>)) {
+        if let Inst::Load(cell) = self.f.insts[iid] {
+            if let Some(fd) = self.folded_cond.get(&cell) {
+                push(fd.cond);
+                push(fd.then_val);
+                push(fd.else_val);
+                return;
+            }
+            if let Some(&value) = self.folded_bound.get(&cell) {
+                push(value);
+                return;
+            }
+        }
+        self.f.insts[iid].uses_each(push);
+    }
+
     /// Constructors and arithmetic over existing values can be repeated; an
     /// actual function evaluation inside them must retain single evaluation.
     fn trivial_value(&self, iid: Idx<Inst>, memo: &mut HashMap<Idx<Inst>, bool>) -> bool {
         if let Some(&trivial) = memo.get(&iid) {
             return trivial;
-        }
-        if let Inst::Load(cell) = self.f.insts[iid] {
-            if let Some(fd) = self.folded_cond.get(&cell) {
-                let trivial = [fd.cond, fd.then_val, fd.else_val]
-                    .iter()
-                    .all(|&v| self.trivial_value(v, memo));
-                memo.insert(iid, trivial);
-                return trivial;
-            }
-            if let Some(&value) = self.folded_bound.get(&cell) {
-                let trivial = self.trivial_value(value, memo);
-                memo.insert(iid, trivial);
-                return trivial;
-            }
         }
         if let Inst::Call { func, .. } = self.f.insts[iid] {
             let cf = &self.ws.module(func.module).functions[func.func];
@@ -1323,7 +1342,7 @@ impl FnEmit<'_> {
             }
         }
         let mut trivial = true;
-        self.f.insts[iid].uses_each(&mut |v| trivial &= self.trivial_value(v, memo));
+        self.rendered_uses_each(iid, &mut |v| trivial &= self.trivial_value(v, memo));
         memo.insert(iid, trivial);
         trivial
     }

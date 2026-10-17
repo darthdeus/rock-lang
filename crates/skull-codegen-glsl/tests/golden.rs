@@ -203,6 +203,17 @@ fn call_swizzle_constructor_with_folded_call_evaluates_once() {
 }
 
 #[test]
+fn call_swizzle_shared_component_keeps_one_vector_source() {
+    let glsl = emit(
+        "fn source(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }
+         fn selected(p: Vec2) -> Vec2 { return Vec2 { x: source(p).x, y: 1.0 }.xx }",
+        &["selected"],
+    ).expect("emit");
+    assert_eq!(glsl.matches("source_Vec2(p)").count(), 1, "{glsl}");
+    assert!(glsl.contains("return vec2(call_result.x, call_result.x);"), "{glsl}");
+}
+
+#[test]
 fn call_swizzle_binding_stays_in_its_branch_and_loop() {
     let glsl = emit(
         "fn source(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }
