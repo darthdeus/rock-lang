@@ -260,13 +260,23 @@ pub fn resolve_bare(
     frag: Option<&FragmentScope>,
     name: Ustr,
 ) -> Result<Resolved, String> {
+    bare_binding(ws, frag, name)?.ok_or_else(|| unbound(name))
+}
+
+// An absent name may still anchor a module path; a broken binding carries
+// a diagnostic that the path lookup must retain if no module binds it.
+fn bare_binding(
+    ws: &Workspace,
+    frag: Option<&FragmentScope>,
+    name: Ustr,
+) -> Result<Option<Resolved>, String> {
     let Some(frag) = frag else {
-        return Ok(plain(name));
+        return Ok(Some(plain(name)));
     };
     match bind_tiers(ws, frag, name, false)?.first {
-        Bound::One(resolved, _) => Ok(resolved),
+        Bound::One(resolved, _) => Ok(Some(resolved)),
         Bound::Several(hits, via, _) => Err(several(ws, name, &hits, via)),
-        Bound::Unbound => Err(unbound(name)),
+        Bound::Unbound => Ok(None),
     }
 }
 
@@ -1136,21 +1146,31 @@ pub fn resolve_member_path(
     path: &UsePathRef,
 ) -> Result<MemberTarget, String> {
     let segments = &path.segments;
+    let mut bare_error = None;
     if !path.from_root && segments.len() == 2 {
         let first = segments[0];
-        if let Ok(resolved) = resolve_bare(ws, Some(frag), first) {
-            if resolved.kind == ResolvedKind::Type {
-                let key = resolved.key;
-                let variant = segments[1];
-                if ws.enums_by_name.contains_key(&key) {
-                    check_key_access(ws, frag, key)?;
-                    return Ok(MemberTarget::EnumVariant { enum_key: key, variant });
+        match bare_binding(ws, Some(frag), first) {
+            Ok(Some(resolved)) => {
+                if resolved.kind == ResolvedKind::Type {
+                    let key = resolved.key;
+                    let variant = segments[1];
+                    if ws.enums_by_name.contains_key(&key) {
+                        check_key_access(ws, frag, key)?;
+                        return Ok(MemberTarget::EnumVariant { enum_key: key, variant });
+                    }
                 }
             }
+            Ok(None) => {}
+            // Module anchors need the path walk; if that also finds no
+            // binding, retain the bare lookup's ambiguity or other error.
+            Err(error) => bare_error = Some(error),
         }
     }
     let mut visiting = Vec::new();
     let (mut pkg_id, mut cur, mut i) = resolve_anchor(ws, frag, path, &mut visiting)?;
+    if i > 0 {
+        bare_error = None;
+    }
 
     while i < segments.len() {
         let seg = segments[i];
@@ -1177,13 +1197,16 @@ pub fn resolve_member_path(
         // modules share one item-name domain, so a child module and an owned
         // name cannot collide — the tree builder rejects that).
         if let Some((next_pkg, next)) = step_module(ws, frag, pkg_id, &cur, seg, &mut visiting)? {
+            bare_error = None;
             pkg_id = next_pkg;
             cur = next;
             i += 1;
             continue;
         }
         let members = module_members(ws, &[Viewer::Fragment(frag)], pkg_id, &cur, seg)?;
-        let not_found = || unresolved_value_path(ws, frag, segments);
+        let not_found = || {
+            bare_error.clone().unwrap_or_else(|| unresolved_value_path(ws, frag, segments))
+        };
         let Resolved { key, kind, owner } = collapse(ws, members, seg, not_found, "glob re-exports")?;
         if kind == ResolvedKind::Type {
             if is_last {

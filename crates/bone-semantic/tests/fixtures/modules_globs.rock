@@ -821,3 +821,103 @@ use self::helper as h;
 pub fn helper() -> int {
     other()
 }
+
+//- two_glob_enums_report_the_competing_bindings_for_a_variant @fail=`Kind` is ambiguous between glob imports chess::a::Kind, chess::b::Kind @not=did not resolve to any definition
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+pub enum Kind { Round, }
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+pub enum Kind { Round, }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::*;
+use chess::b::*;
+fn f() { let k = Kind::Round }
+
+//- one_glob_enum_resolves_a_variant
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+pub enum Kind { Round, }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::*;
+fn f() {
+    let k = Kind::Round
+      //^ chess::a::Kind
+}
+
+//- explicit_qualification_disambiguates_two_glob_enums
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+pub enum Kind { Round, }
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+pub enum Kind { Round, }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::*;
+use chess::b::*;
+fn f() {
+    let k = chess::a::Kind::Round
+      //^ chess::a::Kind
+}
+
+//- an_inaccessible_enum_variant_stays_inaccessible @fail=`Kind` is not accessible from this module
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+enum Kind { Round, }
+
+//-- app.rock @pkg=app,2 @v1
+fn f() { let k = chess::a::Kind::Round }
+
+//- a_module_alias_anchors_a_two_segment_value_path
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+pub const answer: int = 42
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a as a;
+fn f() {
+    let n = a::answer
+      //^ int
+}
+
+//- a_child_module_still_anchors_despite_ambiguous_glob_definitions
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+pub enum Kind { Round, }
+
+//-- lib_b.rock @pkg=chess,1 @v1
+pub mod b;
+pub enum Kind { Round, }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::*;
+use chess::b::*;
+fn f() {
+    let n = Kind::answer
+      //^ int
+}
+
+//-- app_kind.rock @pkg=app,2 @v1
+mod Kind;
+pub const answer: int = 42
+
+//- a_glob_enum_keeps_precedence_over_a_child_module
+//-- lib_a.rock @pkg=chess,1 @v1
+pub mod a;
+pub enum Kind { Round, }
+
+//-- app.rock @pkg=app,2 @v1
+use chess::a::*;
+fn f() {
+    let k = Kind::Round
+      //^ chess::a::Kind
+}
+
+//-- app_kind.rock @pkg=app,2 @v1
+mod Kind;
+pub const Round: int = 42
