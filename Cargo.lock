@@ -77,6 +77,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "bone-inference"
+version = "0.1.0"
+dependencies = [
+ "bone-core",
+ "comfy-la-arena",
+ "itertools",
+ "rust-lapper",
+ "rustc-hash",
+ "skull-parser",
+ "smallvec",
+ "tracing",
+ "ustr",
+]
+
+[[package]]
+name = "bone-lower"
+version = "0.1.0"
+dependencies = [
+ "bone-core",
+ "comfy-la-arena",
+ "itertools",
+ "rust-lapper",
+ "rustc-hash",
+ "skull-parser",
+ "smallvec",
+ "tracing",
+ "ustr",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

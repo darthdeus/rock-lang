@@ -58,6 +58,11 @@ pub(crate) fn infer_lambda(
         };
 
         gamma.assign_named_type(pb, ty)?;
+        if contains_frame_ref(gamma, ty) {
+            gamma
+                .ref_binding_provenance
+                .insert(pb, RefProvenance::Stable);
+        }
 
         // Defer-to-use: a param left as an unresolved var (fresh, or the
         // callee's instantiated generic) may be pinned by a later use in this

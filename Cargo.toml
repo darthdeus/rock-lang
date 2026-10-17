@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/bone-core",
+    "crates/bone-inference",
+    "crates/bone-lower",
     "crates/la-arena",
     "crates/lsp-serde-test",
     "crates/lsp-server-manual",
