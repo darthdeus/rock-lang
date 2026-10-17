@@ -229,7 +229,7 @@ pub fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
         // Skip the recursive expr walk when no call names a registered macro:
         // `try_expand` only mutates a `name(args)` whose `name` is a registry
         // key, so a flat scan that finds none proves `expand_in_ast` would be a
-        // pure no-op (mag: 1 def -> ~130/131 modules skip the walk entirely).
+        // pure no-op; in a project with one macro definition nearly every module skips it.
         if module_calls_macro(ast, reg) {
             expand_in_ast(ast, reg);
         }
@@ -896,6 +896,8 @@ fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData
                 "int" => TypeExprKind::Int,
                 "uint" => TypeExprKind::Uint,
                 "float" => TypeExprKind::Float,
+                "f64" => TypeExprKind::F64,
+                "f32" => TypeExprKind::F32,
                 "string" => TypeExprKind::String,
                 "bool" => TypeExprKind::Bool,
                 "any" => TypeExprKind::Any,

@@ -35,7 +35,7 @@ pub struct Parser<'a> {
     /// swallowed. Mirrors rock's `arrow_lambda_blocked`. The flag persists
     /// through binary-op RHS / postfix recursion (covers `name && x`,
     /// `name.field`); inside parens the arm `=>` is unreachable so it's not
-    /// reset at delimiter boundaries. See `docs/match-guard-parse-ambiguity.md`.
+    /// reset at delimiter boundaries.
     arrow_lambda_blocked: bool,
     /// Set by `parse_operator` so `parse_item` can replicate rock's implicit
     /// `@inline` on block-bodied operator overloads (the `@_transparent` model).
@@ -255,9 +255,8 @@ impl<'a> Parser<'a> {
             }
             // The `@memory(<class>)` file header: every dialect, first
             // non-comment item. It names the memory class of this file's
-            // globals, overriding the package's `[language] memory`
-            // (docs/state-ownership-plan.md R2). Parsed here rather than as an
-            // item annotation because it decorates the FILE, not a declaration;
+            // globals, overriding the package's `[language] memory`. Parsed here
+            // rather than as an item annotation because it decorates the FILE, not a declaration;
             // an unknown class rejects instead of falling back to `game`.
             if self.kind() == TokenKind::At
                 && matches!(self.peek_kind(), TokenKind::Ident(n) if n.as_str() == "memory")
@@ -2335,7 +2334,7 @@ impl<'a> Parser<'a> {
                 .stmt(span, StatementKind::Static(Static { span, keyword_span: Some(start), name, ty, value })));
         }
 
-        // Nested `fn` statement -- a hoisted local helper (docs/static-locals-plan.md).
+        // Nested `fn` statement -- a hoisted local helper.
         // v1: annotations are not allowed; catch the no-arg `@name fn ..` form here
         // for a clear message (arg-carrying annotations fall through to the generic
         // token error).
@@ -3047,7 +3046,7 @@ impl<'a> Parser<'a> {
 
         // `(params) => body` lambda — lookahead distinguishes it from a
         // parenthesized expr / tuple. Suppressed in a match-arm guard so a
-        // `(name) =>` doesn't eat the arm's `=>` (`docs/match-guard-parse-ambiguity.md`).
+        // `(name) =>` doesn't eat the arm's `=>`.
         if !self.arrow_lambda_blocked
             && self.kind() == TokenKind::OpenParen
             && self.looks_like_lambda_params()
@@ -3217,7 +3216,7 @@ impl<'a> Parser<'a> {
                     return Ok(self.ast.expr(span, ExprKind::Bitcast(value, target)));
                 }
                 // `x => body` single-parameter lambda. Suppressed in a match-arm
-                // guard so the arm's `=>` survives (`docs/match-guard-parse-ambiguity.md`).
+                // guard so the arm's `=>` survives.
                 if !self.arrow_lambda_blocked && self.kind() == TokenKind::FatArrow {
                     return self.finish_lambda(vec![LambdaParam { span: base.span, name: base, ty: None }], start);
                 }
@@ -3779,8 +3778,8 @@ impl<'a> Parser<'a> {
                 // Recover a missing `,`: if another field plausibly follows (an
                 // ident or a `..` spread, not `}`/EOF), record the error and keep
                 // parsing the literal instead of bailing. Lets completion inside
-                // an unterminated value above the next field (`z: st.<cursor>`,
-                // mag blood.rock:111) still see the whole literal.
+                // an unterminated value above the next field (`z: st.<cursor>`)
+                // still see the whole literal.
                 if matches!(self.kind(), TokenKind::Ident(_) | TokenKind::DoubleDot) {
                     self.ast
                         .recovery_errors
@@ -3812,7 +3811,7 @@ impl<'a> Parser<'a> {
             let guard = if self.kind() == TokenKind::If {
                 self.advance();
                 // Block the bare-ident / paren-form lambda commits so the guard
-                // stops at the arm's `=>` (`docs/match-guard-parse-ambiguity.md`).
+                // stops at the arm's `=>`.
                 let saved = std::mem::replace(&mut self.arrow_lambda_blocked, true);
                 let g = self.with_allow_literals(false, |p| p.parse_expr(0));
                 self.arrow_lambda_blocked = saved;

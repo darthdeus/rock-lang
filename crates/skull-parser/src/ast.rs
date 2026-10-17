@@ -454,7 +454,7 @@ pub struct Static {
 
 /// `fn <name>(params) [-> ret] { body }` written inside a fn body -- hoisted to
 /// a private top-level function, callable by name and passable as a zero-alloc
-/// value (docs/static-locals-plan.md). v1: no generics, no annotations,
+/// value. v1: no generics, no annotations,
 /// decl-before-use (self-recursion ok, no forward/mutual recursion) -- the last
 /// enforced in bone-lower, not here.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -789,7 +789,7 @@ pub struct ModuleHeader {
 
 /// The file's `@memory(<class>)` header -- first non-comment item only, like
 /// `mod a::b;`. It sets the memory class of the whole file's globals; a
-/// per-declaration `@state` still wins (`docs/state-ownership-plan.md` R2/R3).
+/// per-declaration `@state` still wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryHeader {
     pub class: rock_core::source_code::MemoryClass,

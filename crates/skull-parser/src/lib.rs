@@ -425,8 +425,7 @@ mod tests {
     fn match_arm_guard_does_not_swallow_the_arrow() {
         // A bare-ident guard `if x` must not parse as a `x => {}` lambda and eat
         // the arm's `=>`. Before the `arrow_lambda_blocked` fix this collapsed the
-        // whole match (recovered to a stray `E::B {}`). See
-        // `docs/match-guard-parse-ambiguity.md`.
+        // whole match (recovered to a stray `E::B {}`).
         let s = body_sexp("fn f(e: E, x: bool) { match e { E::A if x => {} E::B => {} } }");
         assert_eq!(
             s,
@@ -446,7 +445,7 @@ mod tests {
         // `=> S { .. }` in a match arm is a struct literal (Rust parity), not the
         // ident `S` then a block. Pre-fix `with_allow_literals(false)` on the arm
         // body stopped the expr at `S`, leaving `{ x: 1.0 }` to mis-parse as a new
-        // arm pattern ("unsupported pattern: OpenCurly"). (mag blood.rock arm.)
+        // arm pattern ("unsupported pattern: OpenCurly").
         let s = body_sexp("fn f(k: K) -> S { match k { K::A => S { x: 1.0 } K::B => S { x: 2.0 } } }");
         assert!(
             s.contains("(arm K::A (block (struct S"),
@@ -460,7 +459,7 @@ mod tests {
         // missing-comma typo, not the end of the literal -- recover (record the
         // error, keep parsing) so the whole literal survives. This is what lets
         // completion inside an unterminated value above the next field see the
-        // literal at all (mag blood.rock:111 `z: st.<cursor>`).
+        // literal at all (`z: st.<cursor>`).
         let s = body_sexp("fn f() { let p = P { a: 1 b: 2 } }");
         assert!(
             s.contains("(struct P") && s.contains("a 1") && s.contains("b 2"),
@@ -1578,8 +1577,8 @@ mod modules_path_tests {
     #[test]
     fn qualified_type_path_parses_in_v1() {
         assert_eq!(
-            let_type("fn f() { let x: mag_core::combat::Actor = x }"),
-            "mag_core::combat::Actor"
+            let_type("fn f() { let x: game_core::combat::Actor = x }"),
+            "game_core::combat::Actor"
         );
     }
 
@@ -1593,7 +1592,7 @@ mod modules_path_tests {
 
     #[test]
     fn root_anchored_and_self_super_type_paths_parse_in_v1() {
-        assert_eq!(let_type("fn f() { let x: ::mag::Actor = x }"), "::mag::Actor");
+        assert_eq!(let_type("fn f() { let x: ::game::Actor = x }"), "::game::Actor");
         assert_eq!(let_type("fn f() { let x: self::Actor = x }"), "self::Actor");
         assert_eq!(let_type("fn f() { let x: super::shared::T = x }"), "super::shared::T");
         assert_eq!(let_type("fn f() { let x: super::super::T = x }"), "super::super::T");
@@ -1602,8 +1601,8 @@ mod modules_path_tests {
     #[test]
     fn value_path_parses_in_v1() {
         assert_eq!(
-            let_value("fn f() { let h = mag_core::combat::heal }"),
-            "mag_core::combat::heal"
+            let_value("fn f() { let h = game_core::combat::heal }"),
+            "game_core::combat::heal"
         );
     }
 
@@ -1617,7 +1616,7 @@ mod modules_path_tests {
     #[test]
     fn qualified_call_parses_in_v1() {
         let ast = parse_v1(
-            "fn f() { let v = mag_core::combat::heal(actor, 5)\nprint(v) }",
+            "fn f() { let v = game_core::combat::heal(actor, 5)\nprint(v) }",
         )
         .expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);

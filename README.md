@@ -16,6 +16,7 @@ crates listed below.
 | `crates/rock-core` | Spans, diagnostics, the type representation, symbols, scopes and node ids |
 | `crates/rock-log` | Logger shared by the compiler and its runtime hosts |
 | `crates/rock-tokenizer` | Lexer and string interpolation |
+| `crates/skull-parser` | Parser, AST, macro expansion and desugaring |
 | `crates/skull-wgsl-abi` | Versioned binding-registration contract between the WGSL backend and a WGPU renderer |
 | `crates/test-utils` | Test helpers; `extract_annotations` is ported from rust-analyzer (MIT OR Apache-2.0) |
 
