@@ -58,6 +58,15 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     // so this is one `Array.prototype.join` here and one `table.concat` on
     // luajit. `_data` is 0-based and may be longer than `len`, hence the slice.
     ("join", 2, "$1._data.slice(0, $1.len).join($2)"),
+    // String primitives declared in stdlib/unified.rock. Indices are native
+    // units (Lua bytes, JS UTF-16); substring bounds are end-exclusive.
+    // `find` returns a 0-based index, or -1 when the needle is absent.
+    ("find", 3, "$1.indexOf($2, $3)"),
+    ("substring", 3, "$1.slice($2, $3)"),
+    ("unit_at", 2, "($1.charCodeAt($2) || 0)"),
+    ("upper", 1, "$1.toUpperCase()"),
+    ("lower", 1, "$1.toLowerCase()"),
+    ("string_char", 1, "String.fromCharCode($1)"),
     // Reference identity (stdlib `same_ref`). `===` on two objects is JS
     // identity, the same question luajit's `rawequal` answers; on primitives
     // both reduce to value equality, which is also what identity means there.

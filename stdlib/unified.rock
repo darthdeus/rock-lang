@@ -3856,9 +3856,9 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
     return r
 """
 
-@inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
+@intrinsic @inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
 
-@inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
+@intrinsic @inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
 
 // Plain-text search for `substr`, starting the scan at unit index `from`.
 // Returns the 0-based unit index of the first match at or after `from`, or -1.

@@ -7182,19 +7182,6 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // JS `.length` (UTF-16 units). `float(int)` is an identity (all doubles).
         ("len", 1) => Some("$1.length"),
         ("float", 1) => Some("$1"),
-        // Host-bodied string ops (all lua_body, so a pure-Rock user fn of the same
-        // name -- e.g. the iterator `find(it, pred)` -- co-emits instead). ASCII
-        // subset: `unit_at` is a JS UTF-16 unit, a luajit byte, equal in [0,127].
-        // `find` -> 0-based indexOf (-1 miss); its `from` default is padded to
-        // `undefined` above (indexOf reads that as 0). `substring(start, end)` is
-        // a 0-based end-exclusive slice (Lua `sub(s, start+1, end)`); callers pass
-        // in-range non-negative bounds.
-        ("find", 3) => Some("$1.indexOf($2, $3)"),
-        ("substring", 3) => Some("$1.slice($2, $3)"),
-        ("unit_at", 2) => Some("($1.charCodeAt($2) || 0)"),
-        ("upper", 1) => Some("$1.toUpperCase()"),
-        ("lower", 1) => Some("$1.toLowerCase()"),
-        ("string_char", 1) => Some("String.fromCharCode($1)"),
         // `from_codepoint(cp)` -> the byte-faithful UTF-8 encoder in
         // JS_STRING_RUNTIME: each output JS char code is one UTF-8 byte, matching
         // luajit's byte-string, so `chars()` (which UTF-8-decodes over `unit_at`)

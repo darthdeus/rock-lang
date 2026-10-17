@@ -97,12 +97,8 @@ fn table_entries_are_distinct_keys() {
     }
 }
 
-// Fail-closed, END TO END: the toy table is math-only and every entry is
-// annotated `@intrinsic` in the stdlib (slice 3), so `unbacked_entries` is
-// empty. This is the demonstration deferred from slice 2 -- it lives on the JS
-// table because there `unbacked_entries` can actually reach empty (the GLSL
-// table still has Vec-method/`texture` entries outside the scalar proving set).
-// It goes RED the moment a JS key drifts from the stdlib signature.
+// Every JS table key, including the string primitives, must have a matching
+// stdlib @intrinsic declaration. A source rename or arity drift fails here.
 #[test]
 fn every_js_entry_is_backed_by_a_stdlib_intrinsic() {
     let modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
