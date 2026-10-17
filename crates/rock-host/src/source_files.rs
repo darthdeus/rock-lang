@@ -192,6 +192,39 @@ pub fn source_file_new(path: impl AsRef<Path>) -> Result<SourceFile> {
     source_file_load(path, false)
 }
 
+/// Load one unprocessed source with its package's parsing and ownership facts.
+/// Standalone files retain their `//! modules:` directive and have no package.
+pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile> {
+    let canonical = fs_err::canonicalize(path.as_ref())?;
+    let mut source = source_file_from_canonical_path(&canonical, false)?;
+    let start_dir = canonical.parent().unwrap_or(&canonical);
+    if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(start_dir)? {
+        let manifest_dir = manifest.parent().unwrap_or(&manifest);
+        let channel = crate::stick::resolved_channel_for(&config);
+        let graph = crate::stick::graph::PackageGraph::build_with_channel(
+            manifest_dir,
+            &config,
+            &channel,
+        )?;
+        let owner = graph.package_of_file(&canonical).ok_or_else(|| {
+            anyhow::anyhow!(
+                "file {} is not owned by the package graph rooted at {}",
+                canonical.display(),
+                manifest_dir.display()
+            )
+        })?;
+        let node = graph.package(owner);
+        source.package = Some(rock_core::source_code::PackageTag {
+            id: node.id.0,
+            self_name: node.self_name.clone(),
+        });
+        source.dialect = node.dialect;
+        source.memory_class = node.memory_class;
+        source.global_policy = node.global_policy;
+    }
+    Ok(source)
+}
+
 /// Load a source file and apply preprocessor output (used by the compilation
 /// pipeline, which wants #if blocks resolved).
 pub fn source_file_new_preprocessed(path: impl AsRef<Path>) -> Result<SourceFile> {

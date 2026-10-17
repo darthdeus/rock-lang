@@ -1,9 +1,5 @@
-//! Coverage for the `rock shader <file> <vert> <frag> [--profile]` two-root
-//! vertex+fragment pipeline form (docs/shaders.md). Shells out
-//! to the real `rock` binary to exercise the full clap parse + dispatch path.
-//!
-//! The single-root A1 fragment form and the fn-library form stay unchanged
-//! (covered by the skull-codegen-glsl goldens); here we pin the CLI wiring.
+//! Coverage for standalone shader entry and function-library CLI wiring.
+//! Shells out to the real `rock` binary through clap and dispatch.
 
 
 /// A vertex+fragment pipeline source, mag-ui shaped.
@@ -31,6 +27,61 @@ fn scratch(name: &str) -> tempfile::TempDir {
         .prefix(&format!("rock_shader_pipeline_{name}_"))
         .tempdir()
         .unwrap()
+}
+
+#[test]
+fn route_b_manifest_dialect_accepts_pub_items() {
+    let dir = scratch("pub_items");
+    let src = dir.path().join("helpers.rock");
+    let legacy = "const OFFSET: float = 2.0\n\
+        @nomangle fn selected(value: float) -> float { return (value :: float) + OFFSET }\n\
+        fn omitted(value: float) -> float { return value * OFFSET }\n";
+    std::fs::write(&src, legacy).unwrap();
+    let emit = || {
+        crate::command::rock_bin()
+            .args(["shader", src.to_str().unwrap(), "selected"])
+            .output()
+            .expect("spawn rock shader")
+    };
+    let reference = emit();
+    assert!(
+        reference.status.success(),
+        "legacy reference: {}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    let reference_glsl = String::from_utf8(reference.stdout).unwrap();
+    assert!(
+        reference_glsl.contains("float selected("),
+        "requested root missing: {reference_glsl}"
+    );
+    assert!(
+        !reference_glsl.contains("omitted"),
+        "unrequested root emitted: {reference_glsl}"
+    );
+
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"shader_helpers\"\ntype = \"lib\"\n\
+         [language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    let public = legacy
+        .replace("const ", "pub const ")
+        .replace("@nomangle fn ", "pub @nomangle fn ")
+        .replace("\nfn ", "\npub fn ")
+        .replace("value :: float", "value : float");
+    std::fs::write(&src, public).unwrap();
+    let result = emit();
+    assert!(
+        result.status.success(),
+        "v1 pub items: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        reference_glsl,
+        "visibility must preserve the selected function library"
+    );
 }
 
 #[test]
