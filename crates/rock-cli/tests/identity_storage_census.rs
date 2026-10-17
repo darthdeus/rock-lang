@@ -38,11 +38,11 @@ const PINNED: &str = "\
 | mag_content | exempt | 5 | 5 | 2 | 0 | 48 | 0 | 0 | 0 | 0 | 60 |
 | mag_encounter_worker | exempt | 3 | 2 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 7 |
 | mag_simulation::nav | exempt module | 5 | 6 | 0 | 0 | 3 | 0 | 0 | 0 | 0 | 14 |
-| mag_world | exempt | 219 | 52 | 6 | 0 | 429 | 97 | 5 | 0 | 4 | 812 |
+| mag_world | exempt | 219 | 52 | 6 | 0 | 430 | 97 | 5 | 0 | 4 | 813 |
 | match3 | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 7 | 6 | 13 |
 | spark | exempt | 2 | 2 | 0 | 0 | 16 | 0 | 0 | 0 | 0 | 20 |
 | std | exempt, zero: remove from the list | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| stone | exempt | 43 | 62 | 6 | 0 | 210 | 39 | 0 | 0 | 5 | 365 |
+| stone | exempt | 43 | 62 | 6 | 0 | 212 | 40 | 0 | 0 | 5 | 368 |
 | survivors | exempt | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4 | 4 |
 | testbed | exempt | 12 | 4 | 0 | 0 | 112 | 2 | 2 | 64 | 67 | 263 |
 | typography | exempt | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | 0 | 2 |
