@@ -15,6 +15,8 @@
 //! statement about actual process overlap.
 //!
 //! Gated (compiles + runs a game): excluded from the default nextest profile.
+//! Fixture children use private worker slots so their spawn budgets measure
+//! their own work independently of other host jobs.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -70,6 +72,8 @@ co fn boot_probe() -> Coroutine<Wait> {
         let out = crate::command::rock_bin().arg("sim").arg(&project).args(specs)
             .args(["--isolated", "-j", "1"]).current_dir(workspace_root())
             .env("ROCK_FIXTURE_BOOT_FORMAT", &capture)
+            .env("ROCK_SIM_WORKER_SLOT_DIR", fixture.path().join("worker-slots"))
+            .env_remove("ROCK_SIM_WORKER_SLOTS")
             .env("ROCK_SIM_LOG_DIR", fixture.path().join(label))
             .env("ROCK_SIM_COMPILE_CACHE_DIR", fixture.path().join("cache"))
             .env("ROCK_SIM_TIMEOUT_SECS", "60")
@@ -130,6 +134,8 @@ co fn slow() -> Coroutine<Wait> {
         let out = crate::command::rock_bin().arg("sim").arg(&project).args(specs)
             .args([mode, "-j", "4", "--jobs-force"]).current_dir(workspace_root())
             .env("ROCK_SIM_LOG_DIR", &history).env("ROCK_SIM_TIMEOUT_SECS", "60")
+            .env("ROCK_SIM_WORKER_SLOT_DIR", fixture.path().join("worker-slots"))
+            .env_remove("ROCK_SIM_WORKER_SLOTS")
             .output_with_deadline().unwrap();
         assert!(out.status.success(), "{label}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let event_paths: Vec<_> = std::fs::read_dir(&history).unwrap().map(|entry| entry.unwrap().path().join("events.jsonl"))
@@ -212,6 +218,8 @@ co fn runtime() -> Coroutine<Wait> {
                 .args([mode, "-j", "1"])
                 .current_dir(workspace_root())
                 .env("ROCK_SIM_TIMEOUT_SECS", "180")
+                .env("ROCK_SIM_WORKER_SLOT_DIR", fixture.path().join("worker-slots"))
+                .env_remove("ROCK_SIM_WORKER_SLOTS")
                 .env("ROCK_SIM_LOG_DIR", fixture.path().join("history"))
                 .output_with_deadline().expect("run renderer fixture");
             let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
