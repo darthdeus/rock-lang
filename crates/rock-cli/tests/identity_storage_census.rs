@@ -6,7 +6,9 @@
 //! `IDENTITY_STORAGE_EXEMPT_MODULES`) in the same commit. A module prefix's
 //! sites are pinned one by one.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -86,6 +88,16 @@ fn identity_storage_census_is_pinned_per_package_and_kind() {
         "census failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let table = String::from_utf8(output.stdout).expect("census output is UTF-8");
-    assert_eq!(table, PINNED, "identity-storage census changed; update the pinned table");
+    let mut verifier = Command::new("python3")
+        .arg(root.join("tools/train/verify_identity_census.py"))
+        .args(["--stdin", "--expected", PINNED])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run census pin verifier");
+    verifier.stdin.take().expect("verifier stdin")
+        .write_all(&output.stdout).expect("write census output");
+    let verified = verifier.wait_with_output().expect("wait for census pin verifier");
+    assert!(verified.status.success(), "{}", String::from_utf8_lossy(&verified.stderr));
 }
