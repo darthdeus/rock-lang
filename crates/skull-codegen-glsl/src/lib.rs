@@ -754,6 +754,9 @@ struct FnEmit<'a> {
     cell_name: HashMap<Idx<Cell>, String>,
     /// Cell -> GLSL type (params from signature, others from first store).
     cell_ty: HashMap<Idx<Cell>, GlslTy>,
+    /// Shared vector calls retain their MIR evaluation point instead of being
+    /// expanded once per swizzle component.
+    value_name: HashMap<Idx<Inst>, String>,
     /// Loop headers matching the range-`for` shape -> their counted-loop info.
     counted: HashMap<Idx<Block>, LoopInfo>,
     /// Other natural-loop headers (general `while`) -> their region.
@@ -1094,8 +1097,8 @@ fn emit_fn_def_with(
         concrete_plan,
         subst: subst.clone(),
         callee_insts,
+        value_name: HashMap::default(),
     };
-    e.assign_cell_names();
     // Global-base struct params + samplers + uniform arrays are dropped from the
     // GLSL signature.
     let dropped: HashSet<usize> = entry
@@ -1138,6 +1141,7 @@ fn emit_fn_def_with(
     }
     e.compute_cell_types()?;
     e.compute_folds();
+    e.assign_names()?;
 
     // Parameter list (entry mode drops uniform-struct + sampler params).
     let params: Vec<String> = mf
@@ -1204,7 +1208,7 @@ impl FnEmit<'_> {
         self.out.push('\n');
     }
 
-    /// Assign a unique GLSL identifier to every cell (source name, deduped).
+    /// Assign unique GLSL identifiers to cells and retained vector calls.
     ///
     /// In entry mode the hoisted locals share the function scope with the
     /// program's bare globals, so a local named like a uniform lane (or an
@@ -1215,7 +1219,7 @@ impl FnEmit<'_> {
     /// cells (sampler/array params) claim their exact spellings first -- they
     /// ARE the global -- and every other cell dedups apart from the reserved
     /// globals, the builtin callables, and its siblings.
-    fn assign_cell_names(&mut self) {
+    fn assign_names(&mut self) -> Result<(), CompilerError> {
         let mut used: HashSet<String> = HashSet::default();
         let claim = |used: &mut HashSet<String>, base: String| -> String {
             let mut name = base.clone();
@@ -1246,6 +1250,82 @@ impl FnEmit<'_> {
             let name = claim(&mut used, base);
             self.cell_name.insert(cid, name);
         }
+        let mut uses: HashMap<Idx<Inst>, usize> = HashMap::default();
+        for b in reverse_postorder(self.f, self.f.entry) {
+            for &iid in &self.f.blocks[b].insts {
+                self.f.insts[iid].uses_each(&mut |v| *uses.entry(v).or_default() += 1);
+            }
+            self.f.blocks[b].term.uses_each(&mut |v| *uses.entry(v).or_default() += 1);
+        }
+        let mut trivial = HashMap::default();
+        for (iid, inst) in self.f.insts.iter() {
+            if !matches!(inst, Inst::Call { .. }) || uses.get(&iid).copied().unwrap_or(0) < 2 {
+                continue;
+            }
+            if !matches!(
+                self.ty_of(iid)?,
+                GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 | GlslTy::Bvec3
+            )
+                || self.trivial_value(iid, &mut trivial)
+            {
+                continue;
+            }
+            let name = claim(&mut used, "call_result".to_string());
+            self.value_name.insert(iid, name);
+        }
+        // A retained call is a statement in its original arm, so that arm can
+        // no longer be absorbed into a folded expression.
+        let mut unfold = Vec::new();
+        for (&block, &cell) in &self.folded_block {
+            let Term::Branch { then_bb, else_bb, .. } = self.f.blocks[block].term else {
+                unreachable!("a folded diamond starts at a branch")
+            };
+            if [then_bb, else_bb].iter().any(|&b| {
+                self.f.blocks[b].insts.iter().any(|i| self.value_name.contains_key(i))
+            }) {
+                unfold.push((block, cell));
+            }
+        }
+        for (block, cell) in unfold {
+            self.folded_block.remove(&block);
+            self.folded_cond.remove(&cell);
+        }
+        Ok(())
+    }
+
+    /// Constructors and arithmetic over existing values can be repeated; an
+    /// actual function evaluation inside them must retain single evaluation.
+    fn trivial_value(&self, iid: Idx<Inst>, memo: &mut HashMap<Idx<Inst>, bool>) -> bool {
+        if let Some(&trivial) = memo.get(&iid) {
+            return trivial;
+        }
+        if let Inst::Load(cell) = self.f.insts[iid] {
+            if let Some(fd) = self.folded_cond.get(&cell) {
+                let trivial = [fd.cond, fd.then_val, fd.else_val]
+                    .iter()
+                    .all(|&v| self.trivial_value(v, memo));
+                memo.insert(iid, trivial);
+                return trivial;
+            }
+            if let Some(&value) = self.folded_bound.get(&cell) {
+                let trivial = self.trivial_value(value, memo);
+                memo.insert(iid, trivial);
+                return trivial;
+            }
+        }
+        if let Inst::Call { func, .. } = self.f.insts[iid] {
+            let cf = &self.ws.module(func.module).functions[func.func];
+            let name = declared_name(cf.name.as_str());
+            let constructor = matches!(name, "v" | "bvec3") && GlslIntrinsics.lookup(cf).is_some();
+            if !constructor && vec_op_symbol(name).is_none() {
+                memo.insert(iid, false);
+                return false;
+            }
+        }
+        let mut trivial = true;
+        self.f.insts[iid].uses_each(&mut |v| trivial &= self.trivial_value(v, memo));
+        memo.insert(iid, trivial);
+        trivial
     }
 
     /// Whether `iid` is a `Load` of an entry-mode global-base struct param cell
@@ -1583,9 +1663,11 @@ impl FnEmit<'_> {
         self.render_val(iid)
     }
 
-    /// Render a value instruction as a GLSL expression (inlined; MIR values are
-    /// single-use, so no CSE duplication).
+    /// Render an expression or a reference to its retained call result.
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
+        if let Some(name) = self.value_name.get(&iid) {
+            return Ok(name.clone());
+        }
         let bin = |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
             Ok(format!("({} {} {})", s.render_val(*a)?, op, s.render_val(*b)?))
         };
@@ -1909,11 +1991,13 @@ impl FnEmit<'_> {
     /// `break`/`continue` block.
     fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
         if let Term::Goto(t) = self.f.blocks[b].term {
-            let has_store = self.f.blocks[b]
+            let has_statement = self.f.blocks[b]
                 .insts
                 .iter()
-                .any(|&i| matches!(self.f.insts[i], Inst::Store { .. }));
-            if !has_store {
+                .any(|&i| {
+                    matches!(self.f.insts[i], Inst::Store { .. }) || self.value_name.contains_key(&i)
+                });
+            if !has_statement {
                 return Some(t);
             }
         }
@@ -1972,8 +2056,7 @@ impl FnEmit<'_> {
     }
 
     /// Emit the straight-line effect statements of a block: Stores (assignments)
-    /// and void (effect-only) calls like `discard()`. Value-returning insts are
-    /// inlined at their use, so they produce no statement here.
+    /// and void (effect-only) calls like `discard()`, plus shared vector calls.
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.f.blocks[b].insts.clone() {
             let line: Option<String> = match &self.f.insts[iid] {
@@ -1990,11 +2073,15 @@ impl FnEmit<'_> {
                         Some(format!("{} = {};", self.cell_name[&cell], rhs))
                     }
                 }
-                // A void call in statement position (discard()): its result is
-                // never consumed, so it never gets inlined at a use -- emit it here.
                 Inst::Call { func, args } => {
                     let cf = &self.ws.module(func.module).functions[func.func];
-                    if cf.return_ty.is_none() {
+                    if let Some(name) = self.value_name.get(&iid) {
+                        Some(format!(
+                            "{} {name} = {};",
+                            self.ty_of(iid)?.name(),
+                            self.render_call(iid, *func, args)?
+                        ))
+                    } else if cf.return_ty.is_none() {
                         Some(format!("{};", self.render_call(iid, *func, args)?))
                     } else {
                         None

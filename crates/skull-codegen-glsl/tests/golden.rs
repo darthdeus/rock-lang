@@ -161,6 +161,144 @@ fn vec3_vec4_constructors() {
 }
 
 #[test]
+fn call_swizzle_texture_evaluates_once() {
+    for (selection, result) in [("rgb", "v(rgb, 1.0)"), ("xy", "v(rgb.x, rgb.y, 0.0, 1.0)")] {
+        let src = format!(
+            "@shader(fragment) fn sampled(scene: Sampler2D, tc: Vec2) -> Vec4 {{
+                let rgb = texture(scene, tc).{selection}
+                return {result}
+            }}"
+        );
+        for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+            let glsl = emit_entry_profile(&src, "sampled", profile).expect("emit");
+            assert_eq!(glsl.matches("texture(scene, tc)").count(), 1, "{selection}:\n{glsl}");
+        }
+    }
+}
+
+#[test]
+fn call_swizzle_nested_constructor_keeps_one_source_call() {
+    let glsl = emit(
+        "fn source(p: Vec2) -> Vec3 { return v(sin(p.x), cos(p.y), p.x * p.y) }
+         fn selected(p: Vec2) -> Vec2 { return v(source(p), 1.0).wzyx.yx }",
+        &["selected"],
+    ).expect("emit");
+    assert_eq!(glsl.matches("source_Vec2(p)").count(), 1, "{glsl}");
+    let binding = glsl.lines().find(|line| line.contains("= vec4(source_Vec2(p), 1.0);")).expect(&glsl);
+    let temp = binding.split_whitespace().nth(1).expect("typed vector binding");
+    assert!(glsl.contains(&format!("return vec2({temp}.z, {temp}.w);")), "{glsl}");
+}
+
+#[test]
+fn call_swizzle_constructor_with_folded_call_evaluates_once() {
+    let glsl = emit(
+        "fn source(t: float) -> float { return sin(t) }
+         fn selected(flag: bool, t: float) -> Vec2 {
+             return v(if flag { source(t) } else { 0.0 }, 1.0).xx
+         }",
+        &["selected"],
+    ).expect("emit");
+    assert_eq!(glsl.matches("source_float(t)").count(), 1, "{glsl}");
+    assert!(glsl.contains("flag ? source_float(t) : 0.0"), "{glsl}");
+}
+
+#[test]
+fn call_swizzle_binding_stays_in_its_branch_and_loop() {
+    let glsl = emit(
+        "fn source(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }
+         fn selected(flag: bool, p: Vec2) -> Vec2 {
+             let result = if flag { source(p).yx } else { v(0.0, 1.0) }
+             return result
+         }
+         fn repeated(n: int, p: Vec2) -> Vec2 {
+             let result = v(0.0, 0.0)
+             for i in 0..n { result = result + source(p).xy }
+             return result
+         }
+         fn conditioned(p: Vec2, n: int) -> int {
+             let left = n
+             while left > 0 && source(p).xy.length() > 0.0 { left = left - 1 }
+             return left
+         }",
+        &["selected", "repeated", "conditioned"],
+    ).expect("emit");
+    let branch = glsl.split("vec2 selected_bool_Vec2(").nth(1).expect(&glsl);
+    let branch_call = branch.find("= source_Vec2(p);").expect(&glsl);
+    assert!(branch.find("if (flag) {").expect(&glsl) < branch_call, "{glsl}");
+    assert!(branch_call < branch.find("} else {").expect(&glsl), "{glsl}");
+    let loop_fn = glsl.split("vec2 repeated_int_Vec2(").nth(1).expect(&glsl);
+    let loop_call = loop_fn.find("= source_Vec2(p);").expect(&glsl);
+    assert!(loop_fn.find("for (;").expect(&glsl) < loop_call, "{glsl}");
+    assert!(loop_call < loop_fn.find("result = (result +").expect(&glsl), "{glsl}");
+    let condition = glsl.split("int conditioned_Vec2_int(").nth(1).expect(&glsl);
+    let condition_call = condition.find("= source_Vec2(p);").expect(&glsl);
+    assert!(condition.find("while (true) {").expect(&glsl) < condition_call, "{glsl}");
+    assert!(condition.find("if ((left > 0)) {").expect(&glsl) < condition_call, "{glsl}");
+    assert!(condition_call < condition.find("length(").expect(&glsl), "{glsl}");
+}
+
+#[test]
+fn call_swizzle_trivial_and_scalar_values_stay_inline() {
+    let glsl = emit(
+        "fn selected(t: float) -> Vec2 { return v(t + 1.0, 2.0).yx }
+         fn scalar(p: Vec2) -> float { return sin(p.x) }
+         fn constant() -> Vec2 { return v(1.0, 2.0).xy }
+         fn folded(flag: bool) -> Vec2 { return v(if flag { 1.0 } else { 2.0 }, 3.0).xx }
+         fn source(p: Vec2) -> Vec4 { return v(p.x, p.y, 0.0, 1.0) }
+         fn single(p: Vec2) -> float { return source(p).x }",
+        &["selected", "scalar", "constant", "folded", "single"],
+    ).expect("emit");
+    assert!(!glsl.contains("call_result"), "trivial expressions must stay inline:\n{glsl}");
+    assert!(glsl.contains("return sin(p.x);"), "{glsl}");
+    assert!(glsl.contains("return source_Vec2(p).x;"), "{glsl}");
+    assert!(glsl.contains("return vec2(vec2((t + 1.0), 2.0).y, vec2((t + 1.0), 2.0).x);"), "{glsl}");
+}
+
+#[test]
+fn call_swizzle_temporary_does_not_shadow_a_local() {
+    let glsl = emit(
+        "fn source(p: Vec2) -> Vec4 { return v(p.x, p.y, 0.0, 1.0) }
+         fn selected(call_result: Vec2) -> Vec2 { return source(call_result).yx }",
+        &["selected"],
+    ).expect("emit");
+    assert!(glsl.contains("vec4 call_result_1 = source_Vec2(call_result);"), "{glsl}");
+    assert!(glsl.contains("return vec2(call_result_1.y, call_result_1.x);"), "{glsl}");
+}
+
+#[test]
+fn call_swizzle_bool_conversion_preserves_component_types() {
+    let glsl = emit(
+        "fn selected(p: Vec3) -> Vec2 { return to_vec3(greater_than(p, v(0.0, 1.0, 2.0))).yx }",
+        &["selected"],
+    ).expect("emit");
+    assert_eq!(glsl.matches("greaterThan(p, vec3(0.0, 1.0, 2.0))").count(), 1, "{glsl}");
+    assert!(glsl.contains("vec3 call_result = vec3(greaterThan(p, vec3(0.0, 1.0, 2.0)));"), "{glsl}");
+    assert!(glsl.contains("return vec2(call_result.y, call_result.x);"), "{glsl}");
+}
+
+#[test]
+fn call_swizzle_helper_preserves_components() {
+    for (selection, ty, components) in [
+        ("rgb", "vec3", &["x", "y", "z"][..]),
+        ("yx", "vec2", &["y", "x"][..]),
+        ("xx", "vec2", &["x", "x"][..]),
+    ] {
+        let src = format!(
+            "fn source(p: Vec2) -> Vec4 {{ return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }}
+             fn selected(p: Vec2) -> {} {{ return source(p).{selection} }}",
+            if ty == "vec3" { "Vec3" } else { "Vec2" }
+        );
+        let glsl = emit(&src, &["selected"]).expect("emit");
+        assert_eq!(glsl.matches("source_Vec2(p)").count(), 1, "{selection}:\n{glsl}");
+        let binding = glsl.lines().find(|line| line.contains("= source_Vec2(p);")).expect(&glsl);
+        let temp = binding.split_whitespace().nth(1).expect("typed vector binding");
+        assert!(binding.trim_start().starts_with("vec4 "), "{glsl}");
+        let args = components.iter().map(|c| format!("{temp}.{c}")).collect::<Vec<_>>().join(", ");
+        assert!(glsl.contains(&format!("return {ty}({args});")), "{selection}:\n{glsl}");
+    }
+}
+
+#[test]
 fn nested_counted_loops() {
     let src = r#"
         fn random2(p: Vec2) -> Vec2 {
