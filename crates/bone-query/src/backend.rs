@@ -381,6 +381,9 @@ pub struct BoneWorkspace {
     /// symbols resolve; later edits are incremental and must NOT re-load (that
     /// would clobber unsaved buffers).
     loaded_roots: std::collections::HashSet<PathBuf>,
+    /// Discovery/read failures are distinct from a standalone source. Failed
+    /// roots remain retryable so fixing the manifest or dependency can recover.
+    source_load_errors: HashMap<PathBuf, String>,
     /// Verbatim editor path -> canonical path. Project discovery keys modules
     /// by the canonicalized path (`project_sources`), but LSP clients send the
     /// URI-decoded spelling (`C:\...` not `\\?\C:\...`; `/./` segments), so
@@ -634,10 +637,18 @@ impl BoneWorkspace {
     /// so `update` won't re-index (and clobber unsaved buffers).
     fn batch_load_for_file(&mut self, file_path: &str) {
         let root = Self::root_for(file_path);
-        self.loaded_roots.insert(root.clone());
-        let Some(files) = Self::project_sources(file_path) else {
-            return; // couldn't resolve the unit; `update` still adds the one file
+        let files = match Self::project_sources(file_path) {
+            Ok(files) => files,
+            Err(cause) => {
+                let message = format!("Cannot load project sources for `{file_path}`: {cause}");
+                log::error!("bone LSP: {message}");
+                self.source_load_errors.insert(root.clone(), message);
+                self.loaded_roots.remove(&root);
+                return;
+            }
         };
+        self.source_load_errors.remove(&root);
+        self.loaded_roots.insert(root.clone());
         let is_bin = stick_is_bin(&root);
         let file_texts: Vec<(String, String)> =
             files.iter().map(|f| (f.path.clone(), f.text.clone())).collect();
@@ -698,10 +709,11 @@ impl BoneWorkspace {
     /// resolution `rock compile` performs. Paths are canonicalized so they match
     /// the canonical paths the LSP queries with (`root_for` / the CLI's
     /// `canonical`); a mismatch would leave the opened file's module unfindable.
-    fn project_sources(file_path: &str) -> Option<Vec<SessionFile>> {
-        let unit =
-            rock_host::compilation_units::determine_compilation_unit_for_file(file_path).ok()?;
-        let sources = rock_host::compilation_units::load_sources_for_compilation_unit(&unit).ok()?;
+    fn project_sources(file_path: &str) -> Result<Vec<SessionFile>, String> {
+        let unit = rock_host::compilation_units::determine_compilation_unit_for_file(file_path)
+            .map_err(|e| format!("source discovery failed: {e:#}"))?;
+        let sources = rock_host::compilation_units::load_sources_for_compilation_unit(&unit)
+            .map_err(|e| format!("source loading failed: {e:#}"))?;
         let mut out = Vec::new();
         for f in &sources.files {
             let f = f.borrow();
@@ -718,7 +730,17 @@ impl BoneWorkspace {
                 global_policy: f.global_policy,
             });
         }
-        Some(out)
+        Ok(out)
+    }
+
+    fn source_load_diagnostic(&self, path: &str) -> Option<Diagnostic> {
+        self.source_load_errors.get(&Self::root_for(path)).map(|message| {
+            bone_diagnostic(
+                Range::new(Position::new(0, 0), Position::new(0, 1)),
+                message.clone(),
+                rock_core::errors::CompilerErrorLevel::Error,
+            )
+        })
     }
 
     /// Apply an editor edit (didOpen/didChange) for `path`. Returns diagnostics
@@ -740,6 +762,12 @@ impl BoneWorkspace {
             if !self.loaded_roots.contains(&proj_root) {
                 self.batch_load_for_file(path);
             }
+        }
+
+        if let Some(diagnostic) = self.source_load_diagnostic(path) {
+            // A broken project cannot be checked as a standalone file. Retry
+            // discovery on the next update instead of caching a partial session.
+            return vec![(editor_path(path).into_owned(), vec![diagnostic])];
         }
 
         // `BONE_LSP_PROFILE=1` prints a per-call breakdown of update's three
@@ -1114,6 +1142,9 @@ impl BoneWorkspace {
     pub fn diagnostics_for(&self, path: &str) -> Vec<Diagnostic> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
+        if let Some(diagnostic) = self.source_load_diagnostic(path) {
+            return vec![diagnostic];
+        }
         let Some(proj) = self.project(path) else {
             return Vec::new();
         };

@@ -236,3 +236,98 @@ fn duplicate_struct_across_modules_surfaces_in_lsp() {
         "duplicate must be gone from diagnostics_for after the fix"
     );
 }
+
+fn source_load_failure_recovers(broken_manifest: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let dep = dir.path().join("dep");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir(&dep).unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"app\"\n[dependencies]\ndep = { path = \"../dep\" }\n",
+    ).unwrap();
+    let manifest = "[package]\nname = \"dep\"\ntype = \"lib\"\n";
+    let dependency = "struct Dependency { value: int }\n";
+    std::fs::write(dep.join("stick.toml"), manifest).unwrap();
+    std::fs::write(dep.join("types.rock"), dependency).unwrap();
+    let broken = if broken_manifest { dep.join("stick.toml") } else { dep.join("types.rock") };
+    if broken_manifest {
+        std::fs::write(&broken, "[package").unwrap();
+    } else {
+        // Invalid UTF-8 is unreadable by the source loader, even as root.
+        std::fs::write(&broken, [0xff, 0xfe]).unwrap();
+    }
+    let src = "fn main() -> int { sibling() }\n";
+    std::fs::write(app.join("main.rock"), src).unwrap();
+    let sibling = "fn sibling() -> int { let d = Dependency { value: 1 }; d.value }\n";
+    std::fs::write(app.join("sibling.rock"), sibling).unwrap();
+    let main = bone_query::canonicalize_lenient(&app.join("main.rock").to_string_lossy());
+    let sibling_path = bone_query::canonicalize_lenient(&app.join("sibling.rock").to_string_lossy());
+    let dep_path = bone_query::canonicalize_lenient(&dep.join("types.rock").to_string_lossy());
+    let reports_cause = |diags: &[lsp_types::Diagnostic]| diags.iter().any(|d| {
+        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+            && d.source.as_deref() == Some("bone")
+            && d.message.contains(broken.file_name().unwrap().to_str().unwrap())
+    });
+
+    let mut bone = BoneWorkspace::new();
+    bone.load_project(&main);
+    let diags = bone.diagnostics_for(&main);
+    assert!(reports_cause(&diags), "CLI diagnostics must identify the broken source/manifest: {diags:?}");
+    for _ in 0..2 {
+        let per = bone.update(&main, src.to_string());
+        let diags = &per.iter().find(|(p, _)| p == &main).expect("edited-file diagnostics").1;
+        assert!(reports_cause(diags), "live updates must retain the load failure: {diags:?}");
+    }
+
+    std::fs::write(dep.join("stick.toml"), manifest).unwrap();
+    std::fs::write(dep.join("types.rock"), dependency).unwrap();
+    let per = bone.update(&main, src.to_string());
+    for (path, diags) in &per {
+        assert!(!diags.iter().any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+            "repair must clear errors and resolve unopened siblings/dependencies in {path}: {diags:?}");
+    }
+    assert_eq!(bone.file_text(&sibling_path), Some(sibling), "unopened sibling indexed after repair");
+    assert!(bone.projects_summary().iter().flat_map(|(_, modules)| modules).any(|m| m.id == dep_path),
+        "dependency indexed in the consuming project after repair");
+    assert!(!reports_cause(&bone.diagnostics_for(&main)), "CLI load error cleared after repair");
+}
+
+#[test]
+fn malformed_dependency_manifest_reports_source_load_error_and_recovers() {
+    source_load_failure_recovers(true);
+}
+
+#[test]
+fn unreadable_dependency_source_reports_source_load_error_and_recovers() {
+    source_load_failure_recovers(false);
+}
+
+#[test]
+fn malformed_project_manifest_reports_source_discovery_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package").unwrap();
+    let file = dir.path().join("main.rock");
+    let src = "fn main() -> int { 1 }\n";
+    std::fs::write(&file, src).unwrap();
+    let file = file.to_str().unwrap();
+    let mut bone = BoneWorkspace::new();
+    let per = bone.update(file, src.to_string());
+    assert!(per.iter().flat_map(|(_, ds)| ds).any(|d| {
+        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR) && d.message.contains("stick.toml")
+    }), "discovery must report the manifest cause: {per:?}");
+}
+
+#[test]
+fn standalone_buffer_without_disk_file_needs_no_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("scratch.rock");
+    let src = "fn scratch() -> int { 1 }\n";
+    let mut bone = BoneWorkspace::new();
+    let per = bone.update(file.to_str().unwrap(), src.to_string());
+    assert!(!per.iter().flat_map(|(_, ds)| ds).any(|d| {
+        d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+    }), "standalone buffer must work without a project or disk source: {per:?}");
+    assert_eq!(bone.file_text(file.to_str().unwrap()), Some(src));
+}
