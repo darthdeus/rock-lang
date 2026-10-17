@@ -1730,7 +1730,9 @@ fn tick5b_slots_present_without_a_legacy_selector() {
         let source = fs::read_to_string(repo.join(format!("mag-world/tick5b_{slot}.rock"))).unwrap();
         assert!(source.contains("present: (fn(H))?"), "{slot} owns its presentation binding");
         assert!(source.contains("present("), "{slot} executes its binding synchronously");
-        assert!(run.contains(&format!("present: mag_tick5b_{slot}")), "{slot} binds its own consumer");
+        assert!(run.contains(&format!("present: mag_tick5b_{slot}"))
+            || run.contains(&format!("slots.{slot}.present = mag_tick5b_{slot}")),
+            "{slot} binds its own consumer");
         assert!(!source.contains("player_actions_harvest_hazards") && !source.contains("WorldTick5bStep"));
     }
     assert!(run.contains("player.present_bandage_start_in(world, bandage)"));
@@ -1742,4 +1744,11 @@ fn tick5b_slots_present_without_a_legacy_selector() {
     let statuses = fs::read_to_string(repo.join("mag-world/tick5b_statuses.rock")).unwrap();
     let body = rock_function_body(&statuses, "pub fn world_tick5b_statuses<M, H>(");
     assert!(body.find("present(host)").unwrap() < body.find("world_player_status_turn(").unwrap());
+    assert!(!body.contains("status_host.unwrap()"));
+    assert!(run.contains("world_tick5b_install(runner)"));
+    let admission = fs::read_to_string(repo.join("mag-world/expedition_player.rock")).unwrap();
+    assert!(admission.contains("world_tick5b_install(world.runner.get().unwrap(), actor)"));
+    let fuses = fs::read_to_string(repo.join("mag-world/tick5b_fuses.rock")).unwrap();
+    assert!(fuses.contains("runner.root.get().unwrap().cast_binding.unwrap()"));
+    assert!(!fuses.contains("binding: (fn"));
 }
