@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Refuses content that must not appear in a public repository.
+# Usage: check-public <file-with-text>   (reads the text to check)
+set -euo pipefail
+text_file="$1"
+patterns=(
+  '/home/[a-z_][a-z0-9_-]*/'
+  '/Users/[A-Za-z0-9_-]+/'
+  '/Volumes/[A-Za-z0-9_-]+/'
+  '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+)
+denylist="${HOME}/.config/rock-lang/denylist"
+if [[ -f "$denylist" ]]; then
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != \#* ]] && patterns+=("$line")
+  done < "$denylist"
+else
+  echo "check-public: warning: no private deny-list at $denylist" >&2
+fi
+status=0
+for p in "${patterns[@]}"; do
+  if grep -nEi -e "$p" "$text_file" >&2; then
+    echo "check-public: matched forbidden pattern: $p" >&2
+    status=1
+  fi
+done
+exit $status

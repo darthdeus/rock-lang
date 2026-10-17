@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/la-arena", "crates/lsp-server-manual", "crates/lsp-types-manual", "crates/lsp-serde-test"]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/darthdeus/rock-lang"
+
+[workspace.dependencies]
+clap = { version = "4.5.20", default-features = false, features = ["std", "help", "usage", "error-context"] }
+log = "0.4.22"
+rand = "0.9.3"
+serde = { version = "1.0.219", default-features = false, features = ["std"] }
+serde_json = "1.0"
+
+[workspace.lints.clippy]
+collapsible_match = "allow"
+collapsible_if = "allow"
+to_string_trait_impl = "allow"
+new_without_default = "allow"
+single_match = "allow"
+len_zero = "allow"
+unused_enumerate_index = "allow"
+inherent_to_string = "allow"
+result_large_err = "allow"
+too_many_arguments = "allow"
+uninlined_format_args = "allow"
+manual_strip = "allow"
+unnecessary_map_or = "allow"
