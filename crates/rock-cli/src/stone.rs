@@ -1601,13 +1601,25 @@ mod watch_reload_tests {
         watcher.refresh(stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler)).unwrap();
         std::fs::write(&scratch, "fn scratch() {}\n").unwrap();
         std::fs::write(restart_dir.join("unrelated.rock"), "fn unrelated() {}\n").unwrap();
+        // Force create and write into separate batches: both may legitimately
+        // report restart.txt, regardless of how quickly the OS coalesces them.
+        std::fs::File::create(&restart).unwrap();
+        let deadline = Instant::now() + HANG_BACKSTOP;
+        let mut event = rx.recv_timeout(HANG_BACKSTOP).expect("watcher never reported restart");
         std::fs::write(&restart, "restart").unwrap();
-        let event = receive_path(&rx, &restart);
-        assert!(event.is_restart_trigger);
-        assert_eq!(event.paths, HashSet::from([restart]));
-        let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
-        assert!(changes.changed_paths.is_empty());
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "scratch caused another event");
+        loop {
+            assert!(event.is_restart_trigger, "unexpected event: {event:?}");
+            assert_eq!(event.paths, HashSet::from([restart.clone()]));
+            let changes = categorize_stone_changes(&event, &Default::default(), &Default::default());
+            assert!(changes.changed_paths.is_empty());
+
+            assert!(Instant::now() < deadline, "watcher never became quiet");
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(next) => event = next,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(error) => panic!("watcher disconnected: {error}"),
+            }
+        }
     }
 
     #[test]
