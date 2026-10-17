@@ -1,0 +1,36 @@
+//! Test: Advanced struct literal formatting
+//! Tags: structs, literals, complex
+
+//=== TEST CASE: simple_struct_literal ===
+fn test() {
+    let player = Player { x: 10, y: 20, health: 100 }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:long_struct_literal_expansion ===
+
+fn test() {
+    let config = GameConfig { width: 1920, height: 1080, fullscreen: true, vsync: true, volume: 0.8 }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:nested_struct_literals ===
+
+fn test() {
+    let entity = Entity { transform: Transform { position: Vec2 { x: 10.0, y: 20.0 }, rotation: 0.0, scale: 1.0 }, sprite: Sprite { texture_id: 42 } }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:single_field_struct_collapse ===
+
+fn test() {
+    return CoFrame {
+        wait_frame: true,
+    }
+}
+
+//=== NO CHANGE ===

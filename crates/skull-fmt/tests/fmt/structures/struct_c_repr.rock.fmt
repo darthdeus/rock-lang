@@ -1,0 +1,78 @@
+//! Test: value struct formatting round-trip
+//! Tags: structs, value, c-repr, ffi
+
+//=== TEST CASE:basic_value ===
+
+value FixVec2 {
+    x: float,
+    y: float,
+}
+
+//=== EXPECTED ===
+value FixVec2 {
+    x: float,
+    y: float,
+}
+//=== TEST CASE:empty_value ===
+
+value Empty {}
+
+//=== EXPECTED ===
+value Empty {}
+//=== TEST CASE:value_many_fields ===
+
+value GraphicsStats {
+    draw_calls: int,
+    text_draw_calls: int,
+    canvas_switches: int,
+    shader_switches: int,
+    images: int,
+    canvases: int,
+    texture_memory: int,
+}
+
+//=== EXPECTED ===
+value GraphicsStats {
+    draw_calls: int,
+    text_draw_calls: int,
+    canvas_switches: int,
+    shader_switches: int,
+    images: int,
+    canvases: int,
+    texture_memory: int,
+}
+//=== TEST CASE:mixed_struct_and_value ===
+
+struct Regular {
+    name: string,
+}
+
+value CRepr {
+    x: float,
+}
+
+//=== EXPECTED ===
+struct Regular {
+    name: string,
+}
+
+value CRepr {
+    x: float,
+}
+//=== TEST CASE:value_multi_field_not_collapsed ===
+
+value FixVec2 { x: float, y: float }
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: value_with_defaults ===
+value WithDefaults {
+    x: float = 1.0,
+    y: float = 2.0,
+}
+
+//=== EXPECTED ===
+value WithDefaults {
+    x: float = 1.0,
+    y: float = 2.0,
+}

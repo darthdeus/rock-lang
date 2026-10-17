@@ -1,0 +1,117 @@
+//! Test: Tuple expression formatting
+//! Tags: tuples, expressions, destructuring
+
+//=== TEST CASE:basic_tuple_literals ===
+
+fn create_tuples() {
+    let point = (1, 2)
+    let triple = (x, y, z)
+    let nested = ((1, 2), (3, 4))
+
+    return (result, status, message)
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: tuple_destructuring ===
+fn destructure_tuples() {
+    let pos = get_position()
+    let (x, y) = pos
+    let triple_data = get_triple()
+    let (first, second, third) = triple_data
+
+    for (index, value) in enumerate(items) {
+        process(index, value)
+    }
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE: long_tuple_formatting ===
+fn long_tuples() {
+    let short_tuple = (a, b, c)
+
+    let long_tuple = (
+        first_very_long_element,
+        second_very_long_element,
+        third_very_long_element,
+        fourth_very_long_element,
+        fifth_very_long_element
+    )
+
+    let function_call_tuple = (
+        calculate_complex_value(param1, param2),
+        process_data_with_long_name(data, context),
+        validate_input_thoroughly(input, validation_rules)
+    )
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE:tuple_in_function_parameters ===
+
+fn process_coordinate_data(point: (float, float), size: (int, int)) {
+    let (x, y) = point
+    let (width, height) = size
+
+    return (x * width, y * height)
+}
+
+fn return_multiple_values() -> (bool, string, int) {
+    return (true, "success", 42)
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:tuple_assignment_and_expressions ===
+
+fn tuple_operations() -> (bool, string) {
+    let coords = (10.5, 20.3)
+    let (x, y) = coords
+    let new_coords = (x + 1.0, y - 1.0)
+
+    let result = if condition {
+        (true, "success")
+    } else {
+        (false, "failure")
+    }
+
+    return result
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: tuple_formatting_simple_expressions ===
+fn test() {
+    let simple = (a, b)
+    let with_ops = (x + 1, y - 2)
+    let mixed = (value, calculate(), "literal")
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE:tuple_formatting_complex_expressions ===
+
+fn test() {
+    let complex = (
+        function_call_with_long_name(param1, param2),
+        another_long_function_call(param3, param4),
+        final_expression_that_is_very_long
+    )
+
+    let nested = (
+        (inner_a, inner_b),
+        (inner_c, inner_d),
+        final_tuple
+    )
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,18 @@
+//! Test: Struct spread (call-site `..arg`) and functional-update (`{ ..base }`)
+//! Tags: struct-spread, functional-update, calls
+
+//=== TEST CASE: call_spread_inline ===
+fn test() {
+    draw(img, ..props)
+    draw(img, ..props, color: c)
+    draw(..a, ..b)
+}
+//=== NO CHANGE ===
+
+//=== TEST CASE: functional_update_inline ===
+fn test() {
+    let a = UiRect { ..r, z: 2 }
+    let b = P { ..base, c: 1, d: 2 }
+    let c = P { ..x, ..y, z: 3 }
+}
+//=== NO CHANGE ===

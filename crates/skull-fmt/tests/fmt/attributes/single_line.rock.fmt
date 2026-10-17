@@ -1,0 +1,22 @@
+//! Test: Keep attributes on same line when possible
+//! Tags: attributes, decorators, single-line
+
+//=== TEST CASE: simple_attributes_stay_inline ===
+// Simple attributes should stay on same line
+@nocontext fn int(value: int) -> int { return value }
+@nocontext fn float(value: float) -> float { return value }
+
+// Multiple attributes can stay together if they fit
+@test
+@nocontext fn simple_test() { assert_eq(1, 1) }
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:long_attribute_breaking ===
+
+
+// Very long attributes should break appropriately
+@deprecated("This function is deprecated and will be removed in version 2.0, please use the new_function instead")
+fn old_function() -> int { return 0 }
+
+//=== NO CHANGE ===

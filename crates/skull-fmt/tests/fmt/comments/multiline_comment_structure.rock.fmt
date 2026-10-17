@@ -1,0 +1,25 @@
+//! Test: Multiline comment structure preservation
+//! Tags: comments, multiline, structure, globals
+
+//=== TEST CASE:multiline_comments_preserve_structure ===
+
+// Time and location state
+global time_of_day: float = 12.0  // 0.0 to 24.0 hours
+global time_speed: float = 1.0    // Time multiplier (1.0 = normal speed)
+global is_indoors: bool = false   // Current indoor/outdoor state
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: complex_multiline_comment_blocks ===
+// Multi-line block comment
+// describing complex functionality
+fn complex_function() {
+    // Single line comment
+    let result = calculate()
+
+    // Another block comment
+    // with multiple lines
+    return result
+}
+
+//=== NO CHANGE ===

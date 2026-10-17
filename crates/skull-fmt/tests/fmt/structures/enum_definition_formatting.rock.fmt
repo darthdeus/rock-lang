@@ -1,0 +1,15 @@
+//! Test: Enum definition formatting with field count threshold
+//! Tags: enums, structures, field-count-threshold
+
+//=== TEST CASE:enum_definition_formatting_field_count_threshold ===
+
+enum DrawCommand {
+    Text { text: string, pos: Vec2, size: float, color: Color, offset: Vec2, shadow: bool },
+    Rectangle { pos: Vec2, size: Vec2, color: Color, mode: string },
+    Circle { pos: Vec2, radius: float, color: Color },
+    Line { start: Vec2, end: Vec2, color: Color },
+    Polygon { vertices: [float], color: Color },
+    Point { x: float, y: float }
+}
+
+//=== NO CHANGE ===

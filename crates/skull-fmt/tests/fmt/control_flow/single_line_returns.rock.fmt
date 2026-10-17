@@ -1,0 +1,32 @@
+//! Test: Single line return statements
+//! Tags: returns, single-line, if-statements
+
+//=== TEST CASE:single_line_if_return_with_comment ===
+
+fn test() {
+    if result == -1 {
+        return 25
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:multiple_single_line_returns ===
+
+fn check_bounds(x: int, y: int) {
+    if x < 0 {
+        return false
+    }
+    if y < 0 {
+        return false
+    }
+    if x >= width {
+        return false
+    }
+    if y >= height {
+        return false
+    }
+    return true
+}
+
+//=== NO CHANGE ===

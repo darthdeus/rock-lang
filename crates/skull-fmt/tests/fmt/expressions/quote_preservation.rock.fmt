@@ -1,0 +1,14 @@
+//! Test: Quote style preservation in inline functions
+//! Tags: inline, strings, quotes
+
+//=== TEST CASE: quote_style_preservation ===
+// Triple quotes should be preserved even for single-line strings
+inline(lua) fn with_triple() = """return 42"""
+
+// Double quotes should be preserved
+inline(lua) fn with_double() = "return 42"
+
+// Triple quotes with special characters
+inline(lua) fn special_chars() = """return "hello" .. 'world'"""
+
+//=== NO CHANGE ===

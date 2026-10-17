@@ -1,0 +1,96 @@
+//! Test: Specific bug regression tests
+//! Tags: regressions, bugs, edge-cases
+
+//=== TEST CASE:comment_relocation_bug ===
+
+fn vec_fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
+    let result = initial
+    // Process array in reverse order
+    let i = vec_len(vec) - 1
+    while i >= 0 {
+        result = f(vec[i], result)
+        i = i - 1
+    }
+    return result
+}
+
+struct FunctionCallInfo {
+    name: string,
+    stage: int,
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: fn_calls_with_if ===
+fn positioning() {
+    let pos = vec2(0.0, if to_center.y > 0 { 1.0 } else { -1.0 })
+    return pos
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE:single_line_if_with_break_and_comment ===
+
+fn search_loop() {
+    for item in items {
+        if item > max { break } // Exit the loop
+        process(item)
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:single_line_if_with_continue_and_comment ===
+
+fn filter_loop() {
+    for item in items {
+        if item == 0 { continue } // Skip this iteration
+        process_nonzero(item)
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:preserve_trailing_comment_on_brace ===
+
+fn test() { // Function comment
+    process_data()
+}
+
+//=== EXPECTED ===
+fn test() {
+    // Function comment
+    process_data()
+}
+
+//=== TEST CASE:identical_trailing_comments_preserved ===
+
+fn process() {
+    first_operation() // Same comment
+    second_operation() // Same comment
+    third_operation() // Different comment
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:empty_blocks_formatting ===
+
+fn empty_cases() {
+    let result = if condition { } else { default_value() }
+
+    while processing { }
+
+    for item in items { }
+}
+
+//=== EXPECTED ===
+fn empty_cases() {
+    let result = if condition {} else { default_value() }
+
+    while processing {}
+
+    for item in items {}
+}

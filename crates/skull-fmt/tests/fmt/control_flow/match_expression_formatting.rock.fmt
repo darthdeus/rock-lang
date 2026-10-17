@@ -1,0 +1,62 @@
+//! Test: Match expression formatting
+//! Tags: match, enum, patterns
+
+//=== TEST CASE:match_enum_shorthand_fields ===
+
+fn test(opt: Option) {
+    match opt {
+        Option::Some { value } => {
+            return value
+        },
+        Option::None => {
+            return 0
+        }
+    }
+}
+
+//=== NO CHANGE ===
+
+// Single-line arm blocks stay inline (preserve); only the genuinely multi-line
+// arm expands.
+//=== TEST CASE: match_arm_indentation ===
+fn test(x: MyEnum) {
+    match x {
+        MyEnum::A => { return 1 },
+        MyEnum::B { value } => { return value },
+        MyEnum::C => {
+            log("handling C case")
+            return 42
+        }
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: match_enum_pattern_formatting ===
+fn test(option: Option<int>) {
+    match option {
+        Option::Some { value } => {
+            log("Found value: {value}")
+            return value * 2
+        },
+        Option::None => {
+            log("No value present")
+            return 0
+        },
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: match_standalone_interior_comments ===
+fn test(kind: Kind) -> int {
+    return match kind {
+        Kind::A => 1,
+        // Standalone comment before an arm must survive.
+        // Multiple lines too.
+        Kind::B => 2,
+        _ => 0,
+    }
+}
+
+//=== NO CHANGE ===

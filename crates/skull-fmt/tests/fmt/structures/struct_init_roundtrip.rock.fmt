@@ -1,0 +1,27 @@
+//! Test: Struct init formatter regressions (multi-field, shorthand, block values)
+//! Tags: struct-init, shorthand, regressions
+
+//=== TEST CASE: struct_init_field_shorthand ===
+fn f() {
+    let a = 1
+    let f = 4
+    let six = Six { a, b + c: 2, d + e: 3, f }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_expression_as_field_value_indent ===
+fn f() {
+    let q = FourInts {
+        a + b: {
+            EVAL_COUNT = EVAL_COUNT + 1
+            10
+        },
+        c + d: {
+            EVAL_COUNT = EVAL_COUNT + 1
+            20
+        },
+    }
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,39 @@
+//! Test: Extern/inline function formatting
+//! Tags: extern, inline, functions
+
+//=== TEST CASE: extern_function_preservation ===
+inline(lua) fn get_working_directory() -> string = """
+    return love.filesystem.getWorkingDirectory()
+"""
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: triple_quoted_string_preservation ===
+inline(lua) fn multi_line_lua() -> int = """
+    local x = 10
+    local y = 20
+    return x + y
+"""
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: extern_with_single_line_lua ===
+inline(lua) fn simple() -> bool = "return true"
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: extern_function_semicolon_removal ===
+inline(lua) fn simple_func() -> int = "return 1"
+inline(lua) fn another_func(x: int) -> int = "return x + 1"
+inline(lua) fn multiline_func() -> int = """
+    return 42
+"""
+inline(lua) fn single_line_func() -> string = "return 'hello'";
+
+//=== EXPECTED ===
+inline(lua) fn simple_func() -> int = "return 1"
+inline(lua) fn another_func(x: int) -> int = "return x + 1"
+inline(lua) fn multiline_func() -> int = """
+    return 42
+"""
+inline(lua) fn single_line_func() -> string = "return 'hello'"

@@ -1,0 +1,46 @@
+//! Test: Lambda expression formatting
+//! Tags: lambdas, arrows, functions
+
+//=== TEST CASE: simple_lambda_expressions ===
+fn test() {
+    let add = (x: int, y: int) => x + y
+    let square = (x: int) => x * x
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: empty_block_lambda_in_call_is_idempotent ===
+fn test() {
+    queue(pool, () => {})
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:long_lambda_parameter_expansion ===
+
+fn test() {
+    let calculate_damage = (base_damage: float, armor_value: float, damage_multiplier: float) => base_damage * damage_multiplier - armor_value
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: lambda_with_block_body ===
+fn test() {
+    let complex_lambda = (x: int) => {
+        let intermediate = x * 2
+        let result = intermediate + 10
+        result
+    }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:lambda_arrow_syntax ===
+
+fn main() {
+    vec_sort(numbers, x => x)
+}
+
+//=== NO CHANGE ===

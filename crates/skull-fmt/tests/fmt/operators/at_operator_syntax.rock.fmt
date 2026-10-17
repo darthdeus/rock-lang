@@ -1,0 +1,206 @@
+//! Test: @ operator syntax formatting
+//! Tags: operators, at-operator, blocks, lambda
+
+//=== TEST CASE:basic_at_operator_usage ===
+
+fn main() {
+    profile("computation") @ expensive_calculation()
+
+    timed_scope("database") @ {
+        query_database()
+        process_results()
+    }
+
+    with_debug_group("render") @ draw_scene()
+}
+
+//=== EXPECTED ===
+fn main() {
+    profile("computation") @ expensive_calculation()
+
+    timed_scope("database") @ {
+        query_database()
+        process_results()
+    }
+
+    with_debug_group("render") @ draw_scene()
+}
+//=== TEST CASE:at_operator_with_complex_blocks ===
+
+fn render_scene() {
+    with_debug_group("map_render")@{
+        for (_, tile) in tile_grid {
+            draw_tile(tile)
+        }
+        update_tile_animations()
+    }
+
+    profile("particle_system") @ particle_update()
+}
+
+//=== EXPECTED ===
+fn render_scene() {
+    with_debug_group("map_render") @ {
+        for (_, tile) in tile_grid {
+            draw_tile(tile)
+        }
+        update_tile_animations()
+    }
+
+    profile("particle_system") @ particle_update()
+}
+//=== TEST CASE:chained_at_operators ===
+
+fn complex_operation() {
+    with_lock("resource")@profile("critical_section")@{
+        access_shared_resource()
+        perform_calculation()
+    }
+}
+
+//=== EXPECTED ===
+fn complex_operation() {
+    with_lock("resource") @ profile("critical_section") @ {
+        access_shared_resource()
+        perform_calculation()
+    }
+}
+//=== TEST CASE:at_operator_in_expressions ===
+
+fn test_expressions() {
+    let result = timed("compute") @ calculate_value()
+
+    let data = profile("data_load") @ {
+        load_from_disk()
+        validate_data()
+        return processed_data
+    }
+}
+
+//=== EXPECTED ===
+fn test_expressions() {
+    let result = timed("compute") @ calculate_value()
+
+    let data = profile("data_load") @ {
+        load_from_disk()
+        validate_data()
+        return processed_data
+    }
+}
+//=== TEST CASE:at_operator_with_function_calls ===
+
+fn nested_calls() {
+    log_scope("outer") @ {
+        inner_function(profile("arg") @ get_value())
+        another_call(
+            with_context("param") @ compute_param()
+        )
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: at_operator_with_method_calls ===
+fn test() {
+    obj.profile("method_timing") @ obj.update().process()
+    player.log_action("move") @ player.move_to(target)
+    debug.trace("computation") @ calculate_complex_result()
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:at_operator_with_conditional_expressions ===
+
+fn test() {
+    profile("conditional") @ if should_process {
+        process_data()
+    } else {
+        skip_processing()
+    }
+
+    timing("loop") @ {
+        update_state()
+    }
+}
+
+//=== EXPECTED ===
+fn test() {
+    profile("conditional") @ if should_process {
+        process_data()
+    } else {
+        skip_processing()
+    }
+
+    timing("loop") @ update_state()
+}
+//=== TEST CASE:at_operator_with_array_and_struct_literals ===
+
+fn test() {
+    process_list("batch") @ [
+        item1,
+        item2,
+        item3
+    ]
+
+    configure_system("setup") @ SystemConfig {
+        enabled: true,
+        timeout: 30,
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: at_operator_with_return_statements ===
+fn test() {
+    return with_timing("calc") @ expensive_function()
+}
+
+fn another_test() {
+    return profile("result") @ {
+        let temp = calculate()
+        validate(temp)
+        temp
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:at_operator_comment_preservation ===
+
+fn test() {
+    // Profile before the operation
+    profile("operation") @ // Start timing here
+    complex_operation()
+
+    timing("batch") @ /* Process batch */ process_batch(data)
+}
+
+//=== NO CHANGE ===
+//=== TEST CASE:at_operator_no_parentheses_syntax ===
+
+fn test() {
+    profile "watcher" @ watch_file_changes()
+    timing "network" @ send_request(url)
+    debug "state" @ print_debug_info()
+}
+
+//=== EXPECTED ===
+fn test() {
+    profile("watcher") @ watch_file_changes()
+    timing("network") @ send_request(url)
+    debug("state") @ print_debug_info()
+}
+//=== TEST CASE: at_operator_with_string_interpolation ===
+fn test() {
+    profile("operation_{operation_id}") @ execute_operation()
+    timing("request_{url}") @ fetch_data(url)
+    debug("user_{user.name}") @ process_user_data(user)
+}
+
+//=== NO CHANGE ===
+//=== TEST CASE: at_operator_single_line_trailing_comment ===
+fn test() {
+    a @ b() // note
+}
+
+//=== NO CHANGE ===

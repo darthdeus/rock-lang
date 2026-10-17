@@ -1,0 +1,112 @@
+//! Test: Enum definitions and variant formatting
+//! Tags: enums, match, variants
+
+//=== TEST CASE: simple_enum ===
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: enum_with_tuple_variants ===
+enum Shape {
+    Point,
+    Circle(float),
+    Rect(float, float)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: enum_with_struct_variants ===
+enum Color {
+    RGB {
+        r: float,
+        g: float,
+        b: float,
+    },
+    RGBA {
+        r: float,
+        g: float,
+        b: float,
+        a: float,
+    },
+    Named(string)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: enum_construction_tuple ===
+fn make_circle(r: float) -> Shape {
+    return Shape::Circle(r)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: enum_construction_struct ===
+fn make_rgb(r: float, g: float, b: float) -> Color {
+    return Color::RGB { r: r, g: g, b: b }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: match_enum_tuple ===
+fn describe(s: Shape) -> string {
+    return match s {
+        Shape::Point => "point",
+        Shape::Circle(r) => "circle",
+        Shape::Rect(w, h) => "rect",
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: match_enum_struct ===
+fn red_amount(c: Color) -> float {
+    return match c {
+        Color::RGB { r, g, b } => r,
+        Color::RGBA { r, g, b, a } => r,
+        Color::Named(name) => 0.0,
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: generic_enum ===
+enum Option<T> {
+    Some(T),
+    None
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: trailing_comma_preserved ===
+enum Status {
+    Active,
+    Inactive,
+    Pending,
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: no_trailing_comma_preserved ===
+enum Mode {
+    Read,
+    Write,
+    Append
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: match_last_arm_trailing_comma_source_derived ===
+fn check(s: Status) -> bool {
+    return match s {
+        Status::Active => true
+        Status::Inactive => false
+        Status::Pending => false
+    }
+}
+
+//=== NO CHANGE ===

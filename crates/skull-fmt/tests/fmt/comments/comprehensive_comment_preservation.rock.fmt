@@ -1,0 +1,135 @@
+//! Test: Comprehensive comment preservation patterns
+//! Tags: comments, preservation, mixed
+
+//=== TEST CASE:comment_preservation_after_assert ===
+
+fn test() {
+    assert_eq(result, expected) // Should match expected value
+    assert(condition) // Must be true to continue
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:comments_with_arithmetic_expressions ===
+
+fn test() {
+    let result = a + b // Simple addition
+    let complex = (x * y) + (a - b) // Mixed operations
+    let formula = 2 * pi * radius // Circle circumference
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:preserve_comments_after_assignments ===
+
+fn test() {
+    let width = 800  // Window width
+    let height = 600 // Window height
+    let title = "My App" // Application title
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: blank_line_before_comment ===
+fn test() {
+    let setup_complete = initialize_system()
+
+    // Main processing loop starts here
+    while running {
+        update()
+    }
+
+    // Cleanup phase
+    shutdown()
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: preserve_separate_comment_lines ===
+fn test() {
+    // This is a standalone comment
+    let value = 42
+
+    // Another standalone comment
+    // With multiple lines
+    process_value(value)
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:preserve_standalone_comments_in_function_body ===
+
+fn process_data() {
+    // Initialize variables
+    let data = load_data()
+
+    // Validate input
+    if !is_valid(data) {
+        return
+    }
+
+    // Process the data
+    transform(data)
+
+    // Save results
+    save_results(data)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:preserve_trailing_comment_on_statement ===
+
+fn test() {
+    let config = load_config() // Load from file
+    validate_config(config) // Ensure validity
+    apply_config(config) // Apply settings
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:mixed_trailing_and_separate_comments ===
+
+fn test() {
+    // Configuration section
+    let host = "localhost" // Development host
+    let port = 8080 // Default port
+
+    // Connection logic
+    let connection = connect(host, port) // Establish connection
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: multiple_separate_comments ===
+fn initialize_system() {
+    // Phase 1: Hardware initialization
+    init_hardware()
+
+    // Phase 2: Software setup
+    load_drivers()
+
+    // Phase 3: User interface
+    setup_ui()
+
+    // System is now ready
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: standalone_comment_preservation ===
+// Global configuration constants
+global MAX_CONNECTIONS: int = 100
+
+// Database configuration
+global DB_HOST: string = "localhost"
+global DB_PORT: int = 5432
+
+fn main() {
+    // Application entry point
+    start_server()
+}
+
+//=== NO CHANGE ===

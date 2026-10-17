@@ -1,0 +1,39 @@
+//! Test: Blank line preservation
+//! Tags: blank-lines, spacing
+
+//=== TEST CASE:blank_line_preservation ===
+
+// Section 1: Type definitions
+struct TypeInfo {
+    name: string,
+    type_id: int,
+    fields: [FieldInfo]
+}
+
+struct FieldInfo {
+    name: string,
+    field_type: string
+}
+
+// Section 2: Helper functions
+fn helper_one() -> int {
+    return 42
+}
+
+fn helper_two() -> int {
+    return 84
+}
+
+// Section 3: Main logic
+fn main() {
+    let x = helper_one()
+    let y = helper_two()
+
+    // Process values
+    if x > y { print("x is bigger") }
+
+    // Final result
+    print("done")
+}
+
+//=== NO CHANGE ===

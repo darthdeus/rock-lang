@@ -1,0 +1,34 @@
+//! Test: Struct literal formatting
+//! Tags: expressions, structs, single-line
+
+//=== TEST CASE: simple_struct_literals_stay_inline ===
+// Single field structs can stay on one line
+let p = Point { x: 1 }
+let name = Name { value: "test" }
+
+// Short multi-field structs can stay on one line if they fit
+let p2 = Point { x: 1, y: 2 }
+let color = RGB { r: 255, g: 128, b: 0 }
+
+// Empty struct
+let empty = Empty {}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: struct_literals_preserve_author_layout ===
+// Layout preserver: a struct literal keeps the author's line layout. A
+// single-line literal stays inline (even past the width limit); one already
+// written multi-line stays multi-line.
+let config = Configuration { name: "very_long_configuration_name", value: 42, enabled: true, debug: false }
+
+let nested = Outer { inner: Inner { x: 1, y: 2 }, z: 3 }
+
+let complex = Data {
+    name: "test",
+    processor: (x: int) => {
+        return x * 2
+    },
+    values: [1, 2, 3, 4, 5],
+}
+
+//=== NO CHANGE ===

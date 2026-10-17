@@ -1,0 +1,134 @@
+//! Test: the formatter preserves the author's intentional layout -- hand-aligned
+//! data-table columns and packed field grouping in multi-line constructs. It is
+//! a layout-preserver, not a normalizer. See docs/skull-fmt-plan.md
+//! Tags: layout, alignment, data-tables, preserve
+
+// Hand-aligned array of struct literals: the column padding before short_code /
+// v is the author's; a multi-line array keeps one row per line AND keeps each
+// row's internal alignment (verbatim row slice).
+//=== TEST CASE: aligned_array_columns_preserved ===
+global REAGENTS: [ReagentData] = [
+    ReagentData { name: "Black Pearl",   short_code: "Bp", v: 1 },
+    ReagentData { name: "Blood Moss",    short_code: "Bm", v: 2 },
+    ReagentData { name: "Mandrake Root", short_code: "Mr", v: 3 },
+]
+
+//=== NO CHANGE ===
+
+// Field packing inside a multi-line struct literal: `kind` on its own line, the
+// next five fields packed onto one line by the author -- kept packed, not
+// exploded one-field-per-line. A field whose value is multi-line still recurses.
+//=== TEST CASE: struct_literal_field_packing_preserved ===
+global S: SpellDef = SpellDef {
+    kind: SpellKind::Lightning,
+    name: "Lightning", words: "Por Ort Grav", cast_time: 0.5, mana_cost: 11,
+    color: color(1.0, 1.0, 0.0, 1.0),
+}
+
+//=== NO CHANGE ===
+
+// A match written on one source line stays inline (preserve), not exploded one
+// arm per line.
+//=== TEST CASE: single_line_match_stays_inline ===
+fn hovered(p: ClickTarget) -> Entity<Mob>? {
+    return match p { ClickTarget::MobE(e) => e, _ => null }
+}
+
+//=== NO CHANGE ===
+
+// A control-flow body the author wrote on one source line stays inline, even
+// with multiple statements (`while c { a; b }`) -- not exploded.
+//=== TEST CASE: single_line_control_flow_body_preserved ===
+fn revert_all() {
+    let i = 0
+    while i < SPELLS.len { revert_spell(i); i += 1 }
+}
+
+//=== NO CHANGE ===
+
+// A multi-line call preserves the author's per-line argument grouping: a hanging
+// call (`f(a, b,` then continuation) keeps that shape; an exploded call (open
+// paren alone, one arg per line) keeps that shape. Not normalized to either.
+//=== TEST CASE: multiline_call_arg_grouping_preserved ===
+fn t() {
+    sim_eq_bool(is_valid_target(h, Faction::Hostile, false), false,
+        "Hostile skips Hostile (no mob-vs-mob brawls)")
+    foo(
+        a,
+        b,
+        c
+    )
+}
+
+//=== NO CHANGE ===
+
+// A struct/enum definition written on one source line stays inline; a multi-line
+// one expands. Same preserve rule as struct literals.
+//=== TEST CASE: single_line_type_defs_preserved ===
+enum TileType { Ground, Wall }
+struct Pt { x: int, y: int }
+enum Occupant { None, Prop(PropType), Door(DoorSpec) }
+
+//=== NO CHANGE ===
+
+// Hand-aligned columns are preserved: aligned `let` columns, aligned match-arm
+// `=>` columns. Non-aligned siblings still normalize (handled elsewhere).
+//=== TEST CASE: hand_aligned_columns_preserved ===
+fn movement() {
+    let up    = if key("up")    { 1.0 } else { 0.0 }
+    let down  = if key("down")  { 1.0 } else { 0.0 }
+    let right = if key("right") { 1.0 } else { 0.0 }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: aligned_match_arms_preserved ===
+fn idx(k: ReagentKind) -> int {
+    return match k {
+        ReagentKind::BlackPearl   => 0,
+        ReagentKind::MandrakeRoot => 4,
+        ReagentKind::Nightshade   => 5,
+    }
+}
+
+//=== NO CHANGE ===
+
+// An EXPLICIT `=> return e` in a match arm keeps the keyword (it returns from the
+// enclosing fn -- dropping it changes control flow); a plain `=> e` stays bare.
+//=== TEST CASE: match_arm_explicit_return_kept ===
+fn has(s: Status, k: Kind) -> bool {
+    for status in s {
+        match (status, k) {
+            (Status::A, Kind::A) => return true,
+            (Status::B, Kind::B) => true,
+            _ => {}
+        }
+    }
+    return false
+}
+
+//=== NO CHANGE ===
+
+// A hugging call whose struct-literal arg carries an interior comment still
+// hugs -- the arg renders its own comments; it isn't un-hugged onto its own line.
+//=== TEST CASE: hug_preserved_with_interior_comment ===
+fn die() {
+    CORPSES.insert(Corpse {
+        grid: player.movable.grid,
+        // Last frame of the death clip = settled face-down pose.
+        sprite_frame: necro_death.frames - 1,
+    })
+}
+
+//=== NO CHANGE ===
+
+// Statements the author put on one source line (`;`-separated, and aligned)
+// stay on that line; a body minified entirely onto one line still expands.
+//=== TEST CASE: semicolon_statements_on_one_line_preserved ===
+co fn vfx() -> Coroutine<CoFrame> {
+    force_load_spell(SpellKind::Lightning);   fire_at_mob(ml); await frame(3)
+    force_load_spell(SpellKind::Flamestrike); fire_at_mob(mf); await frame(3)
+    image_snapshot("done")
+}
+
+//=== NO CHANGE ===

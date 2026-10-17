@@ -1,0 +1,56 @@
+//! Test: Empty struct spacing rules
+//! Tags: structs, spacing, empty-structs
+
+//=== TEST CASE:consecutive_empty_struct_spacing ===
+
+struct A {}
+struct B {}
+struct C {}
+
+//=== EXPECTED ===
+struct A {}
+struct B {}
+struct C {}
+//=== TEST CASE:empty_struct_vs_regular_struct_spacing ===
+
+struct EmptyStruct {}
+struct RegularStruct {
+    field1: int,
+    field2: string,
+}
+
+//=== EXPECTED ===
+struct EmptyStruct {}
+
+struct RegularStruct {
+    field1: int,
+    field2: string,
+}
+//=== TEST CASE:mixed_empty_and_regular_struct_patterns ===
+
+struct Empty1 {}
+struct WithFields {
+    name: string,
+}
+struct Empty2 {}
+struct AnotherWithFields {
+    value: int,
+    active: bool,
+}
+struct Empty3 {}
+
+//=== EXPECTED ===
+struct Empty1 {}
+
+struct WithFields {
+    name: string,
+}
+
+struct Empty2 {}
+
+struct AnotherWithFields {
+    value: int,
+    active: bool,
+}
+
+struct Empty3 {}

@@ -1,0 +1,107 @@
+//! Test: If statements with inline comments
+//! Tags: if-statements, comments, inline
+
+//=== TEST CASE: single_line_if_statements_with_comments ===
+fn test() {
+    if n.north { index = index + 1 }
+    if n.north_east { index = index + 2 }
+    if n.east { index = index + 4 }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: if_statement_with_inline_comment ===
+fn test() {
+    if tile.tile_type == 0 {
+        // Lab wall uses autotiling
+        draw_sprite(sprite_wall_lab, world_pos, tile.sprite_source)
+    } else {
+        draw_sprite(sprite_tileset, world_pos, tile.sprite_source)
+    }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:multiple_if_statements_with_mixed_comments ===
+
+fn process_directions() {
+    if input.left { player.x -= speed } // Move left
+
+    // Complex movement calculation
+    if input.right {
+        player.x += speed * delta_time
+    }
+
+    if input.up { player.y -= speed } // Jump
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:if_loops_on_separate_line ===
+
+fn test() {
+    if condition
+    {
+        action()
+    }
+
+    while running
+    {
+        update()
+    }
+}
+
+//=== EXPECTED ===
+fn test() {
+    if condition {
+        action()
+    }
+
+    while running {
+        update()
+    }
+}
+
+//=== TEST CASE:nested_short_if_fmt ===
+
+fn test() {
+    if outer_condition {
+        if inner_condition { action() }
+        other_action()
+    }
+
+    if another_condition {
+        if nested { short_action() }
+        else { alternative_action() }
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:aligned_comments_in_if_statements ===
+
+fn test() {
+    if condition_a {     // Comment A
+        action_a()
+    } else if condition_b {  // Comment B
+        action_b()
+    } else {             // Comment C
+        default_action()
+    }
+}
+
+//=== EXPECTED ===
+fn test() {
+    if condition_a {
+        // Comment A
+        action_a()
+    } else if condition_b {
+        // Comment B
+        action_b()
+    } else {
+        // Comment C
+        default_action()
+    }
+}

@@ -1,0 +1,64 @@
+//! Test: Integration scenarios and real-world code patterns
+//! Tags: integration, real-world, type-casting, conditionals
+
+//=== TEST CASE: type_casting_with_division ===
+fn test() {
+    let t = j :: float / arc_steps :: float
+    let ratio = width :: int / height :: int
+    let normalized = (value :: float) / (max_value :: float)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: conditional_let_assignments ===
+fn test() {
+    let north = if n.north { 1 } else { 0 }
+    let direction = if moving_up { Direction::North } else { Direction::South }
+    let status = if is_connected { "online" } else { "offline" }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: global_arrays_with_function_calls ===
+global COLOR_BLOOD: [Color] = [ MEAT_BLOOD_COLOR.darken(0.35) ]
+global THEME_COLORS: [Color] = [
+    BASE_COLOR.lighten(0.2),
+    BASE_COLOR.darken(0.3),
+    BASE_COLOR.saturate(0.5)
+]
+
+//=== EXPECTED ===
+global COLOR_BLOOD: [Color] = [MEAT_BLOOD_COLOR.darken(0.35)]
+global THEME_COLORS: [Color] = [
+    BASE_COLOR.lighten(0.2),
+    BASE_COLOR.darken(0.3),
+    BASE_COLOR.saturate(0.5)
+]
+
+//=== TEST CASE: commented_out_function_calls_preservation ===
+fn update_system() {
+    player_update()
+    // lurker_update()  // Disabled for now
+    // enemy_spawn()    // TODO: Re-enable after bug fix
+    particle_update()
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: complex_nested_field_access ===
+fn test() {
+    let distance = player.position.distance_to(target.position)
+    let health_ratio = entity.stats.health / entity.stats.max_health
+    let is_visible = camera.viewport.contains(entity.bounds.center)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: mixed_assignments_and_operations ===
+fn test() {
+    let index = base_index + if offset_enabled { offset_value } else { 0 }
+    let result = initial_value * if multiplier_active { multiplier } else { 1.0 }
+    let color = base_color.blend(if highlighted { highlight_color } else { shadow_color })
+}
+
+//=== NO CHANGE ===

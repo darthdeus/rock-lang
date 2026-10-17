@@ -1,0 +1,52 @@
+//! Test: Coroutine function formatting
+//! Tags: coroutines, co_fn, yield
+
+//=== TEST CASE: simple_coroutine ===
+co fn count(start: int) -> Coroutine<int> {
+    yield start
+    yield start + 1
+    yield start + 2
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: infinite_generator ===
+co fn naturals() -> Coroutine<int> {
+    let n = 0
+    loop {
+        yield n
+        n = n + 1
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: coroutine_with_return ===
+co fn range(from: int, to: int) -> Coroutine<int, int> {
+    let i = from
+    while i < to {
+        yield i
+        i = i + 1
+    }
+    return to - from
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: resume_usage ===
+fn consume() {
+    let gen = naturals()
+    let v = gen.resume() ?? -1
+    print(v)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: await_delegation ===
+co fn outer() -> Coroutine<int, int> {
+    yield 0
+    let r = await range(1, 4)
+    yield r
+}
+
+//=== NO CHANGE ===

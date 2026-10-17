@@ -1,0 +1,30 @@
+//! Test: a fn signature's params wrap based on the signature alone, not the body
+//! Tags: regressions, functions, params, idempotence
+
+// A one-line source fn whose body is a wide struct literal: the body expands,
+// but the params must NOT wrap (the signature itself fits). Measuring the params
+// against the wide inline body broke them in one pass and collapsed them the
+// next, so the file never reached a fixed point.
+
+//=== TEST CASE: wide_body_keeps_params_flat ===
+fn make_config(name: string, port: int) -> Config { return Config { host: name, port: port, retries: 3, verbose: false, timeout: 30 } }
+
+//=== EXPECTED ===
+fn make_config(name: string, port: int) -> Config {
+    return Config { host: name, port: port, retries: 3, verbose: false, timeout: 30 }
+}
+
+//=== TEST CASE: annotation_prefix_counts_toward_signature_width ===
+@pure fn intersect_circle(center_a: Vec2, radius_a: float, center_b: Vec2, radius_b: float) -> bool {
+    return true
+}
+
+//=== EXPECTED ===
+@pure fn intersect_circle(
+    center_a: Vec2,
+    radius_a: float,
+    center_b: Vec2,
+    radius_b: float
+) -> bool {
+    return true
+}

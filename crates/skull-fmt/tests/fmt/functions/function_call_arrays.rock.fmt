@@ -1,0 +1,33 @@
+//! Test: Function calls with array arguments
+//! Tags: function-calls, arrays, formatting
+
+//=== TEST CASE:function_call_with_array_argument_formatting ===
+
+fn test() {
+    let sfx_footsteps = load_multisound([
+        "assets/SFX/Footsteps/footsteps-1.wav",
+        "assets/SFX/Footsteps/footsteps-2.wav",
+        "assets/SFX/Footsteps/footsteps-3.wav",
+        "assets/SFX/Footsteps/footsteps-4.wav",
+        "assets/SFX/Footsteps/footsteps-5.wav"
+    ])
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:nested_array_function_calls ===
+
+fn load_assets() {
+    let sounds = load_sounds([
+        load_audio("music.wav"),
+        load_audio("effects.wav")
+    ])
+
+    let textures = load_textures([
+        "sprite1.png",
+        "sprite2.png",
+        "background.jpg"
+    ])
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,50 @@
+//! Test: Platform-specific and FFI formatting
+//! Tags: conditional-compilation, varargs, ffi
+//! NOTE: These syntax features are not yet supported in current Rock parser
+//! NOTE: Tests are commented out until conditional compilation and varargs are supported
+
+//=== COMMENTED OUT TEST CASE: conditional_compilation_format ===
+// #if lua
+// fn lua_specific_function() {
+//     return "lua implementation"
+// }
+// #end
+//
+// #if js
+// fn js_specific_function() {
+//     return "javascript implementation"
+// }
+// #end
+//
+// //=== EXPECTED ===
+// #if lua
+// fn lua_specific_function() {
+//     return "lua implementation"
+// }
+// #end
+//
+// #if js
+// fn js_specific_function() {
+//     return "javascript implementation"
+// }
+// #end
+
+//=== COMMENTED OUT TEST CASE: varargs_in_extern_functions ===
+// extern fn printf(format: string, ...any) -> int
+// extern fn log_variadic(...any)
+//
+// fn use_varargs() {
+//     printf("Hello %s %d", "world", 42)
+//     log_variadic("multiple", "arguments", "here")
+// }
+//
+// //=== NO CHANGE ===
+
+//=== TEST CASE: placeholder_for_future_features ===
+fn placeholder() {
+    // This file will contain conditional compilation and varargs tests
+    // when those language features are implemented
+    log("Future platform-specific and FFI formatting tests will go here")
+}
+
+//=== NO CHANGE ===

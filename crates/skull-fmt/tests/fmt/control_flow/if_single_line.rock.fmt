@@ -1,0 +1,33 @@
+//! Test: Preserve single-line if statements when appropriate
+//! Tags: if, control-flow, single-line
+
+//=== TEST CASE: simple_single_line_ifs ===
+// Simple returns should stay single-line
+if x > 0 { return x }
+if done { break }
+if error { continue }
+if found { return true }
+
+// Guards at function start
+fn process(value: int) -> int {
+    if value < 0 { return 0 }
+    if value > 100 { return 100 }
+    return value * 2
+}
+
+// Nested but still simple
+fn check(x: int, y: int) -> bool {
+    if x < 0 { if y < 0 { return true } }
+    return false
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: single_line_ifs_stay_inline ===
+// Layout preserver: the author's line breaks are authoritative. A single-line
+// if stays inline, even with multiple statements or past the width limit.
+if condition { let x = 1; process(x); return x }
+
+if very_long_condition_that_definitely_exceeds_the_line_limit { return another_very_long_expression }
+
+//=== NO CHANGE ===

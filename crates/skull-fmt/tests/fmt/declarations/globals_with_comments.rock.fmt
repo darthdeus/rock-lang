@@ -1,0 +1,38 @@
+//! Test: Global variable declarations with comments
+//! Tags: globals, comments, declarations
+
+//=== TEST CASE: globals_with_comments ===
+global global_counter: int = 0  // Track application state
+global max_connections: int = 100  // Connection limit
+
+// Configuration constants
+global default_timeout: float = 30.0
+global retry_count: int = 3  // Maximum retry attempts
+
+global debug_enabled: bool = false  // Debug flag
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:multiline_global_with_comments ===
+
+// Application configuration
+global app_config: AppConfig = AppConfig {
+    name: "MyApp",  // Application name
+    version: "1.0.0",  // Current version
+
+    // Feature flags
+    enable_logging: true,
+    enable_metrics: false,
+}
+
+//=== EXPECTED ===
+// Application configuration
+global app_config: AppConfig = AppConfig {
+    name: "MyApp",     // Application name
+    version: "1.0.0",  // Current version
+
+    // Feature flags
+    enable_logging: true,
+    enable_metrics: false,
+}

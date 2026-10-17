@@ -1,0 +1,49 @@
+//! Test: Inline function formatting
+//! Tags: inline, functions
+
+//=== TEST CASE: inline_function_formatting ===
+// Inline functions should stay on same line with their annotation
+@nomangle inline(lua) fn __rock_hash(obj: any) -> int = """
+    if type(obj) ~= "table" then
+        return 0
+    end
+    return 1
+"""
+
+// Functions with multiple parameters should not be collapsed to single line
+@nomangle
+inline(lua) fn __register_decorated_function(
+    function_name: string,
+    module_path: string,
+    decorators: [any],
+    original_name: string,
+    decorated_name: string
+) = """
+    -- Initialize the annotation registry if it doesn't exist
+    if not _G.__ROCK_ANNOTATION_REGISTRY then
+        _G.__ROCK_ANNOTATION_REGISTRY = {}
+    end
+"""
+
+//=== EXPECTED ===
+// Inline functions should stay on same line with their annotation
+@nomangle inline(lua) fn __rock_hash(obj: any) -> int = """
+    if type(obj) ~= "table" then
+        return 0
+    end
+    return 1
+"""
+
+// Functions with multiple parameters should not be collapsed to single line
+@nomangle inline(lua) fn __register_decorated_function(
+    function_name: string,
+    module_path: string,
+    decorators: [any],
+    original_name: string,
+    decorated_name: string
+) = """
+    -- Initialize the annotation registry if it doesn't exist
+    if not _G.__ROCK_ANNOTATION_REGISTRY then
+        _G.__ROCK_ANNOTATION_REGISTRY = {}
+    end
+"""

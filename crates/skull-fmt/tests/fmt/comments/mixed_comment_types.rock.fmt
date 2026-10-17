@@ -1,0 +1,45 @@
+//! Test: Mixed trailing and separate comments
+//! Tags: comments, mixed, trailing, separate
+
+//=== TEST CASE:mixed_trailing_and_separate_comments ===
+
+fn test() {
+    let x = 42 // Trailing comment
+
+    // Separate comment explaining next block
+    for i in 0..10 {
+        print(i) // Another trailing comment
+    }
+    return;
+}
+
+//=== EXPECTED ===
+fn test() {
+    let x = 42 // Trailing comment
+
+    // Separate comment explaining next block
+    for i in 0..10 {
+        print(i) // Another trailing comment
+    }
+    return
+}
+
+//=== TEST CASE:complex_comment_patterns ===
+
+fn complex_function() {
+    // Initialize variables
+    let count = 0  // Track iterations
+    let result = vec_new()  // Store results
+
+    // Main processing loop
+    while count < 10 {
+        // Process each iteration
+        let value = calculate(count)  // Get computed value
+        vec_push(result, value)
+        count += 1  // Increment counter
+    }
+
+    return result  // Return processed data
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,53 @@
+//! Test: Break and continue statement formatting
+//! Tags: break, continue, control-flow
+
+//=== TEST CASE:break_fmt ===
+
+fn test() {
+    loop {
+        if condition {
+            break
+        }
+
+        if other_condition { break }
+
+        while nested_loop {
+            if exit_nested { break }
+            continue
+        }
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: single_line_control_flow ===
+fn test() {
+    while running {
+        if should_skip { continue }
+        if should_exit { break }
+        process_item()
+    }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:multiline_control_flow ===
+
+fn test() {
+    for item in items {
+        if complex_condition(item) {
+            perform_complex_operation(item)
+            continue
+        }
+
+        if termination_condition(item) {
+            cleanup_resources()
+            break
+        }
+
+        default_processing(item)
+    }
+}
+
+//=== NO CHANGE ===

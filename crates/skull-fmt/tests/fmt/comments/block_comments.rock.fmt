@@ -1,0 +1,122 @@
+//! Test: Block comment (/* */) preservation
+//! Tags: comments, block, preservation
+
+//=== TEST CASE: block_comment_between_statements ===
+fn t() {
+    let a = 1
+    /* between */
+    let b = 2
+    return a + b
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_leading_array_element ===
+fn t() {
+    let arr = [
+        1,
+        /* second */ 2,
+        3
+    ]
+    return arr
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_trailing_last_call_arg ===
+fn t() {
+    let r = add3(
+        1,
+        2,
+        3 /* end */
+    )
+    return r
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_struct_literal_field ===
+fn t() {
+    let p = Point {
+        x: 1,
+        /* y field */ y: 2
+    }
+    return p
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_own_line_struct_decl ===
+struct Point {
+    x: int,
+    /* the y coordinate */
+    y: int
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_leading_and_trailing_arg ===
+fn t() {
+    let r = add3(
+        1,
+        2,
+        /* third */ 3 /* end */
+    )
+    return r
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_match_arm ===
+fn t(x: int) -> int {
+    return match x {
+        1 /* one */ => 10,
+        2 => /* two */ 20,
+        _ => 0
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_fn_signature ===
+fn add(a: int, /* the addend */ b: int) -> int {
+    return a + b
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_tuple_type ===
+fn pair() -> (int, /* second */ int) {
+    return (1, 2)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_if_and_for_header ===
+fn t(xs: [int]) -> int {
+    let sum = 0
+    for /* iter */ v in /* over */ xs {
+        if /* pos */ v > 0 /* yep */ {
+            sum = sum + v
+        }
+    }
+    return sum
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_mid_expression ===
+fn t() -> int {
+    let x = 1 + /* add two */ 2 + 4
+    return x
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: block_comment_trailing_statement ===
+fn t() -> int {
+    let x = 5 /* note */
+    return x
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,61 @@
+//! Test: Real-world function formatting
+//! Tags: functions, real-world
+
+//=== TEST CASE: complex_functions_stay_multiline ===
+// Complex single-expression functions should not be collapsed
+fn sin_range(offset: float, speed: float, min: float, max: float) -> float {
+    return min + (max - min) * ((speed * (time + offset)).sin() / 2.0 + 0.5)
+}
+
+// But complex return expressions should stay multi-line
+fn calculate_damage(base: float, multiplier: float, resistance: float) -> float {
+    return base * multiplier * (1.0 - resistance) + random_float(0, 10)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:simple_functions_collapse ===
+
+// Simple single-statement functions can be collapsed if short enough
+fn reset_player() {
+    player = player_new()
+}
+
+// Very simple functions with return can stay on one line if short
+fn get_player_health() -> float {
+    return player.health
+}
+
+// Simple struct returns should stay simple
+fn make_simple_struct() -> Player {
+    return Player { legs: legs_new() }
+}
+
+//=== EXPECTED ===
+// Simple single-statement functions can be collapsed if short enough
+fn reset_player() {
+    player = player_new()
+}
+
+// Very simple functions with return can stay on one line if short
+fn get_player_health() -> float {
+    return player.health
+}
+
+// Simple struct returns should stay simple
+fn make_simple_struct() -> Player {
+    return Player { legs: legs_new() }
+}
+//=== TEST CASE: complex_struct_formatting ===
+// Complex struct returns should be multi-line
+fn make_complex_struct() -> Config {
+    return Config {
+        max_health: 100,
+        spawn_rate: 0.5,
+        difficulty: 3,
+        debug_mode: false,
+        long_field_name_that_makes_it_too_long: "value"
+    }
+}
+
+//=== NO CHANGE ===

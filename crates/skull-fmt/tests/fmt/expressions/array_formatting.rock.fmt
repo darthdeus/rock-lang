@@ -1,0 +1,70 @@
+//! Test: Array formatting and preservation
+//! Tags: arrays, collections, formatting
+
+//=== TEST CASE: preserve_array_formatting ===
+fn test() {
+    let simple = [1, 2, 3, 4, 5]
+    let strings = ["hello", "world", "test"]
+    let mixed = [item1, item2, item3]
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:tabular_array_formatting_preservation ===
+
+fn test() {
+    let matrix = [
+        [1, 2, 3],
+        [4, 5, 6],
+        [7, 8, 9]
+    ]
+
+    let config_table = [
+        { name = "width";  value = 800 },
+        { name = "height"; value = 600 },
+        { name = "title";  value = "App" }
+    ]
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:long_array_wrapping ===
+
+fn test() {
+    let long_array = [
+        "first_very_long_string_element",
+        "second_very_long_string_element",
+        "third_very_long_string_element",
+        "fourth_very_long_string_element"
+    ]
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: nested_array_structures ===
+fn test() {
+    let nested = [
+        [
+            [1, 2],
+            [3, 4]
+        ],
+        [
+            [5, 6],
+            [7, 8]
+        ]
+    ]
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: spread_elements_keep_trailing_comments ===
+fn test() {
+    let all = [
+        ...position,   // xyz
+        ...color,      // rgba
+        ...texcoord    // uv
+    ]
+    return all
+}
+
+//=== NO CHANGE ===

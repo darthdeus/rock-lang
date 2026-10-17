@@ -1,0 +1,39 @@
+//! Test: Global variables with comments
+//! Tags: globals, comments, alignment
+
+//=== TEST CASE:globals_with_comments ===
+
+
+global SAFE_ZONE_CENTER: Vec2 = vec2(0, 0)  // Player spawn point
+global SAFE_ZONE_RADIUS: float = 10.0        // Radius of the safe zone
+global MAX_WANDER_DISTANCE: float = 15.0     // Max distance from spawn point
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:mixed_global_declarations ===
+
+global WINDOW_WIDTH: int = 1920  // Screen resolution
+global WINDOW_HEIGHT: int = 1080
+
+global DEBUG_MODE: bool = false  // Enable debug features
+global LOG_LEVEL: int = 2        // Logging verbosity
+
+// Game constants
+global GRAVITY: float = 9.81
+global JUMP_FORCE: float = 12.0  // Player jump strength
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:single_global_with_inline_comment ===
+
+global x: int = 42  // This is a comment
+
+//=== EXPECTED ===
+global x: int = 42  // This is a comment
+//=== TEST CASE:global_declarations_with_inline_comments ===
+
+global time_of_day: float = 12.0  // 0.0 to 24.0 hours
+global time_speed: float = 1.0    // Time multiplier (1.0 = normal speed)
+global is_indoors: bool = false   // Current indoor/outdoor state
+
+//=== NO CHANGE ===

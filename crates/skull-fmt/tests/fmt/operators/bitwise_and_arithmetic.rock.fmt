@@ -1,0 +1,30 @@
+//! Test: Bitwise and arithmetic operator formatting
+//! Tags: operators, bitwise, arithmetic
+
+//=== TEST CASE:preserve_spacing_around_operators ===
+
+fn test() {
+    let result = a + b * c
+    let check = x == y
+    return;
+}
+
+//=== EXPECTED ===
+fn test() {
+    let result = a + b * c
+    let check = x == y
+    return
+}
+//=== TEST CASE: bitwise_operators_formatting ===
+fn test_bitwise() {
+    let a = 5
+    let b = 3
+    let and_result = a & b
+    let or_result = a | b
+    let xor_result = a ^ b
+    let not_result = ~a
+    let left_shift = a << 2
+    let right_shift = a >> 1
+}
+
+//=== NO CHANGE ===

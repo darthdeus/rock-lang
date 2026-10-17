@@ -1,0 +1,91 @@
+//! Test: Struct field inline comments preservation
+//! Tags: structs, comments, fields
+
+//=== TEST CASE:struct_field_comments ===
+
+struct User {
+    name: string,        // The user's full name
+    email: string,       // Primary email address
+    age: int,           // Age in years
+    active: bool,       // Account status
+}
+
+//=== EXPECTED ===
+struct User {
+    name: string,        // The user's full name
+    email: string,       // Primary email address
+    age: int,            // Age in years
+    active: bool,        // Account status
+}
+
+//=== TEST CASE: struct_field_comments_with_alignment ===
+struct ServerConfig {
+    host: string,           // Server hostname
+    port: int,              // Port number
+    max_connections: int,   // Maximum concurrent connections
+    ssl_enabled: bool,      // Enable SSL/TLS
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: mixed_struct_field_comments ===
+struct GameEntity {
+    id: int,                // Unique entity identifier
+    position: Vec2,
+    velocity: Vec2,         // Movement vector
+    health: float,
+    max_health: float,      // Maximum health points
+    sprite_id: int,         // Sprite resource ID
+    active: bool,
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:struct_field_comments_multiline ===
+
+struct ComplexConfig {
+    // Network settings
+    network_host: string,       // Primary host
+    network_port: int,          // Port for connections
+
+    // Database settings
+    db_connection: string,      // Connection string
+    db_timeout: float,          // Query timeout in seconds
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: enum_variant_standalone_comments ===
+enum Token {
+    // literals
+    Number,
+    String,
+    // punctuation
+    Comma,
+    Semicolon,
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: struct_comment_before_close ===
+struct Buffer {
+    data: int,
+    len: int,
+    // capacity is fixed at construction
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: struct_grouping_blank_without_comment_preserved ===
+struct Layout {
+    x: int,
+    y: int,
+
+    width: int,
+    height: int,
+}
+
+//=== NO CHANGE ===

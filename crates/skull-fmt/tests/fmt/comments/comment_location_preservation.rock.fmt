@@ -1,0 +1,58 @@
+//! Test: Comment location preservation
+//! Tags: comments, location, standalone
+
+//=== TEST CASE:preserve_comment_location_in_function ===
+
+// Right fold processes from right to left
+fn vec_fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
+    let result = initial
+    // Process array in reverse order
+    let i = vec_len(vec) - 1
+    while i >= 0 {
+        result = f(vec[i], result)
+        i = i - 1
+    }
+    return result
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: comments_are_preserved ===
+fn test() {
+    // Leading comment
+    let value = calculate()  // Trailing comment
+
+    // Block comment
+    process(value)
+
+    // Multiple line comment
+    // continues here
+    return result
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: overloaded_functions_preserve_comments ===
+fn process(x: int) {
+    // Handle integer input
+    return x * 2
+}
+
+fn process(x: string) {
+    // Handle string input
+    return x + "_processed"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: standalone_comment_before_decorated_item ===
+global SCORE: int = 0
+
+// section header before a decorated item must survive
+@update(stage = 10)
+fn tick() {
+    return
+}
+
+//=== NO CHANGE ===

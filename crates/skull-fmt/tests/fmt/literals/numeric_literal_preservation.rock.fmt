@@ -1,0 +1,39 @@
+//! Test: Numeric literal preservation (hex, binary, float)
+//! Tags: literals, numbers, hex, binary, float
+
+//=== TEST CASE:hex_literal_preservation ===
+
+fn test() {
+    let color = 0xFF5733
+    let mask = 0xDEADBEEF
+    let small = 0x1A
+    let upper = 0XFF00FF
+}
+
+//=== EXPECTED ===
+fn test() {
+    let color = 0xFF5733
+    let mask = 0xDEADBEEF
+    let small = 0x1A
+    let upper = 0xFF00FF
+}
+//=== TEST CASE: binary_literal_preservation ===
+fn test() {
+    let flags = 0b11010101
+    let permissions = 0b111000111
+    let simple = 0b1010
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: float_literal_preservation ===
+fn test() {
+    let pi = 3.14159
+    let small = 0.000123
+    let large = 25000000000.0
+    let precise = 0.00000123456789
+    let simple = 1.0
+    let no_leading_zero = 0.5
+}
+
+//=== NO CHANGE ===

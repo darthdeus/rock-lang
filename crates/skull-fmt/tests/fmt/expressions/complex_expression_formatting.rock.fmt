@@ -1,0 +1,94 @@
+//! Test: Complex expression formatting and line breaking
+//! Tags: expressions, line-breaking, complex
+
+//=== TEST CASE:complex_let_statements_with_long_expressions ===
+
+fn test() {
+    let result = { very_long_function_call_that_should_break_across_lines(param1, param2, param3) }
+
+    let computed = {
+        calculate_complex_value(
+            first_parameter_with_long_name,
+            second_parameter_with_calculation,
+            third_parameter_from_context
+        )
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:complex_return_statements_with_long_expressions ===
+
+fn test() {
+    let result = {
+        return very_long_function_call_that_should_break_for_readability(
+            parameter_one,
+            parameter_two,
+            parameter_three
+        )
+    }
+
+    let conditional_return = {
+        return if condition_is_true {
+            complex_calculation_with_multiple_parameters()
+        } else {
+            default_fallback_value()
+        }
+    }
+}
+
+//=== EXPECTED ===
+fn test() {
+    let result = {
+        return very_long_function_call_that_should_break_for_readability(
+            parameter_one,
+            parameter_two,
+            parameter_three
+        )
+    }
+
+    let conditional_return = {
+        return if condition_is_true {
+            complex_calculation_with_multiple_parameters()
+        } else {
+            default_fallback_value()
+        }
+    }
+}
+//=== TEST CASE:nested_complex_expressions ===
+
+fn test() {
+    let nested_result = {
+        process_data({
+            transform_input({
+                validate_and_clean(raw_input_data)
+            })
+        })
+    }
+}
+
+//=== EXPECTED ===
+fn test() {
+    let nested_result = {
+        process_data(
+            {
+                transform_input(
+                    {
+                        validate_and_clean(raw_input_data)
+                    }
+                )
+            }
+        )
+    }
+}
+
+//=== TEST CASE: long_conditional_expressions_in_lets ===
+fn test() {
+    let conditional_value = if very_long_condition_that_spans_multiple_parts {
+        calculate_positive_branch_with_complex_logic()
+    } else {
+        calculate_negative_branch_with_fallback_logic()
+    }
+}
+
+//=== NO CHANGE ===

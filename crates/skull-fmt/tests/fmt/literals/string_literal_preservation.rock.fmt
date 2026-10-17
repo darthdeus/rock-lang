@@ -1,0 +1,79 @@
+//! Test: String literal preservation and escape handling
+//! Tags: strings, literals, escapes
+
+//=== TEST CASE: string_escape_preservation ===
+fn test() {
+    let basic = "hello world"
+    let escaped = "line1\nline2\ttab"
+    let quotes = "He said \"hello\" to me"
+    let backslash = "path\\to\\file"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:string_literal_escape_preservation ===
+
+fn test() {
+    let complex = "First line\nSecond line\tTabbed"
+    let unicode = "Unicode: \u{1F600}"
+    let raw_string = r"Raw string with \n no escapes"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: interpolated_string_escape_preservation ===
+fn test() {
+    let name = "Alice"
+    let age = 30
+    let interpolated = "Hello {name}, you are {age} years old!"
+    let escaped_interpolated = "Value: {value}\nNext line"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:triple_quoted_string_preservation ===
+
+fn test() {
+    let multiline = """
+        This is a multiline string
+        with preserved indentation
+        and line breaks
+    """
+
+    let code_block = """
+    fn example() {
+        return "embedded code"
+    }
+    """
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: string_format_specifiers_preservation ===
+fn test() {
+    let formatted_float = "Value: {x:.2f}"
+    let percentage = "Progress: {value:.0%}"
+    let padded = "ID: {id:>5}"
+    let scientific = "Large number: {num:.2e}"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: complex_format_specifiers ===
+fn test() {
+    let table_row = "| {name:<20} | {value:>10.2f} | {status:^8} |"
+    let timestamp = "[{hour:02}:{minute:02}:{second:02}]"
+    let hex_output = "0x{value:08X}"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: brace_escape_round_trip ===
+fn test() {
+    let a = "literal {{ brace"
+    let b = "both {{ and }} here"
+    let x = 1
+    let c = "{{\"name\":\"{x}\"}}"
+}
+
+//=== NO CHANGE ===

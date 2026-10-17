@@ -1,0 +1,111 @@
+//! Test: Comprehensive if statement formatting
+//! Tags: if-statements, control-flow, comments
+
+//=== TEST CASE:simple_if_statement_formatting ===
+
+fn test() {
+    if condition {
+        action()
+    }
+
+    if x > 0 {
+        process_positive(x)
+    } else {
+        process_negative(x)
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: single_line_if_statements_preserve_braces ===
+fn test() {
+    if simple_condition { simple_action() }
+    if x < 0 { return }
+    if found { break }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:single_line_if_with_comment_formatting ===
+
+fn test() {
+    if debug_enabled { log("Debug mode active") } // Development only
+    if user.is_admin { grant_access() } // Admin privileges
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:multiline_if_statements_not_collapsed ===
+
+fn test() {
+    if complex_condition_that_spans_multiple_checks {
+        perform_complex_operation()
+        log_operation_result()
+        return success
+    }
+
+    if user.has_permission && resource.is_available && !system.is_maintenance_mode {
+        grant_access_to_resource()
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:single_statement_if_blocks_stay_multiline ===
+
+fn test() {
+    if error_occurred {
+        handle_error_with_detailed_logging_and_cleanup()
+    }
+
+    if configuration_needs_update {
+        update_configuration_with_validation_and_backup()
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:if_statement_body_formatting ===
+
+fn test() {
+    if condition {
+        let temp = prepare_data()
+        validate_data(temp)
+        process_data(temp)
+    }
+
+    if needs_cleanup {
+        close_connections()
+        free_memory()
+        log_shutdown()
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:if_statements_with_aligned_comments_preservation ===
+
+fn test() {
+    if state == State::Loading {    // Still initializing
+        show_spinner()
+    } else if state == State::Ready {  // Ready for user input
+        enable_controls()
+    } else {                        // Error state
+        show_error_message()
+    }
+}
+
+//=== EXPECTED ===
+fn test() {
+    if state == State::Loading {
+        // Still initializing
+        show_spinner()
+    } else if state == State::Ready {
+        // Ready for user input
+        enable_controls()
+    } else {
+        // Error state
+        show_error_message()
+    }
+}

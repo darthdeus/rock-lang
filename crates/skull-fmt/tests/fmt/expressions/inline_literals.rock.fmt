@@ -1,0 +1,18 @@
+//! Test: Inline function literals
+//! Tags: inline, literals, functions
+
+//=== TEST CASE: inline_literal_preservation ===
+// Single-line inline functions should preserve their quotes
+inline(lua) fn table_new() -> any = "return {}"
+inline(lua) fn random() -> float = "return math.random()"
+
+// Multi-line inline functions should preserve triple quotes
+inline(lua) fn complex_function(x: int) -> int = """
+    local result = x * 2
+    if result > 100 then
+        return 100
+    end
+    return result
+"""
+
+//=== NO CHANGE ===

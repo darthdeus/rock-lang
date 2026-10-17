@@ -1,0 +1,43 @@
+//! Test: Basic comment preservation
+//! Tags: comments, preservation
+
+//=== TEST CASE: basic_comment_preservation ===
+// This is a comment
+fn hello() {
+    // Another comment
+    let x = 1
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:preserve_comment_block_structure ===
+
+// First comment
+// Second comment
+//
+// After blank comment line
+fn test() {
+    return;
+}
+
+//=== EXPECTED ===
+// First comment
+// Second comment
+//
+// After blank comment line
+fn test() {
+    return
+}
+//=== TEST CASE: preserve_true_trailing_comments ===
+fn test() {
+    let x = 42 // Important value
+    let y = 10 // Another comment
+    return;
+}
+
+//=== EXPECTED ===
+fn test() {
+    let x = 42  // Important value
+    let y = 10  // Another comment
+    return
+}

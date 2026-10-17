@@ -47,6 +47,19 @@ pub fn intrinsic_type_name(key: Ustr) -> Option<&'static str> {
         .find(|name| is_intrinsic_key(key, name))
 }
 
+/// Stdlib `value` descriptors whose Lua representation is one host slot (the
+/// cdata for a `Ptr`, the buffer table with its leaf views for a
+/// `NativeBuffer`): copying one shares the referent and never rebuilds it.
+pub const STD_DESCRIPTOR_TYPES: &[&str] = &[
+    "Ptr", "PtrU8", "PtrI8", "PtrU16", "PtrI16", "PtrU32",
+    "NativeBuffer", "NativeBufferU8", "NativeBufferI8", "NativeBufferU16", "NativeBufferI16",
+    "NativeBufferU32",
+];
+
+pub fn is_descriptor_key(key: Ustr) -> bool {
+    is_intrinsic_key_in(key, STD_DESCRIPTOR_TYPES)
+}
+
 pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
     spellings.iter().any(|spelling| is_intrinsic_key(key, spelling))
 }

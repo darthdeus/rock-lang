@@ -1,0 +1,24 @@
+//! Test: Generic type parameters and constraints
+//! Tags: generics, types, constraints
+
+//=== TEST CASE: simple_generic_fn ===
+fn identity<T>(x: T) -> T {
+    return x
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: multi_generic_params ===
+fn zip<A, B>(xs: [A], ys: [B]) -> [(A, B)] {
+    return []
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: generic_struct ===
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+//=== NO CHANGE ===

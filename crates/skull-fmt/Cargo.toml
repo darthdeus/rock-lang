@@ -10,6 +10,6 @@ workspace = true
 rock-core = { path = "../rock-core" }
 rock-tokenizer = { path = "../rock-tokenizer" }
 skull-parser = { path = "../skull-parser" }
-comfy-la-arena = { workspace = true }
+comfy-la-arena = { path = "../la-arena" }
 ustr = { workspace = true }
 ordered-float = { workspace = true }

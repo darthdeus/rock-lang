@@ -1,0 +1,14 @@
+//! Test: a function type as a generic arg whose return is itself generic
+//! Tags: types, functions, generics, regressions
+
+// `Map<.., () -> Coroutine<CoFrame>>` ends in `>>`, tokenized as one `>>` token
+// the parser splits -- which left the function type's span one `>` too long.
+// Slicing it verbatim grabbed that extra `>`, so the App's own `>` produced
+// `>>>` and the output no longer parsed. Params/return now render structurally;
+// only the `fn(` vs `(` prefix is read from the (reliable) span start.
+
+//=== TEST CASE: function_type_returning_generic_in_map ===
+global SIMS: Map<string, () -> Coroutine<CoFrame>> = map_new()
+global HANDLERS: Map<int, () -> Foo<Bar>> = map_new()
+
+//=== NO CHANGE ===

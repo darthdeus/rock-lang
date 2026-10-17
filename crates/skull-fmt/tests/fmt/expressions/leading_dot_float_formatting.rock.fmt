@@ -1,0 +1,22 @@
+//! Test: leading-dot float literals (`.35`) format verbatim
+//! Tags: expressions, literals, floats
+
+//=== TEST CASE: leading_dot_float_preserved ===
+
+fn f() {
+    let a = .35
+    let xs = [.1, .25, .5]
+    let s = 2.0 + .5
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: tuple_index_not_a_float ===
+
+fn f() {
+    let w = (3, 7)
+    let x = w.0
+    let y = w.1
+}
+
+//=== NO CHANGE ===

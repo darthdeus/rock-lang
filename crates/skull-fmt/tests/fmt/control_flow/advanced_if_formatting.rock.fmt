@@ -1,0 +1,118 @@
+//! Test: Advanced if statement formatting
+//! Tags: if, control-flow, complex
+
+//=== TEST CASE:simple_if_collapse ===
+
+fn test() {
+    if vec_len(multi_sound.sources) == 0 {
+        return
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:complex_if_conditions_multiline ===
+
+fn test() {
+    let result = if input_key == KeyCode::Up && can_move_up { move_player_up() } else { if input_key == KeyCode::Down && can_move_down { move_player_down() } else { if input_key == KeyCode::Space { jump() } else { idle_animation() } } }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:nested_if_expressions ===
+
+fn test() {
+    let result = if game_state == GameState::Playing {
+        if player.position.distance_to(objective) < trigger_radius {
+            if player.has_required_items && !enemies_nearby { complete_objective() } else { show_hint() }
+        } else {
+            update_waypoint()
+        }
+    } else {
+        pause_menu()
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: deeply_nested_indentation_stress_test ===
+fn complex_nested_logic() {
+    for i in [1, 2, 3] {
+        if true {
+            for j in [4, 5, 6] {
+                if true {
+                    let result = {
+                        nested_field = if true {
+                            {
+                                deeply_nested = true;
+                                level = 4;
+                                data = [
+                                    1,
+                                    2,
+                                    3
+                                ]
+                            }
+                        } else {
+                            null
+                        };
+                        other_field = "value"
+                    }
+
+                    if true {
+                        while false {
+                            let batch = [7, 8, 9]
+                            for item in batch {
+                                if true {
+                                    log("Processing")
+                                }
+                            }
+                        }
+                    } else {
+                        log("Processing failed")
+                    }
+                }
+            }
+        }
+    }
+}
+
+//=== EXPECTED ===
+fn complex_nested_logic() {
+    for i in [1, 2, 3] {
+        if true {
+            for j in [4, 5, 6] {
+                if true {
+                    let result = {
+                        nested_field = if true {
+                            {
+                                deeply_nested = true
+                                level = 4
+                                data = [
+                                    1,
+                                    2,
+                                    3
+                                ]
+                            }
+                        } else {
+                            null
+                        }
+                        other_field = "value"
+                    }
+
+                    if true {
+                        while false {
+                            let batch = [7, 8, 9]
+                            for item in batch {
+                                if true {
+                                    log("Processing")
+                                }
+                            }
+                        }
+                    } else {
+                        log("Processing failed")
+                    }
+                }
+            }
+        }
+    }
+}

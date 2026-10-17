@@ -1,0 +1,18 @@
+//! Test: byte-offset slicing survives a multibyte char earlier in the source
+//! Tags: regressions, unicode, offsets
+
+// `Span.offset_range` is byte-based (the tokenizer advances `byte_offset` by
+// `len_utf8()` per char). The printer slices the source with those offsets
+// directly. A multibyte char (here a 3-byte em dash in the leading comment)
+// once drifted every later slice by 2 bytes, stripping the first chars off
+// identifiers and literals after it (`camera` -> `mera`, `clamp` -> `amp`).
+
+//=== TEST CASE: multibyte_comment_then_code ===
+// note — an em dash (3 bytes) precedes this code
+fn compute() -> int {
+    let camera = 1
+    let mouse_wheel_delta = 2
+    return clamp(camera, mouse_wheel_delta, 60)
+}
+
+//=== NO CHANGE ===

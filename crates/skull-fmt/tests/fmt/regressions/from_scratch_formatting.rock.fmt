@@ -1,0 +1,59 @@
+//! Test: From scratch formatting (unformatted -> formatted)
+//! Tags: unformatted, minified, spacing, regression
+
+//=== TEST CASE:simple_function_formatting ===
+
+fn main(){print("Hello")}
+
+//=== EXPECTED ===
+fn main() { print("Hello") }
+
+//=== TEST CASE:let_statement_formatting ===
+
+fn test(){let x=42;let y=x+1;return y}
+
+//=== EXPECTED ===
+fn test() {
+    let x = 42
+    let y = x + 1
+    return y
+}
+
+//=== TEST CASE:struct_formatting ===
+
+struct Point{x:int,y:int}struct Line{start:Point,end:Point}
+
+//=== EXPECTED ===
+struct Point { x: int, y: int }
+struct Line { start: Point, end: Point }
+
+//=== TEST CASE:binary_expression_spacing ===
+
+fn physics(){let fps=1/dt;let speed=velocity*time;return position+speed*fps}
+
+//=== EXPECTED ===
+fn physics() {
+    let fps = 1 / dt
+    let speed = velocity * time
+    return position + speed * fps
+}
+
+//=== TEST CASE:complex_nested_formatting ===
+
+fn complex(){if condition{for item in items{if item.is_valid(){process(item)}else{skip(item)}}}else{return error()}}
+
+//=== EXPECTED ===
+fn complex() {
+    if condition { for item in items { if item.is_valid() { process(item) } else { skip(item) } } } else { return error() }
+}
+
+//=== TEST CASE:function_call_spacing ===
+
+fn calls(){let result=calculate(param1,param2,param3);transform(result);return finalize(result,extra_param)}
+
+//=== EXPECTED ===
+fn calls() {
+    let result = calculate(param1, param2, param3)
+    transform(result)
+    return finalize(result, extra_param)
+}

@@ -1,0 +1,47 @@
+//! Test: annotations that are NOT on a declaration survive formatting
+//! Tags: annotations, params, struct_fields
+//!
+//! `AnnoPos` (crates/bone-core/src/annotations.rs) is the list of positions the
+//! parser accepts an annotation in. Everything below is one of the positions
+//! that is not an item: a fn parameter or a struct field. Dropping either
+//! is silent -- the stripped form reparses and re-formats to itself, so the
+//! idempotency gate cannot see it.
+
+//=== TEST CASE: param_annotations_survive ===
+value UiVary {
+    uv: Vec2,
+}
+
+@shader(fragment)
+fn frag(@attr a: UiVary, @uniform u: UiVary, @engine e: UiVary) {
+    let x = 1
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: param_annotations_with_args_survive ===
+fn sized(@size(32) n: int, @instance i: int, @repr(opaque) o: int) {
+    let x = 1
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: struct_field_annotation_survives ===
+value UiVary {
+    @flat kind: int,
+    uv: Vec2,
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: annotated_params_wrap_one_per_line ===
+@shader(fragment)
+fn wide_entry(
+    @attr attributes: SomeVeryLongAttributeStructName,
+    @uniform uniforms: SomeVeryLongUniformStructName,
+    @engine engine: SomeVeryLongEngineStructName
+) {
+    let x = 1
+}
+
+//=== NO CHANGE ===

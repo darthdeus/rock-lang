@@ -1,0 +1,107 @@
+//! Test: Loop statement formatting
+//! Tags: loops, for, while, control-flow
+
+//=== TEST CASE:basic_for_loop_formatting ===
+
+fn iterate_collection() {
+    for item in collection {
+        process(item)
+    }
+
+    for (i, item) in enumerate(items) {
+        log("Item {i}: {item}")
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:while_loop_formatting ===
+
+fn process_queue() {
+    while !queue.is_empty() {
+        let item = queue.pop()
+        handle_item(item)
+    }
+
+    while true {
+        tick()
+        if should_exit() {
+            break
+        }
+    }
+}
+
+//=== EXPECTED ===
+fn process_queue() {
+    while !queue.is_empty() {
+        let item = queue.pop()
+        handle_item(item)
+    }
+
+    loop {
+        tick()
+        if should_exit() {
+            break
+        }
+    }
+}
+
+//=== TEST CASE:nested_loops_with_break_continue ===
+
+fn search_matrix() {
+    for row in matrix {
+        for (col_idx, value) in enumerate(row) {
+            if value == target {
+                log("Found at column {col_idx}")
+                break
+            }
+            if value < 0 {
+                continue
+            }
+            process_positive_value(value)
+        }
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:loop_with_complex_conditions ===
+
+fn complex_loop() {
+    while (
+        condition_a &&
+        condition_b ||
+        condition_c
+    ) {
+        perform_action()
+    }
+
+    for item in items.filter((x) => x.is_valid() && x.count > 0) {
+        item.process()
+    }
+}
+
+//=== EXPECTED ===
+fn complex_loop() {
+    while (condition_a &&
+        condition_b ||
+        condition_c) {
+        perform_action()
+    }
+
+    for item in items.filter(x => x.is_valid() && x.count > 0) {
+        item.process()
+    }
+}
+
+//=== TEST CASE:single_line_loops ===
+
+fn simple_loops() {
+    for item in items { process(item) }
+
+    while has_work() { do_work() }
+
+    loop { if done() { break } }
+}
+
+//=== NO CHANGE ===

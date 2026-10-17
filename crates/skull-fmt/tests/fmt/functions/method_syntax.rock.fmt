@@ -1,0 +1,45 @@
+//! Test: D-form method syntax formatting (docs/method-syntax-plan.md)
+//! Tags: functions, methods, dform
+
+//=== TEST CASE:simple_dform ===
+fn Mob.take_damage(m, amount: int) -> int {
+    return m.hp - amount
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:dform_generics_both_sides ===
+fn Pair<A, B>.map_first<C>(p, f: fn(A) -> C) -> C {
+    return f(p.a)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:dform_messy_whitespace ===
+fn    Mob . take_damage( m ,amount:int )->int{
+return m.hp-amount
+}
+
+//=== EXPECTED ===
+fn Mob.take_damage(m, amount: int) -> int {
+    return m.hp - amount
+}
+
+//=== TEST CASE:dform_long_signature_wraps ===
+fn Mob.configure(m, alpha: int, beta: int, gamma: int, delta: int, epsilon: int, zeta: int, eta: int) -> int {
+    return alpha
+}
+
+//=== EXPECTED ===
+fn Mob.configure(
+    m,
+    alpha: int,
+    beta: int,
+    gamma: int,
+    delta: int,
+    epsilon: int,
+    zeta: int,
+    eta: int
+) -> int {
+    return alpha
+}

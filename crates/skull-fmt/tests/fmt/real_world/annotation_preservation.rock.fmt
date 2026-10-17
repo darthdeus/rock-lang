@@ -1,0 +1,42 @@
+//! Test: Annotation preservation
+//! Tags: annotations, functions
+
+//=== TEST CASE: parameter_annotation_preservation ===
+// inline(lua) generic fn signatures format unchanged
+inline(lua) fn map_insert<K, V>(map: Map<K, V>, key: K, value: V) = """
+    map[key] = value
+"""
+
+// @nomangle with short inline functions stays on same line
+@nomangle inline(lua) fn special_func() = """return 42"""
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:nocontext_function_formatting ===
+
+// @nocontext should stay inline with regular functions
+@nocontext fn int(value: int) -> int {
+    return value
+}
+
+@nocontext fn int(value: float) -> int {
+    return floor(value) as int
+}
+
+//=== EXPECTED ===
+// @nocontext should stay inline with regular functions
+@nocontext fn int(value: int) -> int {
+    return value
+}
+
+@nocontext fn int(value: float) -> int {
+    return floor(value) as int
+}
+//=== TEST CASE: nocontext_multiline_stays_multiline ===
+// @nocontext with multi-line function body
+@nocontext fn is_nan(value: float) -> bool {
+    // NaN is the only value that is not equal to itself
+    return value != value
+}
+
+//=== NO CHANGE ===

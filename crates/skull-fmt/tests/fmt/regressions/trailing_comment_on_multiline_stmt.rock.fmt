@@ -1,0 +1,14 @@
+//! Test: a trailing comment on a statement that expands across lines
+//! Tags: regressions, comments, idempotence
+
+// A one-line `if c { a; b }  // cmt` expands (two body statements force
+// multi-line). The comment must land ONCE, on the closing `}` -- not dropped
+// (the multi-line form once lost it on the next pass) and not duplicated onto
+// every inner statement that shares the source line.
+
+//=== TEST CASE: comment_lands_once_on_closing_brace ===
+fn handle() {
+    if code == 82 { refresh(); return true }   // R refresh
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,71 @@
+//! Test: Struct field grouping with blank lines
+//! Tags: structs, blank-lines, grouping
+
+//=== TEST CASE: struct_field_grouping_with_blank_lines ===
+fn test() {
+    let camera = Camera {
+        world_center: zero(),
+        world_zoom: 30,
+
+        editor_center: zero(),
+        editor_zoom: 40,
+
+        debug_zoom: 1,
+
+        calculated_world_viewport_size: vec2(15, 15),
+        ppwu: 1,
+    }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:complex_struct_with_nested_grouping ===
+
+fn create_config() {
+    let config = GameConfig {
+        // Graphics settings
+        window_width: 1920,
+        window_height: 1080,
+        fullscreen: true,
+
+        // Audio settings
+        master_volume: 0.8,
+        music_volume: 0.6,
+        sfx_volume: 0.9,
+
+        // Game mechanics
+        difficulty: Difficulty::Normal,
+        auto_save: true,
+
+        // Debug options
+        debug_mode: false,
+        show_fps: true,
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: struct_field_spacing_in_knockback ===
+fn test() {
+    let k = Knockback {
+        chase_range: 8.0,
+        deaggro_time: 2.0,
+        attack_range: 1.0,
+
+        wander_min: 2.0,
+        wander_max: 6.0,
+
+        dash_range: 0.1,
+
+        dash_speed_mult: 6.0,
+        dash_duration: 0.7,
+        dash_cooldown: 4.0,
+
+        jump_chance: 0.1,
+        jump_speed: 4.5,
+        jump_duration: 0.3,
+    }
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,14 @@
+//! Test: Simple nested function call indentation
+//! Tags: structs, function-calls, indentation
+
+//=== TEST CASE:simple_nested_struct_in_function ===
+
+fn test() {
+    let result = make_sprite(SpriteAnimation {
+        start: 0,
+        step: 160,
+        frame_count: 3,
+    })
+}
+
+//=== NO CHANGE ===

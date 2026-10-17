@@ -1,0 +1,19 @@
+//! Test: Backend-specific function formatting
+//! Tags: inline, extern, lua, backend
+
+//=== TEST CASE: inline_lua_format ===
+inline(lua) fn get_platform_name() -> string = """return "Lua Backend" """
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: extern_lua_format ===
+extern(lua) fn lua_only()
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: lua_backend_functions ===
+inline(lua) fn lua_math() -> float = "return math.pi"
+
+extern(lua) fn love_graphics_clear()
+
+//=== NO CHANGE ===

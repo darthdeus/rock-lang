@@ -1,0 +1,72 @@
+//! Test: Function calls and parameter formatting
+//! Tags: functions, calls, parameters
+
+//=== TEST CASE:long_function_call_wrapping ===
+// Layout preserver: no width-driven reflow. An assignment the author wrote on
+// one line stays on one line, even past the width limit (no break after `=`).
+fn test() {
+    current_lighting_config = lerp_lighting_config(current_lighting_config, target_lighting_config, transition_speed)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:complex_function_calls_collapse ===
+
+fn test() {
+    let collision = circle_rect_collision(
+        pos, radius,
+        tile_center, v(tile_half_size)
+    )
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: long_parameter_lists_break_properly ===
+fn make_neighbors(n: bool = false, e: bool = false, s: bool = false, w: bool = false,
+                 ne: bool = false, se: bool = false, sw: bool = false, nw: bool = false) -> AutotileNeighbors {
+    return AutotileNeighbors {
+        north: n,
+        east: e,
+        south: s,
+        west: w,
+        north_east: ne,
+        south_east: se,
+        south_west: sw,
+        north_west: nw,
+    }
+}
+
+//=== EXPECTED ===
+fn make_neighbors(
+    n: bool = false,
+    e: bool = false,
+    s: bool = false,
+    w: bool = false,
+    ne: bool = false,
+    se: bool = false,
+    sw: bool = false,
+    nw: bool = false
+) -> AutotileNeighbors {
+    return AutotileNeighbors {
+        north: n,
+        east: e,
+        south: s,
+        west: w,
+        north_east: ne,
+        south_east: se,
+        south_west: sw,
+        north_west: nw,
+    }
+}
+
+//=== TEST CASE: standalone_comments_between_parameters_survive ===
+fn apply_damage(
+    source: string,
+    // What the ledger records.
+    // Empty falls back to source.
+    death_source: string = ""
+) {
+    return
+}
+
+//=== NO CHANGE ===

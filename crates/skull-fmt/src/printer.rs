@@ -1523,7 +1523,7 @@ impl<'a> Printer<'a> {
                     }
                 }
                 CallSyntax::At => self.at_call(*func, args, data.span),
-                // No-parens surface form (`start_game "mag"` == `start_game("mag")`):
+                // No-parens surface form (`start_game "demo"` == `start_game("demo")`):
                 // re-emit it as `callee arg arg` rather than normalizing to parens.
                 CallSyntax::NoParens => Doc::concat([
                     self.expr(*func),
@@ -1959,7 +1959,7 @@ impl<'a> Printer<'a> {
             // depend on how the chain itself was broken across lines -- so once
             // the formatter put a segment on its own line, the next pass saw a
             // two-line cumulative span and expanded the (single-line) args, an
-            // oscillation (mag `level_editor.rock`). The own span tracks only the
+            // oscillation. The own span tracks only the
             // author's arg-list layout, which is stable under chain reflow.
             let own_span = Span {
                 line_range: (method.span.line_range.0, cur_span.line_range.1),

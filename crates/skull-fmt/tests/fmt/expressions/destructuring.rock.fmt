@@ -1,0 +1,44 @@
+//! Test: Tuple and pattern destructuring formatting
+//! Tags: destructuring, tuples, let, for
+
+//=== TEST CASE: tuple_let_destructure ===
+fn test() {
+    let pair = (1, 2)
+    let (a, b) = pair
+    print(a + b)
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: tuple_destructure_in_for ===
+fn sum_pairs(pairs: [(int, int)]) -> int {
+    let total = 0
+    for (a, b) in pairs {
+        total = total + a + b
+    }
+    return total
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: arena_for_destructure ===
+fn print_all(mobs: Arena<Mob>) {
+    for (entity, mob) in mobs {
+        print(mob.name)
+    }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: nested_tuple_destructure ===
+fn test_nested() {
+    let nested = ((1, 2), 3)
+    let (pair, c) = nested
+    let (a, b) = pair
+    print(a + b + c)
+}
+
+//=== NO CHANGE ===

@@ -1,0 +1,113 @@
+//! Test: Struct literal formatting
+//! Tags: structs, literals, single-line, multiline
+
+//=== TEST CASE: simple_struct_literals_oneline ===
+fn test() {
+    let point = Point { x: 10, y: 20 }
+    let color = Color { r: 255, g: 0, b: 0 }
+    let small = Small { value: 42 }
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE: struct_literal_single_line ===
+fn test() {
+    let simple = SimpleStruct { a: 1, b: 2 }
+    let point = Point { x: 0.0, y: 0.0 }
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE:struct_literal_multiline ===
+
+fn test() {
+    let complex = ComplexStruct {
+        field_one: calculate_value(),
+        field_two: another_function(param1, param2),
+        field_three: nested_struct {
+            inner_field: "value",
+        },
+        field_four: long_expression + another_long_expression,
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: single_field_struct_collapse ===
+fn test() {
+    let wrapper = Wrapper { value: 42 }
+    let name_holder = NameHolder { name: "test" }
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE: struct_literal_single_field_stays_inline ===
+fn test() {
+    let config = Config { enabled: true }
+    let point = Point { x: 10 }
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE:struct_literal_formatting ===
+
+fn test() {
+    let person = Person {
+        name: "Alice",
+        age: 30,
+        email: "alice@example.com",
+        active: true,
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:struct_literal_with_inline_comments ===
+
+fn test() {
+    let config = ServerConfig {
+        host: "localhost",  // Default host
+        port: 8080,         // Standard HTTP alt port
+        ssl_enabled: false, // Disable SSL for development
+    }
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: multifield_struct_trailing_comma ===
+fn test() {
+    let settings = AppSettings {
+        theme: Theme::Dark,
+        auto_save: true,
+        backup_enabled: false,
+        max_connections: 100,
+    }
+}
+
+//=== NO CHANGE ===
+
+
+
+//=== TEST CASE:struct_trailing_comma_consistency ===
+
+fn test() {
+    // Single field - no trailing comma
+    let simple = Simple { value: 1 }
+
+    // Multiple fields - trailing comma
+    let complex = Complex {
+        field1: "value1",
+        field2: "value2",
+    }
+}
+
+//=== NO CHANGE ===

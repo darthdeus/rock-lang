@@ -1,0 +1,28 @@
+//! Test: Array literal formatting
+//! Tags: arrays, literals
+
+//=== TEST CASE:preserve_array_formatting ===
+
+fn test() {
+    let arr = [1, 2, 3]
+    let nested = [[1, 2], [3, 4]]
+    return;
+}
+
+//=== EXPECTED ===
+fn test() {
+    let arr = [1, 2, 3]
+    let nested = [[1, 2], [3, 4]]
+    return
+}
+//=== TEST CASE: tabular_array_formatting_preservation ===
+fn test() {
+    let patterns = [
+        0b00010000, 0b00010100, 0b01010100, 0b01010000, 0b11010101,
+        0b01011100, 0b01110100, 0b01010111, 0b00011100, 0b01111101,
+        0b01111100, 0b01110000, 0b00010001, 0b00010101, 0b01010101
+    ]
+    return patterns
+}
+
+//=== NO CHANGE ===

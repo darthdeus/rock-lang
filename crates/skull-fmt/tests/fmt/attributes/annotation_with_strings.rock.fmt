@@ -1,0 +1,46 @@
+//! Test: defensive verbatim passthrough on parse-error input
+//! Tags: annotations, strings, passthrough, recovery
+//!
+//! A bare string item after `@test` (`@test\n"desc"\nfn ...`) is NOT valid Rock:
+//! a string literal cannot start an item. It is undocumented, used in zero real
+//! files, and rejected by both skull-parser recovery and bone. `parse_module`
+//! reports a recovery error, so `format_code` returns the input unchanged -- a
+//! formatter must never emit corrupt or partial output for a file it cannot
+//! fully parse. These cases pin that contract: unmodeled/invalid input passes
+//! through byte-for-byte (so even `return;` is preserved, not normalized).
+
+//=== TEST CASE: parse_error_input_passes_through_verbatim ===
+
+@test
+"some string"
+fn test() {
+    return;
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: parse_error_preserves_valid_looking_body ===
+
+@test
+"test description for validation"
+fn validate_input() {
+    assert_eq(1 + 1, 2)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: parse_error_multiple_items_passthrough ===
+
+@test
+"first test case"
+fn first_test() {
+    return true
+}
+
+@test
+"second test case with longer description"
+fn second_test() {
+    return false
+}
+
+//=== NO CHANGE ===

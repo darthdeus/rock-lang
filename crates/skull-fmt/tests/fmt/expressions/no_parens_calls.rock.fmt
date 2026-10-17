@@ -1,0 +1,15 @@
+//! Test: no-parens call surface form is preserved
+//! Tags: expressions, calls, no-parens
+
+// rock's `foo a b` (== `foo(a, b)`) keeps its no-parens spelling instead of
+// being normalized to `foo(a, b)`. Tracked through a `CallSyntax::NoParens`
+// AST variant the formatter reads; an explicit-parens call stays parenthesized.
+
+//=== TEST CASE: no_parens_preserved ===
+co fn sim() -> Coroutine<CoFrame> {
+    start_game "demo"
+    place_player 25 8
+    regular_call(a, b)
+}
+
+//=== NO CHANGE ===

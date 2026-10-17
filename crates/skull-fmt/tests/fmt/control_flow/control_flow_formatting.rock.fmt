@@ -1,0 +1,42 @@
+//! Test: Control flow statement formatting
+//! Tags: control-flow, break, continue, return
+
+//=== TEST CASE:break_fmt ===
+
+{
+    loop {
+        if x > max_x { break }
+    }
+}
+
+//=== EXPECTED ===
+{
+    loop {
+        if x > max_x { break }
+    }
+}
+//=== TEST CASE: single_line_control_flow ===
+fn game_loop() {
+    loop {
+        if should_exit() { break }
+        if paused { continue }
+        if level_complete() { return }
+
+        update_game_state()
+    }
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: mixed_control_flow_statements ===
+fn process_items() {
+    for item in items {
+        if item.is_invalid() { continue }
+        if item.is_critical() { return handle_critical(item) }
+        if item.should_skip() { break }
+
+        process_normal_item(item)
+    }
+}
+
+//=== NO CHANGE ===

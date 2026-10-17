@@ -1,0 +1,46 @@
+//! Test: member-chain layout (`a.b().c().d()`)
+//! Tags: expressions, method-chains, wrapping
+
+// A chain of >=2 method calls that fits stays on one line; one that overflows
+// breaks one call per line (head kept with the receiver) rather than collapsing
+// the chain and breaking only the tail call's args.
+
+//=== TEST CASE: short_chain_stays_inline ===
+fn f() {
+    let x = a.b().c()
+    r.fill(bg).outline(EDGE, 1.0)
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: long_chain_breaks_one_per_line ===
+fn f() {
+    r.fill(background_color).outline(UI_BUTTON_EDGE, 1.0).text(label, font_size, UI_BUTTON_TEXT_COLOR, TextAlign::Center)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: chain_on_call_receiver_keeps_base_alone ===
+fn f() {
+    return outer_factory_call().inset(HUD_REGION_PADDING).take_top_center(v(HUD_BAR_WIDTH, HUD_CELL_WIDTH))
+}
+
+//=== NO CHANGE ===
+
+// A multi-line chain with two calls on the first source line breaks one call
+// per line; each call's args stay inline (the author wrote them single-line).
+// Each segment's own arg-list layout drives expansion -- NOT the cumulative
+// receiver span, which would oscillate once a segment moved to its own line.
+//=== TEST CASE: multiline_chain_two_calls_on_first_line ===
+fn f() {
+    screen.take_top(A).take_left(B)
+        .fill(color(0.1, 0.2, 0.3, 0.4))
+}
+
+//=== EXPECTED ===
+fn f() {
+    screen.take_top(A)
+        .take_left(B)
+        .fill(color(0.1, 0.2, 0.3, 0.4))
+}

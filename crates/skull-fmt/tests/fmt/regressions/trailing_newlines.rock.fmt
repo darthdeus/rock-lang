@@ -1,0 +1,31 @@
+//! Test: Trailing newline normalization
+//! Tags: newlines, normalization, file-endings
+
+//=== TEST CASE:no_trailing_newline ===
+
+fn test() { return 42 }
+//=== EXPECTED ===
+fn test() { return 42 }
+//=== TEST CASE: single_trailing_newline ===
+fn test() { return 42 }
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:multiple_trailing_newlines ===
+
+fn test() { return 42 }
+
+
+
+//=== EXPECTED ===
+fn test() { return 42 }
+//=== TEST CASE:preserves_final_newline ===
+
+fn test() {
+    return;
+}
+
+//=== EXPECTED ===
+fn test() {
+    return
+}

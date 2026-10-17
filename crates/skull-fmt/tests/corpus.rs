@@ -1,4 +1,4 @@
-//! Runs the shared `tests/fmt` corpus through skull-fmt and asserts every case
+//! Runs the `tests/fmt` corpus through skull-fmt and asserts every case
 //! formats to its expected output. Prints a pass/fail histogram (run with
 //! `--nocapture`) and fails on ANY mismatch, listing the offending cases. A
 //! genuine bring-up gap goes in `KNOWN_FAILING`, which forces a same-commit
@@ -15,7 +15,7 @@ struct Case {
 }
 
 fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fmt")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt")
 }
 
 fn collect_fmt_files(dir: &Path, out: &mut Vec<PathBuf>) {

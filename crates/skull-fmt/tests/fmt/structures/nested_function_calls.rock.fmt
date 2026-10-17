@@ -1,0 +1,109 @@
+//! Test: Nested function call indentation in struct literals
+//! Tags: structs, function-calls, indentation, nested
+
+//=== TEST CASE:nested_function_calls_in_struct_literals ===
+
+fn create_prefabs() -> Arena<Prefab> {
+    let prefabs: Arena<Prefab> = arena_new()
+
+    arena_insert(prefabs, Prefab {
+            name: "survivor-waypoint",
+
+            sprite: make_sprite(sprite_props, irect(0, 0, 32, 32)),
+
+            anim: make_anim_state(SpriteAnimation {
+                start: irect(0, 0, 32, 32),
+                step: 160,
+                frame_count: 3,
+                frame_time: 0.2,
+                looping: true,
+            }),
+
+            ctor: PREFAB_CTOR_SIMPLE,
+        })
+
+    arena_insert(prefabs, Prefab {
+            name: "fireplace",
+
+            sprite: make_sprite(sprite_props, irect(0, 0, 32, 32)),
+
+            anim: make_anim_state(SpriteAnimation {
+                start: irect(0, 0, 32, 32),
+                step: 160,
+                frame_count: 3,
+                frame_time: 0.2,
+                looping: true,
+            }),
+
+            ctor: PREFAB_CTOR_SIMPLE,
+        })
+
+    arena_insert(prefabs, Prefab {
+            name: "tent",
+            sprite: make_sprite(sprite_props, irect(0, 2 * 16, 2 * 16, 2 * 16)),
+            anim: null,
+            ctor: PREFAB_CTOR_SIMPLE,
+        })
+
+    arena_insert(prefabs, Prefab {
+            name: "bench",
+            sprite: make_sprite(sprite_props, irect(2 * 16, 0, 2 * 16, 2 * 16)),
+            anim: null,
+            ctor: PREFAB_CTOR_SIMPLE,
+        })
+
+    return prefabs
+}
+
+//=== EXPECTED ===
+fn create_prefabs() -> Arena<Prefab> {
+    let prefabs: Arena<Prefab> = arena_new()
+
+    arena_insert(prefabs, Prefab {
+        name: "survivor-waypoint",
+
+        sprite: make_sprite(sprite_props, irect(0, 0, 32, 32)),
+
+        anim: make_anim_state(SpriteAnimation {
+            start: irect(0, 0, 32, 32),
+            step: 160,
+            frame_count: 3,
+            frame_time: 0.2,
+            looping: true,
+        }),
+
+        ctor: PREFAB_CTOR_SIMPLE,
+    })
+
+    arena_insert(prefabs, Prefab {
+        name: "fireplace",
+
+        sprite: make_sprite(sprite_props, irect(0, 0, 32, 32)),
+
+        anim: make_anim_state(SpriteAnimation {
+            start: irect(0, 0, 32, 32),
+            step: 160,
+            frame_count: 3,
+            frame_time: 0.2,
+            looping: true,
+        }),
+
+        ctor: PREFAB_CTOR_SIMPLE,
+    })
+
+    arena_insert(prefabs, Prefab {
+        name: "tent",
+        sprite: make_sprite(sprite_props, irect(0, 2 * 16, 2 * 16, 2 * 16)),
+        anim: null,
+        ctor: PREFAB_CTOR_SIMPLE,
+    })
+
+    arena_insert(prefabs, Prefab {
+        name: "bench",
+        sprite: make_sprite(sprite_props, irect(2 * 16, 0, 2 * 16, 2 * 16)),
+        anim: null,
+        ctor: PREFAB_CTOR_SIMPLE,
+    })
+
+    return prefabs
+}

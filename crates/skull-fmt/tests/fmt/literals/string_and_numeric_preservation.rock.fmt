@@ -1,0 +1,44 @@
+//! Test: String and numeric literal preservation
+//! Tags: literals, strings, numbers
+
+//=== TEST CASE:string_escape_preservation ===
+
+fn test() {
+    let s = "Hello\nWorld\t!"
+    return;
+}
+
+//=== EXPECTED ===
+fn test() {
+    let s = "Hello\nWorld\t!"
+    return
+}
+//=== TEST CASE:float_literal_preservation ===
+
+fn test() {
+    let f = 10.0
+    return;
+}
+
+//=== EXPECTED ===
+fn test() {
+    let f = 10.0
+    return
+}
+//=== TEST CASE: binary_literal_preservation ===
+fn test() {
+    let flags = 0b11010101
+    let mask = 0b00001111
+    return flags
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: hex_literal_preservation ===
+fn test() {
+    let color = 0xFF00AB
+    let addr = 0x1000
+    return color + addr
+}
+
+//=== NO CHANGE ===

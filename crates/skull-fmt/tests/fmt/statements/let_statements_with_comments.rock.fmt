@@ -1,0 +1,26 @@
+//! Test: Let statements with inline comments
+//! Tags: let-statements, comments, inline
+
+//=== TEST CASE:let_statements_with_inline_comments ===
+
+fn test() {
+    let corners = 0b10101010  // Mask for corner bits
+    let x_nc = x & ~corners   // x without corners
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:let_statements_with_complex_expressions ===
+
+fn calculate() {
+    let distance = sqrt(dx * dx + dy * dy)  // Euclidean distance
+    let angle = atan2(dy, dx)  // Angle in radians
+    let normalized = distance / max_distance  // Normalize to 0-1 range
+}
+
+//=== EXPECTED ===
+fn calculate() {
+    let distance = sqrt(dx * dx + dy * dy)  // Euclidean distance
+    let angle = atan2(dy, dx)  // Angle in radians
+    let normalized = distance / max_distance  // Normalize to 0-1 range
+}

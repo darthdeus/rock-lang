@@ -1,0 +1,55 @@
+//! Test: Safe navigation operator formatting
+//! Tags: safe_nav, nullable, expressions
+
+//=== TEST CASE: safe_nav_field_access ===
+fn get_name(p: Player?) -> string {
+    return p?.name ?? "unknown"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: safe_nav_chain ===
+fn get_deep(o: Outer?) -> int {
+    return o?.middle?.inner?.value ?? 0
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: safe_nav_in_let ===
+fn read_value(o: Outer?) {
+    let v = o?.middle?.inner?.value ?? -1
+    print(v)
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: safe_nav_assign ===
+fn write_value(o: Outer?) {
+    o?.middle?.inner?.value = 42
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: null_coalesce_only ===
+fn coalesce(x: int?, y: int?) -> int {
+    return x ?? y ?? 0
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: safe_nav_let_block_already_multiline ===
+fn safe_let(p: Player?) -> string {
+    return p?.let {
+        p.name + " the hero"
+    } ?? "nobody"
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: safe_nav_let_block_inline ===
+// Layout preserver: an inline `?.let { ... }` block stays inline.
+fn safe_let_inline(p: Player?) -> string {
+    return p?.let { p.name } ?? "nobody"
+}
+
+//=== NO CHANGE ===

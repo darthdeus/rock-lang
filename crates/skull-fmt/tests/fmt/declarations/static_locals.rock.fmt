@@ -1,0 +1,23 @@
+//! Test: static local declarations
+//! Tags: static, declarations, locals
+
+//=== TEST CASE: static_inferred_and_annotated ===
+fn f() {
+    static count = 0
+    static scratch: [Vec2] = []
+    count = count + 1
+    scratch.clear()
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: static_normalizes_spacing ===
+fn g() {
+    static   threshold:float=0.5
+}
+
+//=== EXPECTED ===
+fn g() {
+    static threshold: float = 0.5
+}

@@ -1,0 +1,37 @@
+//! Test: Preserve aligned inline comments
+//! Tags: comments, alignment, inline
+
+//=== TEST CASE: aligned_inline_comments ===
+// Aligned comments should maintain their column alignment
+fn neighbors_to_bits(n: Neighbors) -> int {
+    let index = 0
+    if n.north { index = index + 128 }      // N (bit 7)
+    if n.north_east { index = index + 64 }  // NE (bit 6)
+    if n.east { index = index + 32 }        // E (bit 5)
+    if n.south_east { index = index + 16 }  // SE (bit 4)
+    if n.south { index = index + 8 }        // S (bit 3)
+    if n.south_west { index = index + 4 }   // SW (bit 2)
+    if n.west { index = index + 2 }         // W (bit 1)
+    if n.north_west { index = index + 1 }   // NW (bit 0)
+    return index
+}
+
+// Table-like alignment in variable declarations
+struct Config {
+    max_health: int,      // Maximum player health
+    spawn_rate: float,    // Enemy spawn rate
+    difficulty: int,      // Game difficulty level
+    debug_mode: bool,     // Enable debug features
+}
+
+// Aligned pattern matching comments
+fn process(value: int) -> string {
+    match value {
+        0 => "zero",         // Special case
+        1..10 => "small",    // Single digit
+        11..100 => "medium", // Double digit
+        _ => "large",        // Everything else
+    }
+}
+
+//=== NO CHANGE ===

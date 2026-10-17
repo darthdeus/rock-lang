@@ -1,0 +1,129 @@
+//! Test: Function call formatting
+//! Tags: functions, calls, arguments
+
+//=== TEST CASE:function_call_with_array_argument_formatting ===
+
+fn test() {
+    let result = process_data([
+        "item1",
+        "item2",
+        "item3",
+        "item4"
+    ])
+
+    let compact = process_compact(["a", "b", "c"])
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:fn_calls_nowrap ===
+
+fn test() {
+    call_function_with_many_parameters(param1, param2, param3, param4)
+    another_function(a, b, c, d, e)
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:complex_multiline_fn_call_remains_multiline ===
+
+fn test() {
+    let result = calculate_complex_result(
+        first_parameter_with_long_name,
+        second_parameter_with_calculation(a + b * c),
+        third_parameter_from_function_call(),
+        fourth_parameter_with_nested_struct {
+            field1: value1,
+            field2: value2,
+        }
+    )
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE: short_function_calls_stay_single_line ===
+fn test() {
+    let result1 = add(1, 2)
+    let result2 = multiply(x, y)
+    let simple = get_value()
+    let chained = process(get_data())
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: long_function_call_wrapping ===
+fn test() {
+    let result = very_long_function_name_that_should_wrap(
+        first_very_long_parameter_name,
+        second_very_long_parameter_name,
+        third_very_long_parameter_name
+    )
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: function_call_wrapping_consistency ===
+fn test() {
+    // Short calls stay on one line
+    simple_call(a, b, c)
+
+    // Long calls wrap consistently
+    complex_function_call(
+        parameter_with_long_name,
+        another_parameter_with_long_name,
+        final_parameter_with_calculation(x + y)
+    )
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE:function_call_arguments_dont_collapse_inappropriately ===
+
+fn test() {
+    // These should remain multiline due to complexity
+    configure_system(
+        SystemConfig {
+            enabled: true,
+            timeout: 30
+        },
+        UserPreferences {
+            theme: "dark",
+            notifications: false
+        }
+    )
+}
+
+//=== NO CHANGE ===
+
+//=== TEST CASE:complex_function_calls_not_collapsed ===
+
+fn test() {
+    let result = process_data(
+        {
+            input = raw_data;
+            options = {
+                validate = true;
+                transform = true
+            }
+        },
+        context
+    )
+}
+
+//=== EXPECTED ===
+fn test() {
+    let result = process_data(
+        {
+            input = raw_data
+            options = {
+                validate = true
+                transform = true
+            }
+        },
+        context
+    )
+}

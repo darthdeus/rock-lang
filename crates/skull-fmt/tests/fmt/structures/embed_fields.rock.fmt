@@ -1,0 +1,31 @@
+//! Test: `embed` field modifier survives formatting
+//! Tags: struct, embed, fields
+
+//=== TEST CASE: embed_field_preserved ===
+struct Holder {
+    embed p: Pt
+    tag: int
+}
+
+//=== NO CHANGE ===
+
+
+//=== TEST CASE: embed_field_normalizes_spacing ===
+struct Holder {
+    embed    p:Pt
+    tag:int
+}
+
+//=== EXPECTED ===
+struct Holder {
+    embed p: Pt
+    tag: int
+}
+
+//=== TEST CASE: embed_as_field_name_is_not_a_modifier ===
+struct Legacy {
+    embed: int
+    other: int
+}
+
+//=== NO CHANGE ===
