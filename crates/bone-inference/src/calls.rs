@@ -493,10 +493,6 @@ pub(crate) fn select_overload_with_generics(
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
                 .join(", ");
-            let overloads = candidates
-                .iter()
-                .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
-                .join("\n");
             let inaccessible = gamma
                 .inaccessible_overloads
                 .borrow()
@@ -519,6 +515,54 @@ pub(crate) fn select_overload_with_generics(
                 )
                 .is_some()
             });
+            if !hidden_fit && bound_fail.is_none() && recv_ty.is_none() && generic_args.is_empty() {
+                if let Some((symbol, true)) = bone_core::hir::operator_entry(name.as_str()) {
+                    let actuals: SmallVec<[TyId; 2]> = args.iter()
+                        .map(|arg| resolve(gamma, arg_ty[arg], span))
+                        .collect();
+                    // Exact shapes only: widening or generic guesses must not
+                    // hide competing overloads behind a nullable explanation.
+                    let mut near_misses = candidates.iter().filter_map(|&(mid, fid)| {
+                        let f = &gamma.workspace.module(mid).functions[fid];
+                        if !f.generics.is_empty() || f.param_decls.len() != actuals.len() {
+                            return None;
+                        }
+                        let mut nullable_args = SmallVec::<[Idx<Expr>; 2]>::new();
+                        for ((&actual, param), &arg) in actuals.iter().zip(&f.param_decls).zip(args) {
+                            let expected = resolve(gamma, param.ty, span);
+                            if types_equal(gamma, actual, expected) {
+                                continue;
+                            }
+                            let TypeExpr::Nullable(inner) = *gamma.get(actual) else {
+                                return None;
+                            };
+                            if !types_equal(gamma, actual.with_idx(inner), expected) {
+                                return None;
+                            }
+                            nullable_args.push(arg);
+                        }
+                        if nullable_args.is_empty() { None } else { Some((mid, fid, nullable_args)) }
+                    });
+                    if let (Some((mid, fid, nullable_args)), None) = (near_misses.next(), near_misses.next()) {
+                        let expected = gamma.workspace.module(mid).functions[fid].param_decls.iter()
+                            .map(|p| gamma.workspace.render(None, p.ty))
+                            .join(", ");
+                        let mut error = CompilerError::new_with_label(
+                            c.body.expr_spans[nullable_args[0]],
+                            format!("operator `{symbol}` expects operands ({expected}), got ({args_msg})"),
+                        );
+                        error.labels[0].message = "nullable operand".to_string();
+                        for &arg in &nullable_args[1..] {
+                            error = error.with_label(c.body.expr_spans[arg], "nullable operand".to_string());
+                        }
+                        return Err(SelectError::NoFit(error));
+                    }
+                }
+            }
+            let overloads = candidates
+                .iter()
+                .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
+                .join("\n");
             Err(SelectError::NoFit(CompilerError::new_with_label(
                 span,
                 if hidden_fit {
