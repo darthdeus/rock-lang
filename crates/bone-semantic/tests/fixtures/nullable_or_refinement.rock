@@ -17,7 +17,7 @@ fn f(x: S?) -> bool {
     return ok
 }
 
-// method-call receiver form (the mag/loot.rock case).
+// method-call receiver form (a nullable receiver case).
 //- refine_or_rhs_method
 struct Corpse { hp: int }
 fn Corpse.in_reach(c) -> bool {
@@ -31,7 +31,7 @@ fn f(c: Corpse?) -> bool {
 
 // chained: each `== null` clause narrows its own path for the following clause.
 //- refine_or_rhs_chain
-struct Inner { v: int }
+value Inner { v: int }
 struct Mid { inner: Inner? }
 fn f(m: Mid?) -> bool {
     let ok = m == null || m.inner == null || m.inner.v > 0

@@ -2,6 +2,8 @@
 name = "bone-semantic"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
 
 [features]
 sequential = ["bone-core/sequential"]
@@ -9,7 +11,7 @@ sequential = ["bone-core/sequential"]
 [dependencies]
 rustc-hash = { workspace = true }
 ustr = { workspace = true }
-comfy-la-arena = { workspace = true }
+comfy-la-arena = { path = "../la-arena" }
 rust-lapper = { workspace = true }
 rayon = { workspace = true }
 tracing = { workspace = true }
@@ -20,13 +22,14 @@ nonmax = { workspace = true }
 bone-core = { path = "../bone-core" }
 bone-lower = { path = "../bone-lower" }
 bone-inference = { path = "../bone-inference" }
-skull-parser = { path = "../skull-parser"}
+skull-parser = { path = "../skull-parser" }
 rock-core = { path = "../rock-core" }
 
 test-utils = { path = "../test-utils" }
 
 [dev-dependencies]
 datatest-stable = "0.3"
+rock-stdlib = { path = "../rock-stdlib" }
 
 [[test]]
 name = "fixtures"

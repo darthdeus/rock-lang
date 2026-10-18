@@ -9,7 +9,7 @@
 //! field when `resolve_callee` finds NO free candidates (inference.rs
 //! resolve_named_call). Three divergences fall out:
 //!   - free fn with non-matching param type rejects the field call
-//!     (bitgun/tile_editor.rock:105, `t.sprite()` vs stone's free `sprite`)
+//!     (a receiver field and a free function named `sprite`)
 //!   - a type-compatible free fn silently STEALS the method call from the
 //!     field (type-checks, wrong callee at runtime)
 //!   - `f(s)` free syntax resolves to the field (rock rejects)

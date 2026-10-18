@@ -1,11 +1,6 @@
-//! The identity-storage checks (docs/identity-storage-plan.md): declarations
-//! (S0a), function bodies (S0b), and their transitional package exemptions.
-//!
-//! Enforcement is on by default. A package on [`IDENTITY_STORAGE_EXEMPT`],
-//! or a module under a prefix on [`IDENTITY_STORAGE_EXEMPT_MODULES`], gets no
-//! diagnostics; `rock identity-storage-census` counts its sites and the
-//! census test pins those counts per kind, so a migration that removes sites
-//! updates the pinned table and drops the entry here when it reaches zero.
+//! Identity-storage checks for declarations and function bodies.
+//! Hosts supply migration exemptions through the workspace; the compiler
+//! otherwise enforces the same rules for every package.
 
 use bone_core::escape::lambda_is_nonescaping;
 use bone_core::identity_storage::{
@@ -25,111 +20,10 @@ use bone_core::workspace::BodyInference;
 use crate::hir::{BindingInfo, BindingKind, Callee, Expr, Function, Module, TypeCtor, TypeExpr, VariantArgs, VariantPayload};
 use crate::prelude::*;
 
-/// The census label for files outside any package: `tests/` programs and
-/// programs embedded in Rust tests.
-pub const UNPACKAGED_PROGRAMS: &str = "unpackaged programs";
-/// The census label for stdlib files.
-pub const STDLIB_PACKAGE: &str = "std";
-
-/// Programs embedded in Rust tests that declare a package of their own. They
-/// belong to [`UNPACKAGED_PROGRAMS`] until S8 rewrites them; the census does
-/// not count them.
-pub const RUST_EMBEDDED_PACKAGES: &[&str] = &[
-    "enum_json_v1",
-    "legacyapp",
-    "memclass_handle",
-    "memclass_handle_marked",
-    "memclass_handle_named",
-    "memclass_handle_platform",
-    "provider",
-    "v1embed",
-    "v1spec",
-];
-
-/// Packages, by stamped package name, whose identity-storage violations are
-/// counted by the census instead of reported. Two packages that share a name
-/// (`games/testbed`, `demos/testbed`) share an entry.
-pub const IDENTITY_STORAGE_EXEMPT: &[&str] = &[
-    STDLIB_PACKAGE,
-    UNPACKAGED_PROGRAMS,
-    "anvil",
-    "bitgun",
-    "bopt",
-    "chess",
-    "chess_game",
-    "chesslings",
-    "sample_game_c",
-    "sample_game_c_v0",
-    "sample_game_b",
-    "decorator_systems",
-    "idle_core",
-    "logo",
-    "mag",
-    "mag_ai",
-    "mag_content",
-    "mag_encounter_worker",
-    "mag_world",
-    "match3",
-    "spark",
-    "stone",
-    "survivors",
-    "testbed",
-    "typography",
-    "void",
-    "wgpu_renderer",
-];
-
-/// Module path prefixes, by stamped package name and `::`-joined module path,
-/// exempt inside an otherwise enforced package. A prefix covers the module it
-/// names and every module below it: `("p", "nav")` covers `p::nav` and
-/// `p::nav::graph`, not `p::navigation`.
-pub const IDENTITY_STORAGE_EXEMPT_MODULES: &[(&str, &str)] = &[("mag_simulation", "nav")];
-
-/// Why a module's sites are counted by the census instead of reported.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum IdentityStorageExemption {
-    /// Its package is listed whole.
-    Package,
-    /// It is under this listed module path prefix.
-    Module(&'static str),
-}
-
-/// The exemption lists. Production reads [`IDENTITY_STORAGE_EXEMPTIONS`];
-/// tests pass their own.
-pub struct IdentityStorageExemptions {
-    pub packages: &'static [&'static str],
-    pub modules: &'static [(&'static str, &'static str)],
-}
-
-pub const IDENTITY_STORAGE_EXEMPTIONS: IdentityStorageExemptions = IdentityStorageExemptions {
-    packages: IDENTITY_STORAGE_EXEMPT,
-    modules: IDENTITY_STORAGE_EXEMPT_MODULES,
+pub use bone_core::identity_storage::{
+    identity_storage_package, IdentityStorageExemption, IdentityStorageExemptions,
+    RUST_EMBEDDED_PACKAGES, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS,
 };
-
-impl IdentityStorageExemptions {
-    /// The one exemption predicate. A module's path is the `mod` header of
-    /// its file (`Workspace.fragment_scopes`); a file without one matches no
-    /// module prefix.
-    pub fn exemption(&self, ws: &Workspace, module: &Module) -> Option<IdentityStorageExemption> {
-        let package = identity_storage_package(module);
-        if package == UNPACKAGED_PROGRAMS && ws.identity_storage_enforce_unpackaged {
-            return None;
-        }
-        if self.packages.contains(&package) {
-            return Some(IdentityStorageExemption::Package);
-        }
-        let path = &ws.fragment_scopes.get(&module.file)?.module_path;
-        self.modules
-            .iter()
-            .find(|(p, prefix)| *p == package && module_path_under(path, prefix))
-            .map(|(_, prefix)| IdentityStorageExemption::Module(prefix))
-    }
-}
-
-fn module_path_under(path: &[Ustr], prefix: &str) -> bool {
-    let prefix: Vec<&str> = prefix.split("::").collect();
-    path.len() >= prefix.len() && path.iter().zip(&prefix).all(|(segment, want)| segment.as_str() == *want)
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IdentityStorageKind {
@@ -191,21 +85,9 @@ pub struct IdentityStorageSite {
     pub message: String,
 }
 
-/// The census label of the package that owns `module`.
-pub fn identity_storage_package(module: &Module) -> &str {
-    if is_stdlib_module_file(module.file.as_str()) {
-        STDLIB_PACKAGE
-    } else {
-        match module.package {
-            Some(p) if !RUST_EMBEDDED_PACKAGES.contains(&p.as_str()) => p.as_str(),
-            _ => UNPACKAGED_PROGRAMS,
-        }
-    }
-}
-
 /// Whether `module`'s sites are counted by the census instead of reported.
 pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
-    IDENTITY_STORAGE_EXEMPTIONS.exemption(ws, module).is_some()
+    ws.identity_storage_exemptions.exemption(ws, module).is_some()
 }
 
 /// Every declaration position in `module` that stores an identity struct.

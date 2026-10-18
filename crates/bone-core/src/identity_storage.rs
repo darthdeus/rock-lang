@@ -9,7 +9,7 @@
 //! direct elements may be identities after substitution; what those elements
 //! contain is still checked.
 
-use crate::hir::{StructFieldDef, TyId, TypeCtor, TypeExpr, VariantPayload};
+use crate::hir::{Module, StructFieldDef, TyId, TypeCtor, TypeExpr, VariantPayload};
 use crate::prelude::*;
 use crate::workspace::{BodyInference, Workspace};
 
@@ -457,4 +457,85 @@ fn occurrence(ws: &Workspace, ty: TyId, param: Ustr, row: bool, classes: &mut Pa
 
 fn join(items: impl Iterator<Item = (ParamClass, bool)>) -> (ParamClass, bool) {
     items.fold((ParamClass::Phantom, false), |(class, cyclic), (c, y)| (class.max(c), cyclic || y))
+}
+
+/// The census label for files outside any package: `tests/` programs and
+/// programs embedded in Rust tests.
+pub const UNPACKAGED_PROGRAMS: &str = "unpackaged programs";
+/// The census label for stdlib files.
+pub const STDLIB_PACKAGE: &str = "std";
+
+/// Programs embedded in Rust tests that declare a package of their own. They
+/// belong to [`UNPACKAGED_PROGRAMS`] until S8 rewrites them; the census does
+/// not count them.
+pub const RUST_EMBEDDED_PACKAGES: &[&str] = &[
+    "enum_json_v1",
+    "legacyapp",
+    "memclass_handle",
+    "memclass_handle_marked",
+    "memclass_handle_named",
+    "memclass_handle_platform",
+    "provider",
+    "v1embed",
+    "v1spec",
+];
+
+/// Why a module's sites are counted by the census instead of reported.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IdentityStorageExemption {
+    /// Its package is listed whole.
+    Package,
+    /// It is under this listed module path prefix.
+    Module(&'static str),
+}
+
+/// Caller-supplied migration exemptions, retained by the workspace.
+#[derive(Clone, Copy, Debug)]
+pub struct IdentityStorageExemptions {
+    pub packages: &'static [&'static str],
+    pub modules: &'static [(&'static str, &'static str)],
+}
+
+impl Default for IdentityStorageExemptions {
+    fn default() -> Self {
+        Self { packages: &[STDLIB_PACKAGE, UNPACKAGED_PROGRAMS], modules: &[] }
+    }
+}
+
+impl IdentityStorageExemptions {
+    /// The one exemption predicate. A module's path is the `mod` header of
+    /// its file (`Workspace.fragment_scopes`); a file without one matches no
+    /// module prefix.
+    pub fn exemption(&self, ws: &Workspace, module: &Module) -> Option<IdentityStorageExemption> {
+        let package = identity_storage_package(module);
+        if package == UNPACKAGED_PROGRAMS && ws.identity_storage_enforce_unpackaged {
+            return None;
+        }
+        if self.packages.contains(&package) {
+            return Some(IdentityStorageExemption::Package);
+        }
+        let path = &ws.fragment_scopes.get(&module.file)?.module_path;
+        self.modules
+            .iter()
+            .find(|(p, prefix)| *p == package && module_path_under(path, prefix))
+            .map(|(_, prefix)| IdentityStorageExemption::Module(prefix))
+    }
+}
+
+fn module_path_under(path: &[Ustr], prefix: &str) -> bool {
+    let prefix: Vec<&str> = prefix.split("::").collect();
+    path.len() >= prefix.len() && path.iter().zip(&prefix).all(|(segment, want)| segment.as_str() == *want)
+}
+
+
+/// The census label of the package that owns `module`.
+pub fn identity_storage_package(module: &Module) -> &str {
+    if crate::modules::is_stdlib_module_file(module.file.as_str()) {
+        STDLIB_PACKAGE
+    } else {
+        match module.package {
+            Some(p) if !RUST_EMBEDDED_PACKAGES.contains(&p.as_str()) => p.as_str(),
+            _ => UNPACKAGED_PROGRAMS,
+        }
+    }
 }

@@ -1,0 +1,9 @@
+//! @no_check
+
+//- reference_as_rejects @fail
+struct Source { x: int }
+struct Target { x: int }
+fn convert(value: ref Source) -> ref Target {
+    return value as ref Target
+           //^ ref Target
+}

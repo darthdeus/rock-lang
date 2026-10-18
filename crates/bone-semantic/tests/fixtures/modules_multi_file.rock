@@ -925,7 +925,7 @@ fn use_it() -> int {
 
 //- a_legacy_safe_nav_compound_assignment_reaches_a_projected_v1_overload
 //-- geo.rock @pkg=geo,1 @v1
-pub struct Pt {
+pub value Pt {
     pub x: int,
     pub y: int,
 }

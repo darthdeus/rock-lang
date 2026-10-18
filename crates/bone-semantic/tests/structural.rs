@@ -166,7 +166,7 @@ fn legacy_only_workspace_keeps_the_std_namespace() {
 #[test]
 #[ignore]
 fn probe_stdlib_first_wall() {
-    let bundled = include_str!("../../../stdlib/unified.rock");
+    let bundled = rock_stdlib::stdlib_source("unified.rock");
     let owned = std::env::var("BONE_STDLIB_PROBE")
         .ok()
         .map(|p| std::fs::read_to_string(p).expect("read BONE_STDLIB_PROBE"));
@@ -374,7 +374,7 @@ fn main() { let x: int = 2.0 * (3 / 4) }
 
 // The walk follows a local binding back to its `let` initializer: a `float`
 // that entered via `let h = a / b` and only mismatches an `int` later
-// (`2 * h`) still points at the `/`. Regression for mag/projectiles.rock
+// (`2 * h`) still points at the `/`. Regression for a computed frame height
 // `let frame_h = dims.y / N ... p.dir * frame_h` into an int field.
 #[test]
 fn float_div_traced_through_let_binding_hints_idiv() {
@@ -396,7 +396,7 @@ fn main() {
 // A `/` flowing into a re-bindable numeric var (`min(1, ...)`, where `1`
 // provisionally fixes `T=int` and the float arg widens `T` back to float) is
 // NOT a mismatch -- coerce widens it. The hint must defer to that: no error at
-// all. Regression for mag/particles.rock `min(1, (a/b)*1.6)` (a first cut fired
+// all. Regression for numeric widening in `min(1, (a/b)*1.6)` (a first cut fired
 // the hint before coerce got to widen). docs/float-division-plan.md.
 #[test]
 fn float_div_into_widening_numeric_var_is_not_an_error() {
@@ -2649,7 +2649,7 @@ fn identity_storage_capability_is_the_arena_files_alone() {
 
 #[test]
 fn identity_storage_exemptions_follow_the_package() {
-    use bone_semantic::identity_storage::{IDENTITY_STORAGE_EXEMPT, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS};
+    use bone_semantic::identity_storage::IdentityStorageExemptions;
     let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
     let enforced = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("game"), user);
     assert!(
@@ -2662,11 +2662,14 @@ fn identity_storage_exemptions_follow_the_package() {
     );
     let unpackaged = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", None, user);
     assert!(unpackaged.is_empty(), "unpackaged programs are exempt outside bone fixtures: {unpackaged:?}");
-    let package = IDENTITY_STORAGE_EXEMPT
-        .iter()
-        .find(|p| **p != STDLIB_PACKAGE && **p != UNPACKAGED_PROGRAMS)
-        .expect("a package is exempt while S0a's census is nonzero");
-    let exempt = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some(package), user);
+    let mut module = parse_rock_with_file(user, "main.rock").expect("parse user module");
+    module.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "migrating".into() });
+    let ws = bone_semantic::inference::Workspace {
+        identity_storage_exemptions: IdentityStorageExemptions { packages: &["migrating"], modules: &[] },
+        ..Default::default()
+    };
+    let ws = bone_semantic::semantic_passes::semantic_pass_into(ws, &mut [module], &Default::default()).expect("semantic pass");
+    let exempt = module_error_messages(&ws);
     assert!(exempt.is_empty(), "an exempt package gets no diagnostics: {exempt:?}");
 }
 
@@ -2747,21 +2750,18 @@ fn identity_storage_module_exemption_follows_the_module_path() {
 }
 
 #[test]
-fn chess_sfx_identity_storage_is_enforced() {
+fn migrated_package_identity_storage_is_enforced() {
     let user = "struct Mob { hp: int }\nstruct Room { mobs: [Mob] }\nfn count(held: [Mob]) -> int { return 0 }";
-    let errors = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("chess_sfx"), user);
+    let errors = identity_storage_errors("<stdlib>/fixture.rock", "fn print() {}", Some("migrated_package"), user);
     assert!(
         errors.iter().any(|e| e.contains("field `mobs` cannot store identity struct `Mob`")),
-        "chess_sfx fields must reject ordinary identity storage: {errors:?}"
+        "migrated_package fields must reject ordinary identity storage: {errors:?}"
     );
     assert!(
         errors.iter().any(|e| e.contains("parameter `held` cannot store identity struct `Mob`")),
-        "chess_sfx bodies must reject ordinary identity storage: {errors:?}"
+        "migrated_package bodies must reject ordinary identity storage: {errors:?}"
     );
-    assert!(
-        !bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT.contains(&"chess_sfx"),
-        "chess_sfx has no remaining identity-storage sites"
-    );
+
 }
 
 // Identity-to-`any` erasure is recorded where `coerce` accepts the `any`
@@ -2808,4 +2808,50 @@ fn enumerated_arena_records_the_lazy_iterator_protocol() {
     let inference = &ws.inference(module.id).unwrap().per_fn[&BodyOwner::Function(fid)];
     assert_eq!(inference.for_iter_protocol.len(), 1);
     assert!(inference.for_iter_protocol.values().all(|info| info.iter.is_none()));
+}
+
+fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
+    use bone_core::modules::{NsAliases, PackageAliases};
+    let mut modules: Vec<_> = sources.iter().map(|(file, source)| {
+        let mut ast = skull_parser::parse_module_clean_with_dialect(source, (*file).into(), skull_parser::Dialect::V1).unwrap();
+        ast.package = Some(rock_core::source_code::PackageTag { id: 1, self_name: "sample".into() });
+        ast
+    }).collect();
+    let aliases = NsAliases { packages: vec![PackageAliases { id: 1, self_name: "sample".into(), aliases: vec![] }] };
+    match semantic_pass_with_aliases(&mut modules, &aliases) {
+        Err(error) => vec![error.message],
+        Ok(ws) => ws.modules.iter().flat_map(|module| module.interface_errors.iter().chain(module.lowering_errors.values().flatten()))
+            .chain(ws.inferences_iter().flat_map(|(_, inf)| inf.errors.values().flatten()))
+            .map(|error| error.message.clone()).collect(),
+    }
+}
+
+#[test]
+fn ambiguous_annotation_does_not_select_builtin() {
+    let errors = annotation_resolution_errors(&[
+        ("a.rock", "mod a; pub deco init test {}"),
+        ("b.rock", "mod b; pub deco init test {}"),
+        ("main.rock", "use a::*; use b::*; @test fn probe() {}"),
+    ]);
+    assert!(errors.iter().any(|error| error.contains("test") && error.contains("ambiguous")), "{errors:?}");
+    let valid = annotation_resolution_errors(&[
+        ("a.rock", "mod a; pub deco init test {}"),
+        ("main.rock", "use a::*; @test fn probe() {}"),
+    ]);
+    assert!(valid.is_empty(), "{valid:?}");
+}
+
+#[test]
+fn annotation_wire_onchange_references_must_resolve() {
+    for (name, diagnostic) in [("missing", "did not resolve"), ("changed", "not a single definition")] {
+        let source = format!("use a::*; use b::*; deco init wire {{}} @wire(onchange=[{name}]) fn probe() {{}}");
+        let errors = annotation_resolution_errors(&[
+            ("a.rock", "mod a; pub fn changed() {}"),
+            ("b.rock", "mod b; pub fn changed() {}"),
+            ("main.rock", &source),
+        ]);
+        assert!(errors.iter().any(|error| error.contains(name) && error.contains(diagnostic)), "{name}: {errors:?}");
+    }
+    let valid = annotation_resolution_errors(&[("main.rock", "deco init wire {} fn changed() {} @wire(onchange=[changed]) fn probe() {}")]);
+    assert!(valid.is_empty(), "{valid:?}");
 }

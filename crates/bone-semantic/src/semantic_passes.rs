@@ -40,7 +40,7 @@ fn trailing_generic_defaults(
         let classified = match &te.kind {
             TypeExprKind::Int => GenericDefault::Builtin(BuiltinTy::Int),
             TypeExprKind::Uint => GenericDefault::Builtin(BuiltinTy::Uint),
-            TypeExprKind::Float => GenericDefault::Builtin(BuiltinTy::Float),
+            TypeExprKind::Float | TypeExprKind::F64 => GenericDefault::Builtin(BuiltinTy::Float),
             TypeExprKind::Bool => GenericDefault::Builtin(BuiltinTy::Bool),
             TypeExprKind::String => GenericDefault::Builtin(BuiltinTy::String),
             TypeExprKind::Unit => GenericDefault::Builtin(BuiltinTy::Unit),
@@ -143,6 +143,7 @@ pub fn lower_modules(
         .iter()
         .map(|rock_mod| Module {
             file: rock_mod.file,
+            package: rock_mod.package.as_ref().map(|tag| ustr(&tag.self_name)),
             ..Default::default()
         })
         .collect_vec();
@@ -255,7 +256,7 @@ pub fn lower_modules(
                 &ctx,
                 lower_item.rock_module,
                 &ast_item.annotations,
-            );
+            )?;
             validate_annotations(pos, &lowered, &ws.decorator_names)?;
         }
         ctx.flush_scope_probes();
@@ -439,6 +440,7 @@ pub fn lower_modules(
 
     check_embed_site_legality(ws, &ids);
     check_frame_ref_storage(ws, &ids);
+    crate::identity_storage::check_identity_storage(ws, &ids);
 
     Ok(ids)
 }
@@ -759,6 +761,7 @@ pub fn lower_and_infer(
     let ids = lower_modules(ws, rock_modules)?;
 
     infer_modules(ws, &ids)?;
+    crate::relocation::check_relocation(ws);
 
     Ok(ids)
 }
@@ -1060,8 +1063,34 @@ pub fn semantic_pass_without_closure_gate(
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
+    semantic_pass_into(Workspace::default(), rock_modules, aliases)
+}
+
+/// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
+/// fixture harness.
+pub fn semantic_pass_enforcing_identity_storage(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerError> {
+    semantic_pass_enforcing_identity_storage_with_aliases(rock_modules, &bone_core::modules::NsAliases::default())
+}
+
+pub fn semantic_pass_enforcing_identity_storage_with_aliases(
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
+    let ws = Workspace {
+        identity_storage_enforce_unpackaged: true,
+        ..Workspace::default()
+    };
+    let ws = semantic_pass_into(ws, rock_modules, aliases)?;
+    pass_validate_api_closure(&ws)?;
+    Ok(ws)
+}
+
+pub fn semantic_pass_into(
+    mut ws: Workspace,
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
-    let mut ws = Workspace::default();
 
     build_namespaces(&mut ws, rock_modules, aliases)?;
     expand_and_desugar(&mut ws, rock_modules)?;
@@ -2065,7 +2094,8 @@ fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, &'static str)> {
         ItemKind::Enum(e) => Some((e.name.name, "type")),
         ItemKind::Newtype(n) => Some((n.name.name, "type")),
         ItemKind::Global(g) => Some((g.name.name, "global")),
-        ItemKind::Function(f) => Some((f.name.name, "callable")),
+        // The macro registry owns discovery; expansion removes these before lowering.
+        ItemKind::Function(f) if !f.is_macro => Some((f.name.name, "callable")),
         ItemKind::Decorator(d) => Some((d.name.name, "decorator")),
         _ => None,
     }
@@ -2082,6 +2112,7 @@ pub fn check_module_incremental(
     mut prev: InferenceResult,
 ) -> Result<InferenceResult, CompilerError> {
     let mut result = InferenceResult::default();
+    let enforce_identity_storage = !crate::identity_storage::identity_storage_exempt(ws, module);
 
     for (f_id, f) in module.functions.iter() {
         let owner = BodyOwner::Function(f_id);
@@ -2099,7 +2130,19 @@ pub fn check_module_incremental(
         // incremental Session can report exactly how many bodies re-inferred.
         ws.reinferred_body_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        fold_inference(&mut result, owner, check_function(ws, module, mid, f_id, f));
+        let checked = check_function(ws, module, mid, f_id, f).map(|checked| {
+            checked.map(|(owner, inference, mut errs)| {
+                if enforce_identity_storage {
+                    errs.extend(
+                        crate::identity_storage::identity_body_sites(ws, f, body, &inference)
+                            .into_iter()
+                            .map(|site| CompilerError::new_with_label(site.span, site.message)),
+                    );
+                }
+                (owner, inference, errs)
+            })
+        });
+        fold_inference(&mut result, owner, checked);
     }
 
     for (d_id, d) in module.decorators.iter() {
@@ -2384,6 +2427,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                         skull_parser::TypeExprKind::Int
                             | skull_parser::TypeExprKind::Uint
                             | skull_parser::TypeExprKind::Float
+                            | skull_parser::TypeExprKind::F64
                             | skull_parser::TypeExprKind::String
                             | skull_parser::TypeExprKind::Bool
                             | skull_parser::TypeExprKind::Any

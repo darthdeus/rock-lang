@@ -15,7 +15,7 @@
 //!   - rock's check_if never requires an else, so a no-else if in value
 //!     position type-checks and produces nil at runtime -- bone rejects.
 
-// the mag shape (screenshot_scenes.rock): open chain, every branch tail
+// an open conditional chain: open chain, every branch tail
 // the same non-unit type, value discarded
 //- stmt_open_chain_uniform_tails
 fn gives_bool() -> bool { true }

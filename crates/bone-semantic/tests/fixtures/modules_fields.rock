@@ -154,7 +154,7 @@ fn test(a: game::actor::Actor) {
     a.pos.x = 10
 }
 
-//- aliasing_mutation_through_ref_in_private_set_allowed
+//- private_set_identity_field_is_rejected_as_storage @fail=cannot store identity struct
 //-- state.rock @pkg=game,1 @v1
 mod state;
 pub struct Inventory {

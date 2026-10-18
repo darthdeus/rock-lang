@@ -52,18 +52,16 @@ fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()>
     Ok(())
 }
 
-const STDLIB_FILES: &[(&str, &str)] = &[
-    ("<stdlib>/unified.rock", include_str!("../../../stdlib/unified.rock")),
-    ("<stdlib>/logging.rock", include_str!("../../../stdlib/logging.rock")),
-    ("<stdlib>/vec.rock", include_str!("../../../stdlib/vec.rock")),
-    ("<stdlib>/mat.rock", include_str!("../../../stdlib/mat.rock")),
-    ("<stdlib>/arena.rock", include_str!("../../../stdlib/arena.rock")),
-    ("<stdlib>/scene.rock", include_str!("../../../stdlib/scene.rock")),
-    ("<stdlib>/strings.rock", include_str!("../../../stdlib/strings.rock")),
-    ("<stdlib>/json.rock", include_str!("../../../stdlib/json.rock")),
-    ("<stdlib>/shader.rock", include_str!("../../../stdlib/shader.rock")),
-    ("<stdlib>/js.rock", include_str!("../../../stdlib/js.rock")),
-];
+/// The stdlib under its loader ids (`<stdlib>/name`), in load order.
+fn stdlib_sources() -> &'static [(&'static str, &'static str)] {
+    static SOURCES: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    SOURCES.get_or_init(|| {
+        rock_stdlib::stdlib_files()
+            .iter()
+            .map(|f| (&*Box::leak(rock_stdlib::stdlib_file_id(f.name).into_boxed_str()), f.contents))
+            .collect()
+    })
+}
 
 fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
     let sections = test_utils::parse_sections(contents);
@@ -84,7 +82,7 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
     );
 
     let mut std_modules = Vec::new();
-    for (file, source) in STDLIB_FILES {
+    for (file, source) in stdlib_sources() {
         let module = skull_parser::parse_module_clean(source, bone_core::prelude::ustr(file))
             .map_err(|e| format!("{file}: {e}"))?;
         std_modules.push(module);
@@ -117,7 +115,7 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
     let user_files = bone_semantic::test_support::parse_embedded_files(prelude.content);
     assert!(!user_files.is_empty(), "v1_default_prelude has no embedded file");
     let mut modules = Vec::new();
-    for (file, source) in STDLIB_FILES {
+    for (file, source) in stdlib_sources() {
         let module = skull_parser::parse_module_clean(source, bone_core::prelude::ustr(file))
             .map_err(|e| format!("{file}: {e}"))?;
         modules.push(module);
@@ -135,7 +133,7 @@ fn check_std_fixture(contents: &str) -> datatest_stable::Result<()> {
         });
         modules.push(module);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules)
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
         .map_err(|e| format!("stdlib + v1 semantic pass failed: {e}"))?;
     for file in &user_files {
         let module = ws
@@ -162,7 +160,7 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
     if sections.is_empty() {
         if let Err(e) = bone_semantic::test_support::check_types_embedded_with_stdlib(
             &bone_semantic::test_support::parse_embedded_files(contents),
-            STDLIB_FILES,
+            stdlib_sources(),
         ) {
             panic!("{}", e);
         }
@@ -185,7 +183,7 @@ fn check_modules_fixture(contents: &str) -> datatest_stable::Result<()> {
         };
         let files = bone_semantic::test_support::parse_embedded_files(section.content);
         match (
-            bone_semantic::test_support::check_types_embedded_with_stdlib(&files, STDLIB_FILES),
+            bone_semantic::test_support::check_types_embedded_with_stdlib(&files, stdlib_sources()),
             expect_fail,
         ) {
             (Ok(_), true) => failures.push(format!("section `{name}` was marked @fail but passed")),

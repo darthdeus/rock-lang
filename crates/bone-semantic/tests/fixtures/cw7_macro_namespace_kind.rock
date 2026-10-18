@@ -1,0 +1,13 @@
+macro identity_value(x: expr) { x }
+
+fn ordinary(x: int) -> int { x }
+fn ordinary(x: bool) -> bool { x }
+
+fn main() {
+    let expanded = identity_value(21)
+      //^ int
+    let number = ordinary(expanded)
+      //^ int
+    let flag = ordinary(true)
+      //^ bool
+}

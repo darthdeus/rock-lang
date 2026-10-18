@@ -11,6 +11,7 @@ crates listed below.
 |---|---|
 | `crates/bone-core` | HIR, annotation registry, module workspace and shared types of the `bone` typechecker |
 | `crates/bone-inference` | Type inference: unification, calls, fields, purity |
+| `crates/bone-semantic` | Semantic passes, identity-storage validation and typechecker fixtures |
 | `crates/bone-lower` | Lowering from the parser AST to the typechecker's HIR |
 | `crates/la-arena` (`comfy-la-arena`) | Fork of `la-arena` from [rust-analyzer](https://github.com/rust-lang/rust-analyzer), MIT OR Apache-2.0 |
 | `crates/lsp-server-manual` | Fork of `lsp-server` 0.7.9 from rust-analyzer with hand-written serde, MIT OR Apache-2.0 |

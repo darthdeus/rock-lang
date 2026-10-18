@@ -6,8 +6,8 @@
 //! (self-recursive -- fixtures never execute).
 
 //- arena_iter_destructure
-struct Entity<T> { idx: int }
-struct Arena<T> { count: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
 struct AIter<T> { a: Arena<T> }
 fn iter<T>(a: Arena<T>) -> AIter<T> { return AIter { a: a } }
 fn next<T>(it: AIter<T>) -> (bool, Entity<T>, T) { return next(it) }
@@ -22,8 +22,8 @@ fn f<T>(arena: Arena<T>) -> int {
 }
 
 //- arena_iter_single
-struct Entity<T> { idx: int }
-struct Arena<T> { count: int }
+value Entity<T> { idx: int }
+value Arena<T> { count: int }
 struct AIter<T> { a: Arena<T> }
 fn iter<T>(a: Arena<T>) -> AIter<T> { return AIter { a: a } }
 fn next<T>(it: AIter<T>) -> (bool, Entity<T>, T) { return next(it) }

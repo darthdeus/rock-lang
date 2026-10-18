@@ -109,6 +109,8 @@ pub struct Workspace {
     /// counting them as unmigrated unpackaged programs. The bone fixture
     /// harness sets it: its programs are the rule's fixtures.
     pub identity_storage_enforce_unpackaged: bool,
+    /// Host migration policy, shared by declaration, body and emission checks.
+    pub identity_storage_exemptions: crate::identity_storage::IdentityStorageExemptions,
 }
 
 /// See [`Workspace::comptime_inputs`].
@@ -203,6 +205,7 @@ impl Workspace {
             legacy_projections: Default::default(),
             legacy_imports: Default::default(),
             identity_storage_enforce_unpackaged: false,
+            identity_storage_exemptions: Default::default(),
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());

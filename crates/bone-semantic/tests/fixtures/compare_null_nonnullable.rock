@@ -24,7 +24,7 @@ fn f(x: S) -> bool {
 }
 
 // a nullable FIELD refined to non-null by a same-scope assignment is also dead
-// to check (the bitgun / path_refinement pattern, but in one scope).
+// to check (a path-refinement pattern in one scope).
 //- compare_assignment_refined_field_to_null @fail
 struct Inner { v: int }
 struct Top { inner: Inner? }
