@@ -59,3 +59,13 @@ too_many_arguments = "allow"
 uninlined_format_args = "allow"
 manual_strip = "allow"
 unnecessary_map_or = "allow"
+
+# The typechecker recurses deeply; unoptimized frames overflow the default
+# test-thread stack on the larger fixtures.
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
