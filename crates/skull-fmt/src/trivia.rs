@@ -69,7 +69,7 @@ impl Trivia {
                         // merely that the line opens with `/*` -- a line like
                         // `/* a */ x /* b */` opens with `/*` but neither comment
                         // is own-line (the trailing one must stay inline).
-                        let full = src.get(lo..hi).unwrap_or_default();
+                        let full = source_slice(src, lo, hi);
                         let own_line = lines.get(line).is_some_and(|l| l.trim() == full);
                         block.insert(
                             lo,
@@ -185,4 +185,9 @@ impl Trivia {
             .count();
         n.min(2)
     }
+}
+
+/// Tokenizer and parser spans must address the original source exactly.
+pub(crate) fn source_slice(src: &str, lo: usize, hi: usize) -> &str {
+    src.get(lo..hi).expect("invalid source span in formatter")
 }

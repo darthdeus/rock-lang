@@ -196,7 +196,9 @@ impl Connection {
             return Ok(false);
         }
         let resp = Response::new_ok(req.id.clone(), ());
-        let _ = self.sender.send(resp.into());
+        self.sender.send(resp.into()).map_err(|error| {
+            ProtocolError::new(format!("failed to send shutdown response: {error}"))
+        })?;
         match &self.receiver.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(Message::Notification(n)) if n.is_exit() => (),
             Ok(msg) => {
@@ -216,5 +218,18 @@ impl Connection {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    #[test]
+    fn shutdown_reports_send_failure_before_exit() {
+        let (server, client) = Connection::memory();
+        client.sender.send(Notification::new("exit".into(), ()).into()).unwrap();
+        drop(client);
+        let error = server.handle_shutdown(&Request::new(1.into(), "shutdown".into(), ())).unwrap_err();
+        assert!(error.to_string().contains("shutdown response"), "{error}");
     }
 }

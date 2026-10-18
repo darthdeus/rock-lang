@@ -50,18 +50,9 @@ impl<'a> Printer<'a> {
         Doc::text(self.slice(span).trim_end())
     }
 
-    /// Slice the source by byte-offset range. `Span.offset_range` is byte-based
-    /// (the tokenizer's `byte_offset` advances by `len_utf8()` per char), so the
-    /// offsets index `&str` directly -- no char->byte remap. `get` guards against
-    /// a malformed span (out of bounds / not on a UTF-8 boundary).
+    /// Parser spans are byte offsets on UTF-8 boundaries in this source.
     fn slice_range(&self, b0: usize, b1: usize) -> &str {
-        let len = self.src.len();
-        let (b0, b1) = (b0.min(len), b1.min(len));
-        if b0 <= b1 {
-            self.src.get(b0..b1).unwrap_or("")
-        } else {
-            ""
-        }
+        crate::trivia::source_slice(self.src, b0, b1)
     }
 
     /// Did the author write a trailing comma after this (last) entry? Scan the
@@ -2652,6 +2643,10 @@ impl<'a> Printer<'a> {
     /// have a `}` between them and the comment; only the outer one claims it.
     fn claimed_trailing_comment(&self, span: Span) -> Option<(&str, usize)> {
         let (text, col, offset) = self.trivia.trailing_comment(span.line_range.1)?;
+        // Some expression spans already include their trailing comment.
+        if offset < span.offset_range.1 {
+            return Some((text, col));
+        }
         let between = self.slice_range(span.offset_range.1, offset);
         between
             .chars()
@@ -2730,4 +2725,20 @@ fn item_visibility(vis: Option<&Visibility>) -> Vec<Doc> {
         }
     };
     vec![Doc::text(text)]
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+    #[test]
+    fn invalid_source_spans_are_reported() {
+        let src = "// \u{e9}\n";
+        let ast = skull_parser::parse_module_clean(src, "<span>".into()).unwrap();
+        let cfg = FormatConfig::default();
+        let trivia = Trivia::harvest(src, "<span>".into()).unwrap();
+        let printer = Printer::new(&ast, src, &cfg, &trivia);
+        for (lo, hi) in [(0, src.len()+1), (4, 5), (5, 2)] {
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| printer.slice_range(lo, hi))).is_err(), "{lo}..{hi}");
+        }
+    }
 }

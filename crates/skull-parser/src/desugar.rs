@@ -5,8 +5,7 @@
 //!   - placeholder lambda (`_.f`, `_ > 0`  ->  `p => p.f`)  [D1]
 //!   - compound-assign (`a += b`)  [D2]
 //!   - `^name` anaphoric (resolves as a caller-scope ident)
-//! Never desugared at all: smart for-loop `.iter()` insertion [D3] (no game
-//! triggers it) and `.type_info` -> `type_of(obj)` [D4] (`type_of` is no
+//! Never desugared at all: smart for-loop `.iter()` insertion [D3] and `.type_info` -> `type_of(obj)` [D4] (`type_of` is no
 //! fn/builtin). The `skull-cook-diff` oracle skips D1/D2 on rock's side
 //! (`SyntaxDesugarPass::raw_compound_assign`) so it still byte-compares the rest.
 //!
@@ -301,7 +300,7 @@ mod tests {
     #[test]
     fn type_hole_and_range_and_dollar() {
         // `?` type hole, `..=` inclusive range pattern, `$` low-prec application
-        // — corpus features the games don't hit (caught by the tests/ oracle).
+        // — additional surface syntax forms.
         check("let x: ? = 42", "(block (let x ? 42))");
         check(
             "match x { 1..=10 => \"s\", _ => \"o\" }",

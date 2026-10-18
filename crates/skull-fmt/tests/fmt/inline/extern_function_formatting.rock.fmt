@@ -3,7 +3,7 @@
 
 //=== TEST CASE: extern_function_preservation ===
 inline(lua) fn get_working_directory() -> string = """
-    return love.filesystem.getWorkingDirectory()
+    return platform.filesystem.getWorkingDirectory()
 """
 
 //=== NO CHANGE ===

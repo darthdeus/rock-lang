@@ -2489,7 +2489,7 @@ pub fn build_function(
             name: p.name.name,
             ty: ty_ref,
             has_default: p.default.is_some(),
-            annotations: lower_annotations_with_ctx(ctx, a, &p.annotations),
+            annotations: lower_annotations_with_ctx(ctx, a, &p.annotations)?,
         });
     }
 
@@ -2497,7 +2497,7 @@ pub fn build_function(
     // rather than failing fast: the workspace must stay buildable while an
     // annotation is mid-typed (decorator completion runs on it), and
     // `body_errors()` already turns any lowering error into a hard verdict.
-    let annotations = lower_annotations_with_ctx(ctx, a, annotations);
+    let annotations = lower_annotations_with_ctx(ctx, a, annotations)?;
     let mut anno_errors = Vec::new();
     if let Err(e) = validate_annotations(AnnoPos::FnItem, &annotations, &ctx.workspace.decorator_names) {
         anno_errors.push(e);
@@ -2823,7 +2823,7 @@ pub fn relower_function_in_place(
     // Re-validate annotations on the body-only path too: the REPLACE below
     // would otherwise clear a still-present annotation violation recorded by
     // the last full lower.
-    let lowered_annos = lower_annotations_with_ctx(&ctx, a, annotations);
+    let lowered_annos = lower_annotations_with_ctx(&ctx, a, annotations)?;
     if let Err(e) = validate_annotations(AnnoPos::FnItem, &lowered_annos, &ctx.workspace.decorator_names) {
         errors.push(e);
     }
@@ -2937,7 +2937,7 @@ pub fn lower_struct_def(
             (bone_core::modules::NsVisibility::Pub, bone_core::modules::NsVisibility::Pub)
         };
 
-        let field_annotations = lower_annotations_with_ctx(ctx, a, &field.annotations);
+        let field_annotations = lower_annotations_with_ctx(ctx, a, &field.annotations)?;
         validate_annotations(AnnoPos::StructField, &field_annotations, &ctx.workspace.decorator_names)?;
         fields.push(hir::StructFieldDef {
             name: field.name.name,
@@ -2999,7 +2999,7 @@ pub fn lower_enum_def(
                 let rec: Vec<hir::StructFieldDef> = fs
                     .iter()
                     .map(|f| {
-                        let annos = lower_annotations_with_ctx(ctx, a, &f.annotations);
+                        let annos = lower_annotations_with_ctx(ctx, a, &f.annotations)?;
                         validate_annotations(AnnoPos::EnumVariantField, &annos, &ctx.workspace.decorator_names)?;
                         if f.is_embed {
                             comp_error!(
@@ -3356,7 +3356,7 @@ fn lower_state_metadata(
 ) -> Result<(StateMetadata, Option<bone_core::hir::RedundantStateAnnotation>), CompilerError> {
     let (class, site) = memory_class_of(ast);
     let unit_default = metadata_for_memory_class(class);
-    let annotations = lower_annotations_with_ctx(ctx, ast, annotations);
+    let annotations = lower_annotations_with_ctx(ctx, ast, annotations)?;
     let Some(annotation) = annotations.iter().find(|annotation| annotation.is_builtin("state")) else {
         return Ok((unit_default, None));
     };
@@ -3834,7 +3834,7 @@ pub fn lower_decorator_def(
 
         bindings.insert(p.name.name, b_idx);
         params.push(b_idx);
-        let deco_param_annotations = lower_annotations_with_ctx(ctx, a, &p.annotations);
+        let deco_param_annotations = lower_annotations_with_ctx(ctx, a, &p.annotations)?;
         validate_annotations(AnnoPos::DecoParam, &deco_param_annotations, &ctx.workspace.decorator_names)?;
         param_decls.push(ParamDecl {
             name: p.name.name,
@@ -3902,7 +3902,7 @@ pub fn lower_decorator_def(
         span: d.span,
         param_decls,
         num_required,
-        annotations: lower_annotations_with_ctx(ctx, a, annotations),
+        annotations: lower_annotations_with_ctx(ctx, a, annotations)?,
     });
 
     ctx.module.insert_body(BodyOwner::Decorator(idx), body);
@@ -3943,13 +3943,15 @@ pub fn lower_annotations_with_ctx(
     ctx: &LowerCtx,
     ast: &Ast,
     anns: &[skull_parser::Annotation],
-) -> Vec<hir::Annotation> {
+) -> Result<Vec<hir::Annotation>, CompilerError> {
     let mut lowered = lower_annotations(ast, anns);
     for anno in &mut lowered {
         // Only a decorator claims an annotation spelling; a same-named fn or
         // global leaves the builtin in force.
         let resolved = match ctx.v1_scope() {
-            Some(_) => ctx.resolve_bare(anno.name.name, anno.span).ok().map(|r| r.key),
+            Some(frag) => ctx.probed(|| resolve::bare_binding(ctx.workspace, Some(frag), anno.name.name))
+                .map_err(|message| CompilerError::new_with_label(anno.span, message))?
+                .map(|resolved| resolved.key),
             None => legacy_projected_decorator(ctx, anno.name.name),
         };
         if let Some(key) = resolved {
@@ -3969,9 +3971,9 @@ pub fn lower_annotations_with_ctx(
                     .get(&key)
                     .is_some_and(|meta| meta.name.as_str() == "wire")
             });
-        let Some(frag) = ctx.v1_scope().filter(|_| is_wire_role) else {
+        if ctx.v1_scope().is_none() || !is_wire_role {
             continue;
-        };
+        }
         let Some(names) = anno.args.iter().find_map(|arg| {
             (arg.name.as_ref().is_some_and(|name| name.name.as_str() == "onchange"))
                 .then(|| match &arg.value {
@@ -3984,17 +3986,12 @@ pub fn lower_annotations_with_ctx(
         };
         let mut resolved = Vec::with_capacity(names.len());
         for name in names {
-            let Ok(identity) = ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), name.name)) else {
-                resolved.clear();
-                break;
-            };
+            let identity = ctx.resolve_bare(name.name, name.span)?;
             resolved.push(identity.key);
         }
-        if resolved.len() == names.len() {
-            anno.resolved_ident_list = Some(resolved);
-        }
+        anno.resolved_ident_list = Some(resolved);
     }
-    lowered
+    Ok(lowered)
 }
 
 /// The v1 decorator a legacy file's annotation `name` reaches through its

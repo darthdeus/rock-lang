@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn escaped_quotes_in_a_hole_are_escapes_not_a_nested_literal() {
-        // Real corpus shape (`stone/engine/debug/profiling.rock`): the escape
+        // An interpolated join with escaped separator quotes: the escape
         // belongs to the enclosing literal, so the `"` does not open a nested
         // one and the outer literal still closes where it should.
         let src = "\"[{join(parts, \\\",\\\")}]\"";

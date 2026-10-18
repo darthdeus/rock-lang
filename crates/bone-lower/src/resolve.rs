@@ -265,7 +265,7 @@ pub fn resolve_bare(
 
 // An absent name may still anchor a module path; a broken binding carries
 // a diagnostic that the path lookup must retain if no module binds it.
-fn bare_binding(
+pub(crate) fn bare_binding(
     ws: &Workspace,
     frag: Option<&FragmentScope>,
     name: Ustr,

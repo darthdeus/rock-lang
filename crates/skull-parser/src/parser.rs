@@ -1397,7 +1397,7 @@ impl<'a> Parser<'a> {
         extern_body: Option<FunctionBody>,
         inline_backend: FnBackend,
     ) -> PResult<Item> {
-        let generics = self.parse_generics();
+        let generics = self.parse_generics()?;
 
         // D-form probe: `fn Type<gen>.name<gen>(receiver, ..)`. The `.` after the
         // ident+generics selects it; what we parsed as (name, generics) is then
@@ -1426,7 +1426,7 @@ impl<'a> Parser<'a> {
             let last = path.segments.last().expect("path has segments").clone();
             // Optional generics on the receiver tail: `lib::Actor<T>.heal`.
             let receiver_generics = if self.kind() == TokenKind::LessThan {
-                self.parse_generics()
+                self.parse_generics()?
             } else {
                 Vec::new()
             };
@@ -1437,7 +1437,7 @@ impl<'a> Parser<'a> {
             }
             self.advance(); // `.`
             let method_name = self.expect_ident()?;
-            let method_generics = self.parse_generics();
+            let method_generics = self.parse_generics()?;
             for pg in &receiver_generics {
                 if method_generics.iter().any(|mg| mg.name.name == pg.name.name) {
                     return Err(self.err(format!(
@@ -1478,7 +1478,7 @@ impl<'a> Parser<'a> {
             let path_ident = name;
             let path_generics = generics;
             let method_name = self.expect_ident()?;
-            let method_generics = self.parse_generics();
+            let method_generics = self.parse_generics()?;
             if self.kind() == TokenKind::Dot {
                 return Err(self.err("the receiver path may have only one segment (`Type.name`)"));
             }
@@ -1682,27 +1682,24 @@ impl<'a> Parser<'a> {
 
     /// Parse a `<T, U = Default, ...>` generic parameter list (empty if no `<`).
     /// Closes on `>` or a split `>>` (`expect_generic_close`).
-    fn parse_generics(&mut self) -> Vec<Generic> {
+    fn parse_generics(&mut self) -> PResult<Vec<Generic>> {
         let mut out = Vec::new();
         if self.kind() != TokenKind::LessThan {
-            return out;
+            return Ok(out);
         }
         self.advance(); // `<`
         while !matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift)
             && !self.at_end()
         {
             self.skip_comments();
-            let name = match self.expect_ident() {
-                Ok(id) => id,
-                Err(_) => break,
-            };
+            let name = self.expect_ident()?;
             let bound = if self.eat(TokenKind::Colon) {
-                self.parse_type().ok()
+                Some(self.parse_type()?)
             } else {
                 None
             };
             let default = if self.eat(TokenKind::Assign) {
-                self.parse_type().ok()
+                Some(self.parse_type()?)
             } else {
                 None
             };
@@ -1712,10 +1709,8 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        if let Err(e) = self.expect_generic_close() {
-            self.ast.recovery_errors.push(e);
-        }
-        out
+        self.expect_generic_close()?;
+        Ok(out)
     }
 
     /// Synthesize the receiver type for a D-form path (`Map<K, V>` in
@@ -1811,7 +1806,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::Struct)?;
         }
         let name = self.expect_ident()?;
-        let generics = self.parse_generics();
+        let generics = self.parse_generics()?;
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
         Ok(Item {
@@ -1876,7 +1871,7 @@ impl<'a> Parser<'a> {
         let start = self.span();
         self.expect(TokenKind::Enum)?;
         let name = self.expect_ident()?;
-        let generics = self.parse_generics();
+        let generics = self.parse_generics()?;
         self.expect(TokenKind::OpenCurly)?;
         self.delimiter_depth += 1;
         let mut variants = Vec::new();
@@ -1930,7 +1925,7 @@ impl<'a> Parser<'a> {
         let start = self.span();
         self.expect(TokenKind::Newtype)?;
         let name = self.expect_ident()?;
-        let generics = self.parse_generics();
+        let generics = self.parse_generics()?;
         self.expect(TokenKind::OpenParen)?;
         let wrapped = self.parse_type()?;
         if self.kind() == TokenKind::Comma {
@@ -3650,7 +3645,7 @@ impl<'a> Parser<'a> {
                 }
             }
             if !w.is_empty() {
-                spec.width = w.parse().ok();
+                spec.width = Some(w.parse().map_err(|_| self.err("format width overflow"))?);
             }
         }
         // grouping `,` / `_`
@@ -3681,7 +3676,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if !p.is_empty() {
-                    spec.precision = p.parse().ok();
+                    spec.precision = Some(p.parse().map_err(|_| self.err("format precision overflow"))?);
                 }
             }
         }
@@ -4305,4 +4300,25 @@ fn no_parens_breaks_on_op(op: TokenKind) -> bool {
             | TokenKind::Dollar
             | TokenKind::At
     )
+}
+
+#[cfg(test)]
+mod release_tests {
+
+    #[test]
+    fn malformed_generic_types_are_diagnosed() {
+        for source in ["fn f<T: >() {}", "fn f<T = >() {}"] {
+            assert!(crate::parse_module_clean(source, "<generics>".into()).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn overflowing_format_numbers_are_diagnosed() {
+        for spec in ["999999999999999999999999999999999999", ".999999999999999999999999999999999999"] {
+            let source = format!("fn f() {{ let value = \"{{1:{spec}}}\" }}");
+            let error = crate::parse_module_clean(&source, "<format>".into()).unwrap_err();
+            assert!(format!("{error:?}").contains("overflow"));
+        }
+        crate::parse_module_clean("fn f() { let value = \"{1:8.3f}\" }", "<format>".into()).unwrap();
+    }
 }

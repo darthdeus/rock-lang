@@ -1058,8 +1058,7 @@ mod tests {
 
     #[test]
     fn stdlib_surface_forms() {
-        // Forms the games don't exercise but stdlib does (caught by the
-        // skull-cook-diff stdlib oracle):
+        // Additional forms used by the standard library:
         // Leading-variadic param `...any` (stdlib spelling) + extern(lua) body.
         assert_eq!(
             item_sexp("extern(lua) fn print(args: ...any)"),
@@ -1123,8 +1122,8 @@ mod tests {
         assert_eq!(item_sexp("#if debug"), "(#if \"debug\")");
         // Non-Rock bodies render as a marker.
         assert_eq!(
-            item_sexp("extern(ffi, \"stone\") fn s(x: int)"),
-            "(fn s ((x int)) () (ffi \"stone\"))"
+            item_sexp("extern(ffi, \"native\") fn s(x: int)"),
+            "(fn s ((x int)) () (ffi \"native\"))"
         );
     }
 
@@ -1206,8 +1205,8 @@ mod tests {
     #[test]
     fn no_parens_calls() {
         check(
-            "start_game \"match3\"",
-            "(block (call start_game \"match3\"))",
+            "start_task \"batch\"",
+            "(block (call start_task \"batch\"))",
         );
         check("place_player 20 20", "(block (call place_player 20 20))");
         // Operators (bp >= 15) fold into the argument: `foo(a + b)`, matching
@@ -1577,22 +1576,22 @@ mod modules_path_tests {
     #[test]
     fn qualified_type_path_parses_in_v1() {
         assert_eq!(
-            let_type("fn f() { let x: game_core::combat::Actor = x }"),
-            "game_core::combat::Actor"
+            let_type("fn f() { let x: sample::combat::Actor = x }"),
+            "sample::combat::Actor"
         );
     }
 
     #[test]
     fn generic_type_path_parses_in_v1() {
         assert_eq!(
-            let_type("fn f() { let x: stone::collections::Vec<int> = x }"),
-            "(stone::collections::Vec int)"
+            let_type("fn f() { let x: native::collections::Vec<int> = x }"),
+            "(native::collections::Vec int)"
         );
     }
 
     #[test]
     fn root_anchored_and_self_super_type_paths_parse_in_v1() {
-        assert_eq!(let_type("fn f() { let x: ::game::Actor = x }"), "::game::Actor");
+        assert_eq!(let_type("fn f() { let x: ::app::Actor = x }"), "::app::Actor");
         assert_eq!(let_type("fn f() { let x: self::Actor = x }"), "self::Actor");
         assert_eq!(let_type("fn f() { let x: super::shared::T = x }"), "super::shared::T");
         assert_eq!(let_type("fn f() { let x: super::super::T = x }"), "super::super::T");
@@ -1601,8 +1600,8 @@ mod modules_path_tests {
     #[test]
     fn value_path_parses_in_v1() {
         assert_eq!(
-            let_value("fn f() { let h = game_core::combat::heal }"),
-            "game_core::combat::heal"
+            let_value("fn f() { let h = sample::combat::heal }"),
+            "sample::combat::heal"
         );
     }
 
@@ -1616,7 +1615,7 @@ mod modules_path_tests {
     #[test]
     fn qualified_call_parses_in_v1() {
         let ast = parse_v1(
-            "fn f() { let v = game_core::combat::heal(actor, 5)\nprint(v) }",
+            "fn f() { let v = sample::combat::heal(actor, 5)\nprint(v) }",
         )
         .expect("parse failed");
         assert!(ast.recovery_errors.is_empty(), "{:?}", ast.recovery_errors);

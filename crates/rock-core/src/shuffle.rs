@@ -3,8 +3,7 @@
 //!
 //! Cross-module name lookups, overload tables, and other indices walk
 //! `FxHashMap` in iteration order. When two top-level symbols collide on
-//! a name (canonical case: a game had a `global target_cycle` and a test
-//! `co fn target_cycle()`), whichever the iterator yields first wins,
+//! a name (for example a global and a function), whichever the iterator yields first wins,
 //! and the answer leaks the absolute path of the project (because
 //! `ModuleId` carries the file path as a `Ustr`, which feeds the hash).
 //!
@@ -34,13 +33,15 @@ use std::sync::OnceLock;
 
 static SHUFFLE_SEED: OnceLock<Option<u64>> = OnceLock::new();
 
-/// Returns the `ROCK_SHUFFLE_SEED` value, or `None` if unset / unparseable.
+/// Returns the `ROCK_SHUFFLE_SEED` value, or `None` if unset. Invalid settings panic.
 /// Cached after first read so repeated calls cost a single atomic load.
 pub fn shuffle_seed() -> Option<u64> {
     *SHUFFLE_SEED.get_or_init(|| {
-        std::env::var("ROCK_SHUFFLE_SEED")
-            .ok()
-            .and_then(|s| s.parse().ok())
+        match std::env::var("ROCK_SHUFFLE_SEED") {
+            Ok(seed) => Some(seed.parse().expect("ROCK_SHUFFLE_SEED must be a u64")),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => panic!("invalid ROCK_SHUFFLE_SEED: {error}"),
+        }
     })
 }
 
@@ -131,5 +132,21 @@ mod tests {
         assert_eq!(v.len(), 5);
         // We can't assert order without controlling the env, but length
         // must round-trip.
+    }
+}
+
+#[cfg(test)]
+mod invalid_seed_tests {
+    #[test]
+    fn invalid_seed_is_reported() {
+        if std::env::var_os("SHUFFLE_TEST_CHILD").is_some() {
+            super::shuffle_seed();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["shuffle::invalid_seed_tests::invalid_seed_is_reported", "--exact", "--nocapture"])
+            .env("SHUFFLE_TEST_CHILD", "1").env("ROCK_SHUFFLE_SEED", "invalid").output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("ROCK_SHUFFLE_SEED"));
     }
 }

@@ -120,7 +120,8 @@ fn corpus_report() {
         let cases = parse_cases(&short, &text);
         for c in cases {
             total += 1;
-            let got = skull_fmt::format_code(&c.input);
+            let got = std::panic::catch_unwind(|| skull_fmt::format_code(&c.input))
+                .unwrap_or_else(|_| panic!("formatter panicked for {} :: {}\n{}", c.file, c.name, c.input));
             let got_trim = got.trim_end();
             let exp_trim = c.expected.trim_end();
             if got_trim == exp_trim {

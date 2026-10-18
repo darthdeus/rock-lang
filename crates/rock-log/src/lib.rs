@@ -13,8 +13,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // 0=error 1=warn 2=info 3=debug 4=trace. Default info (2). Single
-// source of truth for the whole process; stone-rs's `extern "C"`
-// level bridge delegates here.
+// source of truth for the whole process; external level bridges delegate here.
 static LEVEL: AtomicU8 = AtomicU8::new(2);
 
 /// Parse `error|warn|info|debug|trace` or `0..4`. Unknown / unset =>
@@ -35,8 +34,7 @@ pub fn set_level(level: u8) {
     LEVEL.store(l, Ordering::Relaxed);
     // Keep the `log` facade's static max-level gate in sync. Without
     // this, `log::info!` etc. short-circuit against the max-level set
-    // once at init() and runtime raises (--verbose, the stone_log
-    // FFI bridge) never actually open the gate even though our atomic
+    // once at init() and runtime level changes never open the gate even though our atomic
     // changed. Found by ROCK_LOG=error + --verbose showing nothing.
     log::set_max_level(level_to_log(l));
 }
@@ -99,7 +97,7 @@ fn level_tag(l: log::Level) -> &'static str {
 
 /// SGR sequence for a level, or `""` when colour is off. Only error and
 /// warn get one: colouring every line is noise, and the point is that the
-/// two that need action stand out of a stream the game and the driver both
+/// two that need action stand out of a stream the application and its driver both
 /// write to.
 fn level_color(l: log::Level) -> &'static str {
     match l {
@@ -139,7 +137,7 @@ fn fmt_body(target: &str, args: &std::fmt::Arguments) -> String {
     }
 }
 
-// Shared log epoch (UNIX millis). The rock-cli driver and the game
+// Shared log epoch (UNIX millis). A parent and the child
 // process it spawns are separate processes, each with its own logger
 // install. With a per-process monotonic `Instant` origin their
 // interleaved `[<elapsed>s]` timestamps jump backward every hot-reload
@@ -154,10 +152,7 @@ static EPOCH_MS: Lazy<u128> = Lazy::new(|| {
             return ms;
         }
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let now = unix_millis(SystemTime::now());
     // SAFETY: init() (the only caller, via Lazy::force) runs at process
     // entry before any thread that concurrently mutates the environment;
     // children only ever take the parse branch above (var already set).
@@ -169,8 +164,8 @@ static EPOCH_MS: Lazy<u128> = Lazy::new(|| {
 /// wall-clock measurement at its log site, in place of the ordinary space.
 ///
 /// A record whose content IS a duration or a frame counter cannot be compared
-/// across two runs of the same work, so the sim differential
-/// (`rock-cli/src/sim_record.rs`) drops it. The declaration rides in the stamp
+/// across two runs of the same work, so differential consumers can drop it.
+/// The declaration rides in the stamp
 /// rather than in the message, so the drop never has to sniff for an `ms`
 /// suffix. One character, so a declared record and a plain one align.
 ///
@@ -179,7 +174,7 @@ static EPOCH_MS: Lazy<u128> = Lazy::new(|| {
 /// a log record, and always was -- the harness already strips such a prefix
 /// and loses the category with it; the declaration only adds one more
 /// consequence to text that was already protocol. What the strict grammar
-/// buys is that ordinary game output cannot match it by ACCIDENT.
+/// buys is that ordinary application output cannot match it by ACCIDENT.
 pub const WALL_CLOCK_MARK: &str = "~";
 
 /// The full emitted line, minus colour. Pure so both the emitter and its
@@ -201,10 +196,7 @@ fn format_line(
 }
 
 fn elapsed_secs() -> f64 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let now = unix_millis(SystemTime::now());
     now.saturating_sub(*EPOCH_MS) as f64 / 1000.0
 }
 
@@ -218,10 +210,6 @@ impl log::Log for Logger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        // `[<elapsed>s LEVEL] <body>` — elapsed since process start
-        // (zero-dep, monotonic, matches the engine's [FPS]/[T] style;
-        // wall-clock would need chrono). Level so errors/warns stand
-        // out in the now-unified stream.
         // The whole line is wrapped, not just the level tag -- the body is
         // the part you read while scrolling for what went wrong.
         emit(record.level(), record.target(), record.args(), false);
@@ -262,18 +250,19 @@ static LOGGER: Logger = Logger;
 static INIT: std::sync::Once = std::sync::Once::new();
 
 /// Idempotent. Reads `ROCK_LOG`, installs the global logger. Safe to
-/// call from every process entrypoint (rock-cli `main`, stone-rs init).
+/// call from every process entrypoint.
+/// Panics if another logger is installed or the clock precedes the UNIX epoch.
 pub fn init() {
     INIT.call_once(|| {
         // Establish (or inherit) the shared epoch and publish it to the
-        // environment before any game child is spawned.
+        // environment before any child is spawned.
         Lazy::force(&EPOCH_MS);
+        log::set_logger(&LOGGER).expect("failed to install logger");
         if let Ok(v) = std::env::var("ROCK_LOG") {
             if let Some(l) = parse_level(&v) {
                 set_level(l); // also syncs log::max_level
             }
         }
-        let _ = log::set_logger(&LOGGER);
     });
     // set_logger is one-shot; set_level (here + at runtime via
     // --verbose / the FFI bridge) keeps the facade max-level == our
@@ -407,18 +396,13 @@ pub fn once_should_emit(key: &'static str) -> bool {
 /// wrong. A site-only key reports the first offender and swallows every later
 /// one, so the log shows one row where eight are wrong while the failure count
 /// stays correct -- which is why the subject belongs IN the key rather than
-/// only in the message. Callers that had grown their own set for this
-/// (`stone_get_image_texture`'s stub handles, the blend-mode drift warning) go
-/// through here instead, so one reset reaches all of them.
+/// only in the message. A shared set lets one reset reach every caller.
 pub fn once_should_emit_for(key: &'static str, subject: u64) -> bool {
     DEDUP_SUBJECT.lock().unwrap().insert((key, subject))
 }
 
 /// True if `key` hasn't fired within `interval`. Records the time on
-/// emit. Caller does the `log::` emit. (The `log_once!` /
-/// `log_throttled!` *macros* live in `stone-rs/src/log.rs` so their
-/// existing call-site signatures are unchanged; they delegate the
-/// dedup/throttle decision here and emit through `log::`.)
+/// emit. The caller emits through `log::` after this suppression check.
 pub fn throttle_should_emit(key: &'static str, interval: Duration) -> bool {
     let mut m = THROTTLE.lock().unwrap();
     let now = Instant::now();
@@ -497,8 +481,8 @@ mod tests {
 
     // Regression: set_level must keep the `log` facade's static
     // max-level in sync, else `log::info!` etc. short-circuit against
-    // the level set once at init() and runtime raises (--verbose, the
-    // stone_log_set_level FFI bridge) never open the gate. Reproduced
+    // the level set once at init() and runtime level changes never open
+    // the gate. Reproduced
     // as ROCK_LOG=error + --verbose showing nothing.
     // `log::max_level()` is the facade's static gate that `log::info!`
     // short-circuits against; asserting it directly pins the bug
@@ -543,9 +527,9 @@ mod tests {
     }
 
     /// A wall-clock record is DECLARED at its log site, and the declaration
-    /// travels in the stamp the emitter owns -- not in the message, which a
-    /// game writes. It occupies the separator column, so a declared record and
-    /// a plain one put their bodies at the same offset.
+    /// travels in the stamp the emitter owns, separately from the message an
+    /// application writes. It occupies the separator column, so declared and
+    /// plain records put their bodies at the same offset.
     #[test]
     fn a_declared_wall_clock_record_is_marked_in_the_stamp() {
         let plain = format_line(
@@ -632,5 +616,33 @@ mod tests {
         // our short category -> [CAT] prefix
         assert_eq!(fmt_body("AUDIO", &format_args!("m")), "[AUDIO] m");
         let _ = a;
+    }
+}
+
+fn unix_millis(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH).expect("system clock is before UNIX epoch").as_millis()
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    #[test]
+    #[should_panic(expected = "before UNIX epoch")]
+    fn pre_epoch_clock_is_reported() {
+        unix_millis(UNIX_EPOCH - Duration::from_secs(1));
+    }
+
+    #[test]
+    fn logger_conflict_is_reported() {
+        if std::env::var_os("LOGGER_TEST_CHILD").is_some() {
+            log::set_logger(&LOGGER).unwrap();
+            init();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["release_tests::logger_conflict_is_reported", "--exact", "--nocapture"])
+            .env("LOGGER_TEST_CHILD", "1").output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("install logger"));
     }
 }

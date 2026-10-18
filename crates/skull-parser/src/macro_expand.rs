@@ -9,8 +9,7 @@
 //! live in their defining module's arena, so inlining a body into a caller is a
 //! cross-arena graft (`graft.rs`). Macro defs are dropped after expansion.
 //!
-//! Not yet ported (extend when the oracle demands — none of the games need them
-//! so far): variadic `...rest` splat, body-local hygiene rename, span retag for
+//! Not implemented: variadic `...rest` splat, body-local hygiene rename, span retag for
 //! `__SITE__` (the literal rides along as an `Ident`; retag only affects the
 //! later site-resolution pass, not the cooked s-expr), `ty`/`ident` fragment
 //! substitution, and top-level item-macro splicing.
@@ -105,7 +104,7 @@ pub fn collect_registry(modules: &[Ast]) -> MacroRegistry {
 /// fn), so it is rejected -- a macro always has exactly one meaning. Macro
 /// OVERLOADS (same name, different arity) stay legal; a same-named LOCAL binding
 /// (param, nested fn, `let`) legally shadows a macro and is not a top-level fn,
-/// so it never collides. Cross-module: stdlib + engine + game are one namespace,
+/// so it never collides. Cross-module: all parsed modules share one namespace,
 /// so this runs over the full parsed set before expansion erases the macro defs.
 /// Run on the pre-expansion modules (expansion drops the `is_macro` items).
 pub fn check_macro_name_uniqueness(modules: &[Ast]) -> Vec<CompilerError> {
