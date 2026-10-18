@@ -1,6 +1,6 @@
 //! The one logging backend.
 //!
-//! Single `STONE_LOG` parser, single level, single format
+//! Single `ROCK_LOG` parser, single level, single format
 //! (`[CATEGORY] msg`), single stream (stderr). Every Rust crate logs
 //! through the `log` facade (`log::info!(target: "CAT", …)`) plus the
 //! `log_once!` / `log_throttled!` filters; this is the only thing that
@@ -37,7 +37,7 @@ pub fn set_level(level: u8) {
     // this, `log::info!` etc. short-circuit against the max-level set
     // once at init() and runtime raises (--verbose, the stone_log
     // FFI bridge) never actually open the gate even though our atomic
-    // changed. Found by STONE_LOG=error + --verbose showing nothing.
+    // changed. Found by ROCK_LOG=error + --verbose showing nothing.
     log::set_max_level(level_to_log(l));
 }
 
@@ -261,14 +261,14 @@ pub fn emit_wall_clock(level: log::Level, target: &str, args: std::fmt::Argument
 static LOGGER: Logger = Logger;
 static INIT: std::sync::Once = std::sync::Once::new();
 
-/// Idempotent. Reads `STONE_LOG`, installs the global logger. Safe to
+/// Idempotent. Reads `ROCK_LOG`, installs the global logger. Safe to
 /// call from every process entrypoint (rock-cli `main`, stone-rs init).
 pub fn init() {
     INIT.call_once(|| {
         // Establish (or inherit) the shared epoch and publish it to the
         // environment before any game child is spawned.
         Lazy::force(&EPOCH_MS);
-        if let Ok(v) = std::env::var("STONE_LOG") {
+        if let Ok(v) = std::env::var("ROCK_LOG") {
             if let Some(l) = parse_level(&v) {
                 set_level(l); // also syncs log::max_level
             }
@@ -277,7 +277,7 @@ pub fn init() {
     });
     // set_logger is one-shot; set_level (here + at runtime via
     // --verbose / the FFI bridge) keeps the facade max-level == our
-    // level. This final sync covers STONE_LOG-unset (set_level above
+    // level. This final sync covers ROCK_LOG-unset (set_level above
     // not called) and idempotent re-init.
     log::set_max_level(level_to_log(level()));
 }
@@ -499,7 +499,7 @@ mod tests {
     // max-level in sync, else `log::info!` etc. short-circuit against
     // the level set once at init() and runtime raises (--verbose, the
     // stone_log_set_level FFI bridge) never open the gate. Reproduced
-    // as STONE_LOG=error + --verbose showing nothing.
+    // as ROCK_LOG=error + --verbose showing nothing.
     // `log::max_level()` is the facade's static gate that `log::info!`
     // short-circuits against; asserting it directly pins the bug
     // without an installed logger (`log_enabled!` is always false
@@ -512,7 +512,7 @@ mod tests {
         set_level(2);
         assert_eq!(log::max_level(), log::LevelFilter::Info);
 
-        // The exact --verbose-over-STONE_LOG=error case: drop to
+        // The exact --verbose-over-ROCK_LOG=error case: drop to
         // error, then raise via `level().max(3)`. Must open to debug.
         set_level(0);
         set_level(level().max(3));
