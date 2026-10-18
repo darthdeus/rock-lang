@@ -280,6 +280,27 @@ pub(crate) fn bare_binding(
     }
 }
 
+/// Annotation spellings are claimed only by decorators. Keep lookup failures,
+/// but diagnose ambiguity only among the decorators at the selected tier.
+pub(crate) fn decorator_binding(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    name: Ustr,
+) -> Result<Option<Resolved>, String> {
+    match bind_tiers(ws, frag, name, false)?.first {
+        Bound::One(resolved, _) => Ok((resolved.kind == ResolvedKind::Decorator).then_some(resolved)),
+        Bound::Several(mut hits, via, _) => {
+            hits.retain(|hit| hit.kind == ResolvedKind::Decorator);
+            match hits[..] {
+                [] => Ok(None),
+                [resolved] => Ok(Some(resolved)),
+                _ => Err(several(ws, name, &hits, via)),
+            }
+        }
+        Bound::Unbound => Ok(None),
+    }
+}
+
 /// A bare name in callee position in a v1 fragment (spec 8.3, 8.5). When the
 /// first tier that binds the name binds callables, the family is those and
 /// the callables of every lower tier, each member tagged with its tier for

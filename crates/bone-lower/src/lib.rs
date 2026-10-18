@@ -3949,7 +3949,7 @@ pub fn lower_annotations_with_ctx(
         // Only a decorator claims an annotation spelling; a same-named fn or
         // global leaves the builtin in force.
         let resolved = match ctx.v1_scope() {
-            Some(frag) => ctx.probed(|| resolve::bare_binding(ctx.workspace, Some(frag), anno.name.name))
+            Some(frag) => ctx.probed(|| resolve::decorator_binding(ctx.workspace, frag, anno.name.name))
                 .map_err(|message| CompilerError::new_with_label(anno.span, message))?
                 .map(|resolved| resolved.key),
             None => legacy_projected_decorator(ctx, anno.name.name),
