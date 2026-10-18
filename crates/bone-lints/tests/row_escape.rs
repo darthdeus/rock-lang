@@ -124,8 +124,7 @@ fn static_local_store_is_flagged() {
 
 #[test]
 fn returning_a_row_is_propagation_not_a_hazard() {
-    // `mag`'s `wall_at`, stone's `Sound.data`/`Font.data`: an accessor handing a
-    // row to its caller. A `return` runs nothing, so it cannot invalidate the
+    // An accessor hands a row to its caller. A `return` runs nothing, so it cannot invalidate the
     // slot -- what crosses it is the reference, never the validity window. It is
     // reported only because it is where an INTRAPROCEDURAL check stops.
     let fs = findings("fn accessor(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
@@ -285,7 +284,7 @@ fn arena_iteration_binding_is_a_row_source() {
 
 #[test]
 fn scene_root_is_a_row_source() {
-    // P1's standing limitation: `Scene<T>.get()` hands out an ordinary `T?`
+    // Current limitation: `Scene<T>.get()` hands out an ordinary `T?`
     // that dies with the Scene, so a stored root is the same defect shape.
     assert_eq!(
         kinds(
@@ -360,8 +359,7 @@ fn row_used_before_the_yield_is_clean() {
 
 #[test]
 fn closure_capturing_the_entity_and_refetching_is_clean() {
-    // `mag/glyphs.rock`'s `move_to` / `trace` idiom: capture the handle, get()
-    // inside the callback each frame.
+    // Capture the handle and fetch the row inside the callback each frame.
     let ks = kinds(
         "fn take(f: () -> int) -> int { return f() }\nfn main() -> int {\n    let e = some_entity()\n    return take(() => unwrap(e.get()).hp)\n}",
     );
@@ -370,10 +368,8 @@ fn closure_capturing_the_entity_and_refetching_is_clean() {
 
 #[test]
 fn a_trailing_row_in_a_unit_fn_is_clean() {
-    // `stone`'s `unload_sound` and bitgun's `despawn_mob` both end on
-    // `handle.remove()`, whose `T?` result is discarded because the function
-    // returns nothing. A tail rule that does not read the DECLARED return type
-    // calls that a leaked row, and it inflated the production census by two.
+    // A unit function discards its tail value. Reading only the expression
+    // type would incorrectly report a returned row.
     let ks = kinds("fn drop_it(e: Entity<Mob>) {\n    e.get()\n}");
     assert!(ks.is_empty(), "a discarded tail in a unit fn returns nothing: {ks:?}");
 }
@@ -398,9 +394,7 @@ fn iterating_an_arena_without_storing_is_clean() {
 
 #[test]
 fn finding_reports_at_advice_level() {
-    // A census lint, not a gate: the escape POPULATION is the input to the
-    // P6 build-or-delete decision (`docs/scene-system-plan.md`), so it must be
-    // possible to run it over a tree it would otherwise fail.
+    // A census must be runnable over a tree with escapes without failing it.
     let fs = findings("fn leak(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
     assert_eq!(fs.len(), 1, "expected the one return finding: {fs:?}");
     assert_eq!(fs[0].to_diagnostic().level, CompilerErrorLevel::Advice);

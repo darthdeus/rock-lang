@@ -1,18 +1,12 @@
 //! `row_escape` -- a row place reaching storage that outlives its arena.
 //!
 //! A *row* is the `T` an `Arena<T>` stores, or the root `T` a `Scene<T>` owns.
-//! Both are handed out today as ordinary references: `Entity<T>` is
-//! generation-checked, the `T` it resolves to is not. Once the Scene unloads or
-//! the slot is recycled, a retained row reads dead state, and under the SoA
-//! backing `docs/scene-system-plan.md` P4 wants there is no row object to
-//! retain at all.
+//! Both are handed out as ordinary references: `Entity<T>` is generation-checked,
+//! but the `T` it resolves to is not. A retained row can read dead state once
+//! the scene unloads or the slot is recycled.
 //!
-//! This is the transitional census the plan's P6 rests on: it measures the
-//! escape POPULATION so the decision to build (or delete) the checked
-//! scoped-place property is made against a number. It is deliberately `Advice`
-//! and opt-in -- a lint cannot prove the absence of an escape, so it must not
-//! pose as the boundary. What it cannot see is enumerated in
-//! `docs/lint-row-escape.md`; read that before reading a zero as evidence.
+//! This opt-in `Advice` census measures escapes. Its intraprocedural analysis
+//! cannot prove their absence and does not enforce a lifetime boundary.
 
 use crate::{head_type, EscapeKind, RowEscape};
 use bone_core::hir::{
@@ -62,7 +56,7 @@ pub fn row_escapes_in_body(
 
 /// What the census EXAMINED. A finding count on its own cannot be read: zero
 /// escapes in a project with no `Arena` at all says nothing about escapes,
-/// and the P6 decision this lint feeds turns on distinguishing those two zeros.
+/// so callers can distinguish an empty population from zero escapes.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct RowPopulation {
     /// Bodies carrying at least one row.
@@ -362,7 +356,7 @@ impl Rows {
 
     /// A row read from inside a lambda that was bound outside it. The lambda
     /// outlives the statement that built it, so the row it closed over is read
-    /// at a time nothing has re-validated. `mag/glyphs.rock`'s `move_to`
+    /// at a time nothing has re-validated. a handle-capturing `move_to`
     /// captures the `Entity` and re-`get()`s inside -- which is why the handle
     /// is excluded from `bindings` and this stays quiet on the correct idiom.
     fn captures(&self, ws: &Workspace, bi: &BodyInference, body: &Body, out: &mut Vec<RowEscape>) {
@@ -393,7 +387,7 @@ impl Rows {
     /// reused slot's `_data` instead of mutating in place, so a stale row never
     /// aliases the new occupant. It freezes at the dead entity's values and
     /// writes through it reach nothing, which is why "the mob did not move"
-    /// passes trivially. See `docs/entity-coroutine-binding.md`.
+    /// passes trivially.
     ///
     /// An evaluation-order walk carrying two binding sets: `live` (fetched,
     /// nothing suspended since) and `crossed` (fetched, then suspended). A read

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/bone-core",
     "crates/bone-inference",
+    "crates/bone-lints",
     "crates/bone-lower",
     "crates/bone-semantic",
     "crates/la-arena",
@@ -24,6 +25,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+bone-core = { path = "crates/bone-core" }
+bone-semantic = { path = "crates/bone-semantic" }
+rock-core = { path = "crates/rock-core" }
+skull-parser = { path = "crates/skull-parser" }
 anyhow = "1.0"
 ariadne = "0.4.1"
 atomic_refcell = "0.1.13"

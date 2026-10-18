@@ -1,10 +1,11 @@
+mod support;
 use bone_lints::{
     IncrementalLintCache, LintCacheUpdate, LintOptions, TextEditDelta, UNUSED_VAR, lint_workspace,
 };
 use bone_semantic::prelude::*;
 
 const FILE: &str = "<incremental-cache>";
-const ACTION_FILE: &str = "mag/player.rock";
+const ACTION_FILE: &str = "app/player.rock";
 
 fn workspace(src: &str) -> Workspace {
     let ast = skull_parser::parse_module_clean(src, Ustr::from(FILE)).expect("parse");
@@ -524,7 +525,7 @@ fn action_caller_addition_is_incremental_when_opted_in() {
     let new_ws = workspace_many(&[(ACTION_FILE, new)]);
     let file = Ustr::from(ACTION_FILE);
     let (gameplay_mid, gameplay_owner) = function_owner_in(&new_ws, ACTION_FILE, "gameplay");
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
     let mut old_sources = FxHashMap::default();
     old_sources.insert(file, old);
     let mut new_sources = FxHashMap::default();
@@ -562,7 +563,7 @@ fn action_caller_removal_is_incremental_when_opted_in() {
     let new_ws = workspace_many(&[(ACTION_FILE, new)]);
     let file = Ustr::from(ACTION_FILE);
     let (gameplay_mid, gameplay_owner) = function_owner_in(&new_ws, ACTION_FILE, "gameplay");
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
     let mut old_sources = FxHashMap::default();
     old_sources.insert(file, old);
     let mut new_sources = FxHashMap::default();
@@ -765,7 +766,7 @@ fn action_declaration_addition_updates_the_empty_population() {
     let new = "global ACT_NEW: int = 1\nfn main() { let value = ACT_NEW }\n";
     let old_ws = workspace_many(&[(ACTION_FILE, old)]);
     let new_ws = workspace_many(&[(ACTION_FILE, new)]);
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
     let file = Ustr::from(ACTION_FILE);
     let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
     let mut cache = IncrementalLintCache::default();
@@ -805,7 +806,7 @@ fn action_declaration_removal_restores_the_empty_population() {
     let new = "fn main() { let value = 0 }\n";
     let old_ws = workspace_many(&[(ACTION_FILE, old)]);
     let new_ws = workspace_many(&[(ACTION_FILE, new)]);
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
     let file = Ustr::from(ACTION_FILE);
     let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
     let mut cache = IncrementalLintCache::default();
@@ -835,7 +836,7 @@ fn action_declaration_removal_restores_the_empty_population() {
     );
     assert_eq!(shapes(&cached), shapes(&fresh));
     assert_eq!(cached.len(), 1);
-    assert!(cached[0].error.message.contains("no production Mag ACT_*"));
+    assert!(cached[0].error.message.contains("no production App ACT_*"));
     assert_eq!(stats.full_rebuilds, 0);
     assert_eq!(stats.global_passes, 0);
 }
@@ -843,19 +844,19 @@ fn action_declaration_removal_restores_the_empty_population() {
 #[test]
 fn action_population_elected_in_an_unchanged_file_is_published() {
     let old_parts = [
-        ("mag/other.rock", "fn helper() {}\n"),
+        ("app/other.rock", "fn helper() {}\n"),
         (
             ACTION_FILE,
             "global ACT_OLD: int = 1\nfn main() { let value = ACT_OLD }\n",
         ),
     ];
     let new_parts = [
-        ("mag/other.rock", "fn helper() {}\n"),
+        ("app/other.rock", "fn helper() {}\n"),
         (ACTION_FILE, "fn main() { let value = 0 }\n"),
     ];
     let old_ws = workspace_many(&old_parts);
     let new_ws = workspace_many(&new_parts);
-    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]);
+    let selection = LintOptions::only([bone_lints::ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
     let changed_file = Ustr::from(ACTION_FILE);
     let (main_mid, main_owner) = function_owner_in(&new_ws, ACTION_FILE, "main");
     let mut cache = IncrementalLintCache::default();
@@ -885,7 +886,7 @@ fn action_population_elected_in_an_unchanged_file_is_published() {
     );
     assert_eq!(shapes(&cached), shapes(&fresh));
     assert_eq!(cached.len(), 1);
-    assert_eq!(cached[0].file(), Ustr::from("mag/other.rock"));
+    assert_eq!(cached[0].file(), Ustr::from("app/other.rock"));
     assert_eq!(stats.full_rebuilds, 0);
 }
 

@@ -1,6 +1,7 @@
 //! The Phase 6 raw-input census must inspect typechecked HIR call sites, not a
 //! markdown or source-text inventory.
 
+mod support;
 use bone_lints::{Finding, LintOptions, RAW_INPUT_MIGRATION, lint_workspace};
 use bone_semantic::prelude::*;
 
@@ -11,7 +12,7 @@ fn findings(src: &str, options: &LintOptions) -> Vec<Finding> {
     let ws = semantic_pass(&mut [ast]).expect("clean program typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
-    lint_workspace(&ws, &FxHashSet::default(), true, &sources, options)
+    lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options.clone().with_action_policy(Some(&support::POLICY)))
 }
 
 fn census(src: &str) -> Vec<Finding> {

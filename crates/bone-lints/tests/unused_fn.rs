@@ -76,9 +76,7 @@ fn fn_called_from_global_initializer_is_not_flagged() {
     // A fn referenced only through a GLOBAL initializer (here via a lambda in a
     // struct field) is live -- the global runs at load. bone lowers this to a
     // BodyOwner::Global body, which the walk must treat as a reachability
-    // source, not just Function bodies. Regression: mag PANELS.close/rect
-    // callbacks (shop_close, loot_panel_rect, close_spell_panel) were
-    // false-flagged because only Function bodies were scanned.
+    // source, not just Function bodies.
     let src = "struct Reg {\n    close: fn() -> (),\n}\n\
                global REGS: [Reg] = [\n    Reg { close: () => shutdown() },\n]\n\
                fn shutdown() {}";
@@ -154,8 +152,7 @@ fn operator_overload_target_is_not_flagged() {
 #[test]
 fn pure_alone_is_not_a_root() {
     // `@pure` describes how the fn compiles, not how it is entered. Rooting on
-    // "has any annotation" silently exempted every `@pure`/`@inline` helper --
-    // it hid `step_toward` in mag and 20+ findings in stone.
+    // "has any annotation" would silently exempt every `@pure`/`@inline` helper.
     let src = "fn main() {}\n@pure\nfn dead(x: int) -> int {\n    return x\n}";
     assert_eq!(names(src), vec!["dead".to_string()], "@pure says nothing about reachability");
 }

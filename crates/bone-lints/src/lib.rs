@@ -1,8 +1,6 @@
 //! Lints over bone's typechecked HIR. A pure downstream consumer: reads
 //! `Workspace`/`Body` produced by bone-semantic, never re-typechecks and never
 //! touches the typechecker core. Findings publish through the LSP as warnings.
-//!
-//! Plan + catalog: `docs/lint-future-plan.md`, spec `docs/linter.md`.
 
 use bone_core::hir::{
     AnnoValue, BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, FnBackend, Function,
@@ -202,6 +200,19 @@ pub const OPT_IN_LINTS: &[&str] = &[
     HOST_RESOURCE_SUPPRESSION_CENSUS,
 ];
 
+/// Host-owned action-layer conventions. The public engine has no project policy.
+/// Paths match a complete component; test modules never declare production actions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionLayerPolicy {
+    pub production_root: &'static str,
+    pub production_label: &'static str,
+    pub action_prefix: &'static str,
+    pub raw_input_names: &'static [&'static str],
+    pub raw_input_classes: &'static [&'static str],
+    /// Registration helpers whose reads do not count as action consumers.
+    pub registration_functions: &'static [&'static str],
+}
+
 /// What an invocation asks of the lint engine: which lints run, and the knobs
 /// the lints themselves take. The default tier is the catalog minus
 /// [`OPT_IN_LINTS`]; [`LintOptions::only`] runs exactly the named set, opt-in
@@ -211,12 +222,20 @@ pub const OPT_IN_LINTS: &[&str] = &[
 /// runs, so an opt-in lint costs a build nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LintOptions {
+    action_policy: Option<&'static ActionLayerPolicy>,
     only: Option<Vec<String>>,
     only_types: Option<FxHashSet<Ustr>>,
     ignore_types: FxHashSet<Ustr>,
 }
 
 impl LintOptions {
+    /// Supply the caller's action policy, or explicitly select the plain build.
+    pub fn with_action_policy(mut self, policy: Option<&'static ActionLayerPolicy>) -> Self {
+        self.action_policy = policy;
+        self
+    }
+
+
     /// Run exactly `names`. Names that aren't in [`KNOWN_LINTS`] are kept so a
     /// caller can reject a typo through [`LintOptions::unknown`] -- silently
     /// dropping one would run nothing and report success.
@@ -577,6 +596,7 @@ struct LintDependencyIndex {
     declaration_names: FxHashMap<FunctionKey, Ustr>,
     declaration_spans: FxHashMap<FunctionKey, Span>,
     declaration_fingerprints: FxHashMap<Ustr, String>,
+    action_policy: Option<&'static ActionLayerPolicy>,
     action_declarations: FxHashMap<Ustr, (Ustr, Span)>,
     action_body_edges: FxHashMap<BodyKey, FxHashSet<Ustr>>,
     action_callers: FxHashMap<Ustr, FxHashSet<BodyKey>>,
@@ -587,13 +607,13 @@ struct LintDependencyIndex {
 }
 
 impl LintDependencyIndex {
-    fn build(ws: &Workspace, warm: &FxHashSet<ModuleId>, action_enabled: bool) -> Self {
-        let mut index = Self::default();
+    fn build(ws: &Workspace, warm: &FxHashSet<ModuleId>, action_enabled: bool, policy: Option<&'static ActionLayerPolicy>) -> Self {
+        let mut index = Self { action_policy: policy, ..Self::default() };
         for module in user_modules(ws, warm) {
             index.declaration_fingerprints.insert(module.file, declaration_fingerprint(ws, module));
             index
                 .action_declaration_fingerprints
-                .insert(module.file, action_declaration_fingerprint(module));
+                .insert(module.file, action_declaration_fingerprint(module, policy));
             for (fid, function) in module.functions.iter() {
                 let key = (module.id, fid);
                 index.function_names.entry(function.name).or_default().push(key);
@@ -633,15 +653,15 @@ impl LintDependencyIndex {
     }
 
     fn build_action_rows(&mut self, ws: &Workspace, warm: &FxHashSet<ModuleId>) {
-        for module in user_modules(ws, warm).filter(|module| is_production_mag_module(module.file)) {
-            for (_, global) in module.globals.iter().filter(|(_, global)| is_action_name(global.name)) {
+        for module in user_modules(ws, warm).filter(|module| is_production_action_module(module.file, self.action_policy)) {
+            for (_, global) in module.globals.iter().filter(|(_, global)| is_action_name(global.name, self.action_policy)) {
                 self.action_declarations.insert(global.name, (module.file, global.name_span));
             }
         }
         let declared: FxHashSet<Ustr> = self.action_declarations.keys().copied().collect();
         for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
             for (owner, body) in &module.bodies {
-                let edges = action_edges_in_body(module, *owner, body, &declared);
+                let edges = action_edges_in_body(module, *owner, body, &declared, self.action_policy);
                 self.install_action_edges((module.id, *owner), edges);
             }
         }
@@ -1042,7 +1062,7 @@ impl LintDependencyIndex {
                 .iter()
                 .find(|module| module.id == mid)
                 .and_then(|module| module.bodies.get(&owner).map(|body| (module, body)))
-                .map(|(module, body)| action_edges_in_body(module, owner, body, &declared))
+                .map(|(module, body)| action_edges_in_body(module, owner, body, &declared, self.action_policy))
                 .unwrap_or_default();
             if old == new {
                 continue;
@@ -1072,7 +1092,7 @@ impl LintDependencyIndex {
             let current = ws.modules.iter().find(|module| module.file == *file);
             match current {
                 Some(module) => self.action_declaration_fingerprints.get(file)
-                    != Some(&action_declaration_fingerprint(module)),
+                    != Some(&action_declaration_fingerprint(module, self.action_policy)),
                 None => self.action_declaration_fingerprints.contains_key(file),
             }
         })
@@ -1092,10 +1112,10 @@ impl LintDependencyIndex {
             }
         }
         for module in user_modules(ws, &FxHashSet::default()) {
-            if !changed_files.contains(&module.file) || !is_production_mag_module(module.file) {
+            if !changed_files.contains(&module.file) || !is_production_action_module(module.file, self.action_policy) {
                 continue;
             }
-            for (_, global) in module.globals.iter().filter(|(_, global)| is_action_name(global.name)) {
+            for (_, global) in module.globals.iter().filter(|(_, global)| is_action_name(global.name, self.action_policy)) {
                 invalidation.names.insert(global.name);
                 invalidation.locations.insert((module.file, global.name_span.offset_range.0));
             }
@@ -1104,7 +1124,7 @@ impl LintDependencyIndex {
             for &file in changed_files {
                 if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
                     self.action_declaration_fingerprints
-                        .insert(file, action_declaration_fingerprint(module));
+                        .insert(file, action_declaration_fingerprint(module, self.action_policy));
                 } else {
                     self.action_declaration_fingerprints.remove(&file);
                 }
@@ -1124,10 +1144,10 @@ impl LintDependencyIndex {
             self.action_declarations.remove(&action);
         }
         for module in user_modules(ws, &FxHashSet::default()) {
-            if !changed_files.contains(&module.file) || !is_production_mag_module(module.file) {
+            if !changed_files.contains(&module.file) || !is_production_action_module(module.file, self.action_policy) {
                 continue;
             }
-            for (_, global) in module.globals.iter().filter(|(_, global)| is_action_name(global.name)) {
+            for (_, global) in module.globals.iter().filter(|(_, global)| is_action_name(global.name, self.action_policy)) {
                 self.action_declarations.insert(global.name, (module.file, global.name_span));
             }
         }
@@ -1158,7 +1178,7 @@ impl LintDependencyIndex {
         for &file in changed_files {
             if let Some(module) = ws.modules.iter().find(|module| module.file == file) {
                 self.action_declaration_fingerprints
-                    .insert(file, action_declaration_fingerprint(module));
+                    .insert(file, action_declaration_fingerprint(module, self.action_policy));
             } else {
                 self.action_declaration_fingerprints.remove(&file);
             }
@@ -1214,11 +1234,11 @@ fn declaration_fingerprint(ws: &Workspace, module: &Module) -> String {
     rows.join("\n")
 }
 
-fn action_declaration_fingerprint(module: &Module) -> String {
+fn action_declaration_fingerprint(module: &Module, policy: Option<&ActionLayerPolicy>) -> String {
     let mut rows = module
         .globals
         .iter()
-        .filter(|(_, global)| is_action_name(global.name))
+        .filter(|(_, global)| is_action_name(global.name, policy))
         .map(|(_, global)| global.name.as_str().to_owned())
         .collect::<Vec<_>>();
     rows.sort();
@@ -1230,17 +1250,15 @@ fn action_edges_in_body(
     owner: BodyOwner,
     body: &Body,
     declared: &FxHashSet<Ustr>,
+    policy: Option<&ActionLayerPolicy>,
 ) -> FxHashSet<Ustr> {
     let production_read = match owner {
         BodyOwner::Function(fid) => {
             let function = &module.functions[fid];
             !has_annotation(function, "wire")
-                && !matches!(
-                    declared_name(function.name.as_str()),
-                    "refresh_action_defaults" | "action_new"
-                )
+                && !policy.is_some_and(|policy| policy.registration_functions.contains(&declared_name(function.name.as_str())))
         }
-        BodyOwner::Global(gid) => !is_action_name(module.globals[gid].name),
+        BodyOwner::Global(gid) => !is_action_name(module.globals[gid].name, policy),
         _ => false,
     };
     if !production_read {
@@ -1669,7 +1687,7 @@ impl IncrementalLintCache {
 
         let mut files = FxHashSet::default();
         if invalidation.is_some() && self.dependency.action_declarations.is_empty() {
-            if let Some(module) = user_modules(ws, warm).find(|module| is_production_mag_module(module.file)) {
+            if let Some(module) = user_modules(ws, warm).find(|module| is_production_action_module(module.file, self.dependency.action_policy)) {
                 if let Some((_, function)) = module.functions.iter().next() {
                     let file = module.file;
                     if sources.contains_key(&file) {
@@ -1678,6 +1696,7 @@ impl IncrementalLintCache {
                             file,
                             span: function.span,
                             population_empty: true,
+                            policy: self.dependency.action_policy.expect("configured action policy"),
                         });
                         let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
                         self.global_raw.entry(file).or_default().push(raw.clone());
@@ -1712,6 +1731,7 @@ impl IncrementalLintCache {
                 file,
                 span,
                 population_empty: false,
+                policy: self.dependency.action_policy.expect("configured action policy"),
             });
             let kept = self.filter_cached_suppressions(file, vec![raw.clone()], stats);
             self.global_raw.entry(file).or_default().push(raw.clone());
@@ -2325,7 +2345,7 @@ impl IncrementalLintCache {
         self.global.clear();
         self.global_span_owners.clear();
         self.global_referenced_files.clear();
-        self.dependency = LintDependencyIndex::build(ws, warm, sel.enabled(ACTION_CALLERS));
+        self.dependency = LintDependencyIndex::build(ws, warm, sel.enabled(ACTION_CALLERS), sel.action_policy);
         stats.declarations_revisited += self.dependency.function_nodes.len();
         stats.sibling_groups_requested += self.dependency.sibling_groups.len();
         stats.sibling_groups_revisited += self.dependency.sibling_groups.len();
@@ -2520,13 +2540,13 @@ fn is_global_lint(lint: &str) -> bool {
 }
 
 fn cacheable_selection(sel: &LintOptions) -> bool {
-    *sel == LintOptions::default()
+    (sel.only.is_none() && sel.only_types.is_none() && sel.ignore_types.is_empty())
         || sel
             .only
             .as_ref()
             .is_some_and(|names| {
                 names.len() == 1
-                    && (names[0] == ACTION_CALLERS || names[0] == BACKEND_SIBLING_MISMATCH)
+                    && ((names[0] == ACTION_CALLERS && sel.action_policy.is_some()) || names[0] == BACKEND_SIBLING_MISMATCH)
             })
 }
 
@@ -2725,6 +2745,21 @@ fn flat_findings_with(
     }
     let module = ws.module(mid);
     let mut out: Vec<Finding> = Vec::new();
+    if sel.action_policy.is_none() {
+        for lint in [ACTION_CALLERS, RAW_INPUT_MIGRATION, RAW_INPUT_CLASSIFICATION] {
+            if sel.enabled(lint) {
+                out.push(Finding {
+                    lint,
+                    error: CompilerError::new_with_label(
+                        Span { file: module.file, ..Span::unknown() },
+                        "no action-layer policy configured".to_owned(),
+                    ).with_level(CompilerErrorLevel::Advice),
+                    line: 0,
+                });
+            }
+        }
+    }
+
     if sel.enabled(UNUSED_VAR) {
         let found = unused_vars_in_module(module, variants);
         out.extend(
@@ -2797,16 +2832,16 @@ fn flat_findings_with(
             });
         }
     }
-    if sel.enabled(RAW_INPUT_MIGRATION) {
-        let found = raw_input_sites_in_module(module);
+    if sel.enabled(RAW_INPUT_MIGRATION) && sel.action_policy.is_some() {
+        let found = raw_input_sites_in_module(module, sel.action_policy.unwrap());
         out.extend(
             filter_suppressed_census(found, src, census.as_deref_mut())
                 .iter()
                 .map(Finding::of),
         );
     }
-    if sel.enabled(RAW_INPUT_CLASSIFICATION) {
-        let found = unclassified_raw_input_sites_in_module(module, src);
+    if sel.enabled(RAW_INPUT_CLASSIFICATION) && sel.action_policy.is_some() {
+        let found = unclassified_raw_input_sites_in_module(module, src, sel.action_policy.unwrap());
         out.extend(
             filter_suppressed_census(found, src, census.as_deref_mut())
                 .iter()
@@ -2901,7 +2936,7 @@ pub fn workspace_findings_by_file(
     workspace_findings_by_file_with(ws, warm, is_bin, &LintOptions::default())
 }
 
-fn workspace_findings_by_file_with(
+pub fn workspace_findings_by_file_with(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     is_bin: bool,
@@ -2940,9 +2975,9 @@ fn workspace_findings_by_file_census(
         }
     }
     if !sel.enabled(BACKEND_SIBLING_MISMATCH) {
-        if sel.enabled(ACTION_CALLERS) {
+        if sel.enabled(ACTION_CALLERS) && sel.action_policy.is_some() {
             let t = std::time::Instant::now();
-            let findings = action_caller_gaps(ws, warm);
+            let findings = action_caller_gaps(ws, warm, sel.action_policy.expect("configured action policy"));
             record_family(
                 census.as_deref_mut(),
                 CensusFamily::ActionCaller,
@@ -2983,9 +3018,9 @@ fn workspace_findings_by_file_census(
         }
         out.entry(file).or_default().extend(findings.iter().map(Finding::of));
     }
-    if sel.enabled(ACTION_CALLERS) {
+    if sel.enabled(ACTION_CALLERS) && sel.action_policy.is_some() {
         let t = std::time::Instant::now();
-        let findings = action_caller_gaps(ws, warm);
+        let findings = action_caller_gaps(ws, warm, sel.action_policy.expect("configured action policy"));
         record_family(
             census.as_deref_mut(),
             CensusFamily::ActionCaller,
@@ -3346,7 +3381,7 @@ fn filter_suppressed_census<F: LintFinding>(
 /// True iff `line` bears a `// rock: allow(<lint_name>)` magic comment
 /// (standalone or trailing). Tolerates `//rock:allow`, extra whitespace, and a
 /// trailing justification arg: `allow(unused_var, "WIP")`. No typo-checking --
-/// a misspelled name simply won't match (spec: `docs/linter.md`).
+/// a misspelled name simply won't match.
 fn parse_allow_comment(line: &str, lint_name: &str) -> bool {
     let mut rest = line;
     while let Some(pos) = rest.find("//") {
@@ -4099,43 +4134,17 @@ pub const RAW_INPUT_MIGRATION: &str = "action_layer_raw_input";
 /// remaining site carry one of the accepted non-action classes in source.
 pub const RAW_INPUT_CLASSIFICATION: &str = "action_layer_raw_input_classification";
 
-pub const RAW_INPUT_CLASSES: &[&str] = &[
-    "editor_tool_debug",
-    "deliberate_pointer",
-    "splash_skip",
-    "test_only",
-];
-
-const RAW_INPUT_NAMES: &[&str] = &[
-    "is_key_down",
-    "is_key_pressed",
-    "is_key_released",
-    "is_scancode_down",
-    "is_scancode_pressed",
-    "is_scancode_released",
-    "is_mouse_down",
-    "is_mouse_pressed",
-    "is_mouse_released",
-    "mouse_screen",
-    "stone_get_mouse_position",
-    "stone_get_global_mouse_position",
-    "is_pad_down",
-    "is_pad_pressed",
-    "is_pad_released",
-    "pad_axis_value",
-];
-
 /// Direct input observations are the census population. Action calls, input
 /// event injection, and tool-input helpers are intentionally separate APIs and
 /// therefore do not appear here.
-pub fn raw_input_sites_in_module(module: &Module) -> Vec<RawInputSite> {
+pub fn raw_input_sites_in_module(module: &Module, policy: &ActionLayerPolicy) -> Vec<RawInputSite> {
     let mut out = Vec::new();
     for body in module.bodies.values() {
         for (idx, expr) in body.expr_arena.iter() {
             let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
                 continue;
             };
-            if RAW_INPUT_NAMES.contains(&name.as_str()) {
+            if policy.raw_input_names.contains(&name.as_str()) {
                 out.push(RawInputSite { name: *name, span: body.expr_spans[idx] });
             }
         }
@@ -4160,13 +4169,13 @@ impl LintFinding for RawInputSite {
     }
 }
 
-fn raw_input_class_marker(source: &str, line: usize) -> Option<&str> {
+fn raw_input_class_marker<'a>(source: &'a str, line: usize, policy: &ActionLayerPolicy) -> Option<&'a str> {
     let marker_line = source.lines().nth(line.saturating_sub(1))?.trim();
     let class = marker_line.strip_prefix("// action-layer:")?.trim();
     if class.is_empty() || class.split_whitespace().count() != 1 {
         return None;
     }
-    RAW_INPUT_CLASSES.iter().copied().find(|&known| known == class)
+    policy.raw_input_classes.contains(&class).then_some(class)
 }
 
 #[derive(Clone, Debug)]
@@ -4174,13 +4183,15 @@ pub struct RawInputClassificationGap {
     pub name: Ustr,
     pub span: Span,
     pub line_population: usize,
+    pub classes: &'static [&'static str],
 }
 
 pub fn unclassified_raw_input_sites_in_module(
     module: &Module,
     source: &str,
+    policy: &'static ActionLayerPolicy,
 ) -> Vec<RawInputClassificationGap> {
-    let sites = raw_input_sites_in_module(module);
+    let sites = raw_input_sites_in_module(module, policy);
     let mut sites_per_line: FxHashMap<usize, usize> = FxHashMap::default();
     for site in &sites {
         *sites_per_line.entry(site.span.line_range.0).or_default() += 1;
@@ -4190,11 +4201,12 @@ pub fn unclassified_raw_input_sites_in_module(
         .filter_map(|site| {
             let line_population = sites_per_line[&site.span.line_range.0];
             (line_population != 1
-                || raw_input_class_marker(source, site.span.line_range.0).is_none())
+                || raw_input_class_marker(source, site.span.line_range.0, policy).is_none())
             .then_some(RawInputClassificationGap {
                 name: site.name,
                 span: site.span,
                 line_population,
+                classes: policy.raw_input_classes,
             })
         })
         .collect()
@@ -4221,14 +4233,14 @@ impl LintFinding for RawInputClassificationGap {
             format!(
                 "raw input query `{}` needs an adjacent `// action-layer:` marker: {}",
                 self.name,
-                RAW_INPUT_CLASSES.join(", ")
+                self.classes.join(", ")
             ),
         )
         .with_level(CompilerErrorLevel::Advice)
     }
 }
 
-/// A production Mag action declaration with no production caller. The source
+/// A production project action declaration with no production caller. The source
 /// span is the declaration itself so a missing consumer is named exactly.
 #[derive(Clone, Debug)]
 pub struct ActionCallerGap {
@@ -4236,6 +4248,7 @@ pub struct ActionCallerGap {
     pub file: Ustr,
     pub span: Span,
     pub population_empty: bool,
+    pub policy: &'static ActionLayerPolicy,
 }
 
 pub const ACTION_CALLERS: &str = "action_layer_action_callers";
@@ -4254,12 +4267,12 @@ fn is_test_module(file: Ustr) -> bool {
         || path_uses_component(file, "test")
 }
 
-fn is_production_mag_module(file: Ustr) -> bool {
-    path_uses_component(file, "mag") && !is_test_module(file)
+fn is_production_action_module(file: Ustr, policy: Option<&ActionLayerPolicy>) -> bool {
+    policy.is_some_and(|policy| path_uses_component(file, policy.production_root)) && !is_test_module(file)
 }
 
-fn is_action_name(name: Ustr) -> bool {
-    declared_name(name.as_str()).starts_with("ACT_")
+fn is_action_name(name: Ustr, policy: Option<&ActionLayerPolicy>) -> bool {
+    policy.is_some_and(|policy| declared_name(name.as_str()).starts_with(policy.action_prefix))
 }
 
 fn has_annotation(f: &Function, name: &str) -> bool {
@@ -4273,30 +4286,30 @@ impl LintFinding for ActionCallerGap {
     }
     fn to_diagnostic(&self) -> CompilerError {
         let message = if self.population_empty {
-            "no production Mag ACT_* declarations found".to_owned()
+            format!("no production {} {}* declarations found", self.policy.production_label, self.policy.action_prefix)
         } else {
-            format!("production Mag action `{}` has no production caller", self.action)
+            format!("production {} action `{}` has no production caller", self.policy.production_label, self.action)
         };
         CompilerError::new_with_label(self.span, message).with_level(CompilerErrorLevel::Advice)
     }
 }
 
-/// HIR-backed caller census for production Mag actions. Global declaration
+/// HIR-backed caller census for production project actions. Global declaration
 /// initializers and `@wire` refresh bodies are registration, not callers.
-pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<ActionCallerGap> {
+pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>, policy: &'static ActionLayerPolicy) -> Vec<ActionCallerGap> {
     let declarations: Vec<(Ustr, Ustr, Span)> = user_modules(ws, warm)
-        .filter(|module| is_production_mag_module(module.file))
+        .filter(|module| is_production_action_module(module.file, Some(policy)))
         .flat_map(|module| {
             module
                 .globals
                 .iter()
-                .filter(|(_, global)| is_action_name(global.name))
+                .filter(|(_, global)| is_action_name(global.name, Some(policy)))
                 .map(move |(_, global)| (global.name, module.file, global.name_span))
         })
         .collect();
 
     if declarations.is_empty() {
-        let Some(module) = user_modules(ws, warm).find(|module| is_production_mag_module(module.file))
+        let Some(module) = user_modules(ws, warm).find(|module| is_production_action_module(module.file, Some(policy)))
         else {
             return Vec::new();
         };
@@ -4308,6 +4321,7 @@ pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<Act
             file: module.file,
             span: function.span,
             population_empty: true,
+            policy,
         }];
     }
 
@@ -4315,7 +4329,7 @@ pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<Act
     let mut callers: FxHashSet<Ustr> = FxHashSet::default();
     for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
         for (owner, body) in &module.bodies {
-            callers.extend(action_edges_in_body(module, *owner, body, &declared));
+            callers.extend(action_edges_in_body(module, *owner, body, &declared, Some(policy)));
         }
     }
 
@@ -4327,6 +4341,7 @@ pub fn action_caller_gaps(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> Vec<Act
             file,
             span,
             population_empty: false,
+            policy,
         })
         .collect()
 }
@@ -4460,8 +4475,8 @@ pub fn unknown_type_names(
 }
 
 /// How a row place left the scope its arena's lifetime governs. One kind per
-/// storage class the scoped-place rules in `docs/scene-system-plan.md` list, so
-/// a census can report the shape of the escape population and not just its size.
+/// storage class, so a census can report the shape of the escape population
+/// as well as its size.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EscapeKind {
     StoreGlobal,
@@ -4742,11 +4757,8 @@ pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
 }
 
 /// A `global` whose `@state` resolves to exactly what its unit's memory class
-/// already gives it (`docs/state-ownership-plan.md` R2/R3). The line is
-/// harmless -- it emits the same StateImagePlan entry either way -- which is
-/// why this is a `Warning` and not an error: branches in flight still write
-/// the 87-character line by habit and merge it in, and they should get a named
-/// message rather than a broken build.
+/// already gives it. It emits the same StateImagePlan entry either way, so
+/// the redundant annotation is a `Warning`.
 #[derive(Clone, Debug)]
 pub struct RedundantStateAnnotation {
     pub global: Ustr,
@@ -4806,7 +4818,7 @@ impl LintFinding for RedundantStateAnnotation {
 }
 
 /// A `game`-memory global whose declared type is, or structurally contains, a
-/// type declared `@host_resource` (`docs/state-ownership-plan.md` R4).
+/// type declared `@host_resource`.
 ///
 /// A host resource is a NAME for something the host owns. Game memory is
 /// captured into a WorldImage, hashed into the replay desync digest, and
@@ -4814,15 +4826,8 @@ impl LintFinding for RedundantStateAnnotation {
 /// value means the same to whoever reads it next. A handle does not: the id is
 /// a process-local allocation counter, so two identical runs are free to
 /// disagree on it, and a restore hands back a name for something that is gone.
-/// Every instance of this found so far (`SFX_REPLAY_VOICE`, and the five the
-/// `platform` class caught) was a live defect found by divergence rather than
-/// by a check.
-///
-/// The seven original Stone handle types found 251 declarations in 15
-/// projects. After presentation roots were classified, intentional sim cases
-/// gained reasoned allow comments, and the world-held cases moved to logical
-/// keys, all 15 projects had zero unsuppressed findings. The lint is `Error`;
-/// `host_resource_suppression_census` keeps the allowed population visible.
+/// The lint is `Error`; `host_resource_suppression_census` keeps allowed
+/// declarations visible.
 #[derive(Clone, Debug)]
 pub struct HostResourceInGameMemory {
     pub global: Ustr,
@@ -4852,7 +4857,7 @@ pub const HOST_RESOURCE_SUPPRESSION_CENSUS: &str = "host_resource_suppression_ce
 /// here by the transitive walk rather than by a separate rule.
 ///
 /// `const` is exempt because a `const` never enters the StateSchema
-/// (`crates/skull-mir/src/state_schema.rs`, `!g.is_const`), and `platform` /
+/// (`!g.is_const`), and `platform` /
 /// `debug` are exempt because neither is captured or hashed -- which is
 /// exactly what the two ways out offer.
 pub fn host_resources_in_game_memory_in_module(
@@ -4903,8 +4908,7 @@ fn nominal_host_resource(ws: &Workspace, name: Ustr) -> Option<bone_core::hir::H
 /// same fields either way.
 ///
 /// A function type is not descended into: its type says nothing about what a
-/// capturing lambda closed over, so a claim either way would be made up. See
-/// `docs/state-ownership-plan.md` S2 for what covering that would need.
+/// capturing lambda closed over, so it cannot establish resource reachability.
 fn reach_host_resource(
     ws: &Workspace,
     ty: TyId,

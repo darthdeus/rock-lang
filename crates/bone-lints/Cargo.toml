@@ -2,15 +2,17 @@
 name = "bone-lints"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-bone-core = { path = "../bone-core" }
-rock-core = { path = "../rock-core" }
+bone-core = { workspace = true }
+rock-core = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
-bone-semantic = { path = "../bone-semantic" }
-skull-parser = { path = "../skull-parser" }
+bone-semantic = { workspace = true }
+skull-parser = { workspace = true }
 
 [lints]
 workspace = true

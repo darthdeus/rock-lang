@@ -1,10 +1,9 @@
+mod support;
 use bone_lints::{
     lint_workspace, Finding, LintOptions, ACTION_CALLERS, RAW_INPUT_CLASSIFICATION,
     RAW_INPUT_MIGRATION,
 };
 use bone_semantic::prelude::*;
-use std::fs;
-use std::path::Path;
 
 fn findings(file: &str, src: &str, lint: &str) -> Vec<Finding> {
     let ast = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
@@ -16,7 +15,7 @@ fn findings(file: &str, src: &str, lint: &str) -> Vec<Finding> {
         &FxHashSet::default(),
         true,
         &sources,
-        &LintOptions::only([lint.to_owned()]),
+        &LintOptions::only([lint.to_owned()]).with_action_policy(Some(&support::POLICY)),
     )
 }
 
@@ -26,72 +25,28 @@ fn quoted_after(line: &str, marker: &str) -> Option<String> {
     Some(line[start..start + end].to_owned())
 }
 
-/// One `ACT_*` declaration line, as `(lowercased bare name, registered key)`.
-///
-/// Both `global` and `const` declare an action: a memory class decides which
-/// spelling a write-free declaration takes, so reading only one would make
-/// this census silently short of the spec list -- or, once every `ACT_*` is
-/// converted, empty.
+/// One ACT declaration line as its lowercased bare name and registered key.
 fn action_declaration(line: &str) -> Option<(String, String)> {
     let rest = ["global ", "const "]
         .iter()
         .find_map(|keyword| line.strip_prefix(keyword))?;
     let name = rest.strip_prefix("ACT_")?.split_once(':')?.0.to_lowercase();
-    Some((name, quoted_after(line, "= mag_action(\"")?))
+    Some((name, quoted_after(line, "= app_action(\"")?))
 }
 
 #[test]
 fn the_action_census_reads_both_declaration_spellings() {
     assert_eq!(
-        action_declaration("global ACT_MOVE: MagAction = mag_action(\"move\")"),
+        action_declaration("global ACT_MOVE: AppAction = app_action(\"move\")"),
         Some(("move".to_owned(), "move".to_owned()))
     );
     assert_eq!(
-        action_declaration("const ACT_MOVE: MagAction = mag_action(\"move\")"),
+        action_declaration("const ACT_MOVE: AppAction = app_action(\"move\")"),
         Some(("move".to_owned(), "move".to_owned())),
         "a const ACT_* declaration is still an action declaration"
     );
     assert_eq!(action_declaration("global OTHER: int = 1"), None);
-    assert_eq!(action_declaration("    global ACT_MOVE: MagAction = mag_action(\"move\")"), None);
-}
-
-#[test]
-fn mag_action_globals_are_keyed_to_the_canonical_specs() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mag/actions.rock");
-    let source = fs::read_to_string(path).expect("mag action source");
-    let specs: Vec<String> = source
-        .lines()
-        .filter_map(|line| quoted_after(line, "MagActionSpec { name: \""))
-        .collect();
-    let globals: Vec<(String, String)> = source.lines().filter_map(action_declaration).collect();
-
-    assert!(!specs.is_empty(), "canonical action specs must exist");
-    assert_eq!(
-        globals.len(),
-        specs.len(),
-        "every canonical action must have one production global"
-    );
-    assert_eq!(specs.iter().collect::<FxHashSet<_>>().len(), specs.len());
-    assert_eq!(
-        globals
-            .iter()
-            .map(|(_, key)| key)
-            .collect::<FxHashSet<_>>()
-            .len(),
-        globals.len()
-    );
-    let mut reordered_specs = specs.clone();
-    reordered_specs.reverse();
-    for (global_name, key) in &globals {
-        assert_eq!(
-            global_name, key,
-            "global identity must be keyed by its action name"
-        );
-        assert!(
-            reordered_specs.contains(key),
-            "global key is not a canonical spec: {key}"
-        );
-    }
+    assert_eq!(action_declaration("    global ACT_MOVE: AppAction = app_action(\"move\")"), None);
 }
 
 #[test]
@@ -106,7 +61,7 @@ fn gameplay() {
 
 fn main() { gameplay() }
 "#;
-    let found = findings("mag/player.rock", src, ACTION_CALLERS);
+    let found = findings("app/player.rock", src, ACTION_CALLERS);
     assert_eq!(found.len(), 1, "caller gaps: {found:?}");
     assert!(found[0].error.message.contains("ACT_MISSING"));
     assert!(!found[0].error.message.contains("ACT_USED"));
@@ -123,17 +78,17 @@ fn gameplay() {
 
 fn main() { gameplay() }
 "#;
-    assert!(findings("mag/player.rock", src, ACTION_CALLERS).is_empty());
+    assert!(findings("app/player.rock", src, ACTION_CALLERS).is_empty());
 
     let mutated = src.replace("let value = ACT_USED", "let value = 0");
-    let found = findings("mag/player.rock", &mutated, ACTION_CALLERS);
+    let found = findings("app/player.rock", &mutated, ACTION_CALLERS);
     assert_eq!(found.len(), 1, "mutated caller census: {found:?}");
     assert!(found[0].error.message.contains("ACT_USED"));
 }
 
 #[test]
 fn caller_census_rejects_an_empty_production_declaration_population() {
-    let found = findings("mag/empty.rock", "fn main() {}", ACTION_CALLERS);
+    let found = findings("app/empty.rock", "fn main() {}", ACTION_CALLERS);
     assert_eq!(
         found.len(),
         1,
@@ -142,7 +97,7 @@ fn caller_census_rejects_an_empty_production_declaration_population() {
     assert!(found[0]
         .error
         .message
-        .contains("no production Mag ACT_* declarations"));
+        .contains("no production App ACT_* declarations"));
 }
 
 #[test]
@@ -157,10 +112,10 @@ fn gameplay() {
 
 fn main() { gameplay() }
 "#;
-    let classified = findings("mag/editor_tools.rock", src, RAW_INPUT_CLASSIFICATION);
+    let classified = findings("app/editor_tools.rock", src, RAW_INPUT_CLASSIFICATION);
     assert!(classified.is_empty(), "classified site: {classified:?}");
 
-    let census = findings("mag/editor_tools.rock", src, RAW_INPUT_MIGRATION);
+    let census = findings("app/editor_tools.rock", src, RAW_INPUT_MIGRATION);
     assert_eq!(
         census.len(),
         1,
@@ -168,7 +123,7 @@ fn main() { gameplay() }
     );
 
     let mutated = src.replace("// action-layer: editor_tool_debug\n", "");
-    let found = findings("mag/editor_tools.rock", &mutated, RAW_INPUT_CLASSIFICATION);
+    let found = findings("app/editor_tools.rock", &mutated, RAW_INPUT_CLASSIFICATION);
     assert_eq!(found.len(), 1, "removed classification marker: {found:?}");
 }
 
@@ -184,7 +139,7 @@ fn gameplay() {
 
 fn main() { gameplay() }
 "#;
-    let found = findings("mag/player.rock", src, RAW_INPUT_CLASSIFICATION);
+    let found = findings("app/player.rock", src, RAW_INPUT_CLASSIFICATION);
     assert_eq!(found.len(), 1, "unknown class must fail closed: {found:?}");
 }
 
@@ -200,7 +155,7 @@ fn gameplay() {
 
 fn main() { gameplay() }
 "#;
-    let found = findings("mag/editor_tools.rock", src, RAW_INPUT_CLASSIFICATION);
+    let found = findings("app/editor_tools.rock", src, RAW_INPUT_CLASSIFICATION);
     assert_eq!(
         found.len(),
         2,

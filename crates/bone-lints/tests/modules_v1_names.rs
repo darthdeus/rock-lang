@@ -2,6 +2,7 @@
 //! Lints that key on a declared name (`Task`, `main`) must read the declared
 //! segment, or they go silent (or noisy) the moment a package converts.
 
+mod support;
 use bone_lints::{lint_workspace, task_null_abandon, unused_fns, LintOptions, ACTION_CALLERS};
 use bone_semantic::prelude::*;
 
@@ -38,7 +39,7 @@ fn v1_main_is_a_reachability_root() {
 }
 
 fn action_gaps(src: &str, dialect: skull_parser::Dialect) -> Vec<String> {
-    let file = Ustr::from("mag/actions.rock");
+    let file = Ustr::from("app/actions.rock");
     let mut module = skull_parser::parse_module_clean_with_dialect(src, file, dialect).expect("parse");
     if dialect == skull_parser::Dialect::V1 {
         module.package = Some(skull_parser::PackageTag { id: 0, self_name: "lintv1".to_string() });
@@ -51,14 +52,14 @@ fn action_gaps(src: &str, dialect: skull_parser::Dialect) -> Vec<String> {
         &FxHashSet::default(),
         true,
         &sources,
-        &LintOptions::only([ACTION_CALLERS.to_owned()]),
+        &LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY)),
     )
     .iter()
     .map(|finding| finding.error.message.clone())
     .collect()
 }
 
-// `action_new` (Stone) and `refresh_action_defaults` (MAG) register actions;
+// The configured `action_new` and `refresh_action_defaults` register actions;
 // reading an `ACT_*` there is not a production caller.
 const ACTION_REGISTRATION: &str = r#"
 global ACT_REGISTERED: int = 1

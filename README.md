@@ -10,6 +10,7 @@ crates listed below.
 | Crate | Origin |
 |---|---|
 | `crates/bone-core` | HIR, annotation registry, module workspace and shared types of the `bone` typechecker |
+| `crates/bone-lints` | Lint catalog, HIR analysis and incremental lint cache |
 | `crates/bone-inference` | Type inference: unification, calls, fields, purity |
 | `crates/bone-semantic` | Semantic passes, identity-storage validation and typechecker fixtures |
 | `crates/bone-lower` | Lowering from the parser AST to the typechecker's HIR |
