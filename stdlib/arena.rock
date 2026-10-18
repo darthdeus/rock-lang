@@ -4,7 +4,7 @@
 // alive and neither survives the incarnation it names. The `Arena`/`Entity`
 // decls live in unified.rock with the other early type decls.
 //
-// Design and the phase this implements: `docs/scene-system-plan.md` P1.
+// Arena slots retain generations so stale handles cannot name reused rows.
 
 // The bookkeeping SoA one Arena incarnation owns. A slot's index IS its
 // position in every column, so ops touch column SUBSETS -- `contains` reads
@@ -63,8 +63,8 @@ global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
 
 // The registry holds each store erased, since one map spans every row type. An
 // `ArenaStore<T>` is an identity, and identities never coerce to ordinary
-// `any`; this is the Arena's only erasure (`@identity_erasure`,
-// docs/identity-storage-plan.md S0d). `cast` recovers the type; neither side
+// `any`; this is the Arena's only erasure (`@identity_erasure`).
+// `cast` recovers the type; neither side
 // does anything at runtime.
 @identity_erasure @inline
 fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
@@ -238,7 +238,7 @@ fn __entity_arena<T>(entity: Entity<T>) -> Arena<T> {
 // `Entity.get` is inlined into every trace that reads an entity; the four
 // frames cost 12 of the 500-constant budget and one of the 15 tail-call unroll
 // slots there. Text traces reach their glyph loop with both nearly spent
-// (docs/trace-pressure-work-plan.md).
+//
 fn Entity<T>.get(entity) -> T? {
     let boxed = __arena_store_any(entity._scene_id, entity._arena_id) ?? return null
     let store: ArenaStore<T> = cast(boxed)
@@ -380,7 +380,7 @@ fn Arena<T>.len(arena) -> int {
 //
 // The registry is a STRONG root: a store lives until something retires it, which
 // is a change from the pre-P1 representation where an unreferenced `Arena` table
-// was collectible. Until Scenes own Arenas (`docs/scene-system-plan.md` P2), that
+// was collectible. Until Scenes own Arenas, that
 // makes this the leak oracle -- a loop that spawns and despawns must leave it
 // flat, and a test asserting only `len()` cannot see the difference.
 fn arena_live_count() -> int {
@@ -473,8 +473,8 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
 // `crates/skull/tests/tuple_scalarize.rs`). Both keep the FETCH-OUTSIDE skip-loop
 // shape (one candidate fetched before the while; the loop body runs only on a
 // dead slot) -- the naive fetch-inside shape blacklists to the interpreter at
-// light fragmentation (`docs/iterator-desugaring-investigation.md`, 8.8x at 10%
-// holes). entries/len snapshot once per loop (mutation mid-iteration beyond
+// light fragmentation. entries/len snapshot once per loop (mutation mid-iteration beyond
+//
 // removing the current element is recorded UB).
 //
 // Backing resolves ONCE, at construction: Scene ownership must not put a
@@ -484,7 +484,7 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
 // Each iterator snapshots only the columns it yields from: `values()` never
 // touches generations, `keys()` never touches data. The `data` snapshot is
 // the store's own row column, so it is an `@identity_storage` edge like
-// `ArenaStore.data` (docs/identity-storage-plan.md S0d).
+// `ArenaStore.data`.
 
 struct ArenaValIter<T> {
     occupied: [bool],

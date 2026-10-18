@@ -10,6 +10,7 @@ members = [
     "crates/lsp-types-manual",
     "crates/rock-core",
     "crates/rock-log",
+    "crates/rock-stdlib",
     "crates/rock-tokenizer",
     "crates/skull-fmt",
     "crates/skull-parser",

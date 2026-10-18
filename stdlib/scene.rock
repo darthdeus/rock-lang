@@ -2,7 +2,7 @@
 // dungeon room, loaded level, editor document, preview viewport. `Scene` and
 // `SceneBuilder` are declared in unified.rock with the other early type decls.
 //
-// Design and the phase this implements: `docs/scene-system-plan.md` P2.
+// Scene handles retain generations so stale references cannot name reused rows.
 //
 // Two facts shape everything below.
 //
@@ -84,8 +84,8 @@ fn __scene_root_any(scene_id: int) -> any? {
 }
 
 // A Scene root is an identity, and identities never coerce to ordinary `any`;
-// this is the registry's only erasure (`@identity_erasure`,
-// docs/identity-storage-plan.md S0d). `Scene.get`'s `cast` recovers the type.
+// this is the registry's only erasure (`@identity_erasure`).
+// `Scene.get` recovers the type through `cast`.
 @identity_erasure @inline
 fn __scene_root_erased<T>(root: T) -> any { return root }
 

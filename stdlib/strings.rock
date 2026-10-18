@@ -2,7 +2,7 @@
 // primitives in unified.rock (find/substring/len/unit_at/from_codepoint/
 // string_char/StringBuilder). No Lua patterns, no per-unit hot loops -- the
 // workhorse is plain-text `find` + `substring`, both native on every backend.
-// String contract + rationale: docs/stdlib-multibackend-plan.md.
+// String offsets and lengths count bytes.
 
 // Split `s` on every plain-text occurrence of `delimiter`. Empty delimiter is
 // a programmer error (nothing to split on).
@@ -83,7 +83,7 @@ fn string.trim(s) -> string {
 // measured, 1.98x on twitter.json and 1.38x on a 227KB level.json, and it was
 // also what made the escaped-string payload bimodal (the copy loop's trace is
 // the fragile one, so the same bytes decoded in either 1.6ms or 5.2ms). See
-// docs/json-parser-benchmarking-plan.md.
+//
 //
 // The explicit (1, parts.len) range rather than letting concat use `#_data`:
 // equivalent today, because pop and clear both nil the slot they release, so

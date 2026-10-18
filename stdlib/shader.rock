@@ -1,9 +1,9 @@
-// GPU-only shader surface (docs/shaders.md). Sampler2D is a phantom
+// GPU-only shader surface. Sampler2D is a phantom
 // param type for @shader entry fns -- never constructed CPU-side. texture()
 // maps to the GLSL builtin; reaching it on the CPU is a hard error, never a
 // silent stub.
 
-struct Sampler2D {
+value Sampler2D {
     __handle: int,
 }
 
@@ -17,11 +17,11 @@ struct Sampler2D {
     error("texture_size() is GPU-only (shader fns are not CPU-callable)")
 """
 
-// Integer sampler (the R32I entity-id tier, docs/gles-entity-id-plan.md).
+// Integer sampler (the R32I entity-id tier).
 // Phantom like Sampler2D. texture_id() reads the id channel as int
 // (`texture(s, uv).r`); GLSL ES gives isampler2D no default precision, so the
 // emitter declares it `highp` at the use site.
-struct ISampler2D {
+value ISampler2D {
     __handle: int,
 }
 
@@ -33,7 +33,7 @@ struct ISampler2D {
     error("texture_size() is GPU-only (shader fns are not CPU-callable)")
 """
 
-// GPU builtins (docs/shaders.md). Fragment-stage only; the
+// GPU builtins. Fragment-stage only; the
 // emitter whitelists them per stage. CPU bodies error -- never a silent stub.
 @intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """
     error("frag_coord() is GPU-only (fragment-stage builtin)")
@@ -60,7 +60,7 @@ struct ISampler2D {
     error("vertex_id() is GPU-only (vertex-stage builtin)")
 """
 
-// Uniform arrays (docs/shaders.md). Param-position-only
+// Uniform arrays. Param-position-only
 // phantom, `@size(N)` required on the param, param name = GLSL uniform name.
 // CPU upload stays shader_set_*_array (declared N is capacity).
 struct UniformArray<T> { }
@@ -155,7 +155,7 @@ value GlobalInvocationId { x: int, y: int, z: int }
     return x == math.huge or x == -math.huge
 """
 
-// Bool-vector tier (docs/shaders.md). A plain value struct -- luajit/JS get it
+// Bool-vector tier. A plain value struct -- luajit/JS get it
 // free as a value; the GLSL emitter maps it to `bvec3`, LOCAL/TEMP ONLY (bool
 // interpolants are rejected in attr/varying/uniform position). Built via
 // `bvec3(...)`, reduced via `any`, produced by `greater_than`, and cast to Vec3
@@ -187,7 +187,7 @@ value Bvec3 { x: bool, y: bool, z: bool }
     return v(x, y, z)
 }
 
-// In-game shader compilation (docs/shaders.md). A call
+// In-game shader compilation. A call
 // `rock_shader(vert, frag)` (two direct references to top-level @shader fns)
 // is expanded at MIR lowering to the pipeline key const "<vert>+<frag>" that
 // pipeline() looks up; the driver emits one __rock_shader_register(key, glsl)
@@ -198,7 +198,7 @@ value Bvec3 { x: bool, y: bool, z: bool }
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
 
-// Single-arg fullscreen form (docs/shaders.md): a direct
+// Single-arg fullscreen form: a direct
 // reference to a top-level @shader(fragment) fn. Expands to the bare frag-name
 // key (never contains '+', so it cannot collide with a pair key); the driver
 // routes it to the A1 single-entry emitter (PIXEL body + fullscreen VERTEX
@@ -226,18 +226,18 @@ struct SemanticUniformBlock {
     leaves: [CanonicalUniformLeaf],
 }
 
-struct SemanticUniformArrayMember {
+value SemanticUniformArrayMember {
     name: string,
     values: [CanonicalUniformLeaf],
 }
 
-struct SemanticUniformArrayBlock {
+value SemanticUniformArrayBlock {
     name: string,
     members: [SemanticUniformArrayMember],
 }
 
 @uniform_values inline(lua) fn uniform_values<T>(u: T) -> SemanticUniformBlock = """
-    error("uniform_values is compiler-expanded (docs/shader-binding-layout-plan.md)")
+    error("uniform_values is compiler-expanded")
 """
 
 // Pack `u` into a std140 uniform block: one direct typed store per primitive
@@ -248,7 +248,7 @@ struct SemanticUniformArrayBlock {
 // The layout comes from `u`'s CONCRETE type. A generic source wrapper is
 // admitted; its retained concrete instance supplies that type to the expander.
 @uniform_expand inline(lua) fn pack_uniform_block<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
-    error("pack_uniform_block is compiler-expanded (docs/shader-binding-layout-plan.md)")
+    error("pack_uniform_block is compiler-expanded")
 """
 
 // The std140 layout identity of `u`'s CONCRETE type, as a compile-time
@@ -259,5 +259,5 @@ struct SemanticUniformArrayBlock {
 // pipeline has one block per stage, so the shader name no longer identifies
 // one and the value's type is what does.
 @uniform_expand inline(lua) fn uniform_block_id<T>(u: T) -> int = """
-    error("uniform_block_id is compiler-expanded (docs/shader-binding-layout-plan.md)")
+    error("uniform_block_id is compiler-expanded")
 """

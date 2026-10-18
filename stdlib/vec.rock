@@ -2,7 +2,7 @@
 // keystone type family all backends share (game math and shader math),
 // including the v()/zero() constructors and the Vec2 helpers routed through
 // them. IVec2/Rect/Color and their constructors stay engine-side
-// (stone-core/) because they touch engine-only types or globals.
+// (the host library) because they touch engine-only types or globals.
 
 nobox value Vec2 {
     x: float,
@@ -146,7 +146,7 @@ fn Vec2.to_array(v) -> [float] {
 @pure fn Vec2.sign(a) -> Vec2 { return v(sign(a.x), sign(a.y)) }
 @pure fn Vec2.abs(a) -> Vec2 { return v(abs(a.x), abs(a.y)) }
 
-// Componentwise math, mirroring the GLSL builtins (docs/agent-reference/language.md).
+// Componentwise math, mirroring the GLSL builtins.
 // Pure tier-0 bodies: CPU and route-B GLSL share the same code.
 @pure fn Vec2.min(a, b: Vec2) -> Vec2 { return v(min(a.x, b.x), min(a.y, b.y)) }
 @pure fn Vec2.max(a, b: Vec2) -> Vec2 { return v(max(a.x, b.x), max(a.y, b.y)) }

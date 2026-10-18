@@ -6,10 +6,10 @@
 // and `__SITE__` is "file:line" -- so co-locating one breaks Lua byte-identity
 // for every log site under it. A whole new FILE shifts nothing.
 //
-// They are here rather than in `stone/engine/web/js_ffi.rock` -- where the first
+// They are here rather than in a host web module -- where the first
 // few of them lived -- because that file is the web ENGINE, staged only by
-// `rock web`. A stdlib function whose JS body ships with stone has no binding in
-// a JS program that does not use stone, which is every `--backend js` test.
+// `rock web`. A stdlib function whose JS body ships with a host has no binding in
+// a JS program that does not use that host, which is every `--backend js` test.
 // Engine-owned fns keep their siblings in `js_ffi.rock`; only stdlib-owned ones
 // belong here.
 
@@ -38,7 +38,7 @@
   m.occupied_count = m.occupied_count - 1;
 """
 
-// docs/field-refs-plan.md 1. A field ref IS the key on both backends, so both
+//
 // bodies are the same indexing operation spelled twice.
 @inline inline(js) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = "return o[f];"
 
@@ -56,9 +56,9 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   return typeof ptr === "string" ? ptr : String(ptr);
 """
 
-// `unwrap()` on a null reaches this, so a JS program with no stone in it still
+// `unwrap()` on a null reaches this, so a JS program without a host still
 // needs a traceback.
-@inline inline(js) fn __debug_traceback() -> string = "return new Error().stack || \"\";"
+@intrinsic @inline inline(js) fn __debug_traceback() -> string = "return new Error().stack || \"\";"
 
 // Reports LUA type names, not JS ones -- the return value is compared against
 // `"table"` / `"function"` in Rock source, so the names are the contract and JS
@@ -85,14 +85,14 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 // `Map.keys_into` has a Lua sibling in unified.rock. Keep the ordering
 // contract on JS too; the comparator is local because JS has no shared Lua
 // prelude function to bind as Array.sort's callback.
-@nomangle inline(js) fn __sort_map_keys(keys: any) = """
+@relocates @nomangle inline(js) fn __sort_map_keys<K>(keys: [K]) = """
   keys._data.sort(function(a, b) {
     var sa = lua_tostring(a), sb = lua_tostring(b);
     return sa < sb ? -1 : (sa > sb ? 1 : 0);
   });
 """
 
-// Column-storage boundary primitives (`docs/js-vec-columns-plan.md` stage B).
+// Column-storage boundary primitives.
 // Their luajit siblings are in `unified.rock`; each is the same operation over a
 // 0-based JS array instead of a 1-based Lua table.
 
@@ -240,7 +240,7 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 """
 
 // One bounds check per ELEMENT access, ahead of the leaf reads/writes that
-// follow (`docs/native-buffer-leaf-addressing-plan.md` S5). The luajit sibling
+// follow. The luajit sibling
 // is in `unified.rock`; the message shape follows it.
 @nomangle inline(js) fn __nb_checked_index(buf: any, i: int) -> int = """
   if (i < 0 || i >= buf.len) {

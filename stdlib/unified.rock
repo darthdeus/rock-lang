@@ -42,7 +42,7 @@ fn is_nan(value: float) -> bool {
 // Usage:
 //   let w = ffi_out_int()
 //   let h = ffi_out_int()
-//   stone_get_image_size(handle, w, h)  // extern takes (int, Ptr<int>, Ptr<int>)
+//   get_image_size(handle, w, h)  // extern takes (int, Ptr<int>, Ptr<int>)
 //   return IVec2 { x: w.read(), y: h.read() }
 
 @inline inline(lua) fn __ffi_new_int_1() -> Ptr<int> = 'return ffi.new("int[1]")'
@@ -94,7 +94,7 @@ value Storage { }
 // Usage:
 //   let verts = native_buffer_float(14 * vertex_count)
 //   nb_set(verts, 0, 1.0)
-//   stone_submit_verts(verts.ptr, verts.len)  // extern takes (Ptr<float>, int)
+//   submit_verts(verts.ptr, verts.len)  // extern takes (Ptr<float>, int)
 //
 // Bounds: reads/writes past `len` yield LuaJIT garbage; indexing is 0-based.
 // T ∈ {int, uint, float}; extend with more primitives as needed.
@@ -365,7 +365,7 @@ fn metric_recent(m: Metric, i: int) -> float {
 // `[Vec2]` (Lua-table cell) cost a value struct pays escaping into a Vec.
 //
 // Every op is `@inline` and specializes per element type at its call site (the
-// inliner's call-site specialization, docs/flatvec-plan.md): `buf[len] = v`
+// inliner's call-site specialization): `buf[len] = v`
 // scalarizes and `native_buffer_alloc<T>` names the ctype inside the spliced body.
 // `T` MUST be an FFI-clean value struct -- a primitive or GC-carrying element is a
 // spanned emit-time error at the `flat_vec_new` call (use `native_buffer_int`/
@@ -385,7 +385,7 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 }
 
 // Grow to 2x (>= 4) capacity via a fresh alloc + a scalar element-copy loop; the
-// copy JIT-compiles at these sizes (docs/flatvec-plan.md bench: scalar loop).
+// copy JIT-compiles at these sizes.
 @inline fn FlatVec<T>.grow(fv) {
     let old = fv.buf
     let cap = old.len
@@ -1392,7 +1392,7 @@ inline(lua) fn vec_new<T>() -> [T] = """
 //
 // Not `@nomangle`: no opaque body names these. They expose or mint the BOXED
 // `_data` layout, which is not a representation an opaque caller can be
-// promised (`docs/boundary-contracts.md` 2.3b), so their opaque consumers moved
+// promised, so their opaque consumers moved
 // to the Rock side rather than being given a contract.
 inline(lua) fn __rock_vec_to_lua_array<T>(vec: [T]) -> any = """
     local out = {}
@@ -1404,16 +1404,16 @@ inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
     return { _data = arr, len = len, __ty = "Vec" }
 """
 
-// Hot enough that the call frame matters — mag's outline-overlay loop
-// calls this 3-6x per iteration over OUTLINE_MAX_ENTRIES. Body
+// Repeated appends make the call frame itself expensive. The body is
+// kept inline to avoid spending trace frames in hot loops. Body
 // translated from the Rock equivalent
 // `{ vec.len = vec.len + 1; table_set(vec._data, vec.len, item) }`.
-// See docs/jit-fnew-codegen-investigation.md §"Fourth pass".
+//
 // `vec` names the vec LAYOUT, so a column-stored receiver must not reach this
 // body -- `column_push` routes around it. `item` is stored and never indexed,
 // so it makes no layout claim and carries the contract that says so. It stays
 // spelled `T`: that is the inference edge giving `vec_new()` its element type,
-// and `any`/`any?` would sever it. See `docs/boundary-contracts.md` 2.4.
+// and `any`/`any?` would sever it.
 @relocates @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
@@ -1443,7 +1443,7 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 // stores (the __nb_checked_* pattern; release stripping is the same future
 // release-mode work). `.get(i)` above is the null-returning form.
 //
-// Under the inline index shape (`ROCK_SKULL_INDEX_SHAPE`, docs/backends.md)
+// Under the inline index shape (`ROCK_SKULL_INDEX_SHAPE`)
 // codegen spells the check itself and calls only this cold function on the
 // failing path, so no indexing function carries the message text and no trace
 // records a helper frame. The `__vec_checked_*` calls remain for operands the
@@ -1734,7 +1734,7 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // The one answer to "which compiler-minted value cdata is this": the
 // `__ROCK_C_STRUCT` row whose ctype `x` (a cdata) has, or nil. The registry is
 // keyed by NAME, so the honest question is a linear `ffi.istype` scan over
-// every row (~150 in MAG, 27us a scan); the sim boundary restore asked it
+// every row (a linear scan over registered rows); the sim boundary restore asked it
 // ~1,300 times per crossing. The answer is a function of the ctype alone, so
 // it is memoized per CTypeID, negatives included (`false`; most asks are
 // negatives -- storage arrays and boxed scalars). The registry emitter resets
@@ -1863,7 +1863,7 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
 
 // Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
 // the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
-// at each call site with zero overhead. See docs/compiler-architecture.md.
+// at each call site with zero overhead.
 @inline inline(lua) fn cast<T>(value: any) -> T = "return value"
 @inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
 
@@ -1962,7 +1962,7 @@ fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
     if not c.__defers then return end
     for i = #c.__defers, 1, -1 do
         local ok, err = pcall(c.__defers[i], c)
-        if not ok then __stone_log(0, "CO", "coroutine defer failed during cleanup: " .. tostring(err)) end
+        if not ok then __rock_log(0, "CO", "coroutine defer failed during cleanup: " .. tostring(err)) end
     end
 """
 
@@ -2017,8 +2017,8 @@ inline(lua) fn table_new() -> any = """return {}"""
 // can't see through when emitted as a function (frame inlining tripped
 // `loop unroll limit reached` in per-frame paths like vec_push /
 // vec_get). Marked `@inline inline(lua)` so codegen splices the body
-// at every call site instead of emitting + calling. See
-// docs/jit-fnew-codegen-investigation.md §"Fourth pass".
+// at every call site instead of emitting + calling.
+//
 @inline inline(lua) fn table_len(tbl: any) -> int = """
     return #tbl
 """
@@ -2036,11 +2036,11 @@ inline(lua) fn table_new() -> any = """return {}"""
 // the TOP of the lattice -- it carries both capabilities and coerces down to the
 // single-capability selectors. `ReadFieldRef<T, V>` is read-only (`field_get`)
 // and allows a `value`-struct T, since reading a value field is fine; the
-// writable side refuses a `value`-struct T (immutable). Split per
-// docs/field-refs-plan.md 1.
+// writable side refuses a `value`-struct T (immutable). Capability controls mutation.
+//
 // `field_set` takes the write-only `WriteFieldRef<T, V>` -- the selector an
 // EMBEDDED field can satisfy, being the one that grants no whole-value read
-// (docs/scalarization-and-boxing-design.md S 6). A `FieldRef` coerces down to
+// A `FieldRef` coerces down to
 // it, so call sites are unchanged.
 @inline inline(lua) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = """
     return o[f]
@@ -2066,8 +2066,8 @@ inline(lua) fn table_new() -> any = """return {}"""
 // representation, and a missing column route fell through to the boxed body and
 // died at runtime on `_data` instead of rejecting. The stored VALUE is spelled
 // `T` with `@repr(opaque)`, as `vec_push`'s item is: it makes no layout claim,
-// and an `any` would erase an Arena row (docs/identity-storage-plan.md S0d).
-// `docs/boundary-contracts.md` 2.3b.
+// and an `any` would erase an Arena row.
+//
 // Not `@nomangle`: nothing calls these by their bare name. `@nomangle` is what
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
@@ -2392,7 +2392,7 @@ inline(lua) fn table_new_with_size(size: int) -> any = """
 
 // Global constants. `const` (not `global`): bone enforces these read-only, which
 // is also what lets a shader body fold them -- a mutable `global` has no GLSL
-// lowering (docs/shaders.md).
+// lowering.
 const PI: float = 3.141592653589793
 const TAU: float = 6.283185307179586
 const TWO_PI: float = TAU
@@ -2419,7 +2419,7 @@ const EPSILON: float = 0.0000001
 // (`_itbl` / `format_value`) — that closure construction tripped
 // LuaJIT's FNEW abort on every table-shaped inspect call. State that
 // the old closures captured (`visited`, `precision`) is now passed
-// explicitly. See docs/jit-fnew-codegen-investigation.md.
+// explicitly.
 @nomangle inline(lua) fn __rock_enum_payload_names(keys: any, pos: any) -> any = """
     local types = _G.__ROCK_TYPE_TABLE
     local n = 0
@@ -2724,7 +2724,7 @@ const EPSILON: float = 0.0000001
 // zeros and trailing decimal point trimmed. Module-level (not an
 // IIFE per interpolation) so LuaJIT can trace per-frame string
 // building without an FNEW abort. See
-// docs/jit-fnew-codegen-investigation.md open thread #5.
+//
 @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
@@ -2930,8 +2930,8 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 // table but `{ spine, data, free_indices, occupied_count }` -- a hash spine of
 // slot indices over the same column storage `[V]` already uses. Arena's
 // bookkeeping-SoA vocabulary deliberately: the two are one structure and are
-// meant to collapse (`docs/unfuck-backlog.md`). Layout + the measurements that
-// chose it: `docs/nobox-map-value-design.md`.
+// meant to collapse. The stored representation follows the value layout.
+//
 //
 // These helpers touch the SPINE and the free list only -- never a leaf -- which
 // is what lets them be plain scalar bodies. The V-dependent half is the existing
@@ -3239,7 +3239,7 @@ fn VecIter<T>.next(it) -> (bool, T) {
 // like `v.iter().map(f).filter(p)` fully inlines at its `for` loop, SROA peels
 // every cursor, and the FORL-recovery pass (`skull-transform/src/forl.rs`)
 // rewrites the whole chain into a native counted `for` -- the chain IS the
-// hand-written loop (`docs/iterator-desugaring-investigation.md`).
+// hand-written loop.
 // Shapes are load-bearing for that matcher: map/enumerate are straight-line;
 // filter fetches INSIDE its skip loop and take_while separates its two stop
 // causes, so each layer contributes either a plain ok-flag join, a skip edge
@@ -3820,7 +3820,7 @@ fn ease_in_out_circ(t: float) -> float {
 // retargeting mid-flight for free. Linear rate-limited, so `value`
 // reaches the goal EXACTLY (no asymptotic tail); shaping (env^2,
 // ease_out_quad, ...) is applied by consumers at the read site.
-// Engine sugar stepping against the frame clock: Envelope.step (stone).
+// Engine sugar stepping against the frame clock: Envelope.step (host).
 
 // The first no-box value customer after mutable-place semantics land.
 struct Envelope {
@@ -3851,7 +3851,7 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 @intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
     -- Rock uses 0-based indexing, Lua uses 1-based. Bound, then return: a
     -- `return string.sub(..)` tail call into C is a CALLT no root trace can
-    -- leave through (docs/backends.md, "Wrapper return").
+    -- leave through.
     local r = string.sub(s, start + 1, end_idx)
     return r
 """
@@ -3926,7 +3926,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
         -- This is a perf fallback with identical results, not a swallowed
         -- failure, so it reports itself and continues.
         local msg = "parse_float_at: no C-locale strtod_l on " .. tostring(ffi.os) .. "; using the portable path"
-        local warn = _G.__stone_log
+        local warn = _G.__rock_log
         if warn then warn(1, "STDLIB", msg) else io.stderr:write("[WARN] " .. msg .. "\\n") end
         f = function(str, a, b) local r = tonumber(string.sub(str, a + 1, b)); return r end
     end
@@ -4139,7 +4139,7 @@ struct FunctionCallInfo {
     stage: int,
 }
 
-// Compile-time inputs (docs/comptime-plan.md tier 1). A direct call with a
+// Compile-time inputs. A direct call with a
 // string-literal argument is replaced at MIR lowering with the resolved value:
 // `build_var("NAME")` reads the [build.vars] entry the CLI resolved for this
 // session build; `embed_string("path")` inlines the file at path relative to
