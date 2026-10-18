@@ -104,15 +104,14 @@ impl<'de> serde::Deserialize<'de> for FormattingOptions {
         let insert_spaces = map.remove("insertSpaces")
             .ok_or_else(|| serde::de::Error::missing_field("insertSpaces"))
             .and_then(|v| serde_json::from_value(v).map_err(serde::de::Error::custom))?;
-        let trim_trailing_whitespace = map.remove("trimTrailingWhitespace")
-            .and_then(|v| serde_json::from_value(v).ok());
-        let insert_final_newline = map.remove("insertFinalNewline")
-            .and_then(|v| serde_json::from_value(v).ok());
-        let trim_final_newlines = map.remove("trimFinalNewlines")
-            .and_then(|v| serde_json::from_value(v).ok());
-        let properties = map.into_iter()
-            .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|p| (k, p)))
-            .collect();
+        let trim_trailing_whitespace = crate::deserialize_optional(map.remove("trimTrailingWhitespace"))?;
+        let insert_final_newline = crate::deserialize_optional(map.remove("insertFinalNewline"))?;
+        let trim_final_newlines = crate::deserialize_optional(map.remove("trimFinalNewlines"))?;
+        let mut properties = HashMap::with_capacity(map.len());
+        for (key, value) in map {
+            let property = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            properties.insert(key, property);
+        }
         Ok(FormattingOptions {
             tab_size,
             insert_spaces,

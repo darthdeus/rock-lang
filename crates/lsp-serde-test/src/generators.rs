@@ -133,6 +133,87 @@ pub fn gen_completion_options(_rng: &mut StdRng) -> Vec<Value> {
             "triggerCharacters": ["("],
             "completionItem": { "labelDetailsSupport": true }
         }),
+        // Optional fields are absent by default, but malformed present values
+        // must be rejected just like serde-derived fields.
+        json!({ "resolveProvider": "yes" }),
+        json!({ "triggerCharacters": [".", 1] }),
+        json!({ "allCommitCharacters": [1] }),
+        json!({ "completionItem": { "labelDetailsSupport": 1 } }),
+    ]
+}
+
+pub fn gen_completion_item_capability(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({}),
+        json!({ "snippetSupport": null }),
+        json!({ "snippetSupport": "yes" }),
+        json!({ "commitCharactersSupport": 1 }),
+        json!({ "documentationFormat": "markdown" }),
+        json!({ "deprecatedSupport": "yes" }),
+        json!({ "preselectSupport": "yes" }),
+        json!({ "tagSupport": true }),
+        json!({ "tagSupport": false }),
+        json!({ "tagSupport": { "valueSet": [1] } }),
+        json!({ "tagSupport": { "valueSet": "bad" } }),
+        json!({ "insertReplaceSupport": 1 }),
+        json!({ "resolveSupport": { "properties": "documentation" } }),
+        json!({ "insertTextModeSupport": { "valueSet": "asIs" } }),
+        json!({ "labelDetailsSupport": 1 }),
+    ]
+}
+
+pub fn gen_document_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "extraCapability": true }),
+        json!({ "dynamicRegistration": "yes" }),
+        json!({ "symbolKind": { "valueSet": "bad" } }),
+        json!({ "hierarchicalDocumentSymbolSupport": 1 }),
+        json!({ "tagSupport": { "valueSet": ["bad"] } }),
+        json!({ "tagSupport": { "other": true } }),
+        json!({ "tagSupport": true }),
+        json!({ "tagSupport": false }),
+    ]
+}
+
+pub fn gen_workspace_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "extraCapability": true }),
+        json!({ "dynamicRegistration": "yes" }),
+        json!({ "symbolKind": { "valueSet": "bad" } }),
+        json!({ "tagSupport": { "valueSet": ["bad"] } }),
+        json!({ "tagSupport": { "other": true } }),
+        json!({ "resolveSupport": { "properties": "name" } }),
+        json!({ "tagSupport": true }),
+        json!({ "tagSupport": false }),
+    ]
+}
+
+pub fn gen_document_on_type_formatting_registration_options(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "firstTriggerCharacter": "." }),
+        json!({ "firstTriggerCharacter": ".", "documentSelector": null }),
+        json!({ "firstTriggerCharacter": ".", "documentSelector": "bad" }),
+        json!({ "firstTriggerCharacter": ".", "moreTriggerCharacter": [";", 1] }),
+    ]
+}
+
+pub fn gen_initialize_params(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "capabilities": {} }),
+        json!({ "capabilities": {}, "processId": null }),
+        json!({ "capabilities": {}, "processId": "bad" }),
+        json!({ "capabilities": {}, "rootUri": 1 }),
+        json!({ "capabilities": {}, "rootPath": 1 }),
+        json!({ "capabilities": {}, "trace": 1 }),
+    ]
+}
+
+pub fn gen_message_action_item(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "title": "Continue", "extraString": "value" }),
+        json!({ "title": "Continue", "extraNull": null }),
+        json!({ "title": "Continue", "extraArray": [1, 2] }),
+        json!({ "title": "Continue", "extraObject": { "key": true } }),
     ]
 }
 
@@ -243,9 +324,7 @@ pub fn gen_int_newtype(rng: &mut StdRng) -> Vec<Value> {
 // Custom impl with HashMap<String, FormattingProperty> catch-all.
 // FormattingProperty = bool | i32 | string. Required: tabSize (u32), insertSpaces (bool).
 // Optional: trimTrailingWhitespace, insertFinalNewline, trimFinalNewlines.
-// Extra keys with non-property values: upstream rejects via flatten,
-// manual silently drops via .ok() — adversarial input avoided here, the
-// happy-path test still pins the rest.
+// Extra keys accept bool/int/string values and reject other JSON values.
 
 pub fn gen_formatting_options(rng: &mut StdRng) -> Vec<Value> {
     vec![
@@ -276,6 +355,22 @@ pub fn gen_formatting_options(rng: &mut StdRng) -> Vec<Value> {
         json!({ "tabSize": -1, "insertSpaces": true }),
         // tabSize as string — type mismatch
         json!({ "tabSize": "4", "insertSpaces": true }),
+        // Malformed known fields and flattened formatting properties must fail.
+        json!({ "tabSize": 4, "insertSpaces": true, "trimTrailingWhitespace": "yes" }),
+        json!({ "tabSize": 4, "insertSpaces": true, "insertFinalNewline": 1 }),
+        json!({ "tabSize": 4, "insertSpaces": true, "trimFinalNewlines": 1 }),
+        json!({ "tabSize": 4, "insertSpaces": true, "customArray": [1, 2] }),
+        json!({ "tabSize": 4, "insertSpaces": true, "customNull": null }),
+    ]
+}
+
+pub fn gen_tag_support(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "valueSet": [1] }),
+        json!({ "valueSet": [1], "extra": true }),
+        json!({ "valueSet": [] }),
+        json!({ "valueSet": "bad" }),
+        json!({ "unknown": true }),
     ]
 }
 
@@ -341,17 +436,12 @@ pub fn gen_position_encoding_kind(_rng: &mut StdRng) -> Vec<Value> {
 // (pattern req). Matches the first present in field-precedence order.
 
 pub fn gen_notebook_document_filter(_rng: &mut StdRng) -> Vec<Value> {
-    // Two upstream-quirk inputs are intentionally excluded:
-    //   {"notebookType":"jupyter"}   — upstream's untagged enum rejects it
-    //                                   (likely a serde Option-field quirk);
-    //                                   manual accepts it as ByType. Manual is
-    //                                   the spec-correct behavior.
-    //   {"notebookType":"jupyter","scheme":"file","pattern":"*.ipynb"}
-    //                                — upstream's untagged enum matches
-    //                                  ByScheme and silently drops
-    //                                  `notebookType`; manual keeps all three
-    //                                  in ByType. Manual is spec-correct.
     vec![
+        // ByType and mixed-field cases pin upstream's untagged-enum behavior.
+        json!({ "notebookType": "jupyter" }),
+        json!({ "notebookType": "jupyter", "scheme": "file", "pattern": "*.ipynb" }),
+        json!({ "notebook_type": "jupyter" }),
+        json!({ "notebook_type": 42, "scheme": "file" }),
         // ByScheme alone
         json!({ "scheme": "file" }),
         json!({ "scheme": "file", "pattern": "*.ipynb" }),
@@ -361,6 +451,64 @@ pub fn gen_notebook_document_filter(_rng: &mut StdRng) -> Vec<Value> {
         json!({}),
         // wrong-type field — both reject
         json!({ "notebookType": 42 }),
+        // A malformed optional field cannot be silently discarded to select
+        // another untagged-enum arm.
+        json!({ "notebookType": 42, "scheme": "file" }),
+        json!({ "scheme": 42, "pattern": "*.ipynb" }),
+        json!({ "scheme": "file", "pattern": 42 }),
+    ]
+}
+
+pub fn gen_notebook_selector(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "notebook": "jupyter" }),
+        json!({ "cells": [{ "language": "rust" }] }),
+        json!({ "notebook": null, "cells": [{ "language": "rust" }] }),
+        json!({ "notebook": 42, "cells": [{ "language": "rust" }] }),
+        json!({ "notebook": "jupyter", "cells": [{ "language": 1 }] }),
+    ]
+}
+
+pub fn gen_semantic_tokens(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "data": [] }),
+        json!({ "data": [], "resultId": null }),
+        json!({ "data": [], "resultId": 123 }),
+    ]
+}
+
+pub fn gen_lsif_tool_info(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "name": "rock-lsp" }),
+        json!({ "name": "rock-lsp", "args": ["--stdio"] }),
+        json!({ "name": "rock-lsp", "args": "--stdio" }),
+        json!({ "name": "rock-lsp", "version": 1 }),
+    ]
+}
+
+pub fn gen_lsif_range_based_symbol(_rng: &mut StdRng) -> Vec<Value> {
+    vec![
+        json!({ "id": 1 }),
+        json!({ "id": "symbol", "children": [{ "id": 2 }] }),
+        json!({ "id": 1, "children": "bad" }),
+    ]
+}
+
+pub fn gen_lsif_definition_tag(rng: &mut StdRng) -> Vec<Value> {
+    let range = gen_range(rng);
+    vec![
+        json!({ "text": "symbol", "kind": 1, "fullRange": range }),
+        json!({ "text": "symbol", "kind": 1, "fullRange": range, "deprecated": "yes" }),
+        json!({ "text": "symbol", "kind": 1, "fullRange": range, "detail": 7 }),
+    ]
+}
+
+pub fn gen_lsif_declaration_tag(rng: &mut StdRng) -> Vec<Value> {
+    let range = gen_range(rng);
+    vec![
+        json!({ "text": "symbol", "kind": 1, "fullRange": range }),
+        json!({ "text": "symbol", "kind": 1, "fullRange": range, "deprecated": "yes" }),
+        json!({ "text": "symbol", "kind": 1, "fullRange": range, "detail": 7 }),
     ]
 }
 
@@ -400,6 +548,13 @@ pub fn gen_lsif_vertex(rng: &mut StdRng) -> Vec<Value> {
             "label": "range",
             "start": r["start"], "end": r["end"],
             "tag": { "type": "reference", "text": "foo" }
+        }),
+        // Invalid known tag payloads must not be ignored.
+        json!({
+            "label": "range",
+            "start": r["start"], "end": r["end"],
+            "tag": { "type": "definition", "text": "foo", "kind": 1,
+                "fullRange": r, "deprecated": "yes" }
         }),
         // $event
         json!({ "label": "$event", "kind": "begin", "scope": "document", "data": "id-1" }),

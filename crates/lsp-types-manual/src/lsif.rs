@@ -68,9 +68,10 @@ impl<'de> serde::Deserialize<'de> for ToolInfo {
             .ok_or_else(|| serde::de::Error::missing_field("name"))
             .and_then(|v| serde_json::from_value::<String>(v).map_err(serde::de::Error::custom))?;
         let args = map.remove("args")
-            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+            .map(|v| serde_json::from_value::<Vec<String>>(v).map_err(serde::de::Error::custom))
+            .transpose()?
             .unwrap_or_default();
-        let version = map.remove("version").and_then(|v| serde_json::from_value(v).ok());
+        let version = crate::deserialize_optional(map.remove("version"))?;
         Ok(ToolInfo { name, args, version })
     }
 }
@@ -107,7 +108,8 @@ impl<'de> serde::Deserialize<'de> for RangeBasedDocumentSymbol {
             .ok_or_else(|| serde::de::Error::missing_field("id"))
             .and_then(|v| serde_json::from_value::<Id>(v).map_err(serde::de::Error::custom))?;
         let children = map.remove("children")
-            .and_then(|v| serde_json::from_value::<Vec<RangeBasedDocumentSymbol>>(v).ok())
+            .map(|v| serde_json::from_value::<Vec<RangeBasedDocumentSymbol>>(v).map_err(serde::de::Error::custom))
+            .transpose()?
             .unwrap_or_default();
         Ok(RangeBasedDocumentSymbol { id, children })
     }
@@ -156,13 +158,14 @@ impl<'de> serde::Deserialize<'de> for DefinitionTag {
         let kind = map.remove("kind")
             .ok_or_else(|| serde::de::Error::missing_field("kind"))
             .and_then(|v| serde_json::from_value::<crate::SymbolKind>(v).map_err(serde::de::Error::custom))?;
-        let deprecated = map.remove("deprecated")
-            .and_then(|v| serde_json::from_value::<bool>(v).ok())
-            .unwrap_or_default();
+        let deprecated = match map.remove("deprecated") {
+            Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
+            None => false,
+        };
         let full_range = map.remove("fullRange")
             .ok_or_else(|| serde::de::Error::missing_field("fullRange"))
             .and_then(|v| serde_json::from_value::<Range>(v).map_err(serde::de::Error::custom))?;
-        let detail = map.remove("detail").and_then(|v| serde_json::from_value(v).ok());
+        let detail = crate::deserialize_optional(map.remove("detail"))?;
         Ok(DefinitionTag { text, kind, deprecated, full_range, detail })
     }
 }
@@ -199,13 +202,14 @@ impl<'de> serde::Deserialize<'de> for DeclarationTag {
         let kind = map.remove("kind")
             .ok_or_else(|| serde::de::Error::missing_field("kind"))
             .and_then(|v| serde_json::from_value::<crate::SymbolKind>(v).map_err(serde::de::Error::custom))?;
-        let deprecated = map.remove("deprecated")
-            .and_then(|v| serde_json::from_value::<bool>(v).ok())
-            .unwrap_or_default();
+        let deprecated = match map.remove("deprecated") {
+            Some(value) => serde_json::from_value(value).map_err(serde::de::Error::custom)?,
+            None => false,
+        };
         let full_range = map.remove("fullRange")
             .ok_or_else(|| serde::de::Error::missing_field("fullRange"))
             .and_then(|v| serde_json::from_value::<Range>(v).map_err(serde::de::Error::custom))?;
-        let detail = map.remove("detail").and_then(|v| serde_json::from_value(v).ok());
+        let detail = crate::deserialize_optional(map.remove("detail"))?;
         Ok(DeclarationTag { text, kind, deprecated, full_range, detail })
     }
 }
@@ -368,9 +372,7 @@ impl<'de> serde::Deserialize<'de> for Vertex {
             "document" => Ok(Vertex::Document(serde_json::from_value(val).map_err(D::Error::custom)?)),
             "range" => {
                 let range: Range = serde_json::from_value(val.clone()).map_err(D::Error::custom)?;
-                let tag: Option<RangeTag> = val
-                    .get("tag")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let tag = crate::deserialize_optional(val.get("tag").cloned())?;
                 Ok(Vertex::Range { range, tag })
             }
             "resultSet" => Ok(Vertex::ResultSet(serde_json::from_value(val).map_err(D::Error::custom)?)),

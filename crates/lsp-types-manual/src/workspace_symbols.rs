@@ -26,17 +26,16 @@ impl serde::Serialize for WorkspaceSymbolClientCapabilities {
 impl<'de> serde::Deserialize<'de> for WorkspaceSymbolClientCapabilities {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let dynamic_registration = map.remove("dynamicRegistration")
-            .and_then(|v| serde_json::from_value(v).ok());
-        let symbol_kind = map.remove("symbolKind")
-            .and_then(|v| serde_json::from_value(v).ok());
-        let tag_support = map.remove("tagSupport").and_then(|v| match v {
-            serde_json::Value::Bool(false) | serde_json::Value::Null => None,
-            serde_json::Value::Bool(true) => Some(TagSupport { value_set: vec![] }),
-            other => serde_json::from_value::<TagSupport<SymbolTag>>(other).ok(),
-        });
-        let resolve_support = map.remove("resolveSupport")
-            .and_then(|v| serde_json::from_value(v).ok());
+        let dynamic_registration = crate::deserialize_optional(map.remove("dynamicRegistration"))?;
+        let symbol_kind = crate::deserialize_optional(map.remove("symbolKind"))?;
+        let tag_support = match map.remove("tagSupport") {
+            Some(value) => TagSupport::<SymbolTag>::deserialize_compat(
+                serde::de::IntoDeserializer::into_deserializer(value),
+            )
+            .map_err(serde::de::Error::custom)?,
+            None => None,
+        };
+        let resolve_support = crate::deserialize_optional(map.remove("resolveSupport"))?;
         Ok(WorkspaceSymbolClientCapabilities {
             dynamic_registration,
             symbol_kind,

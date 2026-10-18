@@ -87,8 +87,12 @@ impl<'de> serde::Deserialize<'de> for MessageActionItem {
             .ok_or_else(|| serde::de::Error::missing_field("title"))
             .and_then(|v| serde_json::from_value(v).map_err(serde::de::Error::custom))?;
         let properties = map.into_iter()
-            .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|p| (k, p)))
-            .collect();
+            .map(|(k, v)| {
+                serde_json::from_value(v)
+                    .map(|p| (k, p))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect::<Result<HashMap<_, _>, D::Error>>()?;
         Ok(MessageActionItem { title, properties })
     }
 }

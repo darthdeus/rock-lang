@@ -194,8 +194,8 @@ impl serde::Serialize for NotebookSelector {
 impl<'de> serde::Deserialize<'de> for NotebookSelector {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let notebook = map.remove("notebook").and_then(|v| serde_json::from_value::<Notebook>(v).ok());
-        let cells = map.remove("cells").and_then(|v| serde_json::from_value::<Vec<NotebookCellSelector>>(v).ok());
+        let notebook = crate::deserialize_optional(map.remove("notebook"))?;
+        let cells = crate::deserialize_optional(map.remove("cells"))?;
         if let Some(notebook) = notebook {
             Ok(NotebookSelector::ByNotebook { notebook, cells })
         } else {
@@ -256,7 +256,7 @@ impl serde::Serialize for NotebookDocumentFilter {
             NotebookDocumentFilter::ByType { notebook_type, scheme, pattern } => {
                 let n = 1 + scheme.is_some() as usize + pattern.is_some() as usize;
                 let mut st = s.serialize_struct("ByType", n)?;
-                st.serialize_field("notebookType", notebook_type)?;
+                st.serialize_field("notebook_type", notebook_type)?;
                 if let Some(v) = scheme { st.serialize_field("scheme", v)?; }
                 if let Some(v) = pattern { st.serialize_field("pattern", v)?; }
                 st.end()
@@ -264,7 +264,7 @@ impl serde::Serialize for NotebookDocumentFilter {
             NotebookDocumentFilter::ByScheme { notebook_type, scheme, pattern } => {
                 let n = 1 + notebook_type.is_some() as usize + pattern.is_some() as usize;
                 let mut st = s.serialize_struct("ByScheme", n)?;
-                if let Some(v) = notebook_type { st.serialize_field("notebookType", v)?; }
+                if let Some(v) = notebook_type { st.serialize_field("notebook_type", v)?; }
                 st.serialize_field("scheme", scheme)?;
                 if let Some(v) = pattern { st.serialize_field("pattern", v)?; }
                 st.end()
@@ -272,7 +272,7 @@ impl serde::Serialize for NotebookDocumentFilter {
             NotebookDocumentFilter::ByPattern { notebook_type, scheme, pattern } => {
                 let n = 1 + notebook_type.is_some() as usize + scheme.is_some() as usize;
                 let mut st = s.serialize_struct("ByPattern", n)?;
-                if let Some(v) = notebook_type { st.serialize_field("notebookType", v)?; }
+                if let Some(v) = notebook_type { st.serialize_field("notebook_type", v)?; }
                 if let Some(v) = scheme { st.serialize_field("scheme", v)?; }
                 st.serialize_field("pattern", pattern)?;
                 st.end()
@@ -284,9 +284,13 @@ impl serde::Serialize for NotebookDocumentFilter {
 impl<'de> serde::Deserialize<'de> for NotebookDocumentFilter {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let notebook_type = map.remove("notebookType").and_then(|v| serde_json::from_value::<String>(v).ok());
-        let scheme = map.remove("scheme").and_then(|v| serde_json::from_value::<String>(v).ok());
-        let pattern = map.remove("pattern").and_then(|v| serde_json::from_value::<String>(v).ok());
+        // The upstream untagged enum applies camelCase renaming to its variant
+        // names, but not to the fields inside those variants. Match its
+        // accepted field spelling and ignore the protocol-style camelCase key
+        // as an unknown field.
+        let notebook_type = crate::deserialize_optional(map.remove("notebook_type"))?;
+        let scheme = crate::deserialize_optional(map.remove("scheme"))?;
+        let pattern = crate::deserialize_optional(map.remove("pattern"))?;
         if let Some(nt) = notebook_type {
             Ok(NotebookDocumentFilter::ByType { notebook_type: nt, scheme, pattern })
         } else if let Some(s) = scheme {
@@ -294,7 +298,7 @@ impl<'de> serde::Deserialize<'de> for NotebookDocumentFilter {
         } else if let Some(p) = pattern {
             Ok(NotebookDocumentFilter::ByPattern { notebook_type: None, scheme: None, pattern: p })
         } else {
-            Err(serde::de::Error::custom("NotebookDocumentFilter requires notebookType, scheme, or pattern"))
+            Err(serde::de::Error::custom("NotebookDocumentFilter requires notebook_type, scheme, or pattern"))
         }
     }
 }

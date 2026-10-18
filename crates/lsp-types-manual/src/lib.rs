@@ -17,6 +17,19 @@ use std::{collections::HashMap, fmt::Debug};
 use serde::{de, de::Error, Deserialize};
 use serde_json::Value;
 
+/// Decode an optional serde field while preserving errors for invalid values.
+/// A missing or explicit `null` field becomes `None`.
+pub(crate) fn deserialize_optional<T, E>(value: Option<Value>) -> Result<Option<T>, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    match value {
+        Some(value) => serde_json::from_value::<Option<T>>(value).map_err(E::custom),
+        None => Ok(None),
+    }
+}
+
 pub use uri::Uri;
 mod uri;
 
@@ -1657,7 +1670,8 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for TagSupport<T> 
                         _ => { let _ = map.next_value::<serde_json::Value>()?; }
                     }
                 }
-                Ok(TagSupport { value_set: value_set.unwrap_or_default() })
+                let value_set = value_set.ok_or_else(|| serde::de::Error::missing_field("valueSet"))?;
+                Ok(TagSupport { value_set })
             }
         }
         deserializer.deserialize_map(Visitor(std::marker::PhantomData))
@@ -1668,7 +1682,7 @@ impl<T> TagSupport<T> {
     /// Support for deserializing a boolean tag Support, in case it's present.
     ///
     /// This is currently the case for vscode 1.41.1
-    fn deserialize_compat<'de, S>(serializer: S) -> Result<Option<TagSupport<T>>, S::Error>
+    pub(crate) fn deserialize_compat<'de, S>(serializer: S) -> Result<Option<TagSupport<T>>, S::Error>
     where
         S: serde::Deserializer<'de>,
         T: serde::Deserialize<'de>,

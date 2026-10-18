@@ -247,7 +247,7 @@ impl serde::Serialize for SemanticTokens {
 impl<'de> serde::Deserialize<'de> for SemanticTokens {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let result_id = map.remove("resultId").and_then(|v| serde_json::from_value(v).ok());
+        let result_id = crate::deserialize_optional(map.remove("resultId"))?;
         let data_val = map.remove("data").ok_or_else(|| serde::de::Error::missing_field("data"))?;
         let data = SemanticToken::deserialize_tokens(data_val).map_err(serde::de::Error::custom)?;
         Ok(SemanticTokens { result_id, data })

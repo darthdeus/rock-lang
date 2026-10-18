@@ -222,12 +222,10 @@ macro_rules! impl_lsp_struct {
                         .and_then(|v| serde_json::from_value(v.clone()).map_err(serde::de::Error::custom))?;
                 )*
                 $(
-                    let $nf: Option<$nt> = val.get($nk)
-                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+                    let $nf: Option<$nt> = crate::deserialize_optional(val.get($nk).cloned())?;
                 )*
                 $(
-                    let $of: Option<$ot> = val.get($ok)
-                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+                    let $of: Option<$ot> = crate::deserialize_optional(val.get($ok).cloned())?;
                 )*
                 $(
                     let $ff: $ft = serde_json::from_value(val.clone())

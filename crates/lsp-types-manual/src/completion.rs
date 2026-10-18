@@ -128,20 +128,22 @@ impl serde::Serialize for CompletionItemCapability {
 impl<'de> serde::Deserialize<'de> for CompletionItemCapability {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut map = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
-        let snippet_support = map.remove("snippetSupport").and_then(|v| serde_json::from_value(v).ok());
-        let commit_characters_support = map.remove("commitCharactersSupport").and_then(|v| serde_json::from_value(v).ok());
-        let documentation_format = map.remove("documentationFormat").and_then(|v| serde_json::from_value(v).ok());
-        let deprecated_support = map.remove("deprecatedSupport").and_then(|v| serde_json::from_value(v).ok());
-        let preselect_support = map.remove("preselectSupport").and_then(|v| serde_json::from_value(v).ok());
-        let tag_support = map.remove("tagSupport").and_then(|v| match v {
-            serde_json::Value::Bool(false) | serde_json::Value::Null => None,
-            serde_json::Value::Bool(true) => Some(TagSupport { value_set: vec![] }),
-            other => serde_json::from_value::<TagSupport<CompletionItemTag>>(other).ok(),
-        });
-        let insert_replace_support = map.remove("insertReplaceSupport").and_then(|v| serde_json::from_value(v).ok());
-        let resolve_support = map.remove("resolveSupport").and_then(|v| serde_json::from_value(v).ok());
-        let insert_text_mode_support = map.remove("insertTextModeSupport").and_then(|v| serde_json::from_value(v).ok());
-        let label_details_support = map.remove("labelDetailsSupport").and_then(|v| serde_json::from_value(v).ok());
+        let snippet_support = crate::deserialize_optional(map.remove("snippetSupport"))?;
+        let commit_characters_support = crate::deserialize_optional(map.remove("commitCharactersSupport"))?;
+        let documentation_format = crate::deserialize_optional(map.remove("documentationFormat"))?;
+        let deprecated_support = crate::deserialize_optional(map.remove("deprecatedSupport"))?;
+        let preselect_support = crate::deserialize_optional(map.remove("preselectSupport"))?;
+        let tag_support = match map.remove("tagSupport") {
+            Some(value) => TagSupport::<CompletionItemTag>::deserialize_compat(
+                serde::de::IntoDeserializer::into_deserializer(value),
+            )
+            .map_err(serde::de::Error::custom)?,
+            None => None,
+        };
+        let insert_replace_support = crate::deserialize_optional(map.remove("insertReplaceSupport"))?;
+        let resolve_support = crate::deserialize_optional(map.remove("resolveSupport"))?;
+        let insert_text_mode_support = crate::deserialize_optional(map.remove("insertTextModeSupport"))?;
+        let label_details_support = crate::deserialize_optional(map.remove("labelDetailsSupport"))?;
         Ok(CompletionItemCapability {
             snippet_support,
             commit_characters_support,
