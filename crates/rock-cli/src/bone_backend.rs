@@ -302,7 +302,7 @@ pub(crate) fn aliases_for_session(
 /// The session files for a discovered project: each file's text plus the
 /// dialect and owning package the package graph stamped on it. A session
 /// re-parses on every edit, so it needs the facts, not a one-shot stamp.
-pub fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::SessionFile> {
+pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::SessionFile> {
     sources
         .files
         .iter()
@@ -328,7 +328,7 @@ pub fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::Se
 /// resolves declared inputs once per SESSION BUILD at construction. The stamp
 /// survives `update_file` (the Session mutates its ws in place); a full
 /// session rebuild constructs a new one through here and so re-resolves.
-pub fn bone_session_for_emission(
+pub(crate) fn bone_session_for_emission(
     files: Vec<bone_incremental::session::SessionFile>,
     anchor: &std::path::Path,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {

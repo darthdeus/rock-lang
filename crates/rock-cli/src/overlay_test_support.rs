@@ -97,3 +97,87 @@ pub fn stub_for(full_lua: &str) -> &'static str {
 pub fn run_parts(parts: &[&str]) -> ExecOutcome {
     exec_lua(&parts.join("\n"))
 }
+
+    pub fn print_route_profile(label: &str, profile: &crate::skull_backend::SkullRouteProfile) {
+        eprintln!(
+            "{label}: total={:.3} project_call={:.3} route_call={:.3} snapshot={:.3} live_update={:.3} live_unaccounted={:.3} route_unaccounted={:.3} source_feed={:.3} session={:.3} diagnostics={:.3} lint={:.3} local_lint={:.3} global_lint={:.3} global_findings={:.3} suppression={:.3} suppression_calls={} report_prepare={:.3} summary_sort={:.3} render={:.3} finding={:.3} shape={:.3} checkpoint={:.3} transactions={} commit={:.3} affected={:.3} emit={:.3} write={:.3} rollback={:.3} unaccounted={:.3}",
+            profile.total_ns as f64 / 1_000_000.0,
+            profile.live_project_call_ns as f64 / 1_000_000.0,
+            profile.route_emit_call_ns as f64 / 1_000_000.0,
+            profile.session_snapshot_ns as f64 / 1_000_000.0,
+            profile.live_update_ns as f64 / 1_000_000.0,
+            profile.live_project_unaccounted_ns as f64 / 1_000_000.0,
+            profile.route_unaccounted_ns as f64 / 1_000_000.0,
+            profile.source_lookup_feed_ns as f64 / 1_000_000.0,
+            profile.session_update_ns as f64 / 1_000_000.0,
+            profile.diagnostics_ns as f64 / 1_000_000.0,
+            profile.lint_total_ns as f64 / 1_000_000.0,
+            profile.local_lint_derivation_ns as f64 / 1_000_000.0,
+            profile.global_lint_dependency_ns as f64 / 1_000_000.0,
+            profile.global_lint_derivation_ns as f64 / 1_000_000.0,
+            profile.suppression_filtering_ns as f64 / 1_000_000.0,
+            profile.suppression_filter_calls,
+            profile.report_prepare_ns as f64 / 1_000_000.0,
+            profile.summary_sort_ns as f64 / 1_000_000.0,
+            profile.render_ns as f64 / 1_000_000.0,
+            profile.finding_aggregation_ns as f64 / 1_000_000.0,
+            profile.publication_shape_checks_ns as f64 / 1_000_000.0,
+            profile.transaction_checkpoint_ns as f64 / 1_000_000.0,
+            profile.body_transactions_started,
+            profile.transaction_commit_ns as f64 / 1_000_000.0,
+            profile.affected_chunk_selection_ns as f64 / 1_000_000.0,
+            profile.emit_overlay_ns as f64 / 1_000_000.0,
+            profile.atomic_output_write_ns as f64 / 1_000_000.0,
+            profile.rollback_ns as f64 / 1_000_000.0,
+            profile.unaccounted_ns as f64 / 1_000_000.0,
+        );
+    }
+
+    pub fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
+        let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(root));
+        let sources = crate::unified_compile::discover_sources(&spec).expect("discover");
+        let files = crate::bone_backend::session_files(&sources);
+        let target = files
+            .iter()
+            .find(|f| f.path.ends_with(target_suffix))
+            .map(|f| f.path.clone())
+            .expect("main source");
+        let mut session = crate::bone_backend::bone_session_for_emission(
+            files,
+            std::path::Path::new(root),
+        )
+        .expect("session");
+        let renderer = crate::skull_backend::skull_renderer_target(root).expect("renderer");
+        let mid = skull::user_module_id(session.workspace()).expect("user module");
+        let (_, mut cache) = skull::mir_emit::emit_full_in_for_renderer(
+            session.workspace(),
+            mid,
+            Some(root),
+            renderer,
+        )
+        .expect("fresh emit");
+        let update = session.update_file(&target, edited).expect("edit");
+        assert!(matches!(
+            update.tier,
+            bone_incremental::session::UpdateTier::BodyOnly
+        ));
+        let edits = update
+            .body_update
+            .edit
+            .iter()
+            .map(|edit| skull::instance_graph::SpanEdit {
+                file: edit.file,
+                at: edit.at,
+                byte_delta: edit.byte_delta,
+                line_delta: edit.line_delta,
+            })
+            .collect::<Vec<_>>();
+        skull::mir_emit::emit_overlay_with_span_edits(
+            session.workspace(),
+            &mut cache,
+            &update.reinferred,
+            &edits,
+        )
+        .expect("overlay")
+        .lua
+    }
