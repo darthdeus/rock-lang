@@ -105,6 +105,7 @@ const WGSL_BUILTINS: &[(&str, usize, &str, ResultKind)] = &[
     ("tan", 1, "tan", ResultKind::FirstArg),
     ("sqrt", 1, "sqrt", ResultKind::FirstArg),
     ("exp", 1, "exp", ResultKind::FirstArg),
+    ("log2", 1, "log2", ResultKind::FirstArg),
     ("abs", 1, "abs", ResultKind::FirstArg),
     ("floor", 1, "floor", ResultKind::FirstArg),
     ("ceil", 1, "ceil", ResultKind::FirstArg),
@@ -3828,6 +3829,19 @@ impl<'a> FunctionEmitter<'a> {
                     cur = target;
                 }
                 Term::Branch { cond, then_bb, else_bb } => {
+                    // Direct shader calls materialize scalar literal defaults
+                    // at the call site, so the callee-side nil guard for such
+                    // a param is dead. Other MIR defaults still need their
+                    // nil path, which WGSL cannot render and must reject.
+                    let materialized = self
+                        .body
+                        .param_default_guards
+                        .get(&cond)
+                        .is_some_and(|index| self.body.param_default_materialized.contains(index));
+                    if materialized {
+                        cur = else_bb;
+                        continue;
+                    }
                     match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
                         Some(merge) => cur = merge,
                         None => return Ok(()),

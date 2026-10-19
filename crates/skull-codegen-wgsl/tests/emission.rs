@@ -1415,3 +1415,61 @@ fn orientation_frag(vary: OrientationVary, @textures t: OrientationTex) -> Vec4 
         naga_validate(&artifact.source);
     }
 }
+
+/// The stdlib `log2` maps to the WGSL builtin. Emission naga-validates, so a
+/// passing test also proves `log2` names a real WGSL builtin.
+#[test]
+fn log2_maps_to_the_wgsl_builtin() {
+    let source = r#"
+struct InputTex { input_tex: Sampler2D }
+@shader(fragment)
+fn logfrag(@textures t: InputTex, tc: Vec2) -> Vec4 {
+    let px = texture(t.input_tex, tc)
+    return v(log2(px.r + 1.0), log2(px.g + 1.0), px.b, px.a)
+}
+"#;
+    let artifact = artifact("logfrag", source);
+    assert!(artifact.source.contains("log2("), "{}", artifact.source);
+    naga_validate(&artifact.source);
+}
+
+/// A helper with a float default, called with the argument omitted and
+/// supplied: direct WGSL calls carry the default value like the Lua path, and
+/// no nil guard survives into the helper body.
+#[test]
+fn helper_float_default_is_carried_at_wgsl_call_sites() {
+    let source = r#"
+struct InputTex { input_tex: Sampler2D }
+@pure fn shade(c: Vec4, gain: float = 1.0) -> Vec4 {
+    return v(c.r * gain, c.g * gain, c.b * gain, c.a)
+}
+@shader(fragment)
+fn shadefrag(@textures t: InputTex, tc: Vec2) -> Vec4 {
+    return shade(texture(t.input_tex, tc))
+}
+@shader(fragment)
+fn shadefrag_exp(@textures t: InputTex, tc: Vec2) -> Vec4 {
+    return shade(texture(t.input_tex, tc), 2.0)
+}
+"#;
+    for (root, expected) in [("shadefrag", ", 1.0)"), ("shadefrag_exp", ", 2.0)")] {
+        let artifact = artifact(root, source);
+        let calls: Vec<&str> = artifact
+            .source
+            .lines()
+            .filter(|line| line.contains("shade_") && !line.trim_start().starts_with("fn "))
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "{root} must hold one shade call: {}",
+            artifact.source
+        );
+        assert!(
+            calls[0].contains(expected),
+            "{root} call must carry {expected}: {}",
+            calls[0]
+        );
+        naga_validate(&artifact.source);
+    }
+}
