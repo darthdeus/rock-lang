@@ -1,0 +1,13 @@
+struct Point { x: int, y: int }
+
+fn add(a: Point, b: Point) -> Point {
+    return Point { x: a.x + b.x, y: a.y + b.y }
+}
+
+fn main() {
+    let p = add(Point { x: 1, y: 2 }, Point { x: 3, y: 4 })
+    let xs = [1, 2, 3]
+    let sum = 0
+    for x in xs { sum += x }
+    print("p = {p.x},{p.y} sum = {sum}")
+}

@@ -28,6 +28,7 @@ members = [
     "crates/rock-host",
     "crates/rock-log",
     "crates/rock-stdlib",
+    "crates/rock-wasm",
     "crates/rock-tokenizer",
     "crates/skull-fmt",
     "crates/skull-parser",

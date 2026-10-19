@@ -7,7 +7,18 @@
 /// nested in another (an operand, argument, condition or parenthesized
 /// expression, including each operand of a left-associative `a + b + c`
 /// chain) or a block; a nested `if` costs two levels.
+#[cfg(not(target_family = "wasm"))]
 pub const MAX_NESTING_DEPTH: u32 = 8192;
+
+/// On wasm the binding stack is the engine's, which the module cannot size:
+/// wasm calls run on the host's native stack (about 984 KiB in V8), beside
+/// the 8 MiB linear-memory stack set in `.cargo/config.toml`. Under node 24
+/// nested calls `f(f(..))` trap past 655 levels and nested `if`s past 786,
+/// and the linear stack holds 841 `+` operands. A call or an `if` costs two
+/// levels, so 512 uses at most about 60% of either stack, leaving headroom
+/// for engines with smaller ones.
+#[cfg(target_family = "wasm")]
+pub const MAX_NESTING_DEPTH: u32 = 512;
 
 /// Stack size for threads that run compiler passes. In a release build a
 /// `+` chain, the costliest construct measured, takes about 11 KiB per level

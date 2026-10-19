@@ -1,2 +1,4 @@
+# The linear-memory stack of a wasm build; rock-core `nesting` sizes the wasm
+# nesting limit against it and against the engine's own stack.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "link-arg=-zstack-size=8388608"]

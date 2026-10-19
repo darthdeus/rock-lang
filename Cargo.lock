@@ -1643,6 +1643,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rock-wasm"
+version = "0.1.0"
+dependencies = [
+ "bone-core",
+ "bone-lints",
+ "bone-semantic",
+ "rock-core",
+ "rock-stdlib",
+ "serde_json",
+ "skull",
+ "skull-fmt",
+ "skull-parser",
+ "ustr",
+]
+
+[[package]]
 name = "rust-lapper"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

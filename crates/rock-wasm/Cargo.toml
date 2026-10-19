@@ -1,0 +1,26 @@
+[package]
+name = "rock-wasm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Rock compiler as a WebAssembly module for a browser Worker"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bone-core = { workspace = true }
+bone-lints = { workspace = true }
+bone-semantic = { workspace = true }
+rock-core = { workspace = true }
+rock-stdlib = { workspace = true }
+skull = { workspace = true, features = ["renderer-wgpu"] }
+skull-fmt = { workspace = true }
+skull-parser = { workspace = true }
+serde_json = { workspace = true }
+ustr = { workspace = true }

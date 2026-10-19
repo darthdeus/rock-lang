@@ -57,4 +57,11 @@ jobs:
       - name: Install wasm target
         run: rustup target add wasm32-unknown-unknown
       - name: Check wasm libraries
-        run: cargo check --locked --lib --target wasm32-unknown-unknown -p skull-fmt -p skull -p skull-codegen-glsl -p skull-codegen-wgsl -p rock-stdlib -p bone-incremental -p bone-lints -p rock-lsp
+        run: cargo check --locked --lib --target wasm32-unknown-unknown -p skull-fmt -p skull -p skull-codegen-glsl -p skull-codegen-wgsl -p rock-stdlib -p bone-incremental -p bone-lints -p rock-lsp -p rock-wasm
+      - name: Build wasm module
+        run: cargo build --locked --release --lib --target wasm32-unknown-unknown -p rock-wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Wasm smoke test against native output
+        run: node crates/rock-wasm/tests/smoke.mjs target/wasm32-unknown-unknown/release/rock_wasm.wasm target/debug/rock-plain

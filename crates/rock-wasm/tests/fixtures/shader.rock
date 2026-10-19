@@ -1,0 +1,19 @@
+value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
+value Camera { uProjection: Mat4, uView: Mat4 }
+value Vary { position: Vec4, uv: Vec2 }
+
+@shader(vertex)
+fn quad_vert(@attr a: QuadVert, @uniform u: Camera) -> Vary {
+    let clip = u.uProjection * u.uView * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
+    return Vary { position: clip, uv: a.aTexCoord }
+}
+
+@shader(fragment)
+fn gradient_frag(v: Vary) -> Vec4 {
+    return Vec4 { x: v.uv.x, y: v.uv.y, z: 0.5, w: 1.0 }
+}
+
+fn main() {
+    let key = rock_shader(quad_vert, gradient_frag)
+    print("registered {key}")
+}
