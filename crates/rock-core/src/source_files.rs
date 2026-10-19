@@ -174,6 +174,99 @@ mod tests {
         )
     }
 
+    fn line_col(file: &str, line: usize) -> LineCol {
+        LineCol {
+            file: ustr::ustr(file),
+            line,
+            col: 0,
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn an_empty_set_holds_no_files_and_no_package_roots() {
+        let sources = SourceFiles::empty();
+        assert!(sources.files.is_empty());
+        assert!(sources.package_roots.is_empty());
+    }
+
+    #[test]
+    fn a_single_file_set_holds_exactly_that_file() {
+        let sources = SourceFiles::from_single_file(source("main.rock"));
+        assert_eq!(sources.files.len(), 1);
+        assert_eq!(sources.files[0].borrow().file.to_id_path(), "main.rock");
+        assert!(sources.package_roots.is_empty());
+    }
+
+    #[test]
+    fn a_known_file_is_replaced_in_place_and_a_new_one_is_appended() {
+        let mut sources = SourceFiles::empty();
+        sources.add_or_update_file(source("main.rock"));
+        sources.add_or_update_file(source("other.rock"));
+        assert_eq!(sources.files.len(), 2);
+
+        let mut updated = source("main.rock");
+        updated.contents = "fn main() { changed(); }\n".to_string();
+        sources.add_or_update_file(updated);
+        assert_eq!(sources.files.len(), 2);
+        assert_eq!(sources.files[0].borrow().file.to_id_path(), "main.rock");
+        assert_eq!(sources.files[0].borrow().contents, "fn main() { changed(); }\n");
+    }
+
+    #[test]
+    fn get_line_reads_the_line_by_its_zero_based_index() {
+        let mut sources = SourceFiles::empty();
+        let mut file = source("main.rock");
+        file.contents = "first\nsecond\nthird".to_string();
+        sources.add_or_update_file(file);
+
+        assert_eq!(sources.get_line(&line_col("main.rock", 0)).as_deref(), Some("first"));
+        assert_eq!(sources.get_line(&line_col("main.rock", 1)).as_deref(), Some("second"));
+        assert_eq!(sources.get_line(&line_col("main.rock", 2)).as_deref(), Some("third"));
+        assert_eq!(sources.get_line(&line_col("main.rock", 3)), None);
+        assert_eq!(sources.get_line(&line_col("absent.rock", 0)), None);
+    }
+
+    #[test]
+    fn get_line_drops_the_line_break_but_not_its_carriage_return_escape() {
+        let mut sources = SourceFiles::empty();
+        let mut file = source("crlf.rock");
+        file.contents = "one\r\ntwo\r\n".to_string();
+        sources.add_or_update_file(file);
+
+        assert_eq!(sources.get_line(&line_col("crlf.rock", 0)).as_deref(), Some("one"));
+        assert_eq!(sources.get_line(&line_col("crlf.rock", 1)).as_deref(), Some("two"));
+        assert_eq!(sources.get_line(&line_col("crlf.rock", 2)), None);
+    }
+
+    #[test]
+    fn file_for_linecol_matches_the_file_identifier() {
+        let mut sources = SourceFiles::empty();
+        sources.add_or_update_file(source("main.rock"));
+        sources.add_or_update_file(source("other.rock"));
+
+        let found = sources.file_for_linecol(&line_col("other.rock", 0)).unwrap();
+        assert_eq!(found.borrow().file.to_id_path(), "other.rock");
+        assert!(sources.file_for_linecol(&line_col("absent.rock", 0)).is_none());
+    }
+
+    #[test]
+    fn package_roots_are_stored_keyed_by_package_id() {
+        let mut sources = SourceFiles::empty();
+        sources.set_package_roots([(7, std::path::PathBuf::from("/tmp/pkg"))]);
+        assert_eq!(sources.package_roots.len(), 1);
+        assert_eq!(sources.package_roots[0].0, 7);
+    }
+
+    #[test]
+    fn a_tests_component_anywhere_below_the_root_marks_a_relative_path_test_only() {
+        assert!(SourceFiles::is_test_only_relative_path(Path::new("tests/main.rock")));
+        assert!(SourceFiles::is_test_only_relative_path(Path::new("sims/tests/a.rock")));
+        assert!(SourceFiles::is_test_only_relative_path(Path::new("tests")));
+        assert!(!SourceFiles::is_test_only_relative_path(Path::new("src/main.rock")));
+        assert!(!SourceFiles::is_test_only_relative_path(Path::new("src/testing.rock")));
+    }
+
     #[test]
     fn production_only_keeps_files_when_project_root_is_under_tests() {
         let temp_root = std::env::temp_dir().join(format!(

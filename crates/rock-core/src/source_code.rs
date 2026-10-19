@@ -366,3 +366,230 @@ impl LineCol {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::{LineColError, line_col_to_offset};
+
+    const FILE: &str = "main.rock";
+
+    fn line_col(file: &str, line: usize, col: usize, offset: usize) -> LineCol {
+        LineCol {
+            file: ustr::ustr(file),
+            line,
+            col,
+            offset,
+        }
+    }
+
+    fn span(line_range: (usize, usize), col_range: (usize, usize), offset_range: (usize, usize)) -> Span {
+        Span {
+            file: ustr::ustr(FILE),
+            line_range,
+            col_range,
+            offset_range,
+        }
+    }
+
+    #[test]
+    fn the_unknown_span_is_all_zeroes_in_the_sentinel_file() {
+        let unknown = Span::unknown();
+        assert_eq!(unknown.file.as_str(), "<unknown>");
+        assert_eq!(
+            (unknown.line_range, unknown.col_range, unknown.offset_range),
+            ((0, 0), (0, 0), (0, 0))
+        );
+    }
+
+    #[test]
+    fn the_default_span_is_the_unknown_span() {
+        assert_eq!(Span::default(), Span::unknown());
+        assert_eq!(LineCol::unknown().file, Span::unknown().file);
+        assert_eq!(
+            (LineCol::unknown().line, LineCol::unknown().col, LineCol::unknown().offset),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn an_unknown_span_is_empty_and_has_no_length() {
+        assert!(Span::unknown().is_empty());
+        assert_eq!(Span::unknown().len(), 0);
+    }
+
+    #[test]
+    fn a_span_of_one_character_is_not_empty() {
+        let single = span((1, 1), (5, 8), (17, 20));
+        assert!(!single.is_empty());
+        assert_eq!(single.len(), 3);
+    }
+
+    #[test]
+    fn start_and_end_read_each_range_at_its_own_border() {
+        let covered = span((2, 4), (3, 9), (20, 41));
+        assert_eq!(covered.start(), line_col(FILE, 2, 3, 20));
+        assert_eq!(covered.end(), line_col(FILE, 4, 9, 41));
+    }
+
+    #[test]
+    fn a_span_round_trips_through_its_start() {
+        let point = line_col(FILE, 7, 11, 96);
+        let converted = Span::from_linecol(point.clone());
+        assert_eq!(converted.file, point.file);
+        assert_eq!(converted.line_range, (7, 7));
+        assert_eq!(converted.col_range, (11, 11));
+        assert_eq!(converted.offset_range, (96, 96));
+        assert_eq!(converted.start(), point);
+        assert_eq!(converted.end(), point);
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn merging_keeps_the_first_start_and_the_last_end() {
+        let first = span((1, 2), (4, 7), (13, 22));
+        let last = span((3, 5), (0, 6), (30, 44));
+        let merged = first.merge(&last);
+        assert_eq!(merged.line_range, (1, 5));
+        assert_eq!(merged.col_range, (4, 6));
+        assert_eq!(merged.offset_range, (13, 44));
+        assert_eq!(merged.file, first.file);
+    }
+
+    #[test]
+    #[should_panic]
+    fn merging_spans_of_different_files_is_rejected() {
+        let mut other = span((0, 0), (0, 1), (0, 1));
+        other.file = ustr::ustr("other.rock");
+        span((0, 0), (0, 1), (0, 1)).merge(&other);
+    }
+
+    #[test]
+    fn or_falls_back_only_when_self_is_unknown() {
+        let known = span((1, 1), (0, 4), (28, 32));
+        let other = span((9, 9), (9, 12), (90, 93));
+        assert_eq!(Span::unknown().or(&other), other);
+        assert_eq!(known.or(&other), known);
+    }
+
+    #[test]
+    fn contains_loc_is_half_open_on_the_byte_offsets() {
+        let covered = span((1, 1), (5, 10), (17, 22));
+        assert!(covered.contains_loc(&line_col(FILE, 1, 5, 17)));
+        assert!(covered.contains_loc(&line_col(FILE, 1, 9, 21)));
+        assert!(!covered.contains_loc(&line_col(FILE, 1, 10, 22)));
+        assert!(!covered.contains_loc(&line_col(FILE, 1, 4, 16)));
+        assert!(!covered.contains_loc(&line_col("other.rock", 1, 5, 17)));
+    }
+
+    #[test]
+    fn format_site_is_one_based_on_the_line() {
+        assert_eq!(span((0, 0), (0, 1), (0, 1)).format_site(), "main.rock:1");
+        assert_eq!(span((6, 7), (0, 1), (0, 1)).format_site(), "main.rock:7");
+        assert_eq!(Span::unknown().format_site(), "<unknown>:1");
+    }
+
+    #[test]
+    fn debug_names_the_file_but_not_the_ranges() {
+        assert_eq!(format!("{:?}", span((1, 2), (3, 4), (5, 6))), "Span(main.rock)");
+        assert_eq!(format!("{:?}", Span::unknown()), "Span(unknown)");
+    }
+
+    #[test]
+    fn write_renders_a_header_only_for_a_missing_source() {
+        let mut written = Vec::new();
+        span((1, 1), (5, 8), (17, 20)).write("span message", &mut written);
+        assert_eq!(String::from_utf8(written).unwrap(), "[  ] Advice: span message\n");
+    }
+
+    fn offset_of(source: &str, line: usize, col: usize) -> usize {
+        line_col_to_offset(source, line, col).expect("offset")
+    }
+
+    fn assert_line_out_of_range(source: &str, line: usize, col: usize) {
+        assert!(matches!(
+            line_col_to_offset(source, line, col),
+            Err(LineColError::LineOutOfRange)
+        ));
+    }
+
+    fn assert_column_out_of_range(source: &str, line: usize, col: usize) {
+        assert!(matches!(
+            line_col_to_offset(source, line, col),
+            Err(LineColError::ColumnOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn empty_text_has_no_offsets_to_convert() {
+        assert_line_out_of_range("", 0, 0);
+    }
+
+    #[test]
+    fn a_col_at_the_start_of_a_line_converts_to_its_byte_offset() {
+        let source = "let x = 1;\nlet y = 2;\nlet z = 3;\n";
+        assert_eq!(offset_of(source, 0, 0), 0);
+        assert_eq!(offset_of(source, 1, 0), 11);
+        assert_eq!(offset_of(source, 2, 0), 22);
+    }
+
+    #[test]
+    fn the_last_line_without_a_newline_is_addressable() {
+        let source = "first\nsecond";
+        assert_eq!(source.len(), 12);
+        assert_eq!(offset_of(source, 1, 6), 12);
+        assert_column_out_of_range(source, 1, 7);
+        assert_line_out_of_range(source, 2, 0);
+    }
+
+    #[test]
+    fn the_line_after_a_trailing_newline_does_not_exist() {
+        assert_line_out_of_range("first\n", 1, 0);
+    }
+
+    #[test]
+    fn a_col_past_the_byte_length_of_the_line_is_rejected() {
+        let source = "abc\ndef\n";
+        assert_eq!(offset_of(source, 0, 3), 3);
+        assert_column_out_of_range(source, 0, 4);
+    }
+
+    #[test]
+    fn a_col_is_counted_in_characters_over_byte_offsets() {
+        let source = "h\u{e9}llo\n";
+        assert_eq!(offset_of(source, 0, 1), 1);
+        assert_eq!(offset_of(source, 0, 2), 3);
+        assert_eq!(offset_of(source, 0, 5), 6);
+        assert_eq!(offset_of(source, 0, 6), 6);
+        assert_column_out_of_range(source, 0, 7);
+        assert_line_out_of_range(source, 1, 0);
+    }
+
+    #[test]
+    fn a_crlf_break_counts_as_one_byte_when_advancing() {
+        let source = "ab\r\ncd\r\n";
+        assert_eq!(offset_of(source, 0, 2), 2);
+        assert_eq!(offset_of(source, 1, 0), 3);
+        assert_eq!(offset_of(source, 1, 2), 5);
+        assert_line_out_of_range(source, 2, 0);
+    }
+
+    #[test]
+    fn a_source_file_defaults_to_a_library_file_of_its_own_module() {
+        let file = source_file_from_path_and_contents(
+            "src/main.rock".to_string(),
+            "main.rock".to_string(),
+            "fn main() {}\n".to_string(),
+        );
+        assert_eq!(file.module_id, ModuleId::new("src/main.rock".into()));
+        assert_eq!(file.file.to_id_path(), "src/main.rock");
+        assert_eq!(file.contents, "fn main() {}\n");
+        assert!(!file.is_script);
+        assert!(!file.is_test);
+        assert!(!file.is_test_util);
+        assert!(file.used_packages.is_empty());
+        assert_eq!(file.dialect, Dialect::Legacy);
+        assert_eq!(file.memory_class, MemoryClass::Game);
+        assert_eq!(file.global_policy, GlobalPolicy::Any);
+    }
+}
