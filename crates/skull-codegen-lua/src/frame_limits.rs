@@ -200,7 +200,7 @@ fn statement_slots_upper_bound(inst: &Inst) -> usize {
 /// loop enclosed every block, and the widest statement is taken without any of
 /// the narrowing the emitter applies.
 ///
-/// This is what keeps the check off the compile-time budget: a MAG build emits
+/// This is what keeps the check off the compile-time budget: a large project emits
 /// tens of thousands of bodies and none of them comes near 200 locals, so the
 /// side tables [`frame_overflow`] needs are never allocated.
 pub(crate) fn fits_without_measuring(

@@ -69,8 +69,12 @@ pub struct LspWorkspace {
 
 impl LspWorkspace {
     pub fn new() -> Self {
+        Self::with_policy(crate::CompilerPolicy::default())
+    }
+
+    pub fn with_policy(policy: crate::CompilerPolicy) -> Self {
         Self {
-            bone: bone_query::BoneWorkspace::new(),
+            bone: policy.workspace(),
             semantic_token_cache: HashMap::new(),
             inlay_hint_cache: HashMap::new(),
             document_versions: DocumentVersionTracker::default(),

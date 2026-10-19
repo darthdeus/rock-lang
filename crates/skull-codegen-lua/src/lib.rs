@@ -694,7 +694,7 @@ impl Clone for CodegenCtx {
 /// "arithmetic on local 'r1' (a nil value)").
 ///
 /// This is the reserved *local* namespace only. The `__rock_*` prefix at large
-/// is a shared reserved namespace the stdlib AND stone engine legitimately
+/// is a shared reserved namespace the stdlib and host runtimes legitimately
 /// extend with top-level `@nomangle` fns (`__rock_create_struct`,
 /// `__rock_install_serialize_value`, ...) -- those are top-level globals, never
 /// body locals, so they don't collide and must not be rejected. Only the exact
@@ -883,7 +883,7 @@ impl CodegenCtx {
     /// user fn's Lua name or a global), records a spanned rejection pointing at
     /// that user definition -- drained after emit by [`take_rejection`]. This is
     /// reject-not-panic: a collision is illegal user code, not a compiler bug, so
-    /// it surfaces as a diagnostic and keeps `rock stone` / `lsp serve` alive.
+    /// it surfaces as a diagnostic and keeps interactive compiler hosts alive.
     /// THE single choke point for every synthetic top-level name across skull.
     pub fn mint_synthetic(&self, name: String) -> String {
         if let Some(&span) = self.reserved.get(&name) {
@@ -1223,8 +1223,7 @@ pub fn tail_call_shape() -> TailCallShape {
 /// callee on GC64 -- the name string (a GC constant, 2 slots), its `KSLOT`
 /// hash slot, and the resolved function object (2 more) -- plus the guard that
 /// the global still holds that function. LuaJIT's `maxirconst` limit is 500
-/// SLOTS, and "trace too long" (the limit being hit) is the largest abort class
-/// in mag. An IMMUTABLE upvalue costs 2: only the function object, folded into
+/// SLOTS, and "trace too long" (the limit being hit) can dominate trace aborts. An IMMUTABLE upvalue costs 2: only the function object, folded into
 /// the trace with no lookup and no guard. `docs/trace-pressure-work-plan.md`
 /// carries the per-shape measurement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1319,8 +1318,7 @@ pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
 /// [`ValueCtorShape::Call`] calls the chunk-level `<Name>_vt(..)` ctor, whose
 /// whole body is `return setmetatable({ .. }, <mt>)`. That call frame is what
 /// makes a four-field constructor hot enough to become a `rec_ret` TRACE ROOT --
-/// `Entity_vt` is the largest single leaving-loop family on mag's combat bench,
-/// 106 aborts over three runs -- and its `return setmetatable(..)` is one
+/// and its `return setmetatable(..)` is one
 /// `CALLT` against LuaJIT's 15-slot `loopunroll` budget in every trace that
 /// records it. [`ValueCtorShape::Splice`] writes the table constructor and the
 /// `setmetatable` at the use site instead, so there is no frame to root.
@@ -1420,7 +1418,7 @@ pub fn wrapper_return(expr: &str) -> String {
 }
 
 /// The shipped emitted index shape. `Inline` measured as a redistribution on
-/// mag, not a reduction: the aborts that started inside the helper reappeared
+/// representative workloads, not a reduction: the aborts that started inside the helper reappeared
 /// as leaving-loop roots at the callers' own `for` headers, and the first
 /// frames got no faster (`docs/trace-pressure-work-plan.md`, "Checked-index
 /// helpers inlined at the emitter").
@@ -2074,7 +2072,7 @@ fn emit_named_framed_with_statics_impl(
     // Module-scope const hoisting: an all-constant `value` ctor is built ONCE as a
     // function-owned top-level global and referenced everywhere, instead of rebuilt
     // at each use. On a trace the per-use ctor sinks anyway, but in the interpreter
-    // (mag's aborted HUD/text loops) it allocates every time -- the nested
+    // (uncompiled text-rendering loops) it allocates every time -- the nested
     // `outline_color: Vec2 { 0.0, 0.0 }` per glyph vertex was the entire skull-vs
     // -rock interpreter-path text gap. rock does the same (`__rock_const_*`). The
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
@@ -3469,7 +3467,7 @@ fn check_frame_limits(
 ) {
     // Almost every body is far under both caps, and the exact walk below needs
     // several instruction-sized side tables. Take an allocation-free upper
-    // bound first, so a MAG build pays one linear scan per body rather than
+    // bound first, so a large project pays one linear scan per body rather than
     // five allocations.
     let loop_scoped_locals = color_scope.iter().flatten().count();
     if frame_limits::fits_without_measuring(func, top_locals, loops.len(), loop_scoped_locals) {

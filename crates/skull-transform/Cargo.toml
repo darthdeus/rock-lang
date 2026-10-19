@@ -11,15 +11,15 @@ edition = "2024"
 [dependencies]
 rustc-hash = { workspace = true }
 comfy-la-arena = { workspace = true }
-skull-mir = { path = "../skull-mir" }
-skull-codegen-lua = { path = "../skull-codegen-lua" }
-bone-semantic = { path = "../bone-semantic" }
+skull-mir = { workspace = true }
+skull-codegen-lua = { workspace = true }
+bone-semantic = { workspace = true }
 ustr = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
-skull-parser = { path = "../skull-parser" }
-skull-graph = { path = "../skull-graph" }
+skull-parser = { workspace = true }
+skull-graph = { workspace = true }
 
 [lints]
 workspace = true

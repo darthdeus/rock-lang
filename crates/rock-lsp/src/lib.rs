@@ -1,5 +1,19 @@
 #![allow(clippy::mutable_key_type)]
 
+/// Build-supplied compiler conventions shared by one-shot queries and the server.
+#[derive(Clone, Copy, Default)]
+pub struct CompilerPolicy {
+    pub action_layer: Option<&'static bone_lints::ActionLayerPolicy>,
+    pub identity_storage: bone_query::IdentityStorageExemptions,
+}
+
+impl CompilerPolicy {
+    pub fn workspace(self) -> bone_query::BoneWorkspace {
+        bone_query::BoneWorkspace::with_identity_storage_exemptions(self.identity_storage)
+            .with_lint_options(bone_lints::LintOptions::default().with_action_policy(self.action_layer))
+    }
+}
+
 /// Open a tracing info-span scoped to the rest of the enclosing block, output
 /// to tracing-flame / tracing-perfetto. rock-lsp is its only user.
 #[macro_export]
@@ -192,6 +206,10 @@ fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde
 
 
 pub fn run_lsp_server() -> Result<()> {
+    run_lsp_server_with_policy(CompilerPolicy::default())
+}
+
+pub fn run_lsp_server_with_policy(policy: crate::CompilerPolicy) -> Result<()> {
     info!("Starting Rock LSP server ...");
     debug_log!("LSP_SERVER_STARTING: Debug logging enabled");
 
@@ -286,7 +304,7 @@ pub fn run_lsp_server() -> Result<()> {
     };
 
     let main_loop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        main_loop(connection, initialization_params)
+        main_loop(connection, initialization_params, policy)
     }));
 
     match main_loop_result {
@@ -325,7 +343,7 @@ pub fn run_lsp_server() -> Result<()> {
     Ok(())
 }
 
-fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
+fn main_loop(connection: Connection, params: serde_json::Value, policy: crate::CompilerPolicy) -> Result<()> {
     let mut params_val = params;
 
     // It has been observed that some LSP clients (e.g., some versions of Neovim's native LSP)
@@ -390,7 +408,7 @@ fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
     info!("Starting example main loop");
 
     // let _lsp_context = LspContext::new();
-    let mut workspace = LspWorkspace::new();
+    let mut workspace = LspWorkspace::with_policy(policy);
     let mut shutdown_mode = false;
 
     // debug_log!("LSP_SERVER_INITIALIZED: Workspace created, entering main loop");
@@ -1021,7 +1039,7 @@ fn regenerate_ctags(workspace: &LspWorkspace, uri: &Uri, when: &str) {
 }
 
 /// Regenerate `.rock.tags` for EVERY open project root, not just the edited
-/// file's -- an editor with several packages open (e.g. `mag` + `stone`) must
+/// file's -- an editor with several packages open (e.g. an application and its library) must
 /// keep all their tag files fresh so a jump from one resolves the other, even
 /// while editing only one. Used on didSave: the save is the point a sibling
 /// root's stale tags should catch up. `write_tags_file` skips roots whose bytes

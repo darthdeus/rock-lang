@@ -193,7 +193,7 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
 fn emit_clean_shaped(src: &str, fn_name: &str, shape: TailCallShape) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -263,7 +263,7 @@ fn run_shaped_bound_looped(
 ) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -420,7 +420,7 @@ fn run_shaped_bound_looped(
 fn emit_std(src: &str, fn_name: &str) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -967,7 +967,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
 fn emit_inlined_shaped(src: &str, fn_name: &str, loops: LoopShape) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -1486,7 +1486,7 @@ fn a_multi_return_forward_delivers_the_same_values_under_every_shape() {
 fn emit_clean_bound(src: &str, fn_name: &str, mode: CalleeBindingMode) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -1893,7 +1893,7 @@ fn probe(stop: int) -> int {\n\
 }
 
 /// The shipped shape calls the stdlib helper: the inline shape measured as a
-/// redistribution of aborts on mag, not a reduction (docs/backends.md).
+/// redistribution of aborts in representative workloads, not a reduction (docs/backends.md).
 #[test]
 fn vec_index_read_calls_the_checked_helper_by_default() {
     let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");

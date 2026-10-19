@@ -9,6 +9,9 @@ crates listed below.
 
 | Crate | Origin |
 |---|---|
+| `crates/rock-lsp` | Language server, diagnostics and editor queries |
+| `crates/skull-transform` | Control-flow transforms, inlining and coroutine lowering |
+| `crates/skull-codegen-lua` | Lua emission, local allocation and frame limits |
 | `crates/bone-incremental` | Incremental sessions, dependency invalidation and differential fixtures |
 | `crates/bone-query` | IDE queries, completion ranking and the LSP workspace facade |
 | `crates/bone-mir` | Typechecked MIR definitions and lowering |

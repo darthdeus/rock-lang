@@ -18,10 +18,10 @@ sequential = ["bone-query/sequential"]
 workspace = true
 
 [dependencies]
-rock-host = { path = "../rock-host" }
-bone-query = { path = "../bone-query" }
-bone-lints = { path = "../bone-lints" }
-skull-parser = { path = "../skull-parser" }
+rock-host = { workspace = true }
+bone-query = { workspace = true }
+bone-lints = { workspace = true }
+skull-parser = { workspace = true }
 
 anyhow = { workspace = true }
 fs-err = { workspace = true }
@@ -35,8 +35,8 @@ log = { workspace = true }
 crossterm = "0.28"
 
 env_logger = { workspace = true }
-lsp-server = { path = "../lsp-server-manual", package = "lsp-server-manual" }
-lsp-types = { path = "../lsp-types-manual", package = "lsp-types-manual" }
+lsp-server = { workspace = true }
+lsp-types = { workspace = true }
 tracing = { workspace = true }
 tracing-flame = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }

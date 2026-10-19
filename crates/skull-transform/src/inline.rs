@@ -39,7 +39,7 @@ const MAX_INLINES_PER_FN: usize = 1000;
 /// Max cells a caller may hold before inlining stops (the call stays — always
 /// correct). This is a RAW cell count, but skull-codegen-lua now COLORS cells
 /// (liveness-coalesced onto Lua's 200-local cap), so a function with N raw cells
-/// emits far fewer locals (bitgun `update_mobs`: 193 raw -> 28 colored). The
+/// emits far fewer locals (e.g. 193 raw -> 28 colored). The
 /// budget therefore guards against runaway expansion / the rare all-simultaneously
 /// -live pathological case, not the typical local count; 400 matches the value
 /// the old (coloring-aware) skull validated across the corpus.

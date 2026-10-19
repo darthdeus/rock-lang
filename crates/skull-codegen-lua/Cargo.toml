@@ -13,17 +13,18 @@ edition = "2024"
 [dependencies]
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
-skull-mir = { path = "../skull-mir" }
-bone-semantic = { path = "../bone-semantic" }
+skull-mir = { workspace = true }
+bone-semantic = { workspace = true }
 ustr = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
 ustr = { workspace = true }
-rock-host = { path = "../rock-host" }
-skull-graph = { path = "../skull-graph" }
-skull-parser = { path = "../skull-parser" }
-skull-transform = { path = "../skull-transform" }
+rock-host = { workspace = true }
+rock-stdlib = { workspace = true }
+skull-graph = { workspace = true }
+skull-parser = { workspace = true }
+skull-transform = { workspace = true }
 
 [lints]
 workspace = true

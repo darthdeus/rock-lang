@@ -80,3 +80,18 @@ fn dir_stays_silent_for_lib() {
         "lib package must not run unused_fn: {msgs:?}"
     );
 }
+
+#[test]
+fn default_policy_reports_identity_storage_for_named_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"example-lib\"\n").unwrap();
+    let file = dir.path().join("main.rock");
+    let source = "struct Actor { hp: int }\nstruct Holder { actor: Actor }\nfn main() {}\n";
+    std::fs::write(&file, source).unwrap();
+    let report = diagnostics_report(dir.path().to_str().unwrap()).unwrap();
+    assert!(messages(&report).iter().any(|m| m.contains("cannot store identity struct `Actor`")), "{report}");
+    let mut server = rock_lsp::workspace::LspWorkspace::new();
+    let path = file.to_str().unwrap();
+    server.bone.update(path, source.to_owned());
+    assert!(server.bone.diagnostics_for(path).iter().any(|d| d.message.contains("cannot store identity struct `Actor`")));
+}

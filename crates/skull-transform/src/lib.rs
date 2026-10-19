@@ -499,9 +499,8 @@ fn term_targets_each(term: &Term, f: &mut impl FnMut(Idx<Block>)) {
 /// the WHOLE nested cdata (`Vertex_ct(Vec2_ct(..), Color_ct(..), ..)`) and copies
 /// it into the slot -- ~5 cdata allocations per element that don't sink across
 /// the buffer store. rock instead grabs the slot reference and writes each leaf
-/// field in place (`slot.pos.x = ..`), allocating nothing. This is the mag
-/// HUD/text glyph-quad path (`queue_ui_text_with_font`'s
-/// `verts[ci+N] = make_text_vertex(..)`).
+/// field in place (`slot.pos.x = ..`), allocating nothing. This benefits
+/// glyph-quad loops such as `verts[ci+N] = make_vertex(..)`.
 ///
 /// Rewrite the store to `slot = buf[i]` (a bounds-checked `__nb_checked_get`,
 /// same as the original `__nb_checked_set`) followed by per-leaf `StoreField`s,
@@ -1005,9 +1004,9 @@ fn value_ctor_plan(inst: &Inst) -> Option<(skull_mir::lower::RepId, ValueCtorFor
 /// CELLS can, which is exactly how rock scalarizes (`pos` -> `pos__x`/`pos__y`).
 ///
 /// For `value` structs this removes a cdata that LuaJIT cannot sink across a
-/// side-trace split (the mag `mag.grid.floors_walls` regression). For plain
+/// side-trace split (for example, in grid traversal loops). For plain
 /// structs it removes a Lua TABLE that LuaJIT's SINK only elides on a compiled
-/// trace -- in the interpreter (mag's aborted HUD/text loops) the table
+/// trace -- in the interpreter (uncompiled text-rendering loops) the table
 /// allocates every iteration; rock scalarizes it to per-field locals so it pays
 /// 0 even interpreted. Plain structs are MUTABLE, so `StoreField` writes are
 /// legal (they become field-cell stores); any WHOLE-struct use (pass-by-value,
