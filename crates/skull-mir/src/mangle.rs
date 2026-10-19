@@ -12,7 +12,7 @@
 //! never equals its source name.
 //!
 //! The separator is a single `_` (adopted after a corpus-wide collision scan
-//! found zero collisions over stdlib + stone + every game, ~23k fns --
+//! found zero collisions over stdlib + engine + application corpora, ~23k fns --
 //! `rock-cli/tests/mangle_corpus_scan.rs`, `docs/mangle-unification-plan.md`).
 //! [`collision_errors`] enforces the property permanently: any residual
 //! collision (two distinct signatures mangling alike, or a mangled name equal to

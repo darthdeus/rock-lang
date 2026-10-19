@@ -511,10 +511,10 @@ mod tests {
     fn blend_shadow_is_session_state_not_a_host_handle() {
         let schema = StateSchema::from_entries(vec![StateEntry {
             kind: StateKind::Global,
-            identity: "global:/workspace/stone/engine/compat/bindings.rock::CURRENT_BLEND".into(),
+            identity: "global:/workspace/engine/bindings.rock::CURRENT_BLEND".into(),
             fingerprint: "type=BlendMode".into(),
             physical: vec!["CURRENT_BLEND".into()],
-            owner: Some("/workspace/stone/engine/compat/bindings.rock".into()),
+            owner: Some("/workspace/engine/bindings.rock".into()),
             initializer_identity: None,
             metadata: Some(StateMetadata::default()),
             storage_free: false,

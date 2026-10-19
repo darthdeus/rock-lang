@@ -222,6 +222,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bone-mir"
+version = "0.1.0"
+dependencies = [
+ "bone-semantic",
+ "comfy-la-arena",
+ "skull-parser",
+ "ustr",
+]
+
+[[package]]
 name = "bone-query"
 version = "0.1.0"
 dependencies = [
@@ -1015,6 +1025,33 @@ dependencies = [
  "ordered-float",
  "rock-core",
  "rock-tokenizer",
+ "skull-parser",
+ "ustr",
+]
+
+[[package]]
+name = "skull-graph"
+version = "0.1.0"
+dependencies = [
+ "bone-semantic",
+ "comfy-la-arena",
+ "log",
+ "rayon",
+ "rustc-hash",
+ "skull-mir",
+ "skull-parser",
+ "ustr",
+]
+
+[[package]]
+name = "skull-mir"
+version = "0.1.0"
+dependencies = [
+ "bone-semantic",
+ "comfy-la-arena",
+ "rock-stdlib",
+ "rustc-hash",
+ "skull-graph",
  "skull-parser",
  "ustr",
 ]

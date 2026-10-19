@@ -650,7 +650,7 @@ pub struct Indices {
     /// way in, you have to ask who points AT it.
     ///
     /// HASHED, not ordered. It is written once per EDGE -- 32k times per build
-    /// on mag -- and an `Instance`'s `Ord` compares a `Vec<MonoTyId>` element by
+    /// on a large corpus -- and an `Instance`'s `Ord` compares a `Vec<MonoTyId>` element by
     /// element, which cost 65 ms of a 127 ms build. Nothing reads it in order:
     /// the only question asked of it is whether ANY predecessor lies outside a
     /// region.
@@ -676,7 +676,7 @@ pub struct SpanEdit {
 ///
 /// The value is stored ONCE for every owner that agrees on it: they are equal
 /// by definition, so keeping a copy per owner would be 32k substitution clones
-/// per build on mag to represent 5k distinct answers. An owner that says
+/// per build on a large corpus to represent 5k distinct answers. An owner that says
 /// something DIFFERENT is kept in full, because that is the finding.
 ///
 /// `total` is the number of times the fact was asserted, which is not
@@ -3339,7 +3339,7 @@ impl InstanceGraph {
     ///
     /// An ITERATOR rather than a field: the rows already exist, once, in the
     /// contributions. Materializing a second copy cost 32k `Edge` clones per
-    /// update on mag and served no production consumer -- `artifact` says in
+    /// update on a large corpus and served no production consumer -- `artifact` says in
     /// its own comment that it deliberately works from sites, not edges.
     pub fn edges(&self) -> impl Iterator<Item = &Edge> {
         self.contributions.values().flat_map(|c| c.edges.iter())
@@ -4544,7 +4544,7 @@ fn record_call_impl(
 /// recursive SCCs first. Restricting to an SCC is sound -- every function on an
 /// `f`-to-`f` path lies on an `f`-to-`f` cycle, so no path crosses out of one --
 /// but it buys nothing: the graph is leaf-heavy, so the full search costs 110k
-/// traversal steps on the corpus's largest project (mag: 2,560 starts, 26,883
+/// traversal steps on the corpus's largest project (2,560 starts, 26,883
 /// edges), and the whole 26-project census runs in 1.5s. Measured, after
 /// writing the SCC pass and finding it inert.
 fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
@@ -4553,7 +4553,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // Adjacency by REFERENCE into the contributions. Looking a successor's
     // edges back out of `contributions` instead costs an `Instance` clone per
     // node visited, because the map is keyed by `Owner` -- measured at 3.8 ms
-    // against 1.3 for the map on mag.
+    // against 1.3 for the map on a large corpus.
     let mut succ: FxHashMap<&Instance, &[Edge]> = FxHashMap::default();
     for (owner, c) in &g.contributions {
         if let Some(i) = owner.instance() {

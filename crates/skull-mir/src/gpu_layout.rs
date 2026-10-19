@@ -439,11 +439,11 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
         Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Some(WireKind::U32),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Some(WireKind::Bool32),
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
-            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") {
+            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f") {
                 Some(WireKind::F32x2)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f") {
                 Some(WireKind::F32x3)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f") {
                 Some(WireKind::F32x4)
             } else if bone_semantic::prelude::is_intrinsic_key(n, "Mat4") {
                 Some(WireKind::Mat4)
@@ -792,11 +792,11 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(AttrKind::F32),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some(AttrKind::I32),
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
-            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") {
+            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2") || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f") {
                 Some(AttrKind::F32x2)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3") || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f") {
                 Some(AttrKind::F32x3)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") {
+            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4") || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f") {
                 Some(AttrKind::F32x4)
             } else {
                 None

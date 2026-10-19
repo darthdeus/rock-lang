@@ -1091,7 +1091,7 @@ fn convert_at<S: std::hash::BuildHasher>(
 /// It caps the STRUCTURAL DEPTH of the instantiation types, not the path length
 /// from a root. A path length is a property of how the walk arrived, so capping
 /// on it makes graph MEMBERSHIP depend on discovery order -- measured: with a
-/// path cap, `games/little-knights` produced two different manifests under
+/// path cap, a recursive corpus project produced two different manifests under
 /// forward and reversed root order, failing plan S 20g.4. Type depth is a
 /// property of the instance itself, so the same instance is capped or not
 /// regardless of how it was reached.

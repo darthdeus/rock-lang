@@ -2712,7 +2712,7 @@ impl Builder<'_> {
     /// Column storage has no element slot to index, so the read decomposes into K
     /// leaf reads and packs -- the same shape `let v = xs[i]` takes, which means
     /// SROA peels the pack wherever the binding is only projected from. Emitting a
-    /// whole-element `Index` here instead is what made bitgun stop compiling: it
+    /// whole-element `Index` here instead prevents column collections from compiling: it
     /// reaches the emitter with no slot to name.
     pub(crate) fn loop_element_repr_at(
         &mut self,

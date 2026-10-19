@@ -231,7 +231,7 @@ pub(crate) fn lower_attribution_timing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("ROCK_LOWER_CENSUS").is_ok_and(|value| value == "1")
-            || std::env::var("STONE_LOG").is_ok_and(|value| value == "debug")
+            || std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug")
     })
 }
 

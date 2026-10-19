@@ -7,9 +7,8 @@
 //! walker and cross-checked against LuaJIT -- see the module docs. Nothing here
 //! may grow an offset assertion; that would be a second offset model.
 //!
-//! The live lockstep this replaces: bitgun/grass.rock:133 passes attr sizes
-//! `[2, 1, 1, 1]` by hand, derived from GrassInstance's fields, with
-//! grass_shader.rock:5 carrying a comment asserting the agreement.
+//! An instanced mesh may pass attribute sizes `[2, 1, 1, 1]` by hand,
+//! derived from its fields. These tests exercise that layout contract.
 
 use std::sync::LazyLock;
 use ustr::Ustr;
@@ -19,7 +18,7 @@ use skull_mir::gpu_layout::{
 };
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -43,12 +42,12 @@ fn attrs_of(src: &str, struct_name: &str) -> VertexAttrs {
     vertex_attrs(&ws, Ustr::from(struct_name)).expect("attributes must compute")
 }
 
-/// The live shape: bitgun's GrassInstance.
+/// An instanced mesh with one position and three scalar fields.
 #[test]
-fn grass_instance_attrs_match_the_hand_written_sizes() {
+fn mesh_instance_attrs_match_the_hand_written_sizes() {
     let a = attrs_of(
-        "value GrassInstance { pos: Vec2, rot: float, scale: float, height: float }",
-        "GrassInstance",
+        "value MeshInstance { pos: Vec2, rot: float, scale: float, height: float }",
+        "MeshInstance",
     );
 
     // The `[2, 1, 1, 1]` in gpu_mesh_set_instances(.., 5, [2, 1, 1, 1]).
@@ -67,9 +66,8 @@ fn grass_instance_attrs_match_the_hand_written_sizes() {
 }
 
 /// The engine's sprite vertex: pos(2)+uv(2)+color(4)+pivotY(1)+entityId(1).
-/// Component counts only -- the matching MESH_*_OFFSET constants
-/// (stone-rs/src/sprite.rs:585-586) are offsets, so they are the C layout's to
-/// reproduce, not this module's.
+/// Component counts only -- the matching renderer constants are offsets,
+/// so they are the C layout's to reproduce, not this module's.
 #[test]
 fn sprite_vertex_attr_sizes() {
     let a = attrs_of(
@@ -131,12 +129,12 @@ fn slots_of(src: &str, struct_name: &str) -> TextureSlots {
     texture_slots(&ws, Ustr::from(struct_name)).expect("slots must compute")
 }
 
-/// bitgun grass's live set, in declaration order.
+/// Texture bindings in declaration order.
 #[test]
-fn grass_textures_take_slots_in_field_order() {
+fn mesh_textures_take_slots_in_field_order() {
     let t = slots_of(
-        "struct GrassTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }",
-        "GrassTex",
+        "struct MeshTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }",
+        "MeshTex",
     );
     assert_eq!(t.slots.len(), 3);
     for (i, want) in ["uTexture", "mask_tex", "shadowmap_tex"].iter().enumerate() {

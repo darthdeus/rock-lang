@@ -87,7 +87,7 @@ impl VertexPlan {
     }
 
     /// The float-unit view carries component counts and a stride but NOT
-    /// offsets, and `stone-rs`'s `validate_layout` rebuilds them cumulatively.
+    /// offsets, and the renderer rebuilds them cumulatively.
     /// So the view describes this struct only while every attribute sits at
     /// exactly `4 * cumulative components` -- otherwise the engine would bind
     /// each attribute at a position the checked C layout says is wrong, and the

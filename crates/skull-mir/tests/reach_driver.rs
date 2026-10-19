@@ -1,6 +1,6 @@
 //! Direct tests of the shared reachability driver.
 //!
-//! The backend corpora cannot pin this: no shader in mag/bitgun has a fn with
+//! The backend corpora cannot pin this: the existing shaders have no function with
 //! two distinct emittable callees, so flipping child-visit order leaves every
 //! golden AND `shader-validate` green. Post-order fidelity is load-bearing for
 //! GLSL (it emits straight from the order and has no forward declarations), so

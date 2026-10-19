@@ -493,7 +493,7 @@ impl Default for AbiPlanMemoStats {
 
 pub(super) fn abi_plan_timing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("STONE_LOG").is_ok_and(|value| value == "debug"))
+    *ENABLED.get_or_init(|| std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug"))
 }
 
 fn add_elapsed(counter: &std::sync::atomic::AtomicU64, start: Option<Instant>) {

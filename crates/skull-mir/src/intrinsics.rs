@@ -141,7 +141,7 @@ pub fn is_gpu_only(f: &Function) -> bool {
 
 /// True iff `f` is GPU-side code that may reach a `@gpu_only` intrinsic: a
 /// `@shader(...)` entry or another `@gpu_only` fn. Shader bodies pass through the
-/// Lua backend (bitgun's `heat_shimmer_frag`), so the marker exempts them.
+/// Lua backend too, so the marker exempts them.
 pub fn is_gpu_context(f: &Function) -> bool {
     is_gpu_only(f) || has_anno(f, "shader")
 }

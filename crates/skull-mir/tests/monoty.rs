@@ -18,7 +18,7 @@ use ustr::Ustr;
 
 /// The stdlib, parsed once. Needed for anything that resolves real types.
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

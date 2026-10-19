@@ -361,7 +361,7 @@ impl Builder<'_> {
     /// position, so an opaque body handing back a hand-built box compiled clean
     /// AND PASSED -- Lua's `.field` does not distinguish a table from cdata, so
     /// the guarantee was violated with no diagnostic. Live shape:
-    /// `stone_measure_text_vec2_for` and its `inline(js)` twin.
+    /// a text-measurement FFI function and its `inline(js)` twin.
     ///
     /// Keyed on the SIGNATURE, which is transport-independent -- the JS backend
     /// packs leaves into an array rather than multi-returning them, and this

@@ -512,11 +512,9 @@ fn storage_free_type(
             params.len() == 2 && params.iter().all(|part| storage_free_type(ws, part, visiting, depth + 1)),
         MonoTy::App { ctor: MonoCtor::Ref, .. } => false,
         MonoTy::App { ctor: MonoCtor::Nominal(name), params } => {
-            if bone_semantic::prelude::is_intrinsic_key_in(*name, &[
-                "Ptr", "PtrU8", "PtrI8", "PtrU16", "PtrI16", "PtrU32",
-                "NativeBuffer", "NativeBufferU8", "NativeBufferI8", "NativeBufferU16",
-                "NativeBufferI16", "NativeBufferU32", "FlatVec",
-            ]) {
+            if bone_semantic::prelude::is_descriptor_key(*name)
+                || bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec")
+            {
                 false
             } else if let Some(sid) = ws.struct_by_name.get(name) {
                 let def = &ws.module(sid.module).structs[sid.def];

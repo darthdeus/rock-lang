@@ -14,7 +14,7 @@ use bone_semantic::inference::Workspace;
 
 use super::{coroutine_yield_channel_mono, YieldChannel};
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
-use crate::monoty::{MonoInterner, MonoTy, MonoTyReason};
+use crate::monoty::{MonoCtor, MonoInterner, MonoTy, MonoTyReason};
 
 /// Every symbol a transformed `co fn` owns, plus its yield channel.
 pub struct CoroutinePlan {
@@ -54,6 +54,19 @@ impl CoroutinePlan {
 
     pub fn channel_for_concrete_type(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
         coroutine_yield_channel_mono(ws, ty)
+    }
+
+    pub fn has_return_value(&self) -> bool {
+        matches!(
+            self.result.as_ref(),
+            Some(MonoTy::App {
+                ctor: MonoCtor::Nominal(name),
+                params,
+            }) if name.as_str() == "Coroutine"
+                && params
+                    .get(1)
+                    .is_some_and(|result| !matches!(result, MonoTy::Unit))
+        )
     }
 
     /// The constructor's own name -- the symbol a call site targets.

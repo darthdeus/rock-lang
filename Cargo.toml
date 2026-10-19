@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bone-mir",
+    "crates/skull-mir",
+    "crates/skull-graph",
     "crates/bone-core",
     "crates/bone-incremental",
     "crates/bone-query",
@@ -28,6 +31,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+bone-mir = { path = "crates/bone-mir" }
+skull-mir = { path = "crates/skull-mir" }
+skull-graph = { path = "crates/skull-graph" }
 bone-incremental = { path = "crates/bone-incremental" }
 bone-query = { path = "crates/bone-query" }
 bone-lints = { path = "crates/bone-lints" }

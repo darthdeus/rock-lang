@@ -1078,7 +1078,7 @@ pub fn convert_body(
     subst: &MonoSubst,
 ) -> Converted {
     let mut c = Converted::default();
-    // Slots repeat inferred TyIds ~4x within a body (measured on mag:
+    // Slots repeat inferred TyIds ~4x within a body (measured on a large corpus:
     // 139,559 slots over 34,237 unique ids), so the conversion is memoized per
     // body. The `generics_bound` census counts PER SLOT exactly as before --
     // each hit replays the cached delta -- and an error replays its reason, so
@@ -1410,6 +1410,9 @@ fn concrete_ty_types(
 ) -> Result<rustc_hash::FxHashMap<TyId, MonoTyId>, MonoTyReason> {
     let mut nodes = FxHashSet::default();
     for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
+        collect_type_nodes(ws, inf, *ty, &mut nodes);
+    }
+    for ty in inf.fn_field_call_types.values() {
         collect_type_nodes(ws, inf, *ty, &mut nodes);
     }
     for ty in declared_types {
@@ -1934,9 +1937,12 @@ fn prepare_instance(
             .iter()
             .map(|(_, ty)| *ty)
             .chain(inf.binding_types.iter().map(|(_, ty)| *ty))
+            .chain(inf.fn_field_call_types.values().copied())
             .collect();
         (
-            inf.expr_types.iter().count() + inf.binding_types.iter().count(),
+            inf.expr_types.iter().count()
+                + inf.binding_types.iter().count()
+                + inf.fn_field_call_types.len(),
             tyids.len(),
         )
     } else {

@@ -137,7 +137,7 @@ fn mir(src: &str, fn_name: &str) -> String {
 fn mir_std(src: &str, fn_name: &str) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());

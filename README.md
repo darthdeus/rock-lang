@@ -11,6 +11,9 @@ crates listed below.
 |---|---|
 | `crates/bone-incremental` | Incremental sessions, dependency invalidation and differential fixtures |
 | `crates/bone-query` | IDE queries, completion ranking and the LSP workspace facade |
+| `crates/bone-mir` | Typechecked MIR definitions and lowering |
+| `crates/skull-mir` | Cell-based control-flow IR, lowering and backend layout contracts |
+| `crates/skull-graph` | Backend-neutral instance graph and concrete artifact plans |
 | `crates/bone-core` | HIR, annotation registry, module workspace and shared types of the `bone` typechecker |
 | `crates/bone-lints` | Lint catalog, HIR analysis and incremental lint cache |
 | `crates/bone-inference` | Type inference: unification, calls, fields, purity |

@@ -2159,6 +2159,7 @@ pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
         return GcFieldEq::Native;
     }
     match static_ty(ws, ty) {
+        Some(TypeExpr::Nullable(inner)) => gc_field_eq(ws, ty.with_idx(inner)),
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
             if map_is_value_struct(ws, name) {
                 GcFieldEq::Native
