@@ -811,10 +811,16 @@ mod macos {
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([source]));
             extra.lock().insert(input.clone());
             assert!(observation.scan(false).unwrap().paths.is_empty(), "declaring an unchanged input must not manufacture a reload");
-            std::fs::write(&input, "input edit").unwrap();
+            // A different size keeps the edit visible even when the filesystem
+            // clock gives it the seed's timestamp.
+            std::fs::write(&input, "input edited").unwrap();
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([input]));
             let pending = dir.path().canonicalize().unwrap().join("pending.txt");
             std::fs::write(&pending, "changed before first admission scan").unwrap();
+            // A coarse filesystem clock can stamp this write at or before the
+            // startup instant; pin startup just before it.
+            let stamp = Stamp::read(&pending).unwrap();
+            observation.started = UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32) - Duration::from_nanos(1);
             extra.lock().insert(pending.clone());
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([pending]));
         }
