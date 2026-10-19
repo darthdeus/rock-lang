@@ -17,7 +17,7 @@ mod macro_refs;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity,
@@ -47,14 +47,50 @@ use crate::completion::match_policy::admit;
 use crate::query::{clean_match, SymCat};
 use crate::rank_key::RankKey;
 
-/// Re-parse a tracked user file from its stored text. The Session no longer
-/// retains the AST (it is transient -- the per-body HIR is the incremental
-/// store), so the IDE queries that need surface syntax (typed-hole reports,
-/// macro-param references) re-parse on demand. These are interactive, one-shot
-/// queries, not a hot loop, so a parse per call is fine. Returns the raw
-/// (un-cooked) AST, matching what the queries consumed when it was stored.
-fn reparse_user_file(uf: &bone_incremental::session::UserFile, path: &str) -> Option<skull_parser::Ast> {
-    skull_parser::parse_module(&uf.text, Ustr::from(path)).ok()
+/// A fallback is reported once per request, file and stage until project text
+/// changes. Keep this with the project so closing it also releases the keys.
+#[derive(Default)]
+struct FallbackReports {
+    reported: Mutex<FxHashSet<(&'static str, String, &'static str)>>,
+}
+
+impl FallbackReports {
+    fn report(
+        &self,
+        request: &'static str,
+        path: &str,
+        stage: &'static str,
+        reason: &str,
+        fallback: &str,
+    ) {
+        if self.reported.lock().expect("LSP fallback reports lock")
+            .insert((request, path.to_string(), stage))
+        {
+            log::warn!(target: "LSP",
+                "{request}: `{path}`: {stage} failed: {reason}; fallback: {fallback}");
+        }
+    }
+
+    fn result<T>(
+        &self,
+        result: Result<T, CompilerError>,
+        request: &'static str,
+        path: &str,
+        stage: &'static str,
+        fallback: &str,
+    ) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.report(request, path, stage, &error.message, fallback);
+                None
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.reported.get_mut().expect("LSP fallback reports lock").clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +184,7 @@ fn warm_stdlib() -> Vec<skull_parser::Ast> {
 /// tracked file (needed because bone queries are keyed on byte offsets, but the
 /// session does not retain raw text).
 struct BoneProject {
+    fallbacks: FallbackReports,
     lint_options: bone_lints::LintOptions,
     session: Session,
     texts: HashMap<String, String>,
@@ -211,6 +248,18 @@ struct BoneProject {
     /// not build (logged): every file is then a standalone legacy source,
     /// as in a compile.
     graph: Option<rock_host::stick::graph::PackageGraph>,
+}
+
+impl BoneProject {
+    /// Queries needing surface syntax reparse the stored file; recovery errors
+    /// stay on the partial AST and are already published by Session diagnostics.
+    fn reparse_user_file(&self, path: &str, request: &'static str) -> Option<skull_parser::Ast> {
+        let uf = self.session.files.get(path)?;
+        self.fallbacks.result(
+            skull_parser::parse_module(&uf.text, Ustr::from(path)),
+            request, path, "parse stored source", "omit surface-syntax details; use live inference",
+        )
+    }
 }
 
 /// The package graph for the project rooted at `root`, if it has a manifest.
@@ -577,6 +626,7 @@ impl BoneWorkspace {
                 .map(crate::package_aliases::from_graph)
                 .unwrap_or_default();
             BoneProject {
+                fallbacks: Default::default(),
                 lint_options: self.lint_options.clone(),
                 // Warm-only session is always valid even if the first file
                 // doesn't parse; the file is added by the update_file below.
@@ -687,6 +737,7 @@ impl BoneWorkspace {
                 let now = std::time::Instant::now();
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 let mut project = BoneProject {
+                    fallbacks: Default::default(),
                     lint_options: self.lint_options.clone(),
                     session,
                     texts,
@@ -714,7 +765,17 @@ impl BoneWorkspace {
                     root.display()
                 );
                 for (p, src) in file_texts {
-                    let _ = self.update(&p, src);
+                    for (file, diagnostics) in self.update(&p, src) {
+                        let errors: Vec<_> = diagnostics.iter()
+                            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+                            .map(|d| d.message.as_str()).collect();
+                        if !errors.is_empty() {
+                            if let Some(proj) = self.project(&file) {
+                                proj.fallbacks.report("load_project", &file, "per-file update",
+                                    &errors.join("; "), "retain last good session; continue indexing other files");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -799,6 +860,9 @@ impl BoneWorkspace {
                 .is_some_and(|owner| !graph.includes_file(owner, Path::new(path)))
         }) {
             return vec![(editor_path(path).into_owned(), Vec::new())];
+        }
+        if proj.texts.get(path) != Some(&text) {
+            proj.fallbacks.clear();
         }
         proj.texts.insert(path.to_string(), text.clone());
 
@@ -1048,6 +1112,7 @@ impl BoneWorkspace {
         let path = path_c.as_str();
         let root = Self::root_for(path);
         if let Some(proj) = self.projects.get_mut(&root) {
+            proj.fallbacks.clear();
             proj.texts.remove(path);
             proj.hole_cache.remove(path);
             proj.lint_cache.invalidate_file(Ustr::from(path));
@@ -1107,34 +1172,28 @@ impl BoneWorkspace {
         // `rock-lsp hole-info` CLI prints -- rather than `hover_at`'s bare
         // `Type: ...`. Fenced so the multi-line "In scope:" block keeps its
         // formatting in a Markdown editor.
-        if let Some(uf) = proj.session.files.get(path) {
-            if let Some(hi) = reparse_user_file(uf, path)
-                .and_then(|ast| crate::query::hole_info(ws, mid, inf, &ast, offset))
-            {
-                return Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: format!("```\n{}```", format_hole_report(&hi)),
-                    }),
-                    range: Some(range_from_offsets(
-                        src,
-                        hi.span.offset_range.0,
-                        hi.span.offset_range.1,
-                    )),
-                });
-            }
+        let raw_ast = proj.reparse_user_file(path, "hover");
+        if let Some(hi) = raw_ast.as_ref()
+            .and_then(|ast| crate::query::hole_info(ws, mid, inf, ast, offset))
+        {
+            return Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!("```\n{}```", format_hole_report(&hi)),
+                }),
+                range: Some(range_from_offsets(
+                    src,
+                    hi.span.offset_range.0,
+                    hi.span.offset_range.1,
+                )),
+            });
         }
 
         // Enum-variant match patterns (`MobKind::Skeleton`, incl. the `::`) are
         // resolved from the raw AST FIRST, so a pattern wins over the enclosing
         // match expr (which now renders its own value for its keyword/braces).
         // bone's HIR pattern carries no span, hence the raw-AST read.
-        let pat_ast = proj
-            .session
-            .files
-            .get(path)
-            .and_then(|uf| reparse_user_file(uf, path));
-        let pat_hover = pat_ast
+        let pat_hover = raw_ast
             .as_ref()
             .and_then(|ast| crate::query::enum_variant_pattern_hover(ws, ast, offset));
         // Node resolution runs first (so a param NAME/TYPE in the signature
@@ -1210,11 +1269,7 @@ impl BoneWorkspace {
         // Raw-AST resolutions run FIRST (the HIR node isn't in `node_index`):
         // a macro INVOCATION name (erased by expansion -- otherwise the cursor
         // lands on a spliced body token), then enum-variant match patterns.
-        let raw = proj
-            .session
-            .files
-            .get(path)
-            .and_then(|uf| reparse_user_file(uf, path));
+        let raw = proj.reparse_user_file(path, "definition");
         if let Some(ast) = &raw {
             if let Some(span) =
                 macro_refs::macro_invocation_def(ast, &proj.session.registry, offset)
@@ -1273,7 +1328,7 @@ impl BoneWorkspace {
         let offset = offset_at_line_col(src, pos.line, pos.character);
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
         // Find-usages scopes to the specific overload under the cursor.
-        self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::ThisOverload)
+        self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::ThisOverload, "references")
             .into_iter()
             .filter_map(|s| self.location_from_span_indexed(proj, &s.span, &mut idx_cache))
             .collect()
@@ -1309,8 +1364,7 @@ impl BoneWorkspace {
         let ws = proj.session.workspace();
         let mid = user_module_for_path(ws, path)?;
         let inf = ws.inference(mid)?;
-        let uf = proj.session.files.get(path)?;
-        let ast = reparse_user_file(uf, path)?;
+        let ast = proj.reparse_user_file(path, "hole_info")?;
         let hi = crate::query::hole_info(ws, mid, inf, &ast, offset)?;
         Some(format_hole_report(&hi))
     }
@@ -1526,19 +1580,18 @@ impl BoneWorkspace {
         path: &str,
         offset: usize,
         fn_scope: crate::query::FnRefScope,
+        request: &'static str,
     ) -> Vec<crate::query::RefSite> {
-        if let Some(uf) = proj.session.files.get(path) {
-            if let Some(ast) = reparse_user_file(uf, path) {
-                let macro_refs = macro_refs::macro_param_references(&ast, offset);
-                if !macro_refs.is_empty() {
-                    return macro_refs
-                        .into_iter()
-                        .map(|span| crate::query::RefSite {
-                            span,
-                            shorthand: None,
-                        })
-                        .collect();
-                }
+        if let Some(ast) = proj.reparse_user_file(path, request) {
+            let macro_refs = macro_refs::macro_param_references(&ast, offset);
+            if !macro_refs.is_empty() {
+                return macro_refs
+                    .into_iter()
+                    .map(|span| crate::query::RefSite {
+                        span,
+                        shorthand: None,
+                    })
+                    .collect();
             }
         }
         let ws = proj.session.workspace();
@@ -1565,7 +1618,7 @@ impl BoneWorkspace {
     /// the symbol, all overloads of a function included.
     fn rename_sites(&self, proj: &BoneProject, path: &str, offset: usize) -> Vec<crate::query::RefSite> {
         self.v1_rename_sites(proj, path, offset).unwrap_or_else(|| {
-            self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads)
+            self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads, "rename")
         })
     }
 
@@ -1611,7 +1664,7 @@ impl BoneWorkspace {
         // reports a qualified call by the whole path's span, which no site
         // spelling check below keeps).
         let mut sites: Vec<Span> = self
-            .all_reference_spans(proj, decl.file.as_str(), decl.offset_range.0, crate::query::FnRefScope::AllOverloads)
+            .all_reference_spans(proj, decl.file.as_str(), decl.offset_range.0, crate::query::FnRefScope::AllOverloads, "rename")
             .into_iter()
             .map(|site| site.span)
             .collect();
@@ -1911,20 +1964,12 @@ impl BoneWorkspace {
             } else {
                 src.to_string()
             };
-            let ws = proj.session.combined_unexpanded().ok().and_then(|combined| {
-                reparse_with_project(&combined, path, &balance_delimiters(fixed))
-            });
+            let ws = reparse_with_project(proj, path, &balance_delimiters(fixed), "completion");
             if prof {
                 eprintln!(
                     "[bone completion] broken-buffer fallback reparse {:.2}ms (recovered: {})",
                     t.elapsed().as_secs_f64() * 1000.0,
                     ws.is_some()
-                );
-            }
-            if ws.is_none() {
-                log::warn!(
-                    "completion: broken-buffer recovery failed for `{path}`; \
-                     scope completion degraded to the live workspace"
                 );
             }
             ws
@@ -3076,16 +3121,7 @@ impl BoneWorkspace {
         // dropped the module, so hints still show during partial edits (#21).
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
-            let ws = proj.session.combined_unexpanded().ok().and_then(|combined| {
-                reparse_with_project(&combined, path, &balance_delimiters(src.to_string()))
-            });
-            if ws.is_none() {
-                log::warn!(
-                    "inlay: broken-buffer recovery failed for `{path}`; \
-                     hints degraded to the live workspace"
-                );
-            }
-            ws
+            reparse_with_project(proj, path, &balance_delimiters(src.to_string()), "inlay")
         } else {
             None
         };
@@ -3103,8 +3139,10 @@ impl BoneWorkspace {
         // D-form receiver hints come off the surface AST (bone drops the
         // `receiver_surface` marker at lowering), so reparse the buffer here and
         // fold them into the bone-native hint stream as ordinary type hints.
-        let recv_hints = skull_parser::parse_module(src, Ustr::from(path))
-            .ok()
+        let recv_hints = proj.fallbacks.result(
+            skull_parser::parse_module(src, Ustr::from(path)),
+            "inlay", path, "parse receiver hints", "omit receiver hints; keep inferred hints",
+        )
             .map(|ast| crate::query::receiver_param_hints(&ast, start, end))
             .unwrap_or_default()
             .into_iter()
@@ -4518,20 +4556,19 @@ fn line_prefix_is_blank(src: &str, offset: usize) -> bool {
         .is_some_and(|p| p.chars().all(|c| c == ' ' || c == '\t'))
 }
 
-/// Re-type-check the WHOLE project with the current file replaced by `munged`,
-/// so completion resolves cross-file / dependency types (e.g. a param of an
-/// engine struct). `combined` is the session's `combined_unexpanded()` -- warm
-/// stdlib + every project module, incl. the current file's original AST, which
-/// is swapped out for the munge. A single-file reparse can't see cross-file
-/// types, which is why member/struct-literal completion came up empty in real
-/// projects.
+/// Recover completion or inlay queries against the whole project, replacing
+/// the current file with balanced source. A single-file semantic pass is the
+/// last recovery rung when project analysis fails.
 fn reparse_with_project(
-    combined: &[skull_parser::Ast],
+    proj: &BoneProject,
     path: &str,
     munged: &str,
+    request: &'static str,
 ) -> Option<Workspace> {
+    let combined = proj.fallbacks.result(proj.session.combined_unexpanded(),
+        request, path, "combined-module parse", "use live workspace")?;
     let t = std::time::Instant::now();
-    let out = reparse_with_project_inner(combined, path, munged);
+    let out = reparse_with_project_inner(&combined, path, munged, &proj.fallbacks, request);
     if lsp_profile_enabled() {
         eprintln!(
             "[bone completion] reparse_with_project {:.2}ms ({} modules, recovered: {})",
@@ -4560,7 +4597,7 @@ pub(crate) fn analyze_variant<R>(
         Ok(r) => Some(r),
         Err(e) => {
             log::warn!(
-                "completion: session refused the variant ({}); single-file fallback",
+                "completion: session refused the variant for `{path}` ({}); single-file fallback",
                 e.message
             );
             if lsp_profile_enabled() {
@@ -4570,14 +4607,13 @@ pub(crate) fn analyze_variant<R>(
                 );
             }
             let fallback = skull_parser::parse_module(munged, Ustr::from(path))
-                .ok()
-                .and_then(|m| bone_semantic::semantic_passes::semantic_pass(&mut vec![m]).ok());
+                .and_then(|m| bone_semantic::semantic_passes::semantic_pass(&mut [m]));
             match fallback {
-                Some(ws) => Some(f(&ws)),
-                None => {
+                Ok(ws) => Some(f(&ws)),
+                Err(error) => {
                     log::warn!(
-                        "completion: single-file fallback also failed for `{path}`; \
-                         this munge yields no completions"
+                        "completion: single-file fallback also failed for `{path}`: {}; \
+                         this munge yields no completions", error.message
                     );
                     None
                 }
@@ -4590,6 +4626,8 @@ fn reparse_with_project_inner(
     combined: &[skull_parser::Ast],
     path: &str,
     munged: &str,
+    reports: &FallbackReports,
+    request: &'static str,
 ) -> Option<Workspace> {
     // Project-wide pass: every module except the current file, plus the munge.
     // Resolves cross-file / dependency types (an `IVec2` engine param, etc.).
@@ -4600,15 +4638,17 @@ fn reparse_with_project_inner(
     // (the recovery error stays on `recovery_errors`, which the LSP path never
     // gates on) -- so completion still resolves from the best-effort tree (backlog
     // #21). Only a hard tokenizer failure is `Err`/`None` here.
-    modules.push(skull_parser::parse_module(munged, Ustr::from(path)).ok()?);
-    if let Ok(ws) = bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+    let parsed = reports.result(skull_parser::parse_module(munged, Ustr::from(path)),
+        request, path, "parse recovery source", "use live workspace")?;
+    modules.push(parsed.clone());
+    if let Some(ws) = reports.result(
+        bone_semantic::semantic_passes::semantic_pass(&mut modules),
+        request, path, "project semantic recovery", "try single-file semantic recovery",
+    ) {
         return Some(ws);
     }
-    // Fall back to the munged file alone (same-file structural resolution) when
-    // the project pass can't be built -- e.g. a standalone file whose path
-    // doesn't line up with the session's module ids. Keeps single-file behavior.
-    let mut single = vec![skull_parser::parse_module(munged, Ustr::from(path)).ok()?];
-    bone_semantic::semantic_passes::semantic_pass(&mut single).ok()
+    reports.result(bone_semantic::semantic_passes::semantic_pass(&mut [parsed]),
+        request, path, "single-file semantic recovery", "use live workspace")
 }
 
 /// Whether a reach-path suffix (`a().b().c`, UFCS-chained) has a CALL hop to
@@ -4824,7 +4864,8 @@ fn update_lint_cache(
 }
 
 fn prime_lint_cache(proj: &mut BoneProject) {
-    let _ = update_lint_cache(proj, &bone_lints::LintCacheUpdate::full());
+    // Findings remain in the cache for lint_diagnostics; loading has no response.
+    drop(update_lint_cache(proj, &bone_lints::LintCacheUpdate::full()));
 }
 
 /// Render a typed-hole report (kind line + `In scope:` block) as plain text.
@@ -4887,8 +4928,7 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
     let ws = proj.session.workspace();
     let mid = user_module_for_path(ws, path)?;
     let inf = ws.inference(mid)?;
-    let uf = proj.session.files.get(path)?;
-    let ast = reparse_user_file(uf, path)?;
+    let ast = proj.reparse_user_file(path, "hole_diagnostics")?;
     let line_index = LineIndex::new(src);
     let diags = crate::query::all_holes(ws, mid, inf, &ast)
         .into_iter()
@@ -4983,8 +5023,57 @@ fn symbol_kind(k: SymCat) -> SymbolKind {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/failure_log.rs"]
+mod failure_log;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_parse_failure_reports_cause_and_repaired_request_succeeds() {
+        let capture = super::failure_log::Recording::start();
+        let dir = tempfile::tempdir().unwrap();
+        let sibling = dir.path().join("sibling.rock").to_string_lossy().into_owned();
+        let path = dir.path().join("main.rock").to_string_lossy().into_owned();
+        let good = "fn sibling() { let count = 1 }";
+        let broken = "fn sibling() { let text = \"unterminated";
+        let mut bone = BoneWorkspace::new();
+        bone.update(&sibling, good.into());
+        bone.update(&path, "struct Clash {} struct Clash {}".into());
+        capture.take();
+
+        // Session normally rejects hard parses before storing text. Corrupt
+        // one stored sibling to exercise the defensive combined-parse edge.
+        let root = BoneWorkspace::root_for(&sibling);
+        bone.projects.get_mut(&root).unwrap().session.files.get_mut(&sibling).unwrap()
+            .text = broken.into();
+        let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let cause = skull_parser::parse_module(broken, Ustr::from(sibling.as_str()))
+                .err().expect("hard parse fixture").message;
+            let hints = bone.inlay_hints(&path, Range::new(Position::new(0, 0), Position::new(100, 0)));
+            assert!(hints.is_empty());
+            let records = capture.take();
+            assert!(records.iter().any(|record| record.contains("inlay")
+                && record.contains(&path) && record.contains("combined-module")
+                && record.contains(&cause) && record.contains("live workspace")),
+                "combined parse cause was lost: {records:?}");
+            let proj = bone.projects.get(&root).unwrap();
+            assert!(proj.reparse_user_file(&sibling, "hover").is_none());
+            assert!(capture.take().iter().any(|record| record.contains("hover")
+                && record.contains(&sibling) && record.contains(&cause)),
+                "stored source parse cause was lost");
+        }));
+        bone.projects.get_mut(&root).unwrap().session.files.get_mut(&sibling).unwrap()
+            .text = good.into();
+        if let Err(panic) = check {
+            std::panic::resume_unwind(panic);
+        }
+        bone.update(&path, "fn main() { let count = 1 }".into());
+        assert!(!bone.inlay_hints(&path,
+            Range::new(Position::new(0, 0), Position::new(100, 0))).is_empty());
+        assert!(capture.take().is_empty());
+    }
 
     // Lever A: the call-through partition decomposition must score IDENTICALLY to
     // the full `fuzzy_score(name(arg), q)` for every valid call-through pair (name

@@ -24,6 +24,8 @@ mod completion_ranking;
 mod completion_sweep;
 #[path = "cross_file_diagnostics.rs"]
 mod cross_file_diagnostics;
+#[path = "cw7_backend_failure_reporting.rs"]
+mod cw7_backend_failure_reporting;
 #[path = "ctags.rs"]
 mod ctags;
 #[path = "enum_variant_nav.rs"]
