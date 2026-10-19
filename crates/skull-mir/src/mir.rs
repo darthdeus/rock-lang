@@ -85,15 +85,6 @@ pub fn column_elem_rep_plans(
     }
 }
 
-/// Every element type `mf` builds a column-stored `Vec`, nested fns included.
-/// This is the name-only view used by inspect type definitions; representation
-/// decisions come from [`column_elem_plans`].
-pub fn column_elem_types(mf: &MirFunc, out: &mut std::collections::BTreeSet<Ustr>) {
-    let mut plans = std::collections::BTreeMap::new();
-    column_elem_plans(mf, &mut plans);
-    out.extend(plans.into_keys());
-}
-
 /// A resolved call target: which function in which module. Mangling (rock's
 /// overload scheme) is deferred to codegen, which also reads `is_extern` /
 /// `lua_body` off this ref to pick the emission shape. (bone-mir-design line
