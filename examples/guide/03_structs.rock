@@ -1,0 +1,20 @@
+// Structs group named fields. A struct value is a shared handle:
+// mutating it through one variable is visible through the others.
+struct Point {
+    x: float,
+    y: float,
+}
+
+// A method names its receiver first, without a type.
+fn Point.length(p) -> float {
+    return (p.x * p.x + p.y * p.y).sqrt()
+}
+
+fn main() {
+    let p = Point { x: 3.0, y: 4.0 }
+    print(p.length()) // 5
+    let q = Point { ..p, x: 1.0 } // spread copies the rest: q.y is 4
+    print(q.y)
+    p.x = 10.0 // fields are mutable in place
+    print(p.x)
+}

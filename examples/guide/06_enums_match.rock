@@ -1,0 +1,31 @@
+// Enums list the variants a value can be; `match` dispatches on them.
+// Variants can carry data as a tuple or as named fields.
+enum Shape {
+    Point,
+    Circle(float),
+    Rect { w: float, h: float },
+}
+
+fn area(s: Shape) -> float {
+    return match s {
+        Shape::Point => 0.0,
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rect { w, h } => w * h,
+    }
+}
+
+fn size_name(n: int) -> string {
+    return match n {
+        0 => "none",
+        x if x > 100 => "big", // arms can carry an `if` guard
+        _ => "small", // `_` matches anything left over
+    }
+}
+
+fn main() {
+    print(area(Shape::Circle(1.0))) // 3.14159
+    print(area(Shape::Rect { w: 2.0, h: 3.0 })) // 6
+    print(size_name(0)) // none
+    print(size_name(150)) // big
+    print(size_name(5)) // small
+}

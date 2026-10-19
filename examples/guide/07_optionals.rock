@@ -1,0 +1,32 @@
+// A `T?` holds a `T` or `null`. `?.` stops at null instead of crashing,
+// and `??` picks a fallback when the left side is null.
+struct Named {
+    name: string?,
+}
+
+fn greet(n: Named?) -> string {
+    return "hi " + (n?.name ?? "stranger")
+}
+
+fn first(items: [int]) -> int? {
+    if items.len() == 0 {
+        return null
+    }
+    return items[0]
+}
+
+fn display_name(n: Named?) -> string {
+    // `?.let` runs the block only when the value is not null:
+    return n?.let { n.name ?? "?" } ?? "nobody"
+}
+
+fn main() {
+    print(greet(null)) // hi stranger
+    print(greet(Named { name: "ada" })) // hi ada
+    print(greet(Named { name: null })) // hi stranger
+    let xs = [10, 20]
+    print(first(xs) ?? -1) // 10
+    print(first([]) ?? -1) // -1
+    print(display_name(Named { name: "jo" })) // jo
+    print(display_name(null)) // nobody
+}

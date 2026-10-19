@@ -1,0 +1,32 @@
+// A vertex+fragment pipeline. The vertex entry reads per-vertex
+// attributes and uniforms; the fragment entry shades each pixel.
+// Compile it to GLSL (never run it on the CPU):
+//
+//     rock shader 18_shader_pipeline.rock tint_vert tint_frag
+//
+value Vertex {
+    pos: Vec2,
+    st: Vec2,
+}
+
+value Camera {
+    projection: Mat4,
+    view: Mat4,
+    model: Mat4,
+}
+
+value Varying {
+    position: Vec4,
+    uv: Vec2,
+}
+
+@shader(vertex)
+fn tint_vert(@attr a: Vertex, @uniform u: Camera) -> Varying {
+    let clip = u.projection * u.view * u.model * Vec4 { x: a.pos.x, y: a.pos.y, z: 0.0, w: 1.0 }
+    return Varying { position: clip, uv: a.st }
+}
+
+@shader(fragment)
+fn tint_frag(vary: Varying) -> Vec4 {
+    return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 }
+}

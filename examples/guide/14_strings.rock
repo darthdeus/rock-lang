@@ -1,0 +1,19 @@
+// Strings interpolate `{expr}`; write `{{` for a literal brace.
+// Offsets count bytes. The stdlib adds split, trim and friends.
+fn main() {
+    let name = "rock"
+    print("hello {name}, {1 + 2}") // hello rock, 3
+    print("literal {{braces}}") // literal {braces}
+    print("abc".len()) // 3
+    print("abc".upper()) // ABC
+    print("  hi  ".trim()) // hi
+    print("a,b,c".split(",").join(";")) // a;b;c
+    print("hello".contains("ell")) // true
+    print("hello".find("l")) // 2: first match, or -1
+    print("hello".substring(1, 4)) // ell
+    print("42".parse_int() ?? -1) // 42
+    print("nope".parse_int() ?? -1) // -1
+    for cp in "hey".chars() {
+        print(cp) // 104, 101, 121: Unicode code points
+    }
+}

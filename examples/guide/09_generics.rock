@@ -1,0 +1,26 @@
+// Functions and structs take type parameters in angle brackets.
+// Each use is checked (and compiled) at its concrete types.
+fn first<T>(items: [T]) -> T? {
+    if items.len() == 0 {
+        return null
+    }
+    return items[0]
+}
+
+struct Pair<T> {
+    left: T,
+    right: T,
+}
+
+fn Pair<T>.swap(p) -> Pair<T> {
+    return Pair { left: p.right, right: p.left }
+}
+
+fn main() {
+    print(first([10, 20]) ?? -1) // 10
+    print(first(["a", "b"]) ?? "?") // a
+    let p = Pair { left: 1, right: 2 }
+    print(p.swap().left) // 2
+    let words = Pair { left: "x", right: "y" }
+    print(words.right) // y
+}

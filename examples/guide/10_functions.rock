@@ -1,0 +1,27 @@
+// Parameters can have defaults, and callers can pass any argument by
+// name. Closures use `=>`; a function type is written `fn(T) -> U`.
+fn greet(name: string = "world", loud: bool = false) -> string {
+    let g = "hello " + name
+    if loud {
+        return g.upper()
+    }
+    return g
+}
+
+fn apply(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+
+fn main() {
+    print(greet()) // hello world
+    print(greet("ada")) // hello ada
+    print(greet(name: "ada", loud: true)) // HELLO ADA
+    let double = x => x * 2
+    print(double(21)) // 42
+    print(apply(n => n + 1, 41)) // 42
+    let with_block = x => {
+        let y = x * 10
+        return y + 1
+    }
+    print(with_block(4)) // 41
+}

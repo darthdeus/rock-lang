@@ -1,0 +1,20 @@
+// `[T]` is a growable vector. Indexing starts at 0; `v[i]` aborts
+// when out of bounds, while `v.get(i)` returns null instead.
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    xs.push(4)
+    print(xs.len()) // 4
+    print(xs[0]) // 1
+    print(xs.get(99) ?? -1) // -1
+    print(xs.pop() ?? -1) // 4
+    xs.remove_at(0)
+    print(xs[0]) // 2
+    for (i, x) in enumerate(xs) {
+        print("{i}:{x}") // 0:2, 1:3
+    }
+    let words = ["a", "b"]
+    print(words.rev()[0]) // b
+    print(words.is_empty()) // false
+    words.clear()
+    print(words.len()) // 0
+}

@@ -1,0 +1,9 @@
+// A newtype wraps one value in a distinct type, so the compiler
+// rejects mixing up two ints (or strings) that mean different things.
+newtype UserId(int)
+
+fn main() {
+    let id = UserId(7)
+    print(id) // 7: it prints like the wrapped value
+    print(id.0) // unwrap with `.0`: 7
+}

@@ -1,0 +1,12 @@
+// Every file in a v1 package starts with a `mod` header naming it,
+// then imports what it needs with `use`. Run the whole directory:
+//
+//     rock run .
+//
+mod main;
+
+use super::helpers::shout;
+
+fn main() {
+    print(shout("hello"))
+}

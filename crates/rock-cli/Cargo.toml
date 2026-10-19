@@ -69,6 +69,8 @@ sysinfo = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+skull-codegen-shader = { workspace = true }
+skull-codegen-wgsl = { workspace = true }
 insta = { workspace = true }
 regex-lite = { workspace = true }
 syn = { version = "2", features = ["full"] }

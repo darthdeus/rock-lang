@@ -1,0 +1,9 @@
+// A fullscreen fragment entry: no vertex shader, just a function of
+// the pixel coordinate. Compile it the same way:
+//
+//     rock shader 19_shader_fullscreen.rock tint
+//
+@shader(fragment)
+fn tint(tc: Vec2) -> Vec4 {
+    return v(tc.x, tc.y, 0.5, 1.0)
+}

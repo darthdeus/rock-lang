@@ -1,0 +1,18 @@
+// `Map<K, V>` is a hash map. Iteration order is unspecified,
+// so this example walks the sorted keys for stable output.
+fn main() {
+    let m: Map<string, int> = map_new()
+    m.insert("b", 2)
+    m.insert("a", 1)
+    print(m.len()) // 2
+    print(m["a"]) // 1: `m[k]` aborts on a missing key
+    print(m.get("zzz") ?? -1) // -1: `.get` returns null instead
+    print(m.contains("b")) // true
+    for k in m.keys() {
+        print("{k}={m[k]}") // a=1, b=2
+    }
+    print(m.remove("a") ?? -1) // 1
+    print(m.len()) // 1
+    m.clear()
+    print(m.is_empty()) // true
+}

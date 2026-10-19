@@ -1,0 +1,44 @@
+// `if` is an expression, and chains with `else if`. Loops are `while`,
+// `loop` (with `break`/`continue`) and `for .. in` over ranges,
+// vectors and other collections.
+fn sign_name(n: int) -> string {
+    if n > 0 {
+        return "pos"
+    } else if n < 0 {
+        return "neg"
+    } else {
+        return "zero"
+    }
+}
+
+fn main() {
+    print(sign_name(-3)) // neg
+    let label = if true { "yes" } else { "no" }
+    print(label) // yes
+    for i in 0..3 {
+        print(i) // 0, 1, 2: ranges exclude the end
+    }
+    let total = 0
+    for x in [10, 20, 30] {
+        total = total + x
+    }
+    print(total) // 60
+    let n = 0
+    while n < 2 {
+        n = n + 1
+    }
+    print(n) // 2
+    let count = 0
+    count += 5
+    count -= 2
+    print(count) // 3
+    let i = 0
+    loop {
+        i = i + 1
+        if i < 3 {
+            continue
+        }
+        break
+    }
+    print(i) // 3
+}

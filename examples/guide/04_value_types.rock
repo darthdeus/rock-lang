@@ -1,0 +1,31 @@
+// `value` types look like structs but copy on assignment and on calls,
+// and their fields cannot be mutated in place: replace them wholesale.
+struct Box {
+    n: int,
+}
+
+value Dot {
+    n: int,
+}
+
+fn bump_box(b: Box) {
+    b.n = b.n + 1
+}
+
+fn bump_dot(d: Dot) -> Dot {
+    return Dot { n: d.n + 1 }
+}
+
+fn main() {
+    let b = Box { n: 0 }
+    bump_box(b)
+    print(b.n) // 1: the struct is shared, the caller's copy changed
+    let d = Dot { n: 0 }
+    let d2 = bump_dot(d)
+    print(d.n) // 0: the value was copied, the caller's copy is untouched
+    print(d2.n) // 1
+    let e = d
+    e = Dot { n: 99 } // `let` bindings are reassignable
+    print(d.n) // 0
+    print(e.n) // 99
+}

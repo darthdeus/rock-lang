@@ -1,0 +1,11 @@
+// The stdlib decodes JSON into the JsonValue enum and encodes it back.
+// Decoding fails softly with null; field access is explicit.
+fn main() {
+    let v = json_decode("{{\"a\": 1, \"b\": [true, null]}}")
+    print(json_encode(v ?? json_null())) // {"a":1,"b":[true,null]}
+    let obj = json_as_object(v ?? json_null()) ?? map_new()
+    print(json_as_int(obj.get("a") ?? json_null()) ?? -1) // 1
+    print(json_decode("{{oops}}") == null) // true
+    let built = json_object(map_new())
+    print(json_encode(built)) // {}
+}

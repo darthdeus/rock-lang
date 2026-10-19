@@ -1,0 +1,10 @@
+// Items are private to their file unless marked `pub`.
+mod helpers;
+
+pub fn shout(s: string) -> string {
+    return s.upper() + "!"
+}
+
+fn whisper(s: string) -> string {
+    return s.lower()
+}

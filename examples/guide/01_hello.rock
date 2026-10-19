@@ -1,0 +1,10 @@
+// Your first Rock program. Save it as hello.rock and run it:
+//
+//     rock run hello.rock
+//
+fn main() {
+    print("hello from Rock")
+    let answer = 6 * 7
+    print(answer)
+    print("6 times 7 is {answer}")
+}

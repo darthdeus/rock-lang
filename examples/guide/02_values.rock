@@ -1,0 +1,16 @@
+// Numbers, bools and strings. Rock's primitives are
+// int, uint, float, bool and string (plus any, the escape hatch).
+fn main() {
+    print(7 / 2) // `/` always divides: 3.5, even for ints
+    print(7 ./ 2) // `./` is integer division: 3
+    print(7 % 3) // remainder: 1
+    print(0xFF) // hex literals: 255 (no digit separators)
+    print(3 as float) // convert with `as`: 3
+    print(3.9 as int) // float to int truncates: 3
+    print(-3.9 as int) // floor toward negative infinity: -4
+    print(true && !false) // bools: true
+    print(1 < 2) // comparisons: true
+    print("ab" + "c") // `+` concatenates strings: abc
+    let n: uint = 7
+    print(n + (1 as uint)) // uint arithmetic: 8 (no mixed int/uint ops)
+}
