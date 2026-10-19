@@ -14,6 +14,7 @@ path = "src/lib.rs"
 bone-core = { workspace = true }
 log = { workspace = true }
 once_cell = { workspace = true }
+env_filter = { workspace = true }
 
 [lints]
 workspace = true

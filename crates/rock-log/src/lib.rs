@@ -9,7 +9,8 @@
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::io::Write;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bone_core::prelude::Instant;
 
@@ -37,7 +38,16 @@ pub fn set_level(level: u8) {
     // this, `log::info!` etc. short-circuit against the max-level set
     // once at init() and runtime level changes never open the gate even though our atomic
     // changed. Found by ROCK_LOG=error + --verbose showing nothing.
-    log::set_max_level(level_to_log(l));
+    log::set_max_level(facade_max());
+}
+
+/// The facade's static gate: the installed filter's widest level, else the
+/// single level.
+fn facade_max() -> log::LevelFilter {
+    match FILTER.get() {
+        Some(filter) => filter.0.filter(),
+        None => level_to_log(level()),
+    }
 }
 
 pub fn level() -> u8 {
@@ -84,6 +94,51 @@ fn is_noisy(target: &str) -> bool {
 fn effective_max(target: &str) -> u8 {
     let l = level();
     if is_noisy(target) { l.min(1) } else { l }
+}
+
+/// Per-target filtering in `RUST_LOG` directive syntax, for a process that
+/// installs it with [`init_filtered`] in place of the single level.
+pub struct Filter(env_filter::Filter);
+
+impl Filter {
+    /// `default` for every target, refined by `directives` (`info`,
+    /// `my_crate=debug,warn`, ...), then by `overrides`. Unparsable
+    /// directives are an error rather than silently dropped.
+    pub fn parse(
+        default: log::LevelFilter,
+        directives: Option<&str>,
+        overrides: &[(&str, log::LevelFilter)],
+    ) -> Result<Filter, String> {
+        let mut builder = env_filter::Builder::new();
+        builder.filter_level(default);
+        if let Some(spec) = directives {
+            builder.try_parse(spec).map_err(|e| e.to_string())?;
+        }
+        for (target, level) in overrides {
+            builder.filter(Some(target), *level);
+        }
+        Ok(Filter(builder.build()))
+    }
+
+    pub fn enabled(&self, target: &str, level: log::Level) -> bool {
+        self.0.enabled(&log::Metadata::builder().target(target).level(level).build())
+    }
+}
+
+/// Where the log lines go.
+pub enum Sink {
+    Stderr,
+    File(std::fs::File),
+}
+
+static FILTER: OnceLock<Filter> = OnceLock::new();
+static FILE_SINK: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+
+fn target_enabled(level: log::Level, target: &str) -> bool {
+    match FILTER.get() {
+        Some(filter) => filter.enabled(target, level),
+        None => log_to_level(level) <= effective_max(target),
+    }
 }
 
 fn level_tag(l: log::Level) -> &'static str {
@@ -205,7 +260,7 @@ struct Logger;
 
 impl log::Log for Logger {
     fn enabled(&self, m: &log::Metadata) -> bool {
-        log_to_level(m.level()) <= effective_max(m.target())
+        target_enabled(m.level(), m.target())
     }
     fn log(&self, record: &log::Record) {
         if !self.enabled(record.metadata()) {
@@ -222,14 +277,19 @@ fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock:
     if let Some(table) = record_table(level) {
         table.lock().unwrap().record(target, &args.to_string(), elapsed_secs());
     }
+    let line = format_line(elapsed_secs(), level, target, args, wall_clock);
+    if let Some(file) = FILE_SINK.get() {
+        let mut file = file.lock().unwrap();
+        if let Err(e) = writeln!(file, "{line}") {
+            // The log file is the only channel this process configured, so
+            // its failure goes to stderr with the line it lost.
+            eprintln!("rock-log: cannot write the log file ({e}): {line}");
+        }
+        return;
+    }
     let color = if *COLOR { level_color(level) } else { "" };
     let reset = if color.is_empty() { "" } else { SGR_RESET };
-    eprintln!(
-        "{}{}{}",
-        color,
-        format_line(elapsed_secs(), level, target, args, wall_clock),
-        reset
-    );
+    eprintln!("{}{}{}", color, line, reset);
 }
 
 /// Emit a record DECLARED a wall-clock measurement at its log site: its
@@ -241,7 +301,7 @@ fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock:
 /// declaration; it does not bypass the logger.
 pub fn emit_wall_clock(level: log::Level, target: &str, args: std::fmt::Arguments) {
     init();
-    if log_to_level(level) > effective_max(target) {
+    if !target_enabled(level, target) {
         return;
     }
     emit(level, target, &args, true);
@@ -269,7 +329,22 @@ pub fn init() {
     // --verbose / the FFI bridge) keeps the facade max-level == our
     // level. This final sync covers ROCK_LOG-unset (set_level above
     // not called) and idempotent re-init.
-    log::set_max_level(level_to_log(level()));
+    log::set_max_level(facade_max());
+}
+
+/// [`init`] with per-target `filter` in place of the single level (`ROCK_LOG`
+/// and [`set_level`] no longer gate anything), writing to `sink`.
+/// Panics if a filter or sink was already installed.
+pub fn init_filtered(filter: Filter, sink: Sink) {
+    if FILTER.set(filter).is_err() {
+        panic!("rock-log: a filter is already installed");
+    }
+    if let Sink::File(file) = sink {
+        if FILE_SINK.set(Mutex::new(file)).is_err() {
+            panic!("rock-log: a log file is already installed");
+        }
+    }
+    init();
 }
 
 // ---- error and warning records: what an on-screen development badge reads ----
@@ -631,6 +706,34 @@ mod release_tests {
     #[should_panic(expected = "before UNIX epoch")]
     fn pre_epoch_clock_is_reported() {
         unix_millis(UNIX_EPOCH - Duration::from_secs(1));
+    }
+
+    #[test]
+    fn filtered_logger_writes_enabled_targets_to_its_file() {
+        if let Some(path) = std::env::var_os("FILTERED_TEST_CHILD") {
+            let file = std::fs::File::create(path).unwrap();
+            let filter = Filter::parse(log::LevelFilter::Warn, Some("chosen=debug"), &[("timing", log::LevelFilter::Info)]);
+            init_filtered(filter.unwrap(), Sink::File(file));
+            log::debug!(target: "chosen", "kept debug");
+            log::info!(target: "timing", "kept info");
+            log::info!(target: "other", "dropped info");
+            log::warn!(target: "other", "kept warn");
+            set_level(4);
+            log::trace!(target: "chosen", "dropped trace");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rock-log-filtered-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("out.log");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["release_tests::filtered_logger_writes_enabled_targets_to_its_file", "--exact", "--nocapture"])
+            .env("FILTERED_TEST_CHILD", &path).output().unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let lines: Vec<&str> = written.lines().map(|l| l.split_once("] ").unwrap().1).collect();
+        assert_eq!(lines, ["[chosen] kept debug", "[timing] kept info", "[other] kept warn"]);
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("kept"));
     }
 
     #[test]

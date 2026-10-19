@@ -35,9 +35,8 @@ serde_json = { workspace = true }
 
 ustr = { workspace = true }
 log = { workspace = true }
+rock-log = { workspace = true }
 
-env_logger = { workspace = true }
-env_filter = { workspace = true }
 lsp-server = { workspace = true }
 lsp-types = { workspace = true }
 tracing = { workspace = true }

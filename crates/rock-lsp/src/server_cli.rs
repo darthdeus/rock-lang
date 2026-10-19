@@ -161,25 +161,17 @@ fn top_arg(m: &ArgMatches) -> usize {
     m.get_one::<usize>("top").copied().unwrap_or(10)
 }
 
-/// Stderr logger at a warn floor, refined by `RUST_LOG` directives
-/// (`info`, `rock_lsp=debug,warn`, ...). An unparsable `RUST_LOG` is an error:
-/// env_logger alone would print a warning and drop the bad directives.
-fn stderr_log_builder(rust_log: Option<&str>, timing: bool) -> Result<env_logger::Builder> {
-    let mut builder = env_logger::Builder::new();
-    builder.filter_level(log::LevelFilter::Warn).format_timestamp(None);
-    if let Some(spec) = rust_log {
-        env_filter::Builder::new()
-            .try_parse(spec)
-            .map_err(|e| anyhow::anyhow!("RUST_LOG={spec:?} is not a valid log filter: {e}"))?;
-        builder.parse_filters(spec);
-    }
+/// Stderr filter at a warn floor, refined by `RUST_LOG` directives
+/// (`info`, `rock_lsp=debug,warn`, ...). An unparsable `RUST_LOG` is an error.
+fn stderr_log_filter(rust_log: Option<&str>, timing: bool) -> Result<rock_log::Filter> {
     // ROCK_LSP_TIMING=1: surface the per-request handle timer (info on
     // the `lsp_timing` target) without lifting the default warn floor
     // for everything else, so `:LspLog` shows timing and nothing else.
-    if timing {
-        builder.filter(Some("lsp_timing"), log::LevelFilter::Info);
-    }
-    Ok(builder)
+    let timing_override = [("lsp_timing", log::LevelFilter::Info)];
+    let overrides: &[_] = if timing { &timing_override } else { &[] };
+    rock_log::Filter::parse(log::LevelFilter::Warn, rust_log, overrides).map_err(|e| {
+        anyhow::anyhow!("RUST_LOG={:?} is not a valid log filter: {e}", rust_log.unwrap_or_default())
+    })
 }
 
 /// Install the LSP logger and run the requested `rock lsp` subcommand.
@@ -188,6 +180,7 @@ fn stderr_log_builder(rust_log: Option<&str>, timing: bool) -> Result<env_logger
 /// (`rock-cli` passes `"rock lsp"`); clap reads the subcommand from `args[1]`.
 /// Owns its own logger install — callers must NOT have installed a global
 /// logger first (`rock-cli` intercepts `lsp` before `rock_log::init()`).
+/// It is the shared rock-log backend with a per-target filter.
 pub fn run_cli(args: Vec<String>) -> Result<()> {
     run_cli_with_policy(args, crate::CompilerPolicy::default())
 }
@@ -204,16 +197,15 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
                 val
             };
             let file = open_debug_log(&log_path)?;
-            env_logger::Builder::new()
-                .filter_level(log::LevelFilter::Trace)
-                .target(env_logger::Target::Pipe(Box::new(file)))
-                .format_timestamp_secs()
-                .init();
+            let filter = rock_log::Filter::parse(log::LevelFilter::Trace, None, &[])
+                .map_err(|e| anyhow::anyhow!("ROCK_LSP_DEBUG filter: {e}"))?;
+            rock_log::init_filtered(filter, rock_log::Sink::File(file.into_parts().0));
             log::trace!("LSP_MAIN_STARTED (logging to {log_path})");
         }
         Err(_) => {
             let rust_log = std::env::var("RUST_LOG").ok();
-            stderr_log_builder(rust_log.as_deref(), std::env::var_os("ROCK_LSP_TIMING").is_some())?.init();
+            let filter = stderr_log_filter(rust_log.as_deref(), std::env::var_os("ROCK_LSP_TIMING").is_some())?;
+            rock_log::init_filtered(filter, rock_log::Sink::Stderr);
         }
     }
 
@@ -312,15 +304,12 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use log::{Level, Log, Metadata};
+    use log::Level;
 
-    /// Which of `(target, level)` the logger built from these settings enables.
+    /// Which of `(target, level)` the filter built from these settings enables.
     fn enabled(rust_log: Option<&str>, timing: bool, probes: &[(&str, Level)]) -> Vec<bool> {
-        let logger = stderr_log_builder(rust_log, timing).unwrap().build();
-        probes
-            .iter()
-            .map(|(target, level)| logger.enabled(&Metadata::builder().target(target).level(*level).build()))
-            .collect()
+        let filter = stderr_log_filter(rust_log, timing).unwrap();
+        probes.iter().map(|(target, level)| filter.enabled(target, *level)).collect()
     }
 
     #[test]
@@ -337,7 +326,7 @@ mod tests {
     #[test]
     fn rust_log_rejects_unparsable_directives() {
         for bad in ["rock_lsp=loud", "a=b=c"] {
-            let err = stderr_log_builder(Some(bad), false).err().expect(bad).to_string();
+            let err = stderr_log_filter(Some(bad), false).err().expect(bad).to_string();
             assert!(err.contains("RUST_LOG") && err.contains(bad), "{err}");
         }
     }

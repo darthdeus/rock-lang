@@ -591,18 +591,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "env_logger"
-version = "0.11.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
-dependencies = [
- "anstream",
- "anstyle",
- "env_filter",
- "log",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1595,6 +1583,7 @@ name = "rock-log"
 version = "0.1.0"
 dependencies = [
  "bone-core",
+ "env_filter",
  "log",
  "once_cell",
 ]
@@ -1609,13 +1598,12 @@ dependencies = [
  "bone-query",
  "clap",
  "crossterm",
- "env_filter",
- "env_logger",
  "fs-err",
  "log",
  "lsp-server-manual",
  "lsp-types-manual",
  "rock-host",
+ "rock-log",
  "serde",
  "serde_json",
  "skull-parser",
