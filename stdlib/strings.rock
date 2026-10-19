@@ -149,7 +149,7 @@ fn CharsIter.next(it) -> (bool, int) {
 // When `#s >= width`, returns `s` unchanged (never truncates -- matches
 // Python's format-spec behavior).
 @nomangle
-inline(lua) fn __rock_fmt_pad(s: string, width: int, align: string, fill: string) -> string = """
+@intrinsic inline(lua) fn __rock_fmt_pad(s: string, width: int, align: string, fill: string) -> string = """
     s = tostring(s)
     local n = #s
     if n >= width then return s end
@@ -169,7 +169,7 @@ inline(lua) fn __rock_fmt_pad(s: string, width: int, align: string, fill: string
 // group=3; `_` with hex/oct/bin uses group=4 (nibble grouping). Preserves
 // optional leading sign and any fractional part.
 @nomangle
-inline(lua) fn __rock_fmt_grouping(s: string, sep: string, group: int) -> string = """
+@intrinsic inline(lua) fn __rock_fmt_grouping(s: string, sep: string, group: int) -> string = """
     local sign, num, frac = s:match("^([%+%-]?)(%w+)(%.?.*)$")
     if not num then return s end
     local pattern = "(" .. string.rep(".", group) .. ")"
@@ -183,7 +183,7 @@ inline(lua) fn __rock_fmt_grouping(s: string, sep: string, group: int) -> string
 // `{x:b}` binary conversion (string.format has no %b): floor, sign,
 // repeated %2.
 @nomangle
-inline(lua) fn __rock_fmt_binary(n: int) -> string = """
+@intrinsic inline(lua) fn __rock_fmt_binary(n: int) -> string = """
     local __n = math.floor(n)
     if __n == 0 then return "0" end
     local __neg = __n < 0
@@ -196,7 +196,7 @@ inline(lua) fn __rock_fmt_binary(n: int) -> string = """
 // `{x:.P%}` percent conversion: x*100 with P decimals + literal `%` (P < 0
 // means the default 6).
 @nomangle
-inline(lua) fn __rock_fmt_percent(v: float, p: int) -> string = """
+@intrinsic inline(lua) fn __rock_fmt_percent(v: float, p: int) -> string = """
     local __p = p
     if __p < 0 then __p = 6 end
     return string.format("%." .. __p .. "f", v * 100) .. "%"

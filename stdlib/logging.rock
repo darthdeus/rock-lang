@@ -19,7 +19,7 @@ global __rock_log_level: int = -1
 // sink is installed (rock test / rock run, or early global-init before the
 // install), keep an info default; the nil/<0 guard preserves the contract for
 // that ordering edge (the global-initialization tests).
-@nomangle inline(lua) fn __rock_log_init() = """
+@intrinsic @nomangle inline(lua) fn __rock_log_init() = """
     local src = _G.__rock_log_level_source
     if src ~= nil then
         local lvl = src()
@@ -39,7 +39,7 @@ global __rock_log_level: int = -1
 // to report at all. The sink marks it so a differential harness can drop the
 // record by declaration instead of sniffing its text
 // (`rock_log::WALL_CLOCK_MARK`); the print() fallback has no stamp to mark.
-@nomangle inline(lua) fn __rock_log_emit(level: int, category: string, msg: string, wall_clock: bool) = """
+@intrinsic @nomangle inline(lua) fn __rock_log_emit(level: int, category: string, msg: string, wall_clock: bool) = """
     local sink = _G.__rock_log_sink
     if sink ~= nil then
         sink(level, category or "", msg, wall_clock)
@@ -52,13 +52,13 @@ global __rock_log_level: int = -1
     end
 """
 
-@nomangle inline(lua) fn __rock_log(level: int, category: string, msg: string) = """
+@intrinsic @nomangle inline(lua) fn __rock_log(level: int, category: string, msg: string) = """
     __rock_log_init()
     if level > __rock_log_level then return end
     __rock_log_emit(level, category, msg, false)
 """
 
-@nomangle inline(lua) fn __rock_log_wall_clock(level: int, category: string, msg: string) = """
+@intrinsic @nomangle inline(lua) fn __rock_log_wall_clock(level: int, category: string, msg: string) = """
     __rock_log_init()
     if level > __rock_log_level then return end
     __rock_log_emit(level, category, msg, true)
@@ -80,7 +80,7 @@ fn log_wall_clock(category: string, msg: string) { __rock_log_wall_clock(2, cate
 // `_G.__rock_log_level_sink` seam) so it affects all gating -- Rust + Rock --
 // not just this Lua global. With no sink installed it only updates the local
 // default.
-inline(lua) fn log_set_level(level: int) = """
+@intrinsic inline(lua) fn log_set_level(level: int) = """
     local sink = _G.__rock_log_level_sink
     if sink ~= nil then sink(level) end
     __rock_log_level = level
@@ -121,7 +121,7 @@ fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
 //   __rock_log_site_levels — site -> level, for the summary
 //   __rock_log_wall     — site -> true for a declared wall-clock site
 
-@nomangle inline(lua) fn _log_once_impl(level: int, category: string, msg: string, site: string) = """
+@intrinsic @nomangle inline(lua) fn _log_once_impl(level: int, category: string, msg: string, site: string) = """
     __rock_log_init()
     -- Level 0 is never gated (the minimum level is 0), which is what keeps
     -- log_once always-on.
@@ -143,7 +143,7 @@ fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
 // exactly like one that fired once. Emitted at each site's own level, so an
 // error site's total is never hidden and a warning site's obeys the gate.
 // Idempotent.
-@nomangle inline(lua) fn log_suppression_summary() = """
+@intrinsic @nomangle inline(lua) fn log_suppression_summary() = """
     __rock_log_init()
     if __rock_log_summary_done then return end
     __rock_log_summary_done = true
@@ -197,7 +197,7 @@ macro log_warn_once(category: expr, msg: expr, site: expr) {
 }
 
 // Mockable-now seam used by log_throttled and exposed for deterministic tests.
-@nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
+@intrinsic @nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     __rock_log_init()
     -- Same gate as _log_once_impl: level 0 always fires.
     if level > __rock_log_level then return end
@@ -232,21 +232,21 @@ macro log_warn_throttled_with_now(now_sec: expr, category: expr, msg: expr, inte
 // the engine `time` global (real wall-clock seconds since game start) via
 // log_set_now(); non-host Rock programs leave it nil and fall back
 // to os.clock() so something still works without the engine running.
-@nomangle inline(lua) fn log_set_now(now_sec: float) = """
+@intrinsic @nomangle inline(lua) fn log_set_now(now_sec: float) = """
     __rock_log_now_override = now_sec
 """
 
-@nomangle inline(lua) fn log_clear_now() = """
+@intrinsic @nomangle inline(lua) fn log_clear_now() = """
     __rock_log_now_override = nil
 """
 
-@nomangle inline(lua) fn __rock_log_now() -> float = """
+@intrinsic @nomangle inline(lua) fn __rock_log_now() -> float = """
     if __rock_log_now_override ~= nil then return __rock_log_now_override end
     return os.clock()
 """
 
 // Wall-clock variant; thin wrapper around the mockable seam.
-@nomangle inline(lua) fn _log_throttled_impl(level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
+@intrinsic @nomangle inline(lua) fn _log_throttled_impl(level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     _log_throttled_with_now_impl(__rock_log_now(), level, category, msg, interval_sec, site, wall_clock)
 """
 
@@ -297,7 +297,7 @@ macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
 // would report totals for sites the caller believes it cleared, and the latch
 // would silence it entirely. Called from tests; can be wired into hot reload
 // later if it becomes useful.
-@nomangle inline(lua) fn log_reset_dedup() = """
+@intrinsic @nomangle inline(lua) fn log_reset_dedup() = """
     __rock_log_dedup = {}
     __rock_log_throttle = {}
     __rock_log_counts = {}
@@ -308,7 +308,7 @@ macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
 """
 
 // Number of unique sites currently remembered by log_once. Used in tests.
-@nomangle inline(lua) fn log_dedup_count() -> int = """
+@intrinsic @nomangle inline(lua) fn log_dedup_count() -> int = """
     if __rock_log_dedup == nil then return 0 end
     local n = 0
     for _ in pairs(__rock_log_dedup) do n = n + 1 end

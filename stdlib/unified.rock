@@ -1002,7 +1002,7 @@ deco init on_reload {
     error("unknown unsorted Rock field walk mode: " .. tostring(mode), 0)
 """
 
-@nomangle inline(lua) fn __op_eq(a: any, b: any) -> bool = """
+@intrinsic @nomangle inline(lua) fn __op_eq(a: any, b: any) -> bool = """
     -- Primitive fast path
     if type(a) ~= "table" or type(b) ~= "table" then
         return a == b
@@ -1117,7 +1117,7 @@ deco init on_reload {
     return true
 """
 
-@nomangle inline(lua) fn __op_ne(a: any, b: any) -> bool = """
+@intrinsic @nomangle inline(lua) fn __op_ne(a: any, b: any) -> bool = """
     return not __op_eq(a, b)
 """
 
@@ -1151,7 +1151,7 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 // `for x in 0..10 {}`, loops.rs strips the `__range(a,b)` marker and emits a
 // native numeric for — this function body is unreachable there. Returns a
 // Vec-shaped `{_data, len}` so the result iterates and indexes like a Vec.
-@nomangle @inline inline(lua) fn __range(start_val: int, end_val: int) -> any = """
+@intrinsic @nomangle @inline inline(lua) fn __range(start_val: int, end_val: int) -> any = """
     local t = {}
     for i = start_val, end_val - 1 do
         table.insert(t, i)
@@ -1159,7 +1159,7 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
     return { _data = t, len = end_val - start_val }
 """
 
-@nomangle @inline inline(lua) fn __range_uint(start_val: uint, end_val: uint) -> any = """
+@intrinsic @nomangle @inline inline(lua) fn __range_uint(start_val: uint, end_val: uint) -> any = """
     local t = {}
     for i = start_val, end_val - 1 do
         table.insert(t, i)
@@ -1254,7 +1254,7 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 // (rather than a hard error) so a `print(x)` dropped into a pure
 // helper for debugging doesn't force stripping the annotation.
 @debug_impure
-extern(lua) fn print(args: ...any)
+@intrinsic extern(lua) fn print(args: ...any)
 
 // Helper to ensure float formatting
 fn print_float(value: float) { print(to_string(value)) }
@@ -1263,7 +1263,7 @@ fn print_float(value: float) { print(to_string(value)) }
 @intrinsic extern(lua) fn error(message: string)
 
 // Note: Lua has built-in tostring(), declare as extern
-extern(lua) fn tostring(value: any) -> string
+@intrinsic extern(lua) fn tostring(value: any) -> string
 
 // Method versions of tostring for basic types
 fn to_string(value: int) -> string { return tostring(value) }
@@ -1381,7 +1381,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
 // it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
 // UFCS).
-inline(lua) fn vec_new<T>() -> [T] = """
+@intrinsic inline(lua) fn vec_new<T>() -> [T] = """
     return { _data = {}, len = 0, __ty = "Vec" }
 """
 
@@ -1414,7 +1414,7 @@ inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
 // so it makes no layout claim and carries the contract that says so. It stays
 // spelled `T`: that is the inference edge giving `vec_new()` its element type,
 // and `any`/`any?` would sever it.
-@relocates @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
+@intrinsic @relocates @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
 """
@@ -1655,7 +1655,7 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 """
 
 // Unwrap functions for nullable types (moved early to support vec functions)
-@nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
+@intrinsic @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
 
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
 @intrinsic @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
@@ -1775,7 +1775,7 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // seen table per top-level `deepcopy` call. Hoisted (like __rock_inspect_value)
 // so the wrapper doesn't allocate a fresh closure per copy; @nomangle because
 // it recurses by name and is called from deepcopy's body.
-@nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
+@intrinsic @nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
     if type(obj) == "cdata" then
         local info = __rock_c_struct_of(obj)
         if info then return info.copy(obj) end
@@ -1845,7 +1845,7 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
-inline(lua) fn deepcopy<T>(obj: T) -> T = """
+@intrinsic inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(obj, {})
 """
 
@@ -1864,8 +1864,8 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
 // Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
 // the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
 // at each call site with zero overhead.
-@inline inline(lua) fn cast<T>(value: any) -> T = "return value"
-@inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
+@intrinsic @inline inline(lua) fn cast<T>(value: any) -> T = "return value"
+@intrinsic @inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
 
 // int and float are both `number` in Lua — this cast is a no-op at runtime.
 // `@expand("$1")` substitutes the argument expression at the call site with
@@ -1882,7 +1882,7 @@ inline(lua) fn deepcopy<T>(obj: T) -> T = """
 // default-type-params + PR-A arity bump; `.resume()` shape stays
 // `Y?` regardless of R (D2a unit-elision), with the typed return
 // value on `.result()`.
-inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
+@intrinsic inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
     return c.__resume(c)
 """
 
@@ -1896,7 +1896,7 @@ inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
 // For N = (), both forms compile; the 2-arg form is rarely useful
 // (no `let x = yield V` exists for the body to bind), so prefer the
 // arg-less form there.
-inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
+@intrinsic inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
     return c.__resume(c, arg)
 """
 
@@ -1905,11 +1905,11 @@ inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
 // killed, or fell off without a value-bearing return. For
 // `R = ()` coroutines (the default), `R?` is `()?` and is always
 // null in practice — same observable as before.
-inline(lua) fn result<Y, R, N>(c: Coroutine<Y, R, N>) -> R? = """
+@intrinsic inline(lua) fn result<Y, R, N>(c: Coroutine<Y, R, N>) -> R? = """
     return c.__return
 """
 
-inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
+@intrinsic inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
     if c.__state == -2 then return "errored" elseif c.__state < 0 then return "dead" else return "suspended" end
 """
 
@@ -1920,7 +1920,7 @@ inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
 // coroutine `__return` holds the body's return value (nil iff R is unit or a
 // null-valued nullable). `status()` keeps reporting "dead" for both completed
 // and killed.
-inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
+@intrinsic inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
     return c.__state == -3
 """
 
@@ -1932,7 +1932,7 @@ inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
 // whatever the body's `error("...")` raised. Avoid name collision with
 // the stdlib `extern(lua) fn error(message: string)` (the panic-style
 // thrower) -- that's a parking note from the design discussion.
-inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
+@intrinsic inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
     return c.__error
 """
 
@@ -1978,7 +1978,7 @@ fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
     if c.__on_killed then c.__on_killed(c) end
 """
 
-inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
+@intrinsic inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
     __rock_coroutine_kill(c)
 """
 
@@ -1986,7 +1986,7 @@ inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
 // and not already terminal). The engine's coroutine poller drives this
 // on every hot reload across all polled coroutines. Safe to call on any
 // handle — dead or hook-less coroutines no-op.
-inline(lua) fn fire_hot_reload<Y, R, N>(c: Coroutine<Y, R, N>) = """
+@intrinsic inline(lua) fn fire_hot_reload<Y, R, N>(c: Coroutine<Y, R, N>) = """
     if c.__state >= 0 and c.__on_hot_reload then
         c.__on_hot_reload(c)
     end
@@ -2007,7 +2007,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 """
 
 // Low-level Lua table operations for implementing [T]
-inline(lua) fn table_new() -> any = """return {}"""
+@intrinsic inline(lua) fn table_new() -> any = """return {}"""
 
 @inline inline(lua) fn table_insert(tbl: any, value: any) = "table.insert(tbl, value)"
 
@@ -2019,7 +2019,7 @@ inline(lua) fn table_new() -> any = """return {}"""
 // vec_get). Marked `@inline inline(lua)` so codegen splices the body
 // at every call site instead of emitting + calling.
 //
-@inline inline(lua) fn table_len(tbl: any) -> int = """
+@intrinsic @inline inline(lua) fn table_len(tbl: any) -> int = """
     return #tbl
 """
 
@@ -2053,7 +2053,7 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
 // representation, so a missing column route fell through to the boxed body.
 // Both callers are Map methods (`remove`, `clear`).
-@relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
+@intrinsic @relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -2072,9 +2072,9 @@ inline(lua) fn table_new() -> any = """return {}"""
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
-@inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
-@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
-@relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
+@intrinsic @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
+@intrinsic @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, @repr(opaque) value: T) = "vec._data[index + 1] = value"
+@intrinsic @relocates @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
@@ -2089,25 +2089,25 @@ inline(lua) fn table_new() -> any = """return {}"""
 // creates a bare-name obligation for opaque text to call, and these are reached
 // only through ordinary Rock calls and the column intercept, which match the
 // Rock name rather than the emitted symbol.
-inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
+@intrinsic inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
     local tbl = {}
     for i = 1, capacity do tbl[i] = false end
     return { _data = tbl, len = 0, __ty = "Vec" }
 """
 
-inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
+@intrinsic inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
 
-@relocates inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+@intrinsic @relocates inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
     table.insert(vec._data, lua_index, value)
 """
 
-inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
+@intrinsic inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     local copy = {}
     for i = 1, #vec._data do copy[i] = vec._data[i] end
     return { _data = copy, len = vec.len, __ty = "Vec" }
 """
 
-@relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+@intrinsic @relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
@@ -2677,7 +2677,7 @@ const EPSILON: float = 0.0000001
     table.sort(keys._data, __rock_inspect_key_lt)
 """
 
-@nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
+@intrinsic @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
     if type(obj) == "cdata" then
         local info = __rock_c_struct_of(obj)
         if info then return info.inspect(obj) end
@@ -2701,7 +2701,7 @@ const EPSILON: float = 0.0000001
 """
 
 // Thin wrapper kept for compiler codegen compatibility (incremental.rs emits inspect_formatted calls).
-@nomangle inline(lua) fn inspect_formatted(obj: any, precision: int) -> string = """
+@intrinsic @nomangle inline(lua) fn inspect_formatted(obj: any, precision: int) -> string = """
     return inspect(obj, true, precision)
 """
 
@@ -2725,7 +2725,7 @@ const EPSILON: float = 0.0000001
 // IIFE per interpolation) so LuaJIT can trace per-frame string
 // building without an FNEW abort. See
 //
-@nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
+@intrinsic @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
         local r = string.format("%.2g", v)
@@ -2746,11 +2746,11 @@ const EPSILON: float = 0.0000001
 // (`random*`) and presentation (`presentation_random*`). Each state is a single
 // serializable number, so state-image restore can round-trip them.
 // A 32-bit draw / 2^32 gives a uniform [0, 1) double.
-inline(lua) fn random() -> float = """
+@intrinsic inline(lua) fn random() -> float = """
     return __rock_rng_next() * (1.0 / 4294967296.0)
 """
 fn random_range(min: float, max: float) -> float { return random() * (max - min) + min }
-inline(lua) fn random_int(min: int, max: int) -> int = """
+@intrinsic inline(lua) fn random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
     if r <= 4294967296 then return __rock_rng_next() % r + min end
@@ -2758,24 +2758,24 @@ inline(lua) fn random_int(min: int, max: int) -> int = """
     local lo = __rock_rng_next()
     return (hi * 2097152 + math.floor(lo / 2048)) % r + min
 """
-inline(lua) fn random_seed(seed: int) = """
+@intrinsic inline(lua) fn random_seed(seed: int) = """
     __rock_rng_seed(seed)
 """
-inline(lua) fn random_get_state() -> int = """
+@intrinsic inline(lua) fn random_get_state() -> int = """
     return __rock_rng_state_get()
 """
-inline(lua) fn random_set_state(state: int) = """
+@intrinsic inline(lua) fn random_set_state(state: int) = """
     __rock_rng_state_set(state)
 """
 
 // Presentation RNG
 // Independent stream for visual VFX, particles, audio detuning, and cosmetic UI.
 // Advances without shifting the authoritative gameplay RNG stream.
-inline(lua) fn presentation_random() -> float = """
+@intrinsic inline(lua) fn presentation_random() -> float = """
     return __rock_presentation_rng_next() * (1.0 / 4294967296.0)
 """
 fn presentation_random_range(min: float, max: float) -> float { return presentation_random() * (max - min) + min }
-inline(lua) fn presentation_random_int(min: int, max: int) -> int = """
+@intrinsic inline(lua) fn presentation_random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
     if r <= 4294967296 then return __rock_presentation_rng_next() % r + min end
@@ -2783,13 +2783,13 @@ inline(lua) fn presentation_random_int(min: int, max: int) -> int = """
     local lo = __rock_presentation_rng_next()
     return (hi * 2097152 + math.floor(lo / 2048)) % r + min
 """
-inline(lua) fn presentation_random_seed(seed: int) = """
+@intrinsic inline(lua) fn presentation_random_seed(seed: int) = """
     __rock_presentation_rng_seed(seed)
 """
-inline(lua) fn presentation_random_get_state() -> int = """
+@intrinsic inline(lua) fn presentation_random_get_state() -> int = """
     return __rock_presentation_rng_state_get()
 """
-inline(lua) fn presentation_random_set_state(state: int) = """
+@intrinsic inline(lua) fn presentation_random_set_state(state: int) = """
     __rock_presentation_rng_state_set(state)
 """
 @intrinsic @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
@@ -2833,9 +2833,9 @@ inline(lua) fn get_os() -> string = """
     end
 """
 
-@inline inline(lua) fn phantom<T>() -> T = """return nil"""
-inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
-inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
+@intrinsic @inline inline(lua) fn phantom<T>() -> T = """return nil"""
+@intrinsic inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
+@intrinsic inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
 inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""
 
 fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
@@ -2897,7 +2897,7 @@ inline(lua) fn ffi_cdef(def: string) = """
 
 
 // Map operations
-fn map_new<K, V>() -> Map<K, V> {
+@intrinsic fn map_new<K, V>() -> Map<K, V> {
     transmute(table_new())
 }
 
@@ -2907,7 +2907,7 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 
 // Not `@nomangle`: reached through ordinary Rock calls and the column
 // intercept, both of which match the Rock name rather than the emitted symbol.
-@inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
+@intrinsic @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
     return map[key]
 """
 
@@ -3999,7 +3999,7 @@ inline(lua) fn string.pad_left(s, width: int) -> string = """
 // Format a float as a string with exactly `decimals` fractional digits,
 // right-aligned in a field of `width` chars (use 0 to skip padding).
 // Wraps `string.format("%<width>.<decimals>f", v)`.
-inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
+@intrinsic inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
     local r = string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
     return r
 """
@@ -4103,10 +4103,10 @@ fn string.parse_int(s) -> int? {
 }
 
 // Parse a float from a string. Returns null if the string is not a valid number.
-@inline inline(lua) fn string.parse_float(s) -> float? = "tonumber(s)"
+@intrinsic @inline inline(lua) fn string.parse_float(s) -> float? = "tonumber(s)"
 
 // Read an environment variable by name. Returns null if the variable is not set.
-@inline inline(lua) fn env_var(name: string) -> string? = "os.getenv(name)"
+@intrinsic @inline inline(lua) fn env_var(name: string) -> string? = "os.getenv(name)"
 
 // Read an env var as int. Returns `default_val` if unset or unparseable.
 fn get_env_int(var: string, default_val: int) -> int {

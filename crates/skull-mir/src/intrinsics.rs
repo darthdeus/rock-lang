@@ -30,6 +30,9 @@ pub enum Emission {
     /// Inline expression template; `$1..$n` are argument placeholders
     /// (`sin($1)`, `Math.atan2($1, $2)`). The shipped GLSL table syntax.
     Template(&'static str),
+    /// A callable backend global. Variadic calls pass every supplied argument;
+    /// function values refer to the same global.
+    Global(&'static str),
     /// Emit the fn body once as a backend fn definition and call it.
     Body,
     /// Compile-time expansion at MIR lowering (backend-agnostic).
@@ -158,9 +161,9 @@ fn has_anno(f: &Function, name: &str) -> bool {
 /// A backend's intrinsic mapping table (GLSL, JS, a future C runtime-lib table).
 /// luajit has none -- its mapping is the set of in-source `inline(lua)` bodies.
 /// Keyed by callee identity; the concrete key scheme is the impl's business, but
-/// [`entries`](IntrinsicTable::entries) MUST enumerate the same (name, arity)
-/// space so the fail-closed check ([`unbacked_entries`]) can catch signature
-/// drift.
+/// [`entries`](IntrinsicTable::entries) MUST enumerate the same (key, arity)
+/// space (source-name or declared-signature aliases from [`declared_intrinsics`])
+/// so the fail-closed check ([`unbacked_entries`]) can catch declaration drift.
 pub trait IntrinsicTable {
     /// Backend identity, for diagnostics.
     fn backend(&self) -> &'static str;
@@ -193,14 +196,17 @@ pub trait BackendRealization {
     fn supplies(&self, ws: &Workspace, f: &Function) -> bool;
 }
 
-/// One backend-table entry's identity, for the fail-closed key check.
+/// One backend-table key (source name or declared signature) and arity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntrinsicEntry {
     pub name: &'static str,
     pub arity: usize,
 }
 
-/// The (name, arity) of every `@intrinsic`-declared fn across the workspace --
+/// The source-name and declared-signature keys of every intrinsic fn. A
+/// signature key lets a backend map overloads independently without weakening
+/// the existing fail-closed check. Both aliases come from the declaration.
+/// The (key, arity) set across the workspace --
 /// the set a backend table's keys must be a subset of.
 pub fn declared_intrinsics(ws: &Workspace) -> HashSet<(Ustr, usize)> {
     let mut out = HashSet::new();
@@ -208,6 +214,7 @@ pub fn declared_intrinsics(ws: &Workspace) -> HashSet<(Ustr, usize)> {
         for (_, f) in module.functions.iter() {
             if is_intrinsic(f) {
                 out.insert((f.name, f.param_decls.len()));
+                out.insert((Ustr::from(&crate::mangle::mangle_fn(ws, f)), f.param_decls.len()));
             }
         }
     }
@@ -215,9 +222,9 @@ pub fn declared_intrinsics(ws: &Workspace) -> HashSet<(Ustr, usize)> {
 }
 
 /// Fail-closed key check: every entry of `table` MUST correspond to an
-/// `@intrinsic` declaration in `declared` (its (name, arity) set from
+/// `@intrinsic` declaration in `declared` (its (key, arity) set from
 /// [`declared_intrinsics`]). A key matching no declaration means the stdlib
-/// signature drifted out from under the mapping -- returned here so a test fails
+/// declaration drifted out from under the mapping -- returned here so a test fails
 /// loudly rather than the mapping silently missing at a call site. Pure data in,
 /// pure data out (no `Workspace`) so the algorithm is unit-testable on its own.
 pub fn unbacked_entries(
