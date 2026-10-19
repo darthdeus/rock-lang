@@ -119,14 +119,14 @@ fn fullscreen_uniform_arrays_keep_abi_order() {
 
 /// A non-root module's entry owns its array group under a qualified key. The
 /// runtime packs array values under the semantic interface's array name and
-/// stone-wgpu joins them to the WGSL block by `logical_name`, so the two wires
+/// the renderer joins them to the WGSL block by `logical_name`, so the two wires
 /// must spell the group the same way.
 #[test]
 fn module_qualified_array_owner_reaches_the_runtime_wire() {
     let mut iface = fixture();
     iface.array_groups = vec![LogicalArrayGroup {
         stage: ShaderStage::Fragment,
-        owner: Ustr::from("mag::ankh_overlay_frag"),
+        owner: Ustr::from("example::overlay_frag"),
         members: vec![decl("values", WireKind::F32, 1)],
     }];
 
@@ -642,4 +642,25 @@ fn an_oversized_uniform_array_is_rejected_rather_than_narrowed() {
     )
     .expect_err("a Vec3 array element must be rejected");
     assert!(error.message.contains("Vec3"), "{}", error.message);
+}
+
+#[test]
+fn texture_orientation_mask_bounds_are_checked_from_the_declared_group() {
+    assert!(skull_codegen_glsl::GLSL_STAGE_SAMPLER_BUDGET <= u32::BITS as usize);
+    let mut iface = fixture();
+    iface.uniform_groups.push(LogicalUniformGroup {
+        role: UniformRole::Engine,
+        struct_name: nominal("OrientationEngine"),
+        members: vec![(Ustr::from("uTextureVFlip"), WireKind::U32)],
+    });
+    iface.textures.as_mut().unwrap().samplers = (0..u32::BITS)
+        .map(|slot| (Ustr::from(format!("image_{slot}").as_str()), SamplerKind::Float)).collect();
+    WgslAbiPlan::wgsl(&iface, Span::default()).expect("every uint mask bit is admitted");
+    iface.textures.as_mut().unwrap().samplers.push((Ustr::from("overflow"), SamplerKind::Float));
+    let error = WgslAbiPlan::wgsl(&iface, Span::default()).expect_err("declared slot cannot wrap its mask");
+    assert!(error.message.contains("orientation mask"), "{error:?}");
+    iface.textures.as_mut().unwrap().samplers.pop();
+    iface.uniform_groups.last_mut().unwrap().members[0].1 = WireKind::F32x4;
+    let error = WgslAbiPlan::wgsl(&iface, Span::default()).expect_err("an obsolete layout cannot silently disable orientation");
+    assert!(error.message.contains("uint mask"), "{error:?}");
 }

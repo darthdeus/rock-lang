@@ -1487,7 +1487,7 @@ impl FnEmit<'_> {
         // is not just a cleanup: a GLES/GL driver miscompiles `t = radius + 1; for
         // (; y < t; ..)` for a nested runtime-bounded kernel (the outline_detect
         // classify loop found no neighbors), while the inlined `y < (radius + 1)`
-        // is correct -- pinned by bitgun `outline_classify_sim`.
+        // is correct; the counted-loop regression covers the emitted bound.
         let bounds: Vec<Idx<Inst>> = self.counted.values().map(|li| li.bound).collect();
         for bound in bounds {
             let Inst::Load(bcell) = self.f.insts[bound] else { continue };
@@ -2915,7 +2915,7 @@ struct EntryShape {
 
 /// The default fullscreen vertex stage -- identical to the hand-written
 /// vignette/heat_shimmer VERTEX blocks (the loader compiles the one file twice
-/// with `#define VERTEX` / `#define PIXEL`, `stone-rs/src/shader.rs`).
+/// with `#define VERTEX` / `#define PIXEL`).
 const FULLSCREEN_VERTEX: &str = "layout (location = 0) in vec2 aPos;
 layout (location = 1) in vec2 aTexCoord;
 
@@ -5243,13 +5243,13 @@ fn plan_shader_pipeline_inner(
 
     // One std140 block per STAGE, each at its own binding index. The stages
     // declare different `@uniform` types and cannot be made to share one: a
-    // vertex entry is reused across several fragment entries (mag's `ui_vert`
+    // vertex entry is reused across several fragment entries (`ui_vert`
     // serves three), so a merged per-program type would need that one fn to
     // declare a different struct per program.
     //
     // A stage group holds only what that shader OWNS: the engine-authored
     // camera/time/screen band lives in `@engine` instead, which is what lets
-    // bitgun's grass keep a game-owned `entity_count` beside them.
+    // instanced grass keep a shader-owned `entity_count` beside them.
     let vert_group = vshape
         .uniform_group
         .map(|g| logical_uniform_group(ws, UniformRole::Stage(IrStage::Vertex), g, vf.name_span))
@@ -5646,7 +5646,7 @@ mod assertion_flip_tests {
     use ustr::Ustr;
 
     fn build_ws(src: &str) -> (Workspace, ModuleId) {
-        let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+        let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -6299,7 +6299,7 @@ mod value_test_shader {
     use ustr::Ustr;
 
     fn build_ws(src: &str) -> (Workspace, ModuleId) {
-        let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+        let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

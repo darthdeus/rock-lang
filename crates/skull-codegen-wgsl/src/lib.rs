@@ -1187,11 +1187,34 @@ fn reject_frag_depth(iface: &ShaderInterfacePlan, span: Span) -> Result<(), Comp
     Ok(())
 }
 
+fn validate_texture_orientation(
+    iface: &ShaderInterfacePlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let Some((_, kind)) = iface.uniform_group(UniformRole::Engine)
+        .and_then(|group| group.members.iter().find(|(name, _)| name.as_str() == "uTextureVFlip"))
+    else {
+        return Ok(());
+    };
+    if *kind != WireKind::U32 {
+        return Err(err(span, "engine texture orientation requires a uint mask"));
+    }
+    if iface.textures.as_ref().is_some_and(|group| group.samplers.len() > u32::BITS as usize) {
+        return Err(unsupported_err(
+            span,
+            "per-texture WGPU Canvas orientation",
+            "declared textures exceed the engine uint orientation mask",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_fullscreen_interface(
     iface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
     reject_frag_depth(iface, span)?;
+    validate_texture_orientation(iface, span)?;
     if iface.compute.is_some() || iface.stages.contains(&ShaderStage::Compute) {
         return Err(err(
             span,
@@ -1311,6 +1334,7 @@ fn validate_explicit_interface(
     span: Span,
 ) -> Result<(), CompilerError> {
     reject_frag_depth(iface, span)?;
+    validate_texture_orientation(iface, span)?;
     if iface.compute.is_some() || iface.stages.contains(&ShaderStage::Compute) {
         return Err(err(
             span,
@@ -5367,7 +5391,7 @@ impl<'a> FunctionEmitter<'a> {
             .uniform_block(UniformRole::Engine)
             .is_some_and(|engine| {
                 engine.members.iter().any(|member| {
-                    member.name == Ustr::from("uTextureVFlip") && member.kind == WireKind::F32x4
+                    member.name == Ustr::from("uTextureVFlip") && member.kind == WireKind::U32
                 })
             })
     }
@@ -5376,19 +5400,13 @@ impl<'a> FunctionEmitter<'a> {
         &self,
         texture: &WgslTextureBinding,
     ) -> Result<String, CompilerError> {
-        let component = match texture.slot {
-            0 => "x",
-            1 => "y",
-            2 => "z",
-            3 => "w",
-            _ => {
-                return Err(unsupported_err(
-                    self.span,
-                    "per-texture WGPU Canvas orientation",
-                    "WGSL texture orientation metadata supports at most four texture slots",
-                ));
-            }
-        };
+        let mask = 1u32.checked_shl(texture.slot).ok_or_else(|| {
+            unsupported_err(
+                self.span,
+                "per-texture WGPU Canvas orientation",
+                "WGSL texture orientation slot exceeds the engine uint mask",
+            )
+        })?;
         let engine = self.abi.uniform_block(UniformRole::Engine).ok_or_else(|| {
             err(
                 self.span,
@@ -5396,7 +5414,7 @@ impl<'a> FunctionEmitter<'a> {
             )
         })?;
         Ok(format!(
-            "u_{}.uTextureVFlip.{component} > 0.5",
+            "(u_{}.uTextureVFlip & {mask}u) != 0u",
             engine.struct_name
         ))
     }

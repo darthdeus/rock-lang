@@ -1,6 +1,6 @@
 use bone_semantic::prelude::Span;
-use skull_parser::Dialect;
 use skull_parser::CompilerErrorKind;
+use skull_parser::Dialect;
 use skull_codegen_wgsl::{
     WgslAbiPlan, WgslPrimitiveTopology, emit_fullscreen_shader, plan_fullscreen_artifact,
 };
@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             skull_parser::parse_module_clean(
@@ -22,35 +22,19 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-// This is the deliberate migration slice, not a census of every shader root.
-const ROOTS: &[(&str, &str, &str)] = &[
-    (
-        "blit_frag",
-        include_str!("../../../stone/engine/shaders/post_processing/blit_shader.rock"),
-        include_str!("goldens/blit.wgsl"),
-    ),
-    (
-        "present_frag",
-        include_str!("../../../stone/engine/shaders/post_processing/present_shader.rock"),
-        include_str!("goldens/present.wgsl"),
-    ),
-    (
-        "tonemap_frag",
-        include_str!("../../../stone/engine/shaders/post_processing/tonemapping_shader.rock"),
-        include_str!("goldens/tonemap.wgsl"),
-    ),
+// Self-contained shader fixtures also cover renderer integration shapes.
+const ROOTS: &[(&str, &str)] = &[
+    ("blit_frag", include_str!("fixtures/fullscreen/blit.rock")),
+    ("present_frag", include_str!("fixtures/fullscreen/present.rock")),
+    ("tonemap_frag", include_str!("fixtures/fullscreen/tonemap.rock")),
 ];
 
-const ENTITY_ID_DEBUG: &str = include_str!("../../../stone/engine/shaders/rendering/entity_id_debug_shader.rock");
-const NONFINITE: &str = include_str!("../../../stone/engine/shaders/debug/nonfinite_shader.rock");
+const HOST_VERTEX: &str = include_str!("fixtures/explicit/host_vertex.rock.frag");
+const ENTITY_ID_DEBUG: &str = include_str!("fixtures/fullscreen/entity_id_debug.rock");
+const NONFINITE: &str = include_str!("fixtures/fullscreen/nonfinite.rock.frag");
 
 fn outline_target_source() -> String {
-    format!(
-        "{}\nvalue Vertex {{ pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }}\n{}\n{}",
-        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
-        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
-        include_str!("../../../stone/engine/shaders/rendering/outline_target_shader.rock"),
-    )
+    format!("{}\n{}", HOST_VERTEX, include_str!("fixtures/explicit/outline_target.rock"))
 }
 
 fn workspace(
@@ -60,10 +44,51 @@ fn workspace(
     bone_semantic::prelude::ModuleId,
 ) {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    // Exercise package-qualified symbols as production shader inputs do.
+    let mut module =
+        skull_parser::parse_module_clean_with_dialect(src, Ustr::from("<test>"), Dialect::V1)
+            .expect("parse");
+    module.package = Some(skull_parser::PackageTag {
+        id: 0,
+        self_name: "shader_fixture".to_string(),
+    });
+    modules.push(module);
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module");
     (ws, mid)
+}
+
+/// The modules-v1 definition key of a root in the test module. A v1 function's
+/// registered name is its package-qualified DefKey, so an emitter lookup by the
+/// declared name needs the key; a legacy or already-qualified name passes
+/// through.
+fn root_key(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_semantic::prelude::ModuleId,
+    name: &str,
+) -> String {
+    if ws.functions_by_name.contains_key(&Ustr::from(name)) {
+        return name.to_string();
+    }
+    ws.module(mid)
+        .functions
+        .iter()
+        .map(|(_, f)| f.name.as_str())
+        .find(|key| key.rsplit("::").next() == Some(name))
+        .unwrap_or_else(|| panic!("root `{name}` is not defined in the test module"))
+        .to_string()
+}
+
+fn emit_pipeline(
+    ws: &bone_semantic::inference::Workspace,
+    mid: bone_semantic::prelude::ModuleId,
+    vert_root: &str,
+    frag_root: &str,
+    profile: skull_codegen_glsl::GlslProfile,
+) -> Result<skull_codegen_glsl::ShaderEmission, skull_parser::CompilerError> {
+    let vert = root_key(ws, mid, vert_root);
+    let frag = root_key(ws, mid, frag_root);
+    skull_codegen_glsl::emit_shader_pipeline_with_dependencies(ws, mid, &vert, &frag, profile)
 }
 
 fn v1_workspace(
@@ -108,13 +133,9 @@ fn try_artifact(
     root: &str,
     source: &str,
 ) -> Result<skull_codegen_wgsl::WgslShaderEmission, skull_parser::CompilerError> {
-    let source = format!(
-        "{}\n{}",
-        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
-        source
-    );
-    let (ws, mid) = workspace(&source);
-    let fref = skull_codegen_shader::resolve_root(&ws, mid, root)?;
+    let (ws, mid) = workspace(source);
+    let key = root_key(&ws, mid, root);
+    let fref = skull_codegen_shader::resolve_root(&ws, mid, &key)?;
     let neutral = plan_fullscreen_artifact(&ws, fref)?;
     let abi = WgslAbiPlan::wgsl(&neutral.interface, Span::default())?;
     let emission = emit_fullscreen_shader(&ws, &neutral.ir, &neutral.interface, &abi, Span::default())?;
@@ -127,15 +148,10 @@ fn artifact(root: &str, source: &str) -> skull_codegen_wgsl::WgslShaderEmission 
 }
 
 #[test]
-fn selected_sprite_basic_pipeline_is_admitted_by_wgsl() {
-    let source = format!(
-        "{}\n{}\n{}",
-        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
-        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
-        include_str!("../../../stone/engine/shaders/rendering/sprite_basic_shader.rock"),
-    );
+fn sprite_basic_emitter_fixture_is_admitted_by_wgsl() {
+    let source = format!("{}\n{}", HOST_VERTEX, include_str!("fixtures/explicit/sprite_basic.rock"));
     let (ws, mid) = workspace(&source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         "sprite_basic_vert",
@@ -200,7 +216,7 @@ fn try_explicit_artifact_source(
     fragment_root: &str,
 ) -> Result<skull_codegen_wgsl::WgslShaderEmission, skull_parser::CompilerError> {
     let (ws, mid) = workspace(source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         vertex_root,
@@ -283,7 +299,7 @@ fn mutable_and_nonconstant_globals_remain_rejected_controls() {
 }
 
 #[test]
-fn integer_texture_id_emits_sampler_free_load_and_validates() {
+fn integer_texture_id_emitter_fixture_emits_sampler_free_load_and_validates() {
     let artifact = artifact("entity_id_debug_frag", ENTITY_ID_DEBUG);
     let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
     naga::valid::Validator::new(
@@ -318,7 +334,7 @@ fn bad_entity_id_frag(@textures t: BadEntityIdTex, tc: Vec2) -> Vec4 {
 }
 
 #[test]
-fn nonfinite_intrinsics_emit_typed_ieee_predicates_and_bool_vectors() {
+fn nonfinite_intrinsics_emitter_fixture_emits_typed_ieee_predicates_and_bool_vectors() {
     let artifact = artifact("nonfinite_frag", NONFINITE);
     let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
     naga::valid::Validator::new(
@@ -335,10 +351,10 @@ fn nonfinite_intrinsics_emit_typed_ieee_predicates_and_bool_vectors() {
 }
 
 #[test]
-fn outline_target_emits_an_integer_fragment_output_for_r32i() {
+fn outline_target_emitter_fixture_emits_an_integer_fragment_output_for_r32i() {
     let source = outline_target_source();
     let (ws, mid) = workspace(&source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         "outline_target_vert",
@@ -385,7 +401,7 @@ fn bare_frag(_vary: BareVary) -> Vec4 {
 }
 "#;
     let (ws, mid) = workspace(source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         "bare_vert",
@@ -463,7 +479,7 @@ fn multi_frag(vary: Vary) -> Vec4 {
 }
 "#;
     let (ws, mid) = workspace(source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         "multi_vert",
@@ -507,7 +523,7 @@ fn solid_frag(vary: Vary) -> Vec4 {
 }
 "#;
     let (ws, mid) = workspace(source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         "solid_vert",
@@ -532,16 +548,13 @@ fn solid_frag(vary: Vary) -> Vec4 {
 }
 
 // Mirrors rect_batch.rock's `Vertex`; rect_batch itself drags in `DepthMode`,
-// which this workspace's semantic pass cannot resolve.
-const SPRITE_BATCH_VERTEX: &str = "value Vertex { pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float, colorize: float }";
-
+// which this workspace's semantic pass cannot resolve. The 32-bit twins and the
+// `@nomangle` match the real vertex layout and its emitted symbol.
 fn sprite_batch_source() -> String {
     format!(
-        "{}\n{}\n{}\n{}",
-        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
-        SPRITE_BATCH_VERTEX,
-        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
-        include_str!("../../../stone/engine/shaders/rendering/sprite_batch_shader.rock"),
+        "{}\n{}",
+        HOST_VERTEX,
+        include_str!("fixtures/explicit/sprite_batch.rock.frag")
     )
 }
 
@@ -551,7 +564,7 @@ fn sprite_batch_artifact() -> (
 ) {
     let source = sprite_batch_source();
     let (ws, mid) = workspace(&source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         "sprite_batch_vert",
@@ -630,7 +643,7 @@ fn explicit_artifact_source(
     fragment_root: &str,
 ) -> skull_codegen_wgsl::WgslShaderEmission {
     let (ws, mid) = workspace(source);
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         vertex_root,
@@ -692,7 +705,14 @@ fn reordered_frag(vary: ReorderedVary, @textures t: ReorderedTextures) -> Vec4 {
 }
 "#;
     let artifact = explicit_artifact_source(source, "reordered_vert", "reordered_frag");
-    assert!(artifact.source.contains("let vary = ReorderedVary(input.uv, input.position, input.tint);"), "{0}", artifact.source);
+    // The package name affects the type suffix, not the reconstruction order.
+    let varying_type = artifact.source.lines()
+        .find_map(|line| line.strip_prefix("struct ReorderedVary_")
+            .and_then(|suffix| suffix.strip_suffix(" {"))
+            .filter(|suffix| !suffix.ends_with("Out")))
+        .expect("the declared varying type");
+    let expected = format!("let vary = ReorderedVary_{varying_type}(input.uv, input.position, input.tint);");
+    assert!(artifact.source.contains(&expected), "{0}", artifact.source);
     naga_validate(&artifact.source);
 }
 
@@ -760,17 +780,41 @@ fn naga_validate(source: &str) {
 }
 
 #[test]
-fn selected_sprite_batch_pipeline_is_admitted_by_wgsl() {
-    let (_, artifact) = sprite_batch_artifact();
+fn sprite_batch_emitter_fixture_is_admitted_by_wgsl() {
+    let (glsl, artifact) = sprite_batch_artifact();
+    assert_eq!(artifact.abi.textures.len(), 5);
+    assert_eq!(
+        artifact
+            .abi
+            .textures
+            .iter()
+            .map(|texture| texture.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "uTexture",
+            "uShadowmapTex",
+            "uGlowTex",
+            "uNormalTex",
+            "uSurfaceTex",
+        ]
+    );
+    let engine = artifact.abi.uniform_block(skull_mir::shader_ir::UniformRole::Engine).unwrap();
+    let gl_engine = glsl.abi.uniform_blocks.iter()
+        .find(|(_, block)| block.name == engine.struct_name).unwrap();
+    assert_eq!(engine.size, gl_engine.1.plan.size);
+    for member in &engine.members {
+        let gl_member = gl_engine.1.plan.members.iter().find(|candidate| candidate.name == member.name).unwrap();
+        assert_eq!(member.offset, gl_member.offset, "GL and WGPU share EngineU member offsets");
+        assert_eq!(member.kind, gl_member.kind);
+    }
     naga_validate(&artifact.source);
 }
 
 #[test]
 fn explicit_texture_helpers_carry_canvas_orientation_through_nested_calls() {
     let source = format!(
-        "{}\n{}\n{}",
-        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
-        SPRITE_BATCH_VERTEX,
+        "{}\n{}",
+        HOST_VERTEX,
         r#"
 struct OrientationTex { main: Sampler2D }
 value OrientationVary { position: Vec4, tex_coord: Vec2 }
@@ -778,8 +822,8 @@ value OrientationVary { position: Vec4, tex_coord: Vec2 }
 @shader(vertex)
 fn orientation_vert(@attr a: Vertex, @engine e: EngineU) -> OrientationVary {
     return OrientationVary {
-        position: e.uProjection * e.uView * v(a.pos, 0.0, 1.0),
-        tex_coord: a.uv,
+        position: e.uProjection * e.uView * v(a.pos.to_f64(), 0.0, 1.0),
+        tex_coord: a.uv.to_f64(),
     }
 }
 
@@ -810,7 +854,7 @@ fn orientation_frag(vary: OrientationVary, @textures t: OrientationTex) -> Vec4 
 }
 
 #[test]
-fn explicit_float_vertex_inputs_preserve_their_raw_bits() {
+fn fixture_float_vertex_inputs_preserve_their_raw_bits() {
     let (_, artifact) = sprite_batch_artifact();
     assert!(
         artifact.source.contains("@location(2) input_2: vec4<u32>,"),
@@ -828,37 +872,33 @@ fn explicit_float_vertex_inputs_preserve_their_raw_bits() {
 }
 
 #[test]
-fn sprite_batch_color_is_flat_for_each_primitive() {
-    let (_, artifact) = sprite_batch_artifact();
-    assert!(
-        artifact
-            .abi
-            .varyings
-            .iter()
-            .any(|varying| varying.name == "Color" && varying.flat),
-        "sprite colors are per-primitive values and must not be interpolated on WGPU:\n{}",
-        artifact.source
-    );
-    assert!(
-        artifact
-            .source
-            .contains("@location(1) @interpolate(flat) Color: vec4<f32>,"),
-        "the emitted WGPU color varying must be flat:\n{}",
-        artifact.source
-    );
-    naga_validate(&artifact.source);
+fn sprite_batch_color_interpolation_follows_its_declaration() {
+    for flat in [false, true] {
+        let source = if flat {
+            sprite_batch_source().replace("    Color: Vec4,", "    @flat Color: Vec4,")
+        } else {
+            sprite_batch_source()
+        };
+        let artifact = explicit_artifact_source(&source, "sprite_batch_vert", "sprite_batch_frag");
+        let varying = artifact.abi.varyings.iter().find(|varying| varying.name == "Color").unwrap();
+        assert_eq!(varying.flat, flat, "the authored color annotation controls interpolation");
+        let declaration = artifact.source.lines().find(|line|
+            line.contains(&format!("@location({})", varying.location)) && line.contains(" Color:"))
+            .expect("the color varying is emitted");
+        assert_eq!(declaration.contains("@interpolate(flat)"), flat);
+        naga_validate(&artifact.source);
+    }
 }
 
 #[test]
 fn explicit_frag_coord_matches_gl_bottom_left_coordinates() {
     let (_, artifact) = sprite_batch_artifact();
-    assert!(
-        artifact.source.contains(
-            "vec4<f32>(input.position.x, ((2.0 / abs(u_EngineU.uProjection[1][1])) - input.position.y), input.position.z, input.position.w)"
-        ),
-        "WGSL fragment coordinates must be converted from its top-left builtin to Rock's bottom-left convention:\n{}",
-        artifact.source
-    );
+    let engine = artifact.abi.uniform_block(skull_mir::shader_ir::UniformRole::Engine).unwrap();
+    let conversion = format!(
+        "(vary, vec4<f32>(input.position.x, ((2.0 / abs(u_{}.uProjection[1][1])) - input.position.y), input.position.z, input.position.w))",
+        engine.struct_name);
+    assert!(artifact.source.contains(&conversion),
+        "the fragment wrapper passes Rock's bottom-left coordinates: {}", artifact.source);
     naga_validate(&artifact.source);
 }
 
@@ -897,41 +937,24 @@ fn the_mrt_outputs_keep_their_declaration_order_and_locations() {
     );
 }
 
-/// `Color` is repeated on every vertex of a primitive, while `EntityId` is an
-/// integer id carried as a float. Both must stay flat; UV and world position
-/// remain interpolated.
 #[test]
 fn per_primitive_varyings_carry_the_flat_interpolation_attribute() {
-    let (_, artifact) = sprite_batch_artifact();
-    let flat: Vec<&str> = artifact
-        .abi
-        .varyings
-        .iter()
-        .filter(|varying| varying.flat)
-        .map(|varying| varying.name.as_str())
-        .collect();
-    assert_eq!(flat, ["Color", "EntityId"], "the per-primitive varyings are flat");
-    assert_eq!(artifact.abi.varyings.len(), 5, "and three interpolated varyings remain");
-    assert!(
-        artifact
-            .source
-            .contains("@location(1) @interpolate(flat) Color: vec4<f32>,"),
-        "{}",
-        artifact.source
-    );
-    assert!(
-        artifact
-            .source
-            .contains("@location(4) @interpolate(flat) EntityId: f32,"),
-        "{}",
-        artifact.source
-    );
-    assert_eq!(
-        artifact.source.matches("@interpolate(flat)").count(),
-        2,
-        "only per-primitive varyings may be flat: {}",
-        artifact.source
-    );
+    let (glsl, artifact) = sprite_batch_artifact();
+    let expected: Vec<_> = glsl.interface.varyings.iter()
+        .map(|varying| (varying.name, varying.kind, varying.flat)).collect();
+    let actual: Vec<_> = artifact.abi.varyings.iter()
+        .map(|varying| (varying.name, varying.kind, varying.flat)).collect();
+    assert!(!expected.is_empty());
+    assert_eq!(actual, expected, "WGSL preserves every authored varying and its interpolation");
+    for varying in &artifact.abi.varyings {
+        let declaration = artifact.source.lines().find(|line|
+            line.contains(&format!("@location({})", varying.location))
+                && line.contains(&format!(" {}:", varying.name)))
+            .expect("every declared varying is emitted");
+        assert_eq!(declaration.contains("@interpolate(flat)"), varying.flat, "{}", varying.name);
+    }
+    assert_eq!(artifact.source.matches("@interpolate(flat)").count(),
+        expected.iter().filter(|(_, _, flat)| *flat).count());
 }
 
 /// std140 gives every uniform-array element a 16-byte stride, and WGSL's uniform
@@ -940,57 +963,38 @@ fn per_primitive_varyings_carry_the_flat_interpolation_attribute() {
 /// tightly would validate and then read the wrong element of the CPU's buffer.
 #[test]
 fn uniform_array_elements_are_padded_to_the_std140_stride_and_projected_back() {
-    let (_, artifact) = sprite_batch_artifact();
-    assert_eq!(artifact.abi.array_blocks.len(), 1);
-    let block = &artifact.abi.array_blocks[0];
-    assert_eq!(block.members.len(), 7, "seven light arrays");
-    for (index, member) in block.members.iter().enumerate() {
-        assert_eq!(member.capacity, 16, "`{}` capacity", member.name);
-        assert_eq!(member.stride, 16, "`{}` stride", member.name);
-        assert_eq!(
-            member.offset,
-            index as u32 * 16 * 16,
-            "`{}` offset",
-            member.name
-        );
+    use skull_mir::gpu_layout::WireKind;
+    let (glsl, artifact) = sprite_batch_artifact();
+    assert!(!artifact.abi.array_blocks.is_empty());
+    assert_eq!(artifact.abi.array_blocks.len(), glsl.abi.uniform_array_blocks.len());
+    for block in &artifact.abi.array_blocks {
+        let (_, expected) = glsl.abi.uniform_array_blocks.iter()
+            .find(|(_, expected)| expected.block_name == block.struct_name).unwrap();
+        assert_eq!(block.size, expected.size);
+        assert_eq!(block.members.len(), expected.members.len());
+        for (member, expected) in block.members.iter().zip(&expected.members) {
+            assert_eq!((member.name, member.elem, member.capacity, member.offset, member.stride),
+                (expected.name, expected.elem, expected.capacity, expected.offset, expected.stride));
+            let (scalar, projection) = match expected.elem {
+                WireKind::I32 => ("i32", ".x"),
+                WireKind::F32 => ("f32", ".x"),
+                WireKind::F32x2 => ("f32", ".xy"),
+                WireKind::F32x4 => ("f32", ""),
+                other => panic!("uncovered production array kind: {other:?}"),
+            };
+            assert!(artifact.source.contains(&format!("  {}: array<vec4<{scalar}>, {}>,", member.name, expected.capacity)));
+            let prefix = format!("u_{}.{}[", block.struct_name, member.name);
+            let reads: Vec<_> = artifact.source.split(&prefix).skip(1).collect();
+            assert!(!reads.is_empty(), "the production shader reads {}", member.name);
+            for read in reads {
+                let suffix = &read[read.find(']').expect("array index closes") + 1..];
+                let actual: String = suffix.strip_prefix('.').unwrap_or("").chars()
+                    .take_while(|ch| ch.is_ascii_alphabetic()).collect();
+                assert_eq!(actual, projection.trim_start_matches('.'),
+                    "{} projects back to its declared element width", member.name);
+            }
+        }
     }
-    assert_eq!(block.size, 7 * 16 * 16);
-    // The element type is the PADDED vector, per element kind.
-    assert!(
-        artifact
-            .source
-            .contains("  uLightTypes: array<vec4<i32>, 16>,"),
-        "{}",
-        artifact.source
-    );
-    assert!(
-        artifact
-            .source
-            .contains("  uLightRadii: array<vec4<f32>, 16>,"),
-        "{}",
-        artifact.source
-    );
-    // ... and the read projects it back to the DECLARED element width.
-    for (read, kind) in [
-        ("u_sprite_batch_frag_Arrays.uLightTypes[i].x", "int"),
-        ("u_sprite_batch_frag_Arrays.uLightRadii[i].x", "float"),
-        ("u_sprite_batch_frag_Arrays.uLightPositions[i].xy", "Vec2"),
-        ("u_sprite_batch_frag_Arrays.uLightColors[i]", "Vec4"),
-    ] {
-        assert!(
-            artifact.source.contains(read),
-            "a {kind} array element reads as `{read}`: {}",
-            artifact.source
-        );
-    }
-    // A Vec4 element takes the whole slot, so it must NOT be projected.
-    assert!(
-        !artifact
-            .source
-            .contains("u_sprite_batch_frag_Arrays.uLightColors[i].x"),
-        "a Vec4 element must not be narrowed: {}",
-        artifact.source
-    );
 }
 
 /// WGSL's uniform address space has no `bool`, so the member crosses as the u32
@@ -999,7 +1003,7 @@ fn uniform_array_elements_are_padded_to_the_std140_stride_and_projected_back() {
 /// against the wrong thing would not, so the comparison is asserted here.
 #[test]
 fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
-    let (_, artifact) = sprite_batch_artifact();
+    let (glsl, artifact) = sprite_batch_artifact();
     let block = artifact
         .abi
         .uniform_block(skull_mir::shader_ir::UniformRole::Stage(
@@ -1012,16 +1016,12 @@ fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
         .filter(|member| member.kind == skull_mir::gpu_layout::WireKind::Bool32)
         .map(|member| member.name.as_str())
         .collect();
-    assert_eq!(
-        bools,
-        [
-            "uLightsEnabled",
-            "uShadowsEnabled",
-            "uUnlit",
-            "uGlowEnabled",
-            "uHasNormalTex",
-        ]
-    );
+    let expected: Vec<_> = glsl.interface.uniform_group(skull_mir::shader_ir::UniformRole::Stage(
+        skull_mir::shader_ir::ShaderStage::Fragment)).unwrap().members.iter()
+        .filter(|(_, kind)| *kind == skull_mir::gpu_layout::WireKind::Bool32)
+        .map(|(name, _)| name.as_str()).collect();
+    assert!(!expected.is_empty());
+    assert_eq!(bools, expected, "every authored bool reaches the ABI");
     for name in &bools {
         assert!(
             artifact.source.contains(&format!("  {name}: u32,")),
@@ -1031,7 +1031,7 @@ fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
         assert!(
             artifact
                 .source
-                .contains(&format!("(u_SpriteFragU.{name} != 0u)")),
+                .contains(&format!("(u_{}.{name} != 0u)", block.struct_name)),
             "`{name}` is compared at its read: {}",
             artifact.source
         );
@@ -1067,13 +1067,6 @@ fn the_fragment_control_flow_and_builtins_reach_wgsl() {
             .count(),
         1,
         "the fragment entry takes the builtin position: {}",
-        artifact.source
-    );
-    assert!(
-        artifact.source.contains(
-            "(vary, vec4<f32>(input.position.x, ((2.0 / abs(u_EngineU.uProjection[1][1])) - input.position.y), input.position.z, input.position.w))"
-        ),
-        "and the wrapper passes the bottom-left conversion: {}",
         artifact.source
     );
     assert_eq!(
@@ -1147,25 +1140,25 @@ fn neutral_ir_operation_census_covers_the_three_fullscreen_fixture_roots() {
         (
             "present_frag",
             OperationCensus {
-                calls: 28,
+                calls: 30,
                 constants: 14,
-                fields: 10,
-                loads: 23,
-                stores: 8,
-                value_structs: 0,
-                returns: 1,
+                fields: 18,
+                loads: 29,
+                stores: 11,
+                value_structs: 2,
+                returns: 2,
                 unsupported: 0,
-                non_return_terms: 0,
+                non_return_terms: 3,
             },
         ),
         (
             "tonemap_frag",
             OperationCensus {
-                calls: 18,
+                calls: 17,
                 constants: 7,
-                fields: 14,
-                loads: 24,
-                stores: 10,
+                fields: 12,
+                loads: 15,
+                stores: 3,
                 value_structs: 2,
                 returns: 2,
                 unsupported: 0,
@@ -1174,7 +1167,7 @@ fn neutral_ir_operation_census_covers_the_three_fullscreen_fixture_roots() {
         ),
     ];
     let mut examined = 0;
-    for ((root, source, _), (expected_root, expected_census)) in ROOTS.iter().zip(expected) {
+    for ((root, source), (expected_root, expected_census)) in ROOTS.iter().zip(expected) {
         assert_eq!(*root, expected_root);
         assert_eq!(operation_census(&artifact(root, source)), expected_census);
         examined += 1;
@@ -1183,11 +1176,11 @@ fn neutral_ir_operation_census_covers_the_three_fullscreen_fixture_roots() {
 }
 
 #[test]
-fn the_selected_fullscreen_migration_roots_are_examined_and_emitted_3_of_3() {
+fn fullscreen_emitter_fixture_roots_are_examined_and_emitted_3_of_3() {
     let mut examined = 0;
     let mut emitted = 0;
     let mut errors = Vec::new();
-    for (root, source, _) in ROOTS {
+    for (root, source) in ROOTS {
         examined += 1;
         match std::panic::catch_unwind(|| artifact(root, source)) {
             Ok(_) => emitted += 1,
@@ -1200,42 +1193,43 @@ fn the_selected_fullscreen_migration_roots_are_examined_and_emitted_3_of_3() {
 }
 
 #[test]
-fn source_goldens_and_physical_structure_are_deterministic() {
-    for (root, source, golden) in ROOTS {
-        let artifact = artifact(root, source);
-        assert_eq!(artifact.source, *golden, "WGSL source golden for `{root}`");
+fn fixture_source_and_physical_structure_are_deterministic() {
+    for (root, source) in ROOTS {
+        let emission = artifact(root, source);
+        let repeated = artifact(root, source);
+        assert_eq!(emission.source, repeated.source, "WGSL source for `{root}` is deterministic");
         assert_eq!(
-            artifact.source.matches("@vertex").count(),
+            emission.source.matches("@vertex").count(),
             1,
             "one compiler-owned vertex entry for `{root}`"
         );
         assert_eq!(
-            artifact.source.matches("@fragment").count(),
+            emission.source.matches("@fragment").count(),
             1,
             "one fragment entry for `{root}`"
         );
-        assert!(artifact.source.contains("fn fragment_main"));
-        assert_eq!(artifact.abi.fullscreen_vertex.vertex_count, 4);
+        assert!(emission.source.contains("fn fragment_main"));
+        assert_eq!(emission.abi.fullscreen_vertex.vertex_count, 4);
         assert_eq!(
-            artifact.abi.fullscreen_vertex.topology,
+            emission.abi.fullscreen_vertex.topology,
             WgslPrimitiveTopology::TriangleStrip
         );
-        assert!(artifact.source.contains("@builtin(vertex_index)"));
-        assert!(!artifact.source.contains("FullscreenVertexIn"));
-        assert_eq!(artifact.abi.fragment_outputs.len(), 1);
-        assert_eq!(artifact.abi.fragment_outputs[0].location, 0);
+        assert!(emission.source.contains("@builtin(vertex_index)"));
+        assert!(!emission.source.contains("FullscreenVertexIn"));
+        assert_eq!(emission.abi.fragment_outputs.len(), 1);
+        assert_eq!(emission.abi.fragment_outputs[0].location, 0);
         assert!(
-            artifact
+            emission
                 .abi
                 .textures
                 .iter()
                 .enumerate()
                 .all(|(slot, texture)| texture.slot == slot as u32)
         );
-        for (slot, texture) in artifact.abi.textures.iter().enumerate() {
+        for (slot, texture) in emission.abi.textures.iter().enumerate() {
             assert_eq!(
                 texture.texture_binding,
-                artifact.abi.uniform_blocks.len() as u32 + 1 + slot as u32 * 2
+                emission.abi.uniform_blocks.len() as u32 + 1 + slot as u32 * 2
             );
             assert_eq!(texture.sampler_binding, Some(texture.texture_binding + 1));
         }
@@ -1243,11 +1237,11 @@ fn source_goldens_and_physical_structure_are_deterministic() {
 }
 
 #[test]
-fn naga_validates_all_three_fullscreen_fixture_modules_3_of_3() {
+fn naga_validates_all_three_fullscreen_emitter_fixtures_3_of_3() {
     let mut examined = 0;
     let mut validated = 0;
     let mut errors = Vec::new();
-    for (root, source, _) in ROOTS {
+    for (root, source) in ROOTS {
         examined += 1;
         let artifact = artifact(root, source);
         let validation = match naga::front::wgsl::parse_str(&artifact.source) {
@@ -1275,14 +1269,14 @@ fn naga_validates_all_three_fullscreen_fixture_modules_3_of_3() {
 
 #[test]
 fn v1_shader_identifiers_and_intrinsics_validate_on_both_wgsl_pipelines() {
-    let explicit_main = include_str!("../../rock-cli/tests/fixtures/shader-v1/explicit_wgpu/main.rock");
-    let explicit_helpers = include_str!("../../rock-cli/tests/fixtures/shader-v1/explicit_wgpu/helpers.rock");
+    let explicit_main = include_str!("fixtures/shader-v1/explicit_wgpu/main.rock");
+    let explicit_helpers = include_str!("fixtures/shader-v1/explicit_wgpu/helpers.rock.frag");
     let (ws, mid) = v1_workspace("shader_probe", explicit_main, explicit_helpers);
     let vertex = skull_codegen_glsl::resolve_root(&ws, mid, "shader_probe::shader_probe_vert")
         .expect("v1 vertex root");
     let fragment = skull_codegen_glsl::resolve_root(&ws, mid, "shader_probe::shader_probe_frag")
         .expect("v1 fragment root");
-    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+    let glsl = emit_pipeline(
         &ws,
         mid,
         "shader_probe::shader_probe_vert",
@@ -1318,8 +1312,8 @@ fn v1_shader_identifiers_and_intrinsics_validate_on_both_wgsl_pipelines() {
     assert_naga_valid(&explicit.source);
     assert_eq!(vertex.module, fragment.module, "roots belong to one v1 package");
 
-    let fullscreen_main = include_str!("../../rock-cli/tests/fixtures/shader-v1/fullscreen/main.rock");
-    let fullscreen_helpers = include_str!("../../rock-cli/tests/fixtures/shader-v1/fullscreen/helpers.rock");
+    let fullscreen_main = include_str!("fixtures/shader-v1/fullscreen/main.rock");
+    let fullscreen_helpers = include_str!("fixtures/shader-v1/fullscreen/helpers.rock.frag");
     let (ws, mid) = v1_workspace(
         "shader_probe_fullscreen",
         fullscreen_main,
@@ -1376,4 +1370,48 @@ fn frag_depth_output_is_rejected_by_wgsl() {
         "unexpected rejection: {}",
         error.message
     );
+}
+
+#[test]
+fn canvas_orientation_masks_follow_every_declared_texture_slot() {
+    for count in [5, skull_codegen_glsl::GLSL_STAGE_SAMPLER_BUDGET] {
+        let fields = (0..count).map(|slot| format!("image_{slot}: Sampler2D"))
+            .collect::<Vec<_>>().join(", ");
+        let samples = (0..count).map(|slot| format!(
+            "sample_orientation(t.image_{slot}, vary.tex_coord)"
+        )).collect::<Vec<_>>().join(" + ");
+        let source = format!(
+            "{}\n{}",
+            HOST_VERTEX,
+            format!(r#"
+struct OrientationTex {{ {fields} }}
+value OrientationVary {{ position: Vec4, tex_coord: Vec2 }}
+@shader(vertex)
+fn orientation_vert(@attr a: Vertex, @engine e: EngineU) -> OrientationVary {{
+    return OrientationVary {{
+        position: e.uProjection * e.uView * v(a.pos.to_f64(), 0.0, 1.0),
+        tex_coord: a.uv.to_f64(),
+    }}
+}}
+fn sample_orientation(src: Sampler2D, coord: Vec2) -> Vec4 {{
+    return texture(src, coord)
+}}
+@shader(fragment)
+fn orientation_frag(vary: OrientationVary, @textures t: OrientationTex) -> Vec4 {{
+    return {samples}
+}}
+"#),
+        );
+        let artifact = explicit_artifact_source(&source, "orientation_vert", "orientation_frag");
+        assert_eq!(artifact.abi.textures.len(), count as usize);
+        for texture in &artifact.abi.textures {
+            let suffix = artifact.source.split(&format!("tex_{},", texture.name)).nth(1)
+                .unwrap_or_else(|| panic!("slot {} has no sampling call", texture.slot));
+            let literal = suffix.split("uTextureVFlip & ").nth(1).unwrap().split('u').next().unwrap();
+            let mask: u32 = literal.parse().expect("orientation mask is a WGSL uint literal");
+            assert_eq!(mask.count_ones(), 1, "one orientation bit per logical texture");
+            assert_eq!(mask.trailing_zeros(), texture.slot, "mask identifies the compiler-declared slot");
+        }
+        naga_validate(&artifact.source);
+    }
 }

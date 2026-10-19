@@ -2,8 +2,10 @@
 name = "skull-codegen-glsl"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
 
-# skull-codegen-glsl: the Rock->GLSL emitter (docs/shaders.md).
+# skull-codegen-glsl: the Rock->GLSL emitter .
 # A second codegen backend over the shared skull-mir substrate (the sibling of
 # skull-codegen-lua). Given a typechecked workspace + a set of root fn names, it
 # emits GLSL function definitions for the roots + their reachable callees,
@@ -13,16 +15,16 @@ edition = "2024"
 [dependencies]
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
-skull-mir = { path = "../skull-mir" }
-skull-graph = { path = "../skull-graph" }
-skull-codegen-lua = { path = "../skull-codegen-lua" }
-skull-codegen-shader = { path = "../skull-codegen-shader" }
-bone-semantic = { path = "../bone-semantic" }
-skull-parser = { path = "../skull-parser" }
+skull-mir = { workspace = true }
+skull-graph = { workspace = true }
+skull-codegen-lua = { workspace = true }
+skull-codegen-shader = { workspace = true }
+bone-semantic = { workspace = true }
+skull-parser = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
-rock-host = { path = "../rock-host" }
+rock-stdlib = { workspace = true }
 
 [lints]
 workspace = true

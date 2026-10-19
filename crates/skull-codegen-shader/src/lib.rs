@@ -191,9 +191,9 @@ fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 
 fn nominal_ty(name: &str) -> Option<ShaderTy> {
     match name {
-        "Vec2" => Some(ShaderTy::Vec2),
-        "Vec3" => Some(ShaderTy::Vec3),
-        "Vec4" => Some(ShaderTy::Vec4),
+        "Vec2" | "Vec2f" => Some(ShaderTy::Vec2),
+        "Vec3" | "Vec3f" => Some(ShaderTy::Vec3),
+        "Vec4" | "Vec4f" => Some(ShaderTy::Vec4),
         "Bvec3" => Some(ShaderTy::Bvec3),
         "Mat4" => Some(ShaderTy::Mat4),
         "Sampler2D" => Some(ShaderTy::Sampler(SamplerKind::Float)),
@@ -421,6 +421,7 @@ fn profile_body(
             | Inst::FloatToInt(_)
             | Inst::IntToFloat(_)
             | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
             | Inst::IntToUint(_)
             | Inst::UintToInt(_)
             | Inst::FloatToUint(_)

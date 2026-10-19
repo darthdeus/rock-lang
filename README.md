@@ -11,6 +11,9 @@ crates listed below.
 |---|---|
 | `crates/rock-lsp` | Language server, diagnostics and editor queries |
 | `crates/skull-transform` | Control-flow transforms, inlining and coroutine lowering |
+| `crates/skull-codegen-shader` | Shared shader lowering, layouts and validation |
+| `crates/skull-codegen-glsl` | GLSL shader emission |
+| `crates/skull-codegen-wgsl` | WGSL shader emission and ABI integration |
 | `crates/skull-codegen-lua` | Lua emission, local allocation and frame limits |
 | `crates/bone-incremental` | Incremental sessions, dependency invalidation and differential fixtures |
 | `crates/bone-query` | IDE queries, completion ranking and the LSP workspace facade |

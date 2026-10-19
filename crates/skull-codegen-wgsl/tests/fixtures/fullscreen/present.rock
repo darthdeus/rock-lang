@@ -1,0 +1,28 @@
+struct SrcTex { src_tex: Sampler2D }
+
+value PresentU {
+    encode_srgb: bool = false,
+    src_origin: Vec2,
+    src_extent: Vec2,
+    tex_size: Vec2,
+    active_size: Vec2,
+    dst_scale: Vec2,
+}
+
+fn fixture_linear_to_srgb(value: Vec3) -> Vec3 {
+    return value
+}
+
+@shader(fragment)
+fn present_frag(@textures t: SrcTex, @uniform u: PresentU, tc: Vec2) -> Vec4 {
+    let dst = tc * u.tex_size / u.active_size
+    let texel = u.src_origin + dst * u.src_extent
+    let scale = max(u.dst_scale, v(1.0, 1.0))
+    let region = v(0.5, 0.5) - v(0.5, 0.5) / scale
+    let center_dist = fract(texel) - 0.5
+    let warped = (center_dist - clamp(center_dist, v(0.0, 0.0) - region, region)) * scale + 0.5
+    let lo = u.src_origin + v(0.5, 0.5)
+    let hi = u.src_origin + u.src_extent - v(0.5, 0.5)
+    let pixel = texture(t.src_tex, clamp(floor(texel) + warped, lo, hi) / u.tex_size)
+    return v(if u.encode_srgb { fixture_linear_to_srgb(pixel.rgb) } else { pixel.rgb }, pixel.a)
+}

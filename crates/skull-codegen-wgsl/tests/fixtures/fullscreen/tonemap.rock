@@ -1,0 +1,22 @@
+value TonemapU {
+    exposure: float,
+    bloom_intensity: float,
+    bloom_uv: Vec2,
+}
+
+struct TonemapTex {
+    scene_tex: Sampler2D,
+    bloom_tex: Sampler2D,
+}
+
+@pure fn aces_film(x: Vec3) -> Vec3 {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0)
+}
+
+@shader(fragment)
+fn tonemap_frag(@textures t: TonemapTex, @uniform u: TonemapU, tc: Vec2) -> Vec4 {
+    let scene_pixel = texture(t.scene_tex, tc)
+    let bloom_pixel = texture(t.bloom_tex, tc * u.bloom_uv)
+    let combined = scene_pixel.rgb + bloom_pixel.rgb * u.bloom_intensity
+    return v(aces_film(combined * u.exposure), scene_pixel.a)
+}

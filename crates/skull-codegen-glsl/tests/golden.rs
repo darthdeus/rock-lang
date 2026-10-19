@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -18,7 +18,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
 /// has to carry one. Built here rather than in `stdlib/vec.rock` so the fixture
 /// does not depend on whether the real stdlib has opted in yet.
 static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
@@ -343,7 +343,7 @@ fn nested_counted_loops() {
 /// A counted loop over a RUNTIME invariant bound folds the bound expression into
 /// the `for` header instead of a hoisted temp (`t = r + 1; for (; y < t; ..)`).
 /// The temp form miscompiles on a GLES/GL driver for the outline_detect kernel
-/// (bitgun outline_classify_sim) even though it is valid GLSL; the inlined bound
+/// (an outline classification shader) even though it is valid GLSL; the inlined bound
 /// is correct, and `r + 1` is loop-invariant (`r` is single-store), so re-reading
 /// it in the condition is sound. Mirrors the outline_detect neighbor-scan shape.
 #[test]

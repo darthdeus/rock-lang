@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/skull-codegen-shader",
+    "crates/skull-codegen-glsl",
+    "crates/skull-codegen-wgsl",
     "crates/skull-codegen-lua",
     "crates/skull-transform",
     "crates/rock-lsp",
@@ -35,6 +38,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+skull-wgsl-abi = { path = "crates/skull-wgsl-abi" }
+skull-codegen-shader = { path = "crates/skull-codegen-shader" }
+skull-codegen-glsl = { path = "crates/skull-codegen-glsl" }
+skull-codegen-wgsl = { path = "crates/skull-codegen-wgsl" }
 skull-codegen-lua = { path = "crates/skull-codegen-lua" }
 skull-transform = { path = "crates/skull-transform" }
 rock-lsp = { path = "crates/rock-lsp" }

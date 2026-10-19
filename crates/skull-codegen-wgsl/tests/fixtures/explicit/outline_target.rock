@@ -1,0 +1,24 @@
+value OutlineTargetVary {
+    position: Vec4,
+    TexCoord: Vec2,
+    @flat EntityId: float,
+}
+
+struct MainTex { uTexture: Sampler2D }
+
+@shader(vertex)
+fn outline_target_vert(@attr a: Vertex, @engine e: EngineU) -> OutlineTargetVary {
+    return OutlineTargetVary {
+        position: e.uProjection * e.uView * v(a.pos.to_f64(), 0.0, 1.0),
+        TexCoord: a.uv.to_f64(),
+        EntityId: a.entity_id,
+    }
+}
+
+@shader(fragment)
+fn outline_target_frag(vary: OutlineTargetVary, @textures t: MainTex) -> int {
+    if vary.EntityId <= 0.0 { discard() }
+    let pixel = texture(t.uTexture, vary.TexCoord)
+    if pixel.w <= 0.0 { discard() }
+    return vary.EntityId as int
+}

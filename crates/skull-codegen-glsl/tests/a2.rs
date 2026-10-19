@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -116,7 +116,7 @@ fn builtin_texture_size_maps() {
 
 // --- the vertex+fragment pipeline scaffold (A2a) -----------------------------
 
-/// The mag-UI-shaped port (ui_sdf_bar): a per-vertex attribute struct, a Mat4
+/// A UI shader fixture: a per-vertex attribute struct, a Mat4
 /// uniform block, and a varyings struct whose `position` field drives
 /// gl_Position and is NOT emitted as a varying.
 const UI_SRC: &str = r#"
@@ -143,12 +143,12 @@ const UI_SRC: &str = r#"
 ///
 /// The stages declare different `@uniform` types and cannot be made to share
 /// one: `ui_vert` is a single fn consumed by three different fragment stages
-/// (ui_sim_solid / ui_sdf_bar / ui_dissolve in mag), each with its own uniform
+/// (solid, SDF bar and dissolve), each with its own uniform
 /// struct, so a merged per-program type would need `ui_vert` to declare a
 /// different struct per program. Two blocks is also what WGSL/Vulkan/Metal do.
 ///
 /// Verified to compile and link on real drivers in both profiles before this
-/// was built (a two-block program through `stone-glsl-runner`).
+/// was built (a two-block program through a native GLSL harness).
 #[test]
 fn pipeline_emits_one_block_per_stage() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
@@ -791,8 +791,7 @@ fn reject_fwidth_in_vertex() {
 
 /// The emitted GLSL for the nonfinite-debug shape: bvec3 ctor + isnan/isinf +
 /// any + greaterThan + the vec3(bvec) bool->float cast, all rendered inline as
-/// native GLSL. The port (stone/engine/shaders/debug/nonfinite_shader.rock) is
-/// this fragment.
+/// native GLSL.
 #[test]
 fn bvec_nonfinite_entry_golden() {
     let src = r#"
@@ -980,7 +979,7 @@ fn reject_isampler_return() {
 // consumes several.
 
 /// Locations continue ACROSS the @attr and @instance structs -- one numbering
-/// for the whole vertex stage, not per-struct. This is bitgun grass's live
+/// for the whole vertex stage, not per-struct. This is an instanced grass
 /// shape (quad at 0..1, GrassInstance at 2..5).
 #[test]
 fn instance_attr_locations_continue_after_the_per_vertex_ones() {
@@ -1284,7 +1283,7 @@ fn engine_block_is_declared_in_both_stages() {
 }
 
 /// The shader's OWN group survives beside the engine block -- the case that
-/// rules out collapsing everything into one shared camera type (bitgun's grass
+/// rules out collapsing everything into one shared camera type (instanced grass
 /// mixes engine-owned camera/time with a game-owned `entity_count`).
 ///
 /// Asserted on BOTH stages: the engine block and a shader-owned block coexist at
@@ -1457,7 +1456,7 @@ fn engine_member_with_a_free_name_emits() {
     assert!(glsl.contains("float uEngineTime;"), "got:\n{glsl}");
 }
 
-/// The collision that actually shipped: mag's per-draw `BoltFragU.uTime` against
+/// A per-draw uniform collision: `BoltFragU.uTime` against
 /// an engine clock of the same name. This is the case the raw driver error
 /// (`declaration of "uTime" conflicts with previous declaration`) came from, and
 /// it is why the engine's clock is `uEngineTime`.

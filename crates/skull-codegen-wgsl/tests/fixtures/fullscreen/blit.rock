@@ -1,0 +1,6 @@
+struct InputTex { input_tex: Sampler2D }
+
+@shader(fragment)
+fn blit_frag(@textures t: InputTex, tc: Vec2) -> Vec4 {
+    return texture(t.input_tex, tc)
+}

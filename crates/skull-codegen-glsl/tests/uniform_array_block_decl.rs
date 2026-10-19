@@ -19,7 +19,7 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -77,7 +77,7 @@ fn layout(p: &UniformArrayBlockPlan) -> Vec<(&str, u32, u32, u32)> {
     p.members.iter().map(|m| (m.name.as_str(), m.capacity, m.offset, m.stride)).collect()
 }
 
-/// bitgun's grass shape: two vertex-stage arrays of different element kinds.
+/// An instanced grass fixture: two vertex-stage arrays of different element kinds.
 /// A `Vec2` and a `float` member, deliberately -- a `Vec4`-only fixture cannot
 /// detect a stride bug, because `Vec4`'s base alignment is already 16 and the
 /// round-to-16 is then a no-op (backlog 21).
