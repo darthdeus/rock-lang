@@ -63,7 +63,7 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "pair_box");
-    assert!(body.contains("= {}"), "the mutable capture declares a box `local c<N> = {{}}`:\n{body}");
+    assert!(body.contains("= {v = "), "the dominated initializer seeds its shared box:\n{body}");
     assert!(
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "both captures hoist to env records:\n{body}"

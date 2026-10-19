@@ -137,6 +137,7 @@ pub fn convert_closures_framed(
             lambda_sid.insert(lid, sid);
         }
     }
+    let seeded_boxes = seeded_box_initializers(mf, tree, own, &boxed, &lambda_sid);
     // Live lambdas in inst-arena order (k). A DCE'd lambda (no scope) has no k
     // consumer beyond the counter -- so a dead one never shifts the live names.
     let mut ordered: Vec<(usize, ScopeId)> = Vec::new();
@@ -277,6 +278,16 @@ pub fn convert_closures_framed(
                     new.push(id);
                 }
                 Inst::Store { cell: c, value } => {
+                    if seeded_boxes.get(&c) == Some(&id) {
+                        let seed = mf.alloc_inst(Inst::MakeEnv {
+                            fn_ref: None,
+                            fields: vec![(Ustr::from("v"), value)],
+                        });
+                        new.push(seed);
+                        mf.insts[id] = Inst::Store { cell: c, value: seed };
+                        new.push(id);
+                        continue;
+                    }
                     let boxed_c = boxed.contains(&c);
                     let captured = env_plans.get(&s).is_some_and(|plan| plan.captures_cell(c));
                     // A lambda WRITING a frame cell collapses to `s` (D4(b)): the
@@ -341,14 +352,16 @@ pub fn convert_closures_framed(
         mf.blocks[b].insts = new;
     }
 
-    // --- Materialize each boxed cell as a box table created once at its owner
-    // scope's entry: `{}` for a plain local, `{ v = <param> }` for a boxed param
-    // (the box seeds from the incoming arg before it is overwritten). ---
+    // --- Unseeded locals still need an entry box. Parameters seed from their
+    // incoming argument before rebinding; proven local initializers seed in place. ---
     let mut entry_prepend: HashMap<Idx<Block>, Vec<Idx<Inst>>> = HashMap::default();
     // Sorted so the created boxes / declarations are traversal-independent.
     let mut boxed_sorted: Vec<Idx<Cell>> = boxed.iter().copied().collect();
     boxed_sorted.sort_by_key(|c| raw(*c));
     for c in boxed_sorted {
+        if seeded_boxes.contains_key(&c) {
+            continue;
+        }
         let owner = own.owner[&c];
         let entry = tree.scopes[owner].entry;
         let is_param = tree.scopes[owner].params.contains(&c);
@@ -503,6 +516,85 @@ pub fn convert_closures_framed(
     // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
     // definitions from the chunk. Detached regions use the same sibling shape.
     mf.nested_fns.extend(nested);
+}
+
+/// Delay a local's box until its first store only when no access or capture can
+/// observe the old entry box, and the allocation cannot repeat within the scope.
+fn seeded_box_initializers(
+    mf: &MirFunc,
+    tree: &ScopeTree,
+    own: &Ownership,
+    boxed: &HashSet<Idx<Cell>>,
+    lambda_sid: &HashMap<Idx<Inst>, ScopeId>,
+) -> HashMap<Idx<Cell>, Idx<Inst>> {
+    let locals: HashSet<_> = boxed.iter().copied().filter(|c| {
+        !tree.scopes[own.owner[c]].params.contains(c) && !own.loop_bindings.contains(c)
+    }).collect();
+    if locals.is_empty() {
+        return HashMap::default();
+    }
+    let mut accesses: HashMap<Idx<Cell>, Vec<(Idx<Block>, usize, Idx<Inst>)>> = HashMap::default();
+    for (b, block) in mf.blocks.iter() {
+        let Some(s) = tree.scope_of_block(b) else { continue };
+        for (pos, &id) in block.insts.iter().enumerate() {
+            let mut record = |c| {
+                if locals.contains(&c) && own.owner.get(&c) == Some(&s) {
+                    accesses.entry(c).or_default().push((b, pos, id));
+                }
+            };
+            mf.insts[id].cells_each(&mut record);
+            if let Some(&child) = lambda_sid.get(&id) {
+                for &c in &own.captures[child] {
+                    record(c);
+                }
+            }
+        }
+    }
+    let mut seeded = HashMap::default();
+    let mut dominators = HashMap::default();
+    let mut cyclic = HashMap::default();
+    for (c, sites) in accesses {
+        let owner = own.owner[&c];
+        let scope = &tree.scopes[owner];
+        for &(b, pos, id) in &sites {
+            if !matches!(mf.insts[id], Inst::Store { cell, .. } if cell == c) {
+                continue;
+            }
+            let dominates_all = sites.iter().all(|&(other, other_pos, _)| {
+                if b == other {
+                    pos <= other_pos
+                } else {
+                    let idom = dominators.entry(owner)
+                        .or_insert_with(|| skull_mir::cfg::dominators(mf, scope.entry));
+                    skull_mir::cfg::dominates(idom, b, other)
+                }
+            });
+            if !dominates_all {
+                continue;
+            }
+            // Entry allocation already repeats on entry backedges. Moving into
+            // any other cycle would split a previously shared cell per iteration.
+            if b != scope.entry && *cyclic.entry(b).or_insert_with(|| {
+                let mut pending = Vec::new();
+                skull_mir::cfg::successors(&mf.blocks[b].term, |s| pending.push(s));
+                let mut seen = HashSet::default();
+                while let Some(next) = pending.pop() {
+                    if next == b {
+                        return true;
+                    }
+                    if seen.insert(next) {
+                        skull_mir::cfg::successors(&mf.blocks[next].term, |s| pending.push(s));
+                    }
+                }
+                false
+            }) {
+                continue;
+            }
+            seeded.insert(c, id);
+            break;
+        }
+    }
+    seeded
 }
 
 fn frame_schema(frame: Option<&FrameInfo>) -> Option<FrameSchema> {

@@ -7,22 +7,18 @@
 //! at the creation site. Record mechanics in depth: `env_record_hoist.rs`.
 use crate::common::{emit_module, function_body, run_luajit};
 
-/// True if `body` declares a box cell -- a `local c<N> = {}` line (the box-init
-/// shape). Matched precisely rather than via the bare `= {}` substring, which an
-/// empty vec/map literal or a prelude table also produces.
+/// Recognize empty and seeded box constructors on a cell or register assignment.
+/// Callers also check field access to distinguish boxes from collection literals.
 fn declares_box(body: &str) -> bool {
     body.lines().any(|l| {
-        // The empty box table literal `{}`. The shared closure-conversion pass
-        // materializes it at the owner scope entry, and regalloc may route it
-        // through a temp (`r<N> = {}` then stored into the box cell) or assign the
-        // cell directly; pre-cutover codegen wrote it inline as `local c<N> = {}`.
-        // The caller's `.v = ` assertion confirms it is a box (not an empty
-        // map/tuple literal).
         let t = l.trim();
         let t = t.strip_prefix("local ").unwrap_or(t);
         t.strip_prefix(['c', 'r'])
-            .and_then(|r| r.strip_suffix(" = {}"))
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|r| r.split_once(" = "))
+            .is_some_and(|(n, rhs)| {
+                !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                    && (rhs == "{}" || (rhs.starts_with("{v = ") && rhs.ends_with('}')))
+            })
     })
 }
 
@@ -119,7 +115,7 @@ fn main() { let h = capture_box() h() }
 fn mutated_capture_lowers_to_box_threaded_into_record() {
     let lua = emit_module(MUTATED_CAPTURE);
     let body = function_body(&lua, "capture_box");
-    assert!(declares_box(&body), "a mutable capture must declare a box `local c<N> = {{}}`:\n{body}");
+    assert!(declares_box(&body), "a mutable capture must declare a shared box:\n{body}");
     assert!(body.contains(".v = "), "a mutable capture stores through `.v`:\n{body}");
     assert!(
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
