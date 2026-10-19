@@ -205,6 +205,7 @@
 // prelude: __rock_stride_capacity
 // prelude: __rock_stride_copy
 // prelude: __rock_stride_insert
+// prelude: __rock_stride_reserve
 // prelude: __rock_stride_sort
 // prelude: __rock_stride_sort_leaves
 // prelude: __rock_strided_column_view
