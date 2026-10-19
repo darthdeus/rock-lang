@@ -118,12 +118,12 @@ pub fn dce(func: &mut MirFunc) {
     dce_core(func, None);
 }
 
-/// DCE, optionally fusing a copy-prop substitution into the count scan: when
-/// `subst` is `Some`, each inst's value operands (and each terminator's) are
-/// remapped through it as they are counted, so the post-substitution reference
-/// counts fall out of the same walk that DCE needs anyway — no separate
-/// full-arena remap pass. With `None` it is plain DCE over the current program.
-fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
+/// DCE, optionally fusing a copy-prop analysis into the count scan: with [`CopyProp`]
+/// the value operands (and each terminator's) are remapped through its
+/// substitution as they are counted, and its proven no-op stores are seeded
+/// dead -- so DCE's post-substitution reference counts and the store deletion
+/// fall out of work DCE needs anyway. With `None` it is plain DCE.
+fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
     let ni = func.insts.len();
     let nc = func.cells.len();
     // Reference counts over the CURRENT program (dense, raw-id keyed): live value
@@ -143,8 +143,8 @@ fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
         let MirFunc { blocks, insts, .. } = &mut *func;
         for (_, b) in blocks.iter_mut() {
             for &i in &b.insts {
-                if let Some(s) = subst {
-                    remap_inst(&mut insts[i], &|x| resolve_subst(s, x));
+                if let Some(cp) = cp {
+                    remap_inst(&mut insts[i], &|x| resolve_subst(&cp.subst, x));
                 }
                 value_operands(&insts[i], &mut |op| use_count[raw(op) as usize] += 1);
                 match &insts[i] {
@@ -153,8 +153,8 @@ fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
                     _ => {}
                 }
             }
-            if let Some(s) = subst {
-                remap_term(&mut b.term, &|x| resolve_subst(s, x));
+            if let Some(cp) = cp {
+                remap_term(&mut b.term, &|x| resolve_subst(&cp.subst, x));
             }
             // Terminator operands are permanent uses (terms are never removed), so
             // their +1 is never decremented — a value used by a term stays live.
@@ -183,12 +183,16 @@ fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
         }
     }
 
-    // Seed the worklist with everything dead in the initial program, then cascade.
+    // Seed the worklist with everything dead in the initial program, then cascade;
+    // a store proven a no-op by the copy-prop analysis is dead whatever its cell's
+    // load count.
     let mut dead = vec![false; ni];
     let mut work: Vec<Idx<Inst>> = Vec::new();
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
-            if is_dead_rc(&func.insts[i], i, &use_count, &load_count) {
+            if is_dead_rc(&func.insts[i], i, &use_count, &load_count)
+                || cp.is_some_and(|cp| cp.self_stores[raw(i) as usize])
+            {
                 dead[raw(i) as usize] = true;
                 work.push(i);
             }
@@ -222,7 +226,11 @@ fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
         }
     }
 
-    // Single filter pass; `retain` reuses each block's allocation.
+    drop_flagged(func, &dead);
+}
+
+/// Remove every instruction whose `dead` flag is set from its block.
+fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
     let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
     for bid in block_ids {
         let mut insts = std::mem::take(&mut func.blocks[bid].insts);
@@ -278,7 +286,8 @@ fn is_dead_value(inst: &Inst) -> bool {
 }
 
 /// The pre-emit MIR cleanup: copy-propagate intra-block loads, then DCE the dead
-/// loads/values/stores they leave. Run per-function in `mir_emit`.
+/// loads/values/stores they leave (including the stores copy propagation proves
+/// write back the value their cell already holds). Run per-function in `mir_emit`.
 ///
 /// The two passes are FUSED: copy-prop's substitution is applied as DCE's count
 /// scan walks each inst, so the value-operand remap (`remap_inst` over every
@@ -308,8 +317,8 @@ pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
         // nullable value field's read to the literal that filled it leaves a
         // presence test whose operand is now a fresh ctor.
         let folded = fold_never_nil_compares(func);
-        let subst = copy_propagate_subst(func);
-        dce_core(func, subst.as_deref());
+        let cp = copy_propagate_analysis(func);
+        dce_core(func, cp.as_ref());
         if !changed && !folded {
             break;
         }
@@ -1815,28 +1824,41 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
 /// the next `Store` to it (cells are plain locals, not aliased — only `Store{cell}`
 /// changes one), and a value is single-block (born+consumed in its block, design
 /// invariant), so replacing a `Load(c)` with the value last stored to `c` EARLIER
-/// IN THE SAME BLOCK is sound with no dominance/coroutine-spill hazard. The now-
-/// dead `Load`s (and any store to a now-unloaded cell) are removed by [`dce`].
+/// IN THE SAME BLOCK is sound with no dominance/coroutine-spill hazard. The same
+/// walk proves a `Store` back to the value its cell already holds is a no-op
+/// ([`CopyProp::self_stores`]). The now-dead `Load`s (and any store to a
+/// now-unloaded cell) are removed by [`dce`].
 /// Cross-block loads are left untouched (conservative — a later mem2reg, P7).
 pub fn copy_propagate(func: &mut MirFunc) {
-    let Some(subst) = copy_propagate_subst(func) else {
+    let Some(cp) = copy_propagate_analysis(func) else {
         return;
     };
-    let m = |x: Idx<Inst>| resolve_subst(&subst, x);
+    let m = |x: Idx<Inst>| resolve_subst(&cp.subst, x);
     for (_, inst) in func.insts.iter_mut() {
         remap_inst(inst, &m);
     }
     for (_, b) in func.blocks.iter_mut() {
         remap_term(&mut b.term, &m);
     }
+    if cp.self_stores.iter().any(|&noop| noop) {
+        drop_flagged(func, &cp.self_stores);
+    }
 }
 
-/// The copy-propagation ANALYSIS: build the value->value substitution table
-/// without applying it. Returns `None` when there is nothing to substitute (the
-/// common case for small bodies), so callers skip the remap entirely. Shared by
-/// the standalone [`copy_propagate`] (which then remaps the whole arena) and
-/// [`cleanup`] (which folds the remap into DCE's count scan).
-fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
+/// The intra-block copy-propagation analysis: the value->value substitution
+/// chain, plus the stores the same walk proves are no-ops.
+struct CopyProp {
+    subst: Vec<Option<Idx<Inst>>>,
+    /// Per-inst flags; a true entry is a `Store` writing back the value its cell
+    /// already holds, i.e. removable even though the cell still has loads.
+    self_stores: Vec<bool>,
+}
+
+/// Build the analysis without applying it. Returns `None` when the walk proves
+/// nothing (the common case for small bodies), so callers skip the remap
+/// entirely. Shared by the standalone [`copy_propagate`] (which then remaps the
+/// whole arena) and [`cleanup`] (which folds the remap into DCE's count scan).
+fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
     // A cell STORED inside a closure body can be mutated indirectly by ANY call
     // (the call may invoke that closure — e.g. `with_callback(() => { count = .. })`),
     // so its cached value is not stable across calls. Exclude such cells entirely
@@ -1902,6 +1924,7 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
         }
     }
     let mut subst: Vec<Option<Idx<Inst>>> = vec![None; func.insts.len()];
+    let mut self_stores = vec![false; func.insts.len()];
     let mut any_subst = false;
     let mut cur: Vec<Option<Idx<Inst>>> = vec![None; func.cells.len()];
     let mut touched: Vec<usize> = Vec::new();
@@ -1913,12 +1936,29 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
         for &id in &b.insts {
             match &func.insts[id] {
                 Inst::Store { cell, value } if !escaping[raw(*cell) as usize] => {
-                    let v = resolve_subst(&subst, *value);
                     let ck = raw(*cell) as usize;
-                    if cur[ck].is_none() {
-                        touched.push(ck);
+                    let v = resolve_subst(&subst, *value);
+                    // A store that writes back the value the cell already holds is a
+                    // no-op -- invisible to `is_dead_rc`, which only drops a store
+                    // whose cell has no loads. `cur` is the value last stored to this
+                    // cell in THIS block, so comparing against it rejects the
+                    // load-then-other-store shape: a load taken BEFORE an intervening
+                    // store is not the cell's current value, and storing it back is a
+                    // RESTORE, not a no-op. Before the block's first store `cur` is
+                    // None, so a load of the cell itself is the value the store writes
+                    // (no store can have intervened), which is the proof there.
+                    let noop = match cur[ck] {
+                        Some(w) => resolve_subst(&subst, w) == v,
+                        None => matches!(&func.insts[*value], Inst::Load(d) if *d == *cell),
+                    };
+                    if noop {
+                        self_stores[raw(id) as usize] = true;
+                    } else {
+                        if cur[ck].is_none() {
+                            touched.push(ck);
+                        }
+                        cur[ck] = Some(v);
                     }
-                    cur[ck] = Some(v);
                 }
                 Inst::Load(c) => {
                     if let Some(v) = cur[raw(*c) as usize] {
@@ -1975,7 +2015,7 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
             }
         }
     }
-    any_subst.then_some(subst)
+    (any_subst || self_stores.iter().any(|&noop| noop)).then_some(CopyProp { subst, self_stores })
 }
 
 /// The value ctor and dotted child path `x` reads when it is an unfolded
