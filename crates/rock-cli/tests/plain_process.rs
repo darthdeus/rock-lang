@@ -67,7 +67,7 @@ fn plain_compiler_process_without_private_runtime() {
     assert!(formatted.status.success(), "{}", text(&formatted));
     let checked = invoke(root.path(), &["fmt", "main.rock", "--check"]);
     assert!(checked.status.success(), "{}", text(&checked));
-    let unavailable = invoke(root.path(), &["unregistered-runtime", "main.rock"]);
+    let unavailable = invoke(root.path(), &["stone", "main.rock"]);
     assert!(!unavailable.status.success());
     assert!(text(&unavailable).contains("unavailable"), "{}", text(&unavailable));
     assert!(!root.path().join("prebuilt").exists());
@@ -79,7 +79,7 @@ fn library_uses_plain_services_without_installation() {
     assert!(std::ptr::eq(rock_cli::CliCommand::all(), rock_cli::plain::COMMANDS));
     let services = RuntimeServices::registered();
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("runtime_ffi.rock"), "// private marker\n").unwrap();
+    std::fs::write(root.path().join("stone_ffi.rock"), "// engine marker\n").unwrap();
     assert!(!(services.is_game_project)(root.path()).unwrap());
     assert!((services.configured_runtime_dir)(root.path()).unwrap().is_none());
     assert!((services.program_preamble)(".", ProgramKind::Project).unwrap().is_empty());
@@ -132,7 +132,7 @@ fn plain_parser_rejects_options_whose_private_rules_are_absent() {
 #[test]
 fn plain_reports_identity_storage_in_private_package_names() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("stick.toml"), "[package]\nname = \"example-runtime\"\n").unwrap();
+    std::fs::write(root.path().join("stick.toml"), "[package]\nname = \"stone\"\n").unwrap();
     std::fs::write(root.path().join("main.rock"),
         "struct Actor { hp: int }\nstruct Holder { actor: Actor }\nfn main() {}\n").unwrap();
     for backend in ["bone", "skull"] {
