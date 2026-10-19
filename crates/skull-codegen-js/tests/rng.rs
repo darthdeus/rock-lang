@@ -1,4 +1,4 @@
-//! Pin the `JS_RNG_RUNTIME` mulberry32 stream (docs/backends.md).
+//! Pin the `JS_RNG_RUNTIME` mulberry32 stream.
 //! The JS stream differs from Lua's splitmix by doctrine (bit-parity is a
 //! non-goal); this pins the JS stream INDEPENDENT of node's own PRNG so a
 //! refactor of the prelude can't silently shift it. Runs the ACTUAL prelude

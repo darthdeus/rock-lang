@@ -1,6 +1,6 @@
 //! Logging emission (T8d): the log_once / log_throttled dedup+throttle surface
 //! (stdlib/logging.rock `@nomangle inline(lua)` impls) maps to JS runtime helpers
-//! of the same name; `__stone_emit` prints `[category] msg` into the shared
+//! of the same name; `__rock_log_emit` prints `[category] msg` into the shared
 //! output buffer. Node execution is the correctness oracle; `tests/js_log.rock`
 //! cross-checks against luajit.
 

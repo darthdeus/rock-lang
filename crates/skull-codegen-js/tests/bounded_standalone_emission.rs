@@ -1,7 +1,6 @@
-//! An `Iterator`-bounded body emits STANDALONE to JS at each instantiation
-//! (`docs/monomorphization-plan.md` S 12, mono cut C+D step D-1).
+//! An `Iterator`-bounded body emits STANDALONE to JS at each instantiation.
 //!
-//! The JS sibling of `crates/skull/tests/bounded_standalone_emission.rs`.
+//! The JS sibling of `rock-lang/crates/skull/tests/bounded_standalone_emission.rs`.
 //! JS retains a delivery queue, while the shared graph owns each instance and
 //! its resolved bound tree.
 //!

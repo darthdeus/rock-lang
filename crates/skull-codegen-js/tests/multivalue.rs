@@ -2,7 +2,7 @@
 //! sends leaf 0 as the ordinary return value and leaves 1..N through module-scope
 //! scratch slots (`__rock_ret1 = b; return a;`), which the `CallMulti` caller
 //! captures inseparably (`d0 = f(); d1 = __rock_ret1;`); dest cells hoist-declare
-//! at the fn top. An array would allocate -- see docs/js-nobox-return-abi-plan.md. A closure created
+//! at the fn top. An array would allocate. A closure created
 //! in a loop that captures an iteration-local cell gets a per-iteration `let`
 //! inside the loop body. Boundaries that this raw-lowered path can't emit
 //! correctly REJECT (skip): a closure capturing a loop counter/cursor, a value

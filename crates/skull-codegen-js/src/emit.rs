@@ -1,4 +1,4 @@
-//! Minimal MIR->JS emitter (docs/backends.md) for the conformance
+//! Minimal MIR->JS emitter for the conformance
 //! subset: the scalar fallback bodies of the eight differential intrinsics,
 //! plus the NativeBuffer four-fn surface (TypedArray-backed `{ptr, len}`
 //! structs, checked `buf[i]` via the `__nb_checked_*` shim names --
@@ -230,7 +230,7 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
 /// its own declared wire, or name a slot in a comment and widen the bank.
 /// `BackendFnAbiPlan::result_lanes` is the same ABI policy every
 /// definition and call site reads, so a publisher and the caller capturing it
-/// cannot disagree (`docs/boundary-contracts.md` 1.2).
+/// cannot disagree.
 fn max_published_lanes(
     view: &ArtifactView,
     inline_js: &[JsInlineBody],
@@ -333,7 +333,7 @@ fn ident_positions(code: &str, name: &str) -> Vec<usize> {
 /// The lowered form of a multi-lane `inline(js)` body, or the reason its
 /// publisher does not match the contract.
 ///
-/// The contract (`docs/boundary-contracts.md` 1.2, plan S 13b): a multi-lane
+/// The contract: a multi-lane
 /// body contains exactly one final top-level `return __rock_publish(...)` with
 /// one argument per ABI result lane, no second `return`, and no direct scratch
 /// bank access. A single-lane body returns ordinarily and may use neither.
@@ -520,7 +520,7 @@ fn js_member(base: &str, f: &str) -> Result<String, CompilerError> {
 }
 
 /// Emit `mf` as `function <js_name>(...) { ... }`. `js_name` is the caller's
-/// chosen JS identity (the S3/S4 harness names each fallback fn).
+/// chosen JS identity (the differential harness names each fallback fn).
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {
     let names = CalleeNames::default();
     emit_fn_with_callees(ws, mf, js_name, &names, &HashSet::new(), &GlobalCtx::default())
@@ -1711,7 +1711,7 @@ impl Emitter<'_> {
             // value and leaves 1..N ride module-scope scratch slots -- emulated
             // secondary return registers. An array would allocate, which a
             // `nobox` value forbids outright and every other value pays for
-            // nothing (measured: `docs/js-nobox-return-abi-plan.md`).
+            // nothing (measured).
             //
             // Publishing before the `return` reorders the leaves' evaluation,
             // which is sound ONLY because a leaf is a temp or an
@@ -2168,8 +2168,8 @@ impl Emitter<'_> {
                 // flat `Float32Array(n * size/4)` laid out in the SAME C bytes
                 // luajit uses, which the per-leaf views (`FfiViewCast`) then alias
                 // through `.buffer`. For an all-float element `size/4` IS the float
-                // leaf count, so the vertex pool's storage and its `.ptr` going to
-                // WebGL are unchanged -- pinned by `nb_leaf_layout_premise`.
+                // leaf count, so an all-float buffer's storage and its `.ptr`
+                // handed to a host API are unchanged.
                 other => {
                     let representation = representation.ok_or_else(|| {
                         err(format!(
@@ -2213,7 +2213,7 @@ impl Emitter<'_> {
             // One typed view over the buffer's storage. luajit casts the pointer;
             // JS makes a TypedArray over the same `ArrayBuffer`, so the views and
             // `.ptr` alias the same bytes -- which is what lets leaf-addressed and
-            // whole-`.ptr` (WebGL upload) access to one buffer stay coherent.
+            // whole-`.ptr` (host upload) access to one buffer stay coherent.
             Inst::FfiViewCast { cty, ptr } => {
                 let p = self.render_val(*ptr)?;
                 let array = match cty.as_str() {
@@ -2256,7 +2256,7 @@ impl Emitter<'_> {
             // Column storage: one plain array per leaf, sharing the single
             // `len`. Plain arrays rather than TypedArrays on purpose -- V8's
             // packed-double arrays beat `Float64Array` for the strided reads
-            // this layout exists to make fast (`docs/js-vec-columns-plan.md`).
+            // this layout exists to make fast.
             // A nested leaf path is dotted (`min.x`), so keys are quoted.
             Inst::MakeVecColumns { elem, columns, len, capacity, .. } => {
                 let mut s = format!(
@@ -2872,7 +2872,7 @@ fn emit_ginit_with_nested(
     emit_body_with_nested(ws, &g.mf, &g.init_name, names, hoisted, gctx)
 }
 
-/// The whole workspace as ONE JS program (`docs/backends.md`):
+/// The whole workspace as ONE JS program:
 /// module-driven assembly mirroring skull's Lua `assemble`, but reachability-
 /// driven (roots = `main` + every DECORATED fn + every `deco` body; the whole
 /// stdlib is NOT emitted, only what those roots reach). Emission order:
@@ -3077,7 +3077,7 @@ pub fn emit_program(
     user_mid: bone_semantic::prelude::ModuleId,
 ) -> Result<JsProgram, CompilerError> {
     let scx = js_scx(ws);
-    // The program entry: a nullary `main` in the entry module (D3). Passed as the
+    // The program entry: a nullary `main` in the entry module. Passed as the
     // one extra root; the module-load effects (deco applications, ginits) run
     // regardless of whether a `main` exists.
     let mut extra: Vec<(FuncRef, String)> = Vec::new();
@@ -3483,7 +3483,7 @@ fn assemble_program_core(
     stable.push_str(&definition_stage);
     out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
-    //    initialized registry -- D4).
+    //    initialized registry).
     let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
@@ -3683,7 +3683,7 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
 /// `@nomangle` name whenever a pair exists, so the register lines resolve. The
 /// native Rock body (WATCHER lookup + GL compile) is not JS-emittable, so a
 /// program with a shader pair but no reachable js sibling REJECTS rather than
-/// silently dropping the registration (`docs/backends.md`).
+/// silently dropping the registration.
 fn force_shader_register_sibling(
     ws: &Workspace,
     st: &mut WorklistState,
@@ -3717,6 +3717,14 @@ pub struct JsProgram {
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     /// Compiler-owned logical mutable-state inventory for the emitted artifact.
     pub state_schema: skull_mir::state_schema::StateSchema,
+}
+
+impl JsProgram {
+    /// True when a callable escapes as a code ref, so the prelude needs the
+    /// full code-slot call helper (see [`crate::assemble_prelude`]).
+    pub fn has_code_refs(&self) -> bool {
+        self.code_artifact.entries.values().any(|entry| entry.escaping)
+    }
 }
 
 #[derive(Clone)]
@@ -5290,7 +5298,7 @@ fn lifecycle_plan_stage_js(
             }
             // A compiler-synthesized thunk of one uniform signature
             // (`scene_id -> ()`) per entry -- see the Lua sibling in
-            // `crates/skull/src/mir_emit.rs::lifecycle_plan_stage_lua` for
+            // `rock-lang/crates/skull/src/mir_emit.rs::lifecycle_plan_stage_lua` for
             // the full rationale. A scene thunk resolves the live root for
             // `scene_id` and calls through; it never asks the value its
             // runtime type.
@@ -5425,7 +5433,7 @@ fn emit_inspect_ty(
 /// Per-type `__rock_col_mat` registry for every element type the program stores
 /// as columns: the JS half of luajit's `__rock_materialize_column_type`, which
 /// reads `_G.__ROCK_TYPE_TABLE` for the field walk. JS has no type table and is
-/// not getting one (`docs/feature-inventory.md` S4.2b wants luajit's DELETED),
+/// not getting one (luajit's is slated for deletion),
 /// and the element type is a compile-time fact at every column site anyway --
 /// that is exactly why `spec_key_has_target_storage` forces specialization for one.
 fn emit_col_mat(
@@ -5596,7 +5604,7 @@ fn applied_decorator_names(ws: &Workspace, deco_names: &HashSet<ustr::Ustr>) -> 
     set
 }
 
-/// The entry module's nullary `main`, if it defines one -- the D3 program entry.
+/// The entry module's nullary `main`, if it defines one -- the program entry.
 fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> Option<FuncRef> {
     ws.module(user_mid)
         .functions
@@ -7089,19 +7097,19 @@ fn is_host_put(cf: &bone_semantic::hir::Function) -> bool {
 /// (`crate::JS_LOG_RUNTIME`), not co-emitted. The (name, arity) set matches the
 /// stdlib decls; the host-body gate keeps a plain-Rock same-name user fn on the
 /// co-emit path. `log_error`/`log_warn`/... and `log_get_level` are pure Rock and
-/// co-emit over `__stone_log`/`__stone_log_init` normally.
+/// co-emit over `__rock_log`/`__rock_log_init` normally.
 fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
     const LOG_FNS: &[(&str, usize)] = &[
-        ("__stone_log_init", 0),
-        ("__stone_emit", 4),
-        ("__stone_log", 3),
-        ("__stone_log_wall_clock", 3),
+        ("__rock_log_init", 0),
+        ("__rock_log_emit", 4),
+        ("__rock_log", 3),
+        ("__rock_log_wall_clock", 3),
         ("log_set_level", 1),
         ("_log_once_impl", 4),
         ("_log_throttled_with_now_impl", 7),
-        ("stone_log_set_now", 1),
-        ("stone_log_clear_now", 0),
-        ("__stone_log_now", 0),
+        ("log_set_now", 1),
+        ("log_clear_now", 0),
+        ("__rock_log_now", 0),
         ("_log_throttled_impl", 6),
         ("log_reset_dedup", 0),
         ("log_dedup_count", 0),
@@ -7197,7 +7205,7 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("parse_float_at", 3) => Some("__parse_float($1.slice($2, $3))"),
         // RNG -> the `JS_RNG_RUNTIME` mulberry32 port (stream differs from Lua's
         // splitmix by doctrine; the seedable/deterministic/serializable semantics
-        // hold). `env_var` -> the driver-provided node glue (`process.env`).
+        // hold). `env_var` -> `JS_HOST_RUNTIME`, which asks the embedder's host.
         ("random", 0) => Some("__rock_random()"),
         ("random_int", 2) => Some("__rock_random_int($1, $2)"),
         ("random_seed", 1) => Some("__rock_rng_seed($1)"),
@@ -7710,7 +7718,7 @@ mod tests {
     use super::*;
 
     fn workspace(src: &str) -> Workspace {
-        let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+        let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
             .iter()
             .map(|file| {
                 let id = Ustr::from(format!("<stdlib:{}>", file.name).as_str());

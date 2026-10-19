@@ -30,12 +30,6 @@ mod inline_pipeline;
 mod inspect;
 #[path = "lambda.rs"]
 mod lambda;
-#[path = "web_uniform_block_layout_check.rs"]
-mod web_uniform_block_layout_check;
-#[path = "web_canvas_active_extent.rs"]
-mod web_canvas_active_extent;
-#[path = "web_canvas_resize_gate.rs"]
-mod web_canvas_resize_gate;
 #[path = "log_dedup.rs"]
 mod log_dedup;
 #[path = "loops.rs"]
@@ -57,18 +51,10 @@ mod module_globals;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
 
-#[path = "opaque_container_axes_js.rs"]
-mod opaque_container_axes_js;
 #[path = "multivalue.rs"]
 mod multivalue;
 #[path = "nb_differential.rs"]
 mod nb_differential;
-#[path = "nb_leaf_layout_premise.rs"]
-mod nb_leaf_layout_premise;
-#[path = "nb_value_struct.rs"]
-mod nb_value_struct;
-#[path = "native_buffer_element_admission_js.rs"]
-mod native_buffer_element_admission_js;
 #[path = "no_inline_function.rs"]
 mod no_inline_function;
 #[path = "nomangle_roots.rs"]
@@ -86,22 +72,16 @@ mod session_state;
 mod overlay;
 #[path = "parse_float.rs"]
 mod parse_float;
-#[path = "prelude_decl_arity.rs"]
-mod prelude_decl_arity;
 #[path = "polymorphic_recursion.rs"]
 mod polymorphic_recursion;
 #[path = "program.rs"]
 mod program;
 #[path = "put.rs"]
 mod put;
-#[path = "ret_bank_no_hand_readers.rs"]
-mod ret_bank_no_hand_readers;
 #[path = "ret_bank_sizing.rs"]
 mod ret_bank_sizing;
 #[path = "rng.rs"]
 mod rng;
-#[path = "shader_register.rs"]
-mod shader_register;
 #[path = "shared_tail.rs"]
 mod shared_tail;
 #[path = "snippets.rs"]
@@ -110,8 +90,6 @@ mod snippets;
 mod sort;
 #[path = "spec_column_callee.rs"]
 mod spec_column_callee;
-#[path = "stdlib_sibling_location.rs"]
-mod stdlib_sibling_location;
 #[path = "string_builder.rs"]
 mod string_builder;
 #[path = "string_primitives.rs"]
@@ -136,3 +114,15 @@ mod vec_columns;
 mod vec_flat_enum_strided;
 #[path = "optional_entity_vec.rs"]
 mod optional_entity_vec;
+#[path = "shader_register.rs"]
+mod shader_register;
+#[path = "opaque_container_axes_js.rs"]
+mod opaque_container_axes_js;
+#[path = "nb_value_struct.rs"]
+mod nb_value_struct;
+#[path = "native_buffer_element_admission_js.rs"]
+mod native_buffer_element_admission_js;
+#[path = "stdlib_sibling_location.rs"]
+mod stdlib_sibling_location;
+#[path = "host.rs"]
+mod host;

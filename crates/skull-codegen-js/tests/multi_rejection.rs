@@ -6,7 +6,7 @@
 //! unemittable definition per emission makes that worklist a floor: a test whose
 //! closure needs three unsupported things reports one, and the next two only
 //! appear after the first is built. Same defect (and same fix) as the luajit
-//! path's `crates/skull/tests/multi_rejection.rs`.
+//! path's `rock-lang/crates/skull/tests/multi_rejection.rs`.
 
 use skull_mir::mir::FuncRef;
 
@@ -84,7 +84,7 @@ fn a_nobox_rejection_names_the_body_it_was_emitting() {
     // A `[(NV2, int)]` element used to stand here (case-matrix row 13) and stopped
     // materializing when the tuple box learned to carry the leaves. Neither plain
     // container works either: `[NV2]` column-stores, and so does a `Map<_, NV2>`
-    // VALUE since the spine landed (`docs/nobox-map-value-design.md`).
+    // VALUE as well.
     const TWO_SINK_FNS: &str = "\
 nobox value NV2 { x: float, y: float }
 fn a(k: float) -> int { let t = (NV2{x:k,y:0.0}, 1); print(\"{t}\"); 0 }

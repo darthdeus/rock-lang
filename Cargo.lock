@@ -1886,6 +1886,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skull-codegen-js"
+version = "0.1.0"
+dependencies = [
+ "bone-semantic",
+ "comfy-la-arena",
+ "rock-stdlib",
+ "rustc-hash 2.1.3",
+ "skull",
+ "skull-graph",
+ "skull-mir",
+ "skull-parser",
+ "skull-transform",
+ "ustr",
+]
+
+[[package]]
 name = "skull-codegen-lua"
 version = "0.1.0"
 dependencies = [

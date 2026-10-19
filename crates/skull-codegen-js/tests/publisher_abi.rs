@@ -1,5 +1,4 @@
-//! The multi-lane `inline(js)` PUBLISHER (`docs/boundary-contracts.md` 1.2,
-//! `docs/monomorphization-plan.md` S 13b, S 0h).
+//! The multi-lane `inline(js)` PUBLISHER.
 //!
 //! A JS multi-lane result travels as leaf 0 on the ordinary `return` plus
 //! lanes 1..N in the module-scope scratch bank. An opaque `inline(js)` body used

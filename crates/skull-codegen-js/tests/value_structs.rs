@@ -108,8 +108,7 @@ fn gc_carrying_value_struct_eq() {
 /// guarantee forbids. This replaced a blanket rejection, so it asserts the
 /// property that rejection was protecting rather than the rejection itself: the
 /// value must not materialize as an object OR as a transport array (which is an
-/// allocation just the same, and does not vanish under V8's escape analysis --
-/// measured in docs/js-nobox-return-abi-plan.md).
+/// allocation just the same, and does not vanish under V8's escape analysis).
 #[test]
 fn nobox_value_return_crosses_as_leaves_not_a_box() {
     let src = "nobox value V { x: int, y: int }\n\

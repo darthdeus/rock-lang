@@ -1,7 +1,7 @@
-//! JS execution harness (docs/backends.md): emit an intrinsic's Rock
+//! JS execution harness: emit an intrinsic's Rock
 //! fallback body to JS, run it under `node`, and read back the number. This is
-//! the second EXECUTING backend the intrinsics arc needed (`node`); S4 uses it
-//! for the full mapping-vs-fallback differential.
+//! the second EXECUTING backend (`node`), used for the full
+//! mapping-vs-fallback differential.
 //!
 //! Gated on `node` being present -- absent, the test skips WITH A LOG (never a
 //! silent pass). node is at `/run/current-system/sw/bin/node` on the dev box.

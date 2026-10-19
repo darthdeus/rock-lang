@@ -1,11 +1,11 @@
-//! stone-web arc 1: JS-side emission of per-backend decls.
+//! JS-side emission of per-backend decls.
 //!
 //! - a same-name `inline(lua)`+`inline(js)` pair emits the JS body VERBATIM and
 //!   never the lua body (the collapse + resolve_funcref backend swap picks the JS
 //!   variant);
 //! - `extern(js)` emits a bare driver-/runtime-provided call, no definition;
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
-use crate::common::ws_with;
+use crate::common::{node, ws_with};
 
 
 fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
@@ -99,17 +99,17 @@ fn main() {
 fn an_unmapped_ffi_call_still_rejects() {
     let ws = ws_with(
         r#"
-extern(ffi, "stone") fn stone_save_screenshot(path: string, width: int, height: int, max_size: int) -> bool
+extern(ffi, "host") fn host_save_screenshot(path: string, width: int, height: int, max_size: int) -> bool
 
 fn main() {
-    let ok = stone_save_screenshot("shot.png", 1, 1, 1)
+    let ok = host_save_screenshot("shot.png", 1, 1, 1)
     print("{ok}")
 }
 "#,
     );
     let err = emit_program_js(&ws).expect_err("an unmapped FFI call must reject");
     assert!(
-        err.contains("stone_save_screenshot") && err.contains("not a mapped JS intrinsic"),
+        err.contains("host_save_screenshot") && err.contains("not a mapped JS intrinsic"),
         "unexpected reject message: {err}"
     );
 }
@@ -138,6 +138,38 @@ fn main() {
     assert!(
         !prog.contains("function error("),
         "the runtime throwing `error` global must not be shadowed:\n{prog}"
+    );
+}
+
+#[test]
+fn debug_traceback_uses_the_declared_js_sibling() {
+    let ws = ws_with(
+        r#"
+fn main() {
+    print(__debug_traceback())
+}
+"#,
+    );
+    let prog = emit_program_js(&ws).expect("emit js program");
+    assert!(
+        prog.contains("return new Error().stack || \"\";"),
+        "the declared JS traceback body must own the JS implementation:\n{prog}"
+    );
+    let source = format!(
+        "var __G = {{}};\nfunction print(value) {{ console.log(value); }}\n{}\n{}\nmain();",
+        skull_codegen_js::JS_SESSION_RUNTIME,
+        prog,
+    );
+    let output = node().args(["-e", &source]).output().expect("node");
+    assert!(
+        output.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("Error\n"),
+        "the JS traceback was empty: {:?}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 

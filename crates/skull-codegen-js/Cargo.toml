@@ -2,28 +2,30 @@
 name = "skull-codegen-js"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "JavaScript emission and runtime prelude for Rock programs"
 autotests = false
 
-# skull-codegen-js: the conformance-differential JS backend (docs/backends.md).
-# A structured MIR->JS emitter for the scalar + NativeBuffer subset, run under
-# node as the second executing backend: mapping-vs-fallback for the scalar
-# intrinsics, JS-native vs luajit-native for the @native_required NativeBuffer
-# surface (tests/nb_differential.rs). Not a deployment target (that is S5).
+# A structured MIR->JS emitter plus the JS runtime blocks an emitted program
+# needs. Tests run the output under node (and, for the differentials, luajit)
+# from PATH.
 
 [dependencies]
-skull-mir = { path = "../skull-mir" }
-skull-graph = { path = "../skull-graph" }
+skull-mir = { workspace = true }
+skull-graph = { workspace = true }
 rustc-hash = { workspace = true }
-skull-transform = { path = "../skull-transform" }
-bone-semantic = { path = "../bone-semantic" }
-skull-parser = { path = "../skull-parser" }
+skull-transform = { workspace = true }
+bone-semantic = { workspace = true }
+skull-parser = { workspace = true }
 comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
-rock-host = { path = "../rock-host" }
-skull = { path = "../skull" }
-skull-parser = { path = "../skull-parser" }
+rock-stdlib = { workspace = true }
+skull = { workspace = true }
+skull-parser = { workspace = true }
 ustr = { workspace = true }
 
 [lints]

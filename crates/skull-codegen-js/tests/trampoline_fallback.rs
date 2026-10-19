@@ -1,7 +1,6 @@
 //! T8h: a body the structurer rejects with the shared-branch-tail reason
 //! (a nested-loop shared tail or an over-cap tail) re-emits through the block
-//! trampoline `for (;;) switch (__bb)`, which accepts arbitrary CFGs. Spec:
-//! docs/backends.md. The node-executed value
+//! trampoline `for (;;) switch (__bb)`, which accepts arbitrary CFGs. The node-executed value
 //! checks are the correctness oracle; the shape assertions pin that the
 //! fallback fired (and, dually, that a structured body does NOT trampoline).
 

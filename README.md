@@ -17,6 +17,7 @@ crates listed below.
 | `crates/skull-codegen-glsl` | GLSL shader emission |
 | `crates/skull-codegen-wgsl` | WGSL shader emission and ABI integration |
 | `crates/skull-codegen-lua` | Lua emission, local allocation and frame limits |
+| `crates/skull-codegen-js` | JavaScript emission and runtime prelude (tests need `node`, and `luajit` for the differentials) |
 | `crates/bone-incremental` | Incremental sessions, dependency invalidation and differential fixtures |
 | `crates/bone-query` | IDE queries, completion ranking and the LSP workspace facade |
 | `crates/skull-mir` | Cell-based control-flow IR, lowering and backend layout contracts |

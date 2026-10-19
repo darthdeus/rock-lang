@@ -1,4 +1,4 @@
-//! stone-web arc 2 MB: `@nomangle` discipline under JS emission.
+//! `@nomangle` discipline under JS emission.
 //!
 //! An `inline(js)` body is verbatim text -- the callee-discovery walk cannot
 //! see the calls inside it, and plain-Rock co-emitted fns get mangled JS names

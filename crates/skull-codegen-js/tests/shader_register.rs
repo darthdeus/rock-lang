@@ -1,4 +1,4 @@
-//! stone-web arc 2 P2: `rock_shader` under JS emission.
+//! `rock_shader` under JS emission.
 //!
 //! `rock_shader(vert, frag)` collapses to a pipeline key const; the driver emits
 //! one top-level `__rock_shader_register(key, glsl)` per distinct pair. Those
@@ -55,7 +55,7 @@ fn rock_shader_pair_without_js_register_sibling_rejects() {
 
 #[test]
 fn rock_shader_pair_with_plain_rock_register_emits_it_bare() {
-    // The engine's real `__rock_shader_register` (watcher.rock) is a plain-Rock
+    // A host's real `__rock_shader_register` is typically a plain-Rock
     // @nomangle fn -- portable on JS once its two inline(lua) helpers have js
     // siblings. A reachable plain-Rock register fn must be rooted under its
     // bare name (the driver register lines call it verbatim), not rejected.

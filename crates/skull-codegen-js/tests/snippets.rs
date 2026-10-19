@@ -30,7 +30,7 @@ fn math_snippets_render() {
     assert_eq!(fill_template(template("atan2", 2), &["y", "x"]), "Math.atan2(y, x)");
 }
 
-// The conformance differential set (docs/intrinsics-plan.md slice 5): mappings
+// The conformance differential set: mappings
 // that are algorithmically distinct from the Rock fallback bodies where a second
 // implementation exists (clamp/lerp/sign), coincident where none does
 // (round/fract).
@@ -54,7 +54,7 @@ fn differential_set_snippets_render() {
     );
 }
 
-// The NativeBuffer four-fn surface (docs/nativebuffer-portability-design.md):
+// The NativeBuffer four-fn surface:
 // the 5 phantom-width per-type TypedArray allocs (int/float now lower to the
 // `FfiNewArray` MIR node, not a named template -- see emit.rs), the shared
 // nb_get/nb_set index templates, and the bounds-checked `get` accessor (IIFE so
@@ -101,7 +101,7 @@ fn table_entries_are_distinct_keys() {
 // stdlib @intrinsic declaration. A source rename or arity drift fails here.
 #[test]
 fn every_js_entry_is_backed_by_a_stdlib_intrinsic() {
-    let modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+    let modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());

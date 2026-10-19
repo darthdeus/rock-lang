@@ -1,4 +1,4 @@
-//! `Vec<T>` column storage on the JS backend (`docs/js-vec-columns-plan.md`):
+//! `Vec<T>` column storage on the JS backend:
 //! `[E]` over an all-scalar `value` `E` stores one plain array per leaf, sharing
 //! the Vec's single `len`, with no per-element object. Marked or not -- both
 //! targets column now, so the `nobox` half here is about the GUARANTEE (no

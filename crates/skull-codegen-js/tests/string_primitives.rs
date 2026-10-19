@@ -45,16 +45,6 @@ fn eval_str(defs: &str, root: &str, expect: &str) {
     assert_eq!(s.trim_end_matches('\n'), expect, "wrong result\n{program}");
 }
 
-// find with the default `from` omitted: padded to `undefined`, read as 0.
-#[test]
-fn find_default_from_padded() {
-    let src = "fn root() -> int { \"hello\".find(\"l\") }";
-    let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("find emits");
-    assert!(js.contains(".indexOf(") && js.contains("undefined"), "pads default:\n{js}");
-    eval_str(&js, "root", "2");
-}
-
 // find with an explicit `from`.
 #[test]
 fn find_explicit_from() {

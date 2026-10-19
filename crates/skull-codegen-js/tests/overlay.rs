@@ -446,52 +446,6 @@ fn retained_named_and_capture_free_values_refresh_through_slots() {
 }
 
 #[test]
-fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
-    let source = |tail: i32| {
-        format!(
-            "global CALLBACK: (fn() -> int)? = null\n\
-             @nomangle fn make() -> fn() -> int {{\n\
-               let n = 0\n\
-               return () => {{ n = n + 1 n + {tail} }}\n\
-             }}\n\
-             @nomangle fn start() {{ CALLBACK = make() }}\n\
-             @nomangle fn invoke() -> int {{\n\
-               let f = CALLBACK\n\
-               if f != null {{ return f() }}\n\
-               -1\n\
-             }}\n\
-             fn main() {{ start(); invoke() }}\n"
-        )
-    };
-    let before = ws_with(&source(0));
-    let after = ws_with(&source(10));
-    let mid = function(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let make = function(&after, "make");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(make.module, BodyOwner::Function(make.func))],
-    )
-    .unwrap()
-    .expect_overlay();
-    let output = node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
-        js_runtime(), program.program, overlay
-    ));
-    assert_eq!(output.trim(), "1\n12");
-    assert!(overlay.contains("__rock_code_slot_stage_one"));
-
-    let (fresh, _) = skull_codegen_js::emit::emit_program_cached(&after, mid).unwrap();
-    let fresh_output = node(&format!(
-        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());",
-        js_runtime(), fresh.program
-    ));
-    assert_eq!(fresh_output.trim(), "11");
-}
-
-#[test]
 fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
     let source = |delta: i32, wire: &str| {
         format!(

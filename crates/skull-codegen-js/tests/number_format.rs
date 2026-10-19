@@ -1,4 +1,4 @@
-//! Number-formatting parity (docs/backends.md):
+//! Number-formatting parity:
 //! the JS `lua_tostring` runtime (`JS_STRING_RUNTIME`, C `%.14g` reconstructed
 //! with round-half-to-even) must byte-match Lua's `tostring` for the battery in
 //! `fixtures/number_format.rock`. Runs the SAME fn through the full skull
@@ -27,7 +27,7 @@ fn both_backends_available(test: &str) -> bool {
 }
 
 fn fixture_ws() -> Workspace {
-    let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+    let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());

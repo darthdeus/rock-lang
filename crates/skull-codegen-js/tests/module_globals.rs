@@ -89,8 +89,8 @@ fn derived_global_init_order() {
 
 // TRANSITIVE init order: `global ACT = register(..)` where the `REG` read lives
 // inside `register`, NOT the init expression. The order must still place REG's
-// init first -- a shallow "reads in the init body" edge misses it (mag's
-// ACTIONS / action_new boot crash, `__G.ACTIONS undefined` at load).
+// init first -- a shallow "reads in the init body" edge misses it (a
+// registry global read `undefined` at load).
 #[test]
 fn transitive_global_init_order_through_call() {
     let src = "global REG: Map<string, int> = map_new()\n\

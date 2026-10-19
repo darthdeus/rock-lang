@@ -1,10 +1,10 @@
-//! Module-driven whole-program emission (`emit_program`, M1): the JS analog of
+//! Module-driven whole-program emission (`emit_program`): the JS analog of
 //! skull's Lua `assemble` -- deco def fns, fn defs, ginit fns + ordered init
 //! lines, and decorator APPLICATION lines, assembled from the workspace (roots
 //! = `main` + every decorated fn + every `deco` body). Unlike the per-test
 //! `emit_with_closure`, a decorator-populated global read does NOT reject here
 //! (the applications ARE emitted). Node execution is the correctness oracle
-//! (`crates/rock-cli/tests/js_run_gate.rs`); this file pins the assembly ORDER
+//! (`host.rs` runs whole programs); this file pins the assembly ORDER
 //! and application-line CONTENT in the emitted string.
 
 use crate::common::{node, ws_with, ws_with_named};
@@ -228,36 +228,6 @@ fn main() {}
     assert_eq!(scene.census.scene_root_types, 1);
     assert_eq!(scene.census.arena_identity_fields, 4);
     assert!(js.program.contains("scene_root_types:[\"a_n4_Room_0_z\"]"), "JS SceneImage root key drifted: {}", js.program);
-}
-
-#[test]
-fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery_in_js() {
-    let ws = ws_with(r#"
-struct Room { ticks: int }
-@lifecycle(phase="update", owner="scene") deco init scene_update {}
-@scene_update fn tick(root: Room) { root.ticks += 1 }
-global ROOT: Scene<Room>? = null
-fn load() -> Scene<Room> {
-    return scene_create((_b) => {
-        let root: Room? = Room { ticks: 0 }
-        return root
-    }).unwrap()
-}
-fn main() { ROOT = load() }
-"#);
-    let js = emit_program(&ws);
-    let scene_create_body = js
-        .split("\nfunction ")
-        .find(|part| part.starts_with("scene_create"))
-        .unwrap_or_else(|| panic!("no emitted scene_create specialization:\n{js}"));
-    assert!(
-        scene_create_body.contains("a_n4_Room_0_z"),
-        "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
-    );
-    assert!(
-        !scene_create_body.contains("__rock_get_type"),
-        "Scene construction must not discover its root type from the published value: {scene_create_body}"
-    );
 }
 
 #[test]

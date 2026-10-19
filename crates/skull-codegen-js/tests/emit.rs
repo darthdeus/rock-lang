@@ -1,10 +1,10 @@
-//! MIR->JS emitter tests (docs/backends.md). Lowers each of the eight
+//! MIR->JS emitter tests. Lowers each of the eight
 //! differential intrinsics' scalar fallback bodies and pins the emitted JS
 //! exactly -- the two control-flow shapes (clamp's returning-arms diamond,
 //! sign's store-then-merge via post-dominators) and the straight-line
 //! expression bodies (lerp/round/fract/smoothstep, incl. intrinsic-call
 //! rendering through the JS table). The emitted JS is node-verified against the
-//! luajit reference values by the S3 execution harness; these tests pin the
+//! luajit reference values by the execution harness (`differential.rs`); these tests pin the
 //! structure. Vec overloads (multi-value return) reject -- the reject-don't-
 //! fallback discipline that keeps the emitter honest as the subset grows.
 

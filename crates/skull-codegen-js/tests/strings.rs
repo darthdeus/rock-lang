@@ -1,4 +1,4 @@
-//! String-value emitter tests (docs/backends.md):
+//! String-value emitter tests:
 //! string literals with JS escaping, `+` concat routed through `lua_tostring`
 //! (Lua `..` number-formatting parity), and the scalar interpolation holes
 //! (`ToString` for int/bool/string, the `__rock_format_float` host port for

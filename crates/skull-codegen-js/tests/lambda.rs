@@ -1,4 +1,4 @@
-//! Closure / lambda emission (docs/backends.md). Closure
+//! Closure / lambda emission. Closure
 //! conversion lowers each lambda to a hoisted sibling plus either a reusable
 //! CodeRef or a CodeRef-bearing environment record. `Inst::CallValue` is an
 //! indirect dispatch through `__rock_call`; direct calls retain their physical

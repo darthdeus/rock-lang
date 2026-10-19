@@ -1,4 +1,4 @@
-//! Loop recovery tests (docs/backends.md). The emitter
+//! Loop recovery tests. The emitter
 //! recovers single-entry natural loops from MIR back-edges: a range-`for`
 //! (`loop_binding` slot + pure-increment latch) becomes a real JS
 //! `for (; slot < bound; slot = slot + 1)`, every other natural loop a

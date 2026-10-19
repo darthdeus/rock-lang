@@ -54,7 +54,7 @@ pub fn ws_with(src: &str) -> bone_semantic::inference::Workspace {
 }
 
 pub fn ws_with_named(file: &str, src: &str) -> bone_semantic::inference::Workspace {
-    let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+    let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());

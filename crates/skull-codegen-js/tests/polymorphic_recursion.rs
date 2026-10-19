@@ -1,6 +1,6 @@
 //! Changing-instance recursion is rejected on the JS backend too.
 //!
-//! The Lua sibling is `crates/skull/tests/user_fn_emit_rejection.rs`. This file
+//! The Lua sibling is `rock-lang/crates/skull/tests/user_fn_emit_rejection.rs`. This file
 //! exists because that one could not see JS at all: the depth bound landed in
 //! Lua reachability first, and the JS specialization queue went on draining a
 //! recursion whose every demand names a strictly deeper instantiation. Each node
