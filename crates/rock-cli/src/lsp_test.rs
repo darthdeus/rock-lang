@@ -1790,6 +1790,11 @@ fn read_response_from_chan(rx: &std::sync::mpsc::Receiver<serde_json::Value>, ex
 }
 
 /// Run a single edit sequence test against a persistent LSP server
+fn file_uri(path: &Path) -> Result<String> {
+    let path = path.to_str().ok_or_else(|| anyhow::anyhow!("path is not UTF-8: {}", path.display()))?;
+    Ok(lsp_types::Uri::from_file_path(path)?.as_str().to_string())
+}
+
 /// The file every server this run spawns appends its stderr to. Unique per
 /// run, so concurrent runs (or another user's) never share or clobber it;
 /// named once on stderr so a hang or panic leaves a findable breadcrumb.
@@ -1828,7 +1833,7 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
         "{}.rock",
         test.name.chars().map(|c| if c == ' ' || c == '/' { '_' } else { c }).collect::<String>()
     ));
-    let test_uri = format!("file://{}", std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()).display());
+    let test_uri = file_uri(&std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()))?;
 
     // Write initial content so the LSP can find it
     let initial_code = match &test.steps[0].mode {
@@ -1967,7 +1972,7 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
                     }
                 }
             },
-            "rootUri": format!("file://{}", std::fs::canonicalize(&test_dir)?.display()),
+            "rootUri": file_uri(&std::fs::canonicalize(&test_dir)?)?,
             "workspaceFolders": null
         }
     });
