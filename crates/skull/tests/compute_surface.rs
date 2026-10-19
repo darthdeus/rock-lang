@@ -8,7 +8,9 @@ use ustr::Ustr;
 fn emit_errors(src: &str) -> Vec<String> {
     let ws = common::ws_with_stdlib(src);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
-    match skull::mir_emit::emit_full(&ws, mid) {
+    match skull::mir_emit::emit_full_in_for_renderer(
+        &ws, mid, None, skull::mir_emit::RendererTarget::Wgpu,
+    ) {
         Ok(_) => Vec::new(),
         Err(error) => vec![error.message],
     }
