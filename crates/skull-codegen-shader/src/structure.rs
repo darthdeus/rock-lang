@@ -80,7 +80,10 @@ fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Bloc
     out
 }
 
-fn natural_loops(
+/// The natural loop body of back edge `latch -> header`: `header` plus every node
+/// that reaches `latch` without passing through `header`. Shared by both shader
+/// analysis consumers; each target's post-dominator pass stays its own.
+pub fn natural_loops(
     f: &MirFunc,
     n: usize,
     succ: &[Vec<usize>],
@@ -138,8 +141,6 @@ fn natural_loops(
     out
 }
 
-/// The natural loop body of back edge `latch -> header`: `header` plus every node
-/// that reaches `latch` without passing through `header`.
 #[cfg(test)]
 mod tests {
     use super::*;

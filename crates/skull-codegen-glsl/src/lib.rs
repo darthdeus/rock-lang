@@ -29,6 +29,7 @@ use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
+use skull_codegen_shader::structure::LoopRegion;
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
@@ -55,7 +56,7 @@ use skull_mir::mir::*;
 use skull_parser::CompilerError;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use structure::{LoopRegion, Structure};
+use structure::Structure;
 use ustr::Ustr;
 
 /// A tier-0 GLSL type. Everything else is rejected by the profile pass.
