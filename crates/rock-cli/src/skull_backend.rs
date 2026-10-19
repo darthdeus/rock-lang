@@ -1422,6 +1422,10 @@ fn skull_build_package_with_limit(
     }).collect::<Vec<_>>();
     let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
     let facts = test_program_facts(&ws);
+    let lua = install_rock_state_metadata(lua, &ws, &spec).map_err(|e| SkullFailure {
+        reason: categorize(&e.message),
+        rendered: render_project_err(&sources, &e),
+    })?.parts().concat();
     // The compiler state is dead once the program is emitted. Free it before
     // the program text is copied and the test process runs: project's peaks near
     // 5 GB, and keeping it resident doubled the memory a `rock test` needed

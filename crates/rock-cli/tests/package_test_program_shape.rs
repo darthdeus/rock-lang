@@ -9,6 +9,8 @@ fn root() -> PathBuf {
 }
 
 const MAIN: &str = r#"
+nobox value Probe { x: int, y: int }
+global SPOT: Probe = Probe { x: 3, y: 4 }
 global counter: int = 0
 pub fn bump() -> int {
     counter = counter + 1
@@ -36,8 +38,24 @@ return table.concat({
 }, " ")
 """
 
+inline(lua) fn logical_probe_x() -> int = """
+local entry = assert(__rock_state_entry_for_name("SPOT"))
+return __rock_state_entry_get(entry).x
+"""
+
+inline(lua) fn logical_probe_set_x(value: int) = """
+local entry = assert(__rock_state_entry_for_name("SPOT"))
+local probe = __rock_state_entry_get(entry)
+probe.x = value
+__rock_state_entry_set(entry, probe)
+"""
+
 @test fn package_test_program_has_no_reload_only_state() {
     assert(bump() == 1, "fixture state")
+    assert(logical_probe_x() == SPOT.x, "package tests expose the logical nobox value")
+    let next = SPOT.x + SPOT.y
+    logical_probe_set_x(next)
+    assert(SPOT.x == next, "package tests write the logical value through its compiler adapter")
     let shape = program_shape()
     assert(shape == "read=true plan_stage=false cell_join=false published=false", shape)
 }
@@ -54,7 +72,7 @@ fn package_test_program_omits_reload_only_state_a_game_build_keeps() {
     std::fs::write(project.join("main.rock"), MAIN).unwrap();
     std::fs::write(project.join("tests/shape.rock"), TEST).unwrap();
 
-    let test = crate::command::rock_bin()
+    let test = std::process::Command::new(env!("CARGO_BIN_EXE_rock-plain"))
         .arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")
@@ -66,7 +84,7 @@ fn package_test_program_omits_reload_only_state_a_game_build_keeps() {
     assert!(text.contains("1/1 @tests passed"), "expected one passing test:\n{text}");
 
     let lua = dir.path().join("game.lua");
-    let compile = crate::command::rock_bin()
+    let compile = std::process::Command::new(env!("CARGO_BIN_EXE_rock-plain"))
         .arg("compile").arg(&project).arg("--output").arg(&lua)
         .current_dir(root())
         .output().expect("compile fixture game");
