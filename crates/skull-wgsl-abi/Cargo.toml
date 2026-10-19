@@ -2,6 +2,8 @@
 name = "skull-wgsl-abi"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Versioned binding-registration contract between the WGSL backend and a WGPU renderer"
 license.workspace = true
 repository.workspace = true
 

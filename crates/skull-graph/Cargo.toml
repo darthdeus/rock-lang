@@ -2,6 +2,10 @@
 name = "skull-graph"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Backend-neutral instance graph and concrete artifact plans"
 
 [features]
 sequential = []

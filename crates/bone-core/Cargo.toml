@@ -2,6 +2,8 @@
 name = "bone-core"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "HIR, annotation registry, module workspace and shared types of the bone typechecker"
 license.workspace = true
 repository.workspace = true
 

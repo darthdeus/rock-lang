@@ -2,6 +2,10 @@
 name = "skull-codegen-lua"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Lua emission, local allocation and frame limits"
 
 # skull-codegen-lua: the dumb Lua printer over skull-mir's typed cell-model CFG.
 # Goto + labels (luajit has real `goto`), liveness-based local naming later. The

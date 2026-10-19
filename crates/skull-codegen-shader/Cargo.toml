@@ -2,6 +2,8 @@
 name = "skull-codegen-shader"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Shared shader lowering, layouts and validation"
 license.workspace = true
 repository.workspace = true
 

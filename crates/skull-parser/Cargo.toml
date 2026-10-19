@@ -2,6 +2,8 @@
 name = "skull-parser"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Parser, AST, macro expansion and desugaring"
 license.workspace = true
 repository.workspace = true
 

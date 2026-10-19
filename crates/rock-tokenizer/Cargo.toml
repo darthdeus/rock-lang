@@ -2,6 +2,8 @@
 name = "rock-tokenizer"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Lexer and string interpolation"
 license.workspace = true
 repository.workspace = true
 

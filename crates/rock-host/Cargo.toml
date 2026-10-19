@@ -6,6 +6,10 @@
 name = "rock-host"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Project discovery, source loading, manifest configuration and compiler process support"
 
 [lints]
 workspace = true

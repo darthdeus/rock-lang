@@ -555,6 +555,7 @@ mod macos {
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;
+    #[cfg(target_os = "macos")]
     use std::sync::mpsc::{channel, RecvTimeoutError};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -735,10 +736,12 @@ mod macos {
             Ok(event)
         }
     }
+    #[cfg(target_os = "macos")]
     pub struct MacHandle {
         stop: Sender<()>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
+    #[cfg(target_os = "macos")]
     impl Drop for MacHandle {
         fn drop(&mut self) {
             // The worker may already have stopped when its consumer disconnected.
@@ -748,6 +751,7 @@ mod macos {
             }
         }
     }
+    #[cfg(target_os = "macos")]
     pub fn start(mut config: FileWatcherConfig, paths: Vec<PathBuf>, change_tx: Sender<FileChangeEvent>) -> Result<MacHandle> {
         // Exact inputs may not exist yet; canonicalize their containing directory.
         let canonical = |path: PathBuf| -> Result<PathBuf> {

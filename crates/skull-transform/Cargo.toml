@@ -2,6 +2,10 @@
 name = "skull-transform"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Control-flow transforms, inlining and coroutine lowering"
 
 # skull-transform: CFG->CFG passes over skull-mir's cell IR. The coroutine pass
 # (`co fn` -> stackless state machine) lives here, separated from the IR + the

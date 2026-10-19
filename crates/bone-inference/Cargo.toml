@@ -2,6 +2,8 @@
 name = "bone-inference"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Type inference: unification, calls, fields, purity"
 license.workspace = true
 repository.workspace = true
 

@@ -2,6 +2,10 @@
 name = "skull"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Compiler driver, artifact assembly and incremental Lua emission"
 autotests = false
 
 # skull is the Claude-managed code-generation backend for `bone`'s HIR. It

@@ -2,11 +2,12 @@
 name = "comfy-la-arena"
 version = "0.3.1"
 description = "Simple index-based arena without deletion, but Copy."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/rust-lang/rust-analyzer/tree/master/lib/la-arena"
+license.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/la-arena"
 categories = ["data-structures", "memory-management", "rust-patterns"]
 edition = "2024"
+publish = false
 rust-version = "1.85"
 
 [lints]

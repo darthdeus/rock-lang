@@ -2,6 +2,8 @@
 name = "skull-codegen-glsl"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "GLSL shader emission"
 license.workspace = true
 repository.workspace = true
 

@@ -2,6 +2,8 @@
 name = "bone-semantic"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Semantic passes, identity-storage validation and typechecker fixtures"
 license.workspace = true
 repository.workspace = true
 

@@ -2,6 +2,10 @@
 name = "rock-cli"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "CLI library and standalone rock-plain compiler"
 autobins = false
 
 [lib]

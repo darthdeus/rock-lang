@@ -2,6 +2,10 @@
 name = "bone-incremental"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Incremental sessions, dependency invalidation and differential fixtures"
 
 [dependencies]
 bone-core = { workspace = true }

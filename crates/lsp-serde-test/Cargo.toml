@@ -2,6 +2,8 @@
 name = "lsp-serde-test"
 version = "0.1.0"
 edition = "2021"
+publish = false
+description = "Checks that the LSP forks serialize like the upstream crates"
 license.workspace = true
 repository.workspace = true
 

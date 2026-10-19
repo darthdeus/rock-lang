@@ -2,6 +2,10 @@
 name = "skull-mir"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Cell-based control-flow IR, lowering and backend layout contracts"
 
 # skull-mir: the cell-model CFG IR + HIR->CFG lowering for skull (the
 # Claude-managed backend). A FAITHFUL realization of docs/bone-mir-design.md:

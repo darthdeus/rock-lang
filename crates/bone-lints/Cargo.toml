@@ -2,6 +2,8 @@
 name = "bone-lints"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Lint catalog, HIR analysis and incremental lint cache"
 license.workspace = true
 repository.workspace = true
 

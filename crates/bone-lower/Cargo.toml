@@ -2,6 +2,8 @@
 name = "bone-lower"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Lowering from the parser AST to the typechecker's HIR"
 license.workspace = true
 repository.workspace = true
 

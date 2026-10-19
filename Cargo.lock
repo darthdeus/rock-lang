@@ -243,16 +243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bone-mir"
-version = "0.1.0"
-dependencies = [
- "bone-semantic",
- "comfy-la-arena",
- "skull-parser",
- "ustr",
-]
-
-[[package]]
 name = "bone-query"
 version = "0.1.0"
 dependencies = [

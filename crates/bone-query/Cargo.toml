@@ -2,6 +2,10 @@
 name = "bone-query"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "IDE queries, completion ranking and the LSP workspace facade"
 autotests = false
 
 # IDE/LSP query layer over bone's typed HIR: protocol-agnostic queries

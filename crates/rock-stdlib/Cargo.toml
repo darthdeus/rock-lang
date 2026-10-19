@@ -2,6 +2,8 @@
 name = "rock-stdlib"
 version = "0.1.0"
 edition = "2024"
+publish = false
+description = "Runtime source discovery and the Rock standard library in stdlib/"
 license.workspace = true
 repository.workspace = true
 

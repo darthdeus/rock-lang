@@ -2509,6 +2509,7 @@ fn is_script_source(text: &str) -> bool {
 }
 
 #[test]
+#[ignore = "requires ROCK_FUZZ_REAL=1; run explicitly with --ignored"]
 fn fuzz_session_fixture_package_graph() {
     if std::env::var("ROCK_FUZZ_REAL").is_err() {
         eprintln!("fuzz_session_fixture_package_graph skipped (set ROCK_FUZZ_REAL=1)");

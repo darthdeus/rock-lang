@@ -2,9 +2,10 @@
 name = "lsp-server-manual"
 version = "0.7.9"
 edition = "2024"
+publish = false
 description = "Generic LSP server scaffold. Fork of lsp-server 0.7.9 with hand-rolled serde (no serde_derive)."
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/rust-lang/rust-analyzer/tree/master/lib/lsp-server"
+license.workspace = true
+repository.workspace = true
 
 [lints]
 workspace = true
