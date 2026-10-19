@@ -8,6 +8,7 @@ pub mod code_repr;
 pub mod compile_stats;
 pub mod errors;
 pub mod module_id;
+pub mod nesting;
 pub mod node_id;
 pub mod scope;
 pub mod shuffle;

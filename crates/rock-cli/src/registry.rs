@@ -424,11 +424,12 @@ pub struct EarlyEntry {
     pub run: fn(Vec<String>) -> i32,
 }
 
-/// Run the early entry named by the first argument, if one is registered.
-/// `args` excludes argv[0].
-pub fn run_early_entry(mut args: impl Iterator<Item = String>) -> Option<i32> {
+/// Run the early entry named by the first argument, if one is registered,
+/// calling `prepare` first. `args` excludes argv[0].
+pub fn run_early_entry(mut args: impl Iterator<Item = String>, prepare: impl FnOnce()) -> Option<i32> {
     let first = args.next()?;
     let entry = registered().early_entries.iter().find(|e| e.name == first)?;
+    prepare();
     Some((entry.run)(args.collect()))
 }
 

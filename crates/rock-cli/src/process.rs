@@ -5,10 +5,43 @@ use crate as rock_cli;
 /// Run a CLI process with a static host table, including parsing, logging and cleanup.
 /// Call once, before spawning application threads.
 pub fn main_with(registrations: &'static crate::registry::Registrations) {
+    // The command runs on its own thread because the main thread's stack is
+    // fixed by the OS (often 8 MiB) and compiler passes recurse over the
+    // source tree; see `rock_core::nesting` for the bound.
+    let command = std::thread::Builder::new()
+        .name("rock".into())
+        .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
+        .spawn(move || run_process(registrations))
+        .unwrap_or_else(|error| {
+            eprintln!("Error: cannot start the compiler thread: {error}");
+            std::process::exit(1);
+        });
+    if let Err(panic) = command.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Build rayon's global pool with the compiler stack; `threads` of `None`
+/// keeps rayon's default count. Ignore errors: a pool already initialized
+/// elsewhere is kept.
+#[cfg(not(feature = "sequential"))]
+fn install_compiler_pool(threads: Option<usize>) {
+    let mut pool = rayon::ThreadPoolBuilder::new().stack_size(rock_core::nesting::COMPILER_STACK_BYTES);
+    if let Some(threads) = threads {
+        pool = pool.num_threads(threads);
+    }
+    let _ = pool.build_global();
+}
+
+fn run_process(registrations: &'static crate::registry::Registrations) {
     crate::registry::install(registrations);
     // Early entries (`rock lsp`) run before the allocator default, the logger
     // and clap: they install their own process state.
-    if let Some(code) = rock_cli::registry::run_early_entry(std::env::args().skip(1)) {
+    #[cfg(not(feature = "sequential"))]
+    let prepare = || install_compiler_pool(None);
+    #[cfg(feature = "sequential")]
+    let prepare = || {};
+    if let Some(code) = rock_cli::registry::run_early_entry(std::env::args().skip(1), prepare) {
         std::process::exit(code);
     }
 
@@ -94,8 +127,7 @@ pub fn main_with(registrations: &'static crate::registry::Registrations) {
     // its own (c_test.rs).
     //
     // Honor RAYON_NUM_THREADS / ROCK_NUM_THREADS if set; otherwise
-    // cap at 6. Ignore errors - if rayon's pool was already
-    // initialized somewhere else we just keep going.
+    // cap at 6.
     //
     // Under `--features sequential` we skip building the pool entirely:
     // with rock-semantic's loading also serial under that feature, no
@@ -109,9 +141,7 @@ pub fn main_with(registrations: &'static crate::registry::Registrations) {
                 .unwrap_or(4)
                 .min(6)
         });
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(cap_threads)
-            .build_global();
+        install_compiler_pool(Some(cap_threads));
     }
 
     let context = CommandContext::new(args);

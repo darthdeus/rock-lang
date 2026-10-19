@@ -249,6 +249,32 @@ mod tests {
     }
 
     #[test]
+    fn nesting_beyond_the_limit_drops_only_its_item() {
+        let depth = rock_core::nesting::MAX_NESTING_DEPTH as usize;
+        let deep = format!("fn deep() {{\n{}{}}}\n", "if true {\n".repeat(depth), "}\n".repeat(depth));
+        let src = format!("{deep}fn after() {{\n    let broken =\n    let kept = 1\n}}\n");
+        // The parser recurses to the limit, so it needs the stack compiler threads get.
+        let ast = std::thread::Builder::new()
+            .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
+            .spawn(move || parse_module(&src, Ustr::from("<deep>")).expect("tokenization"))
+            .unwrap()
+            .join()
+            .unwrap();
+        let messages: Vec<&str> = ast.recovery_errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages.len(), 2, "one error for the deep item, one for the broken let: {messages:?}");
+        assert!(messages[0].contains("nested too deeply"), "{messages:?}");
+        let names: Vec<_> = ast
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Function(f) => Some(f.name.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["after"], "the deep fn is dropped and statement recovery still works after it");
+    }
+
+    #[test]
     fn missing_generic_close_is_recorded_as_recovery() {
         let src = "struct Box<T { value: int }\n";
         let ast = parse_module(src, Ustr::from("<generic-close>")).expect("tokenization");

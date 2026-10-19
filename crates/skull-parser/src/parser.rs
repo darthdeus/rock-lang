@@ -11,6 +11,7 @@
 use crate::ast::*;
 use rock_core::source_code::{Dialect, MemoryClass};
 use rock_core::{CompilerError, Span};
+use rock_core::nesting::MAX_NESTING_DEPTH;
 use rock_tokenizer::{interp, Token, TokenKind, Tokenizer};
 use ustr::Ustr;
 
@@ -53,6 +54,14 @@ pub struct Parser<'a> {
     /// Pratt loop breaks at `:` so the paren arm owns the `(expr : Type)`
     /// ascription form (spec 7) instead of `:` binding as a binop.
     paren_head: u32,
+    /// Expression and block levels enclosing the current parse position.
+    nesting: u32,
+    /// Height, in nesting levels, of the deepest expression or block completed
+    /// within the innermost level still open; see [`Parser::nesting_level`].
+    nested_height: u32,
+    /// Set when the nesting limit is hit, so statement recovery propagates
+    /// the error to the item instead of resuming at the same depth.
+    too_deep: bool,
     /// Source text a span can be read back from, innermost last. Interpolated
     /// strings are re-scanned from RAW source so each hole's sub-expression gets
     /// a real file span; a hole whose text carried `\`-escapes is cooked into
@@ -205,6 +214,9 @@ impl<'a> Parser<'a> {
             hole_counter: 0,
             dialect,
             paren_head: 0,
+            nesting: 0,
+            nested_height: 0,
+            too_deep: false,
         }
     }
 
@@ -359,6 +371,7 @@ impl<'a> Parser<'a> {
                     // supported item start has a branch in `parse_item_inner`), so
                     // this stays empty for well-formed programs.
                     self.ast.recovery_errors.push(e);
+                    self.too_deep = false;
                     self.recover_to_next_item(self.pos > item_start);
                 }
             }
@@ -2213,6 +2226,41 @@ impl<'a> Parser<'a> {
     // ---- blocks & statements ---------------------------------------------
 
     fn parse_block(&mut self) -> PResult<Idx<BlockData>> {
+        self.nesting_level(Self::parse_block_level)
+    }
+
+    /// Parse one expression or block level, rejecting source nested deeper
+    /// than [`MAX_NESTING_DEPTH`]. Later passes recurse over the tree, so the
+    /// limit is the tree's height, not only this parser's recursion: a
+    /// left-associative chain is parsed by a loop but nests one level per
+    /// operand. `nesting` stops the descent; `nested_height` measures the
+    /// finished tree bottom-up, with the expression loop adding one per fold.
+    fn nesting_level<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        if self.nesting >= MAX_NESTING_DEPTH {
+            return Err(self.too_deep_error(self.span()));
+        }
+        let start = self.span();
+        self.nesting += 1;
+        let enclosing = std::mem::take(&mut self.nested_height);
+        let result = parse(self);
+        let height = self.nested_height + 1;
+        self.nesting -= 1;
+        self.nested_height = enclosing.max(height);
+        match result {
+            Ok(_) if height > MAX_NESTING_DEPTH => Err(self.too_deep_error(start)),
+            result => result,
+        }
+    }
+
+    fn too_deep_error(&mut self, span: Span) -> CompilerError {
+        self.too_deep = true;
+        CompilerError::new_with_label(
+            span,
+            format!("source nested too deeply: more than {MAX_NESTING_DEPTH} levels of expressions and blocks"),
+        )
+    }
+
+    fn parse_block_level(&mut self) -> PResult<Idx<BlockData>> {
         // A comment immediately before the `{` (e.g. `if cond /* c */ {`) is
         // skipped — it isn't a block statement and would otherwise wall here.
         self.skip_comments();
@@ -2241,6 +2289,10 @@ impl<'a> Parser<'a> {
                     // statement so they don't become standalone comment statements.
                     self.consume_trailing_comments();
                     while self.eat(TokenKind::Semicolon) {}
+                }
+                Err(e) if self.too_deep => {
+                    self.brace_depth -= 1;
+                    return Err(e);
                 }
                 Err(e) => {
                     // Statement-level recovery: a broken statement (e.g. a `let`
@@ -2523,9 +2575,19 @@ impl<'a> Parser<'a> {
     // ---- expressions (Pratt) ---------------------------------------------
 
     fn parse_expr(&mut self, min_bp: u8) -> PResult<Idx<ExprData>> {
+        self.nesting_level(|p| p.parse_expr_level(min_bp))
+    }
+
+    fn parse_expr_level(&mut self, min_bp: u8) -> PResult<Idx<ExprData>> {
         let mut left = self.parse_prefix()?;
+        let mut measured = left;
 
         loop {
+            // Each fold below wraps `left` in a new node one level higher.
+            if left != measured {
+                measured = left;
+                self.nested_height += 1;
+            }
             self.skip_comments_in_expr();
             let op = self.kind();
 

@@ -301,3 +301,41 @@ fn plain_scan_assigns_no_archive_semantics() {
     assert_eq!(rock_cli::lint_union::bin_projects_under(root.path()), expected);
     assert_eq!(rock_cli::lint_union::bin_projects_under(&projects[1]), vec![projects[1].clone()]);
 }
+
+fn nested_programs(depth: usize) -> [(String, String); 2] {
+    let sum = vec!["1"; depth].join(" + ");
+    let ifs = format!("{}print(1)\n{}", "if true {\n".repeat(depth), "}\n".repeat(depth));
+    [
+        (format!("sum{depth}"), format!("fn main() {{\n    let x = {sum}\n    print(x)\n}}\n")),
+        (format!("ifs{depth}"), format!("fn main() {{\n{ifs}}}\n")),
+    ]
+}
+
+#[test]
+fn plain_compiles_deeply_nested_generated_code() {
+    let root = tempfile::tempdir().unwrap();
+    for depth in [200, 2000] {
+        for (name, source) in nested_programs(depth) {
+            let file = format!("{name}.rock");
+            std::fs::write(root.path().join(&file), source).unwrap();
+            let out = invoke(root.path(), &["compile-single", &file]);
+            assert!(out.status.success(), "{name}: {}", text(&out));
+            assert!(String::from_utf8_lossy(&out.stdout).contains("print"), "{name}: no Lua emitted");
+        }
+    }
+}
+
+#[test]
+fn plain_rejects_nesting_beyond_the_limit_with_a_diagnostic() {
+    let root = tempfile::tempdir().unwrap();
+    // The ifs go deep enough that the parser's own descent needs the guard.
+    let [sum, _] = nested_programs(20_000);
+    let [_, ifs] = nested_programs(100_000);
+    for (name, source) in [sum, ifs] {
+        let file = format!("{name}.rock");
+        std::fs::write(root.path().join(&file), source).unwrap();
+        let out = invoke(root.path(), &["compile-single", &file]);
+        assert!(!out.status.success(), "{name} compiled");
+        assert!(text(&out).contains("nested too deeply"), "{name}: {}", text(&out));
+    }
+}
