@@ -12,6 +12,7 @@ autobins = false
 path = "src/lib.rs"
 
 [features]
+default = ["renderer-wgpu"]
 # Shared Lua execution oracles for downstream compiler integration tests.
 test-support = ["dep:test-utils"]
 # Use sequential compiler passes for sampling without Rayon worker frames.
