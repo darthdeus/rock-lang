@@ -277,9 +277,12 @@ pub struct Session {
     /// whose signatures / globals / fields name it. The interface twin of
     /// `dependents` (which tracks body references). An interface change re-LOWERS
     /// these dependents (their signatures must re-resolve the name); a body change
-    /// only re-infers `dependents`. Built from each module's lowered interface
-    /// arena in `rebuild_dependents`.
+    /// only re-infers `dependents`. Rebuilt from cached lowered-interface names
+    /// in `rebuild_dependents`.
     pub dependents_iface: FxHashMap<Ustr, FxHashSet<ModuleId>>,
+    /// Independent of inference: even a module with body errors has interface
+    /// deps. Invalidated when its lowered interface is replaced or purged.
+    module_iface_dep_names: FxHashMap<ModuleId, FxHashSet<Ustr>>,
     pub registry: MacroRegistry,
     /// Macros defined by the WARM (stdlib) modules, paired with their defining
     /// file. `files` only covers user macros, so without this the stdlib ones
@@ -770,6 +773,7 @@ impl Session {
             dependents: Default::default(),
             module_dep_names: Default::default(),
             dependents_iface: Default::default(),
+            module_iface_dep_names: Default::default(),
             registry: Default::default(),
             warm_macros,
             aliases: aliases.clone(),
@@ -1654,6 +1658,7 @@ impl Session {
         self.paths.iter().map(|s| s.as_str()).collect()
     }
     pub fn retain_modules(&mut self, keep: impl Fn(ModuleId) -> bool) {
+        self.module_iface_dep_names.retain(|mid, _| keep(*mid));
         for (i, slot) in self.ws.inferences.iter_mut().enumerate() {
             if !keep(ModuleId::new(i as u32)) {
                 *slot = None;
@@ -1712,6 +1717,7 @@ impl Session {
         // Commit -- past this point nothing fails, so `self.ws` never observes a
         // partially-interned workspace.
         self.ws = ws;
+        self.module_iface_dep_names.clear();
         self.registry = registry;
 
         let reinferred = self.collect_reinferred(&user_mids);
@@ -1756,14 +1762,17 @@ impl Session {
 
         // Interface-position references: each nominal type name a module's
         // INTERFACE arena mentions (signatures / globals / fields / enum payloads).
-        // Read from the lowered HIR, not inference -- a module with no inference
-        // (e.g. a body-error-only module) still has interface deps.
+        // Cache from the lowered HIR, not inference -- a module with no inference
+        // (e.g. a body-error-only module) still has interface deps. Kept interfaces
+        // need no arena walk; `retain_modules` invalidates the replaced ones.
         for module in self.ws.modules.iter() {
             let mid = module.id;
             if mid == ModuleId::builtin() || self.warm_mids.contains(&mid) {
                 continue;
             }
-            for name in iface_dep_names(module) {
+            let names = self.module_iface_dep_names.entry(mid)
+                .or_insert_with(|| iface_dep_names(module));
+            for &name in names.iter() {
                 self.dependents_iface.entry(name).or_default().insert(mid);
             }
         }
