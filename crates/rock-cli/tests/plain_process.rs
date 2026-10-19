@@ -1,4 +1,6 @@
 //! The public CLI runs outside the monorepo with only a LuaJIT installation.
+use std::io::ErrorKind;
+use std::path::Path;
 use std::process::{Command, Output};
 
 fn invoke(root: &std::path::Path, args: &[&str]) -> Output {
@@ -395,23 +397,55 @@ fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
     assert!(record.contains("\"fmt\""), "explicit ROCK_INVOCATION_LOG not written: <{record}>\n{}", text(&out));
 }
 
+/// Publishes the built binary at `exe` without leaving its inode open for
+/// writing, so executing `exe` cannot fail with "Text file busy".
+///
+/// A plain copy holds the destination open for writing until it finishes, and a
+/// test thread that forks in that window passes the write fd to a child; the
+/// child keeps the inode write-referenced until it execs (O_CLOEXEC closes the
+/// fd only at exec), and neither closing our fd nor renaming the file clears
+/// that. A hard link never opens the inode for writing, so it removes the race
+/// wherever the built binary and the relocation dir share a filesystem; the copy
+/// fallback stages under a temporary name so `exe` never holds a partial file.
+fn relocate(from: &str, exe: &Path) {
+    if std::fs::hard_link(from, exe).is_ok() { return; }
+    let staging = exe.with_extension("staging");
+    std::fs::copy(from, &staging).expect("copy the built binary");
+    std::fs::rename(&staging, exe).expect("publish the relocated binary");
+}
+
+/// Starts the relocated binary, retrying while the copy fallback's write fd is
+/// still held by a sibling test's forked child (see `relocate`). A retry spans
+/// one fork-to-exec hop; the deadline keeps a genuine failure reportable.
+fn start_relocated(exe: &Path, root: &Path, args: &[&str]) -> Output {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let started = Command::new(exe)
+            .current_dir(root).args(args)
+            .env("ROCK_DIR", root).env("ROCK_INVOCATION_LOG", "off")
+            .env_remove("ROCK_STDLIB_DIR").env_remove("LUA_PATH").env_remove("LUA_CPATH")
+            .output();
+        match started {
+            Err(error) if error.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            other => return other.expect("start relocated rock"),
+        }
+    }
+}
+
 #[test]
 fn plain_rock_runs_relocated_outside_any_checkout() {
-    // An installed binary has no checkout and no stdlib beside it: copy the
+    // An installed binary has no checkout and no stdlib beside it: relocate the
     // built binary into a bare temp dir (no bin/ layout, no stdlib sibling)
     // and compile + run a small program from another temp dir.
     let home = tempfile::tempdir().unwrap();
     let exe = home.path().join(if cfg!(windows) { "rock.exe" } else { "rock" });
-    std::fs::copy(env!("CARGO_BIN_EXE_rock"), &exe).unwrap();
+    relocate(env!("CARGO_BIN_EXE_rock"), &exe);
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("main.rock"), "fn main() { print(6 * 7) }\n").unwrap();
-    let run = |args: &[&str]| {
-        Command::new(&exe)
-            .current_dir(root.path()).args(args)
-            .env("ROCK_DIR", root.path()).env("ROCK_INVOCATION_LOG", "off")
-            .env_remove("ROCK_STDLIB_DIR").env_remove("LUA_PATH").env_remove("LUA_CPATH")
-            .output().expect("start relocated rock")
-    };
+    let run = |args: &[&str]| start_relocated(&exe, root.path(), args);
     let compiled = run(&["compile-single", "main.rock"]);
     assert!(compiled.status.success(), "{}", text(&compiled));
     assert!(String::from_utf8_lossy(&compiled.stdout).contains("print"), "no Lua emitted");
