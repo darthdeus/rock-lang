@@ -7,19 +7,49 @@ on:
 permissions:
   contents: read
 
+env:
+  # LuaJIT v2.1 at 2.1.1785763465.
+  LUAJIT_SHA: 1edc3e52b67eaf6ce5f809be8e17d6862594b8bc
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install LuaJIT
-        run: sudo apt-get update && sudo apt-get install -y luajit
+      # Distro LuaJIT builds older than 2.1.1785763465 round some exact
+      # ties in number formatting differently from the correctly rounded
+      # result that the Lua and JS backends must agree on.
+      - name: Cache LuaJIT
+        id: luajit-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/luajit
+          key: luajit-${{ runner.os }}-${{ env.LUAJIT_SHA }}
+      - name: Build LuaJIT
+        if: steps.luajit-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/luajit-src"
+          git init -q "$src"
+          git -C "$src" fetch -q --depth 1 https://github.com/LuaJIT/LuaJIT.git "$LUAJIT_SHA"
+          git -C "$src" checkout -q FETCH_HEAD
+          make -C "$src" -j"$(nproc)" PREFIX="$HOME/luajit"
+          make -C "$src" install PREFIX="$HOME/luajit"
+      - name: Put LuaJIT on PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$HOME/luajit/bin" >> "$GITHUB_PATH"
+          "$HOME/luajit/bin/luajit" -v
       - name: Check public content
         shell: bash
         run: |
           git grep -I -h . -- . ':!crates/lsp-types-manual/Cargo.toml' ':!crates/lsp-types-manual/Cargo.toml.orig' > "$RUNNER_TEMP/public-content.txt"
           .githooks/check-public "$RUNNER_TEMP/public-content.txt"
+      - name: Show LuaJIT
+        run: command -v luajit && luajit -v
       - name: Build workspace
         run: cargo build --locked --workspace
       - name: Test workspace
