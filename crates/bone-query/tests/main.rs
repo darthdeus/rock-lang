@@ -58,6 +58,8 @@ mod phantom_block_sentinel;
 mod query;
 #[path = "reachability.rs"]
 mod reachability;
+#[path = "semantic_token_mutations.rs"]
+mod semantic_token_mutations;
 #[path = "semantic_tokens.rs"]
 mod semantic_tokens;
 #[path = "stale_spans_after_body_edit.rs"]

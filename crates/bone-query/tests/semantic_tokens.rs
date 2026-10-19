@@ -4,12 +4,6 @@
 use bone_query::{semantic_tokens_legend, semantic_tokens_modifiers_legend, BoneWorkspace};
 use lsp_types::{Position, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType};
 
-/// Seeded adversarial mutation harness for this module's token surface. Declared
-/// here (not in `main.rs`) so its cases keep the `semantic_tokens::` name prefix
-/// that `just lsp-fuzz` selects.
-#[path = "semantic_token_mutations.rs"]
-mod mutations;
-
 /// `semantic_tokens_range` must agree with `semantic_tokens` over the whole file
 /// (same tokens, same delta encoding) and emit strictly fewer for a viewport --
 /// it's the `textDocument/semanticTokens/range` path nvim uses for open/scroll.
@@ -36,8 +30,7 @@ const PATH: &str = "/tmp/rock_lsp_bone_semtok.rock";
 /// One decoded semantic token: absolute 0-based `(line, char-col)`, its char
 /// length, the legend index of its type and its raw modifier bitset.
 ///
-/// Absolute decoding is the shared adapter: the per-kind tests project type or
-/// modifiers out of it, and the mutation harness reads token ranges off it.
+/// The per-kind tests project type or modifiers out of this adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DecodedToken {
     line: u32,
@@ -277,20 +270,9 @@ fn cross_file_struct_name_colors_as_struct() {
     let bp = bpath.to_str().unwrap();
     bone.update(bp, bsrc.to_string());
     let legend = semantic_tokens_legend();
-    let (mut line, mut col) = (0u32, 0u32);
-    let toks: Vec<_> = bone
-        .semantic_tokens(bp)
-        .data
+    let toks: Vec<_> = decode_workspace(&bone, bp)
         .into_iter()
-        .map(|t| {
-            if t.delta_line != 0 {
-                line += t.delta_line;
-                col = t.delta_start;
-            } else {
-                col += t.delta_start;
-            }
-            (line, col, legend[t.token_type as usize].clone())
-        })
+        .map(|t| (t.line, t.col, legend[t.token_type as usize].clone()))
         .collect();
     // `Mob` return type on line 0 (col 13) -- defined in a.rock.
     assert_eq!(
