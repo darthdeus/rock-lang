@@ -1,9 +1,24 @@
 # Rock
 
-Rock is a statically typed language for writing games, compiled to Lua
-(LuaJIT) and to shaders. This repository is where the compiler is moving as
-it is prepared for an open-source release; it currently holds the
-crates listed below.
+Rock is a statically typed programming language. Programs compile to
+Lua and run on LuaJIT; `@shader` functions compile to GLSL and WGSL.
+
+```rock
+// Your first Rock program. Save it as hello.rock and run it:
+//
+//     rock run hello.rock
+//
+fn main() {
+    print("hello from Rock")
+    let answer = 6 * 7
+    print(answer)
+    print("6 times 7 is {answer}")
+}
+```
+
+```sh
+rock run hello.rock
+```
 
 ## Install
 
@@ -21,7 +36,13 @@ export PATH="$PWD/rock-<target-triple>/bin:$PATH"
 `rock run` and `rock test` execute programs with LuaJIT, so `luajit` must be
 on `PATH`; `--backend js` additionally needs `node`.
 
-## Crates
+## Language guide
+
+New to Rock? Start with [docs/guide.md](docs/guide.md): a tour of the
+language in runnable examples, from a first program through structs,
+enums, optionals, generics, modules, tests and shaders.
+
+## Repository layout
 
 | Crate | Origin |
 |---|---|
