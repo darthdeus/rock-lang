@@ -4257,9 +4257,13 @@ mod backend_stats_workspace_tests {
                 path.to_string_lossy().into_owned()
             })
             .collect();
+        let source = std::fs::canonicalize(source).expect("canonical source path");
         for selected in [paths, vec![dir.path().to_string_lossy().into_owned()]] {
             let (files, packages) = crate::skull_backend::collect_test_units(&selected).unwrap();
-            assert_eq!(files, vec![source.to_string_lossy().into_owned()]);
+            let files: Vec<_> = files.into_iter()
+                .map(|file| std::fs::canonicalize(file).expect("canonical collected source"))
+                .collect();
+            assert_eq!(files, vec![source.clone()]);
             assert!(packages.is_empty());
         }
     }
