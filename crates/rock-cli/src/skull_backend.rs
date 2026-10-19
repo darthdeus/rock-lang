@@ -1,7 +1,7 @@
 //! skull backend integration for `rock-cli` (selected via `--backend skull`).
 //!
 //! skull is the Claude-managed codegen on top of `bone`'s HIR (see the `skull`
-//! crate + `docs/skull-plan.md`). Where `--backend bone` stops at type-checking,
+//! crate + the compiler contract). Where `--backend bone` stops at type-checking,
 //! `--backend skull` goes one step further: it emits Lua from bone's HIR and
 //! (for `test`/`run`) executes it via luajit.
 //!
@@ -12,446 +12,14 @@
 //! goal is `rock test tests --backend skull` at 100%.
 
 use crate::Result;
+use crate::registry::{ProgramKind, RuntimeServices};
 use crate::bone_backend::{categorize, short_path};
-use anyhow::Context;
 use colored::Colorize;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
-
-// Both compile caches share this identity and storage path so invalidation and
-// publication stay identical for sim receipts and frame artifacts.
-// Compile-related prefixes default to keyed; these are runner and diagnostics.
-const COMPILE_CACHE_KEYED_ENV_PREFIXES: &[&str] = &["ROCK_", "SKULL_", "BONE_"];
-const COMPILE_CACHE_KEYED_ENV_NAMES: &[&str] = &["GAME_ART_VAULT", "GAME_SOURCE_DIR", "CARGO_TARGET_DIR", "HOME"];
-const COMPILE_CACHE_UNKEYED_ENV: &[&str] = &[
-    "ROCK_SIM_COMPILE_CACHE",
-    "ROCK_SIM_COMPILE_CACHE_DIR",
-    "ROCK_SIM_COMPILE_CACHE_MAX_MB",
-    "ROCK_SIM_COMPILE_RECEIPT_DIR",
-    "ROCK_SIM_COMPILE_RECEIPT_PREPARE",
-    "ROCK_SIM_COMPILE_SELECTION",
-    "ROCK_BUILD_COMMAND",
-    "ROCK_SKULL_ROUTE_PROFILE",
-    "ROCK_FRAME_COMPILE_CACHE",
-    "ROCK_FRAME_COMPILE_CACHE_DIR",
-    "ROCK_FRAME_COMPILE_CACHE_MAX_MB",
-    "ROCK_FRAME_COMPILE_CACHE_STATS",
-    "ROCK_FRAME_TIMEOUT_SECS",
-    "ROCK_FRAME_WATCHDOG",
-    "ROCK_PERF_STARTUP_WATCHDOG",
-    "ROCK_RUN_SIM",
-    "ROCK_TEST_SEED",
-    "ROCK_MASK_WALL_CLOCK",
-    "ROCK_DETERMINISTIC_IDS",
-    "ROCK_HEADLESS_SCOPE",
-    "ROCK_LUAJIT",
-    "ROCK_AGENT_DAEMON_BIN",
-    "ROCK_AGENT_DAEMON_SOCK",
-    "ROCK_ENGINE_BUILD_RECEIPT",
-    "ROCK_SKIP_ENGINE_BUILD",
-    "ROCK_NUM_THREADS",
-    "ROCK_TEST_TMP",
-    "ROCK_TEST_FILTER",
-    "ROCK_TEST_SHARDS",
-    "ROCK_TEST_SHARD_TESTS",
-    "ROCK_TEST_TIMINGS",
-    "ROCK_TEST_VERBOSE",
-    "ROCK_TEST_GC_COLLECT_MB",
-    "ROCK_TEST_RECEIPT_RELEASE_HELPER",
-    "ROCK_COMPILE_SLOT_TEST_CHILD_DIR",
-    "ROCK_VERBOSE_TIMING",
-    "ROCK_UI_TRACE_DIR",
-    "ROCK_COMPILE_STATS",
-    crate::compile_slots::SPAWN_PHASE_FILE_ENV,
-    crate::compile_slots::SLOTS_ENV,
-    crate::compile_slots::CLASS_ENV,
-    crate::compile_slots::SLOT_DIR_ENV,
-    "ROCK_JOB_ID",
-    "ROCK_INVOCATION_LOG",
-    crate::invocation_log::PARENT_ENV,
-    "ROCK_CHANGE_ID",
-    "ROCK_LOG_EPOCH_MS",
-    "ROCK_SIM_COMPILE_TIMING",
-    "ROCK_SIM_ENTRY_PLAN",
-    "ROCK_SIM_KEEP_BUILD",
-    "ROCK_SIM_LIFECYCLE_LOG",
-    "ROCK_SIM_LOG_DIR",
-    "ROCK_SIM_MEMORY_MB",
-    "ROCK_SIM_SLOT_LOCK",
-    "ROCK_SIM_SPAWN_BARRIER",
-    "ROCK_SIM_TIMEOUT_SECS",
-    "ROCK_SIM_WORKER_SLOTS",
-    "ROCK_SIM_WORKER_SLOT_DIR",
-    "ROCK_SIM_WORKER_WAIT_LOG",
-];
-const COMPILE_CACHE_UNKEYED_ENV_PREFIXES: &[&str] = &["ROCK_JOBS_", "ROCK_SIM_WARN_"];
-
-pub(crate) fn cache_sha256_bytes(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-pub(crate) fn cache_sha256_file(path: &std::path::Path) -> Result<String> {
-    use anyhow::Context;
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    std::io::copy(
-        &mut std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?,
-        &mut hasher,
-    )
-    .with_context(|| format!("hash {}", path.display()))?;
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-pub(crate) fn compile_cache_environment_is_keyed(name: &str) -> bool {
-    (COMPILE_CACHE_KEYED_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-        || COMPILE_CACHE_KEYED_ENV_NAMES.contains(&name))
-        && !COMPILE_CACHE_UNKEYED_ENV.contains(&name)
-        && !COMPILE_CACHE_UNKEYED_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-}
-
-fn compile_cache_environment_sha256() -> String {
-    let keyed = std::env::vars_os()
-        .filter_map(|(name, value)| {
-            let name = name.to_string_lossy().into_owned();
-            compile_cache_environment_is_keyed(&name).then(|| (name, value.to_string_lossy().into_owned()))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    cache_sha256_bytes(serde_json::json!(keyed).to_string().as_bytes())
-}
-
-fn compile_cache_build_vars_sha256(inputs: &bone_semantic::inference::ComptimeInputs) -> String {
-    let mut volatile = inputs.volatile_vars.iter().map(|name| name.as_str()).collect::<Vec<_>>();
-    volatile.sort_unstable();
-    let mut vars = inputs
-        .vars
-        .iter()
-        .filter(|(name, _)| !inputs.volatile_vars.contains(*name))
-        .map(|(name, var)| (name.as_str(), var.value.as_str(), var.secret))
-        .collect::<Vec<_>>();
-    vars.sort_unstable();
-    let canonical = serde_json::json!({
-        "channel": inputs.channel,
-        "modules_mode": inputs.modules_mode,
-        "embed_root": inputs.embed_root.as_ref().map(|root| root.to_string_lossy().into_owned()),
-        "volatile": volatile,
-        "vars": vars,
-    });
-    cache_sha256_bytes(canonical.to_string().as_bytes())
-}
-
-fn compile_cache_stdlib_digest() -> serde_json::Value {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for file in rock_host::stdlib_loader::stdlib_files() {
-        hasher.update(file.name.as_bytes());
-        hasher.update([0]);
-        hasher.update((file.contents.len() as u64).to_le_bytes());
-        hasher.update(file.contents.as_bytes());
-    }
-    serde_json::json!({
-        "dir": rock_host::stdlib_loader::stdlib_dir().to_string_lossy(),
-        "sha256": format!("{:x}", hasher.finalize()),
-    })
-}
-
-/// This `rock` binary, for compiles that run in this process or in a child of it.
-pub(crate) fn current_rock_exe() -> Result<std::path::PathBuf> {
-    std::env::current_exe().context("locating the rock binary")
-}
-
-/// SHA-256 of the compiler `rock_exe` names, or `None` when it cannot be
-/// pinned. Compile caches are off without it: a key must name the compiler
-/// that produced the artifact, not whatever is at the path now. This process's
-/// own binary is pinned to its running image, refused when replaced after the
-/// process started; another binary (a test harness keying the `rock` it spawns)
-/// is hashed from its path, refused when it changes during the read. Memoized
-/// per path.
-pub(crate) fn compile_cache_compiler_sha256(rock_exe: &std::path::Path) -> Option<String> {
-    static HASHES: std::sync::OnceLock<std::sync::Mutex<HashMap<std::path::PathBuf, Option<String>>>> =
-        std::sync::OnceLock::new();
-    let hashes = HASHES.get_or_init(Default::default);
-    if let Some(hash) = hashes.lock().unwrap().get(rock_exe) {
-        return hash.clone();
-    }
-    let running = std::env::current_exe().is_ok_and(|exe| exe == rock_exe);
-    let hash = if running {
-        running_image_sha256()
-    } else {
-        file_sha256_if_unchanged_since(rock_exe, std::time::SystemTime::now())
-    };
-    let hash = match hash {
-        Ok(Some(hash)) => Some(hash),
-        Ok(None) => {
-            log::warn!(target: "CLI", "{} changed while it was keyed; compile caches are off", rock_exe.display());
-            None
-        }
-        Err(error) => {
-            log::warn!(target: "CLI", "cannot hash {}; compile caches are off: {error:#}", rock_exe.display());
-            None
-        }
-    };
-    hashes.lock().unwrap().insert(rock_exe.to_path_buf(), hash.clone());
-    hash
-}
-
-#[cfg(target_os = "linux")]
-fn running_image_sha256() -> Result<Option<String>> {
-    // The kernel resolves this to the mapped image even after its path is replaced.
-    cache_sha256_file(std::path::Path::new("/proc/self/exe")).map(Some)
-}
-
-#[cfg(target_os = "macos")]
-fn running_image_sha256() -> Result<Option<String>> {
-    let exe = std::env::current_exe().context("locate the rock binary to key the compile")?;
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    // SAFETY: `info` is a writable proc_bsdinfo of exactly `size` bytes.
-    let written = unsafe {
-        libc::proc_pidinfo(
-            std::process::id() as libc::c_int,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&mut info as *mut libc::proc_bsdinfo).cast(),
-            size,
-        )
-    };
-    if written != size {
-        return Err(std::io::Error::last_os_error()).context("read this process's start time");
-    }
-    let started = std::time::UNIX_EPOCH
-        + Duration::from_secs(info.pbi_start_tvsec)
-        + Duration::from_micros(info.pbi_start_tvusec);
-    file_sha256_if_unchanged_since(&exe, started)
-}
-
-/// Hash `path` if it is the same file before and after the read and was last
-/// written before `started`; `None` otherwise.
-#[cfg(unix)]
-fn file_sha256_if_unchanged_since(path: &std::path::Path, started: std::time::SystemTime) -> Result<Option<String>> {
-    use std::os::unix::fs::MetadataExt;
-    let stamp = |meta: &std::fs::Metadata| (meta.dev(), meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec());
-    let before = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    let hash = cache_sha256_file(path)?;
-    let after = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    let written = before.modified().with_context(|| format!("mtime of {}", path.display()))?;
-    Ok((stamp(&before) == stamp(&after) && written <= started).then_some(hash))
-}
-
-pub(crate) fn compile_cache_identity(
-    project: &std::path::Path,
-    backend: crate::Backend,
-    comptime: &bone_semantic::inference::ComptimeInputs,
-    rock_exe: &std::path::Path,
-) -> Result<serde_json::Value> {
-    use anyhow::Context;
-    // Null only where caching is off; a child that cannot pin its compiler keys
-    // its receipt to null, which no parent lookup matches.
-    let compiler_sha256 = compile_cache_compiler_sha256(rock_exe);
-    let preamble = skull_game_preamble(&project.to_string_lossy())
-        .context("resolve the game preamble for the compile cache key")?;
-    Ok(serde_json::json!({
-        "compiler_sha256": compiler_sha256,
-        "backend": backend.name(),
-        "stdlib": compile_cache_stdlib_digest(),
-        "preamble_sha256": cache_sha256_bytes(preamble.as_bytes()),
-        "build_vars_sha256": compile_cache_build_vars_sha256(comptime),
-        "environment_sha256": compile_cache_environment_sha256(),
-    }))
-}
-
-pub(crate) fn compile_cache_lock_key(
-    root: &std::path::Path,
-    key: &str,
-    log_target: &'static str,
-    cache_kind: &'static str,
-) -> Result<std::fs::File> {
-    use std::io::{Seek, Write};
-    use std::fs::File;
-    use std::fs::TryLockError;
-    let path = root.join(format!("{key}.lock"));
-    let mut file = File::options().read(true).write(true).create(true).truncate(false)
-        .open(&path).with_context(|| format!("open compile cache lock {}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            crate::compile_slots::report_spawn_phase("cache-wait");
-            let holder = std::fs::read_to_string(&path)
-                .with_context(|| format!("read compile cache lock {}", path.display()))?;
-            log::info!(target: log_target, "waiting for {} compiling the same {} (cache key {})", holder.trim(), cache_kind, &key[..key.len().min(16)]);
-            file.lock().with_context(|| format!("wait for compile cache lock {key}"))?;
-        }
-        Err(error) => return Err(error).with_context(|| format!("lock compile cache key {key}")),
-    }
-    // Keep the inode: unlinking it can strand an existing waiter on the old
-    // lock. Kernel locks die with the holder; replace its stale PID.
-    file.set_len(0).context("clear compile cache lock holder")?;
-    file.rewind().context("rewind compile cache lock holder")?;
-    writeln!(file, "{}", std::process::id()).context("record compile cache lock holder")?;
-    Ok(file)
-}
-
-pub(crate) fn compile_cache_publish_dir(staged: &std::path::Path, entry: &std::path::Path, manifest: &str) -> Result<()> {
-    match std::fs::rename(staged, entry) {
-        Ok(()) => Ok(()),
-        Err(_) if entry.join(manifest).is_file() => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("publish {} -> {}", staged.display(), entry.display())),
-    }
-}
-
-pub(crate) fn compile_cache_mark_used(entry: &std::path::Path, manifest: &str) -> Result<()> {
-    std::fs::File::options().write(true).open(entry.join(manifest))
-        .with_context(|| format!("open {}", entry.join(manifest).display()))?
-        .set_modified(std::time::SystemTime::now())
-        .context("touch compile cache manifest")
-}
-
-pub(crate) fn compile_cache_evict(root: &std::path::Path, entry: &std::path::Path, evicting_prefix: &str) -> Result<()> {
-    let doomed = tempfile::Builder::new().prefix(evicting_prefix).tempdir_in(root)
-        .context("create compile cache eviction dir")?.keep();
-    let target = doomed.join("entry");
-    match std::fs::rename(entry, &target) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            let moved = Err(error).with_context(|| format!("move {} aside", entry.display()));
-            return remove_compile_cache_eviction(&doomed).and(moved);
-        }
-    }
-    remove_compile_cache_eviction(&doomed)
-}
-
-fn remove_compile_cache_eviction(doomed: &std::path::Path) -> Result<()> {
-    match std::fs::remove_dir_all(doomed) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("remove {}", doomed.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
-pub(crate) fn compile_cache_evict_to_budget(
-    root: &std::path::Path,
-    budget: u64,
-    keep: &std::path::Path,
-    manifest: &str,
-    staging_prefix: &str,
-    evicting_prefix: &str,
-    stale_staging: Duration,
-) -> Result<()> {
-    let now = std::time::SystemTime::now();
-    let mut entries = Vec::new();
-    let mut total = 0u64;
-    for item in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let item = item?;
-        let path = item.path();
-        let name = item.file_name().to_string_lossy().into_owned();
-        if name.starts_with(evicting_prefix) {
-            remove_compile_cache_eviction(&path)?;
-            continue;
-        }
-        if name.starts_with(staging_prefix) {
-            let age = item.metadata()?.modified()?;
-            if now.duration_since(age).unwrap_or_default() > stale_staging {
-                std::fs::remove_dir_all(&path)
-                    .with_context(|| format!("remove stale compile cache staging dir {}", path.display()))?;
-            }
-            continue;
-        }
-        // An entry another run is evicting can vanish between listing and stat.
-        let Ok(used) = std::fs::metadata(path.join(manifest)).and_then(|meta| meta.modified()) else { continue };
-        let Ok(bytes) = compile_cache_dir_bytes(&path) else { continue };
-        total += bytes;
-        entries.push((used, bytes, path));
-    }
-    entries.sort();
-    for (_, bytes, path) in entries {
-        if total <= budget { break; }
-        if path == keep { continue; }
-        compile_cache_evict(root, &path, evicting_prefix)?;
-        total -= bytes;
-    }
-    sweep_compile_cache_locks(root)
-}
-
-/// Remove key locks that nobody holds and whose entry is gone. A process that
-/// opened a lock but has not locked it yet can lose its inode here; it then
-/// compiles beside the next locker, which costs a duplicate compile, not a
-/// wrong entry (publication tolerates an existing entry).
-fn sweep_compile_cache_locks(root: &std::path::Path) -> Result<()> {
-    use std::fs::TryLockError;
-    for item in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let path = item?.path();
-        let Some(key) = path.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_suffix(".lock")) else {
-            continue;
-        };
-        if root.join(key).exists() {
-            continue;
-        }
-        let file = match std::fs::File::options().read(true).write(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error).with_context(|| format!("open compile cache lock {}", path.display())),
-        };
-        match file.try_lock() {
-            Ok(()) => match std::fs::remove_file(&path) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(error).with_context(|| format!("remove compile cache lock {}", path.display()));
-                }
-                _ => {}
-            },
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(error)) => {
-                return Err(error).with_context(|| format!("probe compile cache lock {}", path.display()));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod compile_cache_compiler_tests {
-    use super::*;
-
-    #[test]
-    fn compiler_hash_refuses_a_binary_written_after_the_process_started() {
-        let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("rock");
-        std::fs::write(&exe, b"compiler image").unwrap();
-        let written = std::fs::metadata(&exe).unwrap().modified().unwrap();
-        assert_eq!(
-            file_sha256_if_unchanged_since(&exe, written).unwrap().as_deref(),
-            Some(cache_sha256_bytes(b"compiler image").as_str()),
-        );
-        assert_eq!(
-            file_sha256_if_unchanged_since(&exe, written - Duration::from_secs(1)).unwrap(),
-            None,
-            "a binary replaced after the process started is not the running compiler",
-        );
-        assert!(running_image_sha256().unwrap().is_some(), "the test binary predates its own process");
-    }
-
-    #[test]
-    fn compiler_hash_pins_this_process_and_hashes_another_binary_by_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("rock");
-        std::fs::write(&exe, b"harness rock").unwrap();
-        assert_eq!(compile_cache_compiler_sha256(&exe), Some(cache_sha256_bytes(b"harness rock")));
-        let running = current_rock_exe().unwrap();
-        assert_eq!(compile_cache_compiler_sha256(&running), running_image_sha256().unwrap());
-    }
-}
-
-fn compile_cache_dir_bytes(dir: &std::path::Path) -> Result<u64> {
-    let mut total = 0;
-    for file in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
-        total += file?.metadata()?.len();
-    }
-    Ok(total)
-}
 
 /// Parse `src`, type-check it through bone WITH the stdlib injected (so
 /// operators/`print`/`assert` resolve, exactly like `--backend bone`), then emit
@@ -508,14 +76,14 @@ fn skull_emit_full(
     drop(modules);
     // Single-file emission resolves from the file's enclosing project
     // (walk-up), matching the JS single-file path -- the same source must
-    // agree across backends (crates/rock-cli/tests/js_run_gate.rs).
+    // agree across backends (the host launch test).
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)).map_err(|e| {
         EmitFullErr::Compile(vec![CompilerError::new_no_location(format!(
             "build var resolution failed: {e:#}"
         ))])
     })?;
     let ws = ws;
-    // The build lint pass (`docs/lint-future-plan.md`): soft findings report,
+    // The build lint pass (the compiler contract): soft findings report,
     // `Error` findings refuse the program through the same path a type error
     // takes.
     let lint_errs = crate::lint_pass::run_build_lints_single(&ws, file, src);
@@ -610,7 +178,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
             return (false, times);
         }
     };
-    let mut ws = match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
+    let mut ws = match crate::bone_backend::semantic_pass_with_aliases(&mut modules, &aliases) {
         Ok(ws) => ws,
         Err(error) => {
             times.semantic = t.elapsed();
@@ -929,7 +497,7 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 ///
 /// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
 /// `discover_sources` — bone supplies its own via `bone_stdlib_modules()`.
-pub(crate) fn skull_assemble_project(
+pub fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
@@ -1071,7 +639,7 @@ end
 /// real `file` path as the span file id, so the source must be registered under
 /// that same id -- registering under a placeholder makes every span lookup fail
 /// ("Unable to fetch source") and silently drops the snippet + labels.
-pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
+pub fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -1092,6 +660,12 @@ fn no_user_module(e: CompilerError) -> anyhow::Error {
 struct SkullFailure {
     reason: String,
     rendered: String,
+}
+
+impl From<crate::registry::RuntimeFailure> for SkullFailure {
+    fn from(error: crate::registry::RuntimeFailure) -> Self {
+        Self { reason: error.reason.to_owned(), rendered: error.rendered }
+    }
 }
 
 /// Outcome of building + running one file. `Pass` means it emitted valid Lua
@@ -1201,7 +775,7 @@ fn skull_build(
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let _stats = crate::compile_measurements::Scope::begin(file);
-    crate::package::prepare_test_sound_bank(file).map_err(|e| SkullFailure {
+    (crate::registry::RuntimeServices::registered().prepare_unit)(file).map_err(|e| SkullFailure {
         reason: "sound bank preparation failed".to_string(),
         rendered: format!("sound bank preparation failed for {file}: {e:#}"),
     })?;
@@ -1247,24 +821,10 @@ fn skull_build(
         }
     };
 
-    let lua = match configured_stone_dir(
-        std::path::Path::new(file)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(".")),
-    ) {
-        Ok(Some(stone_dir)) => TestProgram {
-            preamble: stone_root_preamble(&stone_dir),
-            lua,
-            setup: "",
-        },
-        Ok(None) => lua.into(),
-        Err(error) => {
-            return Err(SkullFailure {
-                reason: "Stone root resolution failed".to_string(),
-                rendered: error.to_string(),
-            })
-        }
-    };
+    let host = (crate::registry::RuntimeServices::registered().program_host)(
+        crate::registry::TestUnit::File(std::path::Path::new(file)),
+    ).map_err(SkullFailure::from)?;
+    let lua = TestProgram { preamble: host.preamble, lua, setup: host.setup };
     let files = vec![file.to_owned(); tests.len()];
     run_emitted_tests(lua, &tests, &files, TEST_CPU_LIMIT, 1, filter, false)
 }
@@ -1273,7 +833,7 @@ fn skull_build(
 /// `expect_failure`/`@ignore` -- a compile rejection is then the expected
 /// (passing) outcome and each counts as a passing test. Shared by the luajit
 /// and JS executors (both bone-type-check first, so the rule is identical).
-pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
+pub fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
     let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -1318,7 +878,7 @@ fn run_emitted_tests(
     let skipped = tests.len() - selected_tests.len();
 
     // Failure reports quote the program's head; the whole text is not kept
-    // while the test process runs (mag's is about 170 MB).
+    // while the test process runs (project's is about 170 MB).
     // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
         let (script, excerpt) = write_test_program(lua, "").map_err(|e| SkullFailure {
@@ -1535,8 +1095,8 @@ fn run_emitted_tests(
 
 /// Child CPU time one `@test` (or program loading) may use: a hang backstop,
 /// not a speed bound. A loaded host inflates a test's CPU time (memory
-/// reclaim, E-cores, busy SMT siblings): the slowest `mag` test used 21 s on
-/// host-a at load 70 with little free memory, and 16 s under an all-core
+/// reclaim, E-cores, busy SMT siblings): the slowest `project` test used 21 s on
+/// the build host at load 70 with little free memory, and 16 s under an all-core
 /// busy-loop burner.
 const TEST_CPU_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -1662,17 +1222,16 @@ fn run_test_program(
     use rock_host::process_management::{register_child_process, unregister_child_process};
 
     let mut command = rock_host::project::build_luajit_command(script, &[]);
-    crate::common::apply_test_rock_dir(&mut command);
     // Shards and concurrent runs share one worktree; each process gets its own
     // scratch root, removed when this returns.
-    let _scratch = crate::common::test_scratch_dir(&mut command)?;
+    let _scratch = (crate::registry::RuntimeServices::registered().prepare_test)(&mut command)?;
     // An inherited selection would silently narrow an unsharded run.
     match selection {
         Some(selection) => command.env("ROCK_TEST_SHARD_TESTS", selection),
         None => command.env_remove("ROCK_TEST_SHARD_TESTS"),
     };
+    command = (crate::registry::RuntimeServices::registered().runtime_command)(command, crate::registry::RuntimeProcess::LuaTest);
     let mut child = command
-        .env("STONE_HEADLESS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1724,6 +1283,10 @@ pub(crate) fn is_package_tests_dir(path: &str) -> Option<String> {
     None
 }
 
+fn is_rock_test_source(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|e| e == "rock") && !path.to_string_lossy().ends_with('~')
+}
+
 /// Split the `.rock` files under `path` into loose-file units and PACKAGE
 /// units. A directory holding a `stick.toml` is a package: it becomes one unit
 /// compiled through its own manifest, and the walk does not descend into it.
@@ -1735,9 +1298,8 @@ pub(crate) fn is_package_tests_dir(path: &str) -> Option<String> {
 /// rule: a nested manifest starts a different package and is not absorbed as
 /// source of the tree above it.
 ///
-/// A path naming a single file stays that one file, and the `~` and extension
-/// filters match `rock_host::project::find_rock_files_at_path`, which this
-/// replaces on the `rock test` route only.
+/// Single-file and directory inputs use the same source filter. `.lsp` and
+/// `.err` fixtures belong only to their dedicated suites.
 fn walk_test_units(
     path: &str,
     files: &mut Vec<String>,
@@ -1748,7 +1310,9 @@ fn walk_test_units(
         anyhow::bail!("Path does not exist: {}", path);
     }
     if p.is_file() {
-        files.push(path.to_string());
+        if is_rock_test_source(p) {
+            files.push(path.to_string());
+        }
         return Ok(());
     }
     let base = fs_err::canonicalize(p)?;
@@ -1769,9 +1333,8 @@ fn walk_test_units(
             }
             continue;
         }
-        let name = entry_path.to_string_lossy();
-        if entry_path.extension().is_some_and(|e| e == "rock") && !name.ends_with('~') {
-            files.push(name.into_owned());
+        if is_rock_test_source(entry_path) {
+            files.push(entry_path.to_string_lossy().into_owned());
         }
     }
     Ok(())
@@ -1796,7 +1359,7 @@ fn skull_build_package_with_limit(
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
     let _stats = crate::compile_measurements::Scope::begin(dir);
     // Like a game run, so tests never read a bank an earlier tree compiled.
-    crate::package::prepare_test_sound_bank(dir).map_err(|e| SkullFailure {
+    (crate::registry::RuntimeServices::registered().prepare_unit)(dir).map_err(|e| SkullFailure {
         reason: "sound bank preparation failed".to_string(),
         rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
     })?;
@@ -1828,7 +1391,7 @@ fn skull_build_package_with_limit(
     crate::compile_measurements::phase("semantic");
     crate::compile_measurements::timings("bone", &ws.phase_timings);
     // The workspace owns everything emission reads; the parse trees (about
-    // 1 GB for mag) would otherwise stay live through the emit peak.
+    // 1 GB for project) would otherwise stay live through the emit peak.
     drop(modules);
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|e| {
         SkullFailure {
@@ -1858,15 +1421,18 @@ fn skull_build_package_with_limit(
         ws.modules[func.module.index()].file.as_str().to_owned()
     }).collect::<Vec<_>>();
     let tests = test_fns.into_iter().map(|(_, test)| test).collect::<Vec<_>>();
-    let needs_libstone = needs_libstone(&ws);
+    let facts = test_program_facts(&ws);
     // The compiler state is dead once the program is emitted. Free it before
-    // the program text is copied and the test process runs: mag's peaks near
+    // the program text is copied and the test process runs: project's peaks near
     // 5 GB, and keeping it resident doubled the memory a `rock test` needed
     // while its luajit child ran.
     drop((ws, sources));
     crate::allocator::release_freed_memory();
     drop(slot);
-    let lua = prepend_package_preamble(lua, dir, needs_libstone)?;
+    let host = (crate::registry::RuntimeServices::registered().program_host)(
+        crate::registry::TestUnit::Package { dir, facts: &facts },
+    ).map_err(SkullFailure::from)?;
+    let lua = TestProgram { preamble: host.preamble, lua, setup: host.setup };
     crate::compile_measurements::phase("prepare");
     run_emitted_tests(lua, &tests, &files, limit, shards, filter, true)
 }
@@ -1912,58 +1478,15 @@ fn resolve_test_shards(shards: usize, tests: usize, program_bytes: usize, overri
 #[path = "../tests/test_shards/policy.rs"]
 mod test_shard_policy;
 
-/// Whether the checked program declares a native binding into libstone. The
-/// resolved graph can supply native bindings without the full Stone host; this
-/// reads the checked FFI namespace, independent of package names and aliases.
-fn needs_libstone(ws: &bone_semantic::inference::Workspace) -> bool {
-    ws.modules.iter().any(|module| {
-        module.functions.iter().any(|(_, function)| {
-            function.is_extern
-                && function.backend != bone_semantic::hir::FnBackend::Js
-                && function.ffi_lib.is_some_and(|library| library.as_str() == "stone")
+/// Read the checked FFI namespace without assigning runtime meaning to names.
+fn test_program_facts(ws: &bone_semantic::inference::Workspace) -> crate::registry::TestProgramFacts {
+    let ffi_libraries = ws.modules.iter().flat_map(|module| {
+        module.functions.iter().filter_map(|(_, function)| {
+            (function.is_extern && function.backend != bone_semantic::hir::FnBackend::Js)
+                .then_some(function.ffi_lib).flatten().map(|library| library.as_str().to_owned())
         })
-    })
-}
-
-/// Package tests stage native Stone bindings and keep configured asset roots.
-/// Full Stone dependencies also load its CPU host. Lifecycle hooks and the
-/// frame runner are not invoked: no SDL, window, GL or audio device is started.
-fn prepend_package_preamble(
-    lua: String,
-    dir: &str,
-    needs_libstone: bool,
-) -> std::result::Result<TestProgram, SkullFailure> {
-    let path = std::path::Path::new(dir);
-    let stone_dir = configured_stone_dir(path).map_err(|error| SkullFailure {
-        reason: "Stone root resolution failed".to_string(),
-        rendered: error.to_string(),
-    })?;
-    let is_game = rock_host::project::is_game_project(path).map_err(|error| SkullFailure {
-        reason: "test host resolution failed".to_string(),
-        rendered: error.to_string(),
-    })?;
-    if is_game || stone_dir.is_some() || needs_libstone {
-        // Core libstone only: the CPU host does not use optional game cdylibs.
-        rock_host::engine_build::build_libstone().map_err(|error| SkullFailure {
-            reason: "engine library staging failed".to_string(),
-            rendered: format!(
-                "`rock test {dir}` could not stage libstone for the test process: {error:#}"
-            ),
-        })?;
-    }
-    let preamble = if is_game {
-        skull_game_preamble(dir).map_err(|error| SkullFailure {
-            reason: "game preamble resolution failed".to_string(),
-            rendered: error.to_string(),
-        })?
-    } else if let Some(stone_dir) = &stone_dir {
-        stone_root_preamble(stone_dir)
-    } else {
-        String::new()
-    };
-    // The CPU host starts after definitions and before the harness.
-    let setup = if stone_dir.is_some() { "\nsetup_stone()\n" } else { "" };
-    Ok(TestProgram { preamble, lua, setup })
+    }).collect();
+    crate::registry::TestProgramFacts { ffi_libraries }
 }
 
 /// The `@test` fns defined in the package rooted at `dir` -- its own source
@@ -1971,7 +1494,7 @@ fn prepend_package_preamble(
 /// other canonical paths). Module file paths are canonicalized absolute, so a
 /// prefix match against the canonicalized `dir` selects exactly this package.
 /// Carry each test's `FuncRef` so executors retain its source file.
-pub(crate) fn collect_package_test_fns(
+pub fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
 ) -> std::result::Result<Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>, CompilerError> {
@@ -2330,7 +1853,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
     // only the re-inferred chunks (+ their inline-dependent callers), reusing the
     // rest. An interface/structural change (signature, add/remove file) shifts
     // `Idx<Function>`, so the cache is rebuilt with a full emit. See
-    // `docs/skull-incremental-emit-split.md`.
+    // the compiler contract.
     let mut session: Option<bone_incremental::session::Session> = None;
     let mut cache: Option<skull::mir_emit::SkullEmitCache> = None;
 
@@ -2348,10 +1871,10 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         };
         // Game build: drop test-only files (tests/ dirs) so a broken sim/test
         // can't break the watched game output -- parity with the rock backend's
-        // is_game gate. See `docs/sim-layering.md`.
+        // is_game gate. See the compiler contract.
         let path_ref = std::path::Path::new(path);
         let sources = if path_ref.is_dir()
-            && rock_host::project::is_game_project(path_ref).unwrap_or(false)
+            && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref).unwrap_or(false)
         {
             match sources.production_only(path_ref) {
                 Ok(sources) => sources,
@@ -2535,7 +2058,7 @@ pub fn skull_run(path: &str) -> Result<()> {
     } else {
         lua
     };
-    match rock_host::lua_runner::run_lua_code(&program) {
+    match crate::compile_cmd::run_lua_code(&program) {
         Ok(run) => {
             print!("{}", run.stdout);
             if !run.stderr.is_empty() {
@@ -2559,13 +2082,13 @@ pub fn skull_run(path: &str) -> Result<()> {
 /// Render a bone `CompilerError` against a whole project's source set, so spans
 /// resolve to the right file. Every discovered source is registered under its
 /// id-path (the same id used when parsing into a module).
-pub(crate) fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
+pub fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
     render_project_errs(sources, std::slice::from_ref(e))
 }
 
 /// [`render_project_err`] over every collected diagnostic, joined into one
 /// report — the CLI prints ALL of them, matching the LSP.
-pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
+pub fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles::empty();
     for file in &sources.files {
         let f = file.borrow();
@@ -2579,17 +2102,6 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
     crate::bone_backend::render_errs(&sf, errs)
 }
 
-/// `rock run <project-dir> --backend skull` — assemble the whole project (all
-/// project + dependency `.rock` files + bone stdlib), type-check it through
-/// bone, emit Lua via skull, and execute it.
-///
-/// A game project also needs the stone engine runtime (libstone FFI + the frame
-/// loop): the `is_game` branch below stages libstone and execs luajit on
-/// `tmp/main.lua`, where stone's global initializer sets up cimgui, reusing the
-/// rock backend's run recipe
-/// (`build_engine_libs`, `exec_luajit_file`). All games run this way (match3,
-/// mag, bitgun, ...). Non-game projects keep the captured-output pipe. See
-/// `docs/skull-plan.md` — whole-game milestone (reached).
 /// Discover + assemble + bone-typecheck + skull-emit a whole project directory
 /// into one Lua program string. The shared core of `run <dir>` and `compile
 /// <dir>` (the single-file forms share [`skull_emit_full`]); only the tail
@@ -2633,7 +2145,7 @@ fn skull_emit_project_with_inputs(
     };
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
     // sim/test can't break the running game. See
-    // `docs/sim-layering.md`.
+    // the compiler contract.
     let sources = sources
         .production_only(std::path::Path::new(dir))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -2670,7 +2182,7 @@ fn skull_emit_project_with_inputs(
 
     // Lints are a compiler pass, not an editor accessory: they run on the same
     // typechecked output every build produces, and an `Error` finding refuses
-    // the program (`docs/lint-future-plan.md`). The game build dropped `tests/`
+    // the program (the compiler contract). The game build dropped `tests/`
     // above, hence ProductionOnly.
     let lint_errs = crate::lint_pass::run_build_lints(
         &ws,
@@ -2685,7 +2197,7 @@ fn skull_emit_project_with_inputs(
     }
 
     crate::compile_measurements::phase("prepare");
-    // Project build: modules outside `dir` (the `stone` dependency, stdlib) are
+    // Project build: modules outside `dir` (the `engine` dependency, stdlib) are
     // libraries and prune to what the project reaches.
     let emit = match skull::mir_emit::emit_workspace_mir_in_for_renderer(
         &ws,
@@ -2812,7 +2324,8 @@ fn build_rock_state_metadata(
     Ok(out)
 }
 
-struct GameProgram {
+/// Emitted Lua with compiler-owned metadata, passed unchanged to the runtime host.
+pub struct GameProgram {
     lua: String,
     metadata: String,
     metadata_at: usize,
@@ -2998,327 +2511,24 @@ fn build_state_nobox_accessors(
     Ok(format!("\n_G.__ROCK_STATE_NOBOX = {{{}}}\n", rows.concat()))
 }
 
-/// Collect `@sim` info from the bone workspace -- the skull analog of rock's
-/// `sim_registry::collect_sims`, over bone HIR. Returns each sim's wire name
-/// (the `@sim("name")` arg, else the fn name) + its pre-spawn `@sim_env` pairs,
-/// with `@sim_render` sugar (`SIM_SKIP_RENDER=0`) applied first so an explicit
-/// `@sim_env` can override. Workspace/source order; the runner applies each
-/// pair via `Command::env` (later wins). Same shape that drives the emitted
-/// `register_sim` registry, so the wire set the runner sees matches what the
-/// game can dispatch.
-/// The headless window sims that never read pixels boot in. 320x180 is 16:9
-/// like the 1920x1080 game default at a thirty-sixth of the pixels, so scene
-/// render targets shrink to a few megabytes. A game's live window can have a
-/// different aspect: window-derived camera framing must refresh on resize
-/// before a worker entry runs. Four capture sims already run this size
-/// by explicit choice (`frame_stream_capture`, `low_fps_nudge`,
-/// `meme_capture_sound`), so it is a blessed sim size, not a new extreme.
-pub const SIM_SMALL_WINDOW: &str = "320x180";
-
-/// Declared-name prefixes of the engine's async pixel-readback family and its
-/// FFI, plus the imgui test-geometry and synthetic-input families: every
-/// `pixel_readback_*` wrapper, `stone_pixel_readback_*` call, `imgui_test_*`
-/// UI automation helper (scroll/click/drag by presented position), and
-/// `imgui_inject_*` synthetic input call (mouse buttons, text), present and
-/// future. The families are large, uniformly prefixed, and call no shared
-/// funnel, so a prefix covers their growth; over-matching stays on the safe
-/// side (a lifecycle call keeps the window). The imgui families read or drive
-/// presented geometry (item rects, visibility, widget input) rather than
-/// pixels, but that geometry is window-derived exactly like a readback: the
-/// seam proof showed a palette-click sim failing at every size below 1080p
-/// while its siblings pass at 320x180, and the full proof showed a
-/// synthetic-mouse toggle sim failing 6/20 at 320x180.
-pub static SIM_PIXEL_PREFIXES: &[&str] =
-    &["pixel_readback", "stone_pixel_readback", "imgui_test_", "imgui_inject_"];
-
-/// True when the declared callee name reads pixels: an exact root, a MAG
-/// hover-pick reader, or a readback-family prefix.
-fn sim_name_reads_pixels(declared: &str) -> bool {
-    SIM_PIXEL_ROOTS.iter().any(|root| *root == declared)
-        || SIM_MAG_PICK_ROOTS.iter().any(|root| *root == declared)
-        || SIM_PIXEL_PREFIXES.iter().any(|prefix| declared.starts_with(prefix))
+/// A checked sim declaration, in workspace/source order. Wire identities use
+/// the same derivation as the emitted registry; authored environment pairs
+/// retain their order. Runtime interpretation belongs to the host.
+pub struct SimDescriptor {
+    pub module: bone_core::prelude::ModuleId,
+    pub function: bone_core::prelude::Idx<bone_core::hir::Function>,
+    pub wire_name: String,
+    pub source_file: String,
+    pub env_pairs: Vec<(String, String)>,
+    pub render: bool,
 }
 
-/// Declared names of the engine's pixel readers: captures, canvas, window and
-/// depth readback and frame streams, plus the FFI
-/// roots sims may call directly and `sim_submit_guard`, which every guarded
-/// reader funnels through. The tail of the list reads presented-output-derived
-/// state rather than pixels, which the full proof showed is equally
-/// window-derived: the window size (`stone_get_window_size`, asserted 1280x800
-/// by an agent sim), the live view scale (`scene_scale` reads 64 at 1080p but
-/// 6.3 at 320x180; `resolve_view_for` resolves it), the presented UI geometry
-/// census (`imgui_bodies_with_prefix`, `imgui_body_ran`, `imgui_total_vtx_count`;
-/// a prop grid draws zero cards at 320x180), the synthetic mouse position
-/// (`imgui_set_mouse_pos`, the non-inject-prefixed half of the input pair),
-/// and the render-target capacity readers: the native storage queries
-/// (`stone_canvas_capacity_*`, `stone_canvas_boot_*`, `stone_canvas_active_*`,
-/// `stone_canvas_bound_as_target`), the pyramid step (`pyramid_active_step`
-/// derives pyramid geometry from the capacity), and the capacity
-/// re-specification (`ensure_scene_capacity`). Existence and the Rock
-/// active-rect readers are deliberately not listed: `canvas_is_live` funnels
-/// through `stone_canvas_exists`, and `canvas_active` is called by shared
-/// helpers, so matching either keeps hundreds of sims that own fixed-size
-/// canvases. Each name is unique workspace-wide (D-form methods desugar to
-/// bare names, so no method is listed: a sim reading probe bytes created its
-/// probe through `window_probe_new` in the same entry). The async readback,
-/// imgui test-geometry and imgui synthetic-input families are covered by
-/// [`SIM_PIXEL_PREFIXES`]; the scene capacity globals are covered by
-/// [`SIM_CAPACITY_GLOBALS`]. A sim whose transitive callees name one of these
-/// keeps the game's window; anything else boots in [`SIM_SMALL_WINDOW`]
-/// unless it declares its own `STONE_WINDOW`.
-pub static SIM_PIXEL_ROOTS: &[&str] = &[
-    "take_screenshot",
-    "window_probe_new",
-    "read_canvas_pixel",
-    "canvas_read_pixels",
-    "canvas_read_region",
-    "canvas_read_rgba8",
-    "canvas_read_region_i32",
-    "frame_stream_begin",
-    "frame_stream_record",
-    "sim_submit_guard",
-    "stone_read_window_rect",
-    "stone_save_screenshot",
-    "stone_save_screenshot_sized",
-    "stone_read_canvas_pixel",
-    "stone_read_canvas_pixel_channel",
-    "read_depth_pixel",
-    "stone_read_depth_pixel",
-    "stone_get_window_size",
-    "imgui_set_mouse_pos",
-    "scene_scale",
-    "resolve_view_for",
-    "imgui_total_vtx_count",
-    "imgui_body_ran",
-    "imgui_bodies_with_prefix",
-    "pyramid_active_step",
-    "ensure_scene_capacity",
-    "stone_canvas_capacity_w",
-    "stone_canvas_capacity_h",
-    "stone_canvas_boot_w",
-    "stone_canvas_boot_h",
-    "stone_canvas_active_w",
-    "stone_canvas_active_h",
-    "stone_canvas_active_is_creation",
-    "stone_canvas_bound_as_target",
-];
-
-/// MAG's hover-pick readers (mag/click.rock): picking reads the ID buffer (a
-/// readback the engine performs per frame), and sims reach the answer through
-/// these globals readers (`hover_name_target` funnels through
-/// `current_click_target`; the engine hover updaters funnel through
-/// `read_canvas_pixel`). Listed separately from [`SIM_PIXEL_ROOTS`] because
-/// they resolve in MAG's workspace, not in stone's; the matcher consults both.
-pub static SIM_MAG_PICK_ROOTS: &[&str] = &[
-    "pick_at_cursor",
-    "pick_from_id",
-    "current_click_target",
-    "pick_selection_count",
-    "pick_selection_id",
-];
-
-/// Declared names of the scene capacity globals: the bloom pyramid levels and
-/// the capacity the scene target set was built for
-/// (`stone/engine/rendering/draw.rock`). Both follow the boot window: testbed
-/// boots 6 bloom levels at 1280x720 but 4 at 320x180, so a sim asserting a
-/// level count or a capacity panics or fails small. A sim whose transitive
-/// bodies reference one of these keeps the game's window, like a pixel reader.
-/// Matched by declared (bare) name. The drawable size is matched by call
-/// (`drawable_size`, `stone_get_drawable_size` in [`SIM_PIXEL_ROOTS`]), not by
-/// its `DRAWABLE_SIZE` global, which shared helpers read: matching the global
-/// keeps hundreds of sims that never query the size. Liveness and ownership
-/// queries (`canvas_is_live`, `new_canvas`, `destroy_canvas`) do not match and
-/// stay small.
-pub static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
-
-/// Callee edges of one body: resolved calls and protocol dispatch from its
-/// inference, plus function-valued references from a body scan (a named fn
-/// passed as a value lowers to `Expr::Global`, never a call). Mirrors
-/// `bone_lints`' edge walk; bodies without inference (extern decls, opaque
-/// bodies) are leaves, matched by name at their callers instead.
-fn sim_callee_edges(
+pub fn collect_sim_descriptors(
     ws: &bone_semantic::inference::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
-    name_map: &std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
-    >,
-) -> Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)> {
-    use bone_core::hir::{BodyOwner, Callee, Expr};
-    let owner = BodyOwner::Function(fid);
-    let mut out = Vec::new();
-    if let Some(bi) = ws.inference(mid).and_then(|inf| inf.per_fn.get(&owner)) {
-        out.extend(bi.resolved_overload_calls.values().copied());
-        out.extend(bi.implicit_iter_args.values().map(|w| w.func));
-        for info in bi.for_iter_protocol.values() {
-            if let Some(w) = &info.iter {
-                out.push(w.func);
-            }
-            sim_collect_bound_next(&info.next, &mut out);
-        }
-        for tree in bi.bound_call_trees.values() {
-            for bn in tree.next.values() {
-                sim_collect_bound_next(bn, &mut out);
-            }
-        }
-    }
-    if let Some(body) = ws.module(mid).bodies.get(&owner) {
-        for (_, expr) in body.expr_arena.iter() {
-            let name = match expr {
-                Expr::Global(n) | Expr::SiblingRef(n) => Some(n),
-                Expr::Call { callee: Callee::Unresolved { name, .. }, .. } => Some(name),
-                _ => None,
-            };
-            if let Some(fns) = name.map(|n| name_map.get(n)).flatten() {
-                out.extend(fns.iter().copied());
-            }
-        }
-    }
-    out
-}
-
-fn sim_collect_bound_next(
-    bn: &bone_core::workspace::BoundNext,
-    out: &mut Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
-) {
-    if let bone_core::workspace::BoundNext::Concrete { func, sub, .. } = bn {
-        out.push(*func);
-        for bn in sub.next.values() {
-            sim_collect_bound_next(bn, out);
-        }
-    }
-}
-
-/// True when the sim at `(mid, fid)` can read pixels: one of
-/// [`SIM_PIXEL_ROOTS`] is among its transitive callees (memoized across sims,
-/// so one compile walks the shared call graph once). A new sim that captures
-/// is classified by its own calls, never by a name list.
-fn sim_reads_pixels(
-    ws: &bone_semantic::inference::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
-    memo: &mut std::collections::HashMap<
-        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
-        bool,
-    >,
-    visiting: &mut std::collections::HashSet<
-        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
-    >,
-    name_map: &std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
-    >,
-) -> bool {
-    if let Some(&known) = memo.get(&(mid, fid)) {
-        return known;
-    }
-    if !visiting.insert((mid, fid)) {
-        return false;
-    }
-    let callee = &ws.module(mid).functions[fid];
-    let mut reads = sim_name_reads_pixels(skull_mir::mangle::declared_name(callee.name.as_str()));
-    if !reads {
-        for (callee_mid, callee_fid) in sim_callee_edges(ws, mid, fid, name_map) {
-            if sim_reads_pixels(ws, callee_mid, callee_fid, memo, visiting, name_map) {
-                reads = true;
-                break;
-            }
-        }
-    }
-    visiting.remove(&(mid, fid));
-    memo.insert((mid, fid), reads);
-    reads
-}
-
-/// True when the sim at `(mid, fid)` references a scene capacity global: one
-/// of [`SIM_CAPACITY_GLOBALS`] is named by its transitive bodies (memoized
-/// like [`sim_reads_pixels`]). Data globals lower to `Expr::Global` exactly
-/// like function-valued references; a name that resolves to no function is a
-/// data reference and is matched by declared (bare) name.
-fn sim_reads_capacity(
-    ws: &bone_semantic::inference::Workspace,
-    mid: bone_core::prelude::ModuleId,
-    fid: bone_core::prelude::Idx<bone_core::hir::Function>,
-    memo: &mut std::collections::HashMap<
-        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
-        bool,
-    >,
-    visiting: &mut std::collections::HashSet<
-        (bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>),
-    >,
-    name_map: &std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(bone_core::prelude::ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
-    >,
-) -> bool {
-    use bone_core::hir::{BodyOwner, Expr};
-    if let Some(&known) = memo.get(&(mid, fid)) {
-        return known;
-    }
-    if !visiting.insert((mid, fid)) {
-        return false;
-    }
-    let mut reads = false;
-    if let Some(body) = ws.module(mid).bodies.get(&BodyOwner::Function(fid)) {
-        for (_, expr) in body.expr_arena.iter() {
-            let name = match expr {
-                Expr::Global(n) | Expr::SiblingRef(n) => Some(n),
-                _ => None,
-            };
-            let Some(name) = name else { continue };
-            if name_map.contains_key(name) {
-                continue;
-            }
-            let declared = name.as_str().rsplit("::").next().unwrap_or(name.as_str());
-            if SIM_CAPACITY_GLOBALS.iter().any(|root| *root == declared) {
-                reads = true;
-                break;
-            }
-        }
-    }
-    if !reads {
-        for (callee_mid, callee_fid) in sim_callee_edges(ws, mid, fid, name_map) {
-            if sim_reads_capacity(ws, callee_mid, callee_fid, memo, visiting, name_map) {
-                reads = true;
-                break;
-            }
-        }
-    }
-    visiting.remove(&(mid, fid));
-    memo.insert((mid, fid), reads);
-    reads
-}
-
-fn collect_skull_sims(
-    ws: &bone_semantic::inference::Workspace,
-) -> Vec<(String, String, Vec<(String, String)>)> {
+) -> Vec<SimDescriptor> {
     use bone_core::prelude::ModuleId;
     use bone_semantic::hir::AnnoValue;
 
-    // The `@sim` walk + wire derivation is shared with skull's emitted registry
-    // (`skull::mir_emit::collect_sim_fns`) so the runner's wire names match what
-    // the game registered: same module filter, same `sim_wire_name`. It is
-    // spelled out here rather than reused so the walk also keeps each sim's
-    // `(ModuleId, Idx<Function>)`, which the small-window rule needs to read
-    // the sim's resolved calls. Here we additionally read each sim's `@sim_env`
-    // pairs (a runner-only concern): `@sim_render` sugar first so an explicit
-    // `@sim_env` can override.
-    let mut name_map: std::collections::HashMap<
-        ustr::Ustr,
-        Vec<(ModuleId, bone_core::prelude::Idx<bone_core::hir::Function>)>,
-    > = std::collections::HashMap::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            name_map.entry(f.name).or_default().push((module.id, fid));
-        }
-    }
-    let mut pixel_memo = std::collections::HashMap::new();
-    let mut capacity_memo = std::collections::HashMap::new();
-    let mut visiting = std::collections::HashSet::new();
     let mut sims = Vec::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -3329,9 +2539,6 @@ fn collect_skull_sims(
                 continue;
             };
             let mut env_pairs = Vec::new();
-            if f.annotations.iter().any(|a| a.is_builtin("sim_render")) {
-                env_pairs.push(("SIM_SKIP_RENDER".to_string(), "0".to_string()));
-            }
             for ann in &f.annotations {
                 if !ann.is_builtin("sim_env") {
                     continue;
@@ -3344,429 +2551,17 @@ fn collect_skull_sims(
                 };
                 env_pairs.push((k.to_string(), v.to_string()));
             }
-            // Skipped when the sim declares any `STONE_WINDOW` (an explicit
-            // empty keeps the game's own size); prepended so the pair order
-            // reads default-first. `STONE_WINDOW` already travels per entry,
-            // so a shared worker resizes for each entry like an explicit size
-            // today.
-            let explicit_window = env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW");
-            if !explicit_window
-                && !sim_reads_pixels(ws, module.id, fid, &mut pixel_memo, &mut visiting, &name_map)
-                && !sim_reads_capacity(ws, module.id, fid, &mut capacity_memo, &mut visiting, &name_map)
-            {
-                env_pairs.insert(
-                    0,
-                    ("STONE_WINDOW".to_string(), SIM_SMALL_WINDOW.to_string()),
-                );
-            }
-            sims.push((wire.as_str().to_string(), module.file.as_str().to_string(), env_pairs));
+            sims.push(SimDescriptor {
+                module: module.id,
+                function: fid,
+                wire_name: wire.as_str().to_string(),
+                source_file: module.file.as_str().to_string(),
+                env_pairs,
+                render: f.annotations.iter().any(|a| a.is_builtin("sim_render")),
+            });
         }
     }
     sims
-}
-
-fn relative_sim_source_path(
-    workspace_root: &std::path::Path,
-    project_dir: &std::path::Path,
-    source_file: &str,
-) -> Result<String> {
-    use std::path::Component;
-
-    let source_path = std::path::Path::new(source_file);
-    let source_path = if source_path.is_absolute() {
-        source_path.to_path_buf()
-    } else {
-        project_dir.join(source_path)
-    };
-    let source_path = source_path
-        .canonicalize()
-        .with_context(|| format!("resolve @sim source file `{source_file}`"))?;
-    let root_components = workspace_root.components().collect::<Vec<_>>();
-    let source_components = source_path.components().collect::<Vec<_>>();
-    let common = root_components
-        .iter()
-        .zip(&source_components)
-        .take_while(|(root, source)| root == source)
-        .count();
-    if common == 0 || root_components.first() != source_components.first() {
-        anyhow::bail!(
-            "@sim source file `{source_file}` is on a different filesystem root from {}",
-            workspace_root.display()
-        );
-    }
-
-    let mut relative = std::path::PathBuf::new();
-    for component in root_components.iter().skip(common) {
-        if matches!(component, Component::Normal(_)) {
-            relative.push("..");
-        }
-    }
-    for component in source_components.iter().skip(common) {
-        relative.push(component.as_os_str());
-    }
-    let normalized = relative.to_string_lossy().replace('\\', "/");
-    if normalized.is_empty() {
-        anyhow::bail!("@sim source file `{source_file}` resolves to the workspace root");
-    }
-    Ok(normalized)
-}
-
-pub(crate) fn source_root_for_sim_project(project_dir: &std::path::Path) -> Result<std::path::PathBuf> {
-    let project_dir = project_dir
-        .canonicalize()
-        .with_context(|| format!("canonicalize sim project {}", project_dir.display()))?;
-    let mut current = project_dir.as_path();
-    loop {
-        // A stray empty .git in an ancestor is not a source repository.
-        let marker = current.join(".git");
-        let git_dir = if marker.is_dir() {
-            Some(marker)
-        } else {
-            std::fs::read_to_string(&marker).ok().and_then(|text| {
-                text.trim().strip_prefix("gitdir: ").map(|dir| current.join(dir))
-            })
-        };
-        if git_dir.is_some_and(|dir| dir.join("HEAD").is_file()) {
-            return Ok(current.to_path_buf());
-        }
-        let Some(parent) = current.parent() else { break };
-        current = parent;
-    }
-    if let Some(root) = rock_host::project::find_source_root(&project_dir) {
-        if let Ok(root) = root.canonicalize() {
-            if project_dir.starts_with(&root) {
-                return Ok(root);
-            }
-        }
-    }
-    Ok(project_dir)
-}
-
-/// Build the skull game program for `dir`, write the game-shaped `main.lua`
-/// (preamble + entry + the `@sim` registry) to `main_path`, and collect the
-/// project's `@sim` wire names, source paths and env pairs from the SAME
-/// workspace build. The skull counterpart of rock's `compile_sims` -- one
-/// type-check feeds both the emitted registry and the runner's wire/env list,
-/// so they cannot drift.
-pub fn skull_compile_game_and_collect_sims(
-    dir: &str,
-    main_path: &std::path::Path,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, HashMap<String, String>, SkullStone)> {
-    skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None, &[])
-}
-
-pub fn skull_compile_game_and_collect_sims_with_allocation(
-    dir: &str,
-    main_path: &std::path::Path,
-    allocation_manifest: Option<&std::path::Path>,
-    selection: &[String],
-) -> Result<(
-    Vec<String>,
-    HashMap<String, Vec<(String, String)>>,
-    HashMap<String, String>,
-    SkullStone,
-)> {
-    // Session-based build (same machinery as `rock stone`, tests included so the
-    // `@sim` bodies are in the program). The live SkullStone is returned so the
-    // runner can serve mid-sim `reload_edit` ops through the REAL incremental
-    // path (`docs/sim-reload-harness-plan.md`).
-    let incremental_path = main_path.with_file_name("incremental.lua");
-    let _activation = allocation_manifest.map(|_| skull::allocation_report::activation_scope(true));
-    let stone = SkullStone::init_impl(
-        dir, main_path, &incremental_path, true, allocation_manifest, selection,
-    )
-    .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
-
-    let project_dir = std::path::Path::new(dir)
-        .canonicalize()
-        .with_context(|| format!("canonicalize sim project {dir}"))?;
-    let workspace_root = source_root_for_sim_project(&project_dir)?;
-    let mut sims = collect_skull_sims(stone.project.workspace());
-    if let Some(selected) = &stone.selected_sim_names {
-        sims.retain(|(wire, _, _)| selected.contains(wire));
-    }
-    let mut wire_names = Vec::with_capacity(sims.len());
-    let mut env_by_wire = HashMap::with_capacity(sims.len());
-    let mut source_files = HashMap::with_capacity(sims.len());
-    let mut relative_by_source = HashMap::new();
-    for (wire, source_file, env) in sims {
-        wire_names.push(wire.clone());
-        let relative_source = match relative_by_source.entry(source_file.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                relative_sim_source_path(&workspace_root, &project_dir, &source_file)
-                    .with_context(|| format!("record source for @sim `{wire}`"))?,
-            ),
-        };
-        source_files.insert(wire.clone(), relative_source.clone());
-        env_by_wire.insert(wire, env);
-    }
-    Ok((wire_names, env_by_wire, source_files, stone))
-}
-
-#[cfg(test)]
-mod sim_source_path_tests {
-    use super::{relative_sim_source_path, source_root_for_sim_project};
-
-    #[test]
-    fn sim_source_paths_are_workspace_relative_across_projects_and_dependencies() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let project = workspace.join("mag");
-        let source = project.join("tests/sims/example.rock");
-        std::fs::create_dir_all(source.parent().unwrap()).expect("create project source dir");
-        std::fs::write(&source, "@sim\nco fn example() {}\n").expect("write project source");
-
-        let workspace = workspace.canonicalize().expect("canonical workspace");
-        let project = project.canonicalize().expect("canonical project");
-        assert_eq!(
-            relative_sim_source_path(&workspace, &project, source.to_str().unwrap()).unwrap(),
-            "mag/tests/sims/example.rock"
-        );
-
-        let dependency = temp.path().join("dependency/tests/sims/example.rock");
-        std::fs::create_dir_all(dependency.parent().unwrap()).expect("create dependency source dir");
-        std::fs::write(&dependency, "@sim\nco fn example() {}\n").expect("write dependency source");
-        assert_eq!(
-            relative_sim_source_path(&workspace, &project, dependency.to_str().unwrap()).unwrap(),
-            "../dependency/tests/sims/example.rock"
-        );
-    }
-
-    #[test]
-    fn source_root_comes_from_project_when_sdk_root_is_separate() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source_root = temp.path().join("source-worktree");
-        let project = source_root.join("mag");
-        let sdk_root = temp.path().join("sdk");
-        std::fs::create_dir_all(source_root.join(".git")).expect("create source repository marker");
-        std::fs::write(source_root.join(".git/HEAD"), "ref: refs/heads/main\n")
-            .expect("write repository HEAD");
-        std::fs::create_dir_all(&project).expect("create project");
-        std::fs::create_dir_all(&sdk_root).expect("create separate sdk root");
-
-        let found = source_root_for_sim_project(&project).unwrap();
-        assert_eq!(found, source_root.canonicalize().unwrap());
-        assert_ne!(found, sdk_root.canonicalize().unwrap());
-    }
-
-    #[test]
-    fn standalone_sim_project_uses_its_own_source_root() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(temp.path().join(".git")).expect("create empty non-repository marker");
-        let project = temp.path().join("standalone-project");
-        let source = project.join("tests/sims/probe.rock");
-        std::fs::create_dir_all(source.parent().unwrap()).expect("create source directory");
-        std::fs::write(&source, "@sim\nco fn probe() {}\n").expect("write source");
-
-        let project_root = project.canonicalize().expect("canonical project");
-        assert_eq!(source_root_for_sim_project(&project).unwrap(), project_root);
-        assert_eq!(
-            relative_sim_source_path(&project_root, &project_root, source.to_str().unwrap()).unwrap(),
-            "tests/sims/probe.rock"
-        );
-    }
-
-    #[test]
-    fn standalone_sim_project_ignores_invalid_git_files() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let project = temp.path().join("standalone-project");
-        std::fs::create_dir(&project).expect("create project");
-        let project_root = project.canonicalize().unwrap();
-        for marker in ["not a gitdir file\n", "gitdir: missing-metadata\n"] {
-            std::fs::write(temp.path().join(".git"), marker).expect("write invalid git marker");
-            assert_eq!(source_root_for_sim_project(&project).unwrap(), project_root);
-        }
-    }
-
-    #[test]
-    fn source_root_recognizes_worktree_git_files() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source_root = temp.path().join("worktree");
-        let project = source_root.join("game");
-        let metadata = temp.path().join("git-metadata");
-        std::fs::create_dir_all(&project).expect("create project");
-        std::fs::create_dir(&metadata).expect("create git metadata");
-        std::fs::write(metadata.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
-        for gitdir in ["../git-metadata".to_string(), metadata.to_string_lossy().into_owned()] {
-            std::fs::write(source_root.join(".git"), format!("gitdir: {gitdir}\n"))
-                .expect("write worktree git file");
-            assert_eq!(source_root_for_sim_project(&project).unwrap(), source_root.canonicalize().unwrap());
-        }
-    }
-}
-
-#[cfg(test)]
-mod sim_small_window_tests {
-    use super::skull_compile_game_and_collect_sims;
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-
-    fn fixture_env_by_wire() -> HashMap<String, Vec<(String, String)>> {
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/sim-small-window");
-        let out = tempfile::tempdir().expect("small-window output dir");
-        let main = out.path().join("main.lua");
-        let (_wires, env_by_wire, _sources, _stone) =
-            skull_compile_game_and_collect_sims(fixture.to_str().unwrap(), &main)
-                .expect("the small-window fixture must compile");
-        env_by_wire
-    }
-
-    fn env_by_wire() -> &'static HashMap<String, Vec<(String, String)>> {
-        static CACHE: OnceLock<HashMap<String, Vec<(String, String)>>> = OnceLock::new();
-        CACHE.get_or_init(fixture_env_by_wire)
-    }
-
-    /// The env of the sim declared as `short`: the collect key is the wire
-    /// name, which under modules v1 is the sim's DefKey.
-    fn env_for<'a>(
-        env_by_wire: &'a HashMap<String, Vec<(String, String)>>,
-        short: &str,
-    ) -> &'a Vec<(String, String)> {
-        let mut found = None;
-        for (wire, env) in env_by_wire {
-            let declared = wire.rsplit("::").next().unwrap_or(wire.as_str());
-            if declared == short {
-                assert!(found.is_none(), "two sims share the short name `{short}`");
-                found = Some(env);
-            }
-        }
-        found.unwrap_or_else(|| {
-            panic!(
-                "no sim named `{short}`; wires: {:?}",
-                env_by_wire.keys().collect::<Vec<_>>()
-            )
-        })
-    }
-
-    /// Effective STONE_WINDOW: last declaration wins, like the runner.
-    fn stone_window(env: &[(String, String)]) -> Option<&str> {
-        env.iter().rev().find(|(k, _)| k == "STONE_WINDOW").map(|(_, v)| v.as_str())
-    }
-
-    #[test]
-    fn sims_that_read_no_pixels_get_the_small_window() {
-        for short in [
-            "small_window_plain_sim",
-            "small_window_canvas_owner",
-            "small_window_native_reader",
-            "small_window_active_reader",
-            "small_window_drawable_reader",
-            "small_window_drawable_ffi_reader",
-        ] {
-            assert_eq!(
-                stone_window(env_for(env_by_wire(), short)),
-                Some("320x180"),
-                "`{short}` calls no window-derived helper, so it boots in the small window"
-            );
-        }
-    }
-
-    #[test]
-    fn sims_that_capture_keep_the_game_default() {
-        for short in [
-            "small_window_pixel_reader",
-            "small_window_indirect_reader",
-            "small_window_readback_reader",
-            "small_window_ui_reader",
-            "small_window_pick_reader",
-            "small_window_window_reader",
-            "small_window_mouse_reader",
-            "small_window_inject_reader",
-            "small_window_scale_reader",
-            "small_window_view_reader",
-            "small_window_geometry_reader",
-            "small_window_capacity_reader",
-            "small_window_pyramid_reader",
-            "small_window_ensure_reader",
-            "small_window_bloom_reader",
-            "small_window_scene_capacity_reader",
-        ] {
-            assert_eq!(
-                stone_window(env_for(env_by_wire(), short)),
-                None,
-                "`{short}` reads window-derived state, so the harness must not override its window"
-            );
-        }
-    }
-
-    #[test]
-    fn an_explicit_window_size_wins_over_the_small_default() {
-        assert_eq!(
-            stone_window(env_for(env_by_wire(), "small_window_explicit_size")),
-            Some("800x600"),
-            "an explicit @sim_env STONE_WINDOW wins"
-        );
-    }
-
-    #[test]
-    fn every_pixel_root_name_resolves_in_a_stone_workspace() {
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/sim-small-window");
-        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), true)
-            .expect("the small-window fixture must compile");
-        let mut names = std::collections::HashSet::new();
-        for module in project.workspace().modules.iter() {
-            for (_fid, f) in module.functions.iter() {
-                let declared = f.name.as_str().rsplit("::").next().unwrap_or(f.name.as_str());
-                names.insert(declared.to_string());
-            }
-        }
-        for root in super::SIM_PIXEL_ROOTS {
-            assert!(
-                names.contains(*root),
-                "pixel root `{root}` resolves to no function; the set drifted from the engine"
-            );
-        }
-        for prefix in super::SIM_PIXEL_PREFIXES {
-            assert!(
-                names.iter().any(|n| n.starts_with(prefix)),
-                "pixel prefix `{prefix}` matches no function; the set drifted from the engine"
-            );
-        }
-    }
-
-    #[test]
-    fn every_capacity_global_name_resolves_in_a_stone_workspace() {
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/sim-small-window");
-        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), true)
-            .expect("the small-window fixture must compile");
-        let mut names = std::collections::HashSet::new();
-        for module in project.workspace().modules.iter() {
-            for (_gid, g) in module.globals.iter() {
-                let declared = g.name.as_str().rsplit("::").next().unwrap_or(g.name.as_str());
-                names.insert(declared.to_string());
-            }
-        }
-        for root in super::SIM_CAPACITY_GLOBALS {
-            assert!(
-                names.contains(*root),
-                "capacity global `{root}` resolves to no global; the set drifted from the engine"
-            );
-        }
-    }
-
-    #[test]
-    fn mag_pick_root_names_resolve_in_mag() {
-        let mag = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag");
-        let project = crate::live_project::LiveProject::init(mag.to_str().unwrap(), true)
-            .expect("mag must compile");
-        let mut names = std::collections::HashSet::new();
-        for module in project.workspace().modules.iter() {
-            for (_fid, f) in module.functions.iter() {
-                let declared = f.name.as_str().rsplit("::").next().unwrap_or(f.name.as_str());
-                names.insert(declared.to_string());
-            }
-        }
-        for root in super::SIM_MAG_PICK_ROOTS {
-            assert!(
-                names.contains(*root),
-                "pick root `{root}` resolves to no MAG function; the set drifted from the game"
-            );
-        }
-    }
 }
 
 /// `rock compile <project-dir> --backend skull` — assemble + type-check + emit
@@ -3783,18 +2578,13 @@ pub fn skull_compile_project_with_inputs(
     output: Option<String>,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<()> {
-    use std::path::PathBuf;
     let stats = crate::compile_measurements::Scope::begin(dir);
     let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs)?;
-    // A game's runnable main.lua is the same shape run/stone produce via
+    // A game's runnable main.lua is the same shape run/engine produce via
     // write_full_main: preamble (game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble game asset paths are
     // wrong; without the wrapper it never starts.
-    let preamble = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
-        skull_game_preamble(dir)?
-    } else {
-        String::new()
-    };
+    let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Project)?;
     let parts = skull_game_main(&preamble, &emit, emits_main);
     match output {
         Some(out) => {
@@ -3811,71 +2601,13 @@ pub fn skull_compile_project_with_inputs(
 }
 
 fn skull_run_project(dir: &str) -> Result<()> {
-    use std::path::PathBuf;
     let stats = crate::compile_measurements::Scope::begin(dir);
     ensure_renderer_feature(dir)?;
-    let is_game = rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false);
-    if is_game {
-        crate::package::prepare_sound_bank(dir)?;
-    }
+    let runtime = RuntimeServices::registered();
+    (runtime.prepare_run)(dir)?;
     let (lua, emits_main) = skull_emit_project(dir)?;
-
-    // Game projects need the rock backend's run recipe, not a bare stdin
-    // pipe: stage libstone into tmp/ (build_engine_libs), run luajit on a
-    // FILE with LD_LIBRARY_PATH set (build_luajit_command) so
-    // `ffi.load("libstone.so")` resolves, and inherit stdio so the
-    // window/input work. Non-game projects keep the captured-output pipe.
-    if is_game {
-        if !std::env::var("ROCK_SKIP_ENGINE_BUILD").is_ok_and(|v| v == "1") {
-            if let Err(e) = rock_host::engine_build::build_engine_libs(dir) {
-                log::error!(target: "SKULL", "engine build failed: {}", e);
-                crate::ablation_report::exit_with_census(1);
-            }
-        }
-        // Game preamble + `__rock_main_wrapper(main)` entry, built by the same
-        // helpers the stone two-file watch path uses (so both write an
-        // identical tmp/main.lua), and wipe any stale overlay so the engine's
-        // hot-reload watcher can't load a leftover incremental.lua over the
-        // fresh baseline.
-        let lua_file = rock_host::project::default_main_lua_path();
-        if let Err(e) = write_full_main(
-            &skull_game_preamble(dir)?,
-            &lua,
-            emits_main,
-            &lua_file,
-            &lua_file.with_file_name("incremental.lua"),
-        ) {
-            log::error!(target: "SKULL", "cannot write {}: {}", lua_file.display(), e);
-            crate::ablation_report::exit_with_census(1);
-        }
-        crate::compile_measurements::phase("write");
-        stats.success();
-        // No timeout: games run an infinite frame loop.
-        return crate::compile_cmd::exec_luajit_file(&lua_file, None, &[]);
-    }
-
-    // The captured stdin evaluator requires contiguous input.
-    let program = skull_game_main("", &lua, emits_main).concat();
     stats.success();
-    match rock_host::lua_runner::run_lua_code(&program) {
-        Ok(run) => {
-            print!("{}", run.stdout);
-            if !run.stderr.is_empty() {
-                eprint!("{}", run.stderr);
-            }
-            // The program's own exit status is the answer. Printing a crash and
-            // returning Ok is how `rock run` used to exit 0 on a dead program.
-            if !run.success {
-                log::error!(target: "SKULL", "program exited with a runtime error");
-                crate::ablation_report::exit_with_census(1);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            log::error!(target: "SKULL", "runtime error: {}", e.message);
-            crate::ablation_report::exit_with_census(1);
-        }
-    }
+    (runtime.launch)(dir, &lua, emits_main)
 }
 
 /// One JSON line per finished `@test`: `{unit, name, ms, status}`.
@@ -3910,7 +2642,7 @@ fn print_slowest_tests(timings: &[(String, TestTiming)]) {
 /// packages built as ONE workspace each. A cross-file lib can only be tested
 /// the second way -- per-file, any file referencing a sibling's symbol fails to
 /// compile. Shared by every test executor (luajit + JS).
-pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+pub fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut files = Vec::new();
     let mut package_dirs = Vec::new();
     for path in paths {
@@ -3925,7 +2657,7 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     files.sort();
     files.dedup();
     package_dirs.sort();
-    // `mag`, `mag/`, `./mag` and `mag/tests` all name one package: dedup by
+    // `project`, `project/`, `./project` and `project/tests` all name one package: dedup by
     // its canonical root, keeping the first spelling as the unit label.
     let mut seen = HashSet::new();
     let mut unique = Vec::with_capacity(package_dirs.len());
@@ -3937,7 +2669,7 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     Ok((files, unique))
 }
 
-pub(crate) fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) -> Result<()> {
+pub fn skull_test(paths: &[String], filter: Option<&crate::test::TestFilter>) -> Result<()> {
     crate::lint_pass::set_corpus_mode();
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let timings_path = std::env::var_os("ROCK_TEST_TIMINGS");
@@ -4240,10 +2972,10 @@ pub(crate) fn body_touch(text: &str) -> Option<String> {
 
 /// A REAL semantic body edit: flip the first single ASCII digit inside the body
 /// of `fn <name>` (d -> d-1, '0'->'1'). Unlike `body_touch`'s whitespace, this
-/// is a genuine 1-char constant change like editing mag `update_mobs`
+/// is a genuine 1-char constant change like editing project `update_mobs`
 /// `tick_anim(mob.anim, 3, ..)` 3->2 (alternated back to 3 by re-applying the
 /// ORIGINAL text). Returns None if the fn or a body digit isn't found.
-pub(crate) fn body_digit_flip(text: &str, name: &str) -> Option<String> {
+pub fn body_digit_flip(text: &str, name: &str) -> Option<String> {
     let fn_pos = text.find(&format!("fn {name}"))?;
     let brace = text[fn_pos..].find('{')? + fn_pos;
 
@@ -4320,9 +3052,9 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
         baseline_lua.lines().count()
     );
 
-    // Profile only the project's own files (skip the stone engine + other deps
+    // Profile only the project's own files (skip the engine engine + other deps
     // discovery pulls in): match the project directory's basename as a path
-    // component, e.g. `mag` -> only `.../mag/*.rock`.
+    // component, e.g. `project` -> only `.../project/*.rock`.
     let proj_dir = format!(
         "{}/",
         std::path::Path::new(path)
@@ -4443,14 +3175,14 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 }
 
 /// `rock iter-incremental <project>` -- tight-loop sampling profiler for the REAL
-/// stone incremental path. Warm a Session + `emit_full` once, then repeatedly
+/// incremental compilation path. Warm a Session + `emit_full` once, then repeatedly
 /// `update_file` + `emit_overlay` ONE body, alternating between two whitespace
 /// states so every pass is a genuine change (not a content-hash no-op). Reports
 /// the timing distribution (mean/p50/p99/min/max/stddev) + overlay size + the
 /// per-phase breakdown of BOTH halves: `update_file` (clone/cook/lower/infer, from
 /// bone's `phase_timings`) and `emit_overlay`, plus verdict lints. It calls the EXACT same
 /// `session.update_file` + `skull::mir_emit::emit_overlay` that
-/// `SkullStone::recompile` runs on a body edit (no reassembly -- the two-file
+/// `IncrementalProject::recompile` runs on a body edit (no reassembly -- the two-file
 /// split's whole point), so the numbers are the live recompile path, just sampled
 /// in a tight loop instead of off disk.
 ///
@@ -4458,7 +3190,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 /// whole module). `SKULL_ITER_FILE=<substr>` targets a file (whitespace touch of
 /// its first fn); `SKULL_ITER_FN=<name>` profiles a REAL constant edit -- flips
 /// the first digit in that fn's body, alternating with the original (e.g.
-/// `SKULL_ITER_FN=update_mobs` flips mag's `tick_anim(.., 3, ..)` 3<->2).
+/// `SKULL_ITER_FN=update_mobs` flips project's `tick_anim(.., 3, ..)` 3<->2).
 /// `SKULL_ITER_WRITE=1` additionally measures the production atomic overlay
 /// write into a temporary output path.
 fn iter_incremental_sources(path: &str) -> Result<rock_core::SourceFiles> {
@@ -4503,7 +3235,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     );
     // SKULL_ITER_FN=<name>: profile a REAL constant edit (digit flip) in that
     // fn's body, alternating modified <-> original -- e.g.
-    // `SKULL_ITER_FN=update_mobs rock iter-incremental mag` flips `tick_anim(..,
+    // `SKULL_ITER_FN=update_mobs rock iter-incremental project` flips `tick_anim(..,
     // 3, ..)` 3<->2. Else: auto-pick a file and inject whitespace (body_touch).
     let (target, mut state_a, mut state_b) = if let Ok(fname) = std::env::var("SKULL_ITER_FN") {
         let f = files
@@ -4612,7 +3344,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         }
         let update_ms = ms(t_u);
         // bone's per-edit phase breakdown (clone/cook/lower/infer), set by
-        // rebuild_body_incremental inside the SAME update_file the stone loop calls.
+        // rebuild_body_incremental inside the SAME update_file the engine loop calls.
         let update_phases = session.workspace().phase_timings.clone();
         let span_edits = upd
             .body_update
@@ -4628,7 +3360,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
             })
             .unwrap_or_default();
 
-        // `SkullStone::recompile` calls `diagnostics()` inside its `cook` timing --
+        // `IncrementalProject::recompile` calls `diagnostics()` inside its `cook` timing --
         // an O(workspace) error scan + sort over every module. Measure it here too
         // so the iter-incremental "cook" matches the live one (the live cook ALSO
         // includes disk read of the changed file, which an in-memory loop can't).
@@ -4667,8 +3399,8 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         }
         let lint_ms = ms(t_l);
 
-        // Profile the REAL stone path: `emit_overlay` (no reassembly), matching
-        // what `SkullStone::recompile` writes on a body edit.
+        // Profile the REAL engine path: `emit_overlay` (no reassembly), matching
+        // what `IncrementalProject::recompile` writes on a body edit.
         let (emit_ms, overlay, phases) = {
             let ws = session.workspace();
             let t_e = Instant::now();
@@ -4872,89 +3604,14 @@ root-hole names={} rows={} decls={} reason-buckets={} erased-catalogue={}",
 }
 
 // ---------------------------------------------------------------------------
-// stone --backend skull: two-file incremental output (main.lua + incremental.lua)
+// Incremental compiler: two-file output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let Some((config_path, _config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
-        return Ok(None);
-    };
-    let manifest_dir = config_path.parent().unwrap_or(&config_path);
-    let graph = rock_host::stick::graph::PackageGraph::build(manifest_dir)?;
-    let root = graph.root();
-    // Stone testing itself: the root IS the stone package, so resolve its own
-    // directory instead of reporting no Stone root (which fails global init).
-    if graph.package(root).manifest_name == "stone" {
-        return Ok(Some(graph.package(root).root.clone()));
-    }
-    Ok(graph
-        .packages()
-        .iter()
-        .find(|package| package.id != root && package.manifest_name == "stone")
-        .map(|package| package.root.clone()))
-}
-
-fn stone_root_preamble(stone_dir: &std::path::Path) -> String {
-    let escaped = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    format!("__ROCK_STONE_DIR = \"{escaped}\"\n")
-}
-
-/// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
-/// asset resolution. cimgui is initialized by stone's global initializer.
-/// Factored so `skull_run_project` and the stone two-file path build it
-/// identically.
-pub(crate) fn skull_game_preamble(dir: &str) -> Result<String> {
-    use std::path::PathBuf;
-    let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
-    let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    let config = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
-        Some((_, config)) => Some(config),
-        None => None,
-    };
-    let overlay_defaults = rock_host::release::configured_asset_overlays_from(
-        &abs,
-        config.as_ref(),
-        std::env::var_os(rock_host::release::ASSET_OVERLAYS_ENV).as_deref(),
-    )?;
-    let renderer = match skull_renderer_target(dir)? {
-        skull::mir_emit::RendererTarget::Gl => "gl",
-        skull::mir_emit::RendererTarget::Wgpu => "wgpu",
-    };
-    let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
-    if let Some(stone_dir) = configured_stone_dir(&abs)? {
-        let escaped_stone = stone_dir.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-        full.push_str(&format!("__ROCK_STONE_DIR = \"{escaped_stone}\"\n"));
-    }
-    full.push_str("__ROCK_ASSET_OVERLAY_DEFAULTS = {");
-    for (index, path) in overlay_defaults.iter().enumerate() {
-        if index > 0 {
-            full.push_str(", ");
-        }
-        let path = path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-        full.push('"');
-        full.push_str(&path);
-        full.push('"');
-    }
-    full.push_str("}\n");
-    // Stamped for EVERY renderer, not only wgpu. The engine reads this global
-    // per draw (`stone_renderer_is_wgpu` and friends compare it to "wgpu"),
-    // and a global whose value is nil is ABSENT from `_G`, so every read of it
-    // fell through to the state bridge's `__index` metamethod: 5.5M dispatches
-    // per bench run, 98% of everything that reached the bridge. A present
-    // value is a raw hit that constant-folds on a trace.
-    full.push_str(&format!("__ROCK_RENDERER_BACKEND = \"{renderer}\"\n"));
-    if !full.ends_with('\n') {
-        full.push('\n');
-    }
-    Ok(full)
-}
-
-pub(crate) fn ensure_renderer_feature(dir: &str) -> Result<()> {
+pub fn ensure_renderer_feature(dir: &str) -> Result<()> {
     skull_renderer_target(dir).map(|_| ())
 }
 
-fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
+pub fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
     let backend = skull_renderer_backend(dir)?;
     if matches!(backend, rock_host::stick::RendererBackend::Wgpu)
         && !cfg!(feature = "renderer-wgpu")
@@ -4969,7 +3626,7 @@ fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
     })
 }
 
-pub(crate) fn skull_renderer_backend(dir: &str) -> Result<rock_host::stick::RendererBackend> {
+pub fn skull_renderer_backend(dir: &str) -> Result<rock_host::stick::RendererBackend> {
     let abs = std::path::Path::new(dir)
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(dir));
@@ -4986,7 +3643,7 @@ pub(crate) fn skull_renderer_backend(dir: &str) -> Result<rock_host::stick::Rend
 /// changed once (`ROCK_SKULL_CALLEE_BINDING=upvalue` moves every body into a
 /// factory, so `function main(` appears nowhere), which left a chunk that
 /// defined the whole game and then ran nothing.
-fn skull_game_main<'a>(preamble: &'a str, program: &'a GameProgram, emits_main: bool) -> [&'a str; 5] {
+pub(crate) fn skull_game_main<'a>(preamble: &'a str, program: &'a GameProgram, emits_main: bool) -> [&'a str; 5] {
     let [head, metadata, tail] = program.parts();
     let entry = if emits_main { "\n__rock_main_wrapper(main)\n" } else { "" };
     [preamble, head, metadata, tail, entry]
@@ -5003,7 +3660,7 @@ fn write_program_parts(writer: &mut impl std::io::Write, parts: &[&str]) -> std:
 /// case and is fine; ANY other error is surfaced -- a stale `incremental.lua`
 /// left beside a fresh `main.lua` would reintroduce the overlay/main desync the
 /// two-file split exists to avoid.
-pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
+pub fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
     match std::fs::remove_file(incremental_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -5018,7 +3675,7 @@ pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
 /// shared tail of every FULL (re)build: `init`, the interface-rebuild branch of
 /// `recompile`, and `force_full`. Returns the bytes written (the size the `Full`
 /// reload reports).
-fn write_full_main(
+pub fn write_full_main(
     preamble: &str,
     emit_lua: &GameProgram,
     emits_main: bool,
@@ -5032,7 +3689,7 @@ fn write_full_main(
     Ok(bytes)
 }
 
-/// What a stone-skull recompile produced. `cook_ms` is the front end (source
+/// What an incremental recompile produced. `cook_ms` is the front end (source
 /// re-read + per-file incremental cook + re-typecheck via `Session.update_file`);
 /// `emit_ms` is codegen + file write (`emit_overlay`/`emit_full`). `bytes` is the
 /// written output size -- for `Incremental` that's the overlay size, the headline
@@ -5049,7 +3706,7 @@ pub enum SkullReload {
     /// A full artifact is required before the current process can observe this
     /// update; no output was written on this path.
     FullRequired { reasons: Vec<String> },
-    /// A type's runtime SHAPE changed (docs/hot-reload-schema-drift-plan.md):
+    /// A type's runtime SHAPE changed (the compiler contract):
     /// live state cannot be migrated in place. Nothing was written -- the
     /// supervisor must use the restart fallback. `types` names the drifted
     /// types for the
@@ -5160,13 +3817,12 @@ fn emit_phase_ns(phases: &[(&'static str, Duration)], label: &str) -> u128 {
         .map_or(0, |(_, duration)| duration.as_nanos())
 }
 
-/// Persistent stone-skull compile state: a warm bone `Session` + skull emit cache
-/// driving the two-file split (`docs/skull-incremental-emit-split.md`). A body
+/// Persistent incremental compile state: a warm bone `Session` + skull emit cache
+/// driving the two-file split (the compiler contract). A body
 /// edit re-cooks just the edited file and writes a small `incremental.lua` the
 /// running game light-reloads; an interface/structural edit rewrites `main.lua`
 /// (full) and wipes the overlay.
-pub struct SkullStone {
-    selected_sim_names: Option<std::collections::HashSet<String>>,
+pub struct IncrementalProject {
     project: crate::live_project::LiveProject,
     cache: skull::mir_emit::SkullEmitCache,
     preamble: String,
@@ -5174,7 +3830,7 @@ pub struct SkullStone {
     /// Per-type layout hashes of the last program the game process could have
     /// loaded. A full recompile whose hashes drifted returns
     /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing
-    /// (docs/hot-reload-schema-drift-plan.md).
+    /// (the compiler contract).
     shape_hashes: skull::ShapeHashes,
     /// Full rebuilds retain the emitted shape of the original artifact.
     callee_binding: skull::CalleeBindingMode,
@@ -5183,20 +3839,20 @@ pub struct SkullStone {
     artifact_fingerprint: String,
 }
 
-impl SkullStone {
+impl IncrementalProject {
     /// Initial build: warm the Session, `emit_full` -> game-shaped `main.lua`,
     /// wipe `incremental.lua`. Errors render against the project sources.
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
-    /// can't break the running game. See `docs/sim-layering.md`.
-    pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, false, None, &[])
+    /// can't break the running game. See the compiler contract.
+    pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<IncrementalProject> {
+        Self::init_impl(dir, main_path, incremental_path, false, None, |_| Ok(None))
     }
 
-    /// Sim-runner build: same as [`SkullStone::init`] but discovery KEEPS
+    /// Sim-runner build: same as [`IncrementalProject::init`] but discovery KEEPS
     /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
     /// of the emitted program.
-    pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
-        Self::init_impl(dir, main_path, incremental_path, true, None, &[])
+    pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<IncrementalProject> {
+        Self::init_impl(dir, main_path, incremental_path, true, None, |_| Ok(None))
     }
 
     pub fn init_with_tests_and_allocation_report(
@@ -5204,7 +3860,7 @@ impl SkullStone {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
         allocation_manifest: &std::path::Path,
-    ) -> Result<SkullStone> {
+    ) -> Result<IncrementalProject> {
         let _activation = skull::allocation_report::activation_scope(true);
         Self::init_impl(
             dir,
@@ -5212,8 +3868,20 @@ impl SkullStone {
             incremental_path,
             true,
             Some(allocation_manifest),
-            &[],
+            |_| Ok(None),
         )
+    }
+
+    /// Compile checked sim identities selected by the caller. Selection runs
+    /// once on the same workspace used for emission; `None` emits every entry.
+    pub fn init_for_sim_selection(
+        dir: &str,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        allocation_manifest: Option<&std::path::Path>,
+        select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
+    ) -> Result<IncrementalProject> {
+        Self::init_impl(dir, main_path, incremental_path, true, allocation_manifest, select_sims)
     }
 
     fn init_impl(
@@ -5222,32 +3890,27 @@ impl SkullStone {
         incremental_path: &std::path::Path,
         include_tests: bool,
         explicit_allocation_report: Option<&std::path::Path>,
-        selection: &[String],
-    ) -> Result<SkullStone> {
+        select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
+    ) -> Result<IncrementalProject> {
         let stats = crate::compile_measurements::Scope::begin(dir);
         let slot = crate::compile_slots::acquire(dir)?;
         crate::compile_measurements::slot(slot.acquisition());
         let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
-        let (lua, cache, artifact_fingerprint, emits_main, selected_sim_names) = {
+        let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let all_names = collect_skull_sims(ws).into_iter().map(|(name, _, _)| name).collect::<Vec<_>>();
-            let selected = crate::run_sim::resolve_sim_specs(&all_names, selection)?;
-            let selected = selected.into_iter().flat_map(|spec| spec.split(',').map(str::to_owned).collect::<Vec<_>>())
-                .collect::<std::collections::BTreeSet<_>>();
-            let narrow = !selection.is_empty() && selected.len() != all_names.len();
-            let (emit, c) = if narrow {
+            let selected = select_sims(ws)?;
+            let (emit, c) = if let Some(selected) = selected {
                 skull::mir_emit::emit_full_for_selected_sims(
-                    ws, mid, Some(dir), renderer_target, &selected.into_iter().collect::<Vec<_>>(),
+                    ws, mid, Some(dir), renderer_target, &selected,
                 )
             } else {
                 skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
                     ws, mid, Some(dir), renderer_target, None,
                 )
             }.map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
-            let selected_sim_names = if narrow { Some(c.registered_sim_names(ws)) } else { None };
             crate::compile_measurements::emission(&emit);
             let allocation_report_path = allocation_report_path_from_env();
             write_allocation_report(
@@ -5264,18 +3927,18 @@ impl SkullStone {
             let emits_main = emit.emits_main;
             let lua = install_rock_state_metadata(emit.lua, ws, &spec)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
-            (lua, c, artifact_fingerprint, emits_main, selected_sim_names)
+            (lua, c, artifact_fingerprint, emits_main)
         };
         // Full rebuilds retain the shape of the session's original artifact.
         let callee_binding = cache.callee_binding();
-        let preamble = skull_game_preamble(dir)?;
+        let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Game)?;
         crate::compile_measurements::phase("prepare");
         write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
         crate::compile_measurements::phase("write");
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
         stats.success();
-        Ok(SkullStone {
+        Ok(IncrementalProject {
             project,
             cache,
             preamble,
@@ -5285,11 +3948,16 @@ impl SkullStone {
             route_profile_enabled: std::env::var_os("ROCK_SKULL_ROUTE_PROFILE").is_some(),
             last_route_profile: None,
             artifact_fingerprint,
-            selected_sim_names,
         })
     }
 
-    pub(crate) fn sim_selection_is_full(&self) -> bool { self.selected_sim_names.is_none() }
+    pub fn workspace(&self) -> &bone_semantic::inference::Workspace {
+        self.project.workspace()
+    }
+
+    pub fn registered_sim_names(&self) -> std::collections::HashSet<String> {
+        self.cache.registered_sim_names(self.project.workspace())
+    }
 
     pub fn enable_route_profile(&mut self) {
         self.route_profile_enabled = true;
@@ -5317,33 +3985,13 @@ impl SkullStone {
         &self.artifact_fingerprint
     }
 
-    /// Exact source texts and `embed_string` files that produced a sim
-    /// artifact. The test-full compile receipt uses these as its invalidation
-    /// boundary; it deliberately does not retain this live compile session.
-    pub(crate) fn sim_receipt_inputs(
-        &self,
-    ) -> (Vec<(String, String)>, Vec<std::path::PathBuf>) {
-        let sources = self
-            .project
-            .sources()
-            .files
-            .iter()
-            .map(|source| {
-                let source = source.borrow();
-                (source.file.to_id_path(), source.contents.clone())
-            })
-            .collect();
-        let comptime_files = self
-            .cache
-            .comptime_files()
-            .into_iter()
-            .map(|path| std::path::PathBuf::from(path.as_str()))
-            .collect();
-        (sources, comptime_files)
+    /// Source texts that produced this compilation.
+    pub fn sources(&self) -> &SourceFiles {
+        self.project.sources()
     }
 
     /// The `[build.vars]` selection this build stamped into its workspace.
-    pub(crate) fn comptime_inputs(&self) -> &bone_semantic::inference::ComptimeInputs {
+    pub fn comptime_inputs(&self) -> &bone_semantic::inference::ComptimeInputs {
         &self.project.workspace().comptime_inputs
     }
 
@@ -5421,7 +4069,7 @@ impl SkullStone {
 
     /// In-memory edit: replace one source's contents WITHOUT touching disk and
     /// route/emit exactly like a watcher edit. The sim reload-injection path
-    /// (`docs/sim-reload-harness-plan.md`): the runner edits a source in memory
+    /// (the compiler contract): the runner edits a source in memory
     /// and writes only the overlay; the project tree is never mutated. Rejects
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
@@ -5502,9 +4150,9 @@ impl SkullStone {
     }
 
     /// Absolute paths of every `embed_string` input baked into the current
-    /// program -- files the stone watcher must treat as sources: an edit to
+    /// program -- files the engine watcher must treat as sources: an edit to
     /// one routes as a changed non-source path, which forces the full rebuild
-    /// that re-reads it (docs/comptime-plan.md).
+    /// that re-reads it (the compiler contract).
     pub fn comptime_watch_files(&self) -> Vec<std::path::PathBuf> {
         // File ids are already the absolute canonical path the resolver read.
         self.cache
@@ -5560,7 +4208,7 @@ impl SkullStone {
             });
         }
         if full {
-            // Schema-drift gate (docs/hot-reload-schema-drift-plan.md): live
+            // Schema-drift gate (the compiler contract): live
             // data outlives every reload tier, so if any type's runtime layout
             // moved, hot-reloading the recompiled program would drive old-shape
             // state with new-shape readers. Request a complete reconstruction
@@ -5620,7 +4268,9 @@ impl SkullStone {
                     .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
                 ((lua, emits_main), c)
             };
-            self.preamble = skull_game_preamble(self.project.dir())?;
+            self.preamble = (RuntimeServices::registered().program_preamble)(
+                self.project.dir(), ProgramKind::Game,
+            )?;
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             let ((lua, emits_main), staged_cache) = lua;
@@ -5723,13 +4373,13 @@ impl SkullStone {
     /// than an edit tier and with no re-discovery (the session is already
     /// current).
     ///
-    /// Used on the stone restart path: a process restart (libstone/compiler
+    /// Used on the engine restart path: a process restart (engine library/compiler
     /// rebuild) re-spawns luajit, which loads `main.lua` only -- it never
     /// dual-loads the accumulated `incremental.lua` the way the live hot-reload
     /// watcher does. Folding the overlay back into `main.lua` before the restart
     /// means the new process gets the complete current program. The overlay
     /// stays a within-process, single-consumer artifact that never has to cross
-    /// a process boundary (`docs/skull-incremental-emit-split.md`).
+    /// a process boundary (the compiler contract).
     pub fn force_full(&mut self, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<()> {
         let stats = crate::compile_measurements::Scope::begin(self.project.dir());
         crate::compile_measurements::known_sources(self.project.sources().files.len());
@@ -5760,7 +4410,9 @@ impl SkullStone {
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
-        self.preamble = skull_game_preamble(self.project.dir())?;
+        self.preamble = (RuntimeServices::registered().program_preamble)(
+            self.project.dir(), ProgramKind::Game,
+        )?;
         crate::compile_measurements::phase("prepare");
         write_full_main(&self.preamble, &lua, emits_main, main_path, incremental_path)?;
         crate::compile_measurements::phase("write");

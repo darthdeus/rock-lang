@@ -1,60 +1,39 @@
-use crate::*;
-use std::path::Path;
+use std::time::Duration;
 
-/// Exec luajit on a compiled `.lua` file with stdio inherited from the
-/// caller. The single execution path for `rock run` (the skull project path
-/// reuses it) -- replaces the old "pipe code through luajit's stdin" approach,
-/// which broke interactive apps (fm) by closing their keyboard stdin.
-pub(crate) fn exec_luajit_file(
-    lua_file: &Path,
-    timeout: Option<std::time::Duration>,
-    app_args: &[String],
-) -> Result<()> {
-    let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
-    // `rock run --agent-headless` (mag-cli launch) reaches here with
-    // STONE_HEADLESS=1 in the inherited environment.
-    if crate::headless_scope::inherits_headless() {
-        cmd = crate::headless_scope::headless_command(cmd);
-    }
-    cmd.stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
+pub fn run_lua_code(code: &str) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
+    run_lua_code_with_timeout(code, Some(Duration::from_millis(1800)))
+}
 
-    // The CLI goes silent here: the next output is whatever the game
-    // prints once Stone's engine init runs. luajit loading +
-    // JIT-warming the generated main.lua and ffi.load-ing native libs
-    // can take seconds with no signal, making a slow/failed handoff
-    // look like a hang. Mark the boundary so it's attributable.
-    let spawn_t = std::time::Instant::now();
-    log::info!(target: "RUN", "launching luajit -> {}", lua_file.display());
+pub fn run_lua_code_with_timeout(code: &str, timeout: Option<Duration>) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
+    let command = rock_host::project::build_luajit_stdin_command();
+    let command = (crate::registry::RuntimeServices::registered().runtime_command)(command, crate::registry::RuntimeProcess::LuaStdin);
+    rock_host::lua_runner::run_lua_code_with_command(command, code, timeout)
+}
 
-    let mut child = crate::child_lifetime::spawn_bound_child(&mut cmd)
-        .map_err(|e| anyhow::anyhow!("failed to exec luajit: {}", e))?;
-    log::info!(target: "RUN",
-        "luajit pid {} spawned in {:.0}ms; waiting for game",
-        child.id(),
-        spawn_t.elapsed().as_secs_f64() * 1000.0
-    );
-    let pid = child.id();
+use anyhow::Result;
+use crate::skull_backend::GameProgram;
 
-    let status = if let Some(t) = timeout {
-        use wait_timeout::ChildExt;
-        match child.wait_timeout(t).map_err(|e| anyhow::anyhow!("wait_timeout failed: {}", e))? {
-            Some(s) => s,
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                crate::child_lifetime::release_bound_child(pid);
-                anyhow::bail!("Luajit process timed out after {} seconds.", t.as_secs_f32());
+/// Run an ordinary emitted program through the captured stdin evaluator.
+pub fn run_lua_program(lua: &GameProgram, emits_main: bool) -> Result<()> {
+    // The captured stdin evaluator requires contiguous input.
+    let program = crate::skull_backend::skull_game_main("", lua, emits_main).concat();
+    match run_lua_code(&program) {
+        Ok(run) => {
+            print!("{}", run.stdout);
+            if !run.stderr.is_empty() {
+                eprint!("{}", run.stderr);
             }
+            // The program's own exit status is the answer. Printing a crash and
+            // returning Ok is how `rock run` used to exit 0 on a dead program.
+            if !run.success {
+                log::error!(target: "SKULL", "program exited with a runtime error");
+                crate::ablation_report::exit_with_census(1);
+            }
+            Ok(())
         }
-    } else {
-        child.wait().map_err(|e| anyhow::anyhow!("wait failed: {}", e))?
-    };
-
-    crate::child_lifetime::release_bound_child(pid);
-    if !status.success() {
-        crate::ablation_report::exit_with_census(status.code().unwrap_or(1));
+        Err(e) => {
+            log::error!(target: "SKULL", "runtime error: {}", e.message);
+            crate::ablation_report::exit_with_census(1);
+        }
     }
-    Ok(())
 }

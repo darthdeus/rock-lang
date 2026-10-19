@@ -2,10 +2,10 @@
 //!
 //! Lints belong to the compiler, not to the editor: a finding that only appears
 //! in the LSP is one an author can ignore indefinitely and CI can never enforce.
-//! So the same `crates/bone-lints` engine the LSP drives also runs as a pass over
-//! bone's already-typechecked output on every `compile`/`run`/`test`/`stone`
+//! So the same `rock-lang/crates/bone-lints` engine the LSP drives also runs as a pass over
+//! bone's already-typechecked output on every `compile`/`run`/`test`/`engine`
 //! build. `Error`-severity findings FAIL the build; `Warning`/`Advice` report
-//! only. Plan: `docs/lint-future-plan.md`.
+//! only. Plan: the compiler contract.
 
 use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};
 use bone_semantic::inference::Workspace;
@@ -323,7 +323,7 @@ pub(crate) fn rollback_build_lints_cached(
             &warm,
             is_bin,
             &owned_sources,
-            &bone_lints::LintOptions::default(),
+            &crate::registry::lint_options(),
         )?;
         record_lint_cache_stats(stats);
         Ok(())
@@ -368,7 +368,7 @@ fn run_build_lints_cached_inner(
                 &warm,
                 is_bin,
                 &owned_sources,
-                &bone_lints::LintOptions::default(),
+                &crate::registry::lint_options(),
                 change,
             )
         } else {
@@ -377,7 +377,7 @@ fn run_build_lints_cached_inner(
                 &warm,
                 is_bin,
                 &owned_sources,
-                &bone_lints::LintOptions::default(),
+                &crate::registry::lint_options(),
                 change,
             )
         };
@@ -387,7 +387,7 @@ fn run_build_lints_cached_inner(
                 &warm,
                 is_bin,
                 &owned_sources,
-                &bone_lints::LintOptions::default(),
+                &crate::registry::lint_options(),
             );
             debug_assert_eq!(
                 ignored.iter().map(|f| (f.lint, f.error.message.as_str())).collect::<Vec<_>>(),
@@ -501,7 +501,7 @@ pub fn findings(
     root: &Path,
     scope: Scope,
 ) -> Vec<bone_lints::Finding> {
-    findings_with(ws, sources, root, scope, &bone_lints::LintOptions::default())
+    findings_with(ws, sources, root, scope, &crate::registry::lint_options())
 }
 
 /// [`findings`] for an explicit lint selection. `rock lint --lints=<names>`
@@ -519,7 +519,7 @@ pub fn findings_with(
         let is_bin =
             scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         // The REPORT set: this project's own files. A `stick.toml` DEPENDENCY
-        // (`stone/engine` under a game) is scanned but never reported on -- its code
+        // (`engine/engine` under a game) is scanned but never reported on -- its code
         // is not the author's to fix here, and a consumer must not fail a build on a
         // dependency's findings. Scanned rather than warm: an engine body calling
         // into game code is a real reachability edge, and dropping it would
@@ -595,7 +595,7 @@ pub fn unused_fns_under(
     with_source_texts(sources, |texts| {
         let warm = warm_module_ids(ws, texts);
         let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
-        let by_file = bone_lints::workspace_findings_by_file(ws, &warm, is_bin);
+        let by_file = bone_lints::workspace_findings_by_file_with(ws, &warm, is_bin, &crate::registry::lint_options());
         let mut out = Vec::new();
         for (file, findings) in by_file {
             if !Path::new(file.as_str()).starts_with(report_root) {
@@ -704,10 +704,10 @@ mod tests {
             finding("unused_fn", CompilerErrorLevel::Warning),
             finding("unused_fn", CompilerErrorLevel::Warning),
         ];
-        let line = summary_line(&soft, Path::new("mag"));
+        let line = summary_line(&soft, Path::new("example"));
         assert_eq!(
             line,
-            "3 lint warning(s) (2 unused_fn, 1 unused_var) -- run `rock lint mag` for detail"
+            "3 lint warning(s) (2 unused_fn, 1 unused_var) -- run `rock lint example` for detail"
         );
     }
 

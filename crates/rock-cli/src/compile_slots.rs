@@ -1,5 +1,5 @@
 //! Machine-wide memory budget for concurrent full compiles
-//! (docs/agent-coordination.md).
+//! (the compiler contract).
 //!
 //! The slot directory holds a pool of memory. Each compile reserves its
 //! estimated peak ([`estimate_reserve`]), takes a numbered ticket in `queue/`
@@ -10,8 +10,7 @@
 //! file at the top level also counts as a holder, reserving what its record
 //! names or else a full compile.
 //!
-//! The author's interactive compiles try `author-0` first, outside the pool,
-//! which batch work never takes. A process must not hold a slot while it
+//! A configured preferred slot is outside the pool. A process must not hold a slot while it
 //! waits on another process that may need one.
 
 use anyhow::{anyhow, Context, Result};
@@ -22,12 +21,13 @@ use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub(crate) const SLOT_DIR_ENV: &str = "ROCK_COMPILE_SLOT_DIR";
-pub(crate) const SLOTS_ENV: &str = "ROCK_COMPILE_SLOTS";
-pub(crate) const CLASS_ENV: &str = "ROCK_COMPILE_CLASS";
-pub(crate) use rock_host::process_management::{report_spawn_phase, SPAWN_PHASE_FILE_ENV};
+pub const SLOT_DIR_ENV: &str = "ROCK_COMPILE_SLOT_DIR";
+pub const SLOTS_ENV: &str = "ROCK_COMPILE_SLOTS";
+pub const CLASS_ENV: &str = "ROCK_COMPILE_CLASS";
+pub use rock_host::process_management::{report_spawn_phase, SPAWN_PHASE_FILE_ENV};
 
-const AUTHOR_SLOT: &str = "author-0";
+#[cfg(test)]
+const AUTHOR_SLOT: &str = "priority-0";
 const HELD_PREFIX: &str = "held-";
 const QUEUE_DIR: &str = "queue";
 const PEAKS_DIR: &str = "peaks";
@@ -35,27 +35,29 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Measured peaks kept per package; the reservation covers the largest.
 const PEAK_SAMPLES: usize = 8;
 
-/// Planned peak of one full mag compile (measured 4.3-5.4 GB).
-const COMPILE_PEAK_MIB: u64 = 4608;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CompileClass {
-    Interactive,
-    Batch,
-}
-
+/// Resolved host admission policy. No configuration means immediate admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SlotConfig {
+pub struct SlotConfig {
     pub dir: PathBuf,
     pub pool_mib: u64,
-    pub class: CompileClass,
+    pub full_compile_mib: u64,
+    /// An optional slot outside the shared pool, tried before queueing.
+    pub preferred_slot: Option<&'static str>,
+    pub try_preferred_slot: bool,
 }
 
+#[cfg(test)]
+const COMPILE_PEAK_MIB: u64 = 4608;
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum CompileClass { Interactive, Batch }
+
+#[cfg(test)]
 impl SlotConfig {
-    /// A pool that fits `compiles` full compiles.
-    #[cfg(test)]
     pub(crate) fn for_compiles(dir: &Path, compiles: u64, class: CompileClass) -> Self {
-        Self { dir: dir.to_path_buf(), pool_mib: compiles * COMPILE_PEAK_MIB, class }
+        Self { dir: dir.to_path_buf(), pool_mib: compiles * COMPILE_PEAK_MIB,
+            full_compile_mib: COMPILE_PEAK_MIB,
+            preferred_slot: Some(AUTHOR_SLOT), try_preferred_slot: matches!(class, CompileClass::Interactive) }
     }
 }
 
@@ -83,7 +85,7 @@ pub(crate) fn last_acquisition() -> Option<SlotAcquisition> {
     LAST_ACQUISITION.with(|last| last.borrow().clone())
 }
 
-/// A held slot file: `held-<ticket>` (removed on release) or `author-0`.
+/// A held slot file: `held-<ticket>` (removed on release) or the configured preferred slot.
 struct Held {
     file: File,
     path: PathBuf,
@@ -95,7 +97,7 @@ struct Held {
 
 /// One compile's slot; dropping it frees the slot.
 #[must_use = "the slot is freed when this guard drops"]
-pub(crate) struct CompileSlot {
+pub struct CompileSlot {
     held: Option<Held>,
     acquisition: SlotAcquisition,
     /// Set for guards from [`acquire`], which marks the thread as holding.
@@ -138,7 +140,7 @@ impl Drop for CompileSlot {
 
 /// Take a compile slot for `what` (named in the wait log), waiting while the
 /// pool cannot fit its reservation.
-pub(crate) fn acquire(what: &str) -> Result<CompileSlot> {
+pub fn acquire(what: &str) -> Result<CompileSlot> {
     if HOLDING.with(|holding| holding.get()) {
         return Err(anyhow!(
             "this thread already holds a compile slot; a nested acquire for {what} would wait on itself"
@@ -168,17 +170,7 @@ fn current_config() -> Result<Option<SlotConfig>> {
 
 #[cfg(not(test))]
 fn current_config() -> Result<Option<SlotConfig>> {
-    use std::io::IsTerminal;
-    static RAM_POOL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    let inputs = EnvInputs {
-        slots: env_var(SLOTS_ENV)?,
-        class: env_var(CLASS_ENV)?,
-        dir: env_var(SLOT_DIR_ENV)?,
-        home: std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from),
-        job_id_set: std::env::var_os("ROCK_JOB_ID").is_some_and(|id| !id.is_empty()),
-        stderr_is_terminal: std::io::stderr().is_terminal(),
-    };
-    config_from(&inputs, || *RAM_POOL.get_or_init(|| ram_pool_mib(crate::common::total_system_memory_mib())))
+    (crate::registry::registered().compile_slot_policy)()
 }
 
 #[cfg(test)]
@@ -186,65 +178,9 @@ pub(crate) fn set_thread_config(config: Option<SlotConfig>) {
     TEST_CONFIG.with(|current| *current.borrow_mut() = config);
 }
 
-#[cfg_attr(test, allow(dead_code))]
-fn env_var(name: &str) -> Result<Option<String>> {
-    match std::env::var(name) {
-        Ok(value) if value.is_empty() => Ok(None),
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(error) => Err(anyhow!("{name}: {error}")),
-    }
-}
-
-struct EnvInputs {
-    slots: Option<String>,
-    class: Option<String>,
-    dir: Option<String>,
-    home: Option<PathBuf>,
-    job_id_set: bool,
-    stderr_is_terminal: bool,
-}
-
-/// `None` when the limit is off (`ROCK_COMPILE_SLOTS=0`). `ROCK_COMPILE_SLOTS=N`
-/// sizes the pool for N full compiles.
-fn config_from(inputs: &EnvInputs, ram_pool: impl FnOnce() -> u64) -> Result<Option<SlotConfig>> {
-    let pool_mib = match &inputs.slots {
-        Some(value) => value.trim().parse::<u64>().map_err(|_| {
-            anyhow!("{SLOTS_ENV} must be a non-negative integer, got `{value}`")
-        })?.saturating_mul(COMPILE_PEAK_MIB),
-        None => ram_pool(),
-    };
-    if pool_mib == 0 {
-        return Ok(None);
-    }
-    let class = match inputs.class.as_deref() {
-        Some("interactive") => CompileClass::Interactive,
-        Some("batch") => CompileClass::Batch,
-        Some(other) => return Err(anyhow!("{CLASS_ENV} must be `interactive` or `batch`, got `{other}`")),
-        // Agents and rock-jobs run without a terminal; the author types in one.
-        None if !inputs.job_id_set && inputs.stderr_is_terminal => CompileClass::Interactive,
-        None => CompileClass::Batch,
-    };
-    let dir = match (&inputs.dir, &inputs.home) {
-        (Some(dir), _) => PathBuf::from(dir),
-        (None, Some(home)) => home.join("tmp/rock-compile-slots"),
-        (None, None) => return Err(anyhow!("HOME is unset; set {SLOT_DIR_ENV} or {SLOTS_ENV}=0")),
-    };
-    Ok(Some(SlotConfig { dir, pool_mib, class }))
-}
-
-/// The batch pool: 40% of total RAM, at least one full compile.
-fn ram_pool_mib(total_ram_mib: Option<u64>) -> u64 {
-    let Some(total) = total_ram_mib else {
-        log::warn!(target: "COMPILE", "no total RAM reading; allowing one full compile at a time");
-        return COMPILE_PEAK_MIB;
-    };
-    (total.saturating_mul(4) / 10).max(COMPILE_PEAK_MIB)
-}
-
 pub(crate) fn acquire_with(config: &SlotConfig, what: &str) -> Result<CompileSlot> {
     let peak_key = package_key(what);
-    let reserve = estimate_reserve(&config.dir, peak_key.as_deref());
+    let reserve = estimate_reserve(&config.dir, peak_key.as_deref(), config.full_compile_mib);
     acquire_reserving(config, what, reserve, peak_key)
 }
 
@@ -257,19 +193,19 @@ fn acquire_reserving(config: &SlotConfig, what: &str, reserve_mib: u64, peak_key
     let held = |file, path: PathBuf, remove| Held {
         file, path, remove, dir: config.dir.clone(), peak_key: peak_key.clone(), peak_at_admission,
     };
-    if config.class == CompileClass::Interactive {
-        let path = config.dir.join(AUTHOR_SLOT);
+    if let Some(preferred_slot) = config.preferred_slot.filter(|_| config.try_preferred_slot) {
+        let path = config.dir.join(preferred_slot);
         let mut file = open_slot(&path)?;
         match file.try_lock() {
             Ok(()) => {
                 if let Err(error) = write_holder(&mut file, what, reserve_mib, std::env::args()) {
-                    log::warn!(target: "COMPILE", "recording the holder of compile slot {AUTHOR_SLOT}: {error}");
+                    log::warn!(target: "COMPILE", "recording the holder of compile slot {preferred_slot}: {error}");
                 }
-                log::debug!(target: "COMPILE", "took compile slot {AUTHOR_SLOT} for {what}");
+                log::debug!(target: "COMPILE", "took compile slot {preferred_slot} for {what}");
                 report_spawn_phase("compile");
                 return Ok(CompileSlot {
                     held: Some(held(file, path, false)),
-                    acquisition: SlotAcquisition { slot: Some(AUTHOR_SLOT.to_string()), waited: started.elapsed() },
+                    acquisition: SlotAcquisition { slot: Some(preferred_slot.to_string()), waited: started.elapsed() },
                     marks_thread: false,
                 });
             }
@@ -287,7 +223,7 @@ fn acquire_reserving(config: &SlotConfig, what: &str, reserve_mib: u64, peak_key
     loop {
         let busy = {
             let _guard = QueueGuard::lock(&config.dir)?;
-            let pool = PoolState::scan(&config.dir, config.pool_mib)?;
+            let pool = PoolState::scan(config)?;
             let position = pool.queue.iter().position(|entry| entry.name == ticket.name)
                 .ok_or_else(|| anyhow!("compile slot ticket {} vanished from {}", ticket.name, config.dir.display()))?;
             if position < admitted_prefix(config.pool_mib, pool.held_mib(), &pool.queue) {
@@ -432,19 +368,21 @@ struct PoolState {
 }
 
 impl PoolState {
-    fn scan(dir: &Path, pool_mib: u64) -> Result<Self> {
+    fn scan(config: &SlotConfig) -> Result<Self> {
+        let SlotConfig { dir, pool_mib, full_compile_mib, preferred_slot, .. } = config;
+        let pool_mib = *pool_mib;
         let live = |dir: &Path, owned: &dyn Fn(&str) -> bool, removable: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
             let mut entries = Vec::new();
             for item in fs_err::read_dir(dir)? {
                 let item = item?;
                 let name = item.file_name().to_string_lossy().into_owned();
                 // Dot files include the AppleDouble `._*` files macOS writes on ExFAT.
-                if name.starts_with('.') || !owned(&name) || name == AUTHOR_SLOT || !item.file_type()?.is_file() {
+                if name.starts_with('.') || !owned(&name) || Some(name.as_str()) == *preferred_slot || !item.file_type()?.is_file() {
                     continue;
                 }
                 match live_record(&item.path())? {
                     Some(record) => {
-                        let reserve_mib = record_reserve(&record).unwrap_or(COMPILE_PEAK_MIB).min(pool_mib);
+                        let reserve_mib = record_reserve(&record).unwrap_or(*full_compile_mib).min(pool_mib);
                         entries.push(Entry { name, reserve_mib, record });
                     }
                     None if removable(&name) => {
@@ -527,8 +465,8 @@ fn write_holder(file: &mut File, what: &str, reserve_mib: u64, args: impl IntoIt
 
 /// The peak-measurement key of a compile of `what`: its package name and the
 /// `rock` subcommand, so every worktree's copy of a package and every run of
-/// a test fixture share one measurement, while `rock test mag` (tests
-/// included, about 4.9 GB) stays apart from `rock compile mag` (about 1.4 GB).
+/// a test fixture share one measurement, while `rock test project` (tests
+/// included, about 4.9 GB) stays apart from `rock compile project` (about 1.4 GB).
 fn package_key(what: &str) -> Option<String> {
     let manifest = Path::new(what).join("stick.toml");
     match rock_host::stick::StickConfig::from_path_optional(&manifest) {
@@ -545,12 +483,12 @@ fn package_key(what: &str) -> Option<String> {
 }
 
 /// A compile's reservation: the largest recent peak measured for its package
-/// with 25% headroom (one package's peaks vary that much: mag measured
+/// with 25% headroom (one package's peaks vary that much: project measured
 /// 4.3-5.4 GB), capped at a full compile. An unmeasured package reserves a
 /// full compile.
-fn estimate_reserve(dir: &Path, key: Option<&str>) -> u64 {
+fn estimate_reserve(dir: &Path, key: Option<&str>, full_compile_mib: u64) -> u64 {
     key.and_then(|key| read_peaks(dir, key).into_iter().max())
-        .map_or(COMPILE_PEAK_MIB, |peak| (peak + peak / 4).min(COMPILE_PEAK_MIB))
+        .map_or(full_compile_mib, |peak| (peak + peak / 4).min(full_compile_mib))
 }
 
 fn read_peaks(dir: &Path, key: &str) -> Vec<u64> {
@@ -660,13 +598,13 @@ mod tests {
         let path = dir.path().join("held-000000000001");
         let mut file = open_slot(&path).unwrap();
         file.lock().unwrap();
-        let args = ["rock", "package", "mag", "--var", "TELEMETRY_TOKEN=holder-secret-1", "--var=OTHER=holder-secret-2"];
+        let args = ["rock", "package", "example", "--var", "TELEMETRY_TOKEN=holder-secret-1", "--var=OTHER=holder-secret-2"];
         write_holder(&mut file, "package", 4608, args.iter().map(|arg| arg.to_string())).unwrap();
         let record = std::fs::read_to_string(&path).unwrap();
         assert!(!record.contains("holder-secret"), "holder record leaked a --var value: {record}");
         assert!(record.contains("TELEMETRY_TOKEN") && record.contains("OTHER"), "holder record keeps the names: {record}");
         std::fs::create_dir(dir.path().join(QUEUE_DIR)).unwrap();
-        let busy = PoolState::scan(dir.path(), 4608).unwrap().describe(0);
+        let busy = PoolState::scan(&pool(dir.path(), 4608)).unwrap().describe(0);
         assert!(busy.contains("held-000000000001") && !busy.contains("holder-secret"), "{busy}");
     }
 
@@ -675,18 +613,7 @@ mod tests {
     }
 
     fn pool(dir: &Path, pool_mib: u64) -> SlotConfig {
-        SlotConfig { dir: dir.to_path_buf(), pool_mib, class: CompileClass::Batch }
-    }
-
-    fn inputs(slots: Option<&str>, class: Option<&str>, job_id_set: bool, tty: bool) -> EnvInputs {
-        EnvInputs {
-            slots: slots.map(str::to_string),
-            class: class.map(str::to_string),
-            dir: None,
-            home: Some(PathBuf::from("/home/someone")),
-            job_id_set,
-            stderr_is_terminal: tty,
-        }
+        SlotConfig { dir: dir.to_path_buf(), pool_mib, full_compile_mib: COMPILE_PEAK_MIB, preferred_slot: Some(AUTHOR_SLOT), try_preferred_slot: false }
     }
 
     /// Whether `name` is free right now, without waiting.
@@ -840,7 +767,7 @@ mod tests {
             std::fs::write(dir.path().join(name), "").unwrap();
         }
         std::fs::write(dir.path().join("queue/000000000001"), "pid=1").unwrap();
-        let pool = PoolState::scan(dir.path(), 4608).unwrap();
+        let pool = PoolState::scan(&pool(dir.path(), 4608)).unwrap();
         assert!(pool.holders.is_empty() && pool.queue.is_empty());
         assert!(foreign.iter().all(|name| dir.path().join(name).exists()), "a foreign file was removed");
         assert!(!dir.path().join("queue/000000000001").exists(), "a dead ticket stays");
@@ -879,7 +806,6 @@ mod tests {
 
     #[test]
     fn zero_slots_disable_the_limit() {
-        assert_eq!(config_from(&inputs(Some("0"), Some("batch"), true, false), || 5).unwrap(), None);
         set_thread_config(None);
         let slot = acquire("unlimited").unwrap();
         assert_eq!(slot.acquisition().slot, None);
@@ -896,46 +822,20 @@ mod tests {
     }
 
     #[test]
-    fn configuration_reads_count_class_and_directory() {
-        let batch = config_from(&inputs(Some("3"), None, true, true), || unreachable!()).unwrap().unwrap();
-        assert_eq!(batch, config(Path::new("/home/someone/tmp/rock-compile-slots"), 3, CompileClass::Batch));
-        let author = config_from(&inputs(None, None, false, true), || 9000).unwrap().unwrap();
-        assert_eq!((author.pool_mib, author.class), (9000, CompileClass::Interactive));
-        let agent = config_from(&inputs(None, None, false, false), || 9000).unwrap().unwrap();
-        assert_eq!(agent.class, CompileClass::Batch);
-        let forced = config_from(&inputs(None, Some("interactive"), true, false), || 9000).unwrap().unwrap();
-        assert_eq!(forced.class, CompileClass::Interactive);
-        assert!(config_from(&inputs(Some("many"), None, true, false), || 9000).is_err());
-        assert!(config_from(&inputs(None, Some("urgent"), true, false), || 9000).is_err());
-    }
-
-    #[test]
-    fn ram_budget_matches_the_machines() {
-        let full_compiles = |gib: Option<u64>| ram_pool_mib(gib.map(|n| n * 1024)) / COMPILE_PEAK_MIB;
-        assert_eq!(full_compiles(Some(62)), 5, "host-a");
-        assert_eq!(full_compiles(Some(36)), 3, "Studio");
-        assert_eq!(full_compiles(Some(24)), 2);
-        assert_eq!(full_compiles(Some(16)), 1, "m1key");
-        assert_eq!(full_compiles(Some(4)), 1);
-        assert_eq!(full_compiles(None), 1);
-        assert_eq!(ram_pool_mib(Some(62 * 1024)), 25395, "the pool is 40% of RAM, not whole compiles");
-    }
-
-    #[test]
     fn reservations_follow_measured_package_peaks() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(estimate_reserve(dir.path(), None), COMPILE_PEAK_MIB);
-        assert_eq!(estimate_reserve(dir.path(), Some("fixture")), COMPILE_PEAK_MIB, "unmeasured");
+        assert_eq!(estimate_reserve(dir.path(), None, COMPILE_PEAK_MIB), COMPILE_PEAK_MIB);
+        assert_eq!(estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB), COMPILE_PEAK_MIB, "unmeasured");
         record_peak(dir.path(), "fixture", Some(100), Some(400));
-        assert_eq!(estimate_reserve(dir.path(), Some("fixture")), 500);
+        assert_eq!(estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB), 500);
         record_peak(dir.path(), "fixture", Some(900), Some(900));
         assert_eq!(read_peaks(dir.path(), "fixture"), [400], "a peak that did not rise bounds nothing");
-        record_peak(dir.path(), "mag", Some(50), Some(5000));
-        assert_eq!(estimate_reserve(dir.path(), Some("mag")), COMPILE_PEAK_MIB, "capped at a full compile");
+        record_peak(dir.path(), "example", Some(50), Some(5000));
+        assert_eq!(estimate_reserve(dir.path(), Some("example"), COMPILE_PEAK_MIB), COMPILE_PEAK_MIB, "capped at a full compile");
         for _ in 0..PEAK_SAMPLES {
             record_peak(dir.path(), "fixture", Some(0), Some(80));
         }
-        assert_eq!(estimate_reserve(dir.path(), Some("fixture")), 100, "old samples age out");
+        assert_eq!(estimate_reserve(dir.path(), Some("fixture"), COMPILE_PEAK_MIB), 100, "old samples age out");
 
         let package = tempfile::tempdir().unwrap();
         assert_eq!(package_key(package.path().to_str().unwrap()), None);

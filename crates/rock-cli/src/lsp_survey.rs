@@ -342,7 +342,7 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
     let warm_canon = fs_err::canonicalize(&warm_file)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or(warm_file);
-    let mut bone = BoneWorkspace::new();
+    let mut bone = BoneWorkspace::with_identity_storage_exemptions(crate::registry::registered().identity_storage_exemptions);
     bone.load_project(&warm_canon);
 
     // Generate candidates: top targets by each metric x edit kind, deduped.

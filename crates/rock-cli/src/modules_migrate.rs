@@ -1058,7 +1058,7 @@ fn raw_abi_scan(plan: &mut Plan, ctxs: &[Ctx], baselines: &[Checked]) -> std::re
     }
     if !js_sites.is_empty() {
         plan.notes.push(format!(
-            "native Lua audit: {} inline JavaScript body/bodies not checked; JS/web development is paused (docs/backends.md), so JavaScript ABI findings do not block this migration",
+            "native Lua audit: {} inline JavaScript body/bodies not checked; JS/web development is paused, so JavaScript ABI findings do not block this migration",
             js_sites.len()
         ));
     }

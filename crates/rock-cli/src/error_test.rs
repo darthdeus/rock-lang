@@ -313,7 +313,7 @@ fn lint_rejects(
         })
         .map(|m| m.id)
         .collect();
-    bone_lints::lint_workspace(ws, &warm, true, &sources, &bone_lints::LintOptions::default())
+    bone_lints::lint_workspace(ws, &warm, true, &sources, &crate::registry::lint_options())
         .iter()
         .find(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)
         .map(|f| error_text(&[f.error.clone()]))

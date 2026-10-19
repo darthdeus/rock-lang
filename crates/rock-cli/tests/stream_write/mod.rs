@@ -4,11 +4,11 @@ use super::*;
 fn streamed_test_program_matches_concatenation_and_excerpt() {
     for lua in [String::new(), "return 42".to_string(), format!("{}{}tail", "x".repeat(3989), "\u{1f600}")] {
         for harness in ["", "\n-- harness\n"] {
-            let expected = format!("preamble\n{lua}\nsetup_stone()\n{harness}");
+            let expected = format!("preamble\n{lua}\nsetup_runtime()\n{harness}");
             let program = TestProgram {
                 preamble: "preamble\n".into(),
                 lua: lua.clone(),
-                setup: "\nsetup_stone()\n",
+                setup: "\nsetup_runtime()\n",
             };
             let (file, excerpt) = write_test_program(program, harness).unwrap();
             assert_eq!(std::fs::read(file.path()).unwrap(), expected.as_bytes());

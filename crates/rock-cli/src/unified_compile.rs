@@ -104,7 +104,7 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
 /// emitted: the root's manifest name lowercased and dependency keys as
 /// written, because these strings are embedded in emitted StateSchema
 /// metadata and legacy artifacts must stay byte-identical through M4 (the
-/// v1 package identity replaces them; see docs/unfuck-backlog.md).
+/// v1 package identity replaces them; see the compiler contract).
 /// Returns `None` when the source has no stick.toml package graph.
 pub fn build_package_map(
     source_spec: &SourceSpec,

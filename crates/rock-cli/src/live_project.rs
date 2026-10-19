@@ -677,12 +677,12 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
 
     /// A session re-parses on every edit, so it has to KEEP each file's
     /// dialect and owning package rather than re-derive them -- and it was
-    /// given neither. Every Session-backed route (`rock sim`, `rock stone`,
+    /// given neither. Every Session-backed route (`rock sim`, `rock engine`,
     /// `rock watch`, the LSP) therefore read a v1 package as legacy source:
     /// `pub fn` came back as `unsupported item start`, and the definitions it
     /// could still parse had no package, so nothing resolved. Converting
-    /// `libs/chess-core` turned that into 830 type errors in `rock sim
-    /// chesslings` while `rock compile games/chesslings` was clean.
+    /// `libs/example-core` turned that into 830 type errors in `rock sim
+    /// example` while `rock compile games/example` was clean.
     #[test]
     fn a_v1_package_keeps_its_dialect_and_package_through_a_session() {
         let dir = tempfile::tempdir().unwrap();

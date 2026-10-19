@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/rock-cli",
     "crates/skull",
     "crates/skull-codegen-shader",
     "crates/skull-codegen-glsl",
@@ -39,6 +40,15 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+rock-cli = { path = "crates/rock-cli" }
+clap_complete = "4.5"
+fs_extra = "1.3.0"
+insta = { version = "1", features = ["json"] }
+notify = { version = "8.0.0", default-features = false }
+notify-debouncer-full = { version = "0.5.0", default-features = false }
+regex-lite = "0.1"
+rock-log = { path = "crates/rock-log" }
+skull-fmt = { path = "crates/skull-fmt" }
 skull = { path = "crates/skull" }
 skull-wgsl-abi = { path = "crates/skull-wgsl-abi" }
 skull-codegen-shader = { path = "crates/skull-codegen-shader" }

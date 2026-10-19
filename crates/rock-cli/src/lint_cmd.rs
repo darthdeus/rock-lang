@@ -1,6 +1,6 @@
 //! `rock lint <path>` -- the author-facing surface of the lint engine.
 //!
-//! A thin driver over `crates/bone-lints`: type-check the file or project
+//! A thin driver over `rock-lang/crates/bone-lints`: type-check the file or project
 //! through bone exactly as a build does, then run the same catalog the build
 //! pass and the LSP run. One engine, several surfaces. Exits non-zero only on an
 //! `Error`-severity finding, matching the build gate -- a `Warning` reports.
@@ -37,11 +37,11 @@ pub fn do_lint(
             }
             sel
         }
-        None => bone_lints::LintOptions::default(),
+        None => crate::registry::lint_options(),
     };
     let only = type_names(only_types);
     let ignored = type_names(ignore_types);
-    let mut sel = sel.ignoring_types(ignored.iter().copied());
+    let mut sel = sel.with_action_policy(crate::registry::registered().action_layer_policy).ignoring_types(ignored.iter().copied());
     if only_types.is_some() {
         sel = sel.over_types(only.iter().copied());
     }
@@ -96,7 +96,7 @@ pub fn do_lint(
     // `row_escape` is a CENSUS, so it reports the population it examined
     // alongside the findings. A bare zero cannot be read: a project with no
     // `Arena` at all scores the same as one whose every row stays put, and the
-    // build-or-delete decision this feeds (`docs/scene-system-plan.md` P6)
+    // build-or-delete decision this feeds (the compiler contract P6)
     // turns on telling those apart.
     if sel.enabled(bone_lints::ROW_ESCAPE) {
         let warm = lint_pass::warm_modules(&ws, &sources);

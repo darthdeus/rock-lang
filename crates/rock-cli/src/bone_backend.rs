@@ -4,7 +4,7 @@
 //! type-check). It has no codegen or runtime yet, so the commands it can serve
 //! are exactly the ones that bottom out at "does this source type-check": parse,
 //! compile (acts as a check), test, run, stats. Commands that need to *execute* a
-//! program (frame, perf, stone, sim, ...) cannot be served by bone and return a
+//! program (frame, perf, engine, sim, ...) cannot be served by bone and return a
 //! clear error from the dispatcher rather than silently doing nothing.
 //!
 //! Per `bone/CLAUDE.md` we do NOT modify any bone compiler source; this module
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 pub struct BonePhaseTimes {
     pub parse: Duration,
     /// Fused lower + check (`bone_semantic::semantic_passes::semantic_pass`). bone does not expose
-    /// a lower/check boundary publicly; see docs/bone-backend-plan.md.
+    /// a lower/check boundary publicly; see the compiler contract.
     pub semantic: Duration,
     /// Cloning the (LazyLock-cached, pre-parsed) stdlib modules — a per-run
     /// harness cost incurred before `semantic_pass`, counted *within* `semantic`.
@@ -77,8 +77,8 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
     // span lookup then fails and the snippet plus every label is dropped. Added
     // here, the one sink all render paths share, rather than per caller.
     let mut sf = sources.clone();
-    for f in rock_host::stdlib_loader::stdlib_files() {
-        let id = rock_host::stdlib_loader::stdlib_file_id(f.name);
+    for f in rock_stdlib::stdlib_files() {
+        let id = rock_stdlib::stdlib_file_id(f.name);
         sf.add_or_update_file(source_file_from_path_and_contents(
             id.clone(),
             id,
@@ -169,7 +169,7 @@ pub(crate) fn aliases_for_modules(
 /// EVERY diagnostic (all syntax errors, else all type errors) so the CLI reports
 /// the same set the LSP shows. A front-end signature change touches HERE, not
 /// every call site.
-pub(crate) fn check_modules(
+pub fn check_modules(
     modules: &mut [skull_parser::Ast],
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
     let (ws, errs) = check_modules_inner(modules, ClosureGate::Enforce)?;
@@ -184,7 +184,7 @@ pub(crate) fn check_modules(
 /// and repairs what changed) and which read the spec 11 closure themselves
 /// (`api_closure_requirements`). Every other gate is the same; the body
 /// errors come back beside the workspace instead of replacing it.
-pub(crate) fn check_modules_for_tools(
+pub fn check_modules_for_tools(
     modules: &mut [skull_parser::Ast],
 ) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
     check_modules_inner(modules, ClosureGate::LeaveToCaller)
@@ -218,9 +218,9 @@ fn check_modules_inner(
     }
     let aliases = aliases_for_modules(modules).map_err(|error| vec![error])?;
     let ws = match gate {
-        ClosureGate::Enforce => bone_semantic::semantic_passes::semantic_pass_with_aliases(modules, &aliases),
+        ClosureGate::Enforce => semantic_pass_with_aliases(modules, &aliases),
         ClosureGate::LeaveToCaller => {
-            bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, &aliases)
+            semantic_pass_without_closure_gate(modules, &aliases)
         }
     };
     // Expansion RECOVERS: a macro that must not expand (item-macro `mod`/`use`)
@@ -250,7 +250,7 @@ fn syntax_errors(modules: &[skull_parser::Ast]) -> Vec<CompilerError> {
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
 /// code, give me a verified workspace" path (single-file emit, project compile,
 /// iter benches).
-pub(crate) fn check_with_stdlib(
+pub fn check_with_stdlib(
     user: impl IntoIterator<Item = skull_parser::Ast>,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
     check_modules(&mut with_stdlib(user))
@@ -270,7 +270,7 @@ pub(crate) fn bone_session(
     // from the same facts `aliases_for_modules` reads off a parsed set: the
     // root package's manifest, reached through the file that carries graph id 0.
     let aliases = aliases_for_session(&files)?;
-    bone_incremental::session::Session::new(bone_stdlib_modules(), files, &aliases)
+    bone_incremental::session::Session::new_with_identity_storage_exemptions(bone_stdlib_modules(), files, &aliases, crate::registry::registered().identity_storage_exemptions)
 }
 
 /// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
@@ -302,7 +302,7 @@ pub(crate) fn aliases_for_session(
 /// The session files for a discovered project: each file's text plus the
 /// dialect and owning package the package graph stamped on it. A session
 /// re-parses on every edit, so it needs the facts, not a one-shot stamp.
-pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::SessionFile> {
+pub fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::SessionFile> {
     sources
         .files
         .iter()
@@ -328,7 +328,7 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
 /// resolves declared inputs once per SESSION BUILD at construction. The stamp
 /// survives `update_file` (the Session mutates its ws in place); a full
 /// session rebuild constructs a new one through here and so re-resolves.
-pub(crate) fn bone_session_for_emission(
+pub fn bone_session_for_emission(
     files: Vec<bone_incremental::session::SessionFile>,
     anchor: &std::path::Path,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
@@ -447,7 +447,7 @@ pub(crate) fn parse_user_modules(
 /// identified by file path (`parse_user_modules`/`skull_assemble_project`); the
 /// workspace's `module_ids` interner is the single path->id authority, so the id
 /// is only knowable after `semantic_pass` has registered every module.
-pub(crate) fn entry_module_id(
+pub fn entry_module_id(
     ws: &bone_semantic::inference::Workspace,
     file: ustr::Ustr,
 ) -> bone_semantic::prelude::ModuleId {
@@ -489,7 +489,7 @@ pub(crate) fn bone_workspace_timed(
     // Time the call from out here so bone's teardown (dropping the input ASTs at
     // fn return) is included — bone's internal phase timers stop before it.
     let t_call = Instant::now();
-    let res = bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases);
+    let res = semantic_pass_with_aliases(&mut modules, &aliases);
     times.semantic_call = t_call.elapsed();
     times.semantic = t_sem.elapsed();
 
@@ -518,11 +518,11 @@ pub(crate) fn bone_workspace_timed(
 pub(crate) fn bone_stdlib_modules() -> Vec<skull_parser::Ast> {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 let id = ustr::Ustr::from(
-                    rock_host::stdlib_loader::stdlib_file_id(f.name).as_str(),
+                    rock_stdlib::stdlib_file_id(f.name).as_str(),
                 );
                 skull_parser::parse_module(f.contents, id)
                     .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
@@ -553,7 +553,7 @@ fn render_source_errs(src: &str, errs: &[CompilerError]) -> String {
 /// "Unsupported top level item Item { .. }" is the full AST node); this keeps the
 /// histogram and per-file lines readable while preserving the discriminating
 /// detail (which item kind / which type ctor / which missing function).
-pub(crate) fn categorize(msg: &str) -> String {
+pub fn categorize(msg: &str) -> String {
     // First identifier-ish token before a `{`, `(`, or whitespace.
     let head = |s: &str| -> String {
         s.trim()
@@ -656,7 +656,7 @@ pub fn bone_parse(path: &str) -> Result<()> {
 /// loaded and type-checked as ONE workspace via `bone_workspace_timed` — the only
 /// way cross-file references resolve. A bare single file keeps the isolated
 /// single-source pipeline. This makes `rock compile <project> --backend bone`
-/// (e.g. bitgun) a whole-project typecheck, which is the workload `just
+/// (e.g. another project) a whole-project typecheck, which is the workload `just
 /// hyperfine-bone` benchmarks.
 ///
 /// `iters` reuses the same profiling loop the Lua `compile --iters N` uses:
@@ -770,7 +770,7 @@ fn bone_loc_stats(sources: &SourceFiles) -> rock_core::CompileStats {
         stats.total_lines += f.contents.lines().count();
         stats.bytes += f.contents.len();
     }
-    for f in rock_host::stdlib_loader::stdlib_files().iter() {
+    for f in rock_stdlib::stdlib_files().iter() {
         stats.files += 1;
         stats.total_lines += f.contents.lines().count();
         stats.bytes += f.contents.len();
@@ -855,7 +855,7 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
                 crate::ablation_report::exit_with_census(1);
             }
         };
-        match bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &aliases) {
+        match semantic_pass_with_aliases(&mut modules, &aliases) {
             Ok(ws) => ws,
             Err(e) => {
                 eprintln!("{}", e.render(&sources));
@@ -1093,7 +1093,7 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
 /// param) and times `update_file`, reporting the reinferred-body count + the
 /// per-edit timing distribution. `ITER_REINFER_FN=<name>` targets the fn; else
 /// the project fn with the most dependent modules is auto-picked. A tight body
-/// for samply (`samply record -- rock iter-reinfer mag --iters 500`).
+/// for samply (`samply record -- rock iter-reinfer project --iters 500`).
 pub fn bone_iter_reinfer(path: &str, iters: usize, warmup: usize) -> Result<()> {
     use std::path::PathBuf;
 
@@ -1313,7 +1313,7 @@ fn report_phase_timing(label: &str, agg: &BonePhaseTimes, iters: usize) {
 
 /// Trim a long absolute path to something readable in the per-file test line,
 /// keeping the last two components (`dir/file.rock`).
-pub(crate) fn short_path(path: &str) -> String {
+pub fn short_path(path: &str) -> String {
     let p = Path::new(path);
     let file = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
     match p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()) {
@@ -1373,7 +1373,7 @@ mod tests {
     #[test]
     fn a_diagnostic_spanned_into_stdlib_renders_its_snippet() {
         const NEEDLE: &str = "fn Vec<T>.push(";
-        let unified = rock_host::stdlib_loader::stdlib_files()
+        let unified = rock_stdlib::stdlib_files()
             .iter()
             .find(|f| f.name == "unified.rock")
             .expect("unified.rock is a stdlib module");
@@ -1383,7 +1383,7 @@ mod tests {
         let col = offset - head.rfind('\n').map_or(0, |i| i + 1);
         let span = rock_core::Span {
             file: ustr::Ustr::from(
-                rock_host::stdlib_loader::stdlib_file_id("unified.rock").as_str(),
+                rock_stdlib::stdlib_file_id("unified.rock").as_str(),
             ),
             line_range: (line, line),
             col_range: (col, col + NEEDLE.len()),
@@ -1401,9 +1401,9 @@ mod tests {
 
     #[test]
     fn cli_warm_stdlib_uses_loader_file_ids() {
-        let expected: Vec<_> = rock_host::stdlib_loader::stdlib_files()
+        let expected: Vec<_> = rock_stdlib::stdlib_files()
             .iter()
-            .map(|f| rock_host::stdlib_loader::stdlib_file_id(f.name))
+            .map(|f| rock_stdlib::stdlib_file_id(f.name))
             .collect();
         let session = bone_session(Vec::new()).expect("CLI warm session must build");
         let actual: Vec<_> = session
@@ -1415,4 +1415,25 @@ mod tests {
             .collect();
         assert_eq!(actual, expected, "CLI and LSP must warm the same stdlib file ids");
     }
+}
+
+/// Batch and incremental compiles share the host's migration policy.
+pub(crate) fn semantic_pass_without_closure_gate(
+    modules: &mut [skull_parser::Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
+    let ws = bone_semantic::inference::Workspace {
+        identity_storage_exemptions: crate::registry::registered().identity_storage_exemptions,
+        ..Default::default()
+    };
+    bone_semantic::semantic_passes::semantic_pass_into(ws, modules, aliases)
+}
+
+pub fn semantic_pass_with_aliases(
+    modules: &mut [skull_parser::Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
+    let ws = semantic_pass_without_closure_gate(modules, aliases)?;
+    bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
+    Ok(ws)
 }

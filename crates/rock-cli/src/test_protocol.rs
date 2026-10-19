@@ -1,10 +1,10 @@
 //! The `__SKULL__` test-result line protocol shared by the per-backend test
 //! executors (luajit in `skull_backend`, node in `js_test`). One parser, one
 //! histogram helper -- the executor seam of
-//! `docs/backends.md`.
+//! the compiler contract.
 
 /// Parsed marker lines of one test-program run.
-pub(crate) struct SkullMarkers {
+pub struct SkullMarkers {
     /// Number of `PASS` lines.
     pub passed: usize,
     /// The `<detail>` of every `FAIL` line.
@@ -21,7 +21,7 @@ pub(crate) struct SkullMarkers {
 /// the harness-side result; a `value` result is judged by the host. The Skull
 /// harness appends its run token and ordinal for watchdog progress tracking.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TestTime {
+pub struct TestTime {
     pub name: String,
     pub ms: f64,
     pub result: String,
@@ -32,7 +32,7 @@ pub(crate) struct TestTime {
 /// [`TestTime`] lines out of a test program's stdout. `None` = no result lines
 /// at all: the program never reached the harness (an emit/load bug, not a test
 /// failure).
-pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
+pub fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
     let (time_lines, results): (Vec<&str>, Vec<&str>) = stdout
         .lines()
         .filter(|l| l.starts_with("__SKULL__\t"))
@@ -81,7 +81,7 @@ pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
 /// Default relative tolerance for `@test(returns = <float>)` comparison. An
 /// explicit parameter on [`compare_value`] so a future executor with laxer
 /// arithmetic (GLSL) can widen it; int/bool stay exact regardless.
-pub(crate) const FLOAT_REL_TOL: f64 = 1e-12;
+pub const FLOAT_REL_TOL: f64 = 1e-12;
 
 /// Compare a `VALUE` marker's serialized return value against the pinned
 /// `@test(returns = ...)` literal. Backend-neutral: the host parses the
@@ -89,7 +89,7 @@ pub(crate) const FLOAT_REL_TOL: f64 = 1e-12;
 /// executors' serializations need not be byte-identical. Int expectations are
 /// exact f64 equality (42 == 42.0); floats pass within `float_rel_tol`
 /// relative tolerance; bools are exact. `Err` carries the FAIL detail.
-pub(crate) fn compare_value(
+pub fn compare_value(
     expect: &skull::ValueExpect,
     got: &str,
     float_rel_tol: f64,
@@ -139,7 +139,7 @@ pub(crate) fn compare_value(
 /// Bucket reason strings into a histogram sorted by count desc, ties by reason
 /// asc (deterministic output; the JS run's skip histogram IS the emitter work
 /// list, so ordering must be stable).
-pub(crate) fn reason_histogram<'a>(
+pub fn reason_histogram<'a>(
     reasons: impl IntoIterator<Item = &'a str>,
 ) -> Vec<(String, usize)> {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();

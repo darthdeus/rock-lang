@@ -1,0 +1,4 @@
+pub mod nav::graph;
+
+pub struct GraphMob { hp: int }
+pub struct GraphRoom { mobs: [GraphMob] }

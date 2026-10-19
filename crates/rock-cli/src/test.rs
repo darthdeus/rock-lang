@@ -9,7 +9,7 @@
 use crate::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TestFilter {
+pub struct TestFilter {
     patterns: Vec<String>,
     display: String,
 }
@@ -60,7 +60,7 @@ pub struct TestMetadata {
 /// `@test` fns with their `expect_failure` / `@ignore` flags. Files that don't
 /// parse cleanly are skipped — they can't contribute a discoverable test, and
 /// the caller only reaches here after a compile failure anyway.
-pub(crate) fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<TestMetadata> {
+pub fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<TestMetadata> {
     let mut test_functions = Vec::new();
 
     for file in sources.files.iter() {

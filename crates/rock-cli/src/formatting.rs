@@ -143,7 +143,7 @@ fn format_rock_file(file_path: &str) -> Result<String> {
     // longer parses. skull-fmt returns the input unchanged on a parse
     // failure, so a *changed* output that doesn't parse is a formatter bug
     // -- refuse it rather than corrupt the file (cf. rock-format, which
-    // silently produced unparseable output for stone/engine/lib.rock).
+    // silently produced unparseable output for engine/engine/lib.rock).
     if formatted != input {
         let file: ustr::Ustr = format!("<reparse:{file_path}>").into();
         let ast = skull_parser::parse_module_with_dialect(&formatted, file, dialect).map_err(|e| {

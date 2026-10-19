@@ -2,47 +2,39 @@
 name = "rock-cli"
 version = "0.1.0"
 edition = "2024"
-autotests = false
+autobins = false
 
 [lib]
 path = "src/lib.rs"
 
-[[bin]]
-name = "rock"
-path = "src/main.rs"
-
 [features]
-# Build the `rock` binary with bone's parallel passes swapped for sequential
-# std-iterator equivalents (the prelude shim in bone/src/prelude.rs), for clean
+# Swap bone's parallel passes for sequential std-iterator equivalents
+# (the prelude shim in bone/src/prelude.rs), for clean
 # single-threaded sampling profiles with no rayon plumbing frames. rock-cli is a
-# workspace default-member, so `cargo {build,run} --features sequential` resolves
-# this and propagates it to bone. It also flips rock-semantic's source loading
+# workspace default-member; rock-dev-cli forwards `--features sequential`
+# here and this propagates it to bone. It also flips rock-semantic's source loading
 # to serial, so a front-end profile (rock iter-parse / iter-tokenize) has no
 # rayon pool/teardown frames either. See `just samply-bone-seq`.
-sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequential", "rock-lsp/sequential"]
-backend-js = ["dep:skull-codegen-js"]
+sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequential"]
 renderer-wgpu = ["skull/renderer-wgpu"]
 
 [dependencies]
-rock-host = { path = "../rock-host" }
-sound-core = { path = "../sound-core" }
-rock-log = { path = "../rock-log" }
-rock-core = { path = "../rock-core" }
-rock-tokenizer = { path = "../rock-tokenizer" }
-skull-fmt = { path = "../skull-fmt" }
-skull-parser = { path = "../skull-parser" }
-bone-semantic = { path = "../bone-semantic" }
-bone-core = { path = "../bone-core" }
-bone-lints = { path = "../bone-lints" }
-bone-incremental = { path = "../bone-incremental" }
-bone-query = { path = "../bone-query" }
-rock-lsp = { path = "../rock-lsp" }
-skull = { path = "../skull" }
-skull-codegen-glsl = { path = "../skull-codegen-glsl" }
-skull-codegen-js = { path = "../skull-codegen-js", optional = true }
-skull-codegen-c = { path = "../skull-codegen-c" }
-skull-mir = { path = "../skull-mir" }
-lsp-types = { path = "../lsp-types-manual", package = "lsp-types-manual" }
+rock-host = { workspace = true }
+rock-stdlib = { workspace = true }
+rock-log = { workspace = true }
+rock-core = { workspace = true }
+rock-tokenizer = { workspace = true }
+skull-fmt = { workspace = true }
+skull-parser = { workspace = true }
+bone-semantic = { workspace = true }
+bone-core = { workspace = true }
+bone-lints = { workspace = true }
+bone-incremental = { workspace = true }
+bone-query = { workspace = true }
+skull = { workspace = true }
+skull-codegen-glsl = { workspace = true }
+skull-mir = { workspace = true }
+lsp-types = { workspace = true }
 
 clap = { workspace = true }
 clap_complete = { workspace = true }
@@ -52,8 +44,6 @@ serde_json = { workspace = true }
 basic-toml = "0.1"
 fs-err = { workspace = true }
 walkdir = { workspace = true }
-base64 = { workspace = true }
-flate2 = "1"
 tempfile = "3.0"
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
@@ -65,49 +55,26 @@ rayon = { workspace = true }
 fs_extra = { workspace = true }
 atomic_refcell = { workspace = true }
 log = { workspace = true }
-png = "0.18"
 parking_lot = { workspace = true }
 wait-timeout = { workspace = true }
 sha2 = "0.10"
-rodio = { workspace = true }
 sysinfo = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["jobapi2", "winnt", "handleapi", "processthreadsapi"] }
 
 [dev-dependencies]
 insta = { workspace = true }
 regex-lite = { workspace = true }
 syn = { version = "2", features = ["full"] }
 tempfile = "3.0"
-test-utils = { path = "../test-utils" }
+test-utils = { workspace = true }
 # web_smoke_tests: decode the headless-Chrome screenshot for the non-blank check.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true
 
-[package.metadata.cargo-machete]
-# `#[global_allocator]` decl in main.rs; cargo-machete's grep doesn't see it.
-ignored = ["mimalloc"]
-
-[[test]]
-name = "rock_cli_tests"
-path = "tests/main.rs"
-
-[[test]]
-name = "rock_cli_heavy"
-path = "tests/main_heavy.rs"
-
-[[test]]
-name = "rock_cli_js"
-path = "tests/main_js.rs"
-required-features = ["backend-js"]
-
-[[test]]
-name = "rock_cli_wgpu"
-path = "tests/main_wgpu.rs"
-required-features = ["renderer-wgpu"]
+[[bin]]
+name = "rock-plain"
+path = "src/main.rs"

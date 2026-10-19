@@ -17,13 +17,12 @@ use std::time::{Duration, Instant};
 #[cfg(not(target_os = "macos"))]
 type DebouncerCacheType = notify_debouncer_full::RecommendedCache;
 #[cfg(not(target_os = "macos"))]
-pub(crate) type WatchHandle = notify_debouncer_full::Debouncer<notify::RecommendedWatcher, DebouncerCacheType>;
+pub type WatchHandle = notify_debouncer_full::Debouncer<notify::RecommendedWatcher, DebouncerCacheType>;
 #[cfg(target_os = "macos")]
-pub(crate) type WatchHandle = macos::MacHandle;
+pub type WatchHandle = macos::MacHandle;
 
 /// True for files inside a project's *own* `tmp/` output directory
-/// (compiler scratch: `main.lua`, etc.), excluding the `restart.txt`
-/// manual-restart trigger which must still get through.
+/// (compiler scratch: `main.lua`, etc.). Explicit restart inputs bypass this filter.
 ///
 /// The `tmp` segment is matched only in the path **relative to its
 /// watched root** — so a project that itself lives under a `tmp`
@@ -34,9 +33,6 @@ pub(crate) type WatchHandle = macos::MacHandle;
 /// and kills hot reload with no error or log. One predicate so the
 /// two call sites can't drift.
 fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
-    if path.file_name().and_then(|n| n.to_str()) == Some("restart.txt") {
-        return false;
-    }
     match roots.iter().find_map(|r| path.strip_prefix(r).ok()) {
         Some(rel) => rel
             .components()
@@ -53,8 +49,8 @@ pub struct FileWatcherConfig {
     pub debounce_ms: u64,
     /// Whether to filter out metadata-only changes (like touch)
     pub filter_metadata: bool,
-    /// Whether to enable restart trigger file support (tmp/restart.txt)
-    pub restart_trigger_enabled: bool,
+    /// Optional relative path suffix that the host treats as a restart input.
+    pub restart_suffix: Option<PathBuf>,
     /// Exact restart files outside the source roots; their parents are watched
     /// non-recursively so scratch output never becomes a source root.
     pub restart_files: Vec<PathBuf>,
@@ -64,7 +60,7 @@ pub struct FileWatcherConfig {
     pub ignored_roots: Vec<PathBuf>,
     /// Exact files watched IN ADDITION to the extension filter, shared with
     /// the owner so it can be updated after watcher creation. Used for
-    /// embed_string inputs (docs/comptime-plan.md): the set is only known
+    /// embed_string inputs (the compiler contract): the set is only known
     /// after a compile, and grows/shrinks as the game's embeds change.
     pub extra_files: Option<SharedWatchSet>,
     /// Ignore macOS create history for unchanged files present when a watch starts.
@@ -172,12 +168,18 @@ impl InitialFiles {
     }
 }
 
+impl FileWatcherConfig {
+    fn matches_restart_suffix(&self, path: &Path) -> bool {
+        self.restart_suffix.as_ref().is_some_and(|suffix| path.ends_with(suffix))
+    }
+}
+
 impl Default for FileWatcherConfig {
     fn default() -> Self {
         Self {
             debounce_ms: 5,
             filter_metadata: false,
-            restart_trigger_enabled: false,
+            restart_suffix: None,
             restart_files: Vec::new(),
             watch_extensions: vec!["rock".to_string()],
             watch_all_files: false,
@@ -211,12 +213,11 @@ impl FileWatcher {
     }
 
     /// Canonical watcher preset for Rock source trees, shared by
-    /// `rock stone`, `rock watch`, and `rock test --watch`. Single
+    /// `rock engine`, `rock watch`, and `rock test --watch`. Single
     /// source of truth for the settings these used to each hand-roll
     /// (and drift on): 100ms debounce to batch rapid editor saves,
     /// metadata events allowed so `touch` retriggers, `.rock`
-    /// extension, restart-trigger off. Stone opts into restart-trigger
-    /// and the engine-rebuild extensions (rs/c/h/toml) on top. See
+    /// extension, no restart inputs. Hosts supply restart inputs and extra extensions. See
     /// TODO.md "Unify file-watcher configs".
     ///
     /// Only `debounce` differs from `FileWatcherConfig::default()`;
@@ -226,7 +227,6 @@ impl FileWatcher {
         Self::new()
             .with_debounce(100)
             .with_metadata_filter(false)
-            .with_restart_trigger(false)
             .with_extensions(vec!["rock".to_string()])
     }
 
@@ -242,9 +242,9 @@ impl FileWatcher {
         self
     }
 
-    /// Enable/disable restart trigger file support
-    pub fn with_restart_trigger(mut self, enabled: bool) -> Self {
-        self.config.restart_trigger_enabled = enabled;
+    /// Supply a host's relative restart path, including inputs below skipped scratch directories.
+    pub fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
+        self.config.restart_suffix = Some(suffix);
         self
     }
 
@@ -364,31 +364,14 @@ impl FileWatcher {
                             if event_paths.is_empty() {
                                 continue;
                             }
-                            // Check if this is a restart trigger file.
-                            // Match strictly `<...>/tmp/restart.txt` via the
-                            // OS-native Path API: works on both `/` and `\`,
-                            // and rejects stray `restart.txt` files outside
-                            // a `tmp` directory (which the older
-                            // `ends_with("/restart.txt")` substring check
-                            // would have triggered on).
-                            if config.restart_trigger_enabled {
-                                for &path in &event_paths {
-                                    let is_restart_file = path.file_name().and_then(|n| n.to_str())
-                                        == Some("restart.txt");
-                                    let parent_is_tmp = path
-                                        .parent()
-                                        .and_then(|p| p.file_name())
-                                        .and_then(|n| n.to_str())
-                                        == Some("tmp");
-                                    if is_restart_file && parent_is_tmp {
-                                        is_restart_trigger = true;
-                                        has_relevant_changes = true;
-                                        affected_paths.insert(path.clone());
-                                    }
+                            for &path in &event_paths {
+                                if restart_files.contains(path.as_path()) || config.matches_restart_suffix(path) {
+                                    is_restart_trigger = true;
+                                    has_relevant_changes = true;
+                                    affected_paths.insert(path.clone());
                                 }
                             }
 
-                            // Check if this event affects watched file types
                             let affects_watched_files = event_paths.iter().any(|path| {
                                 if config.watch_all_files {
                                     return !path.to_string_lossy().ends_with('~');
@@ -420,10 +403,10 @@ impl FileWatcher {
                                         ModifyKind::Data(_) => {
                                             // Data modifications always go through
                                             // and update the timestamp for each affected file
-                                            // BUT: don't track timestamps for tmp/ files (except restart.txt)
+                                            // Explicit restart inputs bypass the scratch filter.
                                             let now = Instant::now();
                                             for &path in &event_paths {
-                                                if !is_tmp_scratch_file(path, &scratch_roots) {
+                                                if restart_files.contains(path.as_path()) || config.matches_restart_suffix(path) || !is_tmp_scratch_file(path, &scratch_roots) {
                                                     data_write_timestamps.insert(path.clone(), now);
                                                 }
                                             }
@@ -476,7 +459,7 @@ impl FileWatcher {
                             if is_relevant && (affects_watched_files || is_restart_trigger) {
                                 has_relevant_changes = true;
                                 for &path in &event_paths {
-                                    if is_tmp_scratch_file(path, &scratch_roots) {
+                                    if !restart_files.contains(path.as_path()) && !config.matches_restart_suffix(path) && is_tmp_scratch_file(path, &scratch_roots) {
                                         continue;
                                     }
                                     let is_backup = path.to_string_lossy().ends_with('~');
@@ -566,7 +549,7 @@ mod tests {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 mod macos {
     use super::*;
     use sha2::{Digest, Sha256};
@@ -616,7 +599,7 @@ mod macos {
     impl Observation {
         fn admitted(&self, path: &Path) -> bool {
             if self.config.ignored_roots.iter().any(|root| path.starts_with(root))
-                || is_tmp_scratch_file(path, &self.roots)
+                || (!self.restart(path) && is_tmp_scratch_file(path, &self.roots))
                 || path.as_os_str().to_string_lossy().ends_with('~') {
                 return false;
             }
@@ -625,9 +608,7 @@ mod macos {
                 || path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| self.config.watch_extensions.iter().any(|wanted| wanted == ext))
         }
         fn restart(&self, path: &Path) -> bool {
-            self.config.restart_trigger_enabled
-                && path.file_name().is_some_and(|name| name == "restart.txt")
-                && path.parent().and_then(|parent| parent.file_name()).is_some_and(|name| name == "tmp")
+            self.config.restart_files.iter().any(|file| file == path) || self.config.matches_restart_suffix(path)
         }
         fn descend(&self, path: &Path) -> bool {
             !self.config.ignored_roots.iter().any(|root| path.starts_with(root))
@@ -664,7 +645,11 @@ mod macos {
                     let metadata = if kind.is_symlink() { Some(std::fs::metadata(&path)?) } else { None };
                     if kind.is_dir() || metadata.as_ref().is_some_and(|meta| meta.is_dir()) {
                         if self.descend(&path) { children.push(path); }
-                        else if self.config.restart_trigger_enabled && path.file_name().is_some_and(|name| name == "tmp") { files.push(path.join("restart.txt")); }
+                        else if let Some(suffix) = &self.config.restart_suffix {
+                            if suffix.parent().is_some_and(|parent| path.ends_with(parent)) {
+                                if let Some(name) = suffix.file_name() { files.push(path.join(name)); }
+                            }
+                        }
                     } else if kind.is_file() || metadata.as_ref().is_some_and(|meta| meta.is_file()) {
                         files.push(path);
                     }
@@ -876,13 +861,19 @@ mod macos {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().canonicalize().unwrap();
             std::fs::create_dir(root.join("tmp")).unwrap();
-            let restart = root.join("tmp/restart.txt");
+            let restart = root.join("tmp/reload.signal");
             std::fs::write(&restart, "trigger").unwrap();
-            let mut observation = observation(root, FileWatcherConfig { restart_trigger_enabled: true, ..Default::default() });
-            std::fs::remove_file(&restart).unwrap();
-            let event = observation.scan(false).unwrap();
-            assert_eq!(event.paths, HashSet::from([restart]));
-            assert!(event.is_restart_trigger);
+            for config in [
+                FileWatcherConfig { restart_files: vec![restart.clone()], ..Default::default() },
+                FileWatcherConfig { restart_suffix: Some(PathBuf::from("tmp/reload.signal")), ..Default::default() },
+            ] {
+                std::fs::write(&restart, "trigger").unwrap();
+                let mut observation = observation(root.clone(), config);
+                std::fs::remove_file(&restart).unwrap();
+                let event = observation.scan(false).unwrap();
+                assert_eq!(event.paths, HashSet::from([restart.clone()]));
+                assert!(event.is_restart_trigger);
+            }
         }
         #[test]
         fn unreadable_input_does_not_consume_another_files_edit() {
@@ -915,8 +906,9 @@ mod macos {
         #[ignore = "manual watcher startup and steady-state measurement"]
         fn measure_source_watch_population() {
             use std::time::Instant;
-            let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf();
-            for (name, roots) in [("mag", vec![workspace.join("mag"), workspace.join("stdlib")]), ("compiler", crate::watch::compiler_watch_paths())] {
+            let root = PathBuf::from(std::env::var_os("ROCK_WATCH_MEASURE_ROOT")
+                .expect("set ROCK_WATCH_MEASURE_ROOT to the source tree to measure"));
+            for (name, roots) in [("source", vec![root, rock_stdlib::stdlib_dir()])] {
                 let config = FileWatcherConfig { debounce_ms: 100, watch_extensions: vec!["rock".into(), "rs".into(), "c".into(), "h".into(), "toml".into()], ..Default::default() };
                 let mut observation = Observation { config, roots, directories: HashMap::new(), files: HashMap::new(), started: SystemTime::now(), directory_reads: 0 };
                 let start = Instant::now();

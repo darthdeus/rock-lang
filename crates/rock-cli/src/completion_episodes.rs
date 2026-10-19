@@ -1,6 +1,6 @@
 //! `rock completion-episodes <log.jsonl>...` -- stitch completion-log rows
 //! into EPISODES of user struggle and print the tuning metrics
-//! (docs/completion-episodes.md). Pure offline analysis of the client log
+//! (the compiler contract). Pure offline analysis of the client log
 //! (`rock.nvim` completion_log rows); no workspace, no replay.
 //!
 //! An episode groups time- and anchor-proximate popups at one site and

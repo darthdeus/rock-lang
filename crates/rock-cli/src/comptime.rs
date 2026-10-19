@@ -1,4 +1,4 @@
-//! Host-side resolution of comptime inputs (docs/comptime-plan.md tier 1):
+//! Host-side resolution of comptime inputs (the compiler contract tier 1):
 //! turn a project's `[build.vars]` plus the invocation's `--channel`/`--var`
 //! selection into the `ComptimeInputs` skull's `build_var`/`embed_string`
 //! expansion reads off the Workspace. Commands run here, once per session build,

@@ -258,7 +258,7 @@ fn analyze(project: &Path, graph: &PackageGraph) -> (Option<Population>, Analysi
     let population = Population {
         mode,
         rows: rows.into_values().collect(),
-        std_modules: rock_host::stdlib_loader::stdlib_files().len(),
+        std_modules: rock_stdlib::stdlib_files().len(),
     };
     if !untagged.is_empty() {
         let message = format!(
@@ -511,7 +511,7 @@ fn revision(manifest_dir: &Path, graph: &PackageGraph) -> Revision {
         .iter()
         .map(|n| n.root.to_string_lossy().into_owned())
         .collect();
-    paths.push(rock_host::stdlib_loader::stdlib_dir().to_string_lossy().into_owned());
+    paths.push(rock_stdlib::stdlib_dir().to_string_lossy().into_owned());
     let mut args = vec!["status", "--porcelain", "--untracked-files=all", "--"];
     args.extend(paths.iter().map(String::as_str));
     match git(&args) {

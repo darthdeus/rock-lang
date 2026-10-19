@@ -567,7 +567,7 @@ pub(crate) fn lua_references(bodies: &[LuaBody]) -> Result<Vec<LuaRefs>, String>
     }
     script.push_str("}\n");
     script.push_str(include_str!("modules_lua_references.lua"));
-    let run = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(std::time::Duration::from_secs(60)))
+    let run = crate::compile_cmd::run_lua_code_with_timeout(&script, Some(std::time::Duration::from_secs(60)))
         .map_err(|e| format!("the raw-ABI census could not run LuaJIT: {}", e.message))?;
     if !run.success {
         return Err(format!("the raw-ABI census failed in LuaJIT: {}", run.stderr.trim()));
@@ -631,7 +631,7 @@ fn lua_quote(text: &str) -> String {
 
 /// One span edit: replace `range` (empty for an insertion) with `text`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Edit {
+pub struct Edit {
     pub range: (usize, usize),
     pub text: String,
     /// An insertion that ends the text before it (an ascription's `)`), so a
@@ -641,13 +641,13 @@ pub(crate) struct Edit {
 }
 
 impl Edit {
-    pub(crate) fn new(range: (usize, usize), text: impl Into<String>) -> Edit {
+    pub fn new(range: (usize, usize), text: impl Into<String>) -> Edit {
         Edit { range, text: text.into(), closes: false }
     }
 }
 
 /// Apply non-overlapping edits. Overlap is refused (spec 15.2).
-pub(crate) fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<String, String> {
+pub fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<String, String> {
     let mut sorted: Vec<&Edit> = edits.iter().collect();
     sorted.sort_by_key(|e| e.range);
     let mut out = String::with_capacity(text.len() + 64);

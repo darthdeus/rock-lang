@@ -13,8 +13,8 @@
 //! long enough for statistically meaningful data:
 //!
 //! ```text
-//! samply record -- rock iter-tokenize mag --iters 3000
-//! samply record -- rock iter-parse    mag --iters 2000
+//! samply record -- rock iter-tokenize project --iters 3000
+//! samply record -- rock iter-parse    project --iters 2000
 //! ```
 //!
 //! The end-of-run PROFILE line reports a `loc/sec` figure that reuses

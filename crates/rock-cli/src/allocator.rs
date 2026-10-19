@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn negative_mimalloc_commit_counter_is_reported_unknown() {
-        // Measured in a `rock test mag` prepare phase after the workspace drop.
+        // Measured in a `rock test project` prepare phase after the workspace drop.
         let mut values = [0usize; 8];
         values[5] = -549_257_216i64 as usize;
         values[6] = 3_875_405_824;

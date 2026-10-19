@@ -95,7 +95,9 @@ fn collect_sources(inputs: &[String], cwd: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = BTreeSet::new();
     for input in inputs {
         let candidate = Path::new(input);
-        let candidate = if candidate.is_absolute() {
+        let candidate = if input == "stdlib" {
+            rock_stdlib::stdlib_dir()
+        } else if candidate.is_absolute() {
             candidate.to_path_buf()
         } else {
             cwd.join(candidate)
@@ -119,7 +121,7 @@ fn collect_sources(inputs: &[String], cwd: &Path) -> Result<Vec<PathBuf>> {
         anyhow::bail!("declaration inputs contain no .rock files");
     }
     for path in &paths {
-        if !path.starts_with(cwd) {
+        if !path.starts_with(cwd) && !path.starts_with(fs::canonicalize(rock_stdlib::stdlib_dir())?) {
             anyhow::bail!(
                 "declaration input escapes the working directory: '{}'",
                 path.display()
@@ -137,6 +139,10 @@ fn ensure_rock_file(path: &Path) -> Result<()> {
 }
 
 fn display_path(path: &Path, cwd: &Path) -> Result<String> {
+    let stdlib = fs::canonicalize(rock_stdlib::stdlib_dir())?;
+    if let Ok(relative) = path.strip_prefix(&stdlib) {
+        return Ok(format!("stdlib/{}", relative.to_string_lossy().replace('\\', "/")));
+    }
     let relative = path.strip_prefix(cwd).map_err(|_| {
         anyhow::anyhow!("declaration input escapes the working directory: '{}'", path.display())
     })?;

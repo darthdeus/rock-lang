@@ -3,16 +3,16 @@
 //! `unused_fn` asks "is this function reachable", which is only answerable
 //! against a closed world. A `bin` has one: itself plus its dependencies. A
 //! `lib` does not -- its callers live in consumers it cannot see -- so the
-//! ordinary pass skips libs entirely (`StickConfig::is_bin_at`), and stone gets
+//! ordinary pass skips libs entirely (`StickConfig::is_bin_at`), and engine gets
 //! no coverage from `rock lint` or the LSP.
 //!
 //! This recovers it by supplying the missing world. Every consumer in the repo
 //! is analyzed on its own, and a function is reported only when it is unreached
 //! in ALL of them -- the intersection. Per-consumer absence proves nothing: half
-//! of stone's API is called by bitgun and not mag, and reporting either half
+//! of engine's API is called by another project and not project, and reporting either half
 //! from one consumer's view is how the LSP came to flag live engine code.
 //!
-//! Sound here because the repo is the whole world: stone has no external users.
+//! Sound here because the repo is the whole world: engine has no external users.
 //! A lib with consumers outside the tree cannot be linted this way.
 
 use crate::Result;
@@ -34,7 +34,7 @@ pub fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<()> {
     if !lib_root.is_dir() {
         anyhow::bail!("lint --union: `{lib}` is not a directory (a library's root)");
     }
-    // The lib's parent by default -- `stone/` sits beside every game that uses
+    // The lib's parent by default -- `engine/` sits beside every game that uses
     // it, so the common case needs no flag. Deriving this by walking up to a
     // `.git` was tried and is a trap: a repo can sit anywhere above (`/tmp` is
     // one on this machine), and the scan then walks a filesystem.
@@ -157,8 +157,9 @@ fn unreached_in(
     Ok(Some((keys, findings, sources)))
 }
 
-/// Every `bin` package under `root`. Skips VCS/build dirs, and does not descend
-/// into a package once found (a package's subdirectories are its own sources).
+/// Every `bin` package under `root`, skipping build/VCS directories and
+/// registered exclusions. A selected root is always scanned. Package sources
+/// are not searched for nested packages.
 pub fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -177,6 +178,9 @@ pub fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
             }
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') || matches!(name, "target" | "node_modules" | "tmp") {
+                continue;
+            }
+            if (crate::registry::registered().scan_excluded)(&p) {
                 continue;
             }
             stack.push(p);

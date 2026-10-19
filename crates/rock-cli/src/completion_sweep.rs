@@ -1,6 +1,6 @@
 //! `rock completion-sweep <project> [--stride N]` -- deterministic completion
 //! output over a derived corpus of cursor positions, for BYTE-IDENTITY gating
-//! of completion refactors (docs/completion-v2-design.md, M0). Workflow: dump
+//! of completion refactors (the compiler contract, M0). Workflow: dump
 //! to a file before a change, dump again after, `diff`. Any diff is either a
 //! bug or a corpus-pinned intentional change.
 //!
@@ -84,7 +84,7 @@ pub fn completion_sweep(path: &str, stride: usize, check: bool) -> Result<()> {
     }
     let root = fs_err::canonicalize(dir)?;
 
-    let mut bone = BoneWorkspace::new();
+    let mut bone = BoneWorkspace::with_identity_storage_exemptions(crate::registry::registered().identity_storage_exemptions);
     let first = fs_err::canonicalize(&files[0])?.to_string_lossy().to_string();
     bone.load_project(&first);
 
@@ -107,7 +107,7 @@ pub fn completion_sweep(path: &str, stride: usize, check: bool) -> Result<()> {
             n_positions += 1;
             n_items += items.len();
             // `--check`: enforce the position-blind response invariants
-            // (docs/completion-v2-design.md M4) at every swept position --
+            // (the compiler contract M4) at every swept position --
             // the real-project rung of the invariant suite.
             if check {
                 let violations = bone_query::invariants::completion_response_violations(

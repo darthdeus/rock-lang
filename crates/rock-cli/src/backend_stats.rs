@@ -20,7 +20,7 @@
 //! skipped (reads 0); the report prints bone's type-check verdict so a 0 emit is
 //! never silent. bone/skull are timed externally at the call boundaries only
 //! (parse, semantic_pass, emit); finer bone granularity comes from bone's own
-//! per-phase counters (`Workspace::phase_timings`) — see `docs/bone-backend-plan.md`.
+//! per-phase counters (`Workspace::phase_timings`) — see the compiler contract.
 
 use crate::Result;
 use crate::bone_backend::{self, BonePhaseTimes};
@@ -832,7 +832,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         );
         if memo.shared_lock_ns > 0 || memo.local_clone_ns > 0 || memo.shared_clone_ns > 0 {
             println!(
-                "                   timed (STONE_LOG=debug): shared lock {:.3} ms, local clone {:.3} ms, \
+                "                   timed (ROCK_LOG=debug): shared lock {:.3} ms, local clone {:.3} ms, \
                  shared clone {:.3} ms, derivation {:.3} ms per run",
                 memo.shared_lock_ns as f64 / per / 1_000_000.0,
                 memo.local_clone_ns as f64 / per / 1_000_000.0,
@@ -924,7 +924,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
          stops at the failure and skull's emit is SKIPPED (reads 0) — the ratios \
          are only meaningful when bone's verdict is OK. Treat the ratios as \
          directional. Finer bone per-pass stats need bone-side counters \
-         (docs/bone-backend-plan.md)."
+         (the compiler pipeline contract)."
             .dimmed()
     );
 }

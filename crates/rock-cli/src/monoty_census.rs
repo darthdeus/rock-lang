@@ -1,4 +1,4 @@
-//! `rock mono-ty-census [root]` -- Stage 0c evidence (`docs/monomorphization-plan.md`
+//! `rock mono-ty-census [root]` -- Stage 0c evidence (the compiler contract
 //! S 0c). DIAGNOSTIC: it changes no emission and nothing in a build calls it.
 //!
 //! Converts every inferred expr and binding type of the closed world to
@@ -8,7 +8,7 @@
 //!
 //! **Closed world** is the same one `rock lint --union` uses -- every `bin`
 //! project under the root, each analyzed with its own dependency set (stdlib +
-//! stone + its own sources). A per-project view is not a closed world on its
+//! engine + its own sources). A per-project view is not a closed world on its
 //! own, which is why the union is the unit and a project that fails to
 //! type-check is reported LOUDLY rather than skipped quietly: its types are
 //! absent from the totals, and that changes what the totals mean.

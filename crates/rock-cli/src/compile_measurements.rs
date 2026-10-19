@@ -60,7 +60,7 @@ impl Scope {
         #[cfg(feature = "sequential")]
         let threads = 1;
         let now = Instant::now();
-        let pending = Pending {
+        let mut pending = Pending {
             path: PathBuf::from(path), started: now, boundary: now,
             record: json!({
                 "schema": 1,
@@ -68,7 +68,7 @@ impl Scope {
                     .unwrap_or_default().as_millis() as u64,
                 "pid": std::process::id(), "kind": kind, "command": command,
                 "entry": entry, "rock_num_threads": std::env::var("ROCK_NUM_THREADS").ok(),
-                "rayon_threads": threads, "job_id": std::env::var("ROCK_JOB_ID").ok(),
+                "rayon_threads": threads,
                 "compile_slot": null,
             }),
             phases: Vec::new(), timings: Vec::new(),
@@ -77,6 +77,11 @@ impl Scope {
                 "concrete_plans": null, "chunks": null, "dependency_edges": null,
                 "emitted_lua_bytes": null}),
         };
+        for (key, field) in crate::registry::registered().invocation_context_keys {
+            if let Some(field) = field {
+                pending.record[*field] = json!(std::env::var(key).ok());
+            }
+        }
         PENDING.with(|state| *state.borrow_mut() = Some(pending));
         Self(true)
     }

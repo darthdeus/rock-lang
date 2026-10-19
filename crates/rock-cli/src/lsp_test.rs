@@ -5,11 +5,11 @@ use std::process::{Command, Stdio};
 use super::parallel_runner::{self, FileTestResult};
 
 /// `ROCK_BACKEND` override (if any) for the *spawned* `rock-lsp` child running
-/// `.rock.lsp` fixtures. The bone-backed LSP (`rock-lsp/src/bone_backend/`) is
+/// `.rock.lsp` fixtures. The bone-backed LSP (`rock-lang/crates/rock-lsp/src/lib.rs`) is
 /// the language-server front for the skull/bone stack, so `rock test
 /// --backend {skull,bone}` runs fixtures through it; `--backend rock` uses the
 /// legacy LSP unless `ROCK_LSP_TEST_BACKEND=bone` forces the bone path (the
-/// standalone parity lens, `docs/lsp-bone-migration-plan.md`).
+/// standalone parity lens, the compiler contract).
 ///
 /// We deliberately set this on the CHILD only, never the parent's
 /// `ROCK_BACKEND`: a parent override would also switch `rock test` itself,
@@ -484,7 +484,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                     } else {
                     // FOOT-GUN: every new TYPE: must have a matching branch
                     // below, or its expected lines will silently be dropped
-                    // and the test will no-op. See docs/lsp-test-harness.md.
+                    // and the test will no-op. See the compiler contract.
                     while let Some(line) = lines.peek() {
                         if line.starts_with("===") {
                             lines.next();
@@ -1183,9 +1183,8 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         // order ignored. `file:` lines in EXPECTED are treated as
         // placeholders and ignored, mirroring the goto_definition validator
         // (the harness writes a single tempfile named after the test, not
-        // `main.rock`; multi-file `.rock.lsp` is unsupported — see
-        // `rock-lsp/tests/multi/multi_file_goto_def.rs` preamble — so cross-file
-        // assertions live in Rust integration tests instead).
+        // `main.rock`; multi-file `.rock.lsp` is unsupported, so cross-file
+        // assertions live in `rock-lang/crates/rock-lsp/tests/bone/` instead).
         //
         // `EXPECTED:` entries come in groups of three consecutive lines:
         // `file: ...`, `line: N`, `character: N`. A single line containing

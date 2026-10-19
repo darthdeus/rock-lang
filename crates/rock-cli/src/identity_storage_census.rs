@@ -1,15 +1,14 @@
 //! `rock identity-storage-census [root]`: the exact per-package, per-kind
 //! count of identity structs stored in declaration positions (S0a) and in
-//! function bodies (S0b; docs/identity-storage-plan.md). Packages on
-//! `bone_semantic::identity_storage::IDENTITY_STORAGE_EXEMPT`, and modules
-//! under a prefix on `IDENTITY_STORAGE_EXEMPT_MODULES`, report no diagnostics
+//! function bodies (S0b; the compiler contract). Packages on
+//! the registered identity-storage exemption list, and modules under a
+//! registered prefix, report no diagnostics
 //! while they migrate; this census is what keeps their debt visible. A
 //! module prefix is its own row, and its sites are also listed one by one.
-//! `crates/rock-cli/tests/identity_storage_census.rs` pins the table.
+//! The host policy integration test pins the table.
 //!
-//! Scope: every package under `root` (each checked with its own dependency
-//! set), and each top-level `tests/*.rock` program as an unpackaged program.
-//! Programs embedded in Rust tests are unpackaged too but are not counted.
+//! Scope: the registered package and standalone-program population. Each
+//! package is checked with its own dependency set.
 //! Sites are unique by file, line and kind, and belong to the package that
 //! owns the file, so a dependency reached from several roots counts once.
 //! Output is deterministic: sorted, no timings, no absolute paths.
@@ -19,11 +18,17 @@ use std::path::{Path, PathBuf};
 
 use bone_semantic::identity_storage::{
     identity_module_body_sites, identity_storage_exempt, identity_storage_package, identity_storage_sites,
-    IdentityStorageExemption, IdentityStorageExemptions, IdentityStorageKind, IDENTITY_STORAGE_EXEMPTIONS,
+    IdentityStorageExemption, IdentityStorageExemptions, IdentityStorageKind,
 };
 use bone_semantic::inference::Workspace;
 
 use crate::Result;
+
+/// Inputs selected by the host, in deterministic traversal order.
+pub struct CensusPopulation {
+    pub packages: Vec<PathBuf>,
+    pub programs: Vec<PathBuf>,
+}
 
 #[derive(Default)]
 struct Census {
@@ -46,8 +51,9 @@ struct Census {
 /// `file<TAB>line<TAB>kind<TAB>identity<TAB>binding` (1-based line; the
 /// binding is the local, parameter, global or field the diagnostic names).
 pub fn do_identity_storage_census(root: &str) -> Result<()> {
-    let census = collect(root, &IDENTITY_STORAGE_EXEMPTIONS)?;
-    print!("{}", render(&census, &IDENTITY_STORAGE_EXEMPTIONS));
+    let exemptions = &crate::registry::registered().identity_storage_exemptions;
+    let census = collect(root, exemptions)?;
+    print!("{}", render(&census, exemptions));
     if let Ok(label) = std::env::var("ROCK_IDENTITY_CENSUS_BY_FILE") {
         let kind = IdentityStorageKind::ALL
             .iter()
@@ -75,22 +81,13 @@ fn collect(root: &str, exemptions: &IdentityStorageExemptions) -> Result<Census>
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("identity-storage-census: cannot resolve `{root}`: {e}"))?;
     let mut census = Census::default();
-    for dir in packages_under(&root) {
+    let population = (crate::registry::registered().identity_census_population)(&root);
+    for dir in population.packages {
         let label = rel(&root, &dir);
         let spec = crate::common::path_to_source_spec(&dir.display().to_string());
         census_input(&root, &label, &spec, exemptions, &mut census);
     }
-    let mut programs: Vec<PathBuf> = fs_err::read_dir(root.join("tests"))
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x == "rock"))
-                .collect()
-        })
-        .unwrap_or_default();
-    programs.sort();
-    for file in programs {
+    for file in population.programs {
         let label = rel(&root, &file);
         let spec = crate::unified_compile::SourceSpec::Files(vec![file]);
         census_input(&root, &label, &spec, exemptions, &mut census);
@@ -269,9 +266,9 @@ fn render(census: &Census, exemptions: &IdentityStorageExemptions) -> String {
     out
 }
 
-/// Every package directory under `root`, outside `crates/` (whose packages
-/// are Rust test inputs) and build or VCS directories.
-fn packages_under(root: &Path) -> Vec<PathBuf> {
+/// Package directories outside build/VCS directories and host exclusions.
+/// The selected root itself is a search container, not a census package.
+pub fn packages_under(root: &Path, excluded: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -286,10 +283,12 @@ fn packages_under(root: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') || matches!(name, "target" | "node_modules" | "tmp" | "crates") {
+            if name.starts_with('.') || matches!(name, "target" | "node_modules" | "tmp") {
                 continue;
             }
-            stack.push(p);
+            if !excluded(&p) {
+                stack.push(p);
+            }
         }
     }
     out.sort();

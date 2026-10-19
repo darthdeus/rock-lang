@@ -1,6 +1,6 @@
 //! One JSON line per dev-loop `rock` invocation, appended to a per-user log so
-//! edit-to-feedback times can be mined with `tools/loop-stats.py`
-//! (docs/agent-build-and-runtime.md, "Invocation log").
+//! edit-to-feedback times can be mined with a log consumer
+//! (the compiler contract, "Invocation log").
 //!
 //! The record is written once, at exit: `finish` from `main` or `exit`, and an
 //! `atexit` fallback for paths that leave through `std::process::exit` outside
@@ -24,10 +24,6 @@ const LOG_ENV: &str = "ROCK_INVOCATION_LOG";
 pub const PARENT_ENV: &str = "ROCK_INVOCATION_PARENT";
 /// Context variables copied into `env` when set.
 const CONTEXT_ENV: &[&str] = &[
-    "ROCK_JOB_ID",
-    "ROCK_JOBS_BY",
-    "ROCK_JOBS_SELF",
-    "ROCK_CHANGE_ID",
     "ROCK_TEST_FILTER",
     "ROCK_TEST_SHARDS",
 ];
@@ -66,11 +62,9 @@ static STATE: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// The commands that make up the edit-compile-test loop.
 pub fn is_loop_command(name: &str) -> bool {
-    matches!(
-        name,
-        "compile" | "compile-single" | "test" | "test-compile" | "run" | "frame" | "stone"
-            | "watch" | "sim" | "lint" | "stone-test" | "web" | "fmt"
-    )
+    crate::registry::CliCommand::named(name).is_some_and(|command| {
+        (crate::registry::registered().command_metadata)(command).log_invocation
+    })
 }
 
 /// Where records go: `ROCK_INVOCATION_LOG` (a path, or `off`), else
@@ -123,6 +117,8 @@ pub fn begin(command: &'static str, backend: &str) {
     record.insert("branch".into(), json!(branch));
     let env: Map<String, Value> = CONTEXT_ENV
         .iter()
+        .copied()
+        .chain(crate::registry::registered().invocation_context_keys.iter().map(|(key, _)| *key))
         .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), json!(v))))
         .collect();
     record.insert("env".into(), Value::Object(env));
@@ -432,7 +428,7 @@ fn hostname() -> Option<String> {
     }
     let len = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
     let name = String::from_utf8_lossy(&buf[..len]).into_owned();
-    // Short and lowercased, as rock-jobs spells host names.
+    // Short and lowercased, as job supervisor spells host names.
     Some(name.split('.').next().unwrap_or(&name).to_lowercase())
 }
 
@@ -485,9 +481,9 @@ mod tests {
 
     #[test]
     fn recorded_argv_redacts_every_var_value() {
-        let args = ["rock", "package", "mag", "--var", "TOKEN=s3cret", "--channel", "steam", "--var=K=v=2", "--var"];
+        let args = ["rock", "package", "example", "--var", "TOKEN=s3cret", "--channel", "steam", "--var=K=v=2", "--var"];
         let redacted = redact_var_values(args.iter().map(|arg| arg.to_string()));
-        assert_eq!(redacted, ["rock", "package", "mag", "--var", "TOKEN=<redacted>", "--channel", "steam",
+        assert_eq!(redacted, ["rock", "package", "example", "--var", "TOKEN=<redacted>", "--channel", "steam",
             "--var=K=<redacted>", "--var"]);
     }
 

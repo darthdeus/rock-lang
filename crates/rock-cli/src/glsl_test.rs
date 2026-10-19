@@ -1,6 +1,6 @@
 //! `rock test <path> --backend glsl` -- execute the value-test class
 //! (`@test(returns = <literal>)`) on the GPU via the GLSL emitter
-//! (`skull-codegen-glsl`), as described by `docs/backends.md`.
+//! (`skull-codegen-glsl`), as described by the compiler contract.
 //!
 //! Shares the backend-neutral half of the test driver with the luajit and node
 //! paths: unit discovery (`collect_test_units`), the `@test` metadata
@@ -20,7 +20,7 @@
 //! Both profiles (330 core + 300 es) run by default, with per-profile verdicts
 //! (`name [330core]` / `name [300es]`). The heavy lifting -- creating a headless
 //! GL context, compiling the shader, drawing to a 1x1 R32I/R32F target and
-//! reading the pixel back -- lives in the standalone `stone-glsl-runner` binary
+//! reading the pixel back -- lives in the standalone `engine-glsl-runner` binary
 //! (spawned per unit+profile), so the `rock` compiler/LSP binary never links
 //! SDL2. The runner is a workspace artifact, so a missing/broken runner is a
 //! hard error (a gate that can't run must not read as green); only a genuine
@@ -544,10 +544,7 @@ fn spawn_runner(
     let mut cmd = Command::new(runner);
     rock_host::compiler_thp::configure_runtime_command(&mut cmd);
     cmd.arg("--profile").arg(profile);
-    cmd.env(
-        rock_host::project::lib_path_var(),
-        rock_host::project::lib_path_with_inherited(),
-    );
+    cmd = (crate::registry::RuntimeServices::registered().runtime_command)(cmd, crate::registry::RuntimeProcess::Native);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
     child
@@ -565,7 +562,7 @@ fn spawn_runner(
 }
 
 // --- A3: compile-validate registered render shaders on real GL contexts ---
-// (`docs/shaders.md`). The value-test corpus above proves the
+// (the compiler contract). The value-test corpus above proves the
 // EMITTER on GLES; this proves the shaders games actually register.
 
 /// One profile's tallies over a `shader-validate` run.
@@ -768,7 +765,7 @@ fn validate_sources(sources: rock_core::SourceFiles) -> Result<bone_semantic::in
 
 /// Split a single-file `#ifdef VERTEX` / `#ifdef PIXEL` shader into the two
 /// stage sources EXACTLY the way the engine loader does
-/// (`stone-rs/src/shader.rs`): inject `#define VERTEX` / `#define PIXEL` on the
+/// (`engine-rs/src/shader.rs`): inject `#define VERTEX` / `#define PIXEL` on the
 /// line after `#version`. Validating anything else would validate a shader the
 /// engine never compiles.
 fn split_stages(combined: &str) -> (String, String) {
@@ -829,7 +826,7 @@ fn compile_batch(
     Ok((passed, failed))
 }
 
-/// Locate the `stone-glsl-runner` binary: `ROCK_GLSL_RUNNER` override, then a
+/// Locate the `engine-glsl-runner` binary: `ROCK_GLSL_RUNNER` override, then a
 /// sibling of the running `rock` binary (production + release layout), then one
 /// level up (cargo test binaries live in `target/<profile>/deps/`). Missing is
 /// a hard error: the runner is a workspace artifact, and a gate whose executor
@@ -870,7 +867,7 @@ mod tests {
         let dir = package.path().to_str().unwrap().to_owned();
         // No GL profile is available, so no runner is spawned.
         crate::compile_slots::assert_compile_waits_for_slot(move || {
-            super::build_package(&dir, std::path::Path::new("stone-glsl-runner"), &[false, false]);
+            super::build_package(&dir, std::path::Path::new("unused-runner"), &[false, false]);
         });
     }
 }

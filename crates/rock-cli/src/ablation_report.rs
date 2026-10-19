@@ -1,4 +1,4 @@
-//! Stage-0e ablation census reporting (`docs/monomorphization-plan.md` S 0e).
+//! Stage-0e ablation census reporting (the compiler contract S 0e).
 //!
 //! The mode COLLECTS fatals rather than aborting at the first one (see
 //! `skull_mir::ablation`), so something has to drain the registry and turn it
@@ -17,7 +17,7 @@ use skull_mir::ablation::{self, FatalCategory};
 /// test: it ends the process. This is the whole decision, and the decision is
 /// where the mode's invariant lives -- S 0e's fatality is carried by the EXIT
 /// STATUS, so a run that recorded fatals may not leave with 0 no matter what
-/// the call site asked for. Several call sites do ask for 0 (`rock stone` and
+/// the call site asked for. Several call sites do ask for 0 (`rock engine` and
 /// `rock watch` on a clean shutdown) or forward a subprocess's status, and
 /// honouring that verbatim is exactly the "printed a census and exited 0" hole
 /// this module's header forbids.
@@ -208,7 +208,7 @@ mod tests {
     use super::census_exit_code;
 
     /// S 0e's fatality is carried by the exit status, so a recorded fatal must
-    /// override a success the call site asked for. `rock stone` and `rock watch`
+    /// override a success the call site asked for. `rock engine` and `rock watch`
     /// exit 0 on a clean shutdown and `rock compile` forwards a subprocess's
     /// status; without this a run under the mode prints its whole taxonomy and
     /// still reports success, which is the one thing the mode exists to prevent.

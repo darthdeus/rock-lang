@@ -117,7 +117,7 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Optio
 
     // Warm: cold load (project + stick.toml deps) + seed the buffer. Excluded
     // from the timing -- this is what the server does on first open.
-    let mut bone = BoneWorkspace::new();
+    let mut bone = BoneWorkspace::with_identity_storage_exemptions(crate::registry::registered().identity_storage_exemptions);
     bone.load_project(&target);
     bone.update(&target, text.clone());
 
@@ -233,7 +233,7 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Optio
     }
     eprintln!("  (gaps=general gather; rank=rank+materialize; reach=type-path; call-thru=fused-query)");
     eprintln!("  (ctfns=fns past noise guard; argiters=(fn,arg) pairs tested; surv=pairs matched+scored)");
-    // The perf gate (docs/completion-v2-design.md M0): fail loudly when the
+    // The perf gate (the compiler contract M0): fail loudly when the
     // WORST per-keystroke median walks past the budget. Medians, not maxes --
     // a single scheduler hiccup must not flake the gate.
     if let Some(budget) = budget_ms {

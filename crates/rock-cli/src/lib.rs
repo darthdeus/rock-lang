@@ -34,17 +34,14 @@ pub mod backend_stats;
 pub mod bone_backend;
 pub mod skull_backend;
 pub mod docs_index;
-pub mod sdk_check;
 pub mod common;
-mod compile_cmd;
-mod compile_slots;
-mod host_paths;
+pub mod compile_cmd;
+pub mod compile_slots;
 mod package_test_sources;
 pub mod comptime;
 mod dispatcher;
 mod error_test;
-mod file_watcher;
-pub mod game_runtime;
+pub mod file_watcher;
 mod formatting;
 mod completion_episodes;
 mod completion_sweep;
@@ -52,554 +49,86 @@ mod iter_completion;
 mod iter_lsp;
 mod iter_parse;
 pub mod glsl_test;
-#[cfg(feature = "backend-js")]
-pub mod js_test;
-pub mod c_test;
 pub mod live_project;
-#[cfg(feature = "backend-js")]
-pub mod web;
-pub mod package;
-pub mod asset_preflight;
-mod sound_inspect;
-pub mod zip_writer;
-mod test_protocol;
+pub mod test_protocol;
 mod lint_cmd;
 pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
 pub mod invocation_log;
 pub mod child_lifetime;
-mod allocation_join;
-#[cfg(feature = "backend-js")]
-mod mono_manifest;
-mod identity_storage_census;
+pub mod allocation_join;
+pub mod identity_storage_census;
 mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
-mod image_video;
-pub mod run_sim;
-mod headless_scope;
-pub mod sim_record;
-pub mod sim_observability;
-pub mod sim_report;
-mod stone;
-pub mod stone_test;
 mod test;
+pub use test::{TestFilter, TestMetadata, find_test_functions_from_sources};
 mod text_utils;
 pub mod unified_compile;
-mod modules_analysis;
+pub mod modules_analysis;
 mod modules_audit;
 mod modules_fix;
-mod across_yield_fix;
 mod modules_migrate;
-mod watch;
+pub mod watch;
+pub mod registry;
+pub mod plain;
+mod process;
+pub use process::{main_with, compiler_process};
+pub use allocation_join::run as allocation_join_run;
+pub use completion_episodes::completion_episodes;
+pub use completion_sweep::completion_sweep;
+pub use identity_storage_census::do_identity_storage_census;
+pub use iter_completion::iter_completion;
+pub use iter_lsp::iter_lsp;
+pub use iter_parse::iter_parse_skull;
+pub use iter_parse::iter_tokenize;
+pub use lint_cmd::do_lint;
+pub use lsp_survey::lsp_survey;
+pub use modules_audit::run as modules_audit_run;
+pub use modules_audit::Format as ModulesFormat;
+pub use modules_fix::run as modules_fix_run;
+pub use modules_migrate::run as modules_migrate_run;
+pub use modules_migrate::Mode as ModulesMode;
+pub use monoty_census::do_monoty_census;
 
 pub use common::*;
 pub use dispatcher::*;
 pub use file_watcher::*;
 pub use formatting::*;
-pub use run_sim::*;
-pub use stone::*;
-pub use stone_test::*;
 pub use text_utils::*;
 pub use unified_compile::*;
 pub use watch::*;
+pub use registry::{BackendSpec, CliCommand, Operation};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CliCommand {
-    Compile,
-    CompileSingle,
-    Test,
-    TestCompile,
-    Run,
-    Watch,
-    Fmt,
-    Frame,
-    Stone,
-    /// `rock stone-test <root>` — long-lived headless watch process driven
-    /// over JSON-line stdio. Test infrastructure for incremental
-    /// compilation / hot-reload assertions. See
-    /// `docs/stone-test-harness-plan.md`.
-    StoneTest,
-    /// Profile a bounded real render run. The child is hidden via
-    /// `STONE_HEADLESS=1`; MAG additionally boots directly into gameplay.
-    Perf,
-    /// `rock sim <project> <name>` — run a Rock-native `@sim`
-    /// coroutine. Spawns the game with `ROCK_RUN_SIM=<name>`,
-    /// demuxes `__SIM__`-prefixed JSON lines from stderr, prints a
-    /// pass/fail summary, exits non-zero on any expect_fail.
-    /// `<name>` may be comma-separated for chained multi-start
-    /// (`a,b` -> two luajit children sharing one `$OUT` tempdir).
-    Sim,
-    /// `rock sim-report [<run-id>] [--sim-log-dir <root>]` -- read the
-    /// persistent `rock sim` history in `.sim-runs/<run-id>/` in aggregate:
-    /// wall/envelope/startup decomposition, boot amortization, the lane and
-    /// boot-signature census, and worker occupancy. Read-only over the
-    /// history; it never writes, prunes or mutates a run record.
-    SimReport,
-    /// `rock lint <path>` -- run the lint catalog (`crates/bone-lints`) over a
-    /// file or project and report the findings. The author-facing surface of the
-    /// same engine the LSP and the build pass drive; exits non-zero only on an
-    /// `Error`-severity finding, matching the build gate. Dispatched
-    /// pre-backend-switch (like `fmt`/`shader`): lints read bone's typechecked
-    /// output, no codegen involved.
-    Lint,
-    /// `rock completions <shell>` — print a shell completion script
-    /// to stdout. Shells: bash, zsh, fish, powershell, elvish.
-    /// Install (zsh): `rock completions zsh > ~/.zsh/_rock` then add
-    /// the dir to `$fpath` and `compinit`. Install (bash):
-    /// `eval "$(rock completions bash)"` from `~/.bashrc`.
-    Completions,
-    /// `rock iter-compile <project> --iters N` — build the bone workspace once,
-    /// then re-run only the (parallel) inference phase N times. A loop body for
-    /// sampling profilers (`samply record -- rock iter-compile ...`) so nearly
-    /// all samples land in inference rather than parsing. Bone-only; ignores
-    /// `--backend`. See `bone_backend::bone_iter_inference`.
-    IterCompile,
-    /// `rock iter-parse <project> --iters N` -- discover sources once, then
-    /// re-tokenize + re-parse every user `.rock` file N times. A loop body for
-    /// sampling profilers so nearly all samples land in the tokenizer/parser.
-    /// Backend-independent (the front-end is shared); ignores `--backend`. See
-    /// `iter_parse::iter_parse`.
-    IterParse,
-    /// `rock iter-tokenize <project> --iters N` -- discover sources once, then
-    /// re-tokenize every user `.rock` file N times (the parser is never
-    /// constructed). The tokenize-only counterpart to `iter-parse`, for
-    /// profiling the lexer in isolation. Ignores `--backend`. See
-    /// `iter_parse::iter_tokenize`.
-    IterTokenize,
-    /// `rock iter-codegen <project> --iters N` — build the bone workspace once
-    /// (parse + semantic), then re-run only skull's `emit_workspace` (Lua
-    /// codegen: lower MIR -> inline -> regalloc -> stringify) N times. A loop
-    /// body for sampling profilers (`samply record -- rock iter-codegen ...`) so
-    /// nearly all samples land in codegen. Build with `--features sequential`
-    /// for single-threaded attribution. skull-only. See
-    /// `skull_backend::skull_iter_codegen`.
-    IterCodegen,
-    /// `rock iter-cook <project> --iters N` — parse stdlib+project to raw skull
-    /// ASTs once, then loop `clone + skull_parser::cook` (macro-expand +
-    /// desugar) — exactly what bone's `expand_and_desugar` does per compile.
-    /// A tight body for sampling profilers. See `skull_backend::skull_iter_cook`.
-    IterCook,
-    /// `rock skull-inline-stats <project>` — DIAGNOSTIC: replay skull's function
-    /// inliner over the workspace and report what gets inlined and how much code
-    /// each splice copies (per-callee fan-out + inst-copies, top callers). Writes
-    /// `skull-inline-stats.txt`. See `skull_backend::skull_inline_stats`.
-    SkullInlineStats,
-    /// `rock skull-mem2reg-stats <project>` — DIAGNOSTIC: census final emitted
-    /// non-coroutine MIR and report the surviving cell traffic that direct
-    /// promotion could remove without phi placement. Writes
-    /// `skull-mem2reg-stats.txt`.
-    SkullMem2RegStats,
-    /// `rock skull-incremental-profile <project>` — byte-identical correctness
-    /// gate for the full-reassembly `emit_incremental` path: for each project
-    /// file force a body re-cook, time `update_file` + `emit_incremental`, and
-    /// verify the incremental output is byte-identical to a fresh `emit_full`.
-    /// (This is the reassembly path, NOT the two-file overlay the live watcher
-    /// runs -- byte-identity only holds for reassembly; the overlay's gate is the
-    /// runtime-equivalence oracle.) See `skull_backend::skull_incremental_profile`.
-    SkullIncrementalProfile,
-    /// `rock iter-incremental <project> [--iters N --warmup W]` — tight-loop
-    /// profiler for the REAL stone incremental path: warm a Session once, then
-    /// repeatedly `update_file` + `emit_overlay` one body (alternating whitespace
-    /// so every pass is a real change) and report the timing distribution
-    /// (mean/p50/p99) + overlay size. Mirrors what `SkullStone::recompile` does on
-    /// a body edit (no reassembly). See `skull_backend::skull_iter_incremental`.
-    IterIncremental,
-    /// `rock mono-ty-census [root]` -- DIAGNOSTIC (Stage 0c,
-    /// `docs/monomorphization-plan.md`): convert every inferred expr/binding
-    /// type of the closed world to the total `MonoTy` and report conversions,
-    /// distinct logical types, and failures bucketed by reason. Changes no
-    /// emission. See `monoty_census::do_monoty_census`.
-    MonoTyCensus,
-    /// `rock identity-storage-census [root]` -- the exact per-package,
-    /// per-kind count of identity structs in declaration storage
-    /// (`docs/identity-storage-plan.md` S0a). See
-    /// `identity_storage_census::do_identity_storage_census`.
-    IdentityStorageCensus,
-    /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
-    /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
-    /// the closed world (instances keyed by `MonoTy`), and
-    /// report instance/edge counts, the edge-kind histogram and the recursion
-    /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
-    MonoManifest,
-    /// `rock allocation-join <manifest> <activation> [route] [Lua] [JIT trace]` -- join one
-    /// exact-emission manifest to the same artifact's bounded runtime counters,
-    /// filter by `all|update|draw|coroutine|outside`, rank executions per frame, and
-    /// optionally classify observed LuaJIT allocation IR as sunk/retained.
-    AllocationJoin,
-    /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
-    /// for the per-edit LSP query path on the bone backend (the work the editor
-    /// does per keystroke through `BoneWorkspace`): `update` (didChange) +
-    /// `semantic_tokens` + `inlay_hints` refresh, plus on-demand
-    /// `hover`/`completion`/`definition` at the edit cursor. Warms the whole
-    /// compilation unit once, then alternates a 1-char body edit and reports the
-    /// per-op timing distribution. `ITER_LSP_FN`/`ITER_LSP_FILE` target the edit.
-    /// See `iter_lsp::iter_lsp`.
-    IterLsp,
-    /// `rock lsp-survey <project> [--iters N --format json]` -- systematically
-    /// hunt for the slowest LSP edit. Collects per-module/per-function stats
-    /// from the bone workspace (body size, call fan-in, module fan-in), then
-    /// generates + profiles candidate edits across all tiers (body/signature/
-    /// broken) through `BoneWorkspace`, ranking by worst per-edit latency.
-    /// `--format json` dumps the full stats + samples. See `lsp_survey::lsp_survey`.
-    LspSurvey,
-    /// `rock iter-reinfer <project> [--iters N --warmup W]` -- tight loop benching
-    /// the Interface-tier re-inference path (a signature edit reinfers every
-    /// dependent body). Warms a bone Session, alternates a signature edit on a
-    /// high-fan-out fn, times `update_file`, and reports the reinferred-body count
-    /// + timing distribution. `ITER_REINFER_FN` targets the fn (else auto-picked
-    /// by dependent-module count). A samply body. See `bone_backend::bone_iter_reinfer`.
-    IterReinfer,
-    /// `rock iter-completion <project> [--iters N --warmup W]` -- tight-loop
-    /// profiler for the per-keystroke `bone.completion()` path (the slow part is
-    /// `call_through_param_completions`). Warms the workspace, places a cursor at
-    /// a call-through-triggering prefix in a fn body, then loops `completion()`
-    /// reporting the latency distribution. `ITER_COMPL_PREFIX` overrides the
-    /// synthetic prefix, `ITER_COMPL_FILE` the target file. Built to run under
-    /// `perf record`. See `iter_completion::iter_completion`.
-    IterCompletion,
-    /// `rock completion-sweep <project> [--stride N]` -- deterministic
-    /// completion-output dump over a derived corpus of cursor positions
-    /// (identifier ends + after-dot member slots), printed to stdout for
-    /// byte-identity diffing across a refactor. The M0 gate of
-    /// `docs/completion-v2-design.md`. See `completion_sweep::completion_sweep`.
-    CompletionSweep,
-
-    /// `rock completion-episodes <log.jsonl>...` -- stitch completion-log rows
-    /// into episodes of user struggle (accept / typed_out / abandoned; the
-    /// final word at the anchor is ground truth) and print the tuning
-    /// metrics: chars-to-top3, never-surfaced leaderboard, hunted accepts,
-    /// repeat-struggle words. `docs/completion-episodes.md`. See
-    /// `completion_episodes::completion_episodes`.
-    CompletionEpisodes,
-    /// `rock iter-cascade <project> [--iters N --warmup W]` -- tight loop benching
-    /// the Interface-tier RE-LOWER cascade: a field edit on a high-fan-in TYPE
-    /// re-lowers every module whose interface references it (vs `iter-reinfer`,
-    /// which edits a fn signature and only re-infers). Warms a bone Session,
-    /// alternates a struct-field edit on the type with the most interface
-    /// dependents, times `update_file`, and reports the re-lowered module count +
-    /// timing. `ITER_CASCADE_TYPE` targets the type. See
-    /// `bone_backend::bone_iter_cascade`.
-    IterCascade,
-    /// `rock backend-stats <X>` — bone-vs-skull performance comparison on one
-    /// input (file / test file / project): bone's semantic (typecheck floor) vs
-    /// skull's semantic + emit (codegen delta), whole workspace, mean of
-    /// `--iters` timed runs after `--warmup`. Runs BOTH backends itself, so it
-    /// ignores `--backend`. See `backend_stats::do_backend_stats`.
-    BackendStats,
-    /// `rock shader <file.rock> <fn> [fn...] --output <file.glsl>` -- GLSL
-    /// function-library emission (route B, `docs/shaders.md`). Type-checks
-    /// the file against the stdlib, then emits GLSL fn definitions for the named
-    /// root fns + their reachable tier-0 callees, topologically ordered. Strict
-    /// profile (rejects anything above tier 0). Backend-agnostic: dispatched before
-    /// the backend switch, like `fmt`/`completions`.
-    Shader,
-    /// `rock shader-validate <project> [project...]` -- compile+link every
-    /// `rock_shader` pair the project(s) register, on REAL GL contexts in both
-    /// profiles (330core + 300es), via `stone-glsl-runner`'s compile-only mode
-    /// (`docs/shaders.md` § Testing). A driver rejection is a FAIL
-    /// carrying the compile log; a no-display environment skips-with-log
-    /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
-    /// See `glsl_test::shader_validate`.
-    ShaderValidate,
-    /// `rock web <project> [--out <dir>]` -- emit a static browser build
-    /// (`index.html` + `game.js`) for a Rock project via the JS backend. A
-    /// `CliCommand` dispatched pre-backend-switch (like `fmt`/`shader`): it runs
-    /// project-mode JS emission and assembles the browser bundle (runtime
-    /// preludes + `JS_WEB_RUNTIME` + emitted program + a boot line). Serve the
-    /// out dir with any static file server. See `docs/backends.md`.
-    Web,
-    /// `rock package <game>` -- stage native release inputs, bake bytecode,
-    /// and write the manifest consumed by Fire and release verification.
-    Package,
-    /// `rock sound-inspect <game>` -- compile the game's declared sound
-    /// project and open its runtime bank in the independent inspector.
-    SoundInspect,
-    /// Check declared runtime assets without compiling or starting the game.
-    AssetCheck,
-    /// `rock docs-index <dir|file>... --output <file>` — generate a
-    /// deterministic declaration/signature index from Rock source.
-    DocsIndex,
-    /// Check SDK support for a project manifest and its native libraries without building.
-    SdkCheck,
-    /// Build/stage engine libraries once and write a content-bound receipt for a test session.
-    EngineBuildReceipt,
-    /// `rock modules audit <project> [--closed] [--format pretty|json]` --
-    /// read-only modules-v1 audit of one project's package graph and analyzed
-    /// sources (spec 15.1). See `modules_audit::run`.
-    /// `rock modules migrate <package> --check|--apply [--consumer <dir>]...`
-    /// -- convert a legacy package to modules-v1 (spec 15.2). See
-    /// `modules_migrate::run`.
-    Modules,
-    /// `rock fix --imports <package|file> [--check|--apply]` -- add the
-    /// imports a modules-v1 fragment's unresolved names need (spec 15.3).
-    /// See `modules_fix::run`. `rock fix --across-yield <files>` -- see
-    /// `across_yield_fix::run`.
-    Fix,
-}
-
-impl clap::ValueEnum for CliCommand {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[
-            Self::Compile, Self::CompileSingle, Self::Test,
-            Self::TestCompile, Self::Run, Self::Watch, Self::Fmt, Self::Frame,
-            Self::Stone,
-            Self::Perf,
-            Self::Sim,
-            Self::SimReport,
-            Self::Completions,
-            Self::Lint,
-            Self::StoneTest,
-            Self::IterCompile,
-            Self::IterParse,
-            Self::IterTokenize,
-            Self::IterCodegen,
-            Self::IterCook,
-            Self::SkullInlineStats,
-            Self::SkullMem2RegStats,
-            Self::SkullIncrementalProfile,
-            Self::IterIncremental,
-            Self::MonoTyCensus,
-            Self::IdentityStorageCensus,
-            Self::MonoManifest,
-            Self::AllocationJoin,
-            Self::IterLsp,
-            Self::LspSurvey,
-            Self::IterReinfer,
-            Self::IterCompletion,
-            Self::CompletionSweep,
-
-            Self::CompletionEpisodes,
-            Self::IterCascade,
-            Self::BackendStats,
-            Self::Shader,
-            Self::ShaderValidate,
-            Self::Web,
-            Self::Package,
-            Self::SoundInspect,
-            Self::AssetCheck,
-            Self::DocsIndex,
-            Self::SdkCheck,
-            Self::EngineBuildReceipt,
-            Self::Modules,
-            Self::Fix,
-        ]
-    }
-    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        Some(clap::builder::PossibleValue::new(self.cli_name()))
-    }
-}
-
-impl CliCommand {
-    /// User-facing kebab-case name (what the user types and what error
-    /// messages echo). Single source for the clap `to_possible_value`
-    /// surface and the capability-reject message.
-    pub fn cli_name(self) -> &'static str {
-        match self {
-            Self::Compile => "compile",
-            Self::CompileSingle => "compile-single",
-            Self::Test => "test",
-            Self::TestCompile => "test-compile",
-            Self::Run => "run",
-            Self::Watch => "watch",
-            Self::Fmt => "fmt",
-            Self::Frame => "frame",
-            Self::Stone => "stone",
-            Self::StoneTest => "stone-test",
-            Self::Perf => "perf",
-            Self::Sim => "sim",
-            Self::SimReport => "sim-report",
-            Self::Completions => "completions",
-            Self::Lint => "lint",
-            Self::IterCompile => "iter-compile",
-            Self::IterParse => "iter-parse",
-            Self::IterTokenize => "iter-tokenize",
-            Self::IterCodegen => "iter-codegen",
-            Self::IterCook => "iter-cook",
-            Self::SkullInlineStats => "skull-inline-stats",
-            Self::SkullMem2RegStats => "skull-mem2reg-stats",
-            Self::SkullIncrementalProfile => "skull-incremental-profile",
-            Self::IterIncremental => "iter-incremental",
-            Self::MonoTyCensus => "mono-ty-census",
-            Self::IdentityStorageCensus => "identity-storage-census",
-            Self::MonoManifest => "mono-manifest",
-            Self::AllocationJoin => "allocation-join",
-            Self::IterLsp => "iter-lsp",
-            Self::LspSurvey => "lsp-survey",
-            Self::IterReinfer => "iter-reinfer",
-            Self::IterCompletion => "iter-completion",
-            Self::CompletionSweep => "completion-sweep",
-            Self::CompletionEpisodes => "completion-episodes",
-            Self::IterCascade => "iter-cascade",
-            Self::BackendStats => "backend-stats",
-            Self::Shader => "shader",
-            Self::ShaderValidate => "shader-validate",
-            Self::Web => "web",
-            Self::Package => "package",
-            Self::SoundInspect => "sound-inspect",
-            Self::AssetCheck => "asset-check",
-            Self::DocsIndex => "docs-index",
-            Self::SdkCheck => "sdk-check",
-            Self::EngineBuildReceipt => "engine-build-receipt",
-            Self::Modules => "modules",
-            Self::Fix => "fix",
-        }
-    }
-}
-
-/// Compiler backend selected via `--backend`. The default is `skull` (bone
-/// type-check + skull codegen on bone's HIR, emits + runs Lua) for every command
-/// skull serves. The backend-agnostic kept commands (fmt, completions,
-/// stone-test) are dispatched before the backend switch and never reach a
-/// backend. The `bone` backend routes the type-check-capable subset of commands
-/// (compile, test, run, watch) through `bone/`'s from-scratch bidirectional
-/// typechecker only; it has no codegen, so commands that need to execute a
-/// program are rejected with a clear error. See `bone_backend.rs` and
-/// `skull_backend.rs`.
+/// Compiler backend selected via `--backend` / `ROCK_BACKEND`. Each variant's
+/// name, served operations and policy are registered in
+/// the supplied `Registrations::backends` table; the game compile pipeline
+/// keys on the variant.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Backend {
     Bone,
-    /// `skull` — the Claude-managed codegen on bone's HIR (emits + runs Lua).
     Skull,
-    /// `js` — the JS-subset test executor (`docs/backends.md`
-    /// T1): bone type-checks, then each `@test` fn + its callee closure is
-    /// emitted via `skull-codegen-js` and run under node; tests outside the
-    /// subset report SKIP(reason). Serves `test` and `run` when the `backend-js`
-    /// feature is enabled.
     Js,
-    /// `glsl` — the GLSL value-test executor (`docs/backends.md`
-    /// G1): bone type-checks, then each `@test(returns = ...)` value test is
-    /// emitted as a fragment shader (both 330 core + 300 es profiles) and run on
-    /// the GPU headlessly, the returned scalar read back and compared host-side.
-    /// Tests with no `returns=` are outside the value class; tests whose GLSL
-    /// emission rejects report SKIP(reason). Serves `test` only.
     Glsl,
-    /// `c` — the native C backend: bone type-checks, skull monomorphizes, C is
-    /// emitted for the supported closure, then Clang builds it. Unsupported
-    /// tests report SKIP(reason); compile/run/frame reject unsupported programs.
     C,
-}
-
-impl clap::ValueEnum for Backend {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Bone, Self::Skull, Self::Js, Self::Glsl, Self::C]
-    }
-    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        Some(clap::builder::PossibleValue::new(self.name()))
-    }
-}
-
-impl Backend {
-    /// `--backend` value name, used in messages.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Bone => "bone",
-            Self::Skull => "skull",
-            Self::Js => "js",
-            Self::Glsl => "glsl",
-            Self::C => "c",
-        }
-    }
-
-    /// One-clause description of what the backend is, for the reject message.
-    fn tagline(self) -> &'static str {
-        match self {
-            Self::Bone => "bone is a typechecker with no codegen/runtime",
-            Self::Skull => "skull is a bone-HIR codegen",
-            Self::Js => "js is a JS-subset executor (node); no game/engine runtime",
-            Self::Glsl => "glsl is a GLSL value-test executor (GPU), not a program codegen",
-            Self::C => "c is a native C executor (Clang) with a bounded OpenGL game runner",
-        }
-    }
-
-    /// The commands a backend serves through the per-backend dispatch switch.
-    /// Both remaining backends are restricted (the unrestricted legacy `rock`
-    /// backend is gone); this is the exhaustive set for each.
-    ///
-    /// Single source of truth for the capability gate: the reject message's
-    /// "Supported" list is generated from this, and each dispatch match's
-    /// fallthrough is `unreachable!` because `serves` gated it first.
-    ///
-    /// Self-routing commands (`iter-*`, the skull diagnostics) and the
-    /// backend-agnostic kept commands (fmt, completions, stone-test) are
-    /// dispatched *before* the backend switch and bypass this table entirely —
-    /// they are not listed here for any backend.
-    pub fn supported_commands(self) -> &'static [CliCommand] {
-        use CliCommand::*;
-        match self {
-            Self::Bone => &[
-                Test, Compile, CompileSingle, TestCompile, Run, Watch,
-            ],
-            Self::Skull => &[
-                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim,
-            ],
-            Self::Js => &[Test, Run],
-            Self::Glsl => &[Test],
-            Self::C => &[Compile, Test, Run, Frame],
-        }
-    }
-
-    /// Whether this backend can serve `cmd` through the dispatch switch.
-    pub fn serves(self, cmd: CliCommand) -> bool {
-        self.supported_commands().contains(&cmd)
-    }
-
-    pub(crate) fn feature_disabled_reason(self) -> Option<String> {
-        let (feature, hint) = match self {
-            Self::Js if !cfg!(feature = "backend-js") => (
-                "backend-js",
-                "just test-js or `cargo run --features backend-js --bin rock ... --backend js`",
-            ),
-            _ => return None,
-        };
-        Some(format!(
-            "the `{}` backend was omitted from this build; enable the `{}` feature ({})",
-            self.name(), feature, hint,
-        ))
-    }
-
-    /// `Some(message)` if this backend cannot serve `cmd`; `None` if it can.
-    /// The uniform reject message, with its "Supported" list generated from
-    /// `supported_commands`. The capability gate (`require_backend_support`)
-    /// is the only caller; split out so it is pure and unit-testable.
-    pub fn reject_reason(self, cmd: CliCommand) -> Option<String> {
-        if let Some(message) = self.feature_disabled_reason() {
-            return Some(message);
-        }
-        if self.serves(cmd) {
-            return None;
-        }
-        let names: Vec<&str> = self
-            .supported_commands()
-            .iter()
-            .map(|c| c.cli_name())
-            .collect();
-        Some(format!(
-            "the `{}` backend cannot serve `{}` — {}. Supported commands: {}.",
-            self.name(),
-            cmd.cli_name(),
-            self.tagline(),
-            names.join(", "),
-        ))
-    }
 }
 
 /// Resolve the effective backend for an invocation. An explicit choice (the
 /// `--backend` flag or `ROCK_BACKEND` env, pre-parsed into `explicit`) is
 /// honored verbatim -- the capability gate may then reject an unsupported
 /// command. With no explicit choice, the default is `skull`. The
-/// backend-agnostic kept commands (fmt, completions, stone-test) are dispatched
+/// backend-agnostic kept commands (fmt, completions) are dispatched
 /// before the backend switch, so a `skull` default never rejects them.
-fn resolve_backend(explicit: Option<Backend>, _command: CliCommand) -> Backend {
+pub fn resolve_backend(explicit: Option<Backend>, _command: &CliCommand) -> Backend {
     explicit.unwrap_or(Backend::Skull)
 }
 
+/// Shared invocation values plus inert transport filled by registered host decoders.
 pub struct Args {
-    pub command: CliCommand,
+    pub command: &'static CliCommand,
     pub files: Vec<String>,
-    /// Named tests that must be discovered and pass under `rock test --backend c`.
     pub required_tests: Vec<String>,
     /// Comma-separated test-name or source-path substrings from `--filter` or
     /// `ROCK_TEST_FILTER`; the skull test runner applies the parsed selection.
@@ -609,11 +138,7 @@ pub struct Args {
     pub all_rejections: bool,
     pub rejections_out: Option<String>,
     pub output: Option<String>,
-    /// For `rock sim`: opt into a complete sim-wide gross Lua allocation
-    /// census and write its machine-readable artifact to this path.
     pub allocation_census: Option<String>,
-    /// For `rock sim`: instrument compiler-known allocation sites across
-    /// isolated sims and write frame-aware joined reports to this directory.
     pub allocation_sites: Option<String>,
     /// For `rock shader` two-root pipeline form: GLSL profile (`330core` |
     /// `300es`). Default `330core`. See `skull_backend::skull_shader`.
@@ -632,23 +157,18 @@ pub struct Args {
     pub gc_window_start: usize,
     pub gc_window_mode: String,
     pub perf_format: String,
-    /// For `rock sim-report`: number of slow observations to rank.
     pub top: usize,
-    /// For `rock sim-report`: the sim history root to read.
     pub sim_log_dir: Option<String>,
-    /// For `rock sim-report`: compare this named entry across retained runs.
     pub sim_entry: Option<String>,
     pub type_validation: bool,
     pub headless: bool,
-    /// Build and run game commands against this renderer without changing the
-    /// manifest default. The resolved choice feeds compiler, engine build, and
-    /// runtime preamble through rock-host's renderer authority.
+    /// Compiler renderer target override; the manifest remains unchanged.
     pub renderer: Option<RendererBackend>,
     pub test_threads: Option<usize>,
     pub lib: Option<String>,
     pub clean: bool,
     /// `--channel`: release channel for `[build.vars]` resolution
-    /// (docs/comptime-plan.md). None = the project's default_channel.
+    /// (the compiler contract). None = the project's default_channel.
     pub channel: Option<String>,
     /// `--target-os`: artifact target for the `platform` builtin. Cross-builds
     /// package on one OS for another; None = infer from channel, then host.
@@ -660,26 +180,11 @@ pub struct Args {
     pub no_timeout: bool,
     pub dump_state: bool,
     pub update_snapshots: bool,
-    /// For `rock sim`: how many sim children may run at once. `None` uses the
-    /// CPU/RAM/GPU budget in `run_sim::sim_job_budget`, capped by `ROCK_SIM_JOBS`.
     pub jobs: Option<usize>,
     pub jobs_force: bool,
-    /// For `rock sim`: how many of those children may hold FULL-SIZE assets
-    /// at once (real assets with the image cap declined). `None` takes the
-    /// measured default in `run_sim::resolve_full_asset_jobs`.
     pub full_asset_jobs: Option<usize>,
-    /// For `rock sim`: force one fresh process per entry. This is the permanent
-    /// fresh-process reference oracle; the ordinary default uses eligible
-    /// boot-checkpoint workers, including rendered sims.
     pub isolated: bool,
-    /// For `rock sim`: explicitly force the boot-checkpoint worker path. The
-    /// default already uses it where eligible; this spelling makes fallback a
-    /// rejection for diagnostics. Ineligible entries stay isolated with a
-    /// reason.
     pub workers: bool,
-    /// For `rock sim <project>`: the B4 corpus gate. Runs the whole project in
-    /// three predecessor orders and compares every sim against its own
-    /// fresh-process reference. An arc checkpoint, not an iteration step.
     pub multi_order: bool,
 
 
@@ -689,31 +194,18 @@ pub struct Args {
 
     /// For `rock iter-completion`: fail (exit nonzero) when the worst
     /// per-keystroke median exceeds this many ms -- the completion perf gate
-    /// (docs/completion-v2-design.md M0). None = report only.
+    /// (the compiler contract M0). None = report only.
     pub budget_ms: Option<f64>,
 
-    /// For `rock sim`: list every `@sim` wire name in the project,
-    /// one per line, then exit. Skips the runner. Lets scripts enumerate
-    /// a suite without hardcoding the sim array.
     pub list: bool,
-    /// For `rock sim`: print the ordinary worker plan as JSON without running sims.
     pub sim_plan: bool,
 
     pub app_args: Vec<String>,
 
-    /// Launch the game's luajit with `-jv` (verbose trace log to stderr).
-    /// Equivalent to setting `STONE_JV=1`; applies to any command that
-    /// runs the game (`stone`, `frame`, `run`, `perf`, `sim`).
     pub jv: bool,
-    /// `rock run <game> --agent-headless`: boot straight into the editor with
-    /// no window, registered with the agent daemon, access still off.
     pub agent_headless: bool,
-    /// `--agent-access`: enable agent control at boot instead of from the
-    /// editor's Agent Access window.
     pub agent_access: bool,
-    /// `--level <name>`: the catalog level the editor opens at boot.
     pub level: Option<String>,
-    /// `--daemon-sock <path>`: the agent daemon socket for this game.
     pub daemon_sock: Option<String>,
 
     /// For `rock test`: re-run tests on every `.rock` file change in
@@ -723,9 +215,7 @@ pub struct Args {
     pub watch: bool,
     pub port: u16,
 
-    /// `rock web` delivery shape: `--single-file` embeds assets into one html.
     pub single_file: bool,
-    /// `rock web`: wrap the build in an itch.io-ready zip.
     pub itch: bool,
 
     /// Resolved compiler backend for this invocation (default `skull`; see
@@ -767,12 +257,11 @@ pub struct Args {
     pub consumer: Vec<String>,
     /// `rock fix --imports`: add missing `use` items.
     pub imports: bool,
-    /// `rock fix --across-yield`: rewrite sim identity borrows held across a
-    /// suspension (`across_yield_fix::run`).
-    pub across_yield: bool,
+    /// Optional host-supplied recipe selected under `rock fix`.
+    pub fix: Option<&'static registry::FixHandler>,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
-    /// is right when the lib sits beside its consumers (`stone/`); a nested lib
-    /// (`libs/chess-core`) needs the repo root passed explicitly.
+    /// is right when the lib sits beside its consumers (`libs/example/`); a nested lib
+    /// (`libs/example-core`) needs the repo root passed explicitly.
     pub consumers: Option<String>,
 
     /// For `rock test`: force package-aware compilation (the surrounding
@@ -790,43 +279,22 @@ impl Args {
     }
 
     /// Construct the clap `Command` for the rock CLI. Public so
-    /// `rock completions` (`dispatcher.rs`) can hand it to
+    /// `rock completions` (`registrations.rs`) can hand it to
     /// `clap_complete::generate`.
     pub fn command() -> clap::Command {
         use clap::{Arg, ArgAction};
-        clap::Command::new("rock")
+        let command = clap::Command::new("rock")
             .version(env!("CARGO_PKG_VERSION"))
             .about("Rock Compiler")
             .arg(
                 Arg::new("command")
                     .required(true)
-                    .value_parser(clap::value_parser!(CliCommand)),
+                    .value_parser(CliCommand::value_parser()),
             )
             .arg(Arg::new("files").num_args(0..))
-            .arg(
-                Arg::new("require-test")
-                    .long("require-test")
-                    .value_name("NAME")
-                    .action(ArgAction::Append)
-                    .help("For `rock test --backend c`: require this named @test to be discovered and pass (repeatable)."),
-            )
             .arg(Arg::new("filter").long("filter").value_name("PAT")
                 .help("For `rock test`: run @tests whose function name or source path contains a comma-separated substring."))
-            .arg(Arg::new("show-passing").long("show-passing").action(ArgAction::SetTrue)
-                .help("For `rock test --backend c`: list passing and skipped test names in declaration order."))
             .arg(Arg::new("output").long("output").alias("out"))
-            .arg(Arg::new("all-rejections").long("all-rejections").action(ArgAction::SetTrue)
-                .requires("rejections-out")
-                .help("For `rock compile --backend c`: report independent rejections without emitting an artifact."))
-            .arg(Arg::new("rejections-out").long("rejections-out").value_name("FILE.tsv")
-                .requires("all-rejections")
-                .help("Write C rejection locations, diagnostics, classes, symbols and enclosing functions as TSV."))
-            .arg(Arg::new("allocation-census").long("allocation-census")
-                .value_name("PATH")
-                .help("For `rock sim`: opt into a sim-wide gross Lua allocation census and write a complete JSON artifact to PATH (discovery evidence only)."))
-            .arg(Arg::new("allocation-sites").long("allocation-sites")
-                .value_name("DIR")
-                .help("For `rock sim`: instrument compiler-known allocation sites in isolated sims and write frame-aware joined reports to DIR."))
             .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
                 .help("Compile without the standard library"))
@@ -844,44 +312,17 @@ impl Args {
                 .help("Enable verbose debug output"))
             .arg(Arg::new("quiet").long("quiet").action(ArgAction::SetTrue)
                 .help("Disable timing output (Phase Timing, IO Breakdown)"))
-            .arg(Arg::new("frames").short('n').long("frames").default_value("1")
-                .value_parser(clap::value_parser!(usize))
-                .help("Number of frames to run for frame command"))
-            .arg(Arg::new("seconds").long("seconds")
-                .value_parser(clap::value_parser!(f64))
-                .help("Run `rock perf` for this many wall-clock seconds instead of a fixed frame count. Overrides --frames when set."))
-            .arg(Arg::new("warmup-seconds").long("warmup-seconds").default_value("2.0")
-                .value_parser(clap::value_parser!(f64))
-                .help("Skip the first N wall-clock seconds from perf statistics (warmup). Applies to `rock perf` only. Default 2.0s. Set to 0 to disable."))
-            .arg(Arg::new("gc-window").long("gc-window").default_value("0")
-                .value_parser(clap::value_parser!(usize))
-                .help("`rock perf` only: record N frames of gross Lua allocator request traffic (opening at --gc-window-start), byte flow, and request populations. This is request traffic, not retained heap growth. 0 = disabled."))
-            .arg(Arg::new("gc-window-start").long("gc-window-start").default_value("100")
-                .value_parser(clap::value_parser!(usize))
-                .help("`rock perf` only: frame the --gc-window opens on (default 100). Window compilation is counted separately; warmup does not guarantee a settled JIT; `rock perf` sizes its frame budget to cover start + window."))
-            .arg(Arg::new("gc-window-mode").long("gc-window-mode").default_value("stopped")
-                .value_parser(["stopped", "running"])
-                .help("`rock perf --gc-window` only: `stopped` pauses GC after a collection; gross requests still include JIT compilation; `running` preserves the ordinary collector schedule. The mode is recorded in profiler output."))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
-                .help("Output format for `rock perf`, `rock sim-report`, or `rock modules audit`: \"pretty\" (default) or \"json\"."))
-            .arg(Arg::new("top").long("top").default_value("20")
-                .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim-report`: rank this many slow observations (default 20)."))
-            .arg(Arg::new("sim-log-dir").long("sim-log-dir")
-                .help("For `rock sim-report`: the persistent sim history root to read (default: $ROCK_SIM_LOG_DIR, else .sim-runs). Read-only."))
-            .arg(Arg::new("sim-entry").long("sim-entry")
-                .help("For `rock sim-report`: compare one named sim's entry envelope across every retained run instead of reporting one run."))
+                .help("Output format for reports and module tools: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
-            .arg(Arg::new("headless").long("headless").action(ArgAction::SetTrue)
-                .help("Run frame command in headless mode (no display required)"))
             .arg(Arg::new("renderer").long("renderer").value_parser(["gl", "wgpu"])
-                .help("Select the game renderer for this invocation (`gl` or `wgpu`); manifest default remains unchanged"))
+                .help("Select the renderer target for this invocation (`gl` or `wgpu`); manifest default remains unchanged"))
             .arg(Arg::new("test-threads").long("test-threads").value_name("NUM")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
             .arg(Arg::new("lib").long("lib")
-                .help("Load a project as a library context when running a Rock file. Usage: rock run --lib game/ test.rock"))
+                .help("Load a project as a library context when running a Rock file."))
             .arg(Arg::new("clean").long("clean").action(ArgAction::SetTrue)
                 .help("Force a clean build by clearing the cache before compilation"))
             .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
@@ -898,47 +339,14 @@ impl Args {
                 .help("Timeout for run command in seconds (default: 60)"))
             .arg(Arg::new("no-timeout").long("no-timeout").action(ArgAction::SetTrue)
                 .help("Disable timeout for run command (allow infinite execution)"))
-            .arg(Arg::new("dump-state").long("dump-state").action(ArgAction::SetTrue)
-                .help("Dump all global state as JSON after the last frame (for AI/human diagnostics)"))
-            .arg(Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
-                .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
-            .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
-                .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: run up to N sim children concurrently (default: CPU count capped by ROCK_SIM_JOBS when it is a positive integer; explicit -j overrides that environment cap; bounded by total RAM at 3.6 GiB per lane and free GPU memory less a 6 GiB reserve at 2 GiB per lane; explicit N above the RAM budget requires --jobs-force; above only the free-GPU budget it runs at that budget with a warning; at most the core count; a named run narrows N to its name count first; 1 = serial). Applies to the whole-suite and multi-name forms."))
-            .arg(Arg::new("jobs-force").long("jobs-force").action(ArgAction::SetTrue)
-                .requires("jobs")
-                .help("For `rock sim`: run --jobs as asked above the RAM and free-GPU budgets (still bounded by CPU count)."))
-            .arg(Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
-                .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other lanes. Default 2. Bounded by --jobs."))
-            .arg(Arg::new("isolated").long("isolated").action(ArgAction::SetTrue)
-                .conflicts_with("workers")
-                .help("For `rock sim`: force one fresh process per entry -- the permanent fresh-process reference oracle. The default uses eligible boot-checkpoint workers, including rendered sims."))
-            .arg(Arg::new("workers").long("workers").action(ArgAction::SetTrue)
-                .help("For `rock sim`: explicitly require boot-checkpoint workers. The default already uses the same worker policy, including eligible rendered sims; this diagnostic/force spelling rejects where the default may fall back. Hot-reload sims, $OUT-interpolating env and SIM_WORKER_ISOLATED still run isolated with a reported reason."))
-            .arg(Arg::new("multi-order").long("multi-order").action(ArgAction::SetTrue)
-                .conflicts_with_all(["isolated", "workers"])
-                .help("For `rock sim <project> [name...]`: the B4 corpus gate -- run the corpus in registry, reverse and one fixed shuffled order and compare every sim against its own fresh-process reference. With no names it runs the whole project and is an arc checkpoint (slow); with names it runs the same four arms over just those sims, which confirms an already-isolated divergence in seconds but cannot discover a new one."))
             .arg(Arg::new("stride").long("stride").default_value("10")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
             .arg(Arg::new("budget-ms").long("budget-ms")
                 .value_parser(clap::value_parser!(f64))
                 .help("For `rock iter-completion`: fail when the worst per-keystroke median exceeds this many ms (the completion perf gate)."))
-            .arg(Arg::new("plan").long("plan").action(ArgAction::SetTrue)
-                .conflicts_with_all(["list", "isolated", "multi-order", "allocation-census", "allocation-sites", "update-snapshots"])
-                .help("For `rock sim`: compile/discover and print ordinary worker signature sizes and lane counts as JSON, without spawning sims. Honors named selections and --jobs."))
-            .arg(Arg::new("list").long("list").action(ArgAction::SetTrue)
-                .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."))
             .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
-                .help("For `rock test`: re-run tests on source changes. For `rock web`: serve the build and reload connected browsers after successful changes."))
-            .arg(Arg::new("port").long("port").default_value("8000")
-                .value_parser(clap::value_parser!(u16))
-                .help("For `rock web --watch`: loopback HTTP port. Use 0 to choose an available port."))
-            .arg(Arg::new("single-file").long("single-file").action(ArgAction::SetTrue)
-                .help("For `rock web`: emit ONE self-contained .html with every asset base64-embedded. Runs from file:// with no server. Not for large games -- base64 costs +33% and the whole payload is one file."))
-            .arg(Arg::new("itch").long("itch").action(ArgAction::SetTrue)
-                .help("For `rock web`: emit an itch.io-ready .zip with index.html at the archive root. Combine with --single-file for a one-entry archive."))
+                .help("For `rock test`: re-run tests on source changes."))
             .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
                 .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
             .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
@@ -961,45 +369,38 @@ impl Args {
                 .help("For `rock modules migrate`: a consumer package whose references decide what becomes `pub` (repeatable)."))
             .arg(Arg::new("imports").long("imports").action(ArgAction::SetTrue)
                 .help("For `rock fix`: add the `use` items a modules-v1 fragment's unresolved names need, when one accessible candidate exists (plans by default; --apply writes)."))
-            .arg(Arg::new("across-yield").long("across-yield").action(ArgAction::SetTrue)
-                .help("For `rock fix`: rewrite MAG sims' identity borrows held across a suspension to re-resolve from the handle they came from (plans by default; --apply writes)."))
+            .args(registry::registered().fixes.iter().map(|fix|
+                Arg::new(fix.flag).long(fix.flag).action(ArgAction::SetTrue).help(fix.help)
+            ))
             .arg(Arg::new("consumers").long("consumers")
-                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
+                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/example-core`."))
             .arg(Arg::new("backend").long("backend")
-                .value_parser(clap::value_parser!(Backend))
-                .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
-            .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
-                .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
-            .arg(Arg::new("agent-headless").long("agent-headless").action(ArgAction::SetTrue)
-                .help("For `rock run <game>`: boot into the editor with no window (MAG_EDITOR=1 MAG_BOOT_PLAYING=1 STONE_HEADLESS=1); the game registers with the agent daemon with access off."))
-            .arg(Arg::new("agent-access").long("agent-access").action(ArgAction::SetTrue)
-                .help("For `rock run <game>`: enable agent control at boot (MAG_AGENT_ACCESS=1) instead of from the editor's Agent Access window; with --agent-headless this is what `mag-cli launch` runs."))
-            .arg(Arg::new("level").long("level").value_name("NAME")
-                .help("For `rock run <game>`: boot into the editor on this catalog level (MAG_EDITOR=1 MAG_BOOT_PLAYING=1 MAG_EDITOR_LEVEL), windowed unless --agent-headless. Refuses to open a different one if the name is unknown."))
-            .arg(Arg::new("daemon-sock").long("daemon-sock").value_name("PATH")
-                .help("For `rock run <game>`: the agent daemon socket this game registers with (ROCK_AGENT_DAEMON_SOCK); default ~/tmp/rock-agent-daemon/daemon.sock."))
+                .value_parser(BackendSpec::value_parser())
+                .help(format!("Compiler backend (default: skull). {}. Also settable via ROCK_BACKEND.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
             .arg(Arg::new("app_args").last(true).num_args(0..)
-                .help("Arguments to pass through to the Rock app (everything after --)"))
+                .help("Arguments to pass through to the Rock app (everything after --)"));
+        (registry::registered().arguments)(command)
     }
 
-    fn from_matches(m: clap::ArgMatches) -> Self {
+    /// Convert matches from this registry-backed CLI command definition.
+    pub fn from_matches(m: clap::ArgMatches) -> Self {
         let many_str = |name: &str| -> Vec<String> {
             m.get_many::<String>(name).map(|vs| vs.cloned().collect()).unwrap_or_default()
         };
-        let command = *m.get_one::<CliCommand>("command").expect("command required");
+        let command = *m.get_one::<&'static CliCommand>("command").expect("command required");
         let test_filter = m.get_one::<String>("filter").cloned();
-        Args {
+        let mut args = Args {
             command,
             files: many_str("files"),
-            required_tests: many_str("require-test"),
+            required_tests: Default::default(),
             test_filter: test_filter.clone().or_else(|| std::env::var("ROCK_TEST_FILTER").ok()),
             test_filter_explicit: test_filter.is_some(),
-            show_passing: m.get_flag("show-passing"),
-            all_rejections: m.get_flag("all-rejections"),
-            rejections_out: m.get_one::<String>("rejections-out").cloned(),
+            show_passing: Default::default(),
+            all_rejections: Default::default(),
+            rejections_out: Default::default(),
             output: m.get_one::<String>("output").cloned(),
-            allocation_census: m.get_one::<String>("allocation-census").cloned(),
-            allocation_sites: m.get_one::<String>("allocation-sites").cloned(),
+            allocation_census: Default::default(),
+            allocation_sites: Default::default(),
             profile: m.get_one::<String>("profile").cloned(),
             no_stdlib: m.get_flag("no-stdlib"),
             stdout: m.get_flag("stdout"),
@@ -1008,18 +409,18 @@ impl Args {
             warmup: *m.get_one::<usize>("warmup").unwrap(),
             verbose: m.get_flag("verbose"),
             quiet: m.get_flag("quiet"),
-            frames: *m.get_one::<usize>("frames").unwrap(),
-            seconds: m.get_one::<f64>("seconds").copied(),
-            warmup_seconds: *m.get_one::<f64>("warmup-seconds").unwrap(),
-            gc_window: *m.get_one::<usize>("gc-window").unwrap(),
-            gc_window_start: *m.get_one::<usize>("gc-window-start").unwrap(),
-            gc_window_mode: m.get_one::<String>("gc-window-mode").cloned().unwrap(),
+            frames: Default::default(),
+            seconds: Default::default(),
+            warmup_seconds: Default::default(),
+            gc_window: Default::default(),
+            gc_window_start: Default::default(),
+            gc_window_mode: Default::default(),
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
-            top: *m.get_one::<usize>("top").unwrap(),
-            sim_log_dir: m.get_one::<String>("sim-log-dir").cloned(),
-            sim_entry: m.get_one::<String>("sim-entry").cloned(),
+            top: Default::default(),
+            sim_log_dir: Default::default(),
+            sim_entry: Default::default(),
             type_validation: m.get_flag("type-validation"),
-            headless: m.get_flag("headless"),
+            headless: Default::default(),
             renderer: m.get_one::<String>("renderer").map(|value| match value.as_str() {
                 "gl" => RendererBackend::Gl,
                 "wgpu" => RendererBackend::Wgpu,
@@ -1037,28 +438,28 @@ impl Args {
             trace: m.get_flag("trace"),
             timeout: *m.get_one::<u64>("timeout").unwrap(),
             no_timeout: m.get_flag("no-timeout"),
-            dump_state: m.get_flag("dump-state"),
-            update_snapshots: m.get_flag("update-snapshots"),
-            jobs: m.get_one::<usize>("jobs").copied(),
-            jobs_force: m.get_flag("jobs-force"),
-            full_asset_jobs: m.get_one::<usize>("full-asset-jobs").copied(),
-            isolated: m.get_flag("isolated"),
-            workers: m.get_flag("workers"),
-            multi_order: m.get_flag("multi-order"),
+            dump_state: Default::default(),
+            update_snapshots: Default::default(),
+            jobs: Default::default(),
+            jobs_force: Default::default(),
+            full_asset_jobs: Default::default(),
+            isolated: Default::default(),
+            workers: Default::default(),
+            multi_order: Default::default(),
             stride: *m.get_one::<usize>("stride").unwrap(),
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
-            list: m.get_flag("list"),
-            sim_plan: m.get_flag("plan"),
+            list: Default::default(),
+            sim_plan: Default::default(),
             app_args: many_str("app_args"),
-            jv: m.get_flag("jv"),
-            agent_headless: m.get_flag("agent-headless"),
-            agent_access: m.get_flag("agent-access"),
-            level: m.get_one::<String>("level").cloned(),
-            daemon_sock: m.get_one::<String>("daemon-sock").cloned(),
+            jv: Default::default(),
+            agent_headless: Default::default(),
+            agent_access: Default::default(),
+            level: Default::default(),
+            daemon_sock: Default::default(),
             watch: m.get_flag("watch"),
-            port: *m.get_one::<u16>("port").unwrap(),
-            single_file: m.get_flag("single-file"),
-            itch: m.get_flag("itch"),
+            port: Default::default(),
+            single_file: Default::default(),
+            itch: Default::default(),
             package: m.get_flag("package"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
@@ -1070,338 +471,36 @@ impl Args {
             apply: m.get_flag("apply"),
             consumer: m.get_many::<String>("consumer").map(|v| v.cloned().collect()).unwrap_or_default(),
             imports: m.get_flag("imports"),
-            across_yield: m.get_flag("across-yield"),
+            fix: registry::registered().fixes.iter().find(|fix| m.get_flag(fix.flag)),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
             // `skull`. An explicit `--backend skull`/`bone` on a command that
             // backend can't serve still rejects (the capability gate's
             // diagnostic). The backend-agnostic kept commands (fmt, completions,
-            // stone-test) are dispatched before the backend switch, so the
+            // host commands) are dispatched before the backend switch, so the
             // default never rejects them.
             backend: {
                 let explicit = m.get_one::<Backend>("backend").copied().or_else(|| {
-                    match std::env::var("ROCK_BACKEND").ok().as_deref() {
-                        Some("bone") => Some(Backend::Bone),
-                        Some("skull") => Some(Backend::Skull),
-                        Some("js") => Some(Backend::Js),
-                        Some("glsl") => Some(Backend::Glsl),
-                        Some("c") => Some(Backend::C),
-                        _ => None,
+                    let name = std::env::var("ROCK_BACKEND").ok()?;
+                    match BackendSpec::named(&name) {
+                        Some(spec) => Some(spec.backend),
+                        // Same shape and exit code as clap's rejection of an
+                        // unknown `--backend` value.
+                        None => {
+                            let names: Vec<&str> = BackendSpec::all().iter().map(|b| b.name).collect();
+                            eprintln!(
+                                "error: invalid value '{name}' for 'ROCK_BACKEND'\n  [possible values: {}]",
+                                names.join(", ")
+                            );
+                            std::process::exit(2);
+                        }
                     }
                 });
                 resolve_backend(explicit, command)
             },
-        }
-    }
-}
-
-
-/// The `rock-agent-daemon` built next to this `rock`, if any. A source-run
-/// game resolves the daemon from its own executable (LuaJIT under
-/// `prebuilt/`), `ROCK_DIR`, or `PATH`, none of which point at the cargo
-/// target directory, so the launcher hands the sibling down explicitly.
-pub fn sibling_daemon_bin(rock_exe: &std::path::Path) -> Option<std::path::PathBuf> {
-    let candidate = rock_exe.parent()?.join("rock-agent-daemon");
-    candidate.is_file().then_some(candidate)
-}
-
-impl Args {
-    /// The game-side environment the agent launch flags stand for. The game
-    /// reads these variables itself (sims set them with `@sim_env`), so the
-    /// flags are sugar that sets them in the launcher before the spawn.
-    pub fn agent_launch_env(&self) -> Vec<(&'static str, String)> {
-        let mut env = Vec::new();
-        // A level only opens in the editor of a playing boot; without both, a
-        // windowed `--level` launch stops at the main menu.
-        if self.agent_headless || self.level.is_some() {
-            env.push(("MAG_EDITOR", "1".to_string()));
-            env.push(("MAG_BOOT_PLAYING", "1".to_string()));
-        }
-        if self.agent_headless {
-            env.push(("STONE_HEADLESS", "1".to_string()));
-        }
-        if self.agent_access {
-            env.push(("MAG_AGENT_ACCESS", "1".to_string()));
-        }
-        if let Some(level) = &self.level {
-            env.push(("MAG_EDITOR_LEVEL", level.clone()));
-        }
-        if let Some(sock) = &self.daemon_sock {
-            env.push(("ROCK_AGENT_DAEMON_SOCK", sock.clone()));
-        }
-        env
-    }
-}
-
-#[cfg(test)]
-mod arg_tests {
-    use super::{Args, Backend, CliCommand};
-
-    #[test]
-    fn plan_cli_selects_offline_worker_planning() {
-        let args = Args::from_matches(Args::command().try_get_matches_from(
-            ["rock", "sim", "mag", "--plan", "--jobs", "14"]).unwrap());
-        assert!(args.sim_plan);
-        assert_eq!(args.jobs, Some(14));
-        for flag in ["--list", "--isolated", "--multi-order", "--update-snapshots"] {
-            assert!(Args::command().try_get_matches_from(["rock", "sim", "mag", "--plan", flag]).is_err());
-        }
-    }
-
-    #[test]
-    fn sibling_daemon_bin_is_the_daemon_next_to_rock_or_nothing() {
-        let dir = std::env::temp_dir().join(format!("rock-sibling-daemon-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let rock = dir.join("rock");
-        std::fs::write(&rock, b"").unwrap();
-        assert_eq!(super::sibling_daemon_bin(&rock), None);
-        let daemon = dir.join("rock-agent-daemon");
-        std::fs::write(&daemon, b"").unwrap();
-        assert_eq!(super::sibling_daemon_bin(&rock), Some(daemon));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn agent_launch_flags_stand_for_the_game_env() {
-        let parse = |argv: &[&str]| {
-            Args::from_matches(Args::command().try_get_matches_from(argv).expect("parse"))
         };
-        let plain = parse(&["rock", "run", "mag"]);
-        assert!(plain.agent_launch_env().is_empty());
-        let windowed = parse(&["rock", "run", "mag", "--level", "courtyard-study"]);
-        let env = windowed.agent_launch_env();
-        for (key, value) in [("MAG_EDITOR", "1"), ("MAG_BOOT_PLAYING", "1"), ("MAG_EDITOR_LEVEL", "courtyard-study")] {
-            assert_eq!(env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str()), Some(value),
-                       "a windowed --level launch opens the editor on that level: {key}");
-        }
-        assert!(env.iter().all(|(k, _)| *k != "STONE_HEADLESS"), "--level alone keeps the window");
-        let headless = parse(&["rock", "run", "mag", "--agent-headless"]);
-        assert!(headless.agent_launch_env().iter().all(|(k, _)| *k != "MAG_AGENT_ACCESS"),
-                "headless alone leaves agent access off");
-        let agent = parse(&["rock", "run", "mag", "--agent-headless", "--agent-access", "--level", "mcp-selftest",
-                            "--daemon-sock", "/tmp/d.sock"]);
-        let env = agent.agent_launch_env();
-        for (key, value) in [("MAG_EDITOR", "1"), ("MAG_BOOT_PLAYING", "1"), ("MAG_AGENT_ACCESS", "1"),
-                             ("STONE_HEADLESS", "1"), ("MAG_EDITOR_LEVEL", "mcp-selftest"),
-                             ("ROCK_AGENT_DAEMON_SOCK", "/tmp/d.sock")] {
-            assert_eq!(env.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str()), Some(value), "{key}");
-        }
-    }
-
-
-    #[test]
-    fn sim_worker_help_names_the_current_default_and_force_spelling() {
-        let help = Args::command().render_help().to_string();
-        assert!(
-            help.contains("default uses eligible boot-checkpoint workers, including rendered sims"),
-            "sim help lost the worker default wording:\n{help}"
-        );
-        assert!(
-            help.contains("diagnostic/force spelling rejects where the default may fall back"),
-            "sim help lost the explicit --workers distinction:\n{help}"
-        );
-        assert!(
-            !help.contains("rendered entries run isolated with a reported reason"),
-            "sim help still describes the superseded rendered-isolated default:\n{help}"
-        );
-    }
-
-    #[test]
-    fn renderer_override_parses_after_project_name() {
-        let args = Args::from_matches(
-            Args::command()
-                .try_get_matches_from(["rock", "frame", "mag", "--renderer", "wgpu", "-n", "30"])
-                .expect("parse"),
-        );
-        assert_eq!(args.renderer, Some(super::RendererBackend::Wgpu));
-        assert_eq!(args.frames, 30);
-    }
-
-    #[test]
-    fn c_backend_parses_for_test() {
-        let args = Args::from_matches(
-            Args::command()
-                .try_get_matches_from([
-                    "rock",
-                    "test",
-                    "mag-world",
-                    "--backend",
-                    "c",
-                    "--require-test",
-                    "mag_world::first_test",
-                    "--require-test",
-                    "mag_world::second_test",
-                ])
-                .expect("parse"),
-        );
-        assert_eq!(args.backend, Backend::C);
-        assert_eq!(args.command, CliCommand::Test);
-        assert_eq!(args.files, ["mag-world"]);
-        assert_eq!(
-            args.required_tests,
-            ["mag_world::first_test", "mag_world::second_test"]
-        );
-    }
-
-
-}
-
-#[cfg(test)]
-mod caps_tests {
-    use super::{Backend, CliCommand};
-
-    #[test]
-    fn bone_serves_typecheck_subset_only() {
-        use CliCommand::*;
-        for cmd in [Test, Compile, CompileSingle, TestCompile, Run, Watch] {
-            assert!(Backend::Bone.serves(cmd), "bone should serve {:?}", cmd);
-        }
-        // Codegen/runtime/game commands are rejected.
-        for cmd in [Frame, Perf, Stone, Sim] {
-            assert!(!Backend::Bone.serves(cmd), "bone should reject {:?}", cmd);
-        }
-    }
-
-    #[test]
-    fn skull_serves_codegen_subset_only() {
-        use CliCommand::*;
-        // skull is a codegen backend: compile/run/test + the game commands
-        // (stone/frame/perf/sim) that route their compile through its GameCompiler.
-        for cmd in [Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim] {
-            assert!(Backend::Skull.serves(cmd), "skull should serve {:?}", cmd);
-        }
-        // Backend-agnostic kept commands (dispatched before the backend switch)
-        // are not served by skull's per-backend dispatch.
-        for cmd in [Fmt, Completions, StoneTest] {
-            assert!(!Backend::Skull.serves(cmd), "skull should reject {:?}", cmd);
-        }
-    }
-
-    #[test]
-    fn js_serves_test_and_run() {
-        use CliCommand::*;
-        assert!(Backend::Js.serves(Test), "js serves test");
-        assert!(Backend::Js.serves(Run), "js serves run (M1: node program emission)");
-        let feature_reason = Backend::Js.reject_reason(Test);
-        if cfg!(feature = "backend-js") {
-            assert!(feature_reason.is_none(), "feature-enabled JS should be available: {feature_reason:?}");
-        } else {
-            let message = feature_reason.expect("default JS build must reject the omitted backend");
-            assert!(message.contains("backend-js"), "{message}");
-        }
-        // No game/engine surface: everything past headless program execution
-        // stays rejected.
-        for cmd in [Compile, CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
-            assert!(!Backend::Js.serves(cmd), "js should reject {:?}", cmd);
-        }
-        let msg = Backend::Js.reject_reason(CliCommand::Stone).expect("js rejects stone");
-        if cfg!(feature = "backend-js") {
-            assert!(msg.contains("`js` backend cannot serve `stone`"), "{msg}");
-            assert!(msg.contains("run"), "supported list names run: {msg}");
-        } else {
-            assert!(msg.contains("backend-js"), "{msg}");
-        }
-    }
-
-    #[test]
-    fn glsl_serves_test_only() {
-        use CliCommand::*;
-        assert!(Backend::Glsl.serves(Test), "glsl serves test");
-        for cmd in [Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim] {
-            assert!(!Backend::Glsl.serves(cmd), "glsl should reject {:?}", cmd);
-        }
-        let msg = Backend::Glsl.reject_reason(CliCommand::Run).expect("glsl rejects run");
-        assert!(msg.contains("`glsl` backend cannot serve `run`"), "{msg}");
-        assert!(msg.contains("test"), "supported list names test: {msg}");
-    }
-
-    #[test]
-    fn c_serves_compile_test_and_run() {
-        use CliCommand::*;
-        assert!(Backend::C.serves(Compile), "c serves compile");
-        assert!(Backend::C.serves(Test), "c serves test");
-        assert!(Backend::C.serves(Run), "c serves run");
-        assert!(Backend::C.serves(Frame), "c serves frame");
-        for cmd in [CompileSingle, TestCompile, Watch, Stone, Perf, Sim] {
-            assert!(!Backend::C.serves(cmd), "c should reject {:?}", cmd);
-        }
-        let msg = Backend::C.reject_reason(CliCommand::Stone).expect("c rejects stone");
-        assert!(msg.contains("`c` backend cannot serve `stone`"), "{msg}");
-        assert!(msg.contains("test"), "supported list names test: {msg}");
-        assert!(msg.contains("run"), "supported list names run: {msg}");
-        assert!(msg.contains("compile"), "supported list names compile: {msg}");
-    }
-
-    #[test]
-    fn reject_reason_message_is_generated_from_caps_table() {
-        // The "Supported commands" list must be generated from
-        // supported_commands, not hand-typed prose that can drift.
-        let msg = Backend::Bone
-            .reject_reason(CliCommand::Frame)
-            .expect("bone rejects frame");
-        assert!(msg.contains("`bone` backend cannot serve `frame`"), "{msg}");
-        assert!(msg.contains("typechecker"), "{msg}");
-        for cmd in Backend::Bone.supported_commands() {
-            assert!(
-                msg.contains(cmd.cli_name()),
-                "reject message should list supported command {}: {msg}",
-                cmd.cli_name()
-            );
-        }
-    }
-
-    #[test]
-    fn cli_names_are_unique_and_nonempty() {
-        let mut seen = std::collections::HashSet::new();
-        for cmd in <CliCommand as clap::ValueEnum>::value_variants().iter().copied() {
-            let name = cmd.cli_name();
-            assert!(!name.is_empty(), "{:?} has empty cli_name", cmd);
-            assert!(seen.insert(name), "duplicate cli_name {name}");
-        }
-    }
-
-    #[test]
-    fn mem2reg_census_has_a_cli_surface() {
-        assert_eq!(
-            CliCommand::SkullMem2RegStats.cli_name(),
-            "skull-mem2reg-stats"
-        );
-    }
-
-    use super::resolve_backend;
-
-    #[test]
-    fn default_backend_is_skull_for_served_commands() {
-        // With no explicit choice, every command skull serves defaults to skull.
-        for cmd in <CliCommand as clap::ValueEnum>::value_variants().iter().copied() {
-            if Backend::Skull.serves(cmd) {
-                assert_eq!(
-                    resolve_backend(None, cmd),
-                    Backend::Skull,
-                    "{cmd:?} is served by skull -> default should be skull"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn default_backend_is_skull_for_backend_agnostic_commands() {
-        use CliCommand::*;
-        // The kept backend-agnostic commands (fmt, completions, stone-test) are
-        // dispatched before the backend switch, so the resolved default is still
-        // skull -- it just never reaches the per-backend dispatch for them.
-        for cmd in [Fmt, Completions, StoneTest] {
-            assert!(!Backend::Skull.serves(cmd));
-            assert_eq!(resolve_backend(None, cmd), Backend::Skull);
-        }
-    }
-
-    #[test]
-    fn explicit_backend_is_honored_even_when_unserved() {
-        // An explicit choice is verbatim; the capability gate (not this
-        // resolver) is what later rejects an unserved command.
-        assert_eq!(resolve_backend(Some(Backend::Bone), CliCommand::Frame), Backend::Bone);
-        assert_eq!(resolve_backend(Some(Backend::Skull), CliCommand::Test), Backend::Skull);
+        (registry::registered().decode_arguments)(&m, &mut args);
+        args
     }
 }
