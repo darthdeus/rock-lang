@@ -5,6 +5,22 @@ Rock is a statically typed language for writing games, compiled to Lua
 it is prepared for an open-source release; it currently holds the
 crates listed below.
 
+## Install
+
+Install the `rock` compiler from git, or unpack a release archive:
+
+```sh
+cargo install --git https://github.com/darthdeus/rock-lang.git rock-cli
+```
+
+```sh
+tar -xzf rock-<target-triple>.tar.gz
+export PATH="$PWD/rock-<target-triple>/bin:$PATH"
+```
+
+`rock run` and `rock test` execute programs with LuaJIT, so `luajit` must be
+on `PATH`; `--backend js` additionally needs `node`.
+
 ## Crates
 
 | Crate | Origin |
