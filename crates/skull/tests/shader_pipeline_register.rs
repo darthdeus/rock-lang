@@ -11,7 +11,7 @@
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use crate::common::{emit_module, function_body, ws_with_stdlib};
+use crate::common::{emit_mir, emit_module, function_body, ws_with_stdlib};
 use skull::mir_emit::{
     emit_full, emit_incremental, emit_overlay as emit_overlay_result, MirEmit, SkullEmitCache,
 };
@@ -68,6 +68,18 @@ fn call_collapses_to_key_const() {
     assert!(!body.contains("rock_shader("), "unexpanded rock_shader call:\n{body}");
     assert!(!body.contains("compile-time shader-pipeline intrinsic"),
         "phantom body leaked into make_a:\n{body}");
+}
+
+/// The emission lists each registered shader's source, so a host can show
+/// it without parsing the registration out of the Lua.
+#[test]
+fn emission_lists_each_registered_shader_source() {
+    let emit = emit_mir(SRC);
+    let shaders: Vec<_> = emit.shaders.iter().map(|s| (s.key.as_str(), s.language)).collect();
+    assert_eq!(shaders, [(KEY, skull::mir_emit::ShaderLanguage::Glsl)]);
+    let source = &emit.shaders[0].source;
+    assert!(source.contains("void main"), "GLSL source:\n{source}");
+    assert!(emit.lua.contains(source.as_str()), "the listed source is the registered one");
 }
 
 #[test]

@@ -548,6 +548,24 @@ pub struct MirEmit {
     /// factory, and the game booted to a chunk that defined everything and ran
     /// nothing.
     pub emits_main: bool,
+    /// Every shader this artifact registers, as the source the registration
+    /// carries, in registration order. Shared with the emit cache, which
+    /// keeps them across incremental builds.
+    pub shaders: std::sync::Arc<[ShaderSource]>,
+}
+
+/// One registered shader's emitted source.
+#[derive(Clone, Debug)]
+pub struct ShaderSource {
+    pub key: String,
+    pub language: ShaderLanguage,
+    pub source: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderLanguage {
+    Glsl,
+    Wgsl,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3164,6 +3182,7 @@ fn collect_wgpu_projections<T, K>(
 #[derive(Default, Clone)]
 struct ShaderRegistrations {
     lua: String,
+    sources: std::sync::Arc<[ShaderSource]>,
     dependencies: FxHashSet<FuncRef>,
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
     shader_contributions: HashMap<(ModuleId, BodyOwner), Vec<skull_mir::lower::ShaderPair>>,
@@ -5245,6 +5264,7 @@ fn shader_registration_lines(
         ));
     }
     let mut out = String::new();
+    let mut sources = Vec::new();
     let mut dependencies = FxHashSet::default();
     #[cfg(feature = "renderer-wgpu")]
     let mut abi_wires = BTreeMap::new();
@@ -5258,6 +5278,11 @@ fn shader_registration_lines(
             None => skull_codegen_glsl::emit_shader_entry_with_view(ws, scx, program_view, profile)?,
         };
         dependencies.extend(emission.dependencies);
+        sources.push(ShaderSource {
+            key: pair.key.clone(),
+            language: ShaderLanguage::Glsl,
+            source: emission.source.clone(),
+        });
         // Slot order is the engine's whole view of texture binding: it points
         // each sampler at its unit once at link time, then binds by slot.
         let slot_names: Vec<&str> = emission.abi.texture_units.iter().map(|n| n.as_str()).collect();
@@ -5388,6 +5413,11 @@ fn shader_registration_lines(
         for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
             dependencies.extend(emission_dependencies);
             abi_wires.insert(shader_key.clone(), wire.clone());
+            sources.push(ShaderSource {
+                key: shader_key.clone(),
+                language: ShaderLanguage::Wgsl,
+                source: source.clone(),
+            });
             let _ = writeln!(
                 out,
                 "__rock_wgpu_shader_register({}, {}, {}, {})",
@@ -5441,6 +5471,11 @@ fn shader_registration_lines(
                 dependencies.extend(emission.dependencies);
                 let wire = emission.abi.wire()?;
                 abi_wires.insert(entry.key.clone(), wire.clone());
+                sources.push(ShaderSource {
+                    key: entry.key.clone(),
+                    language: ShaderLanguage::Wgsl,
+                    source: emission.source.clone(),
+                });
                 let _ = writeln!(
                     out,
                     "__rock_wgpu_compute_register({}, {}, {}, {})",
@@ -5478,6 +5513,7 @@ fn shader_registration_lines(
     let shader_root_set = roots.iter().chain(compute_collection.entries.iter().map(|entry| &entry.entry)).copied().collect();
     Ok(ShaderRegistrations {
         lua: out,
+        sources: sources.into(),
         dependencies,
         callsites: collection
             .callsites
@@ -6341,6 +6377,7 @@ fn assemble(
             graph_census: crate::instance_graph::RunStats::default(),
             concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
             emits_main,
+            shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
         },
         emitted_bodies,
         unit_reads,
@@ -9037,6 +9074,7 @@ fn assemble_overlay(
             // An overlay redefines changed bodies only; the entry point is
             // already installed by the `main.lua` it loads over.
             emits_main: false,
+            shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
         },
         unit_reads,
         fingerprint_code_rows,
