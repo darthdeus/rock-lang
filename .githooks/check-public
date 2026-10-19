@@ -24,4 +24,12 @@ for p in "${patterns[@]}"; do
     status=1
   fi
 done
+# Citations must resolve in this repository, including nested doc directories.
+root="$(git rev-parse --show-toplevel)"
+while IFS= read -r doc; do
+  if [[ ! -f "$root/$doc" ]]; then
+    echo "check-public: missing documentation: $doc" >&2
+    status=1
+  fi
+done < <(grep -oE 'docs/([A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+[.]md' "$text_file" | sort -u)
 exit $status
