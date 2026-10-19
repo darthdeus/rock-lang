@@ -1,4 +1,5 @@
-//! A mangled name never equals its source name: a non-exempt function with no parameters
+//! A mangled name never equals its source name (ZERO_ARG_MANGLING):
+//! a non-exempt function with no parameters
 //! carries the `_0` arity marker, so Lua's `_G[name]` cannot reach it by its
 //! declared name. Exempt surface names stay bare.
 

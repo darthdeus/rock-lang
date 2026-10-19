@@ -245,8 +245,7 @@ impl BoundRoot {
 /// A construction the concrete-program model REFUSES, as opposed to one it
 /// merely could not complete yet ([`Unresolved`]).
 ///
-/// Three variants reject author programs under
-/// `ConcreteTypeUnavailable` records a
+/// Three variants reject author programs. `ConcreteTypeUnavailable` records a
 /// compiler invariant instead. They become fatal at Stage 3's emission cutover.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RejectionKind {
@@ -877,7 +876,7 @@ pub enum StorageCond {
 /// Calls lowering SYNTHESIZES, keyed by the source operation that triggers them:
 /// `(trigger name, storage condition, the `stdlib_funcref`/`call_spine` names
 /// the arm emits WHEN THAT CONDITION HOLDS)`. Read off
-/// `crates/skull-mir/src/lower/storage.rs`; the complete set is catalogued in
+/// `crates/skull-mir/src/lower/storage.rs`.
 ///
 /// The condition uses the same `skull_mir::lower::ContainerPlan` as lowering.
 /// The names are the column-path ones only -- a non-column
@@ -983,7 +982,8 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
 /// Why a generic emission root carries no uncovered bare-name obligation, or
 /// `None` when it does.
 ///
-/// The obligation is "exist under a BARE name that opaque target text can call", so it is a property of the EMITTED
+/// The obligation is "exist under a BARE name that opaque target text can call", so it is a
+/// property of the EMITTED
 /// SYMBOL, not of genericity. Two things discharge it, and both are enforced
 /// rather than promised:
 ///
@@ -5726,7 +5726,7 @@ pub fn serves(
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
 }
 
-/// Classify every reached callee that is a BOUNDARY, per
+/// Classify every reached callee that is a BOUNDARY.
 ///
 /// An instance is kept for a boundary as well as a Rock body -- Stage 2 splits
 /// them (plan S 9: one `InstanceId` OR one `BoundaryId`), and keeping both here

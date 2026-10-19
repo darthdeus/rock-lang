@@ -1620,7 +1620,8 @@ impl Builder<'_> {
     }
 
 
-    /// A synthesized call to a named runtime entry: the column-storage spine helpers and the `NativeBuffer` bounds
+    /// A synthesized call to a named runtime entry: the column-storage spine helpers and the
+    /// `NativeBuffer` bounds
     /// check. Non-generic by necessity -- `Inst::Call` carries no generic
     /// arguments, so a generic Rock helper could never specialize here.
     ///

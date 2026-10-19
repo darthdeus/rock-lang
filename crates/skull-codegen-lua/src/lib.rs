@@ -1257,7 +1257,8 @@ pub const STATE_CELL: &str = "__rock_state_cell";
 pub const INITIALIZED_CELL: &str = "__rock_initialized_cell";
 
 /// `ROCK_SKULL_STATE_RESERVE=0` leaves every Session's tables to grow lazily
-/// from `{}` instead of sizing them to the schema's rehash fixpoint at load, for A/B measurement. Default: on.
+/// from `{}` instead of sizing them to the schema's rehash fixpoint at load, for A/B measurement.
+/// Default: on.
 pub fn state_reserve_mode() -> bool {
     static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(), Ok("0")))

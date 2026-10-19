@@ -266,7 +266,7 @@ fn generic_constructor_mismatch_names_both_types() {
 // P1b: the mismatch carries a second label at the expected type's origin (the
 // `: Foo` annotation), so the reader sees WHERE the expectation came from.
 // Works for span-carrying types (nominal/compound); builtins (`int`) lower to a
-// shared interned TyId with no per-site span -- documented gap in
+// shared interned TyId with no per-site span.
 #[test]
 fn type_mismatch_labels_the_expected_type_origin() {
     let src = "struct Foo { x: int }\nfn main() { let a: Foo = \"hello\" }";
@@ -2214,7 +2214,8 @@ fn annotation_float_args_lower_as_float() {
     assert_eq!(got, vec!["Float(-2.5)", "Float(1.5)"], "float annotation args must not lower to Other");
 }
 
-// Lossless lowering of param/field annotations: skull-side consumers (@size/@instance/@flat) read these from HIR, so
+// Lossless lowering of param/field annotations: skull-side consumers (@size/@instance/@flat) read
+// these from HIR, so
 // dropping them at lowering is a silent-drop hole.
 #[test]
 fn param_annotations_survive_lowering() {

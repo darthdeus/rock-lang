@@ -9,7 +9,8 @@
 //! (`MirFunc::for_iter_headers`). The one observable change is bound SNAPSHOT:
 //! the per-iteration bound read (e.g. the inlined `it.vec.len`) moves to the
 //! preheader and is evaluated once per loop. That diverges only when the body
-//! mutates the collection being iterated, which is recorded UB. The sanction is exactly why the pass is tag-gated
+//! mutates the collection being iterated, which is recorded UB. The sanction is exactly why the
+//! pass is tag-gated
 //! -- a user-written `while i < xs.len` must keep re-reading its bound.
 //!
 //! Post-inline shape matched (H = the tagged head):

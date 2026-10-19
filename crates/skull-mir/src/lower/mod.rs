@@ -504,7 +504,8 @@ pub struct ScalarCtx {
     /// When set, the scalarized value ABI is disabled workspace-wide: every fn
     /// keeps value structs as first-class single values (params/returns/args),
     /// never splatting them to leaf scalars. Used by the GLSL backend, where a
-    /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves. The toggle is contained in the ABI
+    /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves. The toggle is
+    /// contained in the ABI
     /// policy behind [`BackendFnAbiPlan`], which definitions and direct calls
     /// both read.
     values_first_class: bool,
@@ -3869,7 +3870,8 @@ fn uniform_values_rejection_for_call(
     None
 }
 
-/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value. THE shared resolver: the lowering expander
+/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value. THE shared resolver:
+/// the lowering expander
 /// and the fatal gate both call it, so they cannot diverge on what they
 /// accept. The argument must be a plain string literal -- interpolation or any
 /// computed expression rejects, because the input has to be knowable without
@@ -3926,8 +3928,8 @@ pub fn resolve_comptime_value(
         },
         ExpandKind::EmbedString => {
             // Resolution root: the nearest stick.toml at/above the CALLING
-            // file's dir; fall back to
-            // the invocation's embed_root for synthetic/test module files.
+            // file's dir: a library embeds its own files. Fall back to the
+            // invocation's embed_root for synthetic/test module files.
             let call_file = body.expr_spans[call_expr].file;
             let package_root = std::path::Path::new(call_file.as_str())
                 .exists()

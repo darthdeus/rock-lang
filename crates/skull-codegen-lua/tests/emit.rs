@@ -297,7 +297,8 @@ fn run_shaped_bound_looped(
     // `skull::mir_emit::callee_binding_pass_lua` emits, and for the same
     // reason: a captured callee must already be its final closure.
     let mut binds: Vec<skull_codegen_lua::CalleeBindingPlan> = Vec::new();
-    // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records; the record metatable lives in skull's
+    // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records; the record
+    // metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
     // canonical definition (one copy, shared with `skull::runtime_prelude`).
     let mut lua = format!(

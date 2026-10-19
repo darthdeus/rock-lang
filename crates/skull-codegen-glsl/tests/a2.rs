@@ -971,7 +971,8 @@ fn reject_isampler_return() {
     reject_pipeline(src, "vt", "fr", "sampler");
 }
 
-// --- Attribute locations are RECORDED, not invented while printing ----------. Emission consumes the locations
+// --- Attribute locations are RECORDED, not invented while printing ----------
+// Emission consumes the locations
 // classification computed; it does not re-derive them with an enumerate()
 // index, which assumes one location per field and cannot express a type that
 // consumes several.
