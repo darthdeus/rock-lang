@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::process::Command;
 
 pub fn rock_bin() -> Command {
-    rock(env!("CARGO_BIN_EXE_rock-plain"))
+    rock(env!("CARGO_BIN_EXE_rock"))
 }
 
 pub fn rock(program: impl AsRef<OsStr>) -> Command {

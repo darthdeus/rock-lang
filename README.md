@@ -9,7 +9,7 @@ crates listed below.
 
 | Crate | Origin |
 |---|---|
-| `crates/rock-cli` | CLI library and standalone `rock-plain` compiler |
+| `crates/rock-cli` | CLI library and standalone `rock` compiler |
 | `crates/skull` | Compiler driver, artifact assembly and incremental Lua emission |
 | `crates/rock-lsp` | Language server, diagnostics and editor queries |
 | `crates/skull-transform` | Control-flow transforms, inlining and coroutine lowering |

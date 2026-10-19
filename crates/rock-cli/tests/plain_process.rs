@@ -2,7 +2,7 @@
 use std::process::{Command, Output};
 
 fn invoke(root: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+    Command::new(env!("CARGO_BIN_EXE_rock"))
         .current_dir(root).args(args)
         .env("ROCK_DIR", root).env("ROCK_INVOCATION_LOG", "off").env("ROCK_TEST_VERBOSE", "1")
         .env_remove("ROCK_STDLIB_DIR").env_remove("LUA_PATH").env_remove("LUA_CPATH")
@@ -190,7 +190,7 @@ fn plain_watch_resolves_project_outside_workspace() {
     for fail in [false, true] {
         if output.exists() { std::fs::remove_file(&output).unwrap(); }
         let stream = std::fs::File::create(&log).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rock"))
             .current_dir(root.path()).args(["watch", ".", "--output"]).arg(&output)
             .env("ROCK_DIR", root.path()).env("ROCK_INVOCATION_LOG", "off").env("ROCK_LOG", "info")
             .env_remove("ROCK_STDLIB_DIR").env_remove("ROCK_BACKEND")
@@ -238,7 +238,7 @@ log:close()
 """
 "#, if fail { "error('intentional scratch failure')" } else { "" });
         std::fs::write(root.path().join("scratch.rock"), source).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+        let out = Command::new(env!("CARGO_BIN_EXE_rock"))
             .current_dir(root.path()).args(["test", "scratch.rock"])
             .env("ROCK_DIR", root.path()).env("SCRATCH_LOG", &log)
             .env("ROCK_INVOCATION_LOG", "off").env("ROCK_TEST_VERBOSE", "1")
@@ -301,7 +301,7 @@ fn plain_compile_has_no_cross_process_slot_policy() {
 name = "slot-probe"
 type = "bin"
 "#).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
         .current_dir(root.path()).args(["compile", ".", "out.lua"])
         .env("HOME", root.path()).env("ROCK_DIR", root.path())
         .env("ROCK_INVOCATION_LOG", "off")
@@ -369,7 +369,7 @@ fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
     let state = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("main.rock"), "fn main() {}\n").unwrap();
     let run = |log: Option<&std::path::Path>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rock-plain"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
         command.current_dir(root.path()).args(["fmt", "--check", "main.rock"])
             .env("ROCK_DIR", root.path()).env("XDG_STATE_HOME", state.path()).env("HOME", state.path())
             .env_remove("ROCK_INVOCATION_LOG").env_remove("ROCK_STDLIB_DIR");
@@ -399,7 +399,7 @@ fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
 fn plain_rejects_a_thread_count_that_is_not_a_count() {
     let root = tempfile::tempdir().unwrap();
     for var in ["ROCK_NUM_THREADS", "RAYON_NUM_THREADS"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+        let out = Command::new(env!("CARGO_BIN_EXE_rock"))
             .current_dir(root.path()).args(["fmt", "--check", "missing.rock"])
             .env("ROCK_DIR", root.path()).env("ROCK_INVOCATION_LOG", "off")
             .env_remove("ROCK_NUM_THREADS").env_remove("RAYON_NUM_THREADS").env(var, "eight")

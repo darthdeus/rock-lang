@@ -65,7 +65,7 @@ jobs:
       - name: Build the playground (wasm module and stdlib)
         run: playground/build.sh
       - name: Wasm smoke test against native output
-        run: node crates/rock-wasm/tests/smoke.mjs playground/dist/rock_wasm.wasm target/debug/rock-plain
+        run: node crates/rock-wasm/tests/smoke.mjs playground/dist/rock_wasm.wasm target/debug/rock
       - name: Wasm language server test
         run: node crates/rock-wasm/tests/lsp.mjs playground/dist/rock_wasm.wasm
       - name: Playground worker smoke test

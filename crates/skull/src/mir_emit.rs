@@ -5333,7 +5333,7 @@ fn shader_registration_lines(
     if renderer_target == RendererTarget::Wgpu {
         #[cfg(not(feature = "renderer-wgpu"))]
         return Err(CompilerError::new_no_location(
-            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock-plain --features renderer-wgpu`)".to_string(),
+            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock --features renderer-wgpu`)".to_string(),
         ));
         #[cfg(feature = "renderer-wgpu")]
         {
@@ -5441,7 +5441,7 @@ fn shader_registration_lines(
     if renderer_target == RendererTarget::Wgpu && has_compute {
         #[cfg(not(feature = "renderer-wgpu"))]
         return Err(CompilerError::new_no_location(
-            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock-plain --features renderer-wgpu`)".to_string(),
+            "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock --features renderer-wgpu`)".to_string(),
         ));
         #[cfg(feature = "renderer-wgpu")]
         {

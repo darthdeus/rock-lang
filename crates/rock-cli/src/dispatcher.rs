@@ -65,7 +65,7 @@ impl CommandContext {
             && !cfg!(feature = "renderer-wgpu")
         {
             anyhow::bail!(
-                "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock-plain --features renderer-wgpu`)"
+                "the `wgpu` renderer was omitted from this build; enable the `renderer-wgpu` feature (rebuild with `cargo build -p rock-cli --bin rock --features renderer-wgpu`)"
             );
         }
         Ok(())

@@ -72,7 +72,7 @@ fn package_test_program_omits_reload_only_state_a_game_build_keeps() {
     std::fs::write(project.join("main.rock"), MAIN).unwrap();
     std::fs::write(project.join("tests/shape.rock"), TEST).unwrap();
 
-    let test = std::process::Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+    let test = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
         .arg("test").arg(project.join("tests"))
         .current_dir(root())
         .env("ROCK_TEST_VERBOSE", "1")
@@ -84,7 +84,7 @@ fn package_test_program_omits_reload_only_state_a_game_build_keeps() {
     assert!(text.contains("1/1 @tests passed"), "expected one passing test:\n{text}");
 
     let lua = dir.path().join("game.lua");
-    let compile = std::process::Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+    let compile = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
         .arg("compile").arg(&project).arg("--output").arg(&lua)
         .current_dir(root())
         .output().expect("compile fixture game");

@@ -1,17 +1,17 @@
 // Smoke test for the rock-wasm module, run from the repository root:
-//   node crates/rock-wasm/tests/smoke.mjs <rock_wasm.wasm> <rock-plain>
+//   node crates/rock-wasm/tests/smoke.mjs <rock_wasm.wasm> <rock>
 // Loads the module the way a Worker does, installs the stdlib from memory,
 // compiles each fixture and requires its Lua to equal native
-// `rock-plain compile-single` output byte for byte. Then checks shader
+// `rock compile-single` output byte for byte. Then checks shader
 // output, format, and that source nested past the limit is a diagnostic
 // rather than a trap.
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const [wasmPath, rockPlain] = process.argv.slice(2);
-if (!wasmPath || !rockPlain) {
-  console.error('usage: node smoke.mjs <rock_wasm.wasm> <rock-plain>');
+const [wasmPath, rockBin] = process.argv.slice(2);
+if (!wasmPath || !rockBin) {
+  console.error('usage: node smoke.mjs <rock_wasm.wasm> <rock>');
   process.exit(2);
 }
 const fixtureDir = 'crates/rock-wasm/tests/fixtures';
@@ -57,7 +57,7 @@ for (const name of fs.readdirSync(fixtureDir).filter((n) => n.endsWith('.rock'))
     check(false, `${name} compiles in wasm: ${JSON.stringify(wasm.diagnostics ?? wasm)}`);
     continue;
   }
-  const native = execFileSync(rockPlain, ['compile-single', file], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  const native = execFileSync(rockBin, ['compile-single', file], { encoding: 'utf8', maxBuffer: 1 << 28 });
   check(wasm.lua === native, `${name}: wasm Lua equals native (${wasm.lua.length} bytes, ${ms} ms)`);
 }
 
