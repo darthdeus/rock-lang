@@ -9577,7 +9577,14 @@ fn top() -> int { return generic(7) }
 fn main() { let result = top() }
 "#;
 
+    // This publisher-only type first reaches the shared interner in the setup
+    // join; using it in a Rock body would intern it during concrete planning.
     const SETUP_SRC: &str = r#"
+struct SetupIdentity<T> { value: T }
+
+@nomangle inline(lua)
+fn publish_setup_identity(value: SetupIdentity<int>) -> SetupIdentity<int> = "return value"
+
 @nomangle inline(lua) fn publish(value: int) -> int = "return value"
 
 @shader(fragment)
