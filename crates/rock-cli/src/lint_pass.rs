@@ -9,7 +9,6 @@
 
 use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};
 use bone_semantic::inference::Workspace;
-use rock_core::errors::CompilerErrorLevel;
 use rock_core::{CompilerError, SourceFiles, source_file_from_path_and_contents};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -309,7 +308,7 @@ pub(crate) fn rollback_build_lints_cached(
     scope: Scope,
 ) -> Result<(), String> {
     with_source_texts(sources, |texts| {
-        let warm = warm_module_ids(ws, texts);
+        let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin =
             scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         let owned = owned_files(texts, root);
@@ -352,7 +351,7 @@ fn run_build_lints_cached_inner(
     mut timing: Option<&mut LintRouteTiming>,
 ) -> Vec<CompilerError> {
     let (found, stats) = with_source_texts(sources, |texts| {
-        let warm = warm_module_ids(ws, texts);
+        let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin =
             scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         let owned = owned_files(texts, root);
@@ -428,15 +427,36 @@ fn report_timed(
     sources: &SourceFiles,
     root: &Path,
     mode: LintReport,
-    mut timing: Option<&mut LintRouteTiming>,
+    timing: Option<&mut LintRouteTiming>,
 ) -> Vec<CompilerError> {
     if found.is_empty() {
         record_report_census(0, 0, 0);
         return Vec::new();
     }
     let report_started = Instant::now();
-    let (errors, soft): (Vec<_>, Vec<_>) =
-        found.into_iter().partition(|f| f.level() == CompilerErrorLevel::Error);
+    let (errors, soft) = skull::pipeline::split_findings(found);
+    present_soft(&soft, sources, root, mode, report_started, timing);
+    errors
+}
+
+/// Report the soft tiers of a pipeline build per the invocation's policy;
+/// the pipeline itself refuses on the `Error` findings.
+pub fn report_soft(soft: &[bone_lints::Finding], sources: &SourceFiles, root: &Path) {
+    if soft.is_empty() {
+        record_report_census(0, 0, 0);
+        return;
+    }
+    present_soft(soft, sources, root, policy(), Instant::now(), None);
+}
+
+fn present_soft(
+    soft: &[bone_lints::Finding],
+    sources: &SourceFiles,
+    root: &Path,
+    mode: LintReport,
+    report_started: Instant,
+    mut timing: Option<&mut LintRouteTiming>,
+) {
     let report_prepare_ns = report_started.elapsed().as_nanos();
     let mut summary_sort_ns = 0;
     let mut render_ns = 0;
@@ -453,7 +473,7 @@ fn report_timed(
         LintReport::Summary => {
             if !soft.is_empty() {
                 let started = Instant::now();
-                eprintln!("{}", summary_line(&soft, root));
+                eprintln!("{}", summary_line(soft, root));
                 summary_sort_ns = started.elapsed().as_nanos();
             }
         }
@@ -465,7 +485,6 @@ fn report_timed(
         timing.render_ns += render_ns;
         timing.finding_aggregation_ns += report_started.elapsed().as_nanos();
     }
-    errors.into_iter().map(|f| f.error).collect()
 }
 
 /// Whether this build's sources are the author's WHOLE project. A game build
@@ -480,10 +499,10 @@ pub enum Scope {
     ProductionOnly,
 }
 
-/// [`run_build_lints`] for a single-file build, which has no `SourceFiles` of
-/// its own. `file` must be the same path the module was parsed under, or every
-/// span lookup misses and the findings render without their snippet.
-pub fn run_build_lints_single(ws: &Workspace, file: &str, src: &str) -> Vec<CompilerError> {
+/// The `SourceFiles` and lint root of a single-file build. `file` must be the
+/// same path the module was parsed under, or every span lookup misses and the
+/// findings render without their snippet.
+pub fn single_file_scope(file: &str, src: &str) -> (SourceFiles, std::path::PathBuf) {
     let mut sources = SourceFiles::empty();
     sources.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -491,7 +510,7 @@ pub fn run_build_lints_single(ws: &Workspace, file: &str, src: &str) -> Vec<Comp
         src.to_string(),
     ));
     let root = Path::new(file).parent().unwrap_or(Path::new(".")).to_path_buf();
-    run_build_lints(ws, &sources, &root, Scope::WholeProject)
+    (sources, root)
 }
 
 /// Every finding in the catalog for this build, in workspace order.
@@ -515,7 +534,7 @@ pub fn findings_with(
     sel: &bone_lints::LintOptions,
 ) -> Vec<bone_lints::Finding> {
     with_source_texts(sources, |texts| {
-        let warm = warm_module_ids(ws, texts);
+        let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin =
             scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
         // The REPORT set: this project's own files. A `stick.toml` DEPENDENCY
@@ -593,7 +612,7 @@ pub fn unused_fns_under(
     report_root: &Path,
 ) -> Vec<bone_lints::Finding> {
     with_source_texts(sources, |texts| {
-        let warm = warm_module_ids(ws, texts);
+        let warm = skull::pipeline::warm_module_ids(ws, texts);
         let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
         let by_file = bone_lints::workspace_findings_by_file_with(ws, &warm, is_bin, &crate::registry::lint_options());
         let mut out = Vec::new();
@@ -612,19 +631,11 @@ pub fn unused_fns_under(
     })
 }
 
-/// The modules of `ws` this build does not own -- [`warm_module_ids`] for a
+/// The modules of `ws` this build does not own -- [`skull::pipeline::warm_module_ids`] for a
 /// caller holding only the `SourceFiles`. `rock lint` needs it to validate
 /// `--ignore-types` against the project's own type names.
 pub fn warm_modules(ws: &Workspace, sources: &SourceFiles) -> FxHashSet<ModuleId> {
-    with_source_texts(sources, |texts| warm_module_ids(ws, texts))
-}
-
-fn warm_module_ids(ws: &Workspace, texts: &FxHashMap<Ustr, &str>) -> FxHashSet<ModuleId> {
-    ws.modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin() && !texts.contains_key(&m.file))
-        .map(|m| m.id)
-        .collect()
+    with_source_texts(sources, |texts| skull::pipeline::warm_module_ids(ws, texts))
 }
 
 fn with_source_texts<R>(
@@ -656,6 +667,7 @@ fn with_source_texts<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rock_core::errors::CompilerErrorLevel;
     use rock_core::CompilerError;
     use bone_core::prelude::Span;
 

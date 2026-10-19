@@ -57,6 +57,71 @@ impl EmitFullErr {
     }
 }
 
+/// The command line's [`skull::pipeline::CompileHost`]: alias tables from
+/// manifests on disk, the registry's migration exemptions, the invocation's
+/// lint policy and compile measurements.
+struct CliCompileHost<'a> {
+    sources: &'a SourceFiles,
+    lint_root: &'a std::path::Path,
+    lint_scope: crate::lint_pass::Scope,
+    comptime: CliComptime<'a>,
+}
+
+enum CliComptime<'a> {
+    /// Resolve from the entry path's enclosing project once the program
+    /// checks (single-file emission walks up, matching the JS single-file
+    /// path: the same source must agree across backends).
+    FromEntry(&'a str),
+    /// Resolved before discovery (a project build).
+    Resolved(Option<bone_semantic::inference::ComptimeInputs>),
+}
+
+impl skull::pipeline::CompileHost for CliCompileHost<'_> {
+    fn identity_storage_exemptions(&self) -> bone_query::IdentityStorageExemptions {
+        crate::registry::registered().identity_storage_exemptions
+    }
+
+    fn aliases(
+        &mut self,
+        modules: &[skull_parser::Ast],
+    ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
+        crate::bone_backend::aliases_for_modules(modules)
+    }
+
+    fn comptime_inputs(
+        &mut self,
+    ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
+        match &mut self.comptime {
+            CliComptime::FromEntry(file) => {
+                crate::comptime::inputs_for_entry_path(std::path::Path::new(file)).map_err(|e| {
+                    CompilerError::new_no_location(format!("build var resolution failed: {e:#}"))
+                })
+            }
+            CliComptime::Resolved(inputs) => Ok(inputs.take().unwrap_or_default()),
+        }
+    }
+
+    fn lint_findings(&mut self, ws: &bone_semantic::inference::Workspace) -> Vec<bone_lints::Finding> {
+        crate::lint_pass::findings(ws, self.sources, self.lint_root, self.lint_scope)
+    }
+
+    fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
+        crate::lint_pass::report_soft(&soft, self.sources, self.lint_root);
+    }
+
+    fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {
+        use skull::pipeline::Phase;
+        match phase {
+            Phase::Parsed => crate::compile_measurements::phase("parse+stdlib"),
+            Phase::Checked(ws) => {
+                crate::compile_measurements::phase("semantic");
+                crate::compile_measurements::timings("bone", &ws.phase_timings);
+            }
+            Phase::Prepared => crate::compile_measurements::phase("prepare"),
+        }
+    }
+}
+
 /// Emit the workspace and also discover the user module's `@test` functions
 /// (for execution). Returns `(lua, tests, emits_main)`. `file` is stamped as
 /// the source-file id so spans (and `__SITE__`) carry the real path.
@@ -66,35 +131,16 @@ fn skull_emit_full(
 ) -> std::result::Result<(String, Vec<skull::SkullTest>, bool), EmitFullErr> {
     let stats = crate::compile_measurements::Scope::begin(file);
     crate::compile_measurements::source(file, src.len());
-    let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
-        .map_err(|e| EmitFullErr::Compile(vec![e]))?;
-    let user_file = user.file;
-    let mut modules = crate::bone_backend::with_stdlib([user]);
-    crate::compile_measurements::phase("parse+stdlib");
-    let mut ws = crate::bone_backend::check_modules(&mut modules).map_err(EmitFullErr::Compile)?;
-    crate::compile_measurements::phase("semantic");
-    crate::compile_measurements::timings("bone", &ws.phase_timings);
-    drop(modules);
-    // Single-file emission resolves from the file's enclosing project
-    // (walk-up), matching the JS single-file path -- the same source must
-    // agree across backends (the host launch test).
-    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)).map_err(|e| {
-        EmitFullErr::Compile(vec![CompilerError::new_no_location(format!(
-            "build var resolution failed: {e:#}"
-        ))])
-    })?;
-    let ws = ws;
-    // The build lint pass (the compiler contract): soft findings report,
-    // `Error` findings refuse the program through the same path a type error
-    // takes.
-    let lint_errs = crate::lint_pass::run_build_lints_single(&ws, file, src);
-    if !lint_errs.is_empty() {
-        return Err(EmitFullErr::Compile(lint_errs));
-    }
-    crate::compile_measurements::phase("prepare");
-    let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
-        .map_err(|e| EmitFullErr::Compile(vec![e]))?;
+    let (sources, lint_root) = crate::lint_pass::single_file_scope(file, src);
+    let mut host = CliCompileHost {
+        sources: &sources,
+        lint_root: &lint_root,
+        lint_scope: crate::lint_pass::Scope::WholeProject,
+        comptime: CliComptime::FromEntry(file),
+    };
+    let skull::pipeline::Compiled { ws, entry: user_mid, emission: emit } =
+        skull::pipeline::compile_source(file, src, skull::pipeline::EmitTarget::SINGLE_SOURCE, &mut host)
+            .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
     crate::compile_measurements::emission(&emit);
     let emits_main = emit.emits_main;
     let (lua, skipped) = (emit.lua, emit.skipped);
@@ -169,7 +215,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     // Timed path: assemble via the shared helper but keep the `semantic_pass`
     // call explicit here (the verdict is a bool, not a gate, and the timer must
     // bracket exactly this call).
-    let mut modules = crate::bone_backend::with_stdlib(user_modules);
+    let mut modules = skull::pipeline::with_stdlib(user_modules);
     crate::compile_measurements::phase("parse+stdlib");
     let aliases = match crate::bone_backend::aliases_for_modules(&modules) {
         Ok(aliases) => aliases,
@@ -497,12 +543,12 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 /// to a `ModuleId` via `bone_backend::entry_module_id` once the workspace exists.
 ///
 /// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
-/// `discover_sources` — bone supplies its own via `bone_stdlib_modules()`.
+/// `discover_sources` — bone supplies its own via `skull::pipeline::stdlib_modules()`.
 pub fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
-    Ok((crate::bone_backend::with_stdlib(user_modules), entry_file))
+    Ok((skull::pipeline::with_stdlib(user_modules), entry_file))
 }
 
 /// A Lua harness appended after the emitted module: it runs each `@test` fn with
@@ -2160,7 +2206,7 @@ fn skull_emit_project_with_inputs(
     // discovery (disk read) and the caller's output write, matching the bone
     // backend's `compile` figure so loc/sec lines up across backends.
     let t = Instant::now();
-    let (mut modules, entry_file) = match skull_assemble_project(&sources) {
+    let (modules, entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
@@ -2169,51 +2215,29 @@ fn skull_emit_project_with_inputs(
     };
 
     crate::compile_measurements::phase("parse+stdlib");
-    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
-        Ok(ws) => ws,
-        Err(errs) => {
-            eprintln!("{}", render_project_errs(&sources, &errs));
-            log::error!(target: "SKULL", "bone type-check failed for project {}", dir);
-            crate::ablation_report::exit_with_census(1);
-        }
+    // Project build: modules outside `dir` (the `engine` dependency, stdlib)
+    // are libraries and prune to what the project reaches. The game build
+    // dropped `tests/` above, hence ProductionOnly lints.
+    let mut host = CliCompileHost {
+        sources: &sources,
+        lint_root: std::path::Path::new(dir),
+        lint_scope: crate::lint_pass::Scope::ProductionOnly,
+        comptime: CliComptime::Resolved(Some(inputs)),
     };
-    crate::compile_measurements::phase("semantic");
-    crate::compile_measurements::timings("bone", &ws.phase_timings);
-    // The workspace owns everything lint, emission and metadata read; the
-    // parse trees would otherwise stay live through the emit peak.
-    drop(modules);
-    ws.comptime_inputs = inputs;
-    let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-
-    // Lints are a compiler pass, not an editor accessory: they run on the same
-    // typechecked output every build produces, and an `Error` finding refuses
-    // the program (the compiler contract). The game build dropped `tests/`
-    // above, hence ProductionOnly.
-    let lint_errs = crate::lint_pass::run_build_lints(
-        &ws,
-        &sources,
-        std::path::Path::new(dir),
-        crate::lint_pass::Scope::ProductionOnly,
-    );
-    if !lint_errs.is_empty() {
-        eprintln!("{}", render_project_errs(&sources, &lint_errs));
-        log::error!(target: "SKULL", "{} lint error(s) in project {}", lint_errs.len(), dir);
-        crate::ablation_report::exit_with_census(1);
-    }
-
-    crate::compile_measurements::phase("prepare");
-    // Project build: modules outside `dir` (the `engine` dependency, stdlib) are
-    // libraries and prune to what the project reaches.
-    let emit = match skull::mir_emit::emit_workspace_mir_in_for_renderer(
-        &ws,
-        user_mid,
-        Some(dir),
-        renderer_target,
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
-            log::error!(target: "SKULL", "skull emit failed for project {}", dir);
+    let target = skull::pipeline::EmitTarget { project_root: Some(dir), renderer: renderer_target };
+    let compiled = skull::pipeline::compile_modules(modules, entry_file, target, &mut host);
+    let skull::pipeline::Compiled { ws, emission: emit, .. } = match compiled {
+        Ok(compiled) => compiled,
+        Err(failure) => {
+            use skull::pipeline::Stage;
+            eprintln!("{}", render_project_errs(&sources, &failure.errors));
+            match failure.stage {
+                Stage::Lint => log::error!(target: "SKULL", "{} lint error(s) in project {}", failure.errors.len(), dir),
+                Stage::Emit => log::error!(target: "SKULL", "skull emit failed for project {}", dir),
+                Stage::Parse | Stage::Check | Stage::Comptime => {
+                    log::error!(target: "SKULL", "bone type-check failed for project {}", dir)
+                }
+            }
             crate::ablation_report::exit_with_census(1);
         }
     };

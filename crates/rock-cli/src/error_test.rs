@@ -244,7 +244,7 @@ fn bone_check_case(
     }
     // Total parse: a recoverable syntax error returns Ok with `recovery_errors`,
     // so the rejection is the downstream gate in `check_with_stdlib`
-    // (`syntax_errors`), not the parse `match` above.
+    // (`skull::pipeline::syntax_errors`), not the parse `match` above.
     crate::bone_backend::check_with_stdlib(user).map_err(|errs| error_text(&errs))
 }
 

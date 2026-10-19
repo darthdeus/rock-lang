@@ -32,35 +32,11 @@ pub use skull_codegen_lua::emitted_body_name;
 // that move.
 pub use skull_graph::{artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection};
 pub mod artifact_fingerprint;
+pub mod pipeline;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use skull_parser::CompilerError;
-
-/// Parse, type-check (via bone), lower to MIR, and emit Lua for the single user
-/// module.
-pub fn compile_source(src: &str) -> Result<String, CompilerError> {
-    let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>"))?;
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])?;
-    // `semantic_pass` Ok means "lowered and checked", not "no type errors" —
-    // body-level errors are collected per BodyOwner. Refuse to emit from a
-    // workspace with broken bodies (their inference is missing).
-    let mut body_errs: Vec<&CompilerError> = ws
-        .inferences
-        .iter().flatten()
-        .flat_map(|inf| inf.errors.values().flatten())
-        .collect();
-    body_errs.sort_by_key(|e| e.location.offset);
-    if let Some(e) = body_errs.first() {
-        return Err((*e).clone());
-    }
-    let mid = user_module_id(&ws)?;
-    // The one emission path (same as rock-cli): workspace emit includes the
-    // runtime prelude, enum singletons, value-struct cdefs, and sorted global
-    // inits — a single-module emit that skips those produces Lua that
-    // references undefined globals (e.g. `__rock_enum_<E>_<V>`).
-    Ok(mir_emit::emit_workspace_mir(&ws, mid)?.lua)
-}
 
 /// Per-nominal-type layout hash, keyed by type name (unique workspace-wide).
 pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
@@ -2231,10 +2207,21 @@ fn type_table_defs(
 
 #[cfg(test)]
 mod tests {
-    use super::compile_source;
-
+    /// Stdlib-free emission: these tests pin codegen shapes on programs that
+    /// need no stdlib, and the harness below supplies the few shims they call.
+    /// Programs that need the stdlib compile through [`crate::pipeline`].
     fn emit(src: &str) -> String {
-        compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
+        let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>"))
+            .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
+            .unwrap_or_else(|e| panic!("semantic pass failed: {}", e.message));
+        if let Some(e) = skull_mir::verdict::body_errors(&ws).first() {
+            panic!("skull compile failed: {}", e.message);
+        }
+        let mid = super::user_module_id(&ws).expect("user module");
+        crate::mir_emit::emit_workspace_mir(&ws, mid)
+            .unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
+            .lua
     }
 
     /// The budget itself is tuning and moves with measurement, so this pins the
@@ -3200,7 +3187,7 @@ mod tests {
     /// Transitive inlining: `a` calls `b` calls `c`; re-scanning the caller after
     /// each splice inlines the calls the spliced body introduces, so neither
     /// `= b(` nor `= c(` survives in `a`. (Arithmetic ops aren't used — the
-    /// no-stdlib `compile_source` path can't resolve `__op_*`.)
+    /// stdlib-free `emit` harness can't resolve `__op_*`.)
     #[test]
     fn inlines_transitively() {
         let src = "@inline\n\

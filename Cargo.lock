@@ -1850,9 +1850,11 @@ version = "0.1.0"
 dependencies = [
  "bone-core",
  "bone-incremental",
+ "bone-lints",
  "bone-semantic",
  "comfy-la-arena",
  "rayon",
+ "rock-core",
  "rock-host",
  "rock-stdlib",
  "rustc-hash 2.1.3",

@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use bone_core::prelude::Instant;
+use skull::pipeline::ClosureGate;
 
 /// Wall-clock split of bone's pipeline stages for one source string. bone fuses
 /// lowering + type-checking into `passes::semantic_pass`, so the split we can
@@ -100,19 +101,6 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
     rock_core::errors::render_all(&expanded, &sf)
 }
 
-/// The bone stdlib with `user` modules appended — the checkable module set every
-/// non-incremental path feeds to bone. The SINGLE spot that assembles "stdlib +
-/// user"; callers used to spell `bone_stdlib_modules()` + `push`/`extend` inline
-/// (a dozen copies, which is why a `semantic_pass` signature tweak rippled
-/// everywhere).
-pub(crate) fn with_stdlib(
-    user: impl IntoIterator<Item = skull_parser::Ast>,
-) -> Vec<skull_parser::Ast> {
-    let mut modules = bone_stdlib_modules();
-    modules.extend(user);
-    modules
-}
-
 /// Convert the already-resolved host package graph into bone's namespace
 /// facts. Source files carry dense graph ids, so deriving this once from the
 /// root package's manifest keeps v1 alias lookup tied to the same graph that
@@ -165,15 +153,14 @@ pub(crate) fn aliases_for_modules(
         .map_err(CompilerError::new_no_location)
 }
 
-/// Run bone's front half over an already-assembled `modules` set and gate on the
-/// load-verdict: the one "modules -> verified Workspace" step. `Err` carries
-/// EVERY diagnostic (all syntax errors, else all type errors) so the CLI reports
-/// the same set the LSP shows. A front-end signature change touches HERE, not
-/// every call site.
+/// The host's binding of [`skull::pipeline::check_modules`]: its alias
+/// tables and migration exemptions. Returns the verified workspace; `Err`
+/// carries EVERY diagnostic of the first failing gate (all syntax errors,
+/// else all type errors) so the CLI reports the same set the LSP shows.
 pub fn check_modules(
     modules: &mut [skull_parser::Ast],
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
-    let (ws, errs) = check_modules_inner(modules, ClosureGate::Enforce)?;
+    let (ws, errs) = check_modules_gated(modules, ClosureGate::Enforce)?;
     if !errs.is_empty() {
         return Err(errs);
     }
@@ -188,64 +175,19 @@ pub fn check_modules(
 pub fn check_modules_for_tools(
     modules: &mut [skull_parser::Ast],
 ) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
-    check_modules_inner(modules, ClosureGate::LeaveToCaller)
+    check_modules_gated(modules, ClosureGate::LeaveToCaller)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ClosureGate {
-    Enforce,
-    LeaveToCaller,
-}
-
-fn check_modules_inner(
+fn check_modules_gated(
     modules: &mut [skull_parser::Ast],
     gate: ClosureGate,
 ) -> std::result::Result<(bone_semantic::inference::Workspace, Vec<CompilerError>), Vec<CompilerError>> {
-    let syntax = syntax_errors(modules);
-    if !syntax.is_empty() {
-        return Err(syntax);
-    }
-    // Macro names must be unique against function names (call-position ambiguity)
-    // -- checked before `semantic_pass` expands the macro defs away.
-    let macro_dupes = skull_parser::check_macro_name_uniqueness(modules);
-    if !macro_dupes.is_empty() {
-        return Err(macro_dupes);
-    }
-    // A macro argument label must name one of that macro's parameters -- also
-    // before expansion, which is what drops the labels.
-    let macro_labels = skull_parser::check_macro_call_labels(modules);
-    if !macro_labels.is_empty() {
-        return Err(macro_labels);
-    }
-    let aliases = aliases_for_modules(modules).map_err(|error| vec![error])?;
-    let ws = match gate {
-        ClosureGate::Enforce => semantic_pass_with_aliases(modules, &aliases),
-        ClosureGate::LeaveToCaller => {
-            semantic_pass_without_closure_gate(modules, &aliases)
-        }
-    };
-    // Expansion RECOVERS: a macro that must not expand (item-macro `mod`/`use`)
-    // records the reason on `recovery_errors` and leaves the call in place, so
-    // the syntax gate runs again over the expanded trees. The pass's own
-    // verdict comes second -- the expansion reason explains any type error the
-    // unexpanded call caused. `Session`/LSP still never run this gate.
-    let expanded_syntax = syntax_errors(modules);
-    if !expanded_syntax.is_empty() {
-        return Err(expanded_syntax);
-    }
-    let ws = ws.map_err(|e| vec![e])?;
-    let errs = body_errors(&ws);
-    Ok((ws, errs))
-}
-
-/// Every recovered syntax error across `modules`, in module order. The
-/// compile-path gate: parsing is TOTAL (returns the best-effort tree +
-/// `recovery_errors`), so the CLI compile/test paths refuse a program with any
-/// syntax error HERE rather than at the parse boundary. This keeps the strict
-/// compile verdict while the interactive `Session`/LSP -- which never run this
-/// gate -- keep the partial tree and surface the same errors as diagnostics.
-fn syntax_errors(modules: &[skull_parser::Ast]) -> Vec<CompilerError> {
-    modules.iter().flat_map(|m| m.recovery_errors.iter().cloned()).collect()
+    skull::pipeline::check_modules(
+        modules,
+        crate::registry::registered().identity_storage_exemptions,
+        gate,
+        aliases_for_modules,
+    )
 }
 
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
@@ -254,12 +196,12 @@ fn syntax_errors(modules: &[skull_parser::Ast]) -> Vec<CompilerError> {
 pub fn check_with_stdlib(
     user: impl IntoIterator<Item = skull_parser::Ast>,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
-    check_modules(&mut with_stdlib(user))
+    check_modules(&mut skull::pipeline::with_stdlib(user))
 }
 
 /// A bone incremental `Session` warmed with the stdlib — the watch/hot-reload
 /// counterpart to [`check_with_stdlib`]. Every `Session::new` site passes the
-/// same `bone_stdlib_modules()` warm set; funnel them here.
+/// same `skull::pipeline::stdlib_modules()` warm set; funnel them here.
 ///
 /// This form does NOT resolve comptime inputs; it is for type-check-only
 /// sessions (bone watch, iter benches, LSP survey, tests). A session whose
@@ -271,7 +213,7 @@ pub(crate) fn bone_session(
     // from the same facts `aliases_for_modules` reads off a parsed set: the
     // root package's manifest, reached through the file that carries graph id 0.
     let aliases = aliases_for_session(&files)?;
-    bone_incremental::session::Session::new_with_identity_storage_exemptions(bone_stdlib_modules(), files, &aliases, crate::registry::registered().identity_storage_exemptions)
+    bone_incremental::session::Session::new_with_identity_storage_exemptions(skull::pipeline::stdlib_modules(), files, &aliases, crate::registry::registered().identity_storage_exemptions)
 }
 
 /// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
@@ -433,7 +375,7 @@ pub(crate) fn parse_user_modules(
     // Compile gate: parsing is total, so a project with any syntax error is
     // refused here (the whole-project bone/skull compile funnel) -- the
     // interactive Session keeps the partial tree instead.
-    let syntax = syntax_errors(&modules);
+    let syntax = skull::pipeline::syntax_errors(&modules);
     if !syntax.is_empty() {
         return Err(syntax);
     }
@@ -477,7 +419,7 @@ pub(crate) fn bone_workspace_timed(
 
     let t_sem = Instant::now();
     let t = Instant::now();
-    let mut modules = bone_stdlib_modules();
+    let mut modules = skull::pipeline::stdlib_modules();
     times.stdlib_clone = t.elapsed();
     let t = Instant::now();
     modules.extend(user_modules);
@@ -505,32 +447,6 @@ pub(crate) fn bone_workspace_timed(
     // errors live per-`BodyOwner` on the workspace, so every verdict-shaped
     // consumer must run `body_errors` on `ws`.
     (res.map_err(|e| vec![e]), times)
-}
-
-/// The parsed stdlib modules, so test files can resolve stdlib symbols (`print`,
-/// `__op_add`, `assert_eq`, `vec_new`, `JsonValue`, ...). Iterates the single
-/// shared `stdlib_files()` list real rock embeds (`unified.rock`, `json.rock`, and
-/// anything added later) so bone stays in stdlib parity instead of hand-rolling
-/// its own subset. Parsed once and cloned per check.
-///
-/// bone keys modules by file (`Ast.file`, interned to a dense `ModuleId`), so
-/// each stdlib file uses the loader-owned id shared with the LSP. (Re-checked
-/// per file for now; caching a checked workspace is a later optimization.)
-pub(crate) fn bone_stdlib_modules() -> Vec<skull_parser::Ast> {
-    use std::sync::LazyLock;
-    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = ustr::Ustr::from(
-                    rock_stdlib::stdlib_file_id(f.name).as_str(),
-                );
-                skull_parser::parse_module(f.contents, id)
-                    .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
-            })
-            .collect()
-    });
-    STDLIB.clone()
 }
 
 /// Render bone `CompilerError`s through rock's ariadne pipeline.
@@ -848,7 +764,7 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
         };
         // Bench harness: build the workspace once for the inference loop; no
         // load-verdict gate (we time inference, not acceptance).
-        let mut modules = with_stdlib(user_modules);
+        let mut modules = skull::pipeline::with_stdlib(user_modules);
         let aliases = match aliases_for_modules(&modules) {
             Ok(aliases) => aliases,
             Err(e) => {
@@ -1499,22 +1415,15 @@ mod tests {
 }
 
 /// Batch and incremental compiles share the host's migration policy.
-pub(crate) fn semantic_pass_without_closure_gate(
-    modules: &mut [skull_parser::Ast],
-    aliases: &bone_core::modules::NsAliases,
-) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
-    let ws = bone_semantic::inference::Workspace {
-        identity_storage_exemptions: crate::registry::registered().identity_storage_exemptions,
-        ..Default::default()
-    };
-    bone_semantic::semantic_passes::semantic_pass_into(ws, modules, aliases)
-}
-
 pub fn semantic_pass_with_aliases(
     modules: &mut [skull_parser::Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
-    let ws = semantic_pass_without_closure_gate(modules, aliases)?;
-    bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
-    Ok(ws)
+    skull::pipeline::semantic_pass(
+        modules,
+        aliases,
+        crate::registry::registered().identity_storage_exemptions,
+        ClosureGate::Enforce,
+    )
 }
+
