@@ -42,3 +42,8 @@ workspace = true
 [[test]]
 name = "bone_query_tests"
 path = "tests/main.rs"
+
+# Installs the stdlib from memory, which is process-wide: its own process.
+[[test]]
+name = "stdlib_from_memory"
+path = "tests/stdlib_from_memory.rs"

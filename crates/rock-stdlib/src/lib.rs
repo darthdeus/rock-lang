@@ -1,13 +1,89 @@
-//! The Rock stdlib source files: their names, load order, ids and the
-//! directory they are read from at runtime (they are not embedded).
+//! The Rock stdlib source files: their names, load order, ids and where they
+//! come from at runtime (they are not embedded). A native process reads them
+//! from a directory; a host without a filesystem installs them from memory
+//! with [`install_stdlib`] before the first compile.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// A stdlib source file: its short name and full contents (read from disk).
+/// A stdlib source file: its short name, full contents, and the path editors
+/// and diagnostics name it by.
 pub struct StdlibFile {
     pub name: &'static str,
     pub contents: &'static str,
+    /// The file on disk for a stdlib read from a directory; `<dir>/<name>`
+    /// under the host's display directory for one installed from memory.
+    pub display_path: &'static str,
+}
+
+static FILES: OnceLock<Vec<StdlibFile>> = OnceLock::new();
+
+/// Why [`install_stdlib`] refused a file set.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StdlibInstallError {
+    /// The stdlib was already installed or read from disk; it cannot change
+    /// within a process.
+    AlreadyLoaded,
+    UnknownFile(String),
+    DuplicateFile(String),
+    MissingFile(&'static str),
+}
+
+impl std::fmt::Display for StdlibInstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyLoaded => write!(f, "the stdlib is already loaded in this process"),
+            Self::UnknownFile(name) => write!(f, "`{name}` is not a stdlib file"),
+            Self::DuplicateFile(name) => write!(f, "stdlib file `{name}` was supplied twice"),
+            Self::MissingFile(name) => write!(f, "stdlib file `{name}` was not supplied"),
+        }
+    }
+}
+
+impl std::error::Error for StdlibInstallError {}
+
+/// Install the stdlib from memory, for a host with no filesystem. `files` are
+/// `(name, contents)` pairs naming every file in [`STDLIB_NAMES`] exactly
+/// once, in any order; each is displayed as `<display_dir>/<name>` instead of
+/// a path on the machine that built the compiler. Must run before anything
+/// reads [`stdlib_files`].
+pub fn install_stdlib(
+    display_dir: &str,
+    files: impl IntoIterator<Item = (String, String)>,
+) -> Result<(), StdlibInstallError> {
+    if FILES.get().is_some() {
+        return Err(StdlibInstallError::AlreadyLoaded);
+    }
+    let files = files_from_memory(display_dir, files)?;
+    FILES.set(files).map_err(|_| StdlibInstallError::AlreadyLoaded)
+}
+
+fn files_from_memory(
+    display_dir: &str,
+    files: impl IntoIterator<Item = (String, String)>,
+) -> Result<Vec<StdlibFile>, StdlibInstallError> {
+    let mut slots: Vec<Option<String>> = STDLIB_NAMES.iter().map(|_| None).collect();
+    for (name, contents) in files {
+        let Some(index) = STDLIB_NAMES.iter().position(|n| *n == name) else {
+            return Err(StdlibInstallError::UnknownFile(name));
+        };
+        if slots[index].replace(contents).is_some() {
+            return Err(StdlibInstallError::DuplicateFile(name));
+        }
+    }
+    let display_dir = display_dir.trim_end_matches('/');
+    STDLIB_NAMES
+        .iter()
+        .zip(slots)
+        .map(|(&name, contents)| {
+            let contents = contents.ok_or(StdlibInstallError::MissingFile(name))?;
+            Ok(StdlibFile {
+                name,
+                contents: Box::leak(contents.into_boxed_str()),
+                display_path: Box::leak(format!("{display_dir}/{name}").into_boxed_str()),
+            })
+        })
+        .collect()
 }
 
 /// The stdlib files, in load order. `unified.rock` is the core stdlib;
@@ -61,14 +137,13 @@ fn resolve_stdlib_dir(
     release_stdlib.unwrap_or_else(|| build_checkout_stdlib.to_path_buf())
 }
 
-/// All stdlib files, read from disk on first call and cached for the process
-/// lifetime. Contents are leaked to `&'static str`: the stdlib is resident for
+/// All stdlib files: the ones [`install_stdlib`] supplied, else read from
+/// [`stdlib_dir`] on first call; cached for the process lifetime. Contents are leaked to `&'static str`: the stdlib is resident for
 /// the whole process, so a one-time leak of a bounded, always-live buffer is
 /// not an unbounded leak. Panics with the resolved path if a file can't be
 /// read (the stdlib is not optional; a clear failure beats a thousand
 /// downstream "callee not found"s).
 pub fn stdlib_files() -> &'static [StdlibFile] {
-    static FILES: OnceLock<Vec<StdlibFile>> = OnceLock::new();
     FILES.get_or_init(|| {
         let dir = stdlib_dir();
         STDLIB_NAMES
@@ -86,6 +161,7 @@ pub fn stdlib_files() -> &'static [StdlibFile] {
                 StdlibFile {
                     name,
                     contents: Box::leak(contents.into_boxed_str()),
+                    display_path: Box::leak(path.to_string_lossy().into_owned().into_boxed_str()),
                 }
             })
             .collect()
@@ -151,6 +227,41 @@ mod tests {
         );
         assert_eq!(resolve(None, Some("/usr/bin/rock"), &[]), PathBuf::from(CHECKOUT));
         assert_eq!(resolve(None, None, &[]), PathBuf::from(CHECKOUT));
+    }
+
+    fn memory_files(names: &[&str]) -> Vec<(String, String)> {
+        names.iter().map(|n| (n.to_string(), format!("// {n}"))).collect()
+    }
+
+    #[test]
+    fn memory_stdlib_keeps_load_order_and_neutral_display_paths() {
+        let mut names = STDLIB_NAMES.to_vec();
+        names.reverse();
+        let files = files_from_memory("/stdlib/", memory_files(&names)).unwrap();
+        let got: Vec<_> = files.iter().map(|f| (f.name, f.display_path.to_string())).collect();
+        let want: Vec<_> = STDLIB_NAMES.iter().map(|n| (*n, format!("/stdlib/{n}"))).collect();
+        assert_eq!(got, want);
+        assert_eq!(files[0].contents, "// unified.rock");
+    }
+
+    #[test]
+    fn memory_stdlib_rejects_unknown_duplicate_and_missing_files() {
+        let mut files = memory_files(STDLIB_NAMES);
+        files.push(("extra.rock".into(), String::new()));
+        assert_eq!(
+            files_from_memory("/stdlib", files).err(),
+            Some(StdlibInstallError::UnknownFile("extra.rock".into()))
+        );
+        let mut files = memory_files(STDLIB_NAMES);
+        files.push(("json.rock".into(), String::new()));
+        assert_eq!(
+            files_from_memory("/stdlib", files).err(),
+            Some(StdlibInstallError::DuplicateFile("json.rock".into()))
+        );
+        assert_eq!(
+            files_from_memory("/stdlib", memory_files(&STDLIB_NAMES[1..])).err(),
+            Some(StdlibInstallError::MissingFile("unified.rock"))
+        );
     }
 
     #[test]

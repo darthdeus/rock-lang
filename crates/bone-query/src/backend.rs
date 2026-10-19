@@ -97,21 +97,16 @@ impl FallbackReports {
 // Warm stdlib (parsed once, cloned into every session)
 // ---------------------------------------------------------------------------
 
-/// Each stdlib file's session id and canonical on-disk path. Computed once:
-/// `canonicalize` is a syscall and the id <-> path translation below runs on
-/// every request.
+/// Each stdlib file's session id and canonical display path (its file on
+/// disk, or the host's display path for a stdlib installed from memory).
+/// Computed once: `canonicalize` is a syscall and the id <-> path translation
+/// below runs on every request.
 fn stdlib_paths() -> &'static [(String, String)] {
     static PATHS: OnceLock<Vec<(String, String)>> = OnceLock::new();
     PATHS.get_or_init(|| {
-        let dir = rock_stdlib::stdlib_dir();
         rock_stdlib::stdlib_files()
             .iter()
-            .map(|f| {
-                (
-                    rock_stdlib::stdlib_file_id(f.name),
-                    canonicalize_lenient(&dir.join(f.name).to_string_lossy()),
-                )
-            })
+            .map(|f| (rock_stdlib::stdlib_file_id(f.name), canonicalize_lenient(f.display_path)))
             .collect()
     })
 }
