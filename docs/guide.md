@@ -698,13 +698,10 @@ plain function library. `--profile` picks `330core` (the default) or
 
 ## Backends
 
-The default backend compiles through Lua and runs on LuaJIT. Two flags
-change that:
-
-- `rock run --backend js file.rock` (or `rock test --backend js`)
-  compiles to JavaScript and runs it with `node`, which must be on
-  `PATH`. The default can also be set with `ROCK_BACKEND`.
-- `rock check` uses the bone backend, which only typechecks.
+The default backend compiles through Lua and runs on LuaJIT.
+`rock run --backend js file.rock` (or `rock test --backend js`) compiles
+to JavaScript instead and runs it with `node`, which must be on `PATH`;
+`ROCK_BACKEND=js` makes that the default. `rock check` only typechecks.
 
 `rock compile` emits the Lua without running it; `rock shader`
 emits GLSL as described above.
