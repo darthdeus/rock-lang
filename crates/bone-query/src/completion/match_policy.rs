@@ -54,6 +54,7 @@ impl MatchPolicy {
     }
 
     fn from_env() -> MatchPolicy {
+        // An unset or non-Unicode optional tuning override selects Subseq3.
         std::env::var("ROCK_LSP_MATCH_POLICY")
             .ok()
             .and_then(|v| MatchPolicy::parse(&v))

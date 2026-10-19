@@ -10,6 +10,80 @@ fn all() -> Range {
 }
 
 #[test]
+fn semantic_token_failure_reports_cause_once_and_recovers() {
+    let capture = Recording::start();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.rock").to_string_lossy().into_owned();
+    let good = "fn main() { let count = 1 }";
+    let broken = "fn main() { let text = \"unterminated";
+    let cause = rock_tokenizer::Tokenizer::new(broken, ustr::Ustr::from(path.as_str()))
+        .tokenize().unwrap_err().message;
+    let mut bone = BoneWorkspace::new();
+    bone.update(&path, good.into());
+    assert!(!bone.semantic_tokens(&path).data.is_empty());
+    bone.update(&path, broken.into());
+    capture.take();
+
+    assert!(bone.semantic_tokens(&path).data.is_empty());
+    let records = capture.take();
+    assert_eq!(records.len(), 1, "tokenizer failure must be visible: {records:?}");
+    assert!(records[0].contains("LSP") && records[0].contains("semantic tokens")
+        && records[0].contains(&path) && records[0].contains(&cause)
+        && records[0].contains("empty token response"), "lost context: {records:?}");
+    assert!(bone.semantic_tokens_range(&path, all()).data.is_empty());
+    assert!(capture.take().is_empty(), "full and range requests share failure suppression");
+
+    bone.update(&path, good.into());
+    assert!(!bone.semantic_tokens(&path).data.is_empty());
+    assert!(capture.take().is_empty());
+    bone.update(&path, broken.into());
+    capture.take();
+    bone.semantic_tokens(&path);
+    assert_eq!(capture.take().len(), 1, "repair must release suppression");
+}
+
+#[test]
+fn workspace_symbol_uri_failure_reports_cause_once_and_keeps_other_files() {
+    let capture = Recording::start();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid\nsymbol.rock").to_string_lossy().into_owned();
+    let good_path = dir.path().join("good.rock").to_string_lossy().into_owned();
+    let cause = format!("file://{path}").parse::<lsp_types::Uri>().unwrap_err().to_string();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&path, "fn omitted_symbol() {}".into());
+    bone.update(&good_path, "fn retained_symbol() {}".into());
+    capture.take();
+
+    let symbols = bone.workspace_symbols("_symbol");
+    assert!(symbols.iter().any(|s| s.name == "retained_symbol"));
+    assert!(symbols.iter().all(|s| s.name != "omitted_symbol"));
+    let records = capture.take();
+    assert_eq!(records.len(), 1, "invalid symbol URI must be visible: {records:?}");
+    assert!(records[0].contains("workspace symbols") && records[0].contains(&path)
+        && records[0].contains(&cause) && records[0].contains("omit symbols from this file"),
+        "lost context: {records:?}");
+    bone.workspace_symbols("_symbol");
+    assert!(capture.take().is_empty());
+    bone.remove(&path);
+    assert!(bone.workspace_symbols("_symbol").iter().any(|s| s.name == "retained_symbol"));
+    assert!(capture.take().is_empty());
+}
+
+#[test]
+fn ordinary_empty_queries_do_not_report_failures() {
+    let capture = Recording::start();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.rock").to_string_lossy().into_owned();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&path, "\nfn main() {}".into());
+    capture.take();
+    assert!(bone.hover(&path, Position::new(0, 0)).is_none());
+    assert!(bone.workspace_symbols("absent_symbol").is_empty());
+    assert!(bone.inlay_hints(&path, all()).is_empty());
+    assert!(capture.take().is_empty());
+}
+
+#[test]
 fn parse_fallback_reports_cause_once_and_recovers_after_repair() {
     let capture = Recording::start();
     let dir = tempfile::tempdir().unwrap();

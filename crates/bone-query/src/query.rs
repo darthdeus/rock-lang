@@ -3780,6 +3780,7 @@ fn receiver_head_ty<'a>(
 /// type). `None` when `ty` isn't a tuple, `seg` isn't a valid index, or the
 /// element isn't nominal.
 fn tuple_elem_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId, seg: &str) -> Option<Ustr> {
+    // A non-numeric member name is a normal non-match for a tuple projection.
     let n: usize = seg.parse().ok()?;
     match deref_ty(ws, bi, ty)? {
         hir::TypeExpr::Tuple { elements } => {
@@ -5027,6 +5028,7 @@ pub(crate) fn render_fn_signature(ws: &Workspace, name: ustr::Ustr, f: &bone_sem
     let ret = f
         .return_ty
         .map(|t| format!(" -> {}", ws.render(None, t)))
+        // No declared return type means no return annotation in the signature.
         .unwrap_or_default();
     format!("fn {}({}){}", name, params.join(", "), ret)
 }
@@ -5068,6 +5070,7 @@ pub(crate) fn render_fn_signature_with_defaults(
     let ret = f
         .return_ty
         .map(|t| format!(" -> {}", ws.render(None, t)))
+        // No declared return type means no return annotation in the signature.
         .unwrap_or_default();
     format!("fn {}({}){}", f.name, params.join(", "), ret)
 }

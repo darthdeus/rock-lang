@@ -130,6 +130,7 @@ pub fn explain_sort_text(st: &str) -> Option<String> {
     if b.len() < 18 || !b[..18].iter().all(|c| c.is_ascii_digit()) {
         return None;
     }
+    // Foreign sort text is a normal non-match; only RankKey encodings are explained.
     let fine: u32 = st[8..12].parse().ok()?;
     Some(format!(
         "exact={} type_rank={} band={} kind={} dist={} method={} case={} score={} prox={} freq={} rec={} len={}",

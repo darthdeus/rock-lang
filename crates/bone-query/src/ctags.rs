@@ -40,11 +40,14 @@ pub(crate) fn write_tags_file(path: &Path, mut entries: Vec<CtagsEntry>) -> std:
     out.push_str("!_TAG_FILE_SORTED\t1\t/0=unsorted, 1=sorted, 2=foldcase/\n");
     out.push_str("!_TAG_PROGRAM_AUTHOR\tRock Language\t//\n");
     out.push_str("!_TAG_PROGRAM_NAME\trock\t//\n");
+    // Formatting into String is infallible; disk write failures below are returned.
     let _ = writeln!(out, "!_TAG_PROGRAM_VERSION\t{}\t//", env!("CARGO_PKG_VERSION"));
 
     for e in &entries {
+        // Formatting into String is infallible.
         let _ = write!(out, "{}\t{}\t{};\"\t{}", e.name, e.file, e.line, e.kind);
         for (key, value) in &e.fields {
+            // Formatting into String is infallible.
             let _ = write!(out, "\t{key}:{value}");
         }
         out.push('\n');

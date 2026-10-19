@@ -530,6 +530,7 @@ pub struct InlineLocalEdits {
 pub fn canonicalize_lenient(path: &str) -> String {
     let canon = match fs_err::canonicalize(path) {
         Ok(p) => p.to_string_lossy().to_string(),
+        // Unsaved editor buffers have no disk path to canonicalize; retain their identity.
         Err(_) => return path.to_string(),
     };
     if let Some(unc) = canon.strip_prefix(r"\\?\UNC\") {
@@ -624,6 +625,7 @@ impl BoneWorkspace {
             let aliases = graph
                 .as_ref()
                 .map(crate::package_aliases::from_graph)
+                // Scratch roots need no aliases; graph failures were logged by project_graph.
                 .unwrap_or_default();
             BoneProject {
                 fallbacks: Default::default(),
@@ -727,6 +729,7 @@ impl BoneWorkspace {
         let aliases = graph
             .as_ref()
             .map(crate::package_aliases::from_graph)
+            // Scratch roots need no aliases; graph failures were logged by project_graph.
             .unwrap_or_default();
         match Session::new_with_identity_storage_exemptions(warm_stdlib(), files, &aliases, self.identity_storage_exemptions) {
             Ok(session) => {
@@ -1066,6 +1069,7 @@ impl BoneWorkspace {
                     }
                 }
             } else {
+                // A cache miss is not persisted, so the next update retries hole analysis.
                 proj.hole_cache.get(p).cloned().unwrap_or_default()
             };
             diags.extend(holes);
@@ -1233,6 +1237,7 @@ impl BoneWorkspace {
             .filter(|(file, _)| file.as_str() == path || file.as_str().is_empty())
             .map(|(_, d)| d)
             .collect();
+        // Unavailable hole analysis contributes no hints; hard parse failures are logged inside.
         diags.extend(hole_diagnostics_for(proj, path).unwrap_or_default());
         diags.extend(self.lint_diagnostics(path));
         diags
@@ -1560,6 +1565,7 @@ impl BoneWorkspace {
             .map(|(n, t)| format!("{n}: {t}"))
             .collect::<Vec<_>>()
             .join(", ");
+        // No concrete result type means no generated return annotation.
         let ret = gf.ret.map(|r| format!(" -> {r}")).unwrap_or_default();
         let new_text = format!("\n\nfn {}({}){} {{\n    ?\n}}", gf.name, params, ret);
 
@@ -1748,6 +1754,7 @@ impl BoneWorkspace {
         // (the `allow` verb / known lint names), NOT a name-gate through `admit`.
         match rock_tokenizer::region_at(src, offset) {
             rock_tokenizer::LexRegion::Comment => {
+                // Ordinary comments have no magic directive candidates.
                 return magic_comment_completions(src, offset).unwrap_or_default();
             }
             rock_tokenizer::LexRegion::StringText => return Vec::new(),
@@ -1809,6 +1816,7 @@ impl BoneWorkspace {
                 proj.reach.as_ref(), cx.bool_chain,
             );
             let resolved = by_recv.is_some();
+            // An unresolved/non-member receiver starts empty before the name-walk fallback.
             let mut items = by_recv.unwrap_or_default();
             // FALLBACK: a pure-ident receiver whose type inference can't see --
             // the enclosing call is to an unknown fn (`newHelper(thing.|`), or a
@@ -2849,8 +2857,13 @@ impl BoneWorkspace {
                 let Some(mid) = user_module_for_path(ws, file) else {
                     continue;
                 };
-                let Ok(uri) = <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))) else {
-                    continue;
+                let uri = match <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))) {
+                    Ok(uri) => uri,
+                    Err(error) => {
+                        proj.fallbacks.report("workspace symbols", file, "construct URI",
+                            &error.to_string(), "omit symbols from this file; keep other files");
+                        continue;
+                    }
                 };
                 // Built lazily on the first match in this file: a Ctrl-T query
                 // skips most files, so don't index a file with no hit. Without it
@@ -3144,6 +3157,7 @@ impl BoneWorkspace {
             "inlay", path, "parse receiver hints", "omit receiver hints; keep inferred hints",
         )
             .map(|ast| crate::query::receiver_param_hints(&ast, start, end))
+            // The parse refusal above was logged; retain other inferred hints.
             .unwrap_or_default()
             .into_iter()
             .map(|(span, label)| gaps::HintEntry { span, label, leading: false });
@@ -3274,7 +3288,10 @@ impl BoneWorkspace {
         };
         let prof = lsp_profile_enabled();
         let t = std::time::Instant::now();
-        let Ok(toks) = rock_tokenizer::Tokenizer::new(src, Ustr::from(path)).tokenize() else {
+        let Some(toks) = proj.fallbacks.result(
+            rock_tokenizer::Tokenizer::new(src, Ustr::from(path)).tokenize(),
+            "semantic tokens", path, "tokenize source", "empty token response",
+        ) else {
             return SemanticTokens::default();
         };
         let tok_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -3291,6 +3308,7 @@ impl BoneWorkspace {
         let t = std::time::Instant::now();
         let hir = user_module_for_path(ws, path)
             .map(|mid| semantic_classifications(ws, mid, range))
+            // A missing HIR module still permits lexical tokens for a partial buffer.
             .unwrap_or_default();
         let hir_ms = t.elapsed().as_secs_f64() * 1000.0;
         if prof {
@@ -4163,6 +4181,7 @@ impl<'a> ExpectedArg<'a> {
                     continue;
                 }
                 let params: Vec<TyId> = f.param_decls.iter().map(|p| p.ty).collect();
+                // Speculative overload instantiation may reject a candidate; try the next overload.
                 let Ok(inst) =
                     gamma.trial(|g| inference::instantiate_params(g, &f.generics, &params, span))
                 else {
@@ -4279,6 +4298,7 @@ impl<'a> ExpectedArg<'a> {
                         self.gamma.out.rollback_to(cp2);
                         ok
                     }),
+                    // A rejected speculative instantiation is a type non-match, not a query failure.
                     Err(_) => false,
                 };
                 self.gamma.out.rollback_to(cp);
@@ -5145,6 +5165,7 @@ mod tests {
         let mut target = PathBuf::new();
         let mut reached_assertion = false;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Keep the recording guard alive until the intentional unwind.
             let _capture = super::failure_log::Recording::start();
             let dir = tempfile::tempdir().unwrap();
             target = dir.path().join("target.rock");

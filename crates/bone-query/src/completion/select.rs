@@ -87,6 +87,7 @@ pub(crate) const DEFAULT_MAX_COMPLETION_ITEMS: usize = 200;
 /// is process-stable), mirroring `lsp_profile_enabled`.
 pub(crate) fn max_completion_items() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // An unset or non-Unicode optional tuning override selects the documented default.
     *N.get_or_init(|| parse_max_completions(std::env::var("ROCK_LSP_MAX_COMPLETIONS").ok().as_deref()))
 }
 
@@ -94,6 +95,7 @@ pub(crate) fn max_completion_items() -> usize {
 /// else (unset, empty, non-numeric, 0) falls back to the default. Pure so the
 /// override policy is testable without touching process env.
 fn parse_max_completions(v: Option<&str>) -> usize {
+    // Invalid optional tuning values select the documented default cap.
     v.and_then(|s| s.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_MAX_COMPLETION_ITEMS)

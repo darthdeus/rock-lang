@@ -168,6 +168,7 @@ impl CursorAst {
         let mut orphan: Option<CursorAst> = None;
         let mut empty: Option<CursorAst> = None;
         for (cand, probe) in candidates {
+            // Speculative cursor repairs may be invalid syntax; try the next repair.
             let Ok(ast) = skull_parser::parse_module(&cand, file) else { continue };
             let clean = ast.recovery_errors.is_empty();
             let cx = CursorAst { ast, text: cand, probe };

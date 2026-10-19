@@ -32,11 +32,14 @@ pub fn callable_member_admitted(
 /// names), its glob imports' members, and the std prelude. Sorted.
 fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
     let viewers = [Viewer::Fragment(frag)];
+    // Broken export paths are source diagnostics; omit that tier while offering other names.
     let mut names: Vec<Ustr> =
         resolve::module_member_names(ws, &viewers, frag.package, &frag.module_path).unwrap_or_default();
     names.extend(frag.named.keys().copied());
     for glob in &frag.globs {
+        // Unresolved/inaccessible glob imports are source errors, not query failures.
         if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, glob) {
+            // A broken re-export contributes no names; other import tiers remain usable.
             names.extend(resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default());
         }
     }
@@ -63,6 +66,7 @@ pub fn spellings_by_key(
     let mut out: std::collections::HashMap<Ustr, Vec<Ustr>> = std::collections::HashMap::new();
     for name in tier_names(ws, frag) {
         if kind == DefKind::Callable {
+            // A tier name need not resolve as a callable (or may have a diagnosed broken import).
             let Ok(family) = resolve::resolve_v1_callee(ws, frag, name) else { continue };
             match family {
                 CalleeFamily::Single(resolved) if resolved.kind == ResolvedKind::Callable => {
@@ -77,6 +81,7 @@ pub fn spellings_by_key(
             }
             continue;
         }
+        // Ambiguous or broken bindings cannot supply a usable spelling.
         let Ok(resolved) = resolve::resolve_bare(ws, Some(frag), name) else { continue };
         let matches = matches!(
             (kind, resolved.kind),
@@ -237,9 +242,11 @@ fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
     match resolve::resolve_bare(ws, Some(frag), name) {
         Ok(r) if r.kind != ResolvedKind::Module => Some(r.key),
         Ok(_) => None,
+        // A callable family can be composed even when bare-value resolution rejects it.
         Err(_) => match resolve::resolve_v1_callee(ws, frag, name) {
             Ok(CalleeFamily::Merged { members }) => members.first().map(|m| m.key),
             Ok(CalleeFamily::Single(r)) => Some(r.key),
+            // Neither resolver binds this name; omit the unusable source binding.
             Err(_) => None,
         },
     }
@@ -264,10 +271,13 @@ pub fn path_members(
     segments: &[Ustr],
 ) -> Option<Vec<(Ustr, Member)>> {
     let prefix = UsePathRef { from_root, segments: segments.to_vec() };
+    // A prefix may name an enum instead of a module; probe that below on a module miss.
     if let Ok((package, path)) = resolve::resolve_path_to_module(ws, frag, &prefix) {
         let viewers = [Viewer::Fragment(frag)];
         let mut out = Vec::new();
+        // Broken re-exports are source diagnostics; still offer accessible child modules.
         for name in resolve::module_member_names(ws, &viewers, package, &path).unwrap_or_default() {
+            // Ambiguous/inaccessible/broken bindings are not usable completion candidates.
             if let Ok(members) = resolve::module_members(ws, &viewers, package, &path, name)
                 && let [hit] = members.found[..]
             {
@@ -279,6 +289,7 @@ pub fn path_members(
             .package(package)
             .and_then(|p| p.node(p.key_of(&path)))
             .map(|node| node.children.keys().copied().collect::<Vec<_>>())
+            // No namespace node means no child modules to offer.
             .unwrap_or_default();
         for child in children {
             let mut child_path = segments.to_vec();
@@ -295,7 +306,9 @@ pub fn path_members(
     // `Type::Variant` does (`resolve_member_path`): a one-segment prefix is
     // a bare name, a longer one a path.
     let enum_key = match segments {
+        // An unresolved bare prefix offers neither enum variants nor module members.
         [only] if !from_root => resolve::resolve_bare(ws, Some(frag), *only).ok().map(|r| r.key),
+        // An unresolved qualified prefix is an ordinary completion non-match.
         _ => resolve::resolve_path(ws, frag, &prefix).ok().map(|r| r.key),
     }?;
     let e = ws.enums_by_name.get(&enum_key)?;

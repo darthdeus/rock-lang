@@ -645,6 +645,7 @@ pub(crate) fn call_through_param_completions(
     let global_type_args: &HashMap<String, Vec<CtArg>>;
     let callable_spellings: Option<&HashMap<Ustr, Vec<Ustr>>>;
     if let Some(scoped) = scoped_index {
+        // No indexed name begins with this letter, so this source contributes no candidates.
         scoped_fns = scoped.fns_by_first_char.get(&q[0]).cloned().unwrap_or_default();
         global_type_args = &scoped.global_type_args;
         callable_spellings = Some(&scoped.callable_spellings);
@@ -849,6 +850,7 @@ pub(crate) fn call_through_param_completions(
         let t = cf.first_param_ty.as_str();
         let confident: Vec<&CtArg> = local_args
             .get(t)
+            // No locals of this type means no confident autofill candidate.
             .map(|v| v.iter().filter(|a| !a.method).collect())
             .unwrap_or_default();
         if let [a] = confident.as_slice() {
@@ -1594,6 +1596,7 @@ fn build_member_items(
         let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
         // UFCS methods: functions whose first param is the receiver's struct,
         // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
+        // Non-struct receivers have no nominal UFCS methods.
         let methods = recv_struct
             .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem.as_deref(), frag))
             .unwrap_or_default();
@@ -1679,6 +1682,7 @@ fn build_member_items(
         // and a wrapper `Entity<T>` overload (`e.run_into`, which the NOMINAL
         // `ufcs_methods` DOES surface as a plain item). For the latter, suppress
         // the plain method item below so the pre-filled version isn't doubled.
+        // Non-struct receivers have no FieldRef method candidates.
         let field_ref_matches = recv_struct
             .map(|rs| field_ref_methods(ws, rs, recv_elem, frag))
             .unwrap_or_default();
