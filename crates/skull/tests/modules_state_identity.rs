@@ -227,7 +227,7 @@ pub fn tick() -> int {
 /// their owning function (`__static_<owner>_..`, `__local_<owner>_..`). The
 /// owner of a v1 function is its DefKey, which is not a Lua identifier: the
 /// chunk died with `'(' expected near '::'` (found by migrating
-/// `libs/match3-core`, whose test declares a nested fn).
+/// a library whose test declares a nested fn).
 #[test]
 fn v1_static_cells_and_nested_fns_emit_identifiers() {
     let emitted = emit_v1_package(

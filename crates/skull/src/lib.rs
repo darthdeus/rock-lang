@@ -2243,7 +2243,7 @@ mod tests {
     /// application session; 8 MB still flushed it 31 times in 60 s of play. Neither
     /// architecture may regress below that.
     #[test]
-    fn runtime_prelude_keeps_the_mag_trace_working_set() {
+    fn runtime_prelude_keeps_the_application_trace_working_set() {
         let prelude = super::runtime_prelude();
         for knob in ["\"maxtrace=\" .. __mt", "maxrecord=32000", "maxsnap=4000", "\"maxirconst=\" .. __mk"] {
             assert!(prelude.contains(knob), "runtime prelude stopped setting {knob}");

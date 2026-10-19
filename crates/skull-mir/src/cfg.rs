@@ -188,7 +188,7 @@ pub fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<B
 /// arena ids. The policy layers built on these -- post-dominators, natural-loop
 /// registration, and the `Structure` each backend hands its walker -- stay in
 /// the backend crates: they encode per-target structuring decisions, not shared
-/// analysis. See `docs/unfuck-backlog.md` for the divergences that keeps alive.
+/// analysis.
 pub mod dense {
     use super::successors;
     use crate::mir::{Block, MirFunc};

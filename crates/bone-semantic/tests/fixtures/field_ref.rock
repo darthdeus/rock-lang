@@ -159,9 +159,8 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// H. value struct: the WRITABLE former refuses (a writable ref into a value
-//    struct is meaningless -- the object is passed by copy, so the write would
-//    land on a temporary; docs/value-semantics-axes.md). The read-only ReadFieldRef
+// H. A writable ref into a value struct would write to a temporary copy.
+//    The WRITABLE former refuses. The read-only ReadFieldRef
 //    former accepts, which is what field_get takes.
 // ---------------------------------------------------------------------------
 
@@ -185,7 +184,7 @@ fn main() {
 // ---------------------------------------------------------------------------
 // I. `WriteFieldRef<T, V>` -- the write-only former, terminal in the lattice.
 //    It grants no whole-value read, which is exactly the capability an
-//    EMBEDDED field cannot offer (docs/scalarization-and-boxing-design.md S 6).
+//    EMBEDDED field cannot offer.
 //    Lattice: `FieldRef` is the TOP and coerces DOWN to both single-capability
 //    formers; `ReadFieldRef` and `WriteFieldRef` are INCOMPARABLE, so no
 //    coercion runs between them, and neither coerces back up.

@@ -1,5 +1,5 @@
 //! std140 layout for an `@uniform` binding group -- the uniform half of the
-//! interface artifact (docs/shader-binding-layout-plan.md P2).
+//! interface artifact.
 //!
 //! Every expected offset here is a LITERAL, read off the std140 rules by hand.
 //! None may be computed from the layout function itself: a test that asks the

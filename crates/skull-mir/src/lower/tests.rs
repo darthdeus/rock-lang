@@ -37,7 +37,7 @@ fn missing_wire_slot_rejects_instead_of_boxing() {
     assert!(matches!(variadic, RetSlot::Opaque));
 }
 
-// -- Stage 0b route-table invariants (docs/monomorphization-plan.md S 2b).
+// -- Stage 0b route-table invariants.
 //
 // No Rock program can reach these states, which is why they are rejections
 // rather than diagnostics: each one is constructed by handing the oracle a

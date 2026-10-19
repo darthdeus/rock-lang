@@ -297,8 +297,8 @@ fn main() { print("{pass(1)}") }
 /// The graph is TARGET-NEUTRAL and records bone's collapsed group
 /// REPRESENTATIVE -- the portable `Any` body -- while MIR calls the sibling that
 /// serves the backend being lowered. Raw `FuncRef` equality reported that
-/// correct selection as `callee-decl-mismatch`; `games/sample-game`'s
-/// `file_append` was the corpus's single case, one call of 171,738.
+/// correct selection as `callee-decl-mismatch` when an application supplied
+/// an `inline(lua)` override of a portable body.
 ///
 /// The comparison asks the EMITTER's own rule (`backend_variant`), so the
 /// control below is not redundant: a pair the language does NOT group must

@@ -19,8 +19,7 @@
 //! cross-checks against LuaJIT (`ffi.offsetof` / `ffi.sizeof` assertions per
 //! FFI-clean value struct, aborting at load on drift). Taking offsets from
 //! anywhere else is a second, unvalidated model -- the bypass the raw walker is
-//! private to prevent. See `docs/shader-binding-layout-plan.md` § Layout
-//! ownership.
+//! private to prevent.
 //!
 //! A vertex buffer is laid out by C rules, NOT std140: a `Vec3` occupies 12
 //! bytes with the next attribute immediately after.

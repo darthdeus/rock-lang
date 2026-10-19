@@ -2,7 +2,7 @@ use skull_fmt::{FormatConfig, try_format};
 
 #[test]
 fn path_qualified_return_literal_reparses_and_is_idempotent() {
-    let source = "fn profile(mob: Mob) {\n    if mob.active { return mag_world::world_tick::WorldActorTurnProfile { move_speed: mob.move_speed() } }\n}\n";
+    let source = "fn profile(mob: Mob) {\n    if mob.active { return app_world::world_tick::WorldActorTurnProfile { move_speed: mob.move_speed() } }\n}\n";
     let formatted = try_format(source, &FormatConfig::default()).expect("format source");
     skull_parser::parse_module_clean(&formatted, "<formatted>".into())
         .unwrap_or_else(|error| panic!("formatted literal must parse: {error:?}\n{formatted}"));
@@ -17,9 +17,9 @@ fn path_qualified_return_literal_reparses_and_is_idempotent() {
 
 #[test]
 fn qualified_call_keeps_path_separators_tight() {
-    let source = "fn probe() {\n    mag_world::world_tick::update(actor)\n}\n";
+    let source = "fn probe() {\n    app_world::world_tick::update(actor)\n}\n";
     let formatted = try_format(source, &FormatConfig::default()).expect("format source");
-    assert!(formatted.contains("mag_world::world_tick::update(actor)"), "{formatted}");
+    assert!(formatted.contains("app_world::world_tick::update(actor)"), "{formatted}");
     skull_parser::parse_module_clean(&formatted, "<formatted>".into())
         .expect("formatted call must parse");
     assert_eq!(try_format(&formatted, &FormatConfig::default()).unwrap(), formatted);

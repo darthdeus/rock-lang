@@ -1,5 +1,5 @@
 //! A bound-conformance tree with every leaf carried in terms an emitted body
-//! can read on its own (`docs/monomorphization-plan.md` S 12).
+//! can read on its own.
 //!
 //! [`bone_semantic::prelude::BoundTree`] is stated in the CALLER's vocabulary:
 //! `BoundNext::Concrete::next_generics` maps a callee `VarId` to a `TyId` in the

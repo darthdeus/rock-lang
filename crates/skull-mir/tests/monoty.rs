@@ -1,5 +1,4 @@
-//! Stage 0c properties for the total logical type (`docs/monomorphization-plan.md`
-//! S 0c, S 15a, S 20g.2/3/4).
+//! Stage 0c properties for the total logical type.
 //!
 //! The generated composition is the load-bearing one: the partial tree MonoTy
 //! replaced grew a `string` arm one observed symptom at a time (plan S 19b), and

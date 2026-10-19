@@ -1,4 +1,4 @@
-//! `MonoTy` -- THE logical type (`docs/monomorphization-plan.md` Stage 1). Every
+//! `MonoTy` -- THE logical type. Every
 //! concrete type identity in the compiler is one of these: an `Instance`'s
 //! arguments, the
 //! substitutions specialized lowering reads, the symbols the emitters mangle,

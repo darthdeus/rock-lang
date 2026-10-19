@@ -3,7 +3,7 @@
 //! one candidate exactly as the call path does (`collapse_backend_variants` in
 //! calls.rs). Before the fn-value collapse landed this rejected with "ambiguous
 //! fn-value reference (overloaded)", which broke the NATIVE anvil FmFs adapter
-//! (it stores `stone_*` externs -- each with an extern(js) sibling -- as struct
+//! (it stores `host_*` externs -- each with an extern(js) sibling -- as struct
 //! fields). Genuinely overloaded names (different signatures) still reject as
 //! fn-values: see `fn_value_overload_rejects` in the structural tests.
 
@@ -20,7 +20,7 @@ fn use_it() -> float {
 // an ffi-style extern + a same-signature extern(js) sibling, taken as an arg to
 // a higher-order fn (the FmFs field-store shape).
 //- extern_pair_as_argument
-extern(ffi, "stone") fn get_time() -> float
+extern(ffi, "host") fn get_time() -> float
 extern(js) fn get_time() -> float
 fn call_it(f: fn() -> float) -> float { return f() }
 fn use_it() -> float {

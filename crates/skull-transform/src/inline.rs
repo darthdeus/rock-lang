@@ -1,8 +1,7 @@
 //! Function inlining: a MIR->MIR pass that splices an eligible callee's body
 //! into the caller so a hot loop traces with no per-call frame (rock-codegen
 //! runtime parity). Re-fit of the deleted hybrid-SSA `skull/src/inline.rs`
-//! (`7b1615424^`) onto the cell-model CFG. Optimization context:
-//! `docs/skull-mir-optimization-plan.md`.
+//! onto the cell-model CFG.
 //!
 //! The cell model makes the splice simpler than the old SSA one: there are NO
 //! block params, so arg-binding is a `Store` into the callee's (cloned) param
@@ -1610,7 +1609,7 @@ fn classify(
         return reject_candidate(&mut timing, "missing_inline_annotation");
     }
     // A snapshot lowers the body as if hand-written for the concrete
-    // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
+    // instantiation; a non-generic instance's is the
     // declaration's own body.
     let Some(plan) = concrete_plans.get(inst) else {
         return reject_candidate(&mut timing, "missing_concrete_plan");
@@ -2951,7 +2950,7 @@ fn splice_general(
 /// bodies whose source now lives in `func`'s emitted chunk (the driver visits
 /// each, including ones the inlined bodies themselves introduced). These are the
 /// caller chunk's INLINE codegen dependencies: incremental emit must re-emit
-/// `func` when any of them change (`docs/skull-incremental-emit-split.md`).
+/// `func` when any of them change.
 pub fn inline_functions_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,

@@ -3,16 +3,13 @@
 //! `CountedLoop` detector recognizes, so it prints as a native Lua numeric
 //! `for` (LuaJIT FORL bytecode: hoisted bounds check, counted back-edge,
 //! int<->double transition tolerance). The goto-LOOP form of the same loop
-//! measures 1.8x slower on a type-stable 2M-element sum
-//! (`docs/iterator-implementation-plan.md`, "FORL recovery").
+//! measures 1.8x slower on a type-stable 2M-element sum.
 //!
 //! Fires ONLY on loops tagged by `lower_for_user_iter`
 //! (`MirFunc::for_iter_headers`). The one observable change is bound SNAPSHOT:
 //! the per-iteration bound read (e.g. the inlined `it.vec.len`) moves to the
 //! preheader and is evaluated once per loop. That diverges only when the body
-//! mutates the collection being iterated, which is recorded UB
-//! (`docs/iterator-desugaring-investigation.md` resolved decisions: "iterator
-//! invalidation: ignored"). The sanction is exactly why the pass is tag-gated
+//! mutates the collection being iterated, which is recorded UB. The sanction is exactly why the pass is tag-gated
 //! -- a user-written `while i < xs.len` must keep re-reading its bound.
 //!
 //! Post-inline shape matched (H = the tagged head):
@@ -31,8 +28,7 @@
 //! detector's `slot_sound` scans ALL arena blocks, incl. unreachable ones).
 //!
 //! Skip-loop layers (filter/take_while) extend the join cascade with three
-//! shapes, turning the chain into the flat `for + skip-branch` the
-//! investigation doc blesses (`docs/iterator-desugaring-investigation.md` C3):
+//! shapes, turning the chain into a flat `for + skip-branch`:
 //! - **skip edge** (filter reject): a yield-path branch whose reject arm
 //!   chases back to the fetch head (T or a guard). Rewritten to target the
 //!   latch -- a `continue`.

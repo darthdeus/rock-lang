@@ -1,8 +1,6 @@
-//! Package-qualified enum, value-record and handle text on the Lua backend
-//! (docs/c-backend-memory-ownership.md "Enum formatting"). The structural
+//! Package-qualified enum, value-record and handle text on the Lua backend. The structural
 //! contract lives in `tests/enum_format_conformance.rock`; this holder pins the
-//! package and module segments a packaged program names, matching the C holder
-//! in `crates/skull-codegen-c/tests/enum_format_packages.rs`.
+//! package and module segments a packaged program names.
 
 use crate::common::{emit_v1_package, run_luajit, V1Fragment};
 

@@ -1,6 +1,6 @@
 //! skull MIR: HIR, flattened into a cell-model CFG.
 //!
-//! Faithful to `docs/bone-mir-design.md`:
+//! The cell-model CFG has these invariants:
 //!   - A function is a graph of [`Block`]s; control flow lives ONLY in a block's
 //!     [`Term`]inator.
 //!   - An instruction's `Idx<Inst>` **IS its value** (exactly like `Idx<Expr>`
@@ -127,7 +127,6 @@ pub enum ContainerKind {
     /// element storage is FLAT — one ordinary 1-indexed Lua array per leaf,
     /// `{ <leaf0> = {..}, .., len = n }` — so no per-element table exists.
     /// Replaces the single `_data` backing of [`ContainerKind::Vec`].
-    /// Eligibility + layout rationale: `docs/vec-value-columns-plan.md`.
     VecValueColumns(ColumnElem),
     /// `[E]` where `E` is a wide flat enum with non-false scalar payload leaves.
     /// Elements occupy fixed-width rows in one dense backing array; inactive
@@ -151,7 +150,6 @@ pub enum ContainerKind {
     /// This is what makes an element access allocate nothing: indexing a
     /// primitive pointer yields a number, where indexing a struct-typed pointer
     /// yields a reference cdata. Never a user-facing type.
-    /// See `docs/native-buffer-leaf-addressing-plan.md`.
     NativeBufferLeaf,
     /// `Map<K,V>` — keyed directly by K, no `+1`.
     Map,
@@ -351,7 +349,7 @@ pub enum Inst {
     /// int and the flow position float. Identity on luajit (all doubles), so
     /// codegen-lua renders it as the operand verbatim; non-Lua backends
     /// materialize the conversion (GLSL: fold an int Const to float text, else
-    /// wrap `float(...)`). See `docs/shaders.md`.
+    /// wrap `float(...)`).
     IntToFloat(Idx<Inst>),
     UintToFloat(Idx<Inst>),
     /// Round a float to the nearest `f32` and back: the write into an `f32`
@@ -519,7 +517,7 @@ pub enum Inst {
         /// ONE EXCEPTION, the LEAF FORM: names may instead be DOTTED paths
         /// naming every primitive leaf (`("pos.x", ..), ("pos.y", ..)`), which is
         /// what keeps a `nobox` field from materializing when its parent boxes
-        /// (`flatten_nobox_nested_ctors`, `docs/nobox-nested-ctor-plan.md`). It
+        /// (`flatten_nobox_nested_ctors`). It
         /// exists only between the end of `cleanup` and emit, so no MIR pass sees
         /// it; luajit emits a generated `<name>_lct` and JS rebuilds the nested
         /// objects. Partial flattening is invalid: when any name is dotted the
@@ -893,7 +891,7 @@ pub struct Cell {
     /// identical, the same guarantee that makes `v.field` legal). Any doubt about
     /// what a cell represents leaves it unset -- unset is always today's boxed
     /// emission; only a wrongly-set flag can miscompile, so all conservatism
-    /// lands here (`docs/value-two-tier-plan.md` item 8).
+    /// lands here.
     pub nonnull_value_struct: bool,
     /// A source parameter has a compiler-generated default-fill store. Closure
     /// ownership treats that store as initialization, not mutation.
@@ -1040,7 +1038,7 @@ pub struct EmitIds {
     pub next_blocks: u32,
 }
 
-/// One comptime input a lowered body baked in (docs/comptime-plan.md tier 1):
+/// One comptime input a lowered body baked in:
 /// which input, and the hash of the value that went into the emitted code.
 /// bone hashes only source text, so incremental invalidation must compare
 /// these against the CURRENT inputs itself -- a body with a stale read is a

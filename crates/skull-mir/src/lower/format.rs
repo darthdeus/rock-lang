@@ -1,5 +1,5 @@
 //! Structural value formatting: the one diagnostic text for enums, value
-//! records and handles (docs/c-backend-memory-ownership.md "Enum formatting").
+//! records and handles.
 //!
 //! [`format_tree`] decides the text from the logical type alone, so a flat,
 //! cdata, boxed or leaf-widened enum renders identically. Lowering walks the

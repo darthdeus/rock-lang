@@ -18,8 +18,7 @@
 //!
 //! Those three are INTENDED to agree, and the agreement is MEASURED rather than
 //! assumed: `skull::site_join::census` reports the join with every exclusion
-//! named by cause. It is not yet total; the live populations and the blocker
-//! live in `docs/parked/mono.md`, not here.
+//! named by cause. It is not yet total.
 //!
 //! Correlating them by span could not even detect a disagreement -- several of
 //! these share one span, which is the whole reason the operation is in the key.

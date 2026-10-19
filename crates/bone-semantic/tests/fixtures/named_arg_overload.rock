@@ -13,7 +13,7 @@
 
 // A named arg skips an earlier DEFAULTED param, so positionally it would land
 // in the wrong slot (`color: c` is arg #3 but param #4). Selection must
-// reorder by name and pick the rich overload. Mirrors stone's `draw_sprite`.
+// reorder by name and pick the rich overload.
 //- named_arg_skips_defaulted_param
 struct Image { w: int }
 struct Color { r: int }
@@ -73,7 +73,7 @@ fn caller() -> int {
 }
 
 // A named int literal for a defaulted `float?` param must coerce during
-// selection exactly as it does in single-candidate binding. Mirrors Stone's
+// selection exactly as it does in single-candidate binding. Mirrors a host library's
 // `draw_text(text, pos, size, color, duration: 2)` beside a `draw_text(Font, ...)`.
 //- named_int_literal_coerces_to_nullable_float
 struct Font { id: int }

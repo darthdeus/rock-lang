@@ -1,5 +1,5 @@
 //! An instance's ARGUMENTS and its `SpecSubst` are one fact, which is the E1
-//! architectural cut's premise (`docs/monomorphization-plan.md` cut C+D, E1).
+//! architectural cut's premise.
 //!
 //! Emission keys a body on `Instance` -- a declaration plus interned type
 //! arguments in declaration order -- and the mono graph records a `MonoSubst`

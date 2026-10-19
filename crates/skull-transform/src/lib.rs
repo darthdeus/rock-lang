@@ -1,6 +1,6 @@
 //! Coroutine transform: a `co fn` (lowered to a cell CFG with `Term::Yield`)
 //! becomes an ordinary stackless state-machine `__step` function plus a
-//! constructor, per `docs/stackless-coroutines.md` (decision 6). No LuaJIT
+//! constructor. No LuaJIT
 //! coroutines.
 //!
 //! The cell model SIMPLIFIES this vs the old SSA backend: **only cells cross an
@@ -612,8 +612,7 @@ fn leaf_operand(
             // program computes, not about a heap object surviving. Preserving it
             // instead needs the `Field` reads ordered after the box, which the
             // splice position does not currently give (they land at the parent
-            // ctor's slot, ahead of where emit places the operand). Recorded in
-            // `docs/nobox-nested-ctor-plan.md` as the open alternative.
+            // ctor's slot, ahead of where emit places the operand).
             Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
                 fields.iter().find(|(n, _)| *n == comp).map(|(_, op)| *op)
             }
@@ -3448,7 +3447,7 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
     // live coroutines running (the live-update feature). The ctor writes the
     // stamp; the step's entry (below) rejects a frame with a different one --
     // through `error()`, so the pcall in `__advance` turns it into a clean
-    // errored kill (docs/coroutine-allocation-plan.md "Layout drift").
+    // errored kill.
     let mut canon = String::new();
     {
         use std::fmt::Write as _;

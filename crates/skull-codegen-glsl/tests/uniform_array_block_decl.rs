@@ -1,6 +1,5 @@
 //! **A stage's `@size(N)` params become ONE std140 array block** at a reserved
-//! binding, instead of loose `uniform T name[N];` declarations (backlog 4b,
-//! `docs/shader-binding-layout-plan.md`).
+//! binding, instead of loose `uniform T name[N];` declarations.
 //!
 //! Loose is the out-of-spec arrangement, which is the whole argument for the
 //! port: loose uniforms live in the DEFAULT block, whose ES 3.0 guarantee is 224

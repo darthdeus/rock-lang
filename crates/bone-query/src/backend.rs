@@ -2441,9 +2441,9 @@ impl BoneWorkspace {
                 ));
             }
         }
-        // Coroutine ergonomics: `Wait` is the dominant Stone yield type
+        // Coroutine ergonomics: `Wait` is the common host yield type
         // (~75% of `Coroutine<..>` annotations), so surface it. All gated on a
-        // `Wait` type existing (the Stone `Wait` is an enum); otherwise the
+        // `Wait` type existing (the host's `Wait` is an enum); otherwise the
         // generic `Coroutine<$0>` snippet stands in.
         let has_wait = nominal_exists(ws, "Wait");
         let coroutine_slot = cx.coroutine_generic;
@@ -5257,10 +5257,10 @@ mod tests {
         let cases = [
             ("set_blend_mode", "alpha_threshold", "set_w"),
             ("draw_text_ex", "BANK_PANEL.title", "draw_re"),
-            ("stone_get_text_baseline", "outline_detect_shader", "stone_draw_r"),
-            ("stone_canvas_save_png", "tile_floor_atlas.full_image_rect().w", "stone_draw_r"),
+            ("scene_get_text_baseline", "outline_detect_shader", "scene_draw_r"),
+            ("scene_canvas_save_png", "tile_floor_atlas.full_image_rect().w", "scene_draw_r"),
             ("set_x", "p.pos.x", "set_w"),
-            ("stone_measure_text_vec2", "outline_detect_shader", "stone_draw_r"),
+            ("scene_measure_text_vec2", "outline_detect_shader", "scene_draw_r"),
             ("draw_circle", "world.rect", "draw_t"),
             ("get_tile_at", "world.grid().origin", "get_tx"),
         ];

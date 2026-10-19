@@ -366,7 +366,7 @@ fn counted_loop_invariant_bound_folds() {
     assert!(!glsl.contains("= (r + 1);"), "bound temp must be dropped:\n{glsl}");
 }
 
-// --- relooper: structured control flow (docs/shaders.md) ---------
+// --- relooper: structured control flow ---------
 
 /// Milestone 2: the `pick` shape that `reject_if_branch_sentinel` pinned now
 /// emits an if/else (both arms diverge; ipdom collapses to the virtual exit).
@@ -450,8 +450,7 @@ fn if_else_if_ladder() {
     );
 }
 
-/// Expression-position `if` into a cell folds to a ternary (cosmetic tier,
-/// `docs/shaders.md` item 2): both arms single-store the single-use
+/// Expression-position `if` into a cell folds to a ternary: both arms single-store the single-use
 /// result cell -> `(cond ? a : b)` at the use.
 #[test]
 fn expression_if_into_cell() {
@@ -482,8 +481,7 @@ fn ternary_int_result_outer_coercion() {
     );
 }
 
-/// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`
-/// (cosmetic tier -- `docs/shaders.md`).
+/// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`.
 #[test]
 fn and_in_nested_if() {
     let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#;
@@ -684,8 +682,7 @@ fn nested_loop_with_if() {
     );
 }
 
-/// Const loop bound folds into the for-header (cosmetic tier,
-/// `docs/shaders.md` item 3): `t = 4; for (; i < t; ...)` -> `for (;
+/// Const loop bound folds into the for-header: `t = 4; for (; i < t;...)` -> `for (;
 /// i < 4; ...)`, dropping the single-use bound temp + its declaration. A const
 /// is loop-invariant, so re-reading it each iteration is identical.
 #[test]
@@ -893,7 +890,7 @@ fn int_literal_float_contexts() {
 // bone allows general int->float subsumption (`fn f(i: int) -> float { return i }`
 // and `takes_float(i)` both compile). On GLSL that materializes a `float(...)`
 // wrap; the coercion is inserted at lowering (Inst::IntToFloat), not re-derived
-// in the emitter. Docs: docs/shaders.md.
+// in the emitter.
 
 /// An int PARAM (non-literal) returned from a float fn gets a `float(...)` wrap.
 #[test]
@@ -938,7 +935,7 @@ fn let_float_annotation_cell_typing() {
     );
 }
 
-// --- A1: fragment-entry compilation (docs/shaders.md) -------------------
+// --- A1: fragment-entry compilation -------------------
 
 fn emit_entry(src: &str, root: &str) -> Result<String, String> {
     emit_entry_profile(src, root, skull_codegen_glsl::GlslProfile::Core330)
@@ -1008,8 +1005,7 @@ fn fragment_entry_scaffold() {
 /// `@uniform` is ONE std140 block, not a run of loose uniforms. The block is
 /// declared with no instance name, so its members stay bare GLSL globals and
 /// every body reading them is unchanged -- that is what confines this change to
-/// declaration lines (verified on real drivers in both profiles,
-/// docs/shader-binding-layout-plan.md). Samplers are opaque and cannot live in a
+/// declaration lines. Samplers are opaque and cannot live in a
 /// block, so they stay loose beside it.
 #[test]
 fn fragment_entry_uniforms_are_one_std140_block() {

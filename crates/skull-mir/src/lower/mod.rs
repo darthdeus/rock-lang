@@ -385,7 +385,7 @@ mod structs;
 mod types;
 
 // A flattened child field's physical slots are DOTTED parent keys, the same
-// encoding `embed` uses (`docs/scalarization-and-boxing-design.md` S 6). `.` is
+// encoding `embed` uses. `.` is
 // not an identifier character, so a slot key can never equal a legal user field
 // name -- which the `__`-based encoding this replaced could: an enum field `sig`
 // and a user field `sig__tag` both wrote `sig__tag`, so the table ctor emitted
@@ -504,8 +504,7 @@ pub struct ScalarCtx {
     /// When set, the scalarized value ABI is disabled workspace-wide: every fn
     /// keeps value structs as first-class single values (params/returns/args),
     /// never splatting them to leaf scalars. Used by the GLSL backend, where a
-    /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves
-    /// (`docs/shaders.md` finding 5). The toggle is contained in the ABI
+    /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves. The toggle is contained in the ABI
     /// policy behind [`BackendFnAbiPlan`], which definitions and direct calls
     /// both read.
     values_first_class: bool,
@@ -2822,7 +2821,7 @@ impl Builder<'_> {
 
     /// Constants read in the callee's lexical owner, independent of its wire ABI.
     /// Passing them explicitly avoids nil side exits with the caller's floats
-    /// live (`docs/trace-pressure-work-plan.md`, "Default fill").
+    /// live.
     pub(crate) fn call_param_defaults(&self, func: FuncRef) -> Vec<Option<CallParamDefault>> {
         let module = self.ws.module(func.module);
         let decl = &module.functions[func.func];
@@ -3870,8 +3869,7 @@ fn uniform_values_rejection_for_call(
     None
 }
 
-/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value
-/// (docs/comptime-plan.md tier 1). THE shared resolver: the lowering expander
+/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value. THE shared resolver: the lowering expander
 /// and the fatal gate both call it, so they cannot diverge on what they
 /// accept. The argument must be a plain string literal -- interpolation or any
 /// computed expression rejects, because the input has to be knowable without
@@ -3928,8 +3926,7 @@ pub fn resolve_comptime_value(
         },
         ExpandKind::EmbedString => {
             // Resolution root: the nearest stick.toml at/above the CALLING
-            // file's dir (a library embeds its own files, whatever project is
-            // consuming it -- docs/comptime-plan.md tier 1.5); fall back to
+            // file's dir; fall back to
             // the invocation's embed_root for synthetic/test module files.
             let call_file = body.expr_spans[call_expr].file;
             let package_root = std::path::Path::new(call_file.as_str())

@@ -311,7 +311,7 @@ impl Builder<'_> {
             // `base.field`: project a Group part directly (no cdata); else a
             // boxed field read off the packed base.
             Expr::FieldAccess { base, field } => {
-                // A swizzle read (docs/agent-reference/language.md): select the
+                // A swizzle read: select the
                 // components into a fresh VecN Group (len 1: the bare scalar) --
                 // scalarized end to end, so a swizzle never boxes by itself.
                 if let Some(idxs) = self.swizzle_of(base, field) {

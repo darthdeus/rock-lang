@@ -1,5 +1,4 @@
-//! The target-neutral instance graph, and each artifact's VIEW of it
-//! (`docs/monomorphization-plan.md` S 9, S 11).
+//! The target-neutral instance graph, and each artifact's VIEW of it.
 //!
 //! **It depends on no backend, so any backend may depend on it.** One
 //! [`instance_graph::InstanceGraph`] is built per compilation over one
@@ -8,8 +7,7 @@
 //! lived inside one backend could not be that, and a graph that depended on a
 //! backend to spell its own target axes would not be neutral.
 //!
-//! **Current dependents, stated rather than assumed** (E1 Phase 3/4 in
-//! `docs/monomorphization-plan.md`): `skull`, `skull-codegen-js`, and
+//! **Current dependents, stated rather than assumed**: `skull`, `skull-codegen-js`, and
 //! `skull-codegen-glsl` depend on this crate. Lua, JS, and native shader
 //! registration consume per-target views; route-B's plain GLSL function-library
 //! entry point remains a legacy path because it has no registered shader

@@ -1,6 +1,5 @@
 //! Global nullable refinement (purity-aware) -- a DELIBERATE divergence from
-//! rock. rock never refines a global (`docs/nullable-refinement.md`: "Globals
-//! are never refined -- copy to a local or use `?.`"), because a global can be
+//! rock. rock never refines a global, because a global can be
 //! reassigned by any intervening call. bone makes the intended rule: after
 //! `if G != null`, the global G is refined to non-null until an INTERVENING
 //! EFFECT could change it. The effect set (soundness condition):

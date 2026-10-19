@@ -11,9 +11,8 @@
 //! parameters gets the arity marker `_0` (`foo()` -> `foo_0`), so a mangled name
 //! never equals its source name.
 //!
-//! The separator is a single `_` (adopted after a corpus-wide collision scan
-//! found zero collisions over stdlib + engine + application corpora, ~23k fns --
-//! `rock-cli/tests/mangle_corpus_scan.rs`, `docs/mangle-unification-plan.md`).
+//! The separator is a single `_`; `rock-cli/tests/mangle_corpus_scan.rs`
+//! checks it for collisions across a program's modules.
 //! [`collision_errors`] enforces the property permanently: any residual
 //! collision (two distinct signatures mangling alike, or a mangled name equal to
 //! an exempt bare name) is rejected, never silently renamed.

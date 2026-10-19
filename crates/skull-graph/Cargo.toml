@@ -11,8 +11,7 @@ description = "Backend-neutral instance graph and concrete artifact plans"
 sequential = []
 test-hooks = []
 
-# The TARGET-NEUTRAL instance graph and the per-artifact views over it
-# (`docs/monomorphization-plan.md` S 9, S 11). It sits BELOW every backend so
+# The TARGET-NEUTRAL instance graph and the per-artifact views over it. It sits BELOW every backend so
 # each one realizes the same graph: `skull` (luajit driver),
 # `skull-codegen-js` and `skull-codegen-glsl` all depend on this crate, and it
 # depends on none of them. Roots are an INPUT -- deciding what a build roots

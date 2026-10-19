@@ -1,4 +1,4 @@
-//! The Stage-0e totality ablation (`docs/monomorphization-plan.md` S 0e).
+//! The Stage-0e totality ablation.
 //!
 //! An EXPERIMENTAL build mode, off by default, in which the compiler is held to
 //! plan S 8's target invariant:

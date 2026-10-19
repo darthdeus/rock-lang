@@ -997,8 +997,7 @@ fn value_shape_facts(
     (Some(plan.storage), column_eligible)
 }
 
-/// The Lua wide-value calling convention, decision 1 of
-/// `docs/luajit-wide-value-abi.md` (author, 2026-09-19). An ORDINARY `value`
+/// The Lua wide-value calling convention. An ORDINARY `value`
 /// whose PAYLOAD leaf count is greater than this crosses a Rock-to-Rock Lua
 /// call as ONE slot -- its existing boxed form -- instead of N scalar lanes.
 ///
@@ -1022,8 +1021,7 @@ fn value_shape_facts(
 /// overlapping.
 pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 48;
 
-/// The per-signature lane budget, decisions 1 and 2 of
-/// `docs/luajit-wide-value-abi.md`. Per-value `K` does not bound a signature's
+/// The per-signature lane budget. Per-value `K` does not bound a signature's
 /// width -- five values at the cut are `5 * K` lanes with every one of them
 /// legal -- so after the per-value cut a signature whose surviving lanes exceed this boxes
 /// its widest remaining ORDINARY values, widest first, until it fits.
@@ -1051,7 +1049,7 @@ fn payload_leaf_count(shape: &ValueShape) -> usize {
 }
 
 /// Whether boxing `ty` would IMPLICITLY materialize a `nobox` child, which the
-/// `nobox` guarantee forbids (`docs/nobox-values-plan.md`).
+/// `nobox` guarantee forbids.
 ///
 /// Two of the three value tiers have an answer already. A CDATA box is
 /// normalized by `flatten_nobox_nested_ctors` (`crates/skull-transform`), which
@@ -1063,9 +1061,7 @@ fn payload_leaf_count(shape: &ValueShape) -> usize {
 ///
 /// The ABI cut therefore leaves a GC-tier value carrying a `nobox` descendant
 /// on the scalar wire. Its bodies keep today's frame cost and today's spanned
-/// frame-limit diagnostic; what they do not get is the new wire. See
-/// "AUTHOR DECISION: GC-tier ABI box of an ordinary value with nobox fields"
-/// in `docs/luajit-wide-value-abi.md`.
+/// frame-limit diagnostic; what they do not get is the new wire.
 fn box_would_materialize_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
     let crate::monoty::MonoTy::App {
         ctor: crate::monoty::MonoCtor::Nominal(name), ..
@@ -2537,8 +2533,7 @@ impl BackendFnAbiPlan {
     /// value return under the scalar ABI.
     ///
     /// **A JS transport fact.** Plan S 13b: leaf 0 rides the ordinary JS
-    /// `return`, lanes 1..N ride the module-scope scratch bank
-    /// (`docs/boundary-contracts.md` 1.2). Luajit has native multi-return and
+    /// `return`, lanes 1..N ride the module-scope scratch bank. Luajit has native multi-return and
     /// consults nothing here; the artifact view still records the width for
     /// every artifact, because it is a property of the wire rather than of the
     /// backend that happens to need it spelled out.

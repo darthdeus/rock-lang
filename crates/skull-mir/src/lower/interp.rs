@@ -215,7 +215,7 @@ impl Builder<'_> {
             // the value carries no type tag at runtime, so this is the only point
             // the static type is known. The `inspect(any)` escape (a payload-free
             // enum passed to `inspect`/stored in `any`/inside a composite) is the
-            // deferred box-on-escape-into-`any` work; see docs/skull-enum-value-types.md.
+            // deferred box-on-escape-into-`any` work.
             StringifyRoute::EnumNames(name) => {
                 let names =
                     self.emit_cur(Inst::Global(Ustr::from(

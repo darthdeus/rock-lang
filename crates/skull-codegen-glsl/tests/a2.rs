@@ -1,4 +1,4 @@
-//! A2 vertex+fragment pipeline (docs/shaders.md): whole-program shader
+//! A2 vertex+fragment pipeline: whole-program shader
 //! compilation. RED-first scaffold -- these pin the A2a target behavior and go
 //! green as the emitter lands.
 //!
@@ -695,8 +695,7 @@ fn builtin_vertex_id_maps() {
     assert!(!glsl.contains("vertex_id("), "must not emit a fn call:\n{glsl}");
 }
 
-/// The premise the backend-neutral fullscreen submission rests on
-/// (`docs/gl-surface-census.md`): an A1 entry contributes NO vertex code, so
+/// The premise the backend-neutral fullscreen submission rests on: an A1 entry contributes NO vertex code, so
 /// nothing in an A1 program can observe how a backend tessellates the
 /// fullscreen rectangle. Two different entries emit the same VERTEX section,
 /// byte for byte, and that section reads only the two attributes -- no
@@ -787,7 +786,7 @@ fn reject_fwidth_in_vertex() {
     reject_pipeline(src, "vt", "fr", "fragment");
 }
 
-// --- bool-vector tier (docs/shaders.md B2) -----------------------------------
+// --- bool-vector tier -----------------------------------
 
 /// The emitted GLSL for the nonfinite-debug shape: bvec3 ctor + isnan/isinf +
 /// any + greaterThan + the vec3(bvec) bool->float cast, all rendered inline as
@@ -860,7 +859,7 @@ fn reject_bvec_attribute() {
 }
 
 // --- R32I entity-id tier: int fragment outputs + ISampler2D ------------------
-// The GLES entity-id path (docs/gles-entity-id-plan.md M1): ids live in R32I
+// The GLES entity-id path: ids live in R32I
 // attachments, so fragment entries write `int` outputs and readers sample an
 // `isampler2D` via texture_id(). ES300 note: isampler2D has NO default
 // precision in GLSL ES 3.00, so the declaration itself carries `highp`
@@ -972,8 +971,7 @@ fn reject_isampler_return() {
     reject_pipeline(src, "vt", "fr", "sampler");
 }
 
-// --- Attribute locations are RECORDED, not invented while printing ----------
-// (docs/shader-binding-layout-plan.md P1). Emission consumes the locations
+// --- Attribute locations are RECORDED, not invented while printing ----------. Emission consumes the locations
 // classification computed; it does not re-derive them with an enumerate()
 // index, which assumes one location per field and cannot express a type that
 // consumes several.

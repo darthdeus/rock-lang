@@ -7,8 +7,7 @@
 //! `-> int` extern that passed its return through produced a cdata where the
 //! declaration said number. That is not cosmetic: LuaJIT keys a table by cdata
 //! IDENTITY however its `__eq` compares, so a handle used as a `Map<int, V>` key
-//! only ever hit on the box that was inserted
-//! (`games/testbed/tests/sims/b1_ffi_handle.rock` is the runtime half).
+//! only ever hit on the box that was inserted.
 //!
 //! A `newtype` is a representation ALIAS, not a distinct C type, so it must be
 //! followed: `newtype Handle(int)` is an `int` at the boundary. That matters

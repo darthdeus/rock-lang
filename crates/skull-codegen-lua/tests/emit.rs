@@ -297,8 +297,7 @@ fn run_shaped_bound_looped(
     // `skull::mir_emit::callee_binding_pass_lua` emits, and for the same
     // reason: a captured callee must already be its final closure.
     let mut binds: Vec<skull_codegen_lua::CalleeBindingPlan> = Vec::new();
-    // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
-    // (docs/closure-env-records-plan.md); the record metatable lives in skull's
+    // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records; the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
     // canonical definition (one copy, shared with `skull::runtime_prelude`).
     let mut lua = format!(
@@ -660,7 +659,7 @@ fn exec_default_argument_filled_callee_side() {
     assert_eq!(run(src, "greet(\"World\", \"Hi\")"), "Hi, World!");
 }
 
-// --- Call-site default fill (docs/trace-pressure-work-plan.md, "Default fill") --
+// --- Call-site default fill --
 //
 // The callee keeps its `if p == nil { p = default }` prologue for calls the
 // emitter cannot see (a function value), but every DIRECT call passes a
@@ -1100,7 +1099,7 @@ fn for_vec_backed_iter_inline_is_zero_alloc() {
 // --- Slice 4.5 acceptance gate: the desugared+inlined counted loop is rewritten
 // into the codegen CountedLoop shape and prints as a native numeric `for` (FORL
 // bytecode). The goto-LOOP form of the same loop measured 1.8x slower on a
-// type-stable 2M-element sum (docs/iterator-implementation-plan.md, "FORL recovery").
+// type-stable 2M-element sum.
 #[test]
 fn for_user_iter_inline_emits_forl() {
     let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
@@ -1209,7 +1208,7 @@ fn map_filter_chain_is_zero_alloc_no_residual_next() {
 // --- Skip-loop FORL recovery: a filter/take_while layer's reject edge becomes
 // a `continue` (skip) or a jump to the loop exit (stop), so the whole chain
 // still rewrites into the codegen CountedLoop shape -- the doc-blessed flat
-// `for + skip-branch` (docs/iterator-desugaring-investigation.md C3). The goto
+// `for + skip-branch`. The goto
 // form of the same filter chain measured 1.82x a hand-fused loop
 // (benchmarks/iterator-zero-alloc/chain_parity.rock).
 #[test]
@@ -1472,7 +1471,7 @@ fn a_multi_return_forward_delivers_the_same_values_under_every_shape() {
     }
 }
 
-// --- Callee binding as immutable upvalues (docs/backends.md) ------------------
+// --- Callee binding as immutable upvalues ------------------
 //
 // `CalleeBindingMode::Upvalue` defines a function as a factory whose parameters
 // are named exactly like the callees they replace, so the body text is
@@ -1893,7 +1892,7 @@ fn probe(stop: int) -> int {\n\
 }
 
 /// The shipped shape calls the stdlib helper: the inline shape measured as a
-/// redistribution of aborts in representative workloads, not a reduction (docs/backends.md).
+/// redistribution of aborts in representative workloads, not a reduction.
 #[test]
 fn vec_index_read_calls_the_checked_helper_by_default() {
     let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");

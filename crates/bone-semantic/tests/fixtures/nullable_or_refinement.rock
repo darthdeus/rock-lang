@@ -4,8 +4,7 @@
 //! `if c == null || !c.in_reach()` type-check -- the guard-combine of two
 //! `if c == null { .. }` / `if !c.in_reach() { .. }` early returns.
 //!
-//! DIVERGENCE from rock: rock does not narrow across `||` operands at all
-//! (docs/nullable-refinement.md). bone implements the intended dual-of-`&&`
+//! DIVERGENCE from rock: rock does not narrow across `||` operands at all. bone implements the intended dual-of-`&&`
 //! rule; the guard-combine is the motivating case.
 
 // `x == null` false in the RHS => `x` is non-null there.

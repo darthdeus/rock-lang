@@ -700,7 +700,7 @@ impl Builder<'_> {
             // job, not baked into the IR). On resolution failure, recover an
             // INDIRECT call through a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
-                // A `@struct_expand` fn (docs/shaders.md) is replaced
+                // A `@struct_expand` fn is replaced
                 // by its literal pairs list -- recognized through the intrinsic
                 // registry off the resolved FuncRef, so no user fn is hijacked by
                 // name and the common non-intrinsic call pays only one field read.
@@ -1541,7 +1541,7 @@ impl Builder<'_> {
             // puts the ctor behind a cell, which stops SROA forwarding it, so the
             // box survives to the residue check -- measured as
             // `nobox_coalesce_at_ctor_field` regressing CORRECT -> LOUD REJECT,
-            // exactly the win `docs/parked/inline-lua.md` recorded this costing.
+            // avoiding the per-call wrapper overhead.
             // Narrowing to a static presence does not help: at a `??` the
             // presence is dynamic and the coalesce consumes it anyway.
             // An ORDINARY value has no residue check to catch a lost presence,

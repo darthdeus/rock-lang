@@ -1084,7 +1084,7 @@ fn oracle_globals_survive_repeated_updates() {
     // TYPE's home (builtin int for `global G: int`), not the defining module,
     // so a purge keyed on the ty's module left stale user globals behind and
     // every rebuild after the first died with "duplicate global". Found by
-    // hand-running `rock watch match3 --backend bone`.
+    // hand-running `rock watch example --backend bone`.
     let with_global = "
 global GRID_W: int = 8
 

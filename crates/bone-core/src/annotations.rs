@@ -200,7 +200,7 @@ fn validate_one(
         // `__ROCK_TYPE_TABLE` instead of keeping its own list of names.
         //
         // The optional bare identifier is the NATIVE LEDGER class
-        // (`stone-rs`'s `native_ledger`), for the types the ledger tracks. A
+        // (the host's native ledger), for the types the ledger tracks. A
         // host resource the ledger does not track -- an FFI pointer, a
         // `NativeBuffer` -- carries the annotation with no class: the compile
         // check still applies, and the runtime has nothing to ask about it.

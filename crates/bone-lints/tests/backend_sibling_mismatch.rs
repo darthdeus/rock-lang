@@ -62,7 +62,7 @@ fn matching_siblings_are_not_flagged() {
 
 #[test]
 fn flags_an_arity_drift_across_files() {
-    // The `stone_create_window_ex` shape: the js half never grew the last
+    // The `host_create_window_ex` shape: the js half never grew the last
     // param. Split across modules, since that is how siblings actually live
     // (stdlib/engine decl vs `js_ffi.rock`).
     let lua = "inline(lua) fn make_window(title: string, full: bool) -> int = \"return 1\"";
@@ -89,7 +89,7 @@ fn a_portable_decl_covers_the_missing_backend() {
     // `probe(float)` is served on BOTH backends by the portable Rock body, so
     // the lua-only `probe(int)` overload is the only concrete decl -- and with
     // one concrete backend per signature there is nothing to drift. Missing
-    // this rung false-flags every wrapper-over-raw-extern pair in stone.
+    // this rung false-flags every wrapper-over-raw-extern pair in a host library.
     let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
                inline(js) fn probe(x: int) -> int = \"return x;\"\n\
                fn probe(x: float) -> int {\n    return 0\n}";

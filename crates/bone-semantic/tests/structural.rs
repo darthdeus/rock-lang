@@ -227,7 +227,7 @@ fn main_body_error_messages(src: &str) -> Vec<String> {
 }
 
 // P1a: a leaf type mismatch reads "expected `X`, found `Y`", not the bare
-// jargon "Failed to unify Y and X" (docs/error-quality-plan.md).
+// jargon "Failed to unify Y and X".
 #[test]
 fn leaf_type_mismatch_says_expected_found() {
     let msgs = main_body_error_messages(r#"fn main() { let a: int = "hello" }"#);
@@ -267,7 +267,6 @@ fn generic_constructor_mismatch_names_both_types() {
 // `: Foo` annotation), so the reader sees WHERE the expectation came from.
 // Works for span-carrying types (nominal/compound); builtins (`int`) lower to a
 // shared interned TyId with no per-site span -- documented gap in
-// docs/error-quality-plan.md.
 #[test]
 fn type_mismatch_labels_the_expected_type_origin() {
     let src = "struct Foo { x: int }\nfn main() { let a: Foo = \"hello\" }";
@@ -286,7 +285,7 @@ fn type_mismatch_labels_the_expected_type_origin() {
     );
 }
 
-// `/` is float division (docs/float-division-plan.md); its `float` result in
+// `/` is float division; its `float` result in
 // an int-shaped hole is rejected with a hint to use `./`. Self-contained (the
 // float operators are declared inline) so it needs no stdlib.
 #[test]
@@ -305,7 +304,7 @@ fn main() { foo(3 / 4) }
 
 // The `./` hint also fires when the `/` is buried in the mismatched expression,
 // reached through arithmetic operators (`__op_mul`) rather than being the
-// top-level node (docs/float-division-plan.md).
+// top-level node.
 #[test]
 fn float_div_deep_in_mul_subtree_hints_idiv() {
     let src = r#"
@@ -336,7 +335,7 @@ fn main() { let x: int = -(3 / 4) }
 
 // The hint's label points at the offending `/` subexpression, not the whole
 // mismatched expression, so the caret lands on `(3 / 4)` rather than the outer
-// `2.0 * (3 / 4)` (docs/float-division-plan.md).
+// `2.0 * (3 / 4)`.
 #[test]
 fn float_div_hint_span_points_at_the_division() {
     let src = r#"
@@ -397,7 +396,7 @@ fn main() {
 // provisionally fixes `T=int` and the float arg widens `T` back to float) is
 // NOT a mismatch -- coerce widens it. The hint must defer to that: no error at
 // all. Regression for numeric widening in `min(1, (a/b)*1.6)` (a first cut fired
-// the hint before coerce got to widen). docs/float-division-plan.md.
+// the hint before coerce got to widen).
 #[test]
 fn float_div_into_widening_numeric_var_is_not_an_error() {
     let src = r#"
@@ -1788,7 +1787,7 @@ fn ref_finished_before_a_coroutine_suspension_is_allowed() {
     assert!(!bone_rejects(src), "last use before yield does not put the ref in the coroutine frame");
 }
 
-// IDENTITY BORROW ACROSS SUSPENSION (docs/identity-storage-plan.md): an
+// IDENTITY BORROW ACROSS SUSPENSION: an
 // identity parameter is an implicit borrow that coroutine construction would
 // retain before the first resume, so a `co fn` cannot take one at all.
 #[test]
@@ -2186,8 +2185,7 @@ fn unary_minus_miss_reads_as_operator_error() {
 
 // Float literals in annotation args must survive lowering as
 // `AnnoValue::Float` (incl. the unary-minus form) -- the value-test
-// expectation surface (`@test(returns = 1.5)`,
-// docs/backends.md) reads them; `Other` would make
+// expectation surface (`@test(returns = 1.5)`) reads them; `Other` would make
 // float expectations silently unreadable.
 #[test]
 fn annotation_float_args_lower_as_float() {
@@ -2216,8 +2214,7 @@ fn annotation_float_args_lower_as_float() {
     assert_eq!(got, vec!["Float(-2.5)", "Float(1.5)"], "float annotation args must not lower to Other");
 }
 
-// Lossless lowering of param/field annotations (docs/annotations-design.md
-// S3): skull-side consumers (@size/@instance/@flat) read these from HIR, so
+// Lossless lowering of param/field annotations: skull-side consumers (@size/@instance/@flat) read these from HIR, so
 // dropping them at lowering is a silent-drop hole.
 #[test]
 fn param_annotations_survive_lowering() {
@@ -2270,8 +2267,7 @@ fn field_annotations_survive_lowering() {
 
 // A resolved call to a generic fn persists the winning candidate's
 // instantiated generics (declaration order) in `call_generic_bindings` --
-// the binding source for skull's inliner call-site specialization
-// (docs/flatvec-plan.md, Mechanism).
+// the binding source for skull's inliner call-site specialization.
 #[test]
 fn generic_call_records_instantiation_bindings() {
     let src = r#"value V2 { x: float, y: float }

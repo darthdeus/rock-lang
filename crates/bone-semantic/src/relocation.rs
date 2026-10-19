@@ -1,4 +1,4 @@
-//! ALIASING (docs/identity-storage-plan.md, Author decisions, principle 3): a
+//! ALIASING: a
 //! Vec or Map may not grow, shrink, reorder or rehash while a reference into
 //! one of its elements is live, because the element moves and a write through
 //! the old reference lands in the superseded buffer.

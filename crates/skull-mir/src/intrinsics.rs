@@ -1,6 +1,5 @@
 //! The `@intrinsic` mechanism: the stdlib DECLARES intrinsics, backends
-//! IMPLEMENT them (docs/intrinsics-plan.md, docs/stdlib-multibackend-plan.md
-//! "Intrinsics design"). The portable artifact is the contract, not the mapping.
+//! IMPLEMENT them. The portable artifact is the contract, not the mapping.
 //!
 //! **Body-slot rule.** A fn has one body, and that slot is the luajit story: an
 //! `inline(lua)` body IS the luajit mapping; a Rock body IS the portable
@@ -13,7 +12,7 @@
 //! backend mapping is fatal even when a fallback body exists, so a perf-critical
 //! primitive can never silently degrade to a slow portable loop.
 //!
-//! `@struct_expand` (docs/shaders.md) is an intrinsic whose
+//! `@struct_expand` is an intrinsic whose
 //! emission is a compile-time [`ExpandKind`] on every backend, recognized at MIR
 //! lowering rather than any per-backend table.
 
@@ -48,13 +47,11 @@ pub enum ExpandKind {
     /// `materialize<T>(value: T) -> T` makes a value aggregate's runtime box
     /// explicit at this source position.
     Materialize,
-    /// `@struct_expand fn f<T>(u: T) -> [(string, E)]` -> the literal pairs list
-    /// (docs/shaders.md, Layer 2).
+    /// `@struct_expand fn f<T>(u: T) -> [(string, E)]` -> the literal pairs list.
     StructPairs,
     /// `@shader_expand fn rock_shader<V, F>(vert: V, frag: F) -> string` -> the
     /// pipeline key const `"<vert>+<frag>"`; the driver emits one top-level
-    /// `__rock_shader_register(key, glsl)` per distinct pair
-    /// (docs/shaders.md).
+    /// `__rock_shader_register(key, glsl)` per distinct pair.
     ShaderPipeline,
     /// `@shader_expand fn rock_compute<F>(entry: F) -> string` -> the direct
     /// compute entry key; the driver owns its retained artifact.
@@ -62,23 +59,22 @@ pub enum ExpandKind {
     /// `@vertex_expand fn f<T>(v: FlatVec<T>) -> int | [int]` -> the element's
     /// vertex layout as a literal: the stride for an `int` return, the
     /// per-attribute component counts for `[int]`. Both from one
-    /// `vertex_plan`, so the two cannot drift
-    /// (docs/shader-binding-layout-plan.md, P1 wiring).
+    /// `vertex_plan`, so the two cannot drift.
     VertexLayout,
     /// `@uniform_expand fn f<T>(fv: Ptr<float>, iv: Ptr<int>, u: T)` -> one
     /// DIRECT typed store per primitive leaf of `u`, at the std140 offsets
     /// `gpu_layout::uniform_block` computes. Never a per-leaf helper call. The
     /// views are params rather than looked up here, so the compiler names no
     /// runtime field; the public generic setter is what pairs them with one
-    /// scratch (docs/shader-binding-layout-plan.md).
+    /// scratch.
     UniformBlock,
     /// `@build_var_expand fn build_var(name: string) -> string` -> the value
     /// the host resolved from `[build.vars]` for this invocation, as a string
-    /// const. Undeclared names reject (docs/comptime-plan.md).
+    /// const. Undeclared names reject.
     BuildVar,
     /// `@embed_expand fn embed_string(path: string) -> string` -> the file's
     /// contents as a string const, path resolved against
-    /// `Workspace.comptime_inputs.embed_root` (docs/comptime-plan.md).
+    /// `Workspace.comptime_inputs.embed_root`.
     EmbedString,
     /// `@uniform_values fn f<T>(u: T) -> SemanticUniformBlock` -> one
     /// compiler-owned canonical scalar leaf per logical uniform leaf.

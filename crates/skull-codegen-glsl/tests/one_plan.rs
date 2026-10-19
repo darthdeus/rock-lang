@@ -1,5 +1,4 @@
-//! **GLSL checking and emission consume ONE validated plan** (docs/shaders.md,
-//! `docs/monomorphization-plan.md` S 9).
+//! **GLSL checking and emission consume ONE validated plan**.
 //!
 //! `check_entry_profile` / `check_pipeline_profile` exist so the mono shader
 //! artifact view cannot admit what emission refuses. That guarantee is only

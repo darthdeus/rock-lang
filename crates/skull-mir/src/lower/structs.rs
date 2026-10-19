@@ -703,8 +703,7 @@ impl Builder<'_> {
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
-    /// literal pairs list. See the free helpers above and
-    /// docs/shaders.md (Layer 2).
+    /// literal pairs list. See the free helpers above.
     pub(crate) fn expand_struct_pairs(
         &mut self,
         call: Idx<Expr>,
@@ -775,7 +774,7 @@ impl Builder<'_> {
     }
 
     /// Expand a `rock_shader(vert, frag)` call to its pipeline key const
-    /// `"<vert>+<frag>"` (docs/shaders.md). The driver
+    /// `"<vert>+<frag>"`. The driver
     /// (`skull::mir_emit`) emits the matching top-level `__rock_shader_register`;
     /// this side produces only the key -- no GLSL, so skull-mir stays free of the
     /// GLSL backend. Rejections flow through the shared `resolve_shader_pair`; the
@@ -791,7 +790,7 @@ impl Builder<'_> {
     }
 
     /// `build_var("NAME")` / `embed_string("path")` -> the resolved value as a
-    /// string const (docs/comptime-plan.md tier 1). Resolution goes through the
+    /// string const. Resolution goes through the
     /// shared `resolve_comptime_value`; the fatal gate is
     /// `comptime_input_rejection`.
     pub(crate) fn expand_comptime_input(
@@ -896,8 +895,7 @@ impl Builder<'_> {
         // are live at any store. The whole-value read below loads every leaf
         // into a register before the first store; inside a trace that keeps
         // all of them (41 for the engine block) live in every exit snapshot
-        // taken during the pack, against a 16-register side-trace budget
-        // (docs/trace-pressure-work-plan.md).
+        // taken during the pack, against a 16-register side-trace budget.
         if let Some(source) = self.global_uniform_source(u_e, struct_name)? {
             let leaf_count = source.leaf_count();
             if leaf_count != stores.len() {
@@ -942,8 +940,7 @@ impl Builder<'_> {
     /// The leaves of a uniform-block argument, whatever WIRE its expression
     /// arrived on.
     ///
-    /// A uniform block's packing is a property of its TYPE
-    /// (`docs/luajit-wide-value-abi.md` gate 4), so the leaf shape comes from
+    /// A uniform block's packing is a property of its TYPE, so the leaf shape comes from
     /// the nominal rather than from the argument's `RepPlan`. It has to: an
     /// ordinary `value` wider than the ABI cut crosses a Rock-to-Rock call as
     /// one boxed slot, and that slot's plan is `Opaque` -- it carries no leaf
@@ -1228,8 +1225,7 @@ impl Builder<'_> {
         if let VariantArgs::Unit = args {
             // A payload-free enum is an `int` value GLOBALLY (the variant's
             // declaration-order ordinal). Fast int `match`/`==`/Map keys, and
-            // C-layout-eligible as a value-struct field. See
-            // docs/skull-enum-value-types.md.
+            // C-layout-eligible as a value-struct field.
             if let Some(ord) = payload_free_ordinal(self.ws, enum_name, variant) {
                 return Ok(self.emit_cur(Inst::Const(Lit::Int(ord))));
             }
@@ -1268,7 +1264,7 @@ impl Builder<'_> {
     /// `Some(shape)` iff `base.field` is a flattenable enum field: `base` is a
     /// non-`value` struct and the field's declared type is a [`flat_enum_shape`]
     /// enum. Drives the construct/store/match/materialize rewrites.
-    /// A swizzle read (`v.yx`, `c.rgb` -- docs/agent-reference/language.md): the base's
+    /// A swizzle read: the base's
     /// inferred type is a float vec and `field` is a valid synthetic swizzle for
     /// it. Bone already accepted the read, so this only distinguishes swizzles
     /// from real fields (len-1 `x/y/z/w`) and non-vec bases.

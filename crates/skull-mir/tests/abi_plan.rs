@@ -1,5 +1,4 @@
-//! The backend ABI of ONE EMITTED BODY (`docs/monomorphization-plan.md` cut
-//! C+D, step A*).
+//! The backend ABI of ONE EMITTED BODY.
 //!
 //! Pre-cutover, emission writes two populations of definition: one shared body
 //! per declaration, plus a specialized body per `(FuncRef, Vec<MonoTy>)` the

@@ -922,9 +922,9 @@ pub fn check_callee(
     // The graph is TARGET-NEUTRAL: it records bone's collapsed group
     // REPRESENTATIVE, while MIR calls the sibling serving the backend being
     // lowered. Raw `FuncRef` equality reports a CORRECT cross-backend selection
-    // as a mismatch -- `games/sample-game`'s `inline(lua) file_append`
-    // overriding the engine's portable `@nomangle` one is the corpus's single
-    // case. So the comparison asks the emitter's OWN selection rule, the same
+    // as a mismatch when an application's `inline(lua)` body overrides a
+    // portable `@nomangle` body. The comparison asks the emitter's OWN
+    // selection rule, the same
     // `backend_variant` `artifact::realize_decl` reaches for; a same-name
     // same-signature pair with a REPEATED backend is not a variant group at all
     // (bone refuses it), so it still mismatches.

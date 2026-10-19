@@ -14,7 +14,6 @@ default = []
 perfetto = ["dep:tracing-perfetto", "dep:tracing-flame", "dep:tracing-subscriber"]
 # Mirror rock-cli: build rock-lsp's bone hover/diagnostics path with bone's
 # sequential shim (single-threaded, no rayon frames) for clean profiling. See
-# docs/bone-profiling.md.
 sequential = ["bone-query/sequential"]
 
 [lints]

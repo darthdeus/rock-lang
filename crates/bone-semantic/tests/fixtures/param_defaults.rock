@@ -57,7 +57,7 @@ fn f2(a: int = 1, b: int = a) -> int {
 }
 
 // ...and a param named after a global fn does NOT shadow it in its own
-// default — `color` here is the global fn, unambiguously (the stone pattern
+// default — `color` here is the global fn, unambiguously (the host-library pattern
 // `color: Color = color(0, 0, 0, 0)`).
 //- param_default_shadowing_name_resolves_to_fn
 struct Color2 { r: int }

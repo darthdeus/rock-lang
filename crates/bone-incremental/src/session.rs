@@ -452,7 +452,7 @@ pub enum FileDiff {
 /// Reject a macro name colliding with a function name (call-position ambiguity)
 /// and a macro call whose argument labels don't fit its parameters, cross-module,
 /// on the pre-expansion module set (macros still present). The same gates
-/// `check_modules` applies on the CLI compile path, so sim / stone / LSP rebuilds
+/// `check_modules` applies on the CLI compile path, so CLI / LSP rebuilds
 /// refuse the same programs. Returns the first offender.
 fn reject_macro_name_collisions(modules: &[Ast]) -> Result<(), CompilerError> {
     match check_macro_name_uniqueness(modules)

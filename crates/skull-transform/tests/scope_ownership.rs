@@ -1,4 +1,4 @@
-//! P2 step 2 of `docs/closure-env-records-plan.md`: the scope ownership analysis
+//! The scope ownership analysis
 //! (`skull_transform::scope`). Each snippet lowers ONE fn to raw MIR (no
 //! cleanup, so `var`/`let` stores survive) and asserts the recovered scope tree,
 //! cell owners, and per-lambda captures. Covers the two shapes that break a naive

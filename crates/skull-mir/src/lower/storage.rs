@@ -1165,8 +1165,7 @@ impl Builder<'_> {
 
     /// A fresh column-stored `Map<K, V>`: a hash spine of slot indices over an
     /// empty column Vec, plus the free list and the live count. Arena's
-    /// bookkeeping-SoA field names deliberately -- the two are one structure
-    /// (`docs/unfuck-backlog.md`).
+    /// bookkeeping-SoA field names deliberately -- the two are one structure.
     ///
     /// The `data` columns must exist before the first store, which is why this
     /// mints a zero-length `MakeVecColumns` rather than an empty table.
@@ -1621,8 +1620,7 @@ impl Builder<'_> {
     }
 
 
-    /// A synthesized call to a named runtime entry (`docs/boundary-contracts.md`
-    /// S 1.4): the column-storage spine helpers and the `NativeBuffer` bounds
+    /// A synthesized call to a named runtime entry: the column-storage spine helpers and the `NativeBuffer` bounds
     /// check. Non-generic by necessity -- `Inst::Call` carries no generic
     /// arguments, so a generic Rock helper could never specialize here.
     ///
@@ -1859,7 +1857,7 @@ impl Builder<'_> {
     /// `_data`: luajit's is 1-based, JS's is 0-based. JS cannot simply adopt the
     /// 1-based form to share one rule -- leaving index 0 empty makes every column
     /// a HOLEY array in V8, which forfeits the packed-double fast path the whole
-    /// layout is measured against (`docs/js-vec-columns-plan.md`).
+    /// layout is measured against.
     pub(crate) fn column_base_is_one(&self) -> bool {
         self.scx.target != bone_semantic::hir::FnBackend::Js
     }

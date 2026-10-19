@@ -1,5 +1,4 @@
-//! Identity storage only an instance's substitution shows
-//! (docs/identity-storage-plan.md S0c). `fn stash<T>(x: T) { let v = [x] }`
+//! Identity storage only an instance's substitution shows. `fn stash<T>(x: T) { let v = [x] }`
 //! stores nothing bone can see; `stash<Unit>` stores an identity struct in a
 //! Vec. The body walk is bone's own ([`identity_body_sites_with`]), reading
 //! each slot's type under the instance's substitution, and the sites bone

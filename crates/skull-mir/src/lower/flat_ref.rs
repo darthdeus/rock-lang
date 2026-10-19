@@ -8,8 +8,7 @@
 //! bound to a vec and a slot, hoisted beside the caller like a nested fn. A
 //! `ref` return that addresses a flat element returns `vec, slot`. A body that
 //! never reaches a flat element emits exactly as before, so the cost is paid
-//! only where a flat element is borrowed (`docs/vec-value-columns-plan.md`,
-//! "Flat element refs").
+//! only where a flat element is borrowed.
 use super::*;
 use super::call::DirectCall;
 use bone_semantic::hir::InterpPart;

@@ -1,5 +1,4 @@
-//! The TARGET SPECS an artifact view is taken through
-//! (`docs/monomorphization-plan.md` S 0c final bullet, S 20a, S 20g.1).
+//! The TARGET SPECS an artifact view is taken through.
 //!
 //! **Three independent axes, not a target enum** (plan S 20a). The variants a
 //! flat enum would grow -- `LuaDesktop`, `LuaIos`, `JsWeb`, `CAndroid`,

@@ -222,7 +222,7 @@ fn f() -> int {
 
 // a lambda checked against `fn()` (unit return) has a discarded body tail,
 // like a fn with no declared return -- the with_shader callback shape
-// (stone/engine/rendering/draw_list.rock flush body)
+// (a draw-list flush body)
 //- lambda_arg_unit_ret_tail_if
 fn gives_bool() -> bool { true }
 fn run(cb: fn()) -> int {

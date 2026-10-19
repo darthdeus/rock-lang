@@ -102,7 +102,7 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
 /// fall off a measured write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86;
 /// 17.1x / 11.7x on arm64), so an unmarked wider type stays boxed. An explicit
 /// `nobox` guarantee bypasses this heuristic because boxing is not a legal
-/// fallback. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
+/// fallback.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
 pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
@@ -1023,7 +1023,7 @@ pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
         .collect()
 }
 
-// --- `@struct_expand` intrinsic (docs/shaders.md, Layer 2) --------
+// --- `@struct_expand` intrinsic --------
 //
 // A call to a fn declared `@struct_expand fn f<T>(u: T) -> [(string, E)]` is
 // replaced at lowering by the literal pairs list: one `(field_name, E::V(u.field))`
@@ -2001,7 +2001,7 @@ pub fn bound_next_shape_from_concrete(
 /// iff some variant has an `i`th payload field, and its type must be IDENTICAL
 /// across every variant that has it (a per-position type conflict -> not eligible,
 /// table+SROA). A variant with fewer fields pads the unused slots. Reflection is
-/// sacrificed (no `{__variant}` table); see `docs/skull-enum-value-types.md`.
+/// sacrificed (no `{__variant}` table).
 /// Record / ref payloads are NOT yet eligible (cut 2b+). Payload-free enums are
 /// plain ints (increment 1), not this.
 #[derive(Clone, Debug, PartialEq, Eq)]

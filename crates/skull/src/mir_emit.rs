@@ -2084,7 +2084,7 @@ fn merge_units(
 /// rooting all of them covers every invisible edge class at once -- including the
 /// the string-keyed `on_loop_jump` dispatch site, whose targets appear only as
 /// string literals. CodeRef-backed `@on_reload` values are rooted by their
-/// decorator application. Measured cost on match3: 24 fns / 7.2 KB, 0.3% of the
+/// decorator application. Measured cost on an application: 24 fns / 7.2 KB, 0.3% of the
 /// chunk. Sound beats clever at that price.
 ///
 /// The rest name a fn from generated top-level text rather than from a body:
@@ -4323,7 +4323,7 @@ fn inline_hoisted_bodies(
 /// (`column_element_repr` / `column_element_store`). Anything left is a
 /// decomposition the lowerer does not implement yet -- today, a stdlib Vec entry
 /// point that still goes through the boxed `_data` (`enumerate` is the one real
-/// game code hits, in application's `update_survivors`).
+/// game code hits, in an application's update loop).
 ///
 /// The emitter already refuses these (`write_index`'s `unreachable!`), but a
 /// panic in a parallel emit worker is the wrong shape of loud: no span, no source

@@ -2,7 +2,7 @@
 //! coroutine mid-stack, so its terminal `defer`s never run. `stop` / `replace`
 //! are the cancel verbs that fire them. Reads inference (the TARGET's type is
 //! what identifies the slot), so the harness runs a full `semantic_pass`.
-//! `Task` is declared locally -- the lint keys on the target type, not on stone.
+//! `Task` is declared locally -- the lint keys on the target type, not on the host library.
 
 use bone_lints::{filter_suppressed, task_null_abandon, LintFinding, TaskNullAbandon};
 use bone_semantic::prelude::*;

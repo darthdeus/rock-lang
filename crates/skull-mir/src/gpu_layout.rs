@@ -4,8 +4,7 @@
 //! locations ([`vertex_attrs`], P1), and `@textures` samplers and their units
 //! ([`texture_slots`], P2).
 //!
-//! Part of the target-neutral interface artifact
-//! (`docs/shader-binding-layout-plan.md`). [`AttrKind`] and [`SamplerKind`] are
+//! Part of the target-neutral interface artifact. [`AttrKind`] and [`SamplerKind`] are
 //! scalar kind + arity, never a GLSL type name (`GlslTy::name()` prints
 //! `vec4`), so a WGSL or Metal backend spells the same binding its own way.
 //!
@@ -532,7 +531,7 @@ pub fn uniform_group_members(
                 format!(
                     "uniform block: `{struct_name}` field `{}` has type `{ty_name}`, which has no \
                      std140 form here (want float/int/bool/Vec2/Vec3/Vec4/Mat4). Nested structs \
-                     and arrays are not packed yet -- see docs/shader-binding-layout-plan.md",
+                     and arrays are not packed yet",
                     fd.name
                 ),
             ));
@@ -630,7 +629,7 @@ pub struct ArrayMember {
 /// Separate from the scalar block PHYSICALLY too, not just as a type: the scalar
 /// group changes per draw while arrays change per activation, so sharing one
 /// buffer would force either a per-draw copy of the whole array payload or
-/// partial-update state. See `docs/shader-binding-layout-plan.md`.
+/// partial-update state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniformArrayBlockPlan {
     pub block_name: Ustr,

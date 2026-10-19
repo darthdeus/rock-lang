@@ -1,5 +1,4 @@
-//! Substituting a placeholder bound-call with its concrete `next`
-//! (`docs/monomorphization-plan.md` S 12).
+//! Substituting a placeholder bound-call with its concrete `next`.
 //!
 //! ONE rewrite, driven from two places. The tree that resolves a placeholder
 //! comes from different records depending on how the bounded body reaches the
@@ -276,8 +275,7 @@ fn repack_bound_next_element(
             return Err(CompilerError::new_no_location(format!(
                 "`{}` returns {} values at this specialization but its element \
                  cannot be rebuilt from leaves (a nullable `nobox` element, whose \
-                 presence leaf pairs with no field). Mechanism I of \
-                 docs/nobox-case-matrix.md.",
+                 presence leaf pairs with no field).",
                 func.name, shape.slot_count
             )));
         }

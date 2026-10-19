@@ -1,6 +1,5 @@
 //! Vertex attributes derived from a value struct's fields -- the first slice of
-//! the target-neutral interface artifact (docs/shader-binding-layout-plan.md
-//! P1).
+//! the target-neutral interface artifact.
 //!
 //! Scope note: these assert kinds, locations and component counts ONLY. Byte
 //! offsets and stride are the struct's C layout, owned by skull-mir's layout

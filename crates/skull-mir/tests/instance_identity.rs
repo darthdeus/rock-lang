@@ -1,5 +1,5 @@
 //! [`Instance`] is the ONE concrete-body identity, and [`MonoInterner`] is the
-//! one arena that makes it one (`docs/monomorphization-plan.md` cut C+D, E1).
+//! one arena that makes it one.
 //!
 //! `spec_key_subst_roundtrip.rs` establishes that `(FuncRef, SpecKey)` and
 //! `(FuncRef, MonoSubst)` carry the same information. This file is the other

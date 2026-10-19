@@ -1134,7 +1134,7 @@ pub struct StructDef {
 /// `__ROCK_TYPE_TABLE` at runtime.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct HostResource {
-    /// The native ledger class (`stone-rs`'s `native_ledger`) whose registry
+    /// The host's native ledger class whose registry
     /// can be asked whether one of these handles is still live, or empty for
     /// a host resource the ledger does not track.
     pub ledger_class: Ustr,

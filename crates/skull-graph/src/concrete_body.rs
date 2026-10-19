@@ -1,4 +1,4 @@
-//! `ConcreteBody` type tables (`docs/monomorphization-plan.md` S 9).
+//! `ConcreteBody` type tables.
 //!
 //! An instance's body states its types CONCRETELY: every `Idx<Expr>` and every
 //! `Idx<BindingInfo>` maps to a [`MonoTyId`], converted from the inferred `TyId`

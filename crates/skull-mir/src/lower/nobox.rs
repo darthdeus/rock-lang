@@ -66,10 +66,7 @@ impl Builder<'_> {
     /// stops at the caller's argument expressions.
     ///
     /// Pinned with its controls and the measured exempt population in
-    /// `crates/skull/tests/nobox_generic_return_boundary_sentinel.rs`. Owner:
-    /// the `mono` branch (`docs/parked/mono.md` -> `docs/parked/inline-lua.md`).
-    /// It blocks `docs/scene-system-plan.md` P4's FieldRef pull model, whose
-    /// position descriptor is exactly `ReadFieldRef<T, Vec2>`.
+    /// `crates/skull/tests/nobox_generic_return_boundary_sentinel.rs`.
     pub(crate) fn reject_nobox_boxed_call_args(
         &self,
         func: FuncRef,
@@ -85,7 +82,6 @@ impl Builder<'_> {
         // body, the box is AUTHORIZED at this one boundary
         // ([`Self::authorize_gpu_boundary_boxes`]) -- the guarantee keeps
         // applying to everything else the caller does.
-        // Rationale for shader work: docs/shaders.md, "nobox values and shaders".
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
@@ -128,7 +124,7 @@ impl Builder<'_> {
     /// is the discriminant -- a boxed `[int]` keeps `_data` and is fine.
     ///
     /// Keyed on the DECLARED SEMANTIC param type under the concrete
-    /// substitution, not the argument's (`docs/boundary-contracts.md` 2.4). A
+    /// substitution, not the argument's. A
     /// param spelled `[T]` or `Map<K, V>` states that the body expects that
     /// container's boxed representation, and a column-stored one is not it. A
     /// param spelled `any` states the opposite -- it claims no representation at

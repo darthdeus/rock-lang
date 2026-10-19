@@ -1190,7 +1190,6 @@ pub fn call_sccs(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashMap
 /// recorder too, so dropping the shape does not stop inlining -- it moves the
 /// limit the trace hits (`lj_record_call` grows `baseslot` instead and trips
 /// "trace too deep" at 250 slots) and costs a real interpreter frame.
-/// `docs/trace-pressure-work-plan.md` carries the measurement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TailCallShape {
     /// Every call in tail position is `do return f(...) end`.
@@ -1224,8 +1223,7 @@ pub fn tail_call_shape() -> TailCallShape {
 /// hash slot, and the resolved function object (2 more) -- plus the guard that
 /// the global still holds that function. LuaJIT's `maxirconst` limit is 500
 /// SLOTS, and "trace too long" (the limit being hit) can dominate trace aborts. An IMMUTABLE upvalue costs 2: only the function object, folded into
-/// the trace with no lookup and no guard. `docs/trace-pressure-work-plan.md`
-/// carries the per-shape measurement.
+/// the trace with no lookup and no guard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CalleeBindingMode {
     /// Every call is a global lookup by the callee's emitted name.
@@ -1259,8 +1257,7 @@ pub const STATE_CELL: &str = "__rock_state_cell";
 pub const INITIALIZED_CELL: &str = "__rock_initialized_cell";
 
 /// `ROCK_SKULL_STATE_RESERVE=0` leaves every Session's tables to grow lazily
-/// from `{}` instead of sizing them to the schema's rehash fixpoint at load
-/// (`docs/backends.md`, "Session cells"), for A/B measurement. Default: on.
+/// from `{}` instead of sizing them to the schema's rehash fixpoint at load, for A/B measurement. Default: on.
 pub fn state_reserve_mode() -> bool {
     static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(), Ok("0")))
@@ -1285,7 +1282,6 @@ pub fn state_cell_mode() -> bool {
 /// skipped, because it is guarded on `bc_j(*pc) != -1`. A `while true do .. end`
 /// gets `BC_LOOP` with a real range (`parse_while` patches it with
 /// `jmp_patchins`), so both paths see a closed loop.
-/// `docs/trace-pressure-work-plan.md` carries the measurement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoopShape {
     /// Every non-counted loop stays labelled blocks plus a backward `goto`.
@@ -1310,7 +1306,7 @@ pub fn loop_shape() -> LoopShape {
     })
 }
 
-/// The shipped emitted loop shape. See **Loop shape** in `docs/backends.md`.
+/// The shipped emitted loop shape.
 pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
 
 /// How a GC-tier `value` struct construction is spelled at its use site.
@@ -1322,7 +1318,6 @@ pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
 /// `CALLT` against LuaJIT's 15-slot `loopunroll` budget in every trace that
 /// records it. [`ValueCtorShape::Splice`] writes the table constructor and the
 /// `setmetatable` at the use site instead, so there is no frame to root.
-/// `docs/trace-pressure-work-plan.md` carries the measurement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ValueCtorShape {
     /// Every construction is a call to the chunk-level `<Name>_vt` ctor.
@@ -1350,8 +1345,6 @@ pub fn value_ctor_shape() -> ValueCtorShape {
 pub const DEFAULT_VALUE_CTOR_SHAPE: ValueCtorShape = ValueCtorShape::Call;
 
 /// How a bounds-checked Vec element read, store or column index is spelled.
-/// `docs/backends.md` carries the rule; `docs/trace-pressure-work-plan.md` the
-/// measurement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IndexShape {
     /// Every access calls the stdlib helper (`__vec_checked_get` and kin). In a
@@ -1378,8 +1371,7 @@ pub fn index_shape() -> IndexShape {
 }
 
 /// How a one-expression wrapper -- an `extern(ffi)` binding, a value-struct
-/// `_vt`/`_lct` ctor -- hands its result back. `docs/backends.md` carries the
-/// rule; `docs/trace-pressure-work-plan.md` the measurement.
+/// `_vt`/`_lct` ctor -- hands its result back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WrapperRetShape {
     /// `return lib.f(..)`: a `CALLT` into C. A root trace started at the
@@ -1420,8 +1412,7 @@ pub fn wrapper_return(expr: &str) -> String {
 /// The shipped emitted index shape. `Inline` measured as a redistribution on
 /// representative workloads, not a reduction: the aborts that started inside the helper reappeared
 /// as leaving-loop roots at the callers' own `for` headers, and the first
-/// frames got no faster (`docs/trace-pressure-work-plan.md`, "Checked-index
-/// helpers inlined at the emitter").
+/// frames got no faster.
 pub const DEFAULT_INDEX_SHAPE: IndexShape = IndexShape::Call;
 
 /// The shared per-type metatable global of a GC-tier `value` struct -- the table
@@ -1437,7 +1428,7 @@ pub fn callee_binding_is_bound() -> bool {
     callee_binding_mode() == CalleeBindingMode::Upvalue
 }
 
-/// The shipped emitted shape. See **Callee binding** in `docs/backends.md`:
+/// The shipped emitted callee binding shape:
 /// the measurement (mean frame 5.73 ms -> 4.99 ms, "trace too long" aborts
 /// 1339 -> 386) settled `AUTHOR DECISION -- CALLEE BINDING DEFAULT` in favour
 /// of [`CalleeBindingMode::Upvalue`] on 2026-09-11.
@@ -2361,7 +2352,7 @@ fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc) {
 ///
 /// Hoisting is NOT unconditional: it is sound only while the shared instance
 /// cannot be mutated. The place model legalized leaf writes through mutable
-/// storage (docs/value-semantics-axes.md), so a constant that reaches a mutable
+/// storage, so a constant that reaches a mutable
 /// place must be materialized FRESH per construction -- otherwise `a.p.x = 5`
 /// through one holder rewrites every other holder of that literal, including an
 /// unrelated global (`tests/value_const_hoist_aliasing.rock`). Candidates whose
@@ -3009,8 +3000,7 @@ fn always_inlinable(inst: &Inst) -> bool {
 /// wide value returned by a call occupied two locals (the result and a copy),
 /// which is what pushed functions holding a few wide values past LuaJIT's
 /// 250-slot frame limit. No later write can intervene, because the one write
-/// dominates every read. Narrow receives qualify too; the evidence against a
-/// width threshold is in `docs/nobox-wide-trace-plan.md`.
+/// dominates every read. Narrow receives qualify too.
 fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
     // cell -> (defs, the receive's block and position). Only a receive records
     // a position, so a cell qualifies iff its one def is one.

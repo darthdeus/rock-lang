@@ -219,8 +219,7 @@ pub fn lower_modules(
         ws.log_time("register decls", timer);
     }
 
-    // Annotation registry validation for NON-fn item positions
-    // (docs/annotations-design.md). Fn items, params, and fields validate
+    // Annotation registry validation for NON-fn item positions. Fn items, params, and fields validate
     // during lowering (build_function + the field/variant loops), which also
     // covers nested/grafted fns. Resolve the raw name first so a v1 decorator
     // that happens to share a compiler spelling cannot enter a builtin branch.

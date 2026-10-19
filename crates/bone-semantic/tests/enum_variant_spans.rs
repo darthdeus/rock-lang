@@ -1,4 +1,4 @@
-// RED driver for the enum/variant HIR-span work (docs/lsp-rename-coverage.md).
+// RED driver for the enum/variant HIR-span work.
 //
 // `hir::Expr::EnumVariant` and `hir::Pattern::EnumVariant` today record only the
 // WHOLE expression/pattern span -- not the enum-qualifier token (`Color`) or the

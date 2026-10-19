@@ -8,7 +8,7 @@ publish = false
 description = "Cell-based control-flow IR, lowering and backend layout contracts"
 
 # skull-mir: the cell-model CFG IR + HIR->CFG lowering for skull (the
-# Claude-managed backend). A FAITHFUL realization of docs/bone-mir-design.md:
+# Claude-managed backend). A cell-model CFG backend:
 # variables are mutable cells, expression results are single-use values, an
 # instruction's `Idx<Inst>` IS its value, and control flow lives only in block
 # terminators. NO SSA, NO block params (that arrives later as an additive

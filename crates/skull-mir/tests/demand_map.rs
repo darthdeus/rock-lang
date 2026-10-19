@@ -1,5 +1,4 @@
-//! The specialization demand map's agreement check
-//! (`docs/monomorphization-plan.md` S 12, mono cut C+D step D-1).
+//! The specialization demand map's agreement check.
 //!
 //! D-1 lets a specialization demand carry the bound-conformance tree the callee
 //! body's placeholders resolve through, keyed by the EMITTED BODY. That is sound

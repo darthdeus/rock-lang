@@ -947,17 +947,17 @@ fn arg_position_ranks_expected_enum_variant_first() {
 
 #[test]
 fn plain_completion_demotes_midword_scatter_below_clean_and_camelcase() {
-    // `nog` (3 chars -> subseq admission) mid-word-scatters `stone_log`
-    // (sto-N-e ... l-O-G): ADMITTED under the default subseq3 policy but DEMOTED
+    // `nog` (3 chars -> subseq admission) mid-word-scatters `event_log`
+    // (eve-N-t ... l-O-G): ADMITTED under the default subseq3 policy but DEMOTED
     // to band 3. It cleanly matches the camelCase variant `NotGround`
     // (N-o ... -G-round, the `G` a word boundary) -- band 2 -- which therefore
     // ranks ABOVE the scatter. Admission is permissive; the band does the work.
-    let src = "fn stone_log() {}\n\
+    let src = "fn event_log() {}\n\
                enum E { NotGround }\n\
                fn r() {\n  nog\n}\n";
     // `item` panics if the label is absent, so reaching both proves admission.
     let ng = item(src, 3, 5, "E::NotGround");
-    let sl = item(src, 3, 5, "stone_log");
+    let sl = item(src, 3, 5, "event_log");
     assert!(
         ng.sort_text < sl.sort_text,
         "clean camelCase must rank above mid-word scatter: {:?} vs {:?}",
@@ -965,8 +965,8 @@ fn plain_completion_demotes_midword_scatter_below_clean_and_camelcase() {
         sl.sort_text,
     );
     // The same function is still found by a clean (word-boundary) query.
-    let l2 = labels("fn stone_log() {}\nfn r() {\n  stlog\n}\n", 2, 7);
-    assert!(l2.iter().any(|x| x == "stone_log"), "clean query finds the fn: {l2:?}");
+    let l2 = labels("fn event_log() {}\nfn r() {\n  evlog\n}\n", 2, 7);
+    assert!(l2.iter().any(|x| x == "event_log"), "clean query finds the fn: {l2:?}");
 }
 
 #[test]
@@ -1312,12 +1312,12 @@ fn await_ranks_coroutine_fn_first() {
 }
 
 // -- Coroutine<Wait> ergonomics -----------------------------------------
-// `Wait` is the dominant yield type in Stone games (~75% of all
+// `Wait` is the dominant yield type in coroutine-heavy programs (most
 // `Coroutine<..>` annotations), so completion surfaces it: it ranks first in
 // the first generic arg slot, the `Coroutine` type name expands to
 // `Coroutine<Wait>`/`Coroutine<$0>` snippets, and a `co fn ()` signature
 // offers the `-> Coroutine<Wait>` return type. All gated on a `Wait`
-// struct existing (stone projects); otherwise the generic `Coroutine<$0>` form
+// struct existing (host libraries); otherwise the generic `Coroutine<$0>` form
 // stands in.
 
 const COFRAME: &str = "struct Wait { wait_frame: bool }\n";
@@ -1399,7 +1399,7 @@ fn plain_fn_signature_does_not_offer_coroutine_return_type() {
     assert!(!labels.iter().any(|s| s.starts_with("-> Coroutine")), "plain fn must not offer the return type: {labels:?}");
 }
 
-// The real Stone `Wait` is an ENUM, not a struct -- the ergonomics must fire
+// A host's `Wait` is an ENUM, not a struct -- the ergonomics must fire
 // for the shape that actually ships, not just the throwaway struct above.
 const WAIT_ENUM: &str = "enum Wait { Frame, Secs(float) }\n";
 

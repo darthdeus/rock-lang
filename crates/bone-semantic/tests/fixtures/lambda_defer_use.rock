@@ -1,5 +1,4 @@
-//! Defer-to-use inference for unconstrained lambda params
-//! (docs/lambda-defer-inference-design.md): an overload ambiguity or field
+//! Defer-to-use inference for unconstrained lambda params: an overload ambiguity or field
 //! projection whose operand is an unresolved lambda-param tyvar queues a
 //! pending constraint, resolved when a later use in the same body pins the
 //! param. The harness loads no stdlib, so every overload candidate is defined

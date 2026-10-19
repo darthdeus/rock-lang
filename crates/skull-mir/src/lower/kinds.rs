@@ -382,7 +382,7 @@ impl Builder<'_> {
     /// int-expr-in-float-slot; never int->int (loop counters/bounds, idiv/imod
     /// operands, int==int stay untouched -- the counted-loop latch recognition
     /// keeps matching `Const(Lit::Int(1))`). Identity on luajit; materialized by
-    /// non-Lua backends. See `docs/shaders.md`.
+    /// non-Lua backends.
     pub(crate) fn coerced(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, expected: TyId) -> Idx<Inst> {
         let to_float = self
             .concrete_ty_id(expected)

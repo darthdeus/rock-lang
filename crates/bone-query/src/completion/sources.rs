@@ -1034,7 +1034,7 @@ fn arg_admitted(
 }
 
 /// Whether a nominal type (struct OR enum) named `name` is defined anywhere in
-/// the workspace. The Stone `Wait` yield type is an enum, so the coroutine
+/// the workspace. The host's `Wait` yield type is an enum, so the coroutine
 /// ergonomics probe both.
 pub(crate) fn nominal_exists(ws: &Workspace, name: &str) -> bool {
     let u = Ustr::from(name);

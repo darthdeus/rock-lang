@@ -1,5 +1,4 @@
-//! A target's ARTIFACT VIEW of the shared instance graph
-//! (`docs/monomorphization-plan.md` S 9, S 11).
+//! A target's ARTIFACT VIEW of the shared instance graph.
 //!
 //! An artifact view is one target's REALIZATION of a graph it did not build:
 //! which instances it REACHES, how each is supplied, which opaque dependency

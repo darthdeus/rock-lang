@@ -1,5 +1,4 @@
-//! Scope ownership analysis for env-record lowering (P2 of
-//! `docs/closure-env-records-plan.md`).
+//! Scope ownership analysis for env-record lowering.
 //!
 //! MIR cells carry no scope: a lambda-local `let` and a mutated enclosing `var`
 //! are both just `Store` targets in lambda blocks. To hoist a lambda body to a
@@ -390,7 +389,7 @@ fn loop_binding_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
         .collect()
 }
 
-/// Dominance rail (docs/closure-env-records-plan.md, "Capture classification"):
+/// Dominance rail:
 /// a by-value capture snapshots the cell's value at the record's creation block,
 /// which is only sound if the cell's single write is guaranteed to have run by
 /// then. For a capture owned by the creating lambda's PARENT scope (a fresh local

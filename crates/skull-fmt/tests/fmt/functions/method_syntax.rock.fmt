@@ -1,4 +1,4 @@
-//! Test: D-form method syntax formatting (docs/method-syntax-plan.md)
+//! Test: D-form method syntax formatting
 //! Tags: functions, methods, dform
 
 //=== TEST CASE:simple_dform ===

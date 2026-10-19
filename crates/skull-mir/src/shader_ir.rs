@@ -1,5 +1,4 @@
-//! The TARGET-NEUTRAL shader spine (`docs/monomorphization-plan.md` Stage 3
-//! first slice, `docs/shader-binding-layout-plan.md` § Backend portability).
+//! The TARGET-NEUTRAL shader spine.
 //!
 //! Two objects, and the split between them is the point:
 //!
@@ -25,7 +24,7 @@
 use ustr::Ustr;
 use std::fmt::Write as _;
 
-/// Which GLSL dialect an artifact packages (docs/shaders.md): the `#version`
+/// Which GLSL dialect an artifact packages: the `#version`
 /// line plus the builtin/precision differences that follow from it. `Core330`
 /// is the desktop default; `Es300` is the mobile GLES target.
 ///

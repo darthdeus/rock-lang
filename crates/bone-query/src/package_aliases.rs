@@ -5,7 +5,7 @@
 //! before any file is lowered. Both entry points into bone's front end need
 //! the same table from the same graph: the batch compile
 //! (`semantic_pass_with_aliases`) and the incremental `Session` behind
-//! `rock sim` / `rock stone` / the LSP. This is the one place that maps one to
+//! CLI operations and the LSP. This is the one place that maps one to
 //! the other.
 
 use std::path::Path;

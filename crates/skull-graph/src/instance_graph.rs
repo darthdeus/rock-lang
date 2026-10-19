@@ -1,4 +1,4 @@
-//! The target-neutral instance graph (`docs/monomorphization-plan.md` Stage 0d).
+//! The target-neutral instance graph.
 //!
 //! It owns logical instance reachability below the target artifact views.
 //!
@@ -28,7 +28,7 @@
 //! a coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
 //! nothing here can count them. Every edge recorded is real;
 //! [`InstanceGraph::uninstantiated_roots`] records the generic roots no
-//! instantiation reached. Full accounting: `docs/mono-stage0d-manifest.md`.
+//! instantiation reached.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -87,7 +87,7 @@ pub enum EdgeKind {
     BoundNextWitness,
     /// A call no source expression contains: lowering synthesizes it and
     /// resolves the callee by LITERAL NAME through `Builder::stdlib_funcref` /
-    /// `call_spine` (`docs/boundary-contracts.md` S 1.4). Over-approximated --
+    /// `call_spine`. Over-approximated --
     /// see [`COMPILER_GENERATED_TRIGGERS`].
     CompilerGenerated,
 }
@@ -246,7 +246,7 @@ impl BoundRoot {
 /// merely could not complete yet ([`Unresolved`]).
 ///
 /// Three variants reject author programs under
-/// `docs/monomorphization-plan.md` S 0h. `ConcreteTypeUnavailable` records a
+/// `ConcreteTypeUnavailable` records a
 /// compiler invariant instead. They become fatal at Stage 3's emission cutover.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RejectionKind {
@@ -269,7 +269,7 @@ pub enum RejectionKind {
     /// body, which is [`Unresolved`] data.
     UnconstrainedTypeVar,
     /// An identity struct in an ordinary storage position that only the
-    /// instance's substitution shows (docs/identity-storage-plan.md S0c).
+    /// instance's substitution shows.
     /// Fatal for the package whose call site instantiated it.
     IdentityInOrdinaryStorage,
 }
@@ -786,13 +786,13 @@ pub struct InstanceGraph {
     /// EXCLUDED is the only way to tell a narrowed gate from a dead one, and a
     /// filter whose rejects are invisible reads as "there were none".
     pub excused_generic_roots: BTreeMap<&'static str, BTreeSet<String>>,
-    /// Every reached boundary, classified per `docs/boundary-contracts.md`.
+    /// Every reached boundary, classified by its calling contract.
     pub boundaries: BTreeMap<String, Boundary>,
     /// Helper symbols owned by coroutine instances.
     pub coroutine_helpers: BTreeSet<CoroutineHelper>,
     coroutine_helpers_by_owner: BTreeMap<String, BTreeSet<CoroutineHelper>>,
     /// Which of the 15 literal-name `stdlib_funcref` entries the walk actually
-    /// reached (`docs/boundary-contracts.md` S 1.4). A name absent here is one
+    /// reached. A name absent here is one
     /// the corpus never triggers, not one that does not exist.
     pub erased_entries: BTreeSet<String>,
     /// Runtime entries an opaque `inline(lua)` body calls: the owning
@@ -828,7 +828,7 @@ pub struct InstanceGraph {
     /// A re-installed owner takes its own targets back OUT: re-walking a body
     /// that still calls what it called before loses nothing, and leaving them
     /// in made the suspect region the whole reachable graph -- 3.3 ms of a 7 ms
-    /// update on match3, where 33 owners were re-walked and almost every edge
+    /// application update, where 33 owners were re-walked and almost every edge
     /// came back identical.
     lost: BTreeSet<Instance>,
     /// **The cross-owner facts, maintained where a contribution is installed
@@ -878,7 +878,6 @@ pub enum StorageCond {
 /// `(trigger name, storage condition, the `stdlib_funcref`/`call_spine` names
 /// the arm emits WHEN THAT CONDITION HOLDS)`. Read off
 /// `crates/skull-mir/src/lower/storage.rs`; the complete set is catalogued in
-/// `docs/boundary-contracts.md` S 1.4.
 ///
 /// The condition uses the same `skull_mir::lower::ContainerPlan` as lowering.
 /// The names are the column-path ones only -- a non-column
@@ -952,8 +951,7 @@ impl InstanceGraph {
     }
 }
 
-/// Every runtime entry a synthesized call or an opaque body can name
-/// (`docs/boundary-contracts.md` S 1.4). Kept as ONE list so the inline-body
+/// Every runtime entry a synthesized call or an opaque body can name. Kept as ONE list so the inline-body
 /// scan and the synthesized-call table cannot drift about what the catalogue is.
 pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__map_col_clear",
@@ -985,8 +983,7 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
 /// Why a generic emission root carries no uncovered bare-name obligation, or
 /// `None` when it does.
 ///
-/// The obligation is "exist under a BARE name that opaque target text can call"
-/// (`docs/boundary-contracts.md` 1.2, 1.4), so it is a property of the EMITTED
+/// The obligation is "exist under a BARE name that opaque target text can call", so it is a property of the EMITTED
 /// SYMBOL, not of genericity. Two things discharge it, and both are enforced
 /// rather than promised:
 ///
@@ -4579,7 +4576,6 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // worth running. Counting over the starts would silently re-admit nothing
     // and skip the pair that matters.
     //
-    // Measurements in `docs/parked/mono.md`.
     // The per-declaration instance counts are a maintained index, not a fresh
     // pass over every instance.
     // Starts are instances with an OUTGOING edge -- a leaf can never reach a
@@ -5731,7 +5727,6 @@ pub fn serves(
 }
 
 /// Classify every reached callee that is a BOUNDARY, per
-/// `docs/boundary-contracts.md` Part 1.
 ///
 /// An instance is kept for a boundary as well as a Rock body -- Stage 2 splits
 /// them (plan S 9: one `InstanceId` OR one `BoundaryId`), and keeping both here

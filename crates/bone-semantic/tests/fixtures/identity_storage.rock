@@ -1,5 +1,5 @@
 //! @no_check
-//! Identity storage (docs/identity-storage-plan.md S0a). A `struct` has
+//! Identity storage. A `struct` has
 //! identity and lives only as an Arena row or a Scene/Session root; every
 //! ordinary declaration position holds values or handles. Fields of structs
 //! and values, enum payloads, nullable wrappers, newtypes, non-root globals,

@@ -87,7 +87,7 @@ fn const_alias_chain_inlines() {
     assert!(glsl.contains("1.5"), "aliased const not inlined:\n{glsl}");
 }
 
-/// The stdlib's own PI is the motivating case (docs/shaders.md).
+/// The stdlib's own PI is the motivating case.
 #[test]
 fn stdlib_pi_is_usable_in_a_shader_fn() {
     let src = r#"

@@ -1,5 +1,4 @@
-//! Completion corpus recorder -- the M6 replay corpus's server half
-//! (docs/completion-v2-design.md).
+//! Completion corpus recorder -- the M6 replay corpus's server half.
 //!
 //! Gated on `ROCK_LSP_RECORD`: `1` -> `/tmp/rock-completion-corpus.jsonl`,
 //! any other non-empty value -> that path (the `ROCK_LSP_DEBUG` convention).

@@ -1251,7 +1251,7 @@ fn pure_fn_calling_stdlib_lerp_is_not_flagged_impure() {
     // may only call @pure callees), so the stdlib lerp must itself be `@pure`
     // (it is -- pure arithmetic). Otherwise a @pure caller is wrongly flagged
     // "not provably pure" -- a divergence from rock, which infers the callee's
-    // purity. (`stone/engine/math/types.rock` hit this in the wild.)
+    // purity.
     let src = "@pure\nfn lerp2(a: float, b: float, t: float) -> float { return lerp(a, b, t) }\n";
     let bone = fresh(src);
     let diags = bone.diagnostics_for(PATH);
@@ -1319,7 +1319,7 @@ fn update_omits_backend_sibling_mismatch_without_explicit_selection() {
 }
 
 // A matching sibling pair is the common case -- it must stay silent, or every
-// stone/js_ffi pair would warn.
+// host/js_ffi pair would warn.
 #[test]
 fn matching_backend_siblings_publish_nothing() {
     let dir = tempfile::tempdir().unwrap();

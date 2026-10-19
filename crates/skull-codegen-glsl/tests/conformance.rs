@@ -1,4 +1,4 @@
-//! Conformance harness skeleton (docs/intrinsics-plan.md, slice 5): the
+//! Conformance harness skeleton: the
 //! DIFFERENTIAL precondition for the intrinsics that have BOTH a portable Rock
 //! fallback AND a backend native mapping.
 //!

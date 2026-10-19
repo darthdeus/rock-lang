@@ -1,5 +1,5 @@
 //! @no_check
-//! Identity storage in bodies (docs/identity-storage-plan.md S0b). An identity
+//! Identity storage in bodies. An identity
 //! local, parameter or return is a borrow; a body may not put one into
 //! ordinary storage: a Vec or Map local, a `[x]` literal, a value or enum
 //! constructor that stores it. A `co fn` parameter lives in the coroutine

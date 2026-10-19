@@ -165,8 +165,7 @@ pub struct ValueAlloc {
     /// free-slot watermark, so body-scoped temps disappear from loop-exit
     /// snapshots instead of pinning their values into every side trace — past
     /// ~16 inherited FP values `asm_head_side` aborts the side trace with
-    /// "NYI: register coalescing too complex" and the trace tree blacklists
-    /// (benchmarks/nyicoal/, docs/gc-pressure-reduction-plan.md item 1).
+    /// "NYI: register coalescing too complex" and the trace tree blacklists.
     pub color_scope: Vec<Option<Idx<Block>>>,
 }
 

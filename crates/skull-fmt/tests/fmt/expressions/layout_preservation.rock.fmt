@@ -1,6 +1,6 @@
 //! Test: the formatter preserves the author's intentional layout -- hand-aligned
 //! data-table columns and packed field grouping in multi-line constructs. It is
-//! a layout-preserver, not a normalizer. See docs/skull-fmt-plan.md
+//! a layout-preserver, not a normalizer.
 //! Tags: layout, alignment, data-tables, preserve
 
 // Hand-aligned array of struct literals: the column padding before short_code /

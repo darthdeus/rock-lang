@@ -1,5 +1,5 @@
 //! std140 layout for a stage's ARRAY block -- the `UniformArray<T>` half of the
-//! uniform lane (`docs/shader-binding-layout-plan.md`, backlog 4b).
+//! uniform lane.
 //!
 //! A separate plan type from [`UniformBlockPlan`] on purpose. That one's contract
 //! includes a value-struct producer: `uniform_block_checked` requires its

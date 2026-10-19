@@ -18,8 +18,8 @@ easy to break, so keep these habits:
   a stale module that was hard to find; a lost `!` in `!errs.is_empty()`
   dropped every diagnostic; name-keyed `old_gens` collided overloaded fns. Edit
   in coherent blocks and re-read the whole function afterwards.
-- **Run it.** `cargo test -p bone-semantic` after every change, and check failing names
-  against `docs/known-failing-tests.md` rather than totals.
+- **Run it.** `cargo test -p bone-semantic` after every change, and inspect failing
+  test names rather than totals.
 - `bone-query/` (IDE/LSP navigation -- `definition_at`, `references`, and the
   `lsp_types` facade `BoneWorkspace`) was always freely editable and remains so.
   `crates/bone-semantic/src/query.rs` is just `type_at`, the position->type primitive that
@@ -54,15 +54,6 @@ the_changed_body`, which replaced the flaky timing ratio).
 bumped by full, partial, and body-fast-path lowering. Use it to assert lowering
 work directly; `UpdateResult.relowered` has different semantics when lowering
 fails.
-
-## Design docs -- read first
-
-These predate recent work and may lag current state (check against the source
-before trusting them):
-
-- `docs/bone-backend-plan.md` -- current state, capability, open items (entry point).
-- `docs/bone-typechecker-architecture.md` -- architecture + how inference / stdlib loading work.
-- `docs/bone-mir-design.md`
 
 ## Cross-arena copy invariant (learned the hard way)
 

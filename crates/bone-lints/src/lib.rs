@@ -2997,7 +2997,7 @@ fn workspace_findings_by_file_census(
         }
         return out;
     }
-    // Warm modules are SCANNED (half of every stone sibling set is stdlib) but
+    // Warm modules are SCANNED (half of every backend sibling set is stdlib) but
     // not reported on, like every other lint's treatment of stdlib files.
     let warm_files: FxHashSet<Ustr> = warm.iter().map(|&mid| ws.module(mid).file).collect();
     let t = std::time::Instant::now();
@@ -3489,7 +3489,7 @@ fn backend_name(b: FnBackend) -> Option<&'static str> {
 /// drifted sibling, which is why this needs no opt-out annotation.
 ///
 /// Whole-workspace and decl-level: no inference, no bodies, no call graph.
-/// Stdlib decls participate (half of every stone sibling set lives there);
+/// Stdlib decls participate (half of every backend sibling set lives there);
 /// findings are attributed to the file of the offending decl.
 pub fn backend_sibling_mismatches(ws: &Workspace) -> Vec<BackendSiblingMismatch> {
     backend_sibling_mismatches_by_file(ws).into_values().flatten().collect()
@@ -3955,7 +3955,7 @@ pub fn unused_pure_exprs(ws: &Workspace) -> Vec<UnusedPureExpr> {
 
 /// A `transmute_of_nullable` finding: a `cast`/`transmute` call that strips a
 /// nullable argument to a non-nullable result -- laundering a real
-/// null-on-failure (e.g. `stone_load_image` -> `int?`) into an apparently-valid
+/// null-on-failure (e.g. `host_load_image` -> `int?`) into an apparently-valid
 /// handle. `inner_type` is the argument's rendered type (`int?`, `Mob?`); the
 /// diagnostic names it so the fix (`?? default` / a null check) is obvious.
 #[derive(Clone, Debug)]
@@ -3985,7 +3985,7 @@ impl LintFinding for TransmuteOfNullable {
         // The catalog's only `Error`: a laundered null-on-failure is a
         // correctness hole, not a smell. Irreducible instances do exist (a
         // generic `R` has no `?? default` to fall back to -- see
-        // `take_result` in stone), so unlike `entity_across_yield` the allow
+        // `take_result` in a host library), so unlike `entity_across_yield` the allow
         // comment stays legal.
         .with_level(CompilerErrorLevel::Error)
     }

@@ -4772,8 +4772,8 @@ pub fn completion(
     // away. Match is a CLEAN fuzzy match (`clean_match`): the query is a
     // subsequence whose first char is at a word boundary and the rest land at
     // boundaries / in a run -- so `tilecen` finds `tile_center` across the `_`
-    // and `log` finds `stone_log`, but a mid-word scatter (`nog` across
-    // `__sto(n)e_l(o)(g)`) is dropped rather than shown ranked low. The fuzzy
+    // and `log` finds `event_log`, but a mid-word scatter (`nog` across
+    // `__eve(n)t_l(o)(g)`) is dropped rather than shown ranked low. The fuzzy
     // score in the caller (`arg_sort_text`) then ranks tight runs first.
     // `prefix` is already lowercased.
     let pfx = prefix.as_bytes();
@@ -5448,8 +5448,8 @@ pub(crate) fn fz_boundary(cand: &[u8], j: usize) -> bool {
 /// delimiters (`_ . ( ) : space`) AND camelCase transitions (a lower/digit
 /// followed by an upper -- `NotGround`'s `G`), so PascalCase variant/type names
 /// match by their inner words. This is how people fuzzy-type (`tc` / `tilecen`
-/// -> `tile_center`, `log` -> `stone_log`, `nog` -> `NotGround`), and it drops
-/// coincidental mid-word scatter (`nog` across `__sto(n)e_l(o)(g)` or
+/// -> `tile_center`, `log` -> `event_log`, `nog` -> `NotGround`), and it drops
+/// coincidental mid-word scatter (`nog` across `__eve(n)t_l(o)(g)` or
 /// `Bloody(B)anda(g)e`). Filters completion candidates; ranking still uses the
 /// finer `fuzzy_score`. Boolean DP over (query x cand); char compare is
 /// case-insensitive. Empty = clean.

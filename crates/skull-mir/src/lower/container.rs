@@ -185,7 +185,7 @@ impl ContainerPlan {
         // A wide `nobox` value struct stores row-major in one table: a column
         // per leaf costs a table lookup, bounds check and barrier per leaf on
         // every push and read, which is what made a 50-leaf push end hot traces
-        // at LuaJIT's constant limit (docs/nobox-wide-trace-plan.md). Only a
+        // at LuaJIT's constant limit. Only a
         // non-generic struct: reflection finds a row's layout by struct name
         // (`__ROCK_STRIDED_ROWS`), which names one layout only without params.
         let wide_nobox_struct = matches!(family, ContainerFamily::Vec)

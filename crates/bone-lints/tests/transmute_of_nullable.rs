@@ -87,7 +87,7 @@ fn nullable_struct_transmute_is_flagged() {
 
 // Unlike every other lint in the catalog this one reports at `Error`: a
 // laundered null-on-failure is a correctness hole, not a smell, so it fails the
-// build rather than printing. `stone/engine/systems/coroutines.rock`
+// build rather than printing. The host coroutine library
 // (`take_result`) is the standing proof that irreducible instances exist, which
 // is why -- unlike `entity_across_yield` -- the allow comment stays legal.
 #[test]

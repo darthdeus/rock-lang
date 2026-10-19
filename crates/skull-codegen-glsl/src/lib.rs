@@ -1,4 +1,4 @@
-//! skull-codegen-glsl -- GLSL function-library emission (route B, `docs/shaders.md`).
+//! skull-codegen-glsl -- GLSL function-library emission.
 //!
 //! A second codegen backend over the shared `skull-mir` substrate (sibling of
 //! `skull-codegen-lua`). Given a typechecked [`Workspace`] and a set of root fn
@@ -14,7 +14,7 @@
 //!     skip-and-continue; never emit a guess.
 //!
 //! The tier-0 intrinsic mapping table ([`intrinsic_template`]) is the hand-written
-//! spec from `docs/shaders.md`, keyed by the callee's mangled signature (name +
+//! spec, keyed by the callee's mangled signature (name +
 //! GLSL param types) -- the future `@intrinsic` GLSL column.
 
 mod structure;
@@ -455,7 +455,7 @@ fn inst_kind(inst: &Inst) -> &'static str {
 
 // --- intrinsic mapping table ------------------------------------------------
 
-/// The GLSL tier-0 intrinsic table (`docs/shaders.md`): one row per
+/// The GLSL tier-0 intrinsic table: one row per
 /// (name, arity) -> `$1..$n` expression template. Single source for both
 /// [`GlslIntrinsics::lookup`] (call-site rendering) and
 /// [`GlslIntrinsics::entries`] (the fail-closed key surface), so the two can
@@ -511,7 +511,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     // textureSize returns ivec2; wrap in vec2(...) so the result is a float Vec2
     // (matches Rock's `-> Vec2`, and the gl_FragCoord/size divides it feeds).
     ("texture_size", 1, "vec2(textureSize($1, 0))"),
-    // GPU builtins (docs/shaders.md). frag_coord/discard take no
+    // GPU builtins. frag_coord/discard take no
     // args -> bare builtins (discard renders as the statement `discard;`, see
     // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
     ("frag_coord", 0, "gl_FragCoord"),
@@ -523,7 +523,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
     // param renders as plain GLSL indexing of the declared uniform array.
     ("at", 2, "$1[$2]"),
-    // Bool-vector tier (docs/shaders.md). isnan/isinf are GLES 3.00 builtins.
+    // Bool-vector tier. isnan/isinf are GLES 3.00 builtins.
     // `any` here is arity-1 (Bvec3 reduction) -- distinct from the iterator
     // `any` (arity-2, not a shader intrinsic). `greater_than`/`to_vec3` carry
     // portable Rock bodies for luajit/JS; these templates render the native
@@ -751,7 +751,7 @@ fn vec_op_symbol(name: &str) -> Option<&'static str> {
 // --- per-function emission ---------------------------------------------------
 
 /// A cosmetic-tier fold of a lowered `&&`/`||`/expression-`if` diamond back into
-/// one GLSL expression (`docs/shaders.md`). The diamond stored its
+/// one GLSL expression. The diamond stored its
 /// result into a single-use cell across two single-store arms; instead of
 /// emitting the diamond we render this expression at the cell's one use.
 #[derive(Clone, Copy)]
@@ -819,7 +819,7 @@ struct FnEmit<'a> {
     /// program's whole declared-global surface, plus written builtins).
     reserved_names: HashSet<String>,
     ignored_type_cells: HashSet<Idx<Cell>>,
-    /// Cosmetic folds (`docs/shaders.md`, cosmetic tier). A diamond's
+    /// Cosmetic folds. A diamond's
     /// single-use result cell -> the expression it renders as; the diamond itself
     /// is skipped, its declaration + stores suppressed.
     folded_cond: HashMap<Idx<Cell>, FoldedDiamond>,
@@ -1444,7 +1444,7 @@ impl FnEmit<'_> {
         Ok(())
     }
 
-    /// Detect the cosmetic-tier folds (`docs/shaders.md`): `&&`/`||`
+    /// Detect the cosmetic-tier folds: `&&`/`||`
     /// short-circuit diamonds collapse back to infix boolean expressions.
     fn compute_folds(&mut self) {
         let reach: HashSet<Idx<Block>> =
@@ -1709,7 +1709,7 @@ impl FnEmit<'_> {
             return Err(err(
                 self.span(),
                 format!(
-                    "shader profile: int-typed value ({}) in a float context without an IntToFloat coercion -- a missed lowering sink (docs/shaders.md)",
+                    "shader profile: int-typed value ({}) in a float context without an IntToFloat coercion -- a missed lowering sink",
                     inst_kind(&self.f.insts[iid])
                 ),
             ));
@@ -2920,7 +2920,7 @@ pub fn emit_shader_library(
     emit_shader_library_with_view(ws, &session.scx, &session.view)
 }
 
-// --- A1: fragment-entry compilation (docs/shaders.md) --------------------
+// --- A1: fragment-entry compilation --------------------
 
 /// A classified shader entry signature (A1 fragment, or an A2 pipeline stage).
 struct EntryShape {
@@ -4220,7 +4220,7 @@ fn render_shader_entry(
 }
 
 
-// --- A2: vertex+fragment pipeline (docs/shaders.md) ---------------------
+// --- A2: vertex+fragment pipeline ---------------------
 
 /// The vertex stage: which shader stage a reachability walk is emitting (drives
 /// per-stage builtin gating).
@@ -5173,7 +5173,7 @@ fn check_block_name_collisions<'a>(
 }
 
 /// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
-/// `#ifdef VERTEX`/`#ifdef PIXEL` file (docs/shaders.md). The vertex entry's
+/// `#ifdef VERTEX`/`#ifdef PIXEL` file. The vertex entry's
 /// return type (the varyings value struct) must be exactly the fragment entry's
 /// first param type. Vertex params are classified by annotation: `@attr` (per-
 /// vertex attribute struct), `@instance` (per-instance attribute divisor), and
@@ -5560,8 +5560,7 @@ impl ValueTestRet {
     }
 }
 
-/// A complete GLSL shader pair driving one `@test(returns = ...)` value test
-/// (`docs/backends.md`). The fragment shader wraps the
+/// A complete GLSL shader pair driving one `@test(returns = ...)` value test. The fragment shader wraps the
 /// emitted root fn and writes its scalar result to `layout(location = 0)`; the
 /// vertex shader draws a fullscreen triangle (no vertex attributes). Both carry
 /// the profile's `#version` line so the GL runner compiles them as one program.
