@@ -192,6 +192,13 @@ pub struct RepPlan {
     storage: Option<ValueStorage>,
     column_eligible: bool,
     nobox: bool,
+    /// Whether the lane budget may replace this plan with its boxed form.
+    /// False when boxing would IMPLICITLY materialize a `nobox` child
+    /// ([`box_would_materialize_nobox`]), which the `nobox` guarantee forbids.
+    /// Derived once, from the concrete type being planned, and retained here so
+    /// that budgeting reads the planner's own answer instead of a parallel
+    /// per-signature flag list.
+    boxable: bool,
 }
 
 impl RepPlan {
@@ -221,6 +228,14 @@ impl RepPlan {
 
     pub fn nobox(&self) -> bool {
         self.nobox
+    }
+
+    /// Whether boxing this value is legal at all: an ordinary value whose box
+    /// would materialize a `nobox` descendant is not, so the lane budget must
+    /// leave it on the scalar wire. A `nobox` plan is already excluded by
+    /// [`RepPlan::nobox`], so this fact does not repeat that guarantee.
+    pub fn boxable(&self) -> bool {
+        self.boxable
     }
 
     pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
@@ -1145,7 +1160,11 @@ impl RepArena {
         layout: RepLayout,
         storage: Option<ValueStorage>,
     ) -> RepId {
-        self.intern_with_facts(target, use_context, layout, storage, false, false)
+        // Production mints a `Leaves` plan only through
+        // [`Self::intern_value_shape_plan`], which derives boxing legality from
+        // the concrete type; every other layout is not a lane-budget candidate,
+        // so the fact is vacuous here.
+        self.intern_with_facts(target, use_context, layout, storage, false, false, true)
     }
 
     fn intern_with_facts(
@@ -1156,6 +1175,7 @@ impl RepArena {
         storage: Option<ValueStorage>,
         column_eligible: bool,
         nobox: bool,
+        boxable: bool,
     ) -> RepId {
         self.intern_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = (target, use_context, layout, storage, column_eligible, nobox);
@@ -1186,6 +1206,7 @@ impl RepArena {
                             storage,
                             column_eligible,
                             nobox,
+                            boxable,
                         });
                         inner.by_key.insert(key.clone(), id);
                         id
@@ -1207,6 +1228,11 @@ impl RepArena {
     ) -> RepId {
         let (storage, column_eligible) = value_shape_facts(ws, ty, &shape);
         let nobox = declared_nobox(ws, ty);
+        // Boxing legality is a function of the interned layout: a `Leaves`
+        // shape names its nominal type (`value_shape_facts` asserts it), and
+        // this predicate reads only that name and the workspace, so the plan
+        // needs no extra key slot to keep two answers apart.
+        let boxable = !box_would_materialize_nobox(ws, ty);
         let id = self.intern_with_facts(
             target,
             use_context,
@@ -1214,6 +1240,7 @@ impl RepArena {
             storage,
             column_eligible,
             nobox,
+            boxable,
         );
         self.intern_nested_value_plans(ws, target, &shape);
         id
@@ -1716,16 +1743,16 @@ impl RepArena {
     /// result last), and the loop stops as soon as the budget is met. A
     /// `nobox` value is never a candidate, so a signature the budget cannot
     /// satisfy keeps its lanes rather than acquiring a diagnostic here.
-    /// `boxable` is one flag per wire position, parameters in order and the
-    /// result last: false for a `nobox` value (decision 3) and for an ordinary
-    /// value whose box would materialize a `nobox` child
-    /// ([`box_would_materialize_nobox`]).
+    /// Legality comes from each position's own [`RepPlan::boxable`], derived
+    /// once when its concrete type was planned: false for an ordinary value
+    /// whose box would materialize a `nobox` child
+    /// ([`box_would_materialize_nobox`]); a `nobox` value is excluded
+    /// separately, by [`RepPlan::nobox`].
     fn apply_lane_budget(
         &self,
         target: FnBackend,
         params: &mut [RepId],
         result: &mut Option<RepId>,
-        boxable: &[bool],
     ) {
         let lanes = |id: &RepId| self.get(*id).lanes(self);
         let total = |params: &[RepId], result: &Option<RepId>| {
@@ -1740,11 +1767,11 @@ impl RepArena {
                 .enumerate()
                 .map(|(index, id)| (index, *id, RepUse::Parameter))
                 .chain(result.map(|id| (params.len(), id, RepUse::Return)))
-                .filter(|(index, id, _)| {
+                .filter(|(_, id, _)| {
                     let plan = self.get(*id);
                     matches!(plan.layout(), RepLayout::Leaves(_))
                         && !plan.nobox()
-                        && boxable.get(*index).copied().unwrap_or(false)
+                        && plan.boxable()
                 })
                 .max_by_key(|(index, id, _)| (lanes(id), std::cmp::Reverse(*index)));
             let Some((index, _, use_context)) = widest else { return };
@@ -1851,12 +1878,7 @@ impl RepArena {
                 RepGuarantees { nobox: nobox_only, allow_opaque: true },
             )?)
         };
-        let boxable: Vec<bool> = fn_params
-            .iter()
-            .chain(std::iter::once(ret.as_ref()))
-            .map(|ty| !box_would_materialize_nobox(ws, ty))
-            .collect();
-        self.apply_lane_budget(target, &mut params, &mut result, &boxable);
+        self.apply_lane_budget(target, &mut params, &mut result);
         let scalar_abi = params.iter().any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
             || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_)));
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
@@ -1877,10 +1899,8 @@ impl RepArena {
         mode: Option<AbiMode>,
     ) -> Result<FunctionRepPlan, RepError> {
         let mut params: Vec<RepId> = Vec::with_capacity(f.param_decls.len());
-        let mut boxable: Vec<bool> = Vec::with_capacity(f.param_decls.len() + 1);
         for param in &f.param_decls {
             let ty = declared_mono_type(ws, param.ty, subst)?;
-            boxable.push(ty.as_ref().is_none_or(|ty| !box_would_materialize_nobox(ws, ty)));
             let id = match (mode, ty) {
                 (Some(mode), Some(ty)) => self.plan(
                     ws,
@@ -1906,14 +1926,12 @@ impl RepArena {
             params.push(id);
         }
 
-        let result = f.return_ty.map(|return_ty| {
+        let mut result = f.return_ty.map(|return_ty| {
             let ty = declared_mono_type(ws, return_ty, subst)?;
             if ty.as_ref().is_some_and(|ty| matches!(ty, crate::monoty::MonoTy::Unit)) {
                 return Ok(None);
             }
             let tuple_spelled = declared_tuple_spelled(ws, return_ty);
-            let result_boxable =
-                ty.as_ref().is_none_or(|ty| !box_would_materialize_nobox(ws, ty));
             let id = if let Some(ty) = ty {
                 let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
                 if let Some(mode) = mode {
@@ -1940,11 +1958,9 @@ impl RepArena {
             } else {
                 self.intern(target, RepUse::Return, RepLayout::Opaque)
             };
-            Ok(Some((id, result_boxable)))
+            Ok(Some(id))
         }).transpose()?.flatten();
-        boxable.push(result.is_some_and(|(_, ok)| ok));
-        let mut result = result.map(|(id, _)| id);
-        self.apply_lane_budget(target, &mut params, &mut result, &boxable);
+        self.apply_lane_budget(target, &mut params, &mut result);
         let scalar_abi = mode.is_some()
             && (params
                 .iter()
@@ -1975,11 +1991,6 @@ impl RepArena {
         param_tuple_spelled: &[bool],
         mode: Option<AbiMode>,
     ) -> FunctionRepPlan {
-        let boxable: Vec<bool> = params
-            .iter()
-            .chain(result_ty)
-            .map(|ty| !box_would_materialize_nobox(ws, ty))
-            .collect();
         let mut params: Vec<RepId> = if let Some(mode) = mode {
             params
                 .iter()
@@ -2048,7 +2059,7 @@ impl RepArena {
                 self.intern(target, RepUse::Return, RepLayout::Opaque)
             }
         });
-        self.apply_lane_budget(target, &mut params, &mut result, &boxable);
+        self.apply_lane_budget(target, &mut params, &mut result);
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
         let scalar_abi = mode.is_some()
             && (params
