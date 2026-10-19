@@ -1790,6 +1790,31 @@ fn read_response_from_chan(rx: &std::sync::mpsc::Receiver<serde_json::Value>, ex
 }
 
 /// Run a single edit sequence test against a persistent LSP server
+/// The file every server this run spawns appends its stderr to. Unique per
+/// run, so concurrent runs (or another user's) never share or clobber it;
+/// named once on stderr so a hang or panic leaves a findable breadcrumb.
+fn server_stderr_log() -> Result<PathBuf> {
+    static LOG: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    let mut log = LOG.lock().map_err(|_| anyhow::anyhow!("LSP server stderr log lock poisoned"))?;
+    if let Some(path) = &*log {
+        return Ok(path.clone());
+    }
+    let path = new_server_stderr_log(&std::env::temp_dir())?;
+    eprintln!("LSP server stderr: {}", path.display());
+    *log = Some(path.clone());
+    Ok(path)
+}
+
+fn new_server_stderr_log(dir: &Path) -> Result<PathBuf> {
+    let file = tempfile::Builder::new()
+        .prefix("rock-lsp-test-stderr-")
+        .suffix(".log")
+        .tempfile_in(dir)
+        .map_err(|e| anyhow::anyhow!("cannot create the LSP server stderr log in {}: {e}", dir.display()))?;
+    let (_, path) = file.keep().map_err(|e| anyhow::anyhow!("cannot keep the LSP server stderr log: {e}"))?;
+    Ok(path)
+}
+
 fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> Result<(usize, usize, Vec<String>)> {
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let mut passed = 0;
@@ -1820,7 +1845,7 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
     // operator has a breadcrumb. `Stdio::null()` here previously hid real
     // server bugs (e.g. `Failed to create URI for diagnostics: <unknown>`
     // spamming during stress tests went unnoticed for months).
-    let stderr_log_path = std::env::temp_dir().join("rock-lsp-test-stderr.log");
+    let stderr_log_path = server_stderr_log()?;
     let stderr_for = || -> std::io::Result<Stdio> {
         Ok(Stdio::from(
             std::fs::OpenOptions::new()
@@ -2625,4 +2650,19 @@ pub fn run_lsp_tests(
     }
 
     Ok((total, passed, failed, ignored))
+}
+#[cfg(test)]
+mod stderr_log_tests {
+    use super::new_server_stderr_log;
+
+    #[test]
+    fn each_run_gets_its_own_server_stderr_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = new_server_stderr_log(dir.path()).unwrap();
+        let b = new_server_stderr_log(dir.path()).unwrap();
+        assert_ne!(a, b);
+        for p in [&a, &b] {
+            assert!(p.starts_with(dir.path()) && p.is_file(), "{}", p.display());
+        }
+    }
 }
