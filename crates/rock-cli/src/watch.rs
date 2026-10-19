@@ -1,7 +1,13 @@
 use crate::*;
 
 pub fn loaded_source_watch_paths(project: &str, roots: &[(u32, PathBuf)]) -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from(project), rock_stdlib::stdlib_dir()];
+    let mut paths = vec![PathBuf::from(project)];
+    match rock_stdlib::stdlib_origin() {
+        rock_stdlib::StdlibSource::Dir(dir) => paths.push(dir),
+        rock_stdlib::StdlibSource::Embedded => {
+            log::info!(target: "WATCH", "the stdlib is built in; not watching a stdlib directory");
+        }
+    }
     for (id, root) in roots {
         // Discovery loads only the invoked directory for package zero.
         paths.push(if *id == 0 { root.join("stick.toml") } else { root.clone() });
@@ -66,7 +72,12 @@ pub fn run_compile_watch_loop(
     watching_msg: &str,
     mut on_event: impl FnMut(&FileChangeEvent),
 ) -> Result<()> {
-    watch_paths.push(rock_stdlib::stdlib_dir());
+    match rock_stdlib::stdlib_origin() {
+        rock_stdlib::StdlibSource::Dir(dir) => watch_paths.push(dir),
+        rock_stdlib::StdlibSource::Embedded => {
+            log::info!(target: "WATCH", "the stdlib is built in; watching without a stdlib directory");
+        }
+    }
     let (tx, rx) = channel::<FileChangeEvent>();
     let _watcher = FileWatcher::default_for_rock_sources().watch(watch_paths, tx)?;
     log::info!(target: "WATCH", "{}", watching_msg);

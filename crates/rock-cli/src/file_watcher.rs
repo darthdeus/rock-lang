@@ -1072,7 +1072,11 @@ mod macos {
             use bone_core::prelude::Instant;
             let root = PathBuf::from(std::env::var_os("ROCK_WATCH_MEASURE_ROOT")
                 .expect("set ROCK_WATCH_MEASURE_ROOT to the source tree to measure"));
-            for (name, roots) in [("source", vec![root, rock_stdlib::stdlib_dir()])] {
+            let mut watch_roots = vec![root];
+            if let rock_stdlib::StdlibSource::Dir(dir) = rock_stdlib::stdlib_origin() {
+                watch_roots.push(dir);
+            }
+            for (name, roots) in [("source", watch_roots)] {
                 let config = FileWatcherConfig { debounce_ms: 100, watch_extensions: vec!["rock".into(), "rs".into(), "c".into(), "h".into(), "toml".into()], ..Default::default() };
                 let mut observation = Observation { config, roots, directories: HashMap::new(), files: HashMap::new(), started: SystemTime::now(), directory_reads: 0 };
                 let start = Instant::now();

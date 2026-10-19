@@ -262,7 +262,9 @@ function selectTab(tab) {
 
 async function main() {
   await window.monacoReady;
-  stdlibSources = await fetch('dist/stdlib.json').then((r) => r.json());
+  const stdlibResp = await call('stdlib', {});
+  if (!stdlibResp.ok) throw new Error(`stdlib failed: ${JSON.stringify(stdlibResp)}`);
+  stdlibSources = stdlibResp.files;
   registerProviders();
 
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;

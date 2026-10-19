@@ -1,7 +1,7 @@
 // Smoke test for the rock-wasm module, run from the repository root:
 //   node crates/rock-wasm/tests/smoke.mjs <rock_wasm.wasm> <rock>
-// Loads the module the way a Worker does, installs the stdlib from memory,
-// compiles each fixture and requires its Lua to equal native
+// Loads the module the way a Worker does (the stdlib is the copy embedded in
+// the module), compiles each fixture and requires its Lua to equal native
 // `rock compile-single` output byte for byte. Then checks shader
 // output, format, and that source nested past the limit is a diagnostic
 // rather than a trap.
@@ -40,12 +40,9 @@ function request(body) {
   return response;
 }
 
-const stdlib = Object.fromEntries(
-  fs.readdirSync('stdlib').filter((n) => n.endsWith('.rock'))
-    .map((n) => [n, fs.readFileSync(path.join('stdlib', n), 'utf8')]),
-);
-check(request({ op: 'compile', file: 'a.rock', source: '' }).ok === false, 'compile before install_stdlib is refused');
-check(request({ op: 'install_stdlib', files: stdlib }).ok, 'install_stdlib');
+const stdlibResp = request({ op: 'stdlib' });
+check(stdlibResp.ok && typeof stdlibResp.files === 'object' && 'unified.rock' in stdlibResp.files,
+  'stdlib serves the embedded copy');
 
 for (const name of fs.readdirSync(fixtureDir).filter((n) => n.endsWith('.rock')).sort()) {
   const file = path.join(fixtureDir, name);

@@ -511,7 +511,9 @@ fn revision(manifest_dir: &Path, graph: &PackageGraph) -> Revision {
         .iter()
         .map(|n| n.root.to_string_lossy().into_owned())
         .collect();
-    paths.push(rock_stdlib::stdlib_dir().to_string_lossy().into_owned());
+    if let rock_stdlib::StdlibSource::Dir(dir) = rock_stdlib::stdlib_origin() {
+        paths.push(dir.to_string_lossy().into_owned());
+    }
     let mut args = vec!["status", "--porcelain", "--untracked-files=all", "--"];
     args.extend(paths.iter().map(String::as_str));
     match git(&args) {

@@ -98,7 +98,7 @@ impl FallbackReports {
 // ---------------------------------------------------------------------------
 
 /// Each stdlib file's session id and canonical display path (its file on
-/// disk, or the host's display path for a stdlib installed from memory).
+/// disk, or `/stdlib/<name>` for the embedded wasm copy).
 /// Computed once: `canonicalize` is a syscall and the id <-> path translation
 /// below runs on every request.
 fn stdlib_paths() -> &'static [(String, String)] {

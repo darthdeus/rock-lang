@@ -11,7 +11,11 @@ use lsp_types::{HoverContents, Position};
 
 /// Canonical on-disk path of a stdlib file: what the editor sends and sees.
 fn stdlib_path(name: &str) -> String {
-    bone_query::canonicalize_lenient(&rock_stdlib::stdlib_dir().join(name).to_string_lossy())
+    let dir = match rock_stdlib::stdlib_origin() {
+        rock_stdlib::StdlibSource::Dir(dir) => dir,
+        rock_stdlib::StdlibSource::Embedded => panic!("the stdlib is built in; this test needs a stdlib directory"),
+    };
+    bone_query::canonicalize_lenient(&dir.join(name).to_string_lossy())
 }
 
 /// A scratch project (no stick.toml) that calls a stdlib function.

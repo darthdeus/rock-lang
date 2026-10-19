@@ -5,7 +5,6 @@
 // go-to-definition on a stdlib call, which must land in a parseable
 // file:///stdlib/ URI. Prints each request's latency.
 import fs from 'node:fs';
-import path from 'node:path';
 
 const [wasmPath] = process.argv.slice(2);
 if (!wasmPath) {
@@ -44,13 +43,10 @@ function lsp(method, params, { notification = false } = {}) {
   return { messages: response.messages, reply, ms };
 }
 
-const stdlib = Object.fromEntries(
-  fs.readdirSync('stdlib').filter((n) => n.endsWith('.rock'))
-    .map((n) => [n, fs.readFileSync(path.join('stdlib', n), 'utf8')]),
-);
-check(request({ op: 'lsp', message: { jsonrpc: '2.0', id: 0, method: 'initialize', params: {} } }).ok === false,
-  'lsp before install_stdlib is refused');
-check(request({ op: 'install_stdlib', files: stdlib }).ok, 'install_stdlib');
+const stdlibResp = request({ op: 'stdlib' });
+check(stdlibResp.ok && typeof stdlibResp.files === 'object' && 'unified.rock' in stdlibResp.files,
+  'stdlib serves the embedded copy');
+const stdlib = stdlibResp.files ?? {};
 
 const early = lsp('textDocument/hover', { textDocument: { uri: 'file:///playground/main.rock' }, position: { line: 0, character: 0 } });
 check(early.reply?.error?.code === -32002, 'a request before initialize is ServerNotInitialized');

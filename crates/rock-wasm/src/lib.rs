@@ -13,16 +13,17 @@
 //! instantiate a fresh module after a trap.
 //!
 //! Requests (`op`):
-//! - `install_stdlib` `{files: {name: text}}`: once, before any compile.
 //! - `compile` `{file, source, target?: "gl"|"wgpu", files?: {path: text}}`:
 //!   `files` are what `embed_string` may read. Returns `lua`, `shaders` and
 //!   `diagnostics`, or `stage` and `diagnostics` on failure.
 //! - `format` `{source}`: returns `source`.
 //! - `info`: returns `nesting_limit`.
-//! - `lsp` `{message}`: one JSON-RPC message from the editor (after
-//!   `install_stdlib`); returns `messages`, the responses and notifications
-//!   the language server sends back. `initialize` starts a server and `exit`
-//!   drops it; stdlib locations are `file:///stdlib/<name>`.
+//! - `stdlib`: returns `files`, the embedded stdlib as `{name: text}` for the
+//!   page to display.
+//! - `lsp` `{message}`: one JSON-RPC message from the editor; returns
+//!   `messages`, the responses and notifications the language server sends
+//!   back. `initialize` starts a server and `exit` drops it; stdlib locations
+//!   are `file:///stdlib/<name>`.
 
 use std::sync::Arc;
 
@@ -37,9 +38,6 @@ use serde_json::{Value, json};
 use skull::mir_emit::{RendererTarget, ShaderLanguage};
 use skull::pipeline::{CompileHost, EmitTarget, Stage};
 
-/// Directory the playground's stdlib files are displayed under.
-pub const STDLIB_DISPLAY_DIR: &str = "/stdlib";
-
 /// Handle one JSON request. Errors in the request itself come back as
 /// `{"ok":false,"error":...}`.
 pub fn handle(request: &str) -> Value {
@@ -51,12 +49,6 @@ pub fn handle(request: &str) -> Value {
 
 fn dispatch(request: &Value) -> Result<Value, String> {
     match str_field(request, "op")? {
-        "install_stdlib" => {
-            let files = string_map(request, "files")?.unwrap_or_default();
-            rock_stdlib::install_stdlib(STDLIB_DISPLAY_DIR, files).map_err(|e| e.to_string())?;
-            STDLIB_INSTALLED.store(true, std::sync::atomic::Ordering::Relaxed);
-            Ok(json!({"ok": true}))
-        }
         "compile" => compile(request),
         "format" => {
             let source = str_field(request, "source")?;
@@ -66,15 +58,19 @@ fn dispatch(request: &Value) -> Result<Value, String> {
             }
         }
         "info" => Ok(json!({"ok": true, "nesting_limit": rock_core::nesting::MAX_NESTING_DEPTH})),
+        "stdlib" => {
+            let files: serde_json::Map<String, Value> = rock_stdlib::stdlib_files()
+                .iter()
+                .map(|f| (f.name.to_string(), Value::String(f.contents.to_string())))
+                .collect();
+            Ok(json!({"ok": true, "files": files}))
+        }
         "lsp" => lsp(request),
         op => Err(format!("unknown op `{op}`")),
     }
 }
 
 fn compile(request: &Value) -> Result<Value, String> {
-    if !stdlib_installed() {
-        return Err("install_stdlib must run before compile".to_string());
-    }
     let file = str_field(request, "file")?;
     let source = str_field(request, "source")?;
     let renderer = match request.get("target").and_then(Value::as_str) {
@@ -135,9 +131,6 @@ thread_local! {
 }
 
 fn lsp(request: &Value) -> Result<Value, String> {
-    if !stdlib_installed() {
-        return Err("install_stdlib must run before lsp".to_string());
-    }
     let message = request.get("message").ok_or("missing field `message`")?;
     let message: Message =
         serde_json::from_value(message.clone()).map_err(|e| format!("`message` is not JSON-RPC: {e}"))?;
@@ -248,12 +241,6 @@ fn string_map(request: &Value, name: &str) -> Result<Option<Vec<(String, String)
         .map(Some)
 }
 
-fn stdlib_installed() -> bool {
-    STDLIB_INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-static STDLIB_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 #[cfg(target_family = "wasm")]
 mod abi {
     use std::sync::Mutex;
@@ -305,5 +292,25 @@ mod abi {
     #[unsafe(no_mangle)]
     pub extern "C" fn rock_output_len() -> usize {
         OUTPUT.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_uses_embedded_stdlib_without_install() {
+        let response = handle(r#"{"op":"compile","file":"main.rock","source":"fn main() { print(\"hi\") }\n"}"#);
+        assert_eq!(response["ok"], true, "compile must work without install_stdlib: {response}");
+    }
+
+    #[test]
+    fn stdlib_serves_every_file() {
+        let response = handle(r#"{"op":"stdlib"}"#);
+        assert_eq!(response["ok"], true, "stdlib op must succeed: {response}");
+        for name in rock_stdlib::STDLIB_NAMES {
+            assert!(response["files"][name].is_string(), "stdlib must include {name}: {response}");
+        }
     }
 }

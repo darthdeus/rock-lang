@@ -1,8 +1,8 @@
 // Headless check of the playground Worker, run after playground/build.sh:
 //   node playground/smoke.mjs
 // Loads worker.js as a Worker would (its fetches served from playground/),
-// then sends the messages main.js sends: LSP session, compile per output tab,
-// and format.
+// then sends the messages main.js sends: stdlib, LSP session, compile per
+// output tab, and format.
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -19,6 +19,7 @@ const self = {
   postMessage: (data) => replies.get(data.id)(data),
 };
 const fetchFile = async (url) => {
+  if (url.includes('stdlib.json')) throw new Error('worker must not fetch stdlib.json');
   const bytes = fs.readFileSync(path.join(dir, url));
   const type = url.endsWith('.wasm') ? 'application/wasm' : 'application/json';
   return new Response(bytes, { headers: { 'content-type': type } });
@@ -36,6 +37,10 @@ function post(op, body = {}) {
     self.onmessage({ data: { id, op, ...body } });
   }).then((data) => data.response);
 }
+
+const stdlib = await post('stdlib', {});
+check(stdlib.ok && typeof stdlib.files === 'object' && 'unified.rock' in stdlib.files,
+  'stdlib through the Worker');
 
 const uri = 'file:///playground/main.rock';
 const source = 'fn main() {\n    let n: int = "text"\n}\n';

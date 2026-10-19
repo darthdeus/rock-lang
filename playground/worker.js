@@ -1,29 +1,23 @@
-// The playground's compiler Worker: loads dist/rock_wasm.wasm and the stdlib
-// (dist/stdlib.json, name -> source) and answers one request at a time.
+// The playground's compiler Worker: loads dist/rock_wasm.wasm (the stdlib is
+// the copy embedded in the module) and answers one request at a time.
 //
-// The page posts {id, op, ...} with the rock-wasm ops (compile, format, lsp;
-// see crates/rock-wasm/src/lib.rs) and gets {id, response} back. A compiler
-// panic traps the module; the Worker then starts a fresh instance and answers
-// {id, response, restarted: true} so the page re-sends its LSP session.
+// The page posts {id, op, ...} with the rock-wasm ops (compile, format, lsp,
+// stdlib; see crates/rock-wasm/src/lib.rs) and gets {id, response} back. A
+// compiler panic traps the module; the Worker then starts a fresh instance and
+// answers {id, response, restarted: true} so the page re-sends its LSP session.
 
 let wasmModule = null;
 let exports = null;
-let stdlib = null;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 async function start() {
-  [wasmModule, stdlib] = await Promise.all([
-    WebAssembly.compileStreaming(fetch('dist/rock_wasm.wasm')),
-    fetch('dist/stdlib.json').then((r) => r.json()),
-  ]);
+  wasmModule = await WebAssembly.compileStreaming(fetch('dist/rock_wasm.wasm'));
   instantiate();
 }
 
 function instantiate() {
   exports = new WebAssembly.Instance(wasmModule, {}).exports;
-  const installed = call({ op: 'install_stdlib', files: stdlib });
-  if (!installed.ok) throw new Error(`install_stdlib failed: ${JSON.stringify(installed)}`);
 }
 
 function call(body) {
