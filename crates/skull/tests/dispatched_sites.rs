@@ -16,12 +16,12 @@ use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
-use skull_mir::mir::MirFunc;
+use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::SiteOp;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -32,6 +32,16 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
 
 fn check(src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+}
+
+fn check_with_dependency(src: &str, dependency: &str) -> Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(
+        skull_parser::parse_module_clean(dependency, Ustr::from("games/impostor.rock"))
+            .expect("dependency parse"),
+    );
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
@@ -81,6 +91,36 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
     mf
 }
 
+fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) -> MirFunc {
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == name)
+        .expect("fn not found");
+    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let graph = graph_of(ws);
+    let bodies = skull::concrete_body::build(ws, &graph);
+    let scx = if values_first_class {
+        ScalarCtx::new_values_first_class(ws)
+    } else {
+        ScalarCtx::new(ws)
+    }
+    .sharing(graph.interner().clone());
+    let instance = skull_mir::instance::Instance::base(fref);
+    let plan = bodies.plans.get(&instance).expect("concrete plan");
+    skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower")
+}
+
+fn lowered_body(ws: &Workspace, name: &str) -> MirFunc {
+    lowered_body_in_mode(ws, name, false)
+}
+
+fn lowered_values_first_class_body(ws: &Workspace, name: &str) -> MirFunc {
+    lowered_body_in_mode(ws, name, true)
+}
+
 /// The names lowering stamped as `SiteOp::Dispatched` in `name`'s body.
 fn dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
     fn walk(mf: &MirFunc, out: &mut Vec<&'static str>) {
@@ -95,6 +135,24 @@ fn dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
     }
     let mut out = Vec::new();
     walk(&prepared_body(ws, name), &mut out);
+    out.sort_unstable();
+    out
+}
+
+fn dispatched_instance_names_in(ws: &Workspace, name: &str) -> Vec<(String, String)> {
+    let mf = prepared_body(ws, name);
+    let mut out = Vec::new();
+    for (&id, site) in &mf.call_sites {
+        let SiteOp::Dispatched { name, .. } = site.site.op else {
+            continue;
+        };
+        let callee = mf
+            .callee_instances
+            .get(&id)
+            .expect("a dispatched direct call must record its concrete callee");
+        let function = &ws.module(callee.func.module).functions[callee.func.func];
+        out.push((name.to_string(), function.name.to_string()));
+    }
     out.sort_unstable();
     out
 }
@@ -214,13 +272,15 @@ fn main() { print(two(1.0, 2.0)) }
     assert_dispatched_population(&c, 2);
 }
 
-/// A nobox `value` hole renders ONE call PER LEAF FIELD, all at one expression
-/// and all named `__rock_format_float`. The field-index PATH is what keeps them
-/// distinct; without it the walk records one obligation and the census reports
-/// the rest as `site-not-in-body`.
+/// A nobox `value` hole renders ONE call PER CALLING LEAF FIELD, all at one
+/// expression: `__rock_format_float` for each float, `__rock_quote_string` for
+/// the string. Both ABI modes render it through the same structural format
+/// tree, so they share the obligations. The field-index PATH keeps the calls
+/// distinct; without it the walk records one obligation and the census
+/// reports the rest as `site-not-in-body`.
 ///
-/// The int and string fields are the admission control: they take non-calling
-/// routes, so the count is two rather than "one per field".
+/// The int field is the admission control: it takes a non-calling route, so
+/// the count is three rather than "one per field".
 #[test]
 fn a_nobox_value_hole_carries_one_obligation_per_float_leaf() {
     let src = r#"
@@ -231,14 +291,14 @@ fn main() { print(show(V { a: 1.0, b: 2.0, c: 3, s: "x" })) }
     let ws = check(src);
     assert_eq!(
         dispatched_in(&ws, "show"),
-        vec!["__rock_format_float", "__rock_format_float"],
-        "two float leaves, and the int/string leaves synthesize nothing"
+        vec!["__rock_format_float", "__rock_format_float", "__rock_quote_string"],
+        "two float leaves and a string leaf; the int leaf synthesizes nothing"
     );
     assert_eq!(
         walk_dispatched_in(&ws, "show"),
-        vec!["__rock_format_float", "__rock_format_float"]
+        vec!["__rock_format_float", "__rock_format_float", "__rock_quote_string"]
     );
-    assert_dispatched_population(&census_of(src), 2);
+    assert_dispatched_population(&census_of(src), 3);
 }
 
 /// A COMPOSITE hole synthesizes `inspect`; a transparent newtype in the same
@@ -291,11 +351,66 @@ fn main() { print(show_p(P { x: 1, y: 2 })) print(show_f(1.5)) }
         walk_dispatched_in(&ws, "show_p"),
         vec!["__rock_fmt_pad", "inspect_formatted"]
     );
+    assert_eq!(
+        dispatched_instance_names_in(&ws, "show_p"),
+        vec![
+            ("__rock_fmt_pad".to_string(), "__rock_fmt_pad".to_string()),
+            ("inspect_formatted".to_string(), "inspect_formatted".to_string()),
+        ]
+    );
 
     let empty: Vec<&'static str> = Vec::new();
     assert_eq!(dispatched_in(&ws, "show_f"), empty, "a printf conversion calls nothing");
     assert_eq!(walk_dispatched_in(&ws, "show_f"), empty);
     assert_dispatched_population(&census_of(src), 2);
+}
+
+#[test]
+fn an_ambiguous_dispatched_helper_rejects_the_call() {
+    let ws = check_with_dependency(
+        r#"
+struct P { x: int }
+fn main() { print("{P { x: 1 }:.2}") }
+"#,
+        r#"@nomangle inline(lua) fn inspect_formatted(obj: any, precision: float) -> string = "return 'impostor'""#,
+    );
+    assert!(
+        skull_mir::lower::dispatched_callee_decl(&ws, "inspect_formatted").is_none(),
+        "two distinct bare declarations must be ambiguous"
+    );
+    let graph = graph_of(&ws);
+    assert!(graph.unresolved().any(|unresolved| {
+        unresolved.reason == "compiler-generated-entry-unresolved"
+    }));
+}
+
+#[test]
+fn a_dispatched_render_does_not_borrow_the_holes_bound_tree() {
+    let ws = check(
+        r#"
+value V2 { x: float, y: float }
+
+fn show(a: [V2]) -> string { return "{a.map(_.x).sum_f()}" }
+fn main() { print(show([V2 { x: 1.0, y: 2.0 }])) }
+"#,
+    );
+    assert_eq!(
+        dispatched_instance_names_in(&ws, "show"),
+        vec![(
+            "__rock_format_float".to_string(),
+            "__rock_format_float".to_string()
+        )]
+    );
+    let mf = lowered_body(&ws, "show");
+    assert!(
+        mf.call_sites.iter().any(|(id, site)| {
+            matches!(site.site.op, SiteOp::DirectCall) && mf.bound_trees.contains_key(id)
+        }),
+        "the hole's bounded user call must retain its own tree"
+    );
+    assert!(mf.call_sites.iter().all(|(id, site)| {
+        !matches!(site.site.op, SiteOp::Dispatched { .. }) || !mf.bound_trees.contains_key(id)
+    }));
 }
 
 /// The `%` and `b` conversions and the GROUPING separator each call their own
@@ -451,6 +566,29 @@ fn main() {
     assert_eq!(walk_dispatched_in(&ws, "eq_nobox"), empty);
 
     assert_dispatched_population(&census_of(src), 2);
+}
+
+#[test]
+fn values_first_class_nobox_equality_stays_a_typed_operation() {
+    let ws = check(
+        r#"
+nobox value Point { x: int, y: int }
+fn same(a: Point, b: Point) -> bool { return a == b }
+fn main() { print("{same(Point { x: 1, y: 2 }, Point { x: 1, y: 2 })}") }
+"#,
+    );
+    assert_eq!(walk_dispatched_in(&ws, "same"), Vec::<&'static str>::new());
+    let mf = lowered_values_first_class_body(&ws, "same");
+    assert!(
+        mf.insts.iter().any(|(_, inst)| matches!(inst, Inst::Eq(_, _))),
+        "values-first-class equality must remain a typed MIR operation"
+    );
+    assert!(
+        mf.call_sites
+            .values()
+            .all(|site| !matches!(site.site.op, SiteOp::Dispatched { .. })),
+        "the target-neutral graph records no dispatched helper for nobox equality"
+    );
 }
 
 /// `__op_eq` names SIX declarations and only one of them is callable by that

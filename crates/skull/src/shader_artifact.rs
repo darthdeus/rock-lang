@@ -1,5 +1,4 @@
-//! The GLSL half of an artifact (`docs/monomorphization-plan.md` S 9, S 11,
-//! S 20a).
+//! The GLSL half of an artifact.
 //!
 //! A [`TargetSpec`] carries an OPTIONAL shader axis beside its CPU axes, and
 //! this is what that axis packages: the concrete shader entries the artifact

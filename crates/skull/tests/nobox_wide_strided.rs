@@ -7,10 +7,9 @@
 //! 50-leaf element resolves 50 string keys and bounds-checks 50 arrays. On a
 //! LuaJIT trace that costs about three IR constants and ten instructions per
 //! leaf, and a hot caller's root trace hits the 500-constant limit ("trace too
-//! long") inside the push (`docs/mag-presentation-boundary-plan.md`, slice 4).
+//! long") inside the push.
 //! Row-major storage touches one table, and the push walks it with a running
-//! index, so a leaf costs no new constant. `docs/nobox-wide-trace-plan.md`
-//! carries the measurements.
+//! index, so a leaf costs no new constant.
 //!
 //! Unlike the numeric flat-enum tier, these leaves may be bools, strings,
 //! closures and nil (an inactive enum payload slot, an absent nullable), so the

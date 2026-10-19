@@ -9,7 +9,6 @@
 //! instead (dotted leaf keys plus a presence key) through `<Name>_lct`. The
 //! leaf-count sweep that separates this from the column threshold lives in
 //! `nobox_column_threshold.rs`. Design + work list:
-//! `docs/nobox-nested-ctor-plan.md`.
 
 use crate::common::{function_body, mangled_name, run_luajit, try_emit_module};
 

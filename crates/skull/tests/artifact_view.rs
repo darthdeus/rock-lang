@@ -1,4 +1,4 @@
-//! The first TARGET ARTIFACT VIEW (`docs/monomorphization-plan.md` S 9, S 11).
+//! The first TARGET ARTIFACT VIEW.
 //!
 //! An artifact view is a target's REALIZATION of the one shared
 //! [`InstanceGraph`]: which declarations it retains, how each boundary is
@@ -23,7 +23,7 @@ use skull_mir::intrinsics::BackendRealization;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -898,7 +898,7 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
 fn synthetic_targets_share_instances_and_diverge_in_physical_obligations() {
     let ws = check(
         r#"
-extern(ffi, "stone") fn host_tick(n: int) -> int
+extern(ffi, "host") fn host_tick(n: int) -> int
 fn main() { let x = 1; host_tick(x) }
 "#,
     );
@@ -949,7 +949,7 @@ fn main() { let x = 1; host_tick(x) }
 /// than leaving a dead branch: every erased runtime entry that gets an instance
 /// is non-generic, and the generic ones (`__rock_col_sort<T, K>`) get NO
 /// instance at all, because a synthesized call to a generic entry has no
-/// binding record (the `no-bindings` hole, `docs/parked/mono.md` backlog 4).
+/// binding record (the `no-bindings` hole).
 ///
 /// When that hole closes, a generic entry gains instances and this goes red at
 /// the `<= 1` assertion -- which is the point at which the ambiguity arm starts
@@ -1072,7 +1072,7 @@ fn platform_capabilities_participate_in_boundary_admission() {
 
     let ws = check(
         r#"
-extern(ffi, "stone") fn host_tick(n: int) -> int
+extern(ffi, "host") fn host_tick(n: int) -> int
 fn main() { let n = host_tick(1) }
 "#,
     );
@@ -1116,7 +1116,7 @@ fn platform_is_part_of_boundary_contract_identity() {
 
     let ws = check(
         r#"
-extern(ffi, "stone") fn host_tick(n: int) -> int
+extern(ffi, "host") fn host_tick(n: int) -> int
 fn main() { let n = host_tick(1) }
 "#,
     );
@@ -1186,7 +1186,7 @@ fn in_game_shader_packaging_uses_the_runtime_adapted_source_profile() {
 /// would have been vacuous on the very axis under test. A portable
 /// representative with an exact Lua sibling makes luajit select too.
 const AXES: &str = r#"
-extern(ffi, "stone") fn host_tick(n: int) -> int
+extern(ffi, "host") fn host_tick(n: int) -> int
 inline(lua) fn only_lua(x: int) -> int = "return x + 1"
 fn portable_op(x: int) -> int { return x * 3 }
 inline(lua) fn portable_op(x: int) -> int = "return x * 3"
@@ -1479,7 +1479,7 @@ fn a_declaration_the_artifact_binds_itself_is_not_severed() {
     let ws = check(
         r#"
 inline(lua) fn bound_probe(x: int) -> int = "return x + 1"
-extern(ffi, "stone") fn host_probe(n: int) -> int
+extern(ffi, "host") fn host_probe(n: int) -> int
 fn main() { let n = bound_probe(1) + host_probe(2) }
 "#,
     );

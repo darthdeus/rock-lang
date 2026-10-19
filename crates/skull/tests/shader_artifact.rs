@@ -1,4 +1,4 @@
-//! The GLSL ARTIFACT VIEW (`docs/monomorphization-plan.md` S 9, S 11, S 20a).
+//! The GLSL ARTIFACT VIEW.
 //!
 //! The shader half of an artifact: what the GPU side of one target packages,
 //! taken over the SAME target-neutral instance graph the CPU view realizes.
@@ -19,12 +19,12 @@ use skull::artifact::{self, ArtifactRequest};
 use skull::instance_graph::{self, InstanceGraph};
 use skull::shader_artifact::{self, ShaderArtifactRequest, ShaderProgram, ShaderRejection};
 use skull::target_projection::{
-    JAVASCRIPT_WEB, LUAJIT_DESKTOP, LUAJIT_IOS, NATIVE_C64_DESKTOP,
+    JAVASCRIPT_WEB, LUAJIT_DESKTOP, LUAJIT_IOS,
 };
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -113,15 +113,19 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
         "the profile changed WHICH shader instances are packaged"
     );
 
-    // CONTROL: no shader axis, no shader artifact -- and this is the target
-    // whose CPU view is otherwise the most different, so it is not passing by
-    // being identical to the others.
-    assert!(shader_artifact::realize_shader(
-        &ws,
-        &g,
-        &ShaderArtifactRequest { spec: NATIVE_C64_DESKTOP, programs: &roots }
-    )
-    .is_none());
+    // CONTROL: no shader axis, no shader artifact. Native C now packages the
+    // same Core330 side artifact as the other desktop GL targets.
+    assert!(
+        shader_artifact::realize_shader(
+            &ws,
+            &g,
+            &ShaderArtifactRequest {
+                spec: skull::target_projection::WASM32_WASI,
+                programs: &roots,
+            }
+        )
+        .is_none()
+    );
 }
 
 /// Retention is REACHABILITY from the shader entries over the shared graph's

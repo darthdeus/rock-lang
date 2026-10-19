@@ -3,7 +3,7 @@
 //!
 //! The `ffi.cdef` lives inside an opaque `inline(lua)` body, so the declaration
 //! is the only contract the compiler has. LuaJIT hands back a BOXED cdata for a
-//! 64-bit C integer return, and every Stone resource handle is `uint64_t`, so a
+//! 64-bit C integer return, and every host engine resource handle is `uint64_t`, so a
 //! `-> int` extern that passed its return through produced a cdata where the
 //! declaration said number. That is not cosmetic: LuaJIT keys a table by cdata
 //! IDENTITY however its `__eq` compares, so a handle used as a `Map<int, V>` key
@@ -240,7 +240,7 @@ fn main() { print("x") }
 /// trace that leaves the function through it aborts `leaving loop in root
 /// trace` (`rec_ret` requires a real `RET`). Every value-returning wrapper
 /// binds the result to a local and returns that instead; measured 166 -> 0
-/// aborts on the shipped LuaJIT (docs/backends.md, "Wrapper return").
+/// aborts on the shipped LuaJIT.
 #[test]
 fn every_value_returning_wrapper_returns_through_a_local() {
     let lua = emit_module(SRC);

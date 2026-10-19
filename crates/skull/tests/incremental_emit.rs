@@ -1,4 +1,4 @@
-//! Oracle for skull incremental codegen (`docs/skull-incremental-emit-split.md`):
+//! Oracle for skull incremental codegen:
 //! after re-emitting only the bodies a (simulated) edit re-inferred, the assembled
 //! Lua must be BYTE-IDENTICAL to a fresh full emit of the edited workspace. The
 //! interesting case is editing an INLINED callee — its callers' chunks contain its
@@ -875,7 +875,7 @@ fn graph_added_construction_failure_is_propagated_by_incremental() {
 /// reached. So a specialized body reaching a FURTHER specialization has to come
 /// out of the walk, and if the walk stopped carrying that edge the build fails
 /// loudly (`no liveness walk reached it`) rather than quietly rebuilding it in a
-/// second place. Measured on bitgun: cutting the edge fires that rejection.
+/// second place. Measured on application: cutting the edge fires that rejection.
 ///
 /// Here the property is observable as output: the specialized body is emitted at
 /// all, and it is emitted ONCE -- two deciders would each be entitled to render

@@ -1,4 +1,4 @@
-//! `ConcreteBody` type tables (`docs/monomorphization-plan.md` S 9, S 15a).
+//! `ConcreteBody` type tables.
 //!
 //! The property under test is not "a table exists". It is that the table is a
 //! function of the INSTANCE: one generic body reached at two instantiations has
@@ -19,7 +19,7 @@ use skull_mir::mir::{Inst, MirFunc, Term};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

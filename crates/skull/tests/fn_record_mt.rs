@@ -1,4 +1,4 @@
-//! P2 step 4 of docs/closure-env-records-plan.md: the `__rock_fn_mt` runtime
+//! Shared function metatables: the `__rock_fn_mt` runtime
 //! helper -- a shared metatable making an env record `{ __slot = <CodeRef>, <captures> }`
 //! callable as `f(...)` via `__call`, initialized once at load with the
 //! preservation idiom so pre- and post-reload records share metatable identity.

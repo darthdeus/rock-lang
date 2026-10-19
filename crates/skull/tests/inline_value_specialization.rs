@@ -1,5 +1,4 @@
-//! P2 exit oracle (docs/flatvec-plan.md "Mechanism: call-site specialization via
-//! the inliner"). An `@inline` generic fn whose param/return bind to a VALUE
+//! Call-site specialization via the inliner. An `@inline` generic fn whose param/return bind to a VALUE
 //! struct at the call site is spliced as a PER-INSTANTIATION specialized snapshot:
 //! the body lowers as if hand-written for `V2`, so the value flows field-wise (no
 //! `V2_ct(..)` box, no boxed `__nb_checked_set` store). The bounds-checked slot

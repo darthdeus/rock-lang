@@ -1,5 +1,5 @@
 //! Codegen-shape + rejection contract for the `@struct_expand` intrinsic
-//! (docs/shaders.md). A call to a `@struct_expand fn f<T>(u:
+//!. A call to a `@struct_expand fn f<T>(u:
 //! T) -> [(string, E)]` is replaced at emit by the literal pairs list -- one
 //! `(field_name, E::V(u.field))` per struct field, declaration order, the variant
 //! chosen structurally by payload type. The positive control lives here (successful
@@ -153,7 +153,7 @@ fn build(t: float, c: NV2) -> int {
 /// A `nobox` payload at the expansion spreads into the flat enum's slots, as a
 /// source ctor stores it, so no box is minted at all. Emitting at all is the
 /// other half: an implicit box here used to reject a legitimate program
-/// (`bitgun_queue_heat_shimmer`'s `pass_uniforms`).
+/// (`queue_effect_uniforms`'s `pass_uniforms`).
 #[test]
 fn a_nobox_payload_spreads_into_the_flat_slots() {
     let lua = emit_module(NOBOX_PAYLOAD);

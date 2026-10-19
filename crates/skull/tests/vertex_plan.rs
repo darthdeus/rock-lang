@@ -12,7 +12,7 @@
 //! So the load-bearing tests here are differential (reorder, add a field), and
 //! `grass_instance_shape_pins_the_known_values` is deliberately the WEAK one --
 //! it passes against a hardcoded table and is kept only to pin the numbers the
-//! bitgun call site uses.
+//! application call site uses.
 
 use crate::common::ws_of;
 use skull_mir::gpu_layout::AttrKind;
@@ -24,14 +24,14 @@ use ustr::Ustr;
 // recognizes vectors by nominal NAME -- so the fixture declares its own, the
 // same way `value_leaf_layout.rs` declares its shapes.
 const SHAPES: &str = r#"
-value Vec2 { x: float, y: float }
-value Vec3 { x: float, y: float, z: float }
-value Vec4 { x: float, y: float, z: float, w: float }
-value Grass { pos: Vec2, rot: float, scale: float, height: float }
-value GrassReordered { rot: float, pos: Vec2, scale: float, height: float }
-value GrassPlusOne { pos: Vec2, rot: float, scale: float, height: float, tint: float }
+value Vec2 { x: f32, y: f32 }
+value Vec3 { x: f32, y: f32, z: f32 }
+value Vec4 { x: f32, y: f32, z: f32, w: f32 }
+value Grass { pos: Vec2, rot: f32, scale: f32, height: f32 }
+value GrassReordered { rot: f32, pos: Vec2, scale: f32, height: f32 }
+value GrassPlusOne { pos: Vec2, rot: f32, scale: f32, height: f32, tint: f32 }
 value WithInt { pos: Vec2, id: int }
-value Wide { a: Vec4, b: Vec3, c: float }
+value Wide { a: Vec4, b: Vec3, c: f32 }
 fn main() { }
 "#;
 
@@ -50,7 +50,7 @@ fn stride(ws: &bone_semantic::inference::Workspace, name: &str) -> usize {
         .byte_stride
 }
 
-/// The numbers bitgun's `gpu_mesh_set_instances` call site passes by hand
+/// The numbers application's `gpu_mesh_set_instances` call site passes by hand
 /// (stride 5 floats = 20 bytes, components [2,1,1,1]).
 ///
 /// WEAK ON PURPOSE: a hardcoded table passes this. It pins the values, it does
@@ -139,7 +139,7 @@ fn an_integer_attribute_rejects_the_float_unit_form() {
 }
 
 /// The float-unit view (`gpu_mesh_*`'s component-counts-plus-stride) DROPS
-/// `byte_offset`, and `stone-rs`'s `validate_layout` reconstructs offsets
+/// `byte_offset`, and the renderer's `validate_layout` reconstructs offsets
 /// cumulatively -- so the two agree only while every attribute sits exactly at
 /// `4 * cumulative components`. That holds for every struct expressible today
 /// (all admitted kinds are 4-byte-aligned floats) and expires at the first
@@ -192,7 +192,7 @@ fn a_slot_off_its_cumulative_position_rejects_the_float_unit_view() {
 }
 
 /// TRAILING padding is the other half of the same representability hole. The
-/// float-unit view states component counts and a stride; `stone-rs`'s
+/// float-unit view states component counts and a stride; the renderer's
 /// `validate_layout` then checks `sum(sizes) == stride`. So a struct whose
 /// stride exceeds its attributes' extent is not describable by the view either
 /// -- the per-slot start check above passes it, and the failure lands at mesh

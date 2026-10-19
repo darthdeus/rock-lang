@@ -1,4 +1,4 @@
-//! Findings 3+4+5 (docs/closure-env-records-plan.md review): every synthetic
+//! Findings 3+4+5: every synthetic
 //! top-level Lua name codegen mints -- `<fn>__lambda<k>`, and the coroutine
 //! machinery `<co>__step`/`__resume`/`__advance`/`__defer<k>` +
 //! `__on_killed`/`__on_resume`/`__on_hot_reload` -- is minted through ONE

@@ -9,6 +9,7 @@ crates listed below.
 
 | Crate | Origin |
 |---|---|
+| `crates/skull` | Compiler driver, artifact assembly and incremental Lua emission |
 | `crates/rock-lsp` | Language server, diagnostics and editor queries |
 | `crates/skull-transform` | Control-flow transforms, inlining and coroutine lowering |
 | `crates/skull-codegen-shader` | Shared shader lowering, layouts and validation |

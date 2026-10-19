@@ -1,5 +1,5 @@
 //! Codegen-shape contract for how a capturing lambda snapshots its captures into
-//! an env record (P2.6 of docs/closure-env-records-plan.md). The pre-P2.6 IIFE
+//! an env record. The pre-P2.6 IIFE
 //! by-value snapshot is gone: every capture is a record FIELD instead. A
 //! single-assignment capture is snapshotted BY VALUE (the field holds the value);
 //! a mutable capture is BOXED and the field holds the shared box table, so a later

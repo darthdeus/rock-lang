@@ -1,4 +1,4 @@
-//! The whole-program half of the callee binding (`docs/backends.md`): the
+//! The whole-program half of the callee binding: the
 //! assembled artifact's second pass and executable incremental rebinding.
 //!
 //! The mode comes from `emit_full_with_callee_binding`, not the environment:

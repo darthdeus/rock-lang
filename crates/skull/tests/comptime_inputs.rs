@@ -1,5 +1,5 @@
 //! Expansion contract for the tier-1 comptime-input intrinsics
-//! (docs/comptime-plan.md): `build_var("NAME")` inlines the value the host
+//!: `build_var("NAME")` inlines the value the host
 //! resolved from `[build.vars]`, `embed_string("path")` inlines a tracked
 //! file's contents. Both take only string literals, resolve against
 //! `Workspace.comptime_inputs`, and reject with a span on every failure --
@@ -124,9 +124,9 @@ fn broken() -> string {
 
 #[test]
 fn embed_resolves_against_the_calling_files_own_package() {
-    // A LIBRARY file (stone) embeds relative to its own stick.toml dir, not
+    // A LIBRARY file (host) embeds relative to its own stick.toml dir, not
     // the consuming project's embed_root -- the cimgui migration's
-    // prerequisite (docs/comptime-plan.md tier 1.5 item 1). The calling
+    // prerequisite. The calling
     // file's dir has a stick.toml; embed_root points somewhere else entirely.
     let pkg = tempfile::tempdir().unwrap();
     std::fs::write(pkg.path().join("stick.toml"), "[package]\nname = \"libpkg\"\ntype = \"lib\"\n").unwrap();
@@ -342,7 +342,7 @@ fn other() -> int {
 }
 
 // --- global initializers ---
-// ALL in-tree production comptime reads happen in global initializers (mag's
+// ALL in-tree production comptime reads happen in global initializers (application's
 // telemetry/build_info stamps, the profiler SHA, the cimgui prelude), which
 // emit through `UnitOut`, not a function Chunk. A read recorded only on
 // chunks leaves this whole shape invisible to the watch set and to overlay

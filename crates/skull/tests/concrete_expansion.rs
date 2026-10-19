@@ -2,8 +2,6 @@
 
 use crate::common::{function_body, run_luajit, try_emit_module};
 
-const UNIFORM_BLOCK_SOURCE: &str = include_str!("../../../stone/engine/rendering/uniform_block.rock");
-
 const STRUCT_VALID: &str = r#"
 enum E { F(float), I(int) }
 value S { x: float }
@@ -55,7 +53,7 @@ fn main() {
 "#;
 
 const VERTEX_VALID: &str = r#"
-value V { pos: Vec2, rot: float }
+value V { pos: Vec2f, rot: f32 }
 
 @vertex_expand inline(lua) fn stride<T>(buf: FlatVec<T>) -> int = """
     error("stride must be compiler-expanded")
@@ -72,7 +70,7 @@ fn main() {
 "#;
 
 const VERTEX_INVALID: &str = r#"
-value WithId { pos: Vec2, id: int }
+value WithId { pos: Vec2f, id: int }
 
 @vertex_expand inline(lua) fn stride<T>(buf: FlatVec<T>) -> int = """
     error("stride must be compiler-expanded")
@@ -243,24 +241,4 @@ fn invalid_concrete_uniform_values_wrapper_rejects_at_the_expander() {
     let err = try_emit_module(UNIFORM_VALUES_INVALID).expect_err("invalid concrete uniform-values expansion");
     assert!(err.message.contains("@uniform_values"), "wrong rejection:\n{}", err.message);
     assert!(err.message.contains("Bad"), "rejection lost the concrete subject:\n{}", err.message);
-}
-
-#[test]
-fn shader_uniform_setter_is_an_ordinary_generic_function() {
-    assert!(
-        UNIFORM_BLOCK_SOURCE.contains("fn set_uniform_block<T>(shader_name: string, u: T)"),
-        "the shader setter still has no concrete-instance generic function"
-    );
-    assert!(
-        !UNIFORM_BLOCK_SOURCE.contains("macro set_uniform_block("),
-        "the obsolete source-body macro workaround remains"
-    );
-    assert!(
-        UNIFORM_BLOCK_SOURCE.contains("fn __upload_resolved_block<T>("),
-        "the generic upload helper still uses the obsolete macro workaround"
-    );
-    assert!(
-        !UNIFORM_BLOCK_SOURCE.contains("macro __upload_resolved_block("),
-        "the generic upload helper remains a macro"
-    );
 }

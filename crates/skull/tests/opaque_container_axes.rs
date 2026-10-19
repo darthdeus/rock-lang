@@ -1,5 +1,5 @@
 //! The remaining container axes of the 2.4 trigger
-//! (`docs/boundary-contracts.md`): `Arena<T>`, `FlatVec<T>`, `NativeBuffer<T>`.
+//!: `Arena<T>`, `FlatVec<T>`, `NativeBuffer<T>`.
 //!
 //! 2.4 names five container constructors; only `[T]`/`Vec<T>` and `Map<K, V>`
 //! were implemented, and `TypeCtor::Nominal(_)` silently admitted the rest.

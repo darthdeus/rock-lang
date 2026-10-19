@@ -20,7 +20,7 @@ use skull_mir::site::SiteDomain;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -213,7 +213,7 @@ fn main() {
 /// joins.
 ///
 /// The scan is a worklist for exactly this: one pass over the instance's own
-/// body sees `Outer`'s literal and nothing below it, and bitgun's `Mob` ->
+/// body sees `Outer`'s literal and nothing below it, and application's `Mob` ->
 /// `MobTimers` -> `random_range` is the real case that found it.
 #[test]
 fn a_default_reached_through_another_default_joins() {

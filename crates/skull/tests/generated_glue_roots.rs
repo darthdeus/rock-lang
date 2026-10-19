@@ -226,7 +226,7 @@ fn shader_glue_dependencies_are_retained_through_the_view() {
 }
 
 /// Under modules v1 a function's name is its DefKey (`<pkg>::<module>::<name>`),
-/// so the sim glue must find the registrar by its declared name: once Stone is
+/// so the sim glue must find the registrar by its declared name: once host engine is
 /// v1, a bare-name lookup fails every sim build.
 #[test]
 fn v1_sim_glue_finds_register_sim_by_declared_name() {

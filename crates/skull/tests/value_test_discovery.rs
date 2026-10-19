@@ -1,5 +1,5 @@
 //! `@test(returns = <literal>)` discovery: the annotation arg becomes
-//! `SkullTest::returns` contract in `docs/backends.md`, and the
+//! `SkullTest::returns` contract, and the
 //! malformed shapes reject with a spanned CompilerError.
 
 use skull::ValueExpect;

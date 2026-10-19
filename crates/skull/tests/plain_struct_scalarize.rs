@@ -4,7 +4,7 @@
 //! skull unboxes `value` structs (opt #1, `scalarize_value_cells`) but used to
 //! emit plain structs as a Lua table and lean on LuaJIT's allocation sinking
 //! (SINK) to elide them. SINK only fires on a compiled trace -- in the
-//! interpreter (mag's aborted HUD/text loops) the table allocates every
+//! interpreter (application's aborted HUD/text loops) the table allocates every
 //! iteration. rock scalarizes plain structs into per-field locals at codegen, so
 //! the table never exists and rock pays 0 even interpreted. This pins skull to
 //! that parity: a non-escaping plain-struct cell is split into per-field cells.

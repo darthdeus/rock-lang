@@ -186,8 +186,6 @@ mod tail_calls;
 mod mangle_rename_hot_reload;
 #[path = "mem2reg_stats.rs"]
 mod mem2reg_stats;
-#[path = "mir_execution_oracle.rs"]
-mod mir_execution_oracle;
 #[path = "modules_state_identity.rs"]
 mod modules_state_identity;
 #[path = "modules_lifecycle.rs"]
@@ -274,8 +272,6 @@ mod synthetic_name_collision;
 mod tuple_scalarize;
 #[path = "uniform_block_pack.rs"]
 mod uniform_block_pack;
-#[path = "uint_surface.rs"]
-mod uint_surface;
 #[path = "user_fn_emit_rejection.rs"]
 mod user_fn_emit_rejection;
 #[path = "value_ctor_splice.rs"]

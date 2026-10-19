@@ -1,4 +1,4 @@
-//! Increment 2a/2b (`docs/skull-enum-value-types.md`): a TABLE-represented
+//! Increment 2a/2b: a TABLE-represented
 //! payload enum constructed and matched WITHIN a body, never escaping, must not
 //! allocate the `{__variant, __ty, [1]=payload}` table. `skull-transform`'s SROA
 //! splits the non-escaping enum cell into per-field cells (`__variant`/`__ty`

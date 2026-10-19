@@ -1,5 +1,5 @@
 //! `_G.__ROCK_NB_STORAGE`: the compiler's description of concrete NativeBuffer
-//! storage (`docs/runtime-world-plan.md` S1). A holder of a storage cdata asks
+//! storage. A holder of a storage cdata asks
 //! it what the bytes mean -- element ctype, element width, and the leaf views
 //! minted over that element -- instead of reading a `__ty` spelling, which names
 //! the wrapper and never the element.
@@ -11,7 +11,7 @@
 use crate::common::emit_module;
 
 const VALUE_ELEM: &str = r#"
-value Mix { x: float, id: int, on: bool }
+value Mix { x: f32, id: int, on: bool }
 
 fn nbm(n: int) -> NativeBuffer<Mix> { return native_buffer_alloc(n) }
 
@@ -44,7 +44,7 @@ fn primitive_and_sized_element_types_are_registered() {
 #[test]
 fn a_value_element_registers_its_luajit_width_and_every_leaf_view() {
     let lua = emit_module(VALUE_ELEM);
-    // float + int + bool with C padding: 4 + 4 + 1 -> 12 (align 4).
+    // f32 + int + bool with C padding: 4 + 4 + 1 -> 12 (align 4).
     let line = lua
         .lines()
         .find(|l| l.starts_with("__rock_nb_storage(\"Mix\","))

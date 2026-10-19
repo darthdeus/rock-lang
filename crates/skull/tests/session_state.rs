@@ -296,7 +296,7 @@ print(b_value .. ":" .. tostring(__rock_state_get(key)))
     assert_eq!(run_luajit(&program, "lifecycle_session"), "1:2");
 }
 
-// --- Session cells under the bound shape (docs/backends.md) -----------------
+// --- Session cells under the bound shape -----------------
 //
 // Under `CalleeBindingMode::Upvalue` a mutable-global access reads the active
 // Session's tables through two chunk-level locals, `__rock_state_cell` and
@@ -410,7 +410,7 @@ print({probe}())
     assert_eq!(run_luajit(&program, "session_cells_mid_call"), "741");
 }
 
-// --- Session tables sized from the schema (docs/backends.md, "Session cells") --
+// --- Session tables sized from the schema --
 //
 // LuaJIT specialises a constant-key read to the table's CURRENT array/hash
 // split (`ULE asize` / `ABC` guard). `__rock_state` used to start as `{}` and

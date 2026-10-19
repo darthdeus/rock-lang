@@ -6,7 +6,6 @@
 //! emitted ACCESS SHAPE, so that is what these assert: no `<name>_ct(` on the
 //! buffer path, and no struct-slot reference.
 //!
-//! Design + measurements: docs/native-buffer-leaf-addressing-plan.md.
 
 use crate::common::{emit_module, function_body};
 
@@ -166,5 +165,44 @@ fn a_single_field_leaf_read_loads_only_that_leaf() {
     assert!(
         body.contains("__nb_checked_index("),
         "the hoisted bounds check must survive; it is what makes the leaf loads pure:\n{body}"
+    );
+}
+
+/// An `f32` constructor rounds each leaf it builds. Once inlined into a store
+/// on a `float` leaf view, that rounding is the store's own, so it must not
+/// survive as a separate `__rock_f32` call per leaf (the vertex hot path).
+const F32_CTOR_STORE: &str = r#"
+value V2f { x: f32, y: f32 }
+value FVert { pos: V2f, w: f32, id: int, py: f32 }
+
+@nomangle inline(lua) fn __nb_alloc_FVert(n: int) -> Ptr<FVert> = 'return ffi.new("FVert[?]", n)'
+fn nb_fvert(n: int) -> NativeBuffer<FVert> { return NativeBuffer { ptr: __nb_alloc_FVert(n), len: n } }
+
+@pure fn fvert(x: float, y: float, w: float, id: int, py: float = 0.0) -> FVert {
+    return FVert { pos: V2f { x: x, y: y }, w: w, id: id, py: py }
+}
+
+fn fill_f32(buf: NativeBuffer<FVert>, n: int) {
+    for i in 0..n {
+        let f = (i as float) * 0.1
+        buf[i] = fvert(f, f + 0.3, 0.7, i)
+    }
+}
+
+fn main() {
+    let buf = nb_fvert(4)
+    fill_f32(buf, 4)
+}
+"#;
+
+#[test]
+fn an_inlined_f32_ctor_store_rounds_only_in_the_float_view() {
+    let lua = emit_module(F32_CTOR_STORE);
+    let body = function_body(&lua, "fill_f32");
+    assert!(!body.contains("fvert("), "precondition: the constructor call is inlined:\n{body}");
+    assert!(body.contains(".__vf"), "precondition: the leaves store through the float view:\n{body}");
+    assert!(
+        !body.contains("__rock_f32("),
+        "a float-view store already rounds; the inlined ctor's rounding is redundant:\n{body}"
     );
 }

@@ -1,5 +1,5 @@
 //! Stage 0d properties for the shadow instance graph
-//! (`docs/monomorphization-plan.md` S 0d, S 12, S 20g.4).
+//!.
 
 use std::sync::LazyLock;
 
@@ -8,7 +8,7 @@ use skull::instance_graph::{self, EdgeKind};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -402,7 +402,7 @@ fn extern_availability_distinguishes_backend_owned_js_boundary() {
     // ever asked; only a JS-hosted extern on the JS artifact reaches the
     // capability arm.
     let src = r#"
-extern(ffi, "stone") fn host_tick(n: int) -> int
+extern(ffi, "host") fn host_tick(n: int) -> int
 extern(js) fn web_tick(n: int) -> int
 fn main() { host_tick(3) }
 "#;
@@ -1246,7 +1246,7 @@ fn main() { bump(1) }
 /// A call INSIDE a shared generic body, walked at an instance, resolves through
 /// the caller's substitution and reaches a CONCRETE callee.
 ///
-/// `docs/mono-stage0e-ablation.md` prices this population at 43 pairs / 46 sites
+/// Emission measurements price this population at 43 pairs / 46 sites
 /// / 23 callees, but that is measured on the EMISSION path, which still lowers
 /// shared generic bodies. In the graph every walked body is an instance, so the
 /// binding always has a substitution to resolve against, and no `unbound-generic`

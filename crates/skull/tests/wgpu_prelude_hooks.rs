@@ -1,5 +1,5 @@
 //! The Lua prelude reaches the renderer's pending WGPU shader queue only
-//! through `@nomangle` hooks, so a modules-v1 Stone, whose globals and plain
+//! through `@nomangle` hooks, so a modules-v1 host engine, whose globals and plain
 //! functions have hashed physical names, is published exactly like a legacy
 //! one. A registrar without its publish hook fails the load instead of
 //! skipping the publication.

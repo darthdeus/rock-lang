@@ -1,10 +1,10 @@
-//! Control 2 of the 2.4 trigger (`docs/boundary-contracts.md`): the rule reads
+//! Control 2 of the 2.4 trigger: the rule reads
 //! the DECLARED SEMANTIC parameter or receiver type under the concrete
 //! substitution, and a `Map<K, V>` is a container on the same terms `[T]` is.
 //!
 //! A `Map<K, V>` at a column-eligible V is not a bare table: it is
 //! `{spine, data, free_indices, occupied_count}` over column storage
-//! (`docs/nobox-map-value-design.md`). An opaque body handed one sees the
+//!. An opaque body handed one sees the
 //! WRAPPER -- `pairs(m)` walks four bookkeeping fields instead of the entries,
 //! which is a silent wrong answer, not a crash.
 //!

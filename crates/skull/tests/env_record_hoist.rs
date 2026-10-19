@@ -1,4 +1,4 @@
-//! P2 step 6 of docs/closure-env-records-plan.md: a CAPTURING lambda hoists to a
+//! Capturing lambda hoisting: a CAPTURING lambda hoists to a
 //! top-level `function <enclosing>__lambda<k>(<env>, <params>) ... end` whose captures
 //! arrive as fields of the env record, and the creation site builds a plain data record
 //! `setmetatable({ __slot = <logical CodeRef>, c<A> = .. }, __rock_fn_mt)` instead of an

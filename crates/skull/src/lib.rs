@@ -11,7 +11,6 @@
 //! copy-prop, DCE, and — once bone models `value` types — arg-SROA) and for
 //! retargeting (a JS backend would reloop/dispatch the same MIR). The long-term
 //! goal is `rock test tests --backend skull` at 100% as bone grows. See
-//! `docs/skull-plan.md`.
 
 pub mod allocation_report;
 pub mod coroutine_emit;
@@ -67,7 +66,7 @@ pub fn compile_source(src: &str) -> Result<String, CompilerError> {
 pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 
 /// Hash every nominal type's RUNTIME LAYOUT for the hot-reload schema-drift
-/// restart trigger (docs/hot-reload-schema-drift-plan.md): live data outlives
+/// restart trigger: live data outlives
 /// a reload, so a layout change means the process must restart. The hash
 /// covers exactly what determines how live values are laid out -- ordered
 /// (field name, field type) pairs for structs (+ the value/cdata flag),
@@ -443,27 +442,26 @@ fn runtime_prelude() -> &'static str {
     //      512 KB total / 1000 traces). A real game's hot traces overflow the
     //      mcode arena -> "failed to allocate mcode memory" -> a GLOBAL trace
     //      flush wipes every good trace -> the hot loop drops to the interpreter
-    //      and re-traces on a cliff/spiral (mag floors_walls: ~2.6 ms vs ~0.5
+    //      and re-traces on a cliff/spiral (application floors_walls: ~2.6 ms vs ~0.5
     //      with this). A trace must fit one `sizemcode` block. On arm64 macOS,
     //      dyld leaves room for the first block near the VM but later mappings
     //      prevent a second one, so that first block must hold the hot set --
     //      which is why size == max on both arches: one block, not several.
     //      The budget is arch-split because the jump range is: x64 reaches
     //      +/-2GB, arm64 only +/-128MB, so arm64 keeps the 16 MB figure from
-    //      the W1 decision in docs/luajit-mcode-flush-plan.md while x64 takes
-    //      64 MB. 8 MB was sized against `mag floors_walls` and is far too
+    //      the code-cache limit while x64 takes
+    //      64 MB. 8 MB was sized against `application floors_walls` and is far too
     //      small for the live game: a 60 s session of real play (summons,
     //      combat, multiple spaces) flushed 31 times -- once every ~0.7 s --
     //      and flush-plus-recovery accounted for 94% of all frame time over
     //      budget. Evidence and the per-frame join are in
-    //      docs/trace-pressure-work-plan.md.
     //      ROCK_JIT_MCODE_KB overrides both, so the budget can be swept
     //      without a rebuild; this prelude runs at chunk load and beats any
     //      -O flag passed on the command line.
     //      `hotexit` is raised from LuaJIT's default 10 to 100 because a side
     //      trace that FAILS is never penalised or blacklisted
     //      (lj_trace.c:596-606) and snap->count only saturates on success, so a
-    //      doomed exit is re-recorded ~245 times for nothing. MAG's hottest
+    //      doomed exit is re-recorded ~245 times for nothing. application's hottest
     //      exits are doomed: they die in asm_head_side and never appear as a
     //      parent for any other trace. Measured -57% aborts and -22% mean frame
     //      on two independent workloads (a scripted combat sim and a recorded
@@ -474,7 +472,7 @@ fn runtime_prelude() -> &'static str {
     //      conservative pick rather than a tuned one. ROCK_JIT_HOTEXIT
     //      overrides it, so a regression reverts without a rebuild.
     //      `maxtrace` is 32000 (LuaJIT default 1000, previously 4000 here).
-    //      A MAG combat session compiles ~24,600 traces; at 4000 the trace
+    //      An application combat session compiles ~24,600 traces; at 4000 the trace
     //      array filled six times per benchmark run and every fill flushed
     //      the whole cache -- all compiled code, every side-exit counter and
     //      every abort penalty -- so the working set was re-recorded from
@@ -487,7 +485,7 @@ fn runtime_prelude() -> &'static str {
     //      constant limit, not maxrecord, but raising it only converts the
     //      aborts into tail-call unroll aborts at the same starts.
     //      `hotloop` and `loopunroll` stay at LuaJIT's defaults (56, 15) but
-    //      are exposed as ROCK_JIT_HOTLOOP / ROCK_JIT_LOOPUNROLL: MAG's inner
+    //      are exposed as ROCK_JIT_HOTLOOP / ROCK_JIT_LOOPUNROLL: application's inner
     //      loops (glyphs per string, points per ribbon) run fewer than 56
     //      iterations, so they never become loop traces and get unrolled by
     //      whichever function-entry trace reaches them, which is where the
@@ -508,7 +506,7 @@ fn runtime_prelude() -> &'static str {
         // NO-OP, and the survivor is valid Lua: `= {LEAF_VIEWS}` reads an unset
         // global, so the table is EMPTY rather than a syntax error. `pairs({})`
         // then makes `__nb_refresh_views` do nothing and every view dangles
-        // after a grow -- silently, which is the class that killed mag's
+        // after a grow -- silently, which is the class that killed application's
         // spell_damages once already. Fail loudly at build time instead.
         assert!(
             !out.contains("{LEAF_VIEWS}"),
@@ -543,12 +541,12 @@ const PRELUDE_TEMPLATE: &str =
 -- -- the Session cells first of all -- are CLOSED upvalues (UREFC: one guard,
 -- no constant) by the time an emitted function runs under the JIT. Left open,
 -- every inlined frame reading a cell would intern its own 2-slot i64 guard
--- constant (docs/trace-pressure-work-plan.md, "Session cells"). The matching
+-- constant. The matching
 -- `end` is the last line the full emitter writes; the entry call the CLI
 -- appends runs after it.
 do
 -- Chunk-level cells every bound function reads a mutable global through
--- (docs/backends.md, "Session cells"). Seated by __rock_session_publish below.
+--. Seated by __rock_session_publish below.
 local __rock_state_cell, __rock_initialized_cell
 local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
@@ -695,7 +693,7 @@ if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
 -- grows lazily from `{}` rehashes once per hash-part overflow -- each time
 -- recomputing the array part from the keys populated so far -- which left
 -- every trace recorded before a move with a permanently failing guard
--- (`docs/backends.md`, "Session cells"). Defined outside the define-once block
+--. Defined outside the define-once block
 -- so a reload with a newer artifact never keeps an older constructor.
 _G.__rock_session_new = function(schema_id)
   local capacity = rawget(_G, "__ROCK_STATE_CAPACITY")
@@ -983,7 +981,7 @@ _G.__rock_state_install_global_bridge = function()
   mt.__rock_state_bridge = true
   setmetatable(_G, mt)
 end
--- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
+-- Shared metatable of capturing-lambda env records:
 -- a record { __slot = <CodeRef>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.
 {FN_MT}
@@ -1287,7 +1285,7 @@ fn value_struct_defs(
 /// with LuaJIT. Deriving both from the same owned RepPlan C-layout result
 /// is what keeps them from describing different layouts.
 ///
-/// Leaf addressing (`docs/native-buffer-leaf-addressing-plan.md`) indexes typed
+/// Leaf addressing indexes typed
 /// views with COMPILER-COMPUTED byte offsets — a literal constant per leaf, which
 /// is the whole point, since a runtime offset lookup would cost what the boxing
 /// cost. If that model ever disagreed with LuaJIT's, every element access would
@@ -1511,7 +1509,7 @@ fn lua_key_read(table: &str, key: &str) -> String {
 /// Scalar payloads only (cut 1), so there is no inter-enum dependency; emitted
 /// BEFORE value structs so a future enum-typed value-struct field resolves. Name-
 /// sorted for deterministic output. Reflection is sacrificed: there is no
-/// `{__variant}` table -- see `docs/skull-enum-value-types.md`.
+/// `{__variant}` table.
 fn enum_cdata_defs(ws: &Workspace) -> String {
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -1839,7 +1837,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
 ///
 /// Purely STRUCTURAL: it names nominal types and says nothing about which of
 /// them the host owns. The native-class list stays in exactly one place
-/// (`stone/engine/host_projection.rock`); a copy here would be a second thing
+/// (the host projection); a copy here would be a second thing
 /// to forget a type in, and the two drifting would make every handle of the
 /// forgotten type serialize as a missing one.
 ///
@@ -2051,25 +2049,11 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 /// empty, so this only adds entries. No metatables: type tagging is the direct
 /// `__ty`.
 ///
-/// `type_id` below is WRITE-ONLY, and deliberately so. It is a counter over
-/// `ws.modules` in resolution order, so it renumbers whenever a declaration
-/// moves between files or a dependency is added -- it is not stable across
-/// builds, worktrees or manifest edits. Every consumer of this table keys by
-/// the type NAME (`serialization.rock`, `snapshot.rock`, `sim_checkpoint.rock`,
-/// `stdlib/unified.rock`) and reads `.kind`/`.fields`/`.variants`; nothing in
-/// the tree reads `.type_id`, and `docs/incremental-testing.md` already treats
-/// its variation as harmless.
-///
-/// It becomes load-bearing the moment anything reads it -- a `type_id<T>()`
-/// intrinsic, an entry in the canonical serializer's hash, a save, a wire
-/// message, an FFI tag. If that day comes, derive the number from a sorted,
-/// order-independent key the way `StateSchema` already does with
-/// `(kind, identity)`, rather than from module order.
 /// The `host_resource` key of a type-table entry, or nothing.
 ///
 /// `@host_resource(<class>)` on the declaration is the ONE place a type is
 /// named a host resource; `__stone_host_projection_class`
-/// (`stone/engine/host_projection.rock`) reads this key instead of keeping its
+/// (the host projection) reads this key instead of keeping its
 /// own list of type names, which is what stops the two drifting and reporting
 /// every handle of a forgotten type as a missing one. A host resource the
 /// native ledger does not track publishes the empty class, which reads as
@@ -2087,7 +2071,6 @@ fn type_table_defs(
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
     let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
-    let mut type_id = 100i64;
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
             // Row offsets of a `[S]` stored as strided rows, so reflection
@@ -2143,23 +2126,19 @@ fn type_table_defs(
                 ));
             }
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", type_id = {id}{hr}, fields = {{ {f} }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\"{hr}, fields = {{ {f} }} }}\n",
                 n = skull_mir::mangle::type_symbol(ws, s.name),
                 k = kind,
-                id = type_id,
                 hr = host_resource_key(s.host_resource),
                 f = fields.join(", ")
             ));
-            type_id += 1;
         }
         for (_, nt) in module.newtypes.iter() {
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}{hr}, fields = {{ }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\"{hr}, fields = {{ }} }}\n",
                 n = skull_mir::mangle::type_symbol(ws, nt.name),
-                id = type_id,
                 hr = host_resource_key(nt.host_resource)
             ));
-            type_id += 1;
         }
     }
     for module in ws.modules.iter() {
@@ -2186,11 +2165,9 @@ fn type_table_defs(
                 // the payload slots, which reflection reads directly.
                 if let Some(vd) = boxed_variant_descs(ws, e) {
                     out.push_str(&format!(
-                        "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", type_id = {id}, fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
+                        "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
                         n = skull_mir::mangle::type_symbol(ws, e.name),
-                        id = type_id,
                     ));
-                    type_id += 1;
                 }
                 continue;
             };
@@ -2242,13 +2219,11 @@ fn type_table_defs(
                 })
                 .collect();
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }}, variants = {{ {v} }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", fields = {{ {f} }}, variants = {{ {v} }} }}\n",
                 n = skull_mir::mangle::type_symbol(ws, e.name),
-                id = type_id,
                 f = fields.join(", "),
                 v = variants.join(", ")
             ));
-            type_id += 1;
         }
     }
     Ok(out)
@@ -2265,8 +2240,8 @@ mod tests {
     /// The budget itself is tuning and moves with measurement, so this pins the
     /// shape and the floor rather than a literal. LuaJIT's own defaults (512 KB
     /// total, 32 KB blocks) flush the trace arena thousands of times in a real
-    /// MAG session; 8 MB still flushed it 31 times in 60 s of play. Neither
-    /// architecture may regress below that. See docs/trace-pressure-work-plan.md.
+    /// application session; 8 MB still flushed it 31 times in 60 s of play. Neither
+    /// architecture may regress below that.
     #[test]
     fn runtime_prelude_keeps_the_mag_trace_working_set() {
         let prelude = super::runtime_prelude();
@@ -2361,7 +2336,7 @@ mod tests {
         out
     }
 
-    /// The schema-drift restart trigger's oracle (docs/hot-reload-schema-drift-plan.md):
+    /// The schema-drift restart trigger's oracle:
     /// the hash moves iff the runtime LAYOUT moves. Body edits are invisible;
     /// each shape-edit class moves exactly its own type's entry; a removed type
     /// counts as drifted (live data under it is stale).
@@ -2566,7 +2541,7 @@ mod tests {
     /// `B` must still init before `A`. Pre-fix, `A` (declared first) ran before
     /// `B`, read `B` as nil, and `A` latched nil — exactly the
     /// `global sprite_batch_shader = watched_shader(...)` -> `SHADERS_TO_LOAD`
-    /// crash that took mag down under skull (there a nil vec push, here a nil
+    /// crash that took an application down under skull (there a nil vec push, here a nil
     /// latch). (No arithmetic: the stdlib-less test path has no `__op_add`.)
     #[test]
     fn exec_global_init_dep_through_call() {
@@ -2984,7 +2959,7 @@ mod tests {
     /// an explicit value arg splats its fields with NO cdata ctor, and the
     /// default-fill stores per-field scalars (no cdata either). RED before the
     /// defaulted-value-param scalarization: the callsite packed `V2_ct(...)` to
-    /// feed the single-cdata defaulted slot (mag's per-tile `wall_pivot`).
+    /// feed the single-cdata defaulted slot (application's per-tile `wall_pivot`).
     #[test]
     fn scalar_abi_defaulted_value_param_no_cdata() {
         // No arithmetic: the stdlib-less unit path has no `__op_*` (see
@@ -3043,7 +3018,7 @@ mod tests {
     /// literal). The global reads back as a single cdata (`Scalar`), not a
     /// `Group`, so the per-field default-fill must field-read its components —
     /// not store the whole cdata into the first slot. RED before that handling:
-    /// mag crashed `Color_ct(<cdata>, nil, nil, nil)` on
+    /// An application crashed `Color_ct(<cdata>, nil, nil, nil)` on
     /// `journal_log("...")` omitting `hue: Color = JOURNAL_HUE_DEFAULT`.
     #[test]
     fn exec_defaulted_value_param_global_default() {

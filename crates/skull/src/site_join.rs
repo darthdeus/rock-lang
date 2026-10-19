@@ -33,7 +33,7 @@
 //! wrong callee is the one failure instance-driven emission cannot tolerate.
 //!
 //! It is NOT yet an oracle. Current populations, the mutation results and the
-//! structural blocker are recorded in `docs/parked/mono.md` -- a live number in
+//! structural blocker belong in measurements -- a live number in
 //! a source comment goes stale silently.
 
 use std::collections::{BTreeMap, HashMap};
@@ -941,7 +941,7 @@ pub fn check_callee(
     // `inline(js)`, `extern` -- is emitted once per declaration and target, so
     // its generic arguments do not participate in the symbol emission spells;
     // demanding an instantiation for one asked a Rock question of a non-Rock callee
-    // and reported the absence as `callee-no-key` (bitgun: 215 sites over 18
+    // and reported the absence as `callee-no-key` (application: 215 sites over 18
     // declarations, `__vec_data_get`, `transmute`, `phantom` among them).
     //
     // The identity that IS load-bearing for it -- declaration, class, target,
@@ -1015,7 +1015,7 @@ fn classify(
     // Nothing about it is looked up: emission renders the callee OPERAND, so
     // whether the graph happened to record an obligation at this expression is
     // not what makes the call safe -- what the operand is, is. Deciding it after
-    // the lookup filed 62 of bitgun's indirect calls under `site-not-in-body`,
+    // the lookup filed 62 of an application's indirect calls under `site-not-in-body`,
     // which named the wrong cause for all of them.
     //
     // A `named-function` operand is NOT here: it carries a `target`, so it left

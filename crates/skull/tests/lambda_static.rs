@@ -1,4 +1,4 @@
-//! P2 step 1 of docs/closure-env-records-plan.md: a `static` local inside a
+//! Lambda static locals: a `static` local inside a
 //! capturing lambda body is legal (rejected only in `co fn`/`@pure`), and its
 //! cell already folds into the ENCLOSING fn's chunk statics -- so it carries the
 //! standard hot-reload reset-on-init-edit / preserve-otherwise behavior. This

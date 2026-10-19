@@ -22,7 +22,7 @@ use ustr::Ustr;
 const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -852,7 +852,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
 /// instantiation it does not have. An opaque body is emitted once per
 /// declaration and target, so its generic arguments do not participate in the
 /// symbol emission spells -- and demanding a Rock instance record for one
-/// reported the absence as an unverified call (bitgun: 215 sites).
+/// reported the absence as an unverified call (application: 215 sites).
 ///
 /// The control is the Rock arm over the SAME instance: it still demands the
 /// record, so this is not a blanket exemption for generic callees.
@@ -1335,7 +1335,7 @@ fn main() { print("{use_both()}") }
 /// `lower_expr_repr` is a second entry into expression lowering -- the value
 /// route the scalar ABI takes -- and it did not narrow the site cursor. Every
 /// call under an unboxed argument was therefore stamped with the ENCLOSING
-/// expression, so it selected the enclosing expression's callee: bitgun filed
+/// expression, so it selected the enclosing expression's callee: application filed
 /// 138 calls as `callee-decl-mismatch` this way, `outer(inner(..))` naming
 /// `outer` from the `inner` call and the reverse.
 ///
@@ -1593,7 +1593,7 @@ fn main() { print("{apply(add_one, 1)}") }
 /// dispatches on `expr_arena[target]` directly -- so nothing installed the site
 /// cursor for it: in statement position the cursor was absent entirely and in
 /// value position it named the enclosing assignment. The bounds check the write
-/// synthesizes was therefore siteless (bitgun: 61 `__nb_checked_index`), while
+/// synthesizes was therefore siteless (application: 61 `__nb_checked_index`), while
 /// the walk keys that obligation on the `Expr::Index` node itself.
 ///
 /// The READ side is the control: it goes through `lower_expr_repr` and always

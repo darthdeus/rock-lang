@@ -6,7 +6,7 @@
 //!
 //! A `value` struct holding the enum field therefore scalarizes into a C-layout
 //! cdata with an int field (NOT a Lua table) and works across the scalar ABI
-//! (by-value pass). See `docs/skull-enum-value-types.md`.
+//! (by-value pass).
 use crate::common::{emit_mir, emit_module, require_luajit};
 
 #[test]
@@ -161,13 +161,12 @@ fn run_skull_test(src: &str, fn_name: &str) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-/// SENTINEL (`docs/test-sentinels.md`): a payload-free enum that ESCAPES into `any`
+/// SENTINEL: a payload-free enum that ESCAPES into `any`
 /// -- here passed directly to the generic `inspect(any)` -- loses its static type
 /// and renders as the bare ordinal int, NOT `<Enum>::<Variant>`. A `{x}` interp
 /// hole renders correctly (the static type is known at the hole; see
 /// `enum_payload_free_stringify.rock`); this `inspect`/`any`-escape path is the
-/// deferred box-on-escape-into-`any` work (increment 4 in
-/// `docs/skull-enum-value-types.md`).
+/// deferred box-on-escape-into-`any` work.
 ///
 /// This pins the CURRENT (wrong) behavior. When increment 4 lands, the output
 /// becomes "BlendMode::Additive" and this assertion goes red -- FLIP the expected

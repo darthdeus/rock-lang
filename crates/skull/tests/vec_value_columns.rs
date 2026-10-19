@@ -1,5 +1,5 @@
 //! Lowering-shape oracle for flat `Vec<T>` element storage, T an all-scalar
-//! `value` struct (`docs/vec-value-columns-plan.md`). A `[V2]` stores its
+//! `value` struct. A `[V2]` stores its
 //! elements FLAT -- one ordinary Lua array per leaf -- so no per-element table
 //! exists at any point: no `V2_ct(..)` on push, no whole-element
 //! `__vec_checked_get` on read.
@@ -354,7 +354,7 @@ fn main() {
 /// The stdlib Vec surface over column storage, end to end. These are PLAIN
 /// generics -- no `@inline`, no `@pure` -- so nothing used to specialize them and
 /// every one reached the shared `_data` body: `xs.set(..)` failed at top level,
-/// and `Vec.clear` is what stopped bitgun running.
+/// and `Vec.clear` is what stopped an application running.
 ///
 /// They work now because a column-eligible instantiation forces specialization
 /// whether or not the callee opted in, and because the specialized copy is

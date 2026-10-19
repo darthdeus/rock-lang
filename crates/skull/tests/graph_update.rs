@@ -1,5 +1,5 @@
 //! **`InstanceGraph::update_bodies` against a fresh build**, one causal
-//! producer per test (`docs/parked/mono.md`, "The persistent graph updater").
+//! producer per test.
 //!
 //! The oracle is `graph_snapshot::canonical`: raw field equality is invalid
 //! across arenas, because the updated graph's arena is the one v1 interned into
@@ -26,7 +26,7 @@ use skull::instance_graph::{self, Instance, InstanceGraph, RejectionKind, Update
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

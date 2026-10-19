@@ -1,4 +1,4 @@
-//! The Lua wide-value calling convention (`docs/luajit-wide-value-abi.md`).
+//! The Lua wide-value calling convention.
 //!
 //! An ORDINARY `value` whose PAYLOAD leaf count exceeds
 //! `WIDE_VALUE_PAYLOAD_LEAF_CUT` crosses a Rock-to-Rock Lua call as ONE slot
@@ -42,14 +42,14 @@ fn float_inits(leaves: usize, base: &str) -> String {
 
 // --- gate 1: the wide-uniform witness compiles, loads and computes ---------
 //
-// `docs/repros/luajit-wide-uniform/source.rock.txt`'s shape: a 58-leaf ordinary
+// A retained wide-uniform shape: a 58-leaf ordinary
 // `value` built once, then passed to and returned from helpers inside a loop,
 // with other live locals in the caller. On the scalar wire the caller's frame
 // is past `LJ_MAX_SLOTS` and the compiler rejects the body; the retained
 // `generated-function.lua` witness keeps failing either way.
 
-/// The 27-field / 58-leaf shape of MAG's `DungeonRelightU`, in a form that
-/// needs no MAG or Stone type: five 2-leaf `nobox` pairs, eleven 3-leaf
+/// The 27-field / 58-leaf shape of an application's `DungeonRelightU`, in a form that
+/// needs no application or host engine type: five 2-leaf `nobox` pairs, eleven 3-leaf
 /// `nobox` triples, one 4-leaf `nobox` quad and eleven plain floats.
 const WIDE_UNIFORM_SRC: &str = r#"
 nobox value P2 { x: float, y: float }
@@ -149,7 +149,7 @@ fn the_wide_uniform_helper_takes_one_slot_per_wide_value() {
 
 /// Gate 3: the boxed wide value CONTAINS `nobox` values. The callee must read
 /// their fields out of the box without the implicit-materialization rejection
-/// recorded in `mag/LIGHTING_COMPILER_LIMITS.md`, and must be able to build a
+/// seen with nested uniform fields, and must be able to build a
 /// new one from them.
 #[test]
 fn a_boxed_wide_value_carrying_nobox_fields_reads_and_writes_them() {
@@ -187,11 +187,7 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
 /// produces different Lua rather than making that file load.
 #[test]
 fn the_retained_old_abi_witness_still_fails_to_load() {
-    let witness = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/repros/luajit-wide-uniform/generated-function.lua"
-    ))
-    .expect("the retained witness");
+    let witness = include_str!("fixtures/generated-function.lua");
     let err = luajit_loads(&witness, "wide_value_abi_old_witness")
         .expect_err("the retained witness is a diagnostic of the old ABI, not a repaired oracle");
     assert!(err.contains("too complex"), "unexpected parse error: {err}");

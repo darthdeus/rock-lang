@@ -1,5 +1,5 @@
 //! What the 2.4 trigger must READ to reach every declared slot
-//! (`docs/boundary-contracts.md`).
+//!.
 //!
 //! The rule asks a question about the callee's DECLARED type. Two ways of
 //! answering it were wrong, and both failed silently at runtime rather than

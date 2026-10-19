@@ -8,8 +8,7 @@
 //! values `asm_head_side` hard-aborts with "NYI: register coalescing too complex"
 //! (no spill fallback), blacklisting the trace tree. Body-scoped `local`s sit
 //! ABOVE the loop control slots and get pruned, collapsing the inherited set to
-//! the genuinely-live values. Standalone repro + in-game abort sites:
-//! `benchmarks/nyicoal/`, `docs/gc-pressure-reduction-plan.md` item 1.
+//! the genuinely-live values.
 use crate::common::{emit_module, function_body, run_luajit};
 
 /// Multi-use loop-body temps (`t1`/`t2` below are used twice, so they are not

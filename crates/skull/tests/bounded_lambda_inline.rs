@@ -2,8 +2,7 @@
 //! its body must not make it un-inlinable: `fn fwd<I: Iterator<int>>(it: I) {
 //! it.reduce(0, (a, x) => a + x) }` forwards its generic receiver into a
 //! fn-value terminal with the closure constructed in its own body. The caller
-//! must fully inline the chain (docs/nested-generic-terminal-fnparam-bug.md,
-//! Bug 1); a refusal leaves a residual bounded call and the caller cannot emit.
+//! must fully inline the chain; a refusal leaves a residual bounded call and the caller cannot emit.
 use crate::common::{emit_mir, run_luajit};
 
 const FWD_TERMINALS: &str = r#"

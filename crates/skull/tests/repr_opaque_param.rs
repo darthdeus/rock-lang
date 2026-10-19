@@ -1,5 +1,5 @@
 //! `@repr(opaque)`: the parameter-level representation contract
-//! (`docs/boundary-contracts.md` 2.4).
+//!.
 //!
 //! The 2.4 rejection fires on a parameter whose declared semantic type, under
 //! the call's substitution, is a container with a column-stored element --

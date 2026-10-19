@@ -1,4 +1,4 @@
-//! `native_buffer_alloc<T>` intrinsic (docs/flatvec-plan.md). skull owns the
+//! `native_buffer_alloc<T>` intrinsic. skull owns the
 //! value-struct cdef names, so a call resolves its concrete element type at the
 //! site and emits `ffi.new("<ctype>[?]", n)` wrapped in a `NativeBuffer` -- no
 //! per-type `__nb_alloc_*` boilerplate. The rejection of a non-allocatable

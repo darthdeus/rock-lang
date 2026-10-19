@@ -1,5 +1,5 @@
 //! The canonical-snapshot oracle the persistent graph updater is gated on
-//! (`docs/parked/mono.md`).
+//!.
 //!
 //! Two properties, and the second is what makes the first worth anything: the
 //! snapshot must be STABLE across builds that mean the same thing, and it must
@@ -28,7 +28,7 @@ use skull_mir::monoty::{MonoSubst, MonoTy, MonoTyReason};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

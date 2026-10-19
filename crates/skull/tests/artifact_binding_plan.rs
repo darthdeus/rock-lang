@@ -42,9 +42,9 @@ fn compiler_plan_tracks_added_removed_and_arbitrary_top_level_bindings() {
         r#"
 global ordinary: int = 1
 global __rock_user_binding: int = 2
-global __stone_user_binding: int = 3
+global __host_user_binding: int = 3
 global __ROCK_user_binding: int = 4
-global stone_user_binding: int = 5
+global host_user_binding: int = 5
 global replay_user_binding: int = 6
 global runtime_binding_not_in_old_classifier: int = 7
 fn main() {}
@@ -54,9 +54,9 @@ fn main() {}
         r#"
 global ordinary: int = 1
 global __rock_user_binding: int = 2
-global __stone_user_binding: int = 3
+global __host_user_binding: int = 3
 global __ROCK_user_binding: int = 4
-global stone_user_binding: int = 5
+global host_user_binding: int = 5
 global replay_user_binding: int = 6
 global runtime_binding_added: int = 8
 fn main() {}
@@ -66,9 +66,9 @@ fn main() {}
     for name in [
         "ordinary",
         "__rock_user_binding",
-        "__stone_user_binding",
+        "__host_user_binding",
         "__ROCK_user_binding",
-        "stone_user_binding",
+        "host_user_binding",
         "replay_user_binding",
         "runtime_binding_not_in_old_classifier",
     ] {

@@ -1,4 +1,4 @@
-//! Total valid-type identity (`docs/monomorphization-plan.md` S 2a/S 2b).
+//! Total valid-type identity.
 //!
 //! `unit`, `any`, `never` and a function type are VALID logical types. `MonoTy`
 //! has a constructor for each, so a generic bound to one has a name -- the

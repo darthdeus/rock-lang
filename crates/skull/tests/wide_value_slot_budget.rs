@@ -299,18 +299,17 @@ fn the_local_variable_cap_agrees_with_luajit_across_the_boundary() {
     walk("flat_locals", 198, 201, flat_locals);
 }
 
-/// The author's named witness, at the width `docs/nobox-wide-trace-plan.md`
-/// records: three live 50-leaf values load, four do not.
+/// The retained width witness: three live 50-leaf values load, four do not.
 #[test]
 fn the_held_wide_value_witness_agrees_with_luajit() {
     walk("held_values", 3, 4, |held| fixture(50, held));
 }
 
 /// The rejection must reach the INCREMENTAL re-emit path too, not only a fresh
-/// full build. `rock stone` re-emits the edited body and reassembles; a body
+/// full build. the host watch command re-emits the edited body and reassembles; a body
 /// edit that pushes a function over the frame limit must fail the reload with
 /// the Rock diagnostic rather than publish Lua the engine cannot parse
-/// (`docs/compiler-hygiene-lessons.md`, "The re-emit paths are THREE").
+///.
 #[test]
 fn the_frame_limit_rejection_reaches_the_incremental_path() {
     let fits = padded_receive(50, 100);

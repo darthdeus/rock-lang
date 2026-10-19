@@ -1,4 +1,4 @@
-//! P1 of docs/closure-env-records-plan.md: a co-fn lifecycle hook
+//! A co-fn lifecycle hook
 //! (`on_killed`/`on_resume`/`on_hot_reload`) must compile to a per-co-fn
 //! top-level Lua fn taking the frame `s`, stored as a compiler-owned CodeRef --
 //! NOT a per-construction closure over the frame table.

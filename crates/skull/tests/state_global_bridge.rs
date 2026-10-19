@@ -7,8 +7,8 @@
 //! nil)` cannot make it present. So the miss path runs on every such read, and
 //! it used to end in `return old_read(t, key)`: a Lua-level TAIL CALL, which
 //! spends one of LuaJIT's 15 `loopunroll` slots in every trace that records it.
-//! Measured on mag's combat bench, that link was 31.7% of the remaining
-//! tail-call budget (`docs/trace-pressure-work-plan.md`).
+//! Measured on an application's combat bench, that link was 31.7% of the remaining
+//! tail-call budget.
 //!
 //! Which of the three pre-bridge fallback shapes applies -- function, table, or
 //! none -- cannot change between two calls of the metamethod, so it is resolved

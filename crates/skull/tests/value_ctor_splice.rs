@@ -3,7 +3,7 @@
 //! `<Name>_vt(a, b)` is a call to a chunk-level function whose entire body is
 //! `return setmetatable({ a = a, b = b, __ty = "Name" }, __rock_vt_Name)`. That
 //! call frame is what lets LuaJIT root a trace at the constructor: `Entity_vt`
-//! is the largest single `leaving loop in root trace` family on mag's combat
+//! is the largest single `leaving loop in root trace` family on an application's combat
 //! bench (106 aborts over three runs), and its `return setmetatable(..)` is one
 //! `CALLT` against the 15-slot `loopunroll` budget in every trace that records
 //! it. `ROCK_SKULL_VALUE_CTOR=splice` writes the body at the use site instead,
@@ -142,7 +142,7 @@ fn the_two_shapes_differ_only_where_a_gc_table_value_is_built() {
 /// `return setmetatable(..)` body is a `CALLT` into C, which a root trace
 /// started at the ctor's entry cannot leave through (`rec_ret` needs a real
 /// `RET`), so every such root aborted `leaving loop in root trace`. Measured
-/// 166 -> 0 on the shipped LuaJIT (docs/backends.md, "Wrapper return").
+/// 166 -> 0 on the shipped LuaJIT.
 #[test]
 fn the_ctor_definition_returns_through_a_local_not_a_tail_call() {
     let call = emit(ValueCtorShape::Call);

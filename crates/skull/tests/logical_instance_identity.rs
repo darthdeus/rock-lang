@@ -23,7 +23,7 @@ use skull_mir::lower::ScalarCtx;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
@@ -140,7 +140,7 @@ fn main() {
 /// A generic instantiated at a COROUTINE type, and at a container of one,
 /// records its instance.
 ///
-/// bitgun's remaining three cases were `tick`/`start` over a coroutine payload
+/// application's remaining three cases were `tick`/`start` over a coroutine payload
 /// and `clear` over a `Map` of them -- the coroutine's yield type is a function
 /// type one level down, which is why the container arm is not redundant with
 /// the bare one.

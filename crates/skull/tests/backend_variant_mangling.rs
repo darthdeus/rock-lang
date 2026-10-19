@@ -2,7 +2,7 @@
 //! of its own `(name, signature)`, so it is IDENTICAL with or without a same-name
 //! inline(js)/extern(js) backend sibling or an unrelated overload declared
 //! elsewhere. This is what makes hot reload safe (see mangle_rename_hot_reload.rs)
-//! and what fixed the stone-web arc-2 regression where a web sibling silently
+//! and what fixed the web renderer arc-2 regression where a web sibling silently
 //! renamed every previously-unique Lua definition and call site.
 use crate::common::emit_module;
 

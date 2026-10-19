@@ -1,4 +1,4 @@
-//! Finding 2 (docs/closure-env-records-plan.md review): `ScopeTree::build`
+//! Finding 2: `ScopeTree::build`
 //! panicked ("no entry found for key") when `fold_const_branches` removed the
 //! block holding an OUTER lambda's creation while the outer's body blocks
 //! (containing an INNER lambda) lingered in the arena -- the inner lambda's

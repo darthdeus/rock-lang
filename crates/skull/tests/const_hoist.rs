@@ -1,11 +1,11 @@
 //! Codegen-shape contract: an all-constant `MakeValueStruct` is hoisted to ONE
 //! function-owned module-scope constant, not rebuilt at each use.
 //!
-//! The mag HUD/text path's `make_text_vertex` writes a nested
+//! The application HUD/text path's `make_text_vertex` writes a nested
 //! `outline_color: FixVec2 { 0.0, 0.0 }` into every glyph vertex slot. opt #3 does
 //! not recurse into nested value-struct fields, so this becomes a literal
 //! `slot.outline_color = FixVec2_ct(0.0, 0.0)` per store. On a trace it sinks; in the
-//! interpreter (mag's aborted HUD loops) it allocates a fresh cdata every store --
+//! interpreter (application's aborted HUD loops) it allocates a fresh cdata every store --
 //! the entire skull-vs-rock interpreter-path gap on the text loop (skull 8.25 vs
 //! rock 6.70 KB per draw_text call; `benchmarks/opt_showcase/07_text_interp_alloc.rock`).
 //! rock hoists an all-constant value-struct literal to a module-scope constant

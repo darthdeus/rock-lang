@@ -17,7 +17,7 @@
 //! These tests were the sentinels pinning the OLD overload-driven-mangling bug
 //! (adding an overload renamed the unique `foo` and orphaned the running global,
 //! silent-stale). The fix (always-mangle) landed; the assertions are flipped to
-//! guard the correct behavior. History: docs/mangle-rename-hot-reload-investigation.md.
+//! guard the correct behavior.
 use crate::common::ws_of;
 
 /// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only),
@@ -28,8 +28,8 @@ use crate::common::ws_of;
 /// global lookup is the only spelling that has one. Under the shipped bound
 /// shape the caller holds its callee as an immutable upvalue, so a closure
 /// captured BEFORE the reload keeps calling the pre-edit body -- which is why
-/// `rock stone` publishes a whole `main.lua` and re-runs the binding pass
-/// instead of an overlay (`crates/rock-cli/tests/stone_full_reload_binding.rs`).
+/// the host watch command publishes a whole `main.lua` and re-runs the binding pass
+/// instead of an overlay (the full-reload binding test).
 /// The mangling property itself is shape-independent: the symbol is still
 /// `foo_int` either way.
 fn emit_program(src: &str) -> String {

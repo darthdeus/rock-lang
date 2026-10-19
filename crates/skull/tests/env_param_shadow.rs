@@ -1,4 +1,4 @@
-//! Finding 1 (docs/closure-env-records-plan.md review): a hoisted CAPTURING
+//! Finding 1: a hoisted CAPTURING
 //! lambda takes an env-record param. Named literally `e`, it shadowed any user
 //! global (or fn) named `e` read inside ANY capturing lambda body -- `Inst::Global`
 //! emits the bare name, so the global resolved to the env record (a table) and

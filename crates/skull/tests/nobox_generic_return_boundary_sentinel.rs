@@ -32,7 +32,7 @@
 //! substituted return type, while the three controls remain unchanged. This
 //! keeps the return boundary fail-closed even when the declaration spells a
 //! generic return.
-//! `docs/scene-system-plan.md` P4's FieldRef pull model is unblocked -- a
+//! the FieldRef pull model is unblocked -- a
 //! position descriptor is `ReadFieldRef<T, Vec2>`, which is precisely this
 //! shape.
 //!
@@ -47,7 +47,7 @@
 //! back nobox leaves, and they are already marked: `@scalar_abi` (imgui's
 //! `imgui_get_mouse_pos`, `imgui_get_cursor_screen_pos`,
 //! `imgui_get_content_region_avail`, `imgui_get_mouse_drag_delta` in both the
-//! Lua and JS lanes, plus `stone_measure_text_vec2_for`) and `@gpu_only`
+//! Lua and JS lanes, plus `host_measure_text_vec2_for`) and `@gpu_only`
 //! (`texture`, `texture_size`, `frag_coord`), which this function already
 //! exempts. `fn_scalar_abi_spec` is the existing discriminant -- see this
 //! file's own line 10 -- so the arm is "declared return is nobox under the

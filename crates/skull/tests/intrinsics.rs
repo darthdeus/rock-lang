@@ -1,4 +1,4 @@
-//! The `@intrinsic` mechanism (docs/intrinsics-plan.md, slice 1): the fail-closed
+//! The `@intrinsic` mechanism: the fail-closed
 //! key check catches a backend-table key that no `@intrinsic` declaration backs,
 //! and the generic-key pin fixes what a generic intrinsic's stable registry key
 //! is (the declared-signature mangle, NOT a monomorphization -- there is none).

@@ -3,7 +3,7 @@
 //! re-init and the value is PRESERVED. Editing the initializer changes the
 //! compiler's initializer identity, so the overlay clears both slots and the
 //! next reach RE-INITS with the new value.
-//! Design: docs/static-locals-plan.md.
+//!
 //!
 //! No arithmetic here on purpose: the no-stdlib emit harness can't resolve `+`
 //! (it routes through a stdlib op fn), so the static is observed via a bool

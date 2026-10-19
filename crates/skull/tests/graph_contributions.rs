@@ -1,5 +1,5 @@
 //! The primary-record model behind the persistent updater
-//! (`docs/parked/mono.md`): every flat field of an [`InstanceGraph`] is derived
+//!: every flat field of an [`InstanceGraph`] is derived
 //! from one [`Contribution`] per body, so a re-walk can REPLACE a body's facts
 //! instead of the graph accumulating them.
 //!
@@ -17,7 +17,7 @@ use skull::instance_graph::{self, Instance, InstanceGraph, Owner};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

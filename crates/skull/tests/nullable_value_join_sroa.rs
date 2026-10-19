@@ -2,20 +2,21 @@
 //! `unwrap()`) must not rebuild the value's box. The read copies the stored
 //! box on its present arm and joins the copy with `nil` in one cell; SROA
 //! used to keep that cell whole because a nil test is not a field read, so
-//! Lua allocated one table per nested value on every read. MAG's live mob
+//! Lua allocated one table per nested value on every read. application's live mob
 //! poll (`if let pc = mob.attack_co`) paid two tables per mob per tick.
 
 use crate::common::{emit_module, function_body, run_luajit};
 
+const PIPELINE: &str = r#"
+nobox value Pipeline {
+    shader_name: string,
+    parametric_quads: bool = false,
+    after_scene: bool = false,
+}
+"#;
+
 #[test]
-fn production_pipeline_nullable_transfers_do_not_materialize() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../stone/engine/rendering/pass.rock");
-    let source = std::fs::read_to_string(path).unwrap();
-    let start = source.lines().find(|line| line.contains("value Pipeline {")).unwrap();
-    let offset = source.find(start).unwrap();
-    let end = source[offset..].find("\n}").unwrap() + offset + 2;
-    let declaration = source[offset..end].replacen("pub ", "", 1);
+fn nullable_pipeline_transfers_do_not_materialize() {
     let fixture = r#"
 struct RecipeHolder { pipeline: Pipeline? = null }
 fn publish(h: RecipeHolder, p: Pipeline) { h.pipeline = p }
@@ -46,7 +47,7 @@ fn main() {
     describe(dst)
 }
 "#;
-    let lua = emit_module(&format!("{declaration}\n{fixture}"));
+    let lua = emit_module(&format!("{PIPELINE}\n{fixture}"));
     for name in ["publish", "copy_recipe"] {
         let body = function_body(&lua, name);
         for ctor in ["Pipeline_vt(", "Pipeline_ct("] {

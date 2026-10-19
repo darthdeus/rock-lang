@@ -68,24 +68,6 @@ fn nonfinite_frag(@textures t: SrcTex, tc: Vec2) -> Vec4 {
 fn use_all() -> string { return rock_shader(nonfinite_frag) }
 "#;
 
-const OUTLINE_PROJECTION_SRC: &str = concat!(
-    r#"
-struct MainTex { uTexture: Sampler2D }
-value Vertex { pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }
-    value EngineU { uProjection: Mat4, uView: Mat4 }
-    "#,
-    include_str!("../../../stone/engine/shaders/common/utils_math.rock"),
-    include_str!("../../../stone/engine/shaders/rendering/outline_target_shader.rock"),
-    include_str!("../../../stone/engine/shaders/rendering/outline_detect_shader.rock"),
-    r#"
-fn use_all() -> string {
-    let target = rock_shader(outline_target_vert, outline_target_frag)
-    let detect = rock_shader(outline_detect_vert, outline_detect_frag)
-    return target + detect
-}
-"#,
-);
-
 fn test_mid(ws: &Workspace) -> ModuleId {
     *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("<test> module id")
 }
@@ -232,7 +214,7 @@ fn run_callback() { print(CALLBACK()) }
 "#;
 
 fn wgpu_overlay_session(source: &str) -> Session {
-    let stdlib = rock_host::stdlib_loader::stdlib_files()
+    let stdlib = rock_stdlib::stdlib_files()
         .iter()
         .map(|file| {
             let id = ustr::Ustr::from(format!("<stdlib:{}>", file.name).as_str());
@@ -477,19 +459,4 @@ fn nonfinite_projection_reaches_selected_wgpu() {
     assert_eq!(census.admitted, 1, "nonfinite shader remains omitted: {census:?}");
     assert_eq!(census.omitted, 0, "nonfinite shader projection failed: {census:?}");
     assert!(emit.lua.contains("__rock_wgpu_shader_register(\"nonfinite_frag\""));
-}
-
-#[test]
-fn current_outline_sources_report_their_exact_wgpu_projection_census() {
-    let ws = ws_with_stdlib(OUTLINE_PROJECTION_SRC);
-    let mid = test_mid(&ws);
-    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
-        .expect("the current outline sources must reach projection census");
-    let census = cache.wgpu_projection_census().expect("WGPU projection census");
-    println!("current outline projection census: {census:?}");
-    assert_eq!(census.examined, 2);
-    assert_eq!(census.admitted, 2, "current outline sources remain omitted: {census:?}");
-    assert_eq!(census.omitted, 0, "current outline projection omissions: {census:?}");
-    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"outline_target_vert+outline_target_frag\""));
-    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"outline_detect_vert+outline_detect_frag\""));
 }

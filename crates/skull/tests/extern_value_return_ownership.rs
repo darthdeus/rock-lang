@@ -19,7 +19,7 @@
 //! up until something reuses the memory.
 //!
 //! Marking `Vec2` nobox (`0b1875dab`) changed allocation enough to make the reuse
-//! actually happen: `rock frame bitgun --dump-state` began reporting
+//! actually happen: `rock frame application --dump-state` began reporting
 //! `LAST_FRAME_GFX` (a `GraphicsStats` filled through exactly this wrapper) as
 //! garbage in 4 of 5 runs, and the garbage decoded to ASCII from the dump's own
 //! JSON buffer (`,"sh`, `cdat`, `ader`). With the stdlib's `Vec2` boxed the same
@@ -32,10 +32,10 @@ use crate::common::emit_module;
 const EXTERN_VALUE_RETURN: &str = r#"
 value Stats { a: int, b: int }
 
-extern(ffi, "stone") fn stone_probe_stats() -> Stats
+extern(ffi, "host") fn host_probe_stats() -> Stats
 
 fn main() {
-    let s = stone_probe_stats()
+    let s = host_probe_stats()
     print("{s.a}")
 }
 "#;
@@ -44,10 +44,10 @@ fn main() {
 fn an_extern_value_return_does_not_hand_back_a_reference_into_its_out_param() {
     let lua = emit_module(EXTERN_VALUE_RETURN);
     assert!(
-        !crate::common::definitions_matching(&lua, "stone_probe_stats").is_empty(),
-        "no `stone_probe_stats` wrapper was emitted:\n{lua}"
+        !crate::common::definitions_matching(&lua, "host_probe_stats").is_empty(),
+        "no `host_probe_stats` wrapper was emitted:\n{lua}"
     );
-    let wrapper = crate::common::function_body(&lua, "stone_probe_stats");
+    let wrapper = crate::common::function_body(&lua, "host_probe_stats");
     assert!(
         wrapper.contains("ffi.new(\"Stats[1]\")"),
         "the out-param shape changed; this test pins the wrapper:\n{wrapper}"

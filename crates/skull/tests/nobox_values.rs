@@ -373,7 +373,7 @@ fn main() {
 
 /// Two INDEPENDENT violations in one body are both reported. The verifier used
 /// to return on the first, so a body with two sinks looked like a body with
-/// one -- which is how `bitgun_queue_heat_shimmer`'s `pass_uniforms` gap stayed
+/// one -- which is how `queue_effect_uniforms`'s `pass_uniforms` gap stayed
 /// invisible behind an earlier rejection, and how any "N sinks left" count read
 /// as a total when it was a floor.
 #[test]
@@ -1196,7 +1196,7 @@ fn main() {
 
 /// `@scalar_abi` is how an `inline(lua)` FFI wrapper takes a nobox value without
 /// materializing it -- the alternative at every call site is `materialize(v)`.
-/// The whole imgui surface (`stone/engine/ui/imgui.rock`) rests on this working
+/// The whole imgui surface (the host UI bindings) rests on this working
 /// in BOTH directions, and on named args reaching the right leaf group.
 #[test]
 fn a_scalar_abi_ffi_wrapper_threads_nobox_leaves_both_ways() {
@@ -1525,7 +1525,7 @@ fn a_nobox_rejection_anchors_on_the_offending_expression() {
     let err = try_emit_module(NOBOX_REJECTION_SITE)
         .expect_err("a boxed sink materializes the value");
     // Assert on the byte offset, not `line`/`col`: the three coordinate systems
-    // in `docs/span-position-units.md` disagree on their base, and the offset is
+    // for spans disagree on their base, and the offset is
     // the one that needs no conversion. The `fn` header is the anchor this used
     // to report, and a whole-fn anchor cannot tell two violations in one body
     // apart -- which is how one sink hid another inside `draw_fractures`.
@@ -2002,7 +2002,7 @@ fn a_stored_gc_tier_value_keeps_nullable_and_nested_nobox_fields_as_leaves() {
 // A leaf read through a `nobox` field of an UNBOXED GC-tier value (a scalar-ABI
 // param) projects the leaf off the value's Group. The `_vt` box keys that leaf
 // as `lock.place.x`, but building the box just to read the key back is an
-// allocation the leaf-threaded value never needed (MAG's
+// allocation the leaf-threaded value never needed (application's
 // `hostile_target_evaluate` reads `input.lock.target` this way per mob).
 const NOBOX_IN_GC_VALUE_PARAM_LEAF_READ: &str = r#"
 nobox value P { x: int, y: int }
@@ -2038,7 +2038,7 @@ fn a_leaf_read_through_a_nobox_field_of_a_gc_tier_param_does_not_box() {
 
 // Functional update of a GC-tier value whose base is a local: the fields the
 // literal does not name come off the base by the box's layout, so a `nobox`
-// field is read by its leaves (MAG's `CarriedItemView { ..view, id }`).
+// field is read by its leaves (application's `CarriedItemView { ..view, id }`).
 const NOBOX_IN_GC_VALUE_FUNCTIONAL_UPDATE: &str = r#"
 nobox value C { r: float, g: float }
 enum Kind { Plain, Tagged(string) }
@@ -2062,7 +2062,7 @@ fn a_functional_update_of_a_gc_tier_value_reads_nobox_fields_by_leaf() {
 // The same read off a BOXED GC-tier local (reassigned in a loop, so it lives in
 // one cell): the enum inside the `nobox` field is keyed by its leaves
 // (`lock.target.__tag`, ...), so reading the whole enum off `lock.target`
-// found nil. A hostile-target lock read in MAG had this shape.
+// found nil. A hostile-target lock read in an application had this shape.
 const NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ: &str = r#"
 nobox value P { x: int, y: int }
 nobox value Id { a: int, b: int }

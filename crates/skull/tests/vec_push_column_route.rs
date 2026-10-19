@@ -1,4 +1,4 @@
-//! Control 4 of the 2.4 contract (`docs/boundary-contracts.md`): a column
+//! Control 4 of the 2.4 contract: a column
 //! receiver must not REACH the boxed `vec_push` body, and if its column route
 //! were missing the call would reject rather than fall through.
 //!
@@ -116,7 +116,7 @@ fn both_receiver_forms_answer_correctly() {
 ///
 /// Stated over the definition COUNT, not the spelling. `vec_push` is not
 /// `@nomangle` -- no opaque body names it, so it carries no bare-name obligation
-/// (`docs/boundary-contracts.md` 2.3b) -- and asserting a bare spelling would
+/// -- and asserting a bare spelling would
 /// pin the mangling exemption rather than the no-specialization property this
 /// test is about.
 #[test]

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/skull",
     "crates/skull-codegen-shader",
     "crates/skull-codegen-glsl",
     "crates/skull-codegen-wgsl",
@@ -38,6 +39,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+skull = { path = "crates/skull" }
 skull-wgsl-abi = { path = "crates/skull-wgsl-abi" }
 skull-codegen-shader = { path = "crates/skull-codegen-shader" }
 skull-codegen-glsl = { path = "crates/skull-codegen-glsl" }

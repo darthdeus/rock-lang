@@ -1,6 +1,3 @@
-const LOWER_SOURCE: &str = include_str!("../../skull-mir/src/lower/mod.rs");
-const EMIT_SOURCE: &str = include_str!("../src/mir_emit.rs");
-
 use crate::common::try_emit_module;
 use crate::common::ws_with_stdlib;
 use ustr::Ustr;
@@ -50,47 +47,6 @@ fn direct_admission_error(src: &str) -> skull_parser::CompilerError {
     let ws = ws_with_stdlib(src);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
     skull_mir::lower::expansion_rejection(&ws, mid).expect("fixture must be rejected by admission")
-}
-
-#[test]
-fn expansion_admission_has_one_module_traversal() {
-    let start = LOWER_SOURCE
-        .find("pub fn expansion_rejection")
-        .expect("combined expansion admission validator");
-    let end = LOWER_SOURCE[start..]
-        .find("/// Every distinct `rock_shader` pair")
-        .map(|offset| start + offset)
-        .expect("combined validator boundary");
-    let body = &LOWER_SOURCE[start..end];
-
-    assert_eq!(
-        body.matches("resolve_call_fn(").count(),
-        1,
-        "the combined validator must resolve each candidate in one traversal"
-    );
-    for old in [
-        "struct_expand_rejection",
-        "shader_expand_rejection",
-        "vertex_expand_rejection",
-        "uniform_expand_rejection",
-        "uniform_values_rejection",
-    ] {
-        assert_eq!(
-            LOWER_SOURCE.matches(&format!("pub fn {old}")).count(),
-            0,
-            "legacy top-level validator `{old}` still owns a traversal"
-        );
-        assert_eq!(
-            EMIT_SOURCE.matches(&format!("lower::{old}")).count(),
-            0,
-            "driver still calls legacy validator `{old}`"
-        );
-    }
-    assert_eq!(
-        EMIT_SOURCE.matches("lower::expansion_rejection").count(),
-        1,
-        "driver must call the combined validator exactly once"
-    );
 }
 
 #[test]

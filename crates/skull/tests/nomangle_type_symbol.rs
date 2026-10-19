@@ -1,7 +1,7 @@
 //! `@nomangle` on a struct or value type keeps its declared name as the
 //! emitted type symbol under modules v1: the C typedef, `ffi.new`/`ffi.sizeof`
 //! strings and the `__ty` tag. Hand-written inline Lua that spells the type
-//! (Stone's graphics-stats cdef, vertex buffers, snapshot's Font remap) relies
+//! (host engine's graphics-stats cdef, vertex buffers, snapshot's Font remap) relies
 //! on that name.
 
 /// Inline Lua names the exempt types by their declared names; the program only

@@ -59,7 +59,7 @@ fn flat_container_element_ref_mutates_only_the_selected_element_on_lua() {
 /// relocatable-storage rule for a retained `ref` let: that rule is the
 /// language's, and this test pins the backend boundary below it.
 fn emit_past_relocatable_ref_rule(source: &str) -> String {
-    let mut modules: Vec<_> = rock_host::stdlib_loader::stdlib_files()
+    let mut modules: Vec<_> = rock_stdlib::stdlib_files()
         .iter()
         .map(|file| {
             skull_parser::parse_module_clean(

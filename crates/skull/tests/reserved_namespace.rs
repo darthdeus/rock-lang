@@ -13,7 +13,7 @@
 //! compiles, AND the exact emitted-Lua substring proves the user name survived
 //! codegen. The reserved set is the *body-local* namespace only (`r<N>`/`v<N>`
 //! temps, `c<N>` cells, the `__rock_env` env param). The `__rock_` prefix at
-//! large is NOT reserved: the stdlib AND stone engine define top-level
+//! large is NOT reserved: the stdlib AND host engine define top-level
 //! `@nomangle __rock_*` fns (`__rock_create_struct`, ...), which are globals,
 //! never body locals, so a `__rock_foo` def compiles.
 use crate::common::emit_module;
@@ -71,7 +71,7 @@ fn main() { print("{radius(3)}") }
 
 /// POSITIVE CONTROL: a user `__rock_*` global that is NOT `__rock_env` names no
 /// body local, so it compiles. Guards against re-banning the whole `__rock_`
-/// prefix, which the stdlib and stone engine legitimately extend
+/// prefix, which the stdlib and host engine legitimately extend
 /// (`__rock_install_serialize_value`, ...) and which broke every real compile.
 #[test]
 fn global_rock_prefixed_non_env_compiles() {

@@ -1,4 +1,4 @@
-//! Stage-0e totality ablation (`docs/monomorphization-plan.md` S 0e).
+//! Stage-0e totality ablation.
 
 use std::sync::LazyLock;
 
@@ -9,7 +9,7 @@ use ustr::Ustr;
 use crate::common::AblationGuard as ModeGuard;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

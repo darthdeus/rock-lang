@@ -1,5 +1,5 @@
 //! An `Iterator`-bounded body emits STANDALONE at each instantiation
-//! (`docs/monomorphization-plan.md` S 12, mono cut C+D step D-1).
+//!.
 //!
 //! A bounded fn's body holds placeholder `Inst::CallBoundMulti`s whose concrete
 //! `next` is known per instantiation. Those are resolved from a
@@ -22,7 +22,7 @@ use ustr::Ustr;
 use crate::common::{definitions_matching, function_body, AblationGuard as ModeGuard, InlineOffGuard};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());

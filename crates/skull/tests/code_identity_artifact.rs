@@ -187,37 +187,6 @@ fn main() { ROOT = load() }
 }
 
 #[test]
-fn scene_population_dispatch_does_not_copy_a_bucket_per_system() {
-    let scene_source = include_str!("../../../stdlib/scene.rock");
-    assert!(
-        !scene_source.contains("let out: [int] = []") && !scene_source.contains("vec_push(out"),
-        "population dispatch must iterate a stable bucket without allocating a per-system copy"
-    );
-    let systems_source = include_str!("../../../stone/engine/systems/systems.rock");
-    assert!(
-        systems_source.contains("let population_len = __scene_type_population_length"),
-        "population dispatch must use the phase-start length"
-    );
-    assert!(
-        !systems_source.contains("__SCENE_REGISTRY.next_id"),
-        "population dispatch must not scan the historical id ceiling"
-    );
-}
-
-#[test]
-fn scene_runtime_arms_measure_repeated_fixed_windows_after_churn_drains() {
-    let source = include_str!("../../../games/testbed/tests/sims/scene_lifecycle_runtime_arms.rock");
-    assert!(source.contains("const SLRA_WINDOW_FRAMES: int = 4"));
-    assert!(source.contains("const SLRA_SAMPLE_COUNT: int = 5"));
-    assert!(source.contains("slra_report(\"feature_off\", timing"));
-    assert!(source.contains("cpu_spread={timing.max - timing.min}"));
-    assert!(!source.contains("slra_report(\"feature_off\", 0.0"));
-    assert_eq!(source.matches("await frame(SLRA_WINDOW_FRAMES)").count(), 4);
-    assert!(source.contains("sim_eq_int(vec_len(drained_population), 0, \"churn drain"));
-    assert!(source.contains("sim_eq_int(slra_historical_count() - historical_before, 203"));
-}
-
-#[test]
 fn artifact_definition_metadata_emits_a_keyed_plan_without_running_the_decorator() {
     let emit = emit_mir(r#"
 @artifact_definition(catalog="widgets", key_param="key")

@@ -7,7 +7,7 @@
 //! that packed cdata into the caller. The field reads then become
 //! `Field`-off-`MakeValueStruct`, and the cdata allocates once per iteration --
 //! LuaJIT cannot sink it across the side-trace split of a data-dependent branch
-//! (the mag `mag.grid.floors_walls` regression). The SROA forwarding pass in
+//! (a nested grid update regression). The SROA forwarding pass in
 //! `skull-transform` forwards those reads to the ctor operands so DCE drops the
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
 use crate::common::{emit_module, function_body, require_luajit, run_luajit};
@@ -190,7 +190,7 @@ fn value_struct_field_reads_dont_materialize_cdata() {
 /// does not happen; leaf addressing is 0 on both. Measured on this repo's own
 /// benchmarks: `nativebuffer_value_store` 72.9 -> 0.9 B/vertex under
 /// `jit.off()`, unchanged at 0 with the JIT on.
-/// See docs/native-buffer-leaf-addressing-plan.md.
+///
 const NATIVE_BUFFER_VALUE_STORE: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, w: float }
@@ -276,7 +276,7 @@ fn native_buffer_single_field_store_takes_no_slot() {
 /// A GENERIC value struct (`Pair<T>`, GC-carrying tier) must ride the scalar
 /// ABI just like an FFI-clean value struct: per-field leaf params, a
 /// destructured multi-return, and NO `_vt` table materialization in a
-/// non-escaping caller. Pins item 4 of docs/value-two-tier-plan.md -- the
+/// non-escaping caller. Pins the value-return boundary -- the
 /// mechanism the Entity<T> flip depends on for its per-iteration-table win.
 const GENERIC_VALUE_SCALARIZE: &str = r#"
 value Pair<T> { a: T, b: T }

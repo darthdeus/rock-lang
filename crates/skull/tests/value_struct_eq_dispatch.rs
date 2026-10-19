@@ -8,9 +8,22 @@
 // struct operands and routes to `EqRoute::Primitive`.
 use crate::common::{emit_module, function_body, require_luajit, run_luajit};
 
+const HANDLE_EQUALITY_FIXTURE: &str = r#"
+struct EqTag { n: int }
+
+fn entity_matches(xs: [Entity<EqTag>], target: Entity<EqTag>) -> int {
+    let matches = 0
+    for e in xs {
+        if e == target { matches += 1 }
+        if e != target { matches += 2 }
+    }
+    return matches
+}
+"#;
+
 #[test]
 fn vector_handle_equality_does_not_materialize_carriers() {
-    let lua = emit_module(include_str!("../../../tests/handle_equality.rock"));
+    let lua = emit_module(HANDLE_EQUALITY_FIXTURE);
     let body = function_body(&lua, "entity_matches");
     assert!(
         body.contains("==") && (body.contains("~=") || body.contains("not")),
@@ -167,7 +180,7 @@ fn value_struct_equality_preserves_semantics() {
 
 // Scalar `value` operands arrive as leaf cells. Comparing them must stay
 // leaf-wise: packing both sides into `*_vt` tables to reach `__eq` allocated
-// two tables per comparison (MAG's per-frame `Task.state == ...` checks on
+// two tables per comparison (application's per-frame `Task.state == ...` checks on
 // `Entity<T>`, which is generic and so never answers `nobox_value_name`).
 const SCALAR_LEAF_EQUALITY: &str = r#"
 value V2 { x: float, y: float }
@@ -259,4 +272,34 @@ fn stored_float_value_equality_matches_a_fresh_operand() {
     lua.push_str("\nprint(stored_float_eq(0.4, 0.1), stored_float_ne(0.4, 0.1), stored_float_eq(0.5, 0.25))\n");
     let out = run_luajit(&lua, "value_struct_eq_stored_float");
     assert_eq!(out.trim(), "true\tfalse\ttrue", "stored float value equality:\n{out}");
+}
+
+#[test]
+fn nullable_boxed_value_fields_compare_contents_in_enclosing_values() {
+    require_luajit();
+    let mut lua = emit_module(r#"
+value Child { name: string, amount: int }
+value Parent { name: string, child: Child? = null }
+struct Holder { row: Parent }
+fn same(a: Holder, b: Holder) -> bool { return a.row == b.row }
+
+struct Reference { name: string }
+value ReferenceParent { child: Reference? = null }
+struct ReferenceHolder { row: ReferenceParent }
+fn same_reference(a: ReferenceHolder, b: ReferenceHolder) -> bool { return a.row == b.row }
+"#);
+    lua.push_str(r#"
+local function row(child) return { row = Parent_vt("parent", child) } end
+local a = row(Child_vt("child", 3))
+local b = row(Child_vt("child", 3))
+local c = row(Child_vt("child", 4))
+local absent = row(nil)
+local reference = { name = "same" }
+print(a.row == b.row, a.row == c.row, absent.row == row(nil).row, a.row == absent.row,
+  ReferenceParent_vt(reference) == ReferenceParent_vt(reference),
+  ReferenceParent_vt(reference) == ReferenceParent_vt({name="same"}))
+"#);
+    let out = run_luajit(&lua, "nullable_boxed_value_field_equality");
+    assert_eq!(out.trim(), "true\tfalse\ttrue\tfalse\ttrue\tfalse",
+        "nullable value fields compare contents; nullable reference fields retain identity:\n{out}");
 }

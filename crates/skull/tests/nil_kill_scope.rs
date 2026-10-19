@@ -9,7 +9,7 @@
 //! assigns a GLOBAL of that name: it does nothing for LuaJIT snapshot pressure
 //! (there is no local to drop) and, because skull installs an `_G` metatable for
 //! Rock state globals, it costs a `__newindex` metamethod dispatch every time it
-//! runs. Measured on mag's combat bench before the fix: 278 such statements in
+//! runs. Measured on an application's combat bench before the fix: 278 such statements in
 //! the artifact, ~68,000 metamethod dispatches per run.
 //!
 //! The invariant is checked over the WHOLE emitted artifact, stdlib included:
@@ -21,7 +21,7 @@ use crate::common::emit_module;
 /// `noise` is big enough that the emitter calls it rather than inlining it, and
 /// takes a scalarised `value` struct, so each `noise(v(..))` is a multi-return
 /// producer whose destination cells feed the call's trailing arguments. This is
-/// the shape `mag`/`stone`'s `mote_curl` has, where the defect was found.
+/// the shape `application`/`host`'s `mote_curl` has, where the defect was found.
 const SRC: &str = r#"
 @pure fn h3(x: float, y: float, z: float) -> float {
     let h = sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453

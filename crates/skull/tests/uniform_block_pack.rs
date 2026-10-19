@@ -1,5 +1,4 @@
-//! `@uniform_expand` -- the std140 packer (docs/shader-binding-layout-plan.md
-//! P2). The expansion emits one DIRECT typed store per primitive leaf, at the
+//! `@uniform_expand` -- the std140 packer. The expansion emits one DIRECT typed store per primitive leaf, at the
 //! offsets `gpu_layout::uniform_block` computed, into views passed as params.
 //!
 //! What these pin that a layout unit test cannot: that the offsets reach the
@@ -339,7 +338,7 @@ fn main() {
 /// into a register before the first store, and in a trace that keeps all of
 /// them live in every exit snapshot taken during the pack -- the engine block's
 /// 41 leaves against LuaJIT's 16-register side-trace budget
-/// (docs/trace-pressure-work-plan.md). Pinned by register count: the packing
+///. Pinned by register count: the packing
 /// function must declare fewer registers than the block has leaves.
 const GLOBAL_SOURCE: &str = r#"
 // `Mat4` is stored as a flat leaf table (keys like `c0.x`) while `Vec4`

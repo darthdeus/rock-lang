@@ -1503,6 +1503,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "skull"
+version = "0.1.0"
+dependencies = [
+ "bone-incremental",
+ "bone-semantic",
+ "comfy-la-arena",
+ "rayon",
+ "rock-host",
+ "rock-stdlib",
+ "rustc-hash 2.1.3",
+ "skull-codegen-glsl",
+ "skull-codegen-lua",
+ "skull-codegen-shader",
+ "skull-codegen-wgsl",
+ "skull-graph",
+ "skull-mir",
+ "skull-parser",
+ "skull-transform",
+ "smallvec",
+ "tempfile",
+ "test-utils",
+ "ustr",
+]
+
+[[package]]
 name = "skull-codegen-glsl"
 version = "0.1.0"
 dependencies = [

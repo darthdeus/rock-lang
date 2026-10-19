@@ -116,7 +116,7 @@ fn tuple_whole_use_keeps_table() {
     );
 }
 
-// The option-B gate (docs/iterator-terminal-ops-plan.md): bare
+// The option-B gate: bare
 // `for (e, v) in arena` desugars through the 2-tuple `pairs()` protocol, and
 // the per-iteration `(Entity<T>, T)` tuple must be removed by the compiler --
 // parity with the deleted 3-value `ArenaIter`. With `e` unused, the Entity

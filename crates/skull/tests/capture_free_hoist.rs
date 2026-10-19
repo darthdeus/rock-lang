@@ -1,4 +1,4 @@
-//! P3 of docs/closure-env-records-plan.md: a lambda whose scope captures NOTHING
+//! Capture-free hoisting: a lambda whose scope captures NOTHING
 //! hoists to a top-level `function <enclosing>__lambda<k>(<params>) ... end` and
 //! is referenced through one reusable logical CodeRef at the creation site. A
 //! capturing lambda carries that CodeRef plus its environment record.

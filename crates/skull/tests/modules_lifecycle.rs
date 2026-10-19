@@ -154,7 +154,7 @@ fn main() {}
 }
 
 /// Only a decorator claims an annotation spelling. A v1 fn that shares a
-/// builtin's name (Stone defines `fn shader`, `fn uniform`, `fn size`) must
+/// builtin's name (host engine defines `fn shader`, `fn uniform`, `fn size`) must
 /// leave the builtin in force rather than making it an unknown annotation.
 #[test]
 fn v1_fn_named_like_a_builtin_annotation_keeps_the_builtin() {

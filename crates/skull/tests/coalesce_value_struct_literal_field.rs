@@ -27,7 +27,7 @@ fn main() {
 "#;
 
 /// Control: the same coalesce, hoisted into a `let` first. CORRECT today --
-/// this is the shape the mag call site was rewritten to.
+/// this is the shape the application call site was rewritten to.
 const VALUE_FIELD_HOISTED: &str = r#"
 struct Thing { at: Vec2 = v(0, 0) }
 

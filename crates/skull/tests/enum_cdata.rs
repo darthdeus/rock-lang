@@ -1,4 +1,4 @@
-//! Cut 1 (`docs/skull-enum-value-types.md`): a uniform single-scalar-payload
+//! Cut 1: a uniform single-scalar-payload
 //! enum is a `value`-struct-style cdata `{ int __tag; <T> _0; }` -- NO
 //! `{__variant}` table, reflection sacrificed for performance. It reuses the whole
 //! value-struct machinery: `<Enum>_ct` ctor, value-struct SROA (a local construct+
