@@ -577,6 +577,39 @@ pub fn renders_inline(f: &Function) -> bool {
         || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.iter().count() == 2)
 }
 
+// Union of lexical and future-use keywords in GLSL ES 3.00 section 3.8 and
+// GLSL 3.30 section 3.6. Use one set so body names stay portable across profiles.
+// https://registry.khronos.org/OpenGL/specs/es/3.0/GLSL_ES_Specification_3.00.pdf
+// https://registry.khronos.org/OpenGL/specs/gl/GLSLangSpec.3.30.pdf
+const GLSL_KEYWORDS: &str = "
+    attribute const uniform varying layout centroid flat smooth noperspective
+    break continue do for while switch case default if else in out inout
+    float int void bool true false invariant discard return
+    mat2 mat3 mat4 mat2x2 mat2x3 mat2x4 mat3x2 mat3x3 mat3x4 mat4x2 mat4x3 mat4x4
+    vec2 vec3 vec4 ivec2 ivec3 ivec4 bvec2 bvec3 bvec4 uint uvec2 uvec3 uvec4
+    lowp mediump highp precision
+    sampler1D sampler2D sampler3D samplerCube
+    sampler1DShadow sampler2DShadow samplerCubeShadow
+    sampler1DArray sampler2DArray sampler1DArrayShadow sampler2DArrayShadow
+    isampler1D isampler2D isampler3D isamplerCube isampler1DArray isampler2DArray
+    usampler1D usampler2D usampler3D usamplerCube usampler1DArray usampler2DArray
+    sampler2DRect sampler2DRectShadow isampler2DRect usampler2DRect
+    samplerBuffer isamplerBuffer usamplerBuffer
+    sampler2DMS isampler2DMS usampler2DMS
+    sampler2DMSArray isampler2DMSArray usampler2DMSArray struct
+    coherent volatile restrict readonly writeonly resource atomic_uint
+    patch sample subroutine common partition active asm
+    class union enum typedef template this packed goto
+    inline noinline public static extern external interface
+    long short double half fixed unsigned superp input output
+    hvec2 hvec3 hvec4 dvec2 dvec3 dvec4 fvec2 fvec3 fvec4 sampler3DRect filter
+    image1D image2D image3D imageCube iimage1D iimage2D iimage3D iimageCube
+    uimage1D uimage2D uimage3D uimageCube image1DArray image2DArray
+    iimage1DArray iimage2DArray uimage1DArray uimage2DArray
+    image1DShadow image2DShadow image1DArrayShadow image2DArrayShadow
+    imageBuffer iimageBuffer uimageBuffer sizeof cast namespace using row_major
+";
+
 /// The GLSL-side callable spellings the emitter renders, derived from
 /// [`GLSL_INTRINSICS`] so the reserved set can never drift from the table: a
 /// template's `ident(` callees plus bare-identifier templates. The spelling is
@@ -1218,7 +1251,7 @@ impl FnEmit<'_> {
     /// -- helpers emit with an empty interface reserved set. Global-reference
     /// cells (sampler/array params) claim their exact spellings first -- they
     /// ARE the global -- and every other cell dedups apart from the reserved
-    /// globals, the builtin callables, and its siblings.
+    /// globals, lexical keywords, builtin callables, and its siblings.
     fn assign_names(&mut self) -> Result<(), CompilerError> {
         let mut used: HashSet<String> = HashSet::default();
         let claim = |used: &mut HashSet<String>, base: String| -> String {
@@ -1241,6 +1274,7 @@ impl FnEmit<'_> {
             self.cell_name.insert(cid, name);
         }
         used.extend(self.reserved_names.iter().cloned());
+        used.extend(GLSL_KEYWORDS.split_whitespace().map(str::to_string));
         used.extend(glsl_builtin_callables().into_iter().map(str::to_string));
         for (cid, cell) in self.f.cells.iter() {
             if self.cell_name.contains_key(&cid) {
