@@ -26,6 +26,20 @@ pub fn report_spawn_phase(phase: &str) {
     }
 }
 
+/// Collect a child pipe drained by `thread`. A panicked reader or a failed
+/// read is a harness failure: returning empty or truncated output instead
+/// would let the caller judge the program on bytes it never fully saw.
+pub fn join_drained_pipe(
+    thread: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    pipe: &str,
+) -> Result<Vec<u8>, String> {
+    match thread.join() {
+        Ok(Ok(buf)) => Ok(buf),
+        Ok(Err(e)) => Err(format!("failed to read the child's {pipe}: {e}")),
+        Err(_) => Err(format!("the thread draining the child's {pipe} panicked")),
+    }
+}
+
 // Global list to track active child processes for cleanup on exit
 static ACTIVE_CHILDREN: Lazy<Arc<Mutex<Vec<u32>>>> = Lazy::new(|| Arc::new(Mutex::new(Vec::new())));
 

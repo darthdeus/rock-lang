@@ -27,55 +27,61 @@ pub struct TestTime {
     pub result: String,
 }
 
-/// Parse the `__SKULL__\tPASS|FAIL\t<detail>` and
+/// Parse the `__SKULL__\tPASS\t`, `__SKULL__\tFAIL\t<detail>` and
 /// `__SKULL__\tVALUE\t<name>\t<serialized>` result lines and the
-/// [`TestTime`] lines out of a test program's stdout. `None` = no result lines
-/// at all: the program never reached the harness (an emit/load bug, not a test
-/// failure).
+/// [`TestTime`] lines out of a test program's stdout. `None` = no valid result
+/// protocol: either no result lines at all (the program never reached the
+/// harness, an emit/load bug rather than a test failure) or a `__SKULL__` line
+/// of an unknown kind or shape, which is logged. Every caller treats `None` as
+/// a harness failure that shows the whole stdout; counting an unrecognized line
+/// as a pass would let a broken harness report green.
 pub fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
-    let (time_lines, results): (Vec<&str>, Vec<&str>) = stdout
-        .lines()
-        .filter(|l| l.starts_with("__SKULL__\t"))
-        .partition(|l| l.starts_with("__SKULL__\tTIME\t"));
-    if results.is_empty() {
-        return None;
-    }
-    let fails: Vec<String> = results
-        .iter()
-        .filter(|l| l.contains("\tFAIL\t"))
-        .map(|l| l.splitn(3, '\t').nth(2).unwrap_or("").to_string())
-        .collect();
-    let values: Vec<(String, String)> = results
-        .iter()
-        .filter(|l| l.contains("\tVALUE\t"))
-        .map(|l| {
-            let mut parts = l.splitn(4, '\t').skip(2);
-            let name = parts.next().unwrap_or("").to_string();
-            let val = parts.next().unwrap_or("").to_string();
-            (name, val)
-        })
-        .collect();
-    let times = time_lines
-        .iter()
-        .filter_map(|l| {
-            let mut parts = l.split('\t').skip(2);
-            let time = (|| Some(TestTime {
-                name: parts.next()?.to_string(),
-                ms: parts.next()?.parse().ok()?,
-                result: parts.next()?.to_string(),
-            }))();
-            if time.is_none() {
-                log::warn!(target: "CLI", "malformed test time line: {l:?}");
+    let mut markers = SkullMarkers { passed: 0, fails: Vec::new(), values: Vec::new(), times: Vec::new() };
+    let mut results = 0usize;
+    for line in stdout.lines() {
+        let Some(body) = line.strip_prefix("__SKULL__\t") else { continue };
+        let (kind, rest) = body.split_once('\t').unwrap_or((body, ""));
+        let parsed = match kind {
+            "PASS" if rest.is_empty() && body.len() > kind.len() => {
+                markers.passed += 1;
+                true
             }
-            time
-        })
-        .collect();
-    Some(SkullMarkers {
-        passed: results.len() - fails.len() - values.len(),
-        fails,
-        values,
-        times,
-    })
+            "FAIL" if body.len() > kind.len() => {
+                markers.fails.push(rest.to_string());
+                true
+            }
+            "VALUE" => match rest.split_once('\t') {
+                Some((name, value)) if !name.is_empty() => {
+                    markers.values.push((name.to_string(), value.to_string()));
+                    true
+                }
+                _ => false,
+            },
+            "TIME" => {
+                let mut parts = rest.split('\t');
+                let time = (|| Some(TestTime {
+                    name: parts.next().filter(|n| !n.is_empty())?.to_string(),
+                    ms: parts.next()?.parse().ok()?,
+                    result: parts.next()?.to_string(),
+                }))();
+                match time {
+                    Some(time) => {
+                        markers.times.push(time);
+                        // TIME is bookkeeping, not a result.
+                        continue;
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !parsed {
+            log::error!(target: "CLI", "test protocol error: unrecognized marker line {line:?}");
+            return None;
+        }
+        results += 1;
+    }
+    (results > 0).then_some(markers)
 }
 
 /// Default relative tolerance for `@test(returns = <float>)` comparison. An
@@ -188,6 +194,24 @@ mod tests {
             TestTime { name: "t_a".into(), ms: 12.5, result: "pass".into() },
             TestTime { name: "t_b".into(), ms: 0.031, result: "value".into() },
         ]);
+    }
+
+    #[test]
+    fn unknown_or_malformed_result_marker_is_rejected_not_counted() {
+        // An unknown kind used to be counted as a PASS (passed = results -
+        // fails - values). Every malformed shape below must reject the run.
+        for bad in [
+            "__SKULL__\tSKIP\tt_a\n",
+            "__SKULL__\tPASSED\t\n",
+            "__SKULL__\tPASS\tdetail\n",
+            "__SKULL__\tFAIL\n",
+            "__SKULL__\tVALUE\tt_a\n",
+            "__SKULL__\tTIME\tt_a\tnot-ms\tpass\n",
+            "__SKULL__\tnote\tFAIL\tx\n",
+        ] {
+            let stdout = format!("__SKULL__\tPASS\t\n{bad}");
+            assert!(parse_skull_markers(&stdout).is_none(), "accepted {bad:?}");
+        }
     }
 
     #[test]

@@ -296,7 +296,8 @@ impl std::fmt::Debug for CliCommand {
 /// Why a recognized backend is unavailable in this build.
 #[derive(Clone, Copy)]
 pub enum OmittedBackend {
-    Build(&'static str),
+    /// Not compiled into this binary at all.
+    Build,
     Feature { feature: &'static str, hint: &'static str },
 }
 
@@ -366,7 +367,7 @@ impl Backend {
         let spec = self.spec();
         let omitted = spec.omitted.as_ref()?;
         Some(match omitted {
-            OmittedBackend::Build(reason) => format!("the `{}` backend is not in this build; {}", spec.name, reason),
+            OmittedBackend::Build => format!("the `{}` backend is not included in this build", spec.name),
             OmittedBackend::Feature { feature, hint } => format!(
                 "the `{}` backend was omitted from this build; enable the `{}` feature ({})",
                 spec.name, feature, hint,

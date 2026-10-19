@@ -139,22 +139,12 @@ pub fn run_lua_code_with_command(
 
     unregister_child_process(pid);
 
-    // A panicked reader thread or a failed read is a HARNESS failure and is
-    // reported as one. `unwrap_or_default()` here would hand back empty output
-    // and let the caller judge the program on it.
-    let drained = |joined: std::thread::Result<std::io::Result<Vec<u8>>>, which: &str| {
-        match joined {
-            Ok(Ok(buf)) => Ok(buf),
-            Ok(Err(e)) => Err(CompilerError::new_no_location(format!(
-                "failed to read the luajit process's {which}: {e}"
-            ))),
-            Err(_) => Err(CompilerError::new_no_location(format!(
-                "the thread draining the luajit process's {which} panicked"
-            ))),
-        }
+    let drained = |thread: std::thread::JoinHandle<std::io::Result<Vec<u8>>>, pipe: &str| {
+        crate::process_management::join_drained_pipe(thread, pipe)
+            .map_err(|e| CompilerError::new_no_location(format!("luajit run: {e}")))
     };
-    let stdout = drained(stdout_thread.join(), "stdout")?;
-    let stderr = drained(stderr_thread.join(), "stderr")?;
+    let stdout = drained(stdout_thread, "stdout")?;
+    let stderr = drained(stderr_thread, "stderr")?;
 
     if let Some(e) = write_error {
         // A child load/runtime failure is the useful result even when it

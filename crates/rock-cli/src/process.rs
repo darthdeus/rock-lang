@@ -66,6 +66,12 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
 
     let args = Args::parse();
 
+    // Same shape and exit code as an invalid `ROCK_BACKEND`.
+    if let Err(error) = rock_cli::common::thread_count_request() {
+        eprintln!("error: {error}");
+        std::process::exit(2);
+    }
+
     if compiler_process(args.command, args.list) {
         if let Err(error) = rock_host::compiler_thp::enter_compiler_process() {
             log::error!(target: "CLI", "cannot start compiler with its THP default: {error}");

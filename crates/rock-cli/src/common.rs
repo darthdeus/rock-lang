@@ -112,8 +112,8 @@ impl ProcessManager {
 
         // Spawn background threads to drain pipes continuously. This prevents
         // the child from blocking on a full pipe buffer while the parent polls.
-        // Read errors are surfaced to parent stderr -- silently truncating
-        // would hand callers a partial buffer that looks complete.
+        // A read error ends the thread with that error, and the join below
+        // fails the wait: truncated output must never be judged as complete.
         let stdout_thread = child.stdout.take().map(|mut h| {
             let progress_tx = progress_tx.clone();
             let test_token = test_token.clone();
@@ -157,13 +157,11 @@ impl ProcessManager {
                                 let _ = stdout.flush();
                             }
                         }
-                        Err(e) => {
-                            log::error!(target: "CLI", "ProcessManager: error reading child stdout: {}", e);
-                            break;
-                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => return Err(e),
                     }
                 }
-                buf
+                Ok(buf)
             })
         });
         let stderr_thread = child.stderr.take().map(|h| {
@@ -204,13 +202,10 @@ impl ProcessManager {
                                 }
                             }
                         }
-                        Err(e) => {
-                            log::error!(target: "CLI", "ProcessManager: error reading child stderr: {}", e);
-                            break;
-                        }
+                        Err(e) => return Err(e),
                     }
                 }
-                buf
+                Ok(buf)
             })
         });
         drop(progress_tx);
@@ -335,8 +330,16 @@ impl ProcessManager {
             }
         }
 
-        let stdout = stdout_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
-        let stderr = stderr_thread.map(|t| t.join().unwrap_or_default()).unwrap_or_default();
+        // A pipe the caller did not capture has no output; a captured one must
+        // drain completely.
+        let drained = |thread: Option<thread::JoinHandle<io::Result<Vec<u8>>>>, pipe: &str| -> Result<Vec<u8>> {
+            thread
+                .map(|t| rock_host::process_management::join_drained_pipe(t, pipe).map_err(anyhow::Error::msg))
+                .transpose()
+                .map(Option::unwrap_or_default)
+        };
+        let stdout = drained(stdout_thread, "stdout")?;
+        let stderr = drained(stderr_thread, "stderr")?;
 
         // Reader joins ensure the final markers have arrived. After a timeout
         // retain the test state observed when the budget expired.
@@ -606,6 +609,41 @@ mod tests {
     };
 
     #[test]
+    fn thread_count_request_rejects_a_value_that_is_not_a_count() {
+        use super::parse_thread_count_request as parse;
+        assert_eq!(parse(None, None), Ok(None));
+        assert_eq!(parse(Some("2"), Some("3")), Ok(Some(2)));
+        assert_eq!(parse(None, Some("3")), Ok(Some(3)));
+        assert_eq!(parse(Some("0"), Some("3")), Ok(None));
+        let error = parse(Some("eight"), Some("3")).unwrap_err();
+        assert!(error.contains("'eight'") && error.contains("ROCK_NUM_THREADS"), "got: {error}");
+        assert!(parse(None, Some("-1")).unwrap_err().contains("RAYON_NUM_THREADS"));
+    }
+
+    #[test]
+    fn panicked_pipe_reader_fails_the_wait_instead_of_returning_empty_output() {
+        fn decode_panics(_: &[u8]) -> Option<()> {
+            panic!("decoder panic inside the stderr reader")
+        }
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "echo progress >&2"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let result = super::ProcessManager::wait_with_progress_watchdog(
+            &mut child,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            decode_panics,
+            false,
+            false,
+        );
+        let error = result.err().expect("a panicked reader must fail the wait");
+        assert!(error.to_string().contains("stderr"), "got: {error}");
+    }
+
+    #[test]
     fn test_start_requires_the_run_token() {
         assert_eq!(parse_test_start(b"ROCK_TEST_START\tabc\t3\n", "abc"), Some(3));
         assert_eq!(parse_test_start(b"ROCK_TEST_START\tforged\t3\n", "abc"), None);
@@ -660,10 +698,33 @@ mod tests {
 
 /// Thread count requested by `ROCK_NUM_THREADS`, else `RAYON_NUM_THREADS`.
 /// It sizes both the compiler's global rayon pool and the C test pool.
+/// `0` asks for the default, as in rayon. A value that is not a count is an
+/// error: ignoring it would silently run with a different pool size.
+pub fn thread_count_request() -> std::result::Result<Option<usize>, String> {
+    parse_thread_count_request(
+        std::env::var("ROCK_NUM_THREADS").ok().as_deref(),
+        std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
+    )
+}
+
+fn parse_thread_count_request(
+    rock: Option<&str>,
+    rayon: Option<&str>,
+) -> std::result::Result<Option<usize>, String> {
+    let Some((var, value)) = rock.map(|v| ("ROCK_NUM_THREADS", v)).or(rayon.map(|v| ("RAYON_NUM_THREADS", v)))
+    else {
+        return Ok(None);
+    };
+    match value.parse::<usize>() {
+        Ok(0) => Ok(None),
+        Ok(n) => Ok(Some(n)),
+        Err(_) => Err(format!("invalid value '{value}' for '{var}': expected a thread count")),
+    }
+}
+
+/// [`thread_count_request`] for pool construction. `main_with` rejects an
+/// invalid value at startup, so reaching the panic means a pool was built
+/// outside the CLI process lifecycle with a bad environment.
 pub fn requested_thread_count() -> Option<usize> {
-    std::env::var("ROCK_NUM_THREADS")
-        .ok()
-        .or_else(|| std::env::var("RAYON_NUM_THREADS").ok())
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|n| *n > 0)
+    thread_count_request().unwrap_or_else(|error| panic!("{error}"))
 }

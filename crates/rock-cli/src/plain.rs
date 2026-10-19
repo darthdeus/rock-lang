@@ -265,8 +265,8 @@ pub static SKULL: BackendSpec = BackendSpec {
 pub static JS: BackendSpec = BackendSpec {
     backend: Backend::Js,
     name: "js",
-    tagline: "js is a private JS-subset executor (node)",
-    omitted: Some(OmittedBackend::Build("use the private monorepo `rock` build with `backend-js`")),
+    tagline: "js is a JS-subset executor (node)",
+    omitted: Some(OmittedBackend::Build),
     operations: &[],
     filter_rejection: None,
 };
@@ -286,8 +286,8 @@ pub static GLSL: BackendSpec = BackendSpec {
 pub static C: BackendSpec = BackendSpec {
     backend: Backend::C,
     name: "c",
-    tagline: "c is a private native C executor (Clang)",
-    omitted: Some(OmittedBackend::Build("use the private monorepo `rock` build")),
+    tagline: "c is a native C executor (Clang)",
+    omitted: Some(OmittedBackend::Build),
     operations: &[],
     filter_rejection: None,
 };
@@ -377,5 +377,6 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     fixes: &[],
     sim_environment: None,
     runtime_services: &RUNTIME_SERVICES,
-    initialize_process: |_| {},
+    // A public tool does not record working directories and branches unless asked.
+    initialize_process: |_| crate::invocation_log::require_explicit_log_path(),
 };

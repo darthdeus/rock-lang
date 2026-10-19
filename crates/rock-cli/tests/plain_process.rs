@@ -103,7 +103,8 @@ fn private_backends_are_omitted_before_source_discovery() {
         for command in ["compile", "test", "run"] {
             let out = invoke(root.path(), &[command, "missing.rock", "--backend", backend]);
             assert!(!out.status.success());
-            assert!(text(&out).contains(&format!("the `{backend}` backend is not in this build")), "{}", text(&out));
+            assert!(text(&out).contains(&format!("the `{backend}` backend is not included in this build")), "{}", text(&out));
+            assert!(!text(&out).contains("monorepo"), "{}", text(&out));
         }
     }
     let help = invoke(root.path(), &["--help"]);
@@ -337,5 +338,51 @@ fn plain_rejects_nesting_beyond_the_limit_with_a_diagnostic() {
         let out = invoke(root.path(), &["compile-single", &file]);
         assert!(!out.status.success(), "{name} compiled");
         assert!(text(&out).contains("nested too deeply"), "{name}: {}", text(&out));
+    }
+}
+
+#[test]
+fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("main.rock"), "fn main() {}\n").unwrap();
+    let run = |log: Option<&std::path::Path>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rock-plain"));
+        command.current_dir(root.path()).args(["fmt", "--check", "main.rock"])
+            .env("ROCK_DIR", root.path()).env("XDG_STATE_HOME", state.path()).env("HOME", state.path())
+            .env_remove("ROCK_INVOCATION_LOG").env_remove("ROCK_STDLIB_DIR");
+        if let Some(log) = log {
+            command.env("ROCK_INVOCATION_LOG", log);
+        }
+        command.output().expect("start public plain CLI")
+    };
+    let out = run(None);
+    let mut written = Vec::new();
+    let mut pending = vec![state.path().to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() { pending.push(path) } else { written.push(path) }
+        }
+    }
+    assert!(written.is_empty(), "plain build logged without opting in: {written:?}\n{}", text(&out));
+
+    let log = state.path().join("chosen.jsonl");
+    let out = run(Some(&log));
+    let record = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(record.contains("\"fmt\""), "explicit ROCK_INVOCATION_LOG not written: <{record}>\n{}", text(&out));
+}
+
+#[test]
+fn plain_rejects_a_thread_count_that_is_not_a_count() {
+    let root = tempfile::tempdir().unwrap();
+    for var in ["ROCK_NUM_THREADS", "RAYON_NUM_THREADS"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_rock-plain"))
+            .current_dir(root.path()).args(["fmt", "--check", "missing.rock"])
+            .env("ROCK_DIR", root.path()).env("ROCK_INVOCATION_LOG", "off")
+            .env_remove("ROCK_NUM_THREADS").env_remove("RAYON_NUM_THREADS").env(var, "eight")
+            .output().expect("start public plain CLI");
+        assert_eq!(out.status.code(), Some(2), "{var}: {}", text(&out));
+        assert!(text(&out).contains(&format!("invalid value 'eight' for '{var}'")), "{}", text(&out));
     }
 }

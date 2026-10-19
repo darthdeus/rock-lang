@@ -1,4 +1,5 @@
-//! One JSON line per dev-loop `rock` invocation, appended to a per-user log so
+//! One JSON line per dev-loop `rock` invocation, appended to `ROCK_INVOCATION_LOG`
+//! or, in builds that default to it, a per-user state log, so
 //! edit-to-feedback times can be mined with a log consumer
 //! (the compiler contract, "Invocation log").
 //!
@@ -15,6 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bone_core::prelude::Instant;
 
@@ -68,12 +70,25 @@ pub fn is_loop_command(name: &str) -> bool {
     })
 }
 
-/// Where records go: `ROCK_INVOCATION_LOG` (a path, or `off`), else
-/// `$XDG_STATE_HOME/rock/invocations.jsonl`, else
-/// `~/.local/state/rock/invocations.jsonl`. `None` when disabled or no home.
+/// Whether an unset `ROCK_INVOCATION_LOG` logs to the per-user state
+/// directory. A build that does not want to record its users' working
+/// directories and branches by default turns this off in its registrations.
+static STATE_DIR_DEFAULT: AtomicBool = AtomicBool::new(true);
+
+/// Write records only where `ROCK_INVOCATION_LOG` names a path.
+pub fn require_explicit_log_path() {
+    STATE_DIR_DEFAULT.store(false, Ordering::Relaxed);
+}
+
+/// Where records go: `ROCK_INVOCATION_LOG` (a path, or `off`), else, unless
+/// [`require_explicit_log_path`] was called, `$XDG_STATE_HOME/rock/invocations.jsonl`
+/// or `~/.local/state/rock/invocations.jsonl`. `None` when disabled or no home.
 pub fn log_path() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os(LOG_ENV).filter(|v| !v.is_empty()) {
         return (value != "off").then(|| PathBuf::from(value));
+    }
+    if !STATE_DIR_DEFAULT.load(Ordering::Relaxed) {
+        return None;
     }
     let state = std::env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
