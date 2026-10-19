@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
             skull_parser::parse_module_clean(
