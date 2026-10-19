@@ -94,8 +94,14 @@ impl std::error::Error for FileUriError {}
 impl Uri {
     /// The absolute filesystem path a `file:` URI names, percent-decoded.
     /// Any other scheme, a remote host, a query or fragment, or a path that
-    /// does not decode to UTF-8 is an error.
+    /// does not decode to UTF-8 is an error. On Windows the path must start
+    /// with a drive (`file:///C:/x` or `file:///c%3A/x`) and comes back as
+    /// `C:\x`.
     pub fn to_file_path(&self) -> Result<String, FileUriError> {
+        self.to_file_path_on(cfg!(windows))
+    }
+
+    fn to_file_path_on(&self, windows: bool) -> Result<String, FileUriError> {
         let err = |why: &str| FileUriError(format!("{why}: {}", self.as_str()));
         match self.scheme() {
             Some(scheme) if scheme.eq_lowercase("file") => {}
@@ -116,21 +122,22 @@ impl Uri {
             .decode()
             .into_string()
             .map_err(|_| err("file: URI path is not UTF-8 after decoding"))?;
-        if !path.starts_with('/') {
-            return Err(err("file: URI path is not absolute"));
-        }
-        Ok(path.into_owned())
+        uri_path_to_native(&path, windows).ok_or_else(|| err("file: URI path is not absolute"))
     }
 
     /// The `file:` URI for an absolute filesystem path, percent-encoding every
-    /// byte outside the unreserved set and `/`.
+    /// byte outside the unreserved set and `/`. On Windows the path must start
+    /// with a drive (`C:\x` or `C:/x`); UNC paths are not supported.
     pub fn from_file_path(path: &str) -> Result<Uri, FileUriError> {
-        if !path.starts_with('/') {
-            return Err(FileUriError(format!("path is not absolute: {path}")));
-        }
-        let mut s = String::with_capacity(path.len() + 7);
+        Self::from_file_path_on(path, cfg!(windows))
+    }
+
+    fn from_file_path_on(path: &str, windows: bool) -> Result<Uri, FileUriError> {
+        let uri_path = native_to_uri_path(path, windows)
+            .ok_or_else(|| FileUriError(format!("path is not absolute: {path}")))?;
+        let mut s = String::with_capacity(uri_path.len() + 7);
         s.push_str("file://");
-        for &b in path.as_bytes() {
+        for &b in uri_path.as_bytes() {
             if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
                 s.push(b as char);
             } else {
@@ -142,10 +149,83 @@ impl Uri {
     }
 }
 
+
+/// Whether a Windows path starts `X:` followed by the end or a separator in
+/// `seps`.
+fn starts_with_drive(path: &str, seps: &[u8]) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b.len() == 2 || seps.contains(&b[2]))
+}
+
+/// A decoded `file:` URI path as a native absolute path. On Windows the URI
+/// path is `/C:/dir/f` (the client may have percent-encoded the colon; it is
+/// decoded by now) and becomes `C:\dir\f`; elsewhere it is used as is.
+fn uri_path_to_native(path: &str, windows: bool) -> Option<String> {
+    if !windows {
+        return path.starts_with('/').then(|| path.to_string());
+    }
+    let rest = path.strip_prefix('/').filter(|rest| starts_with_drive(rest, b"/"))?;
+    let mut native = rest.replace('/', "\\");
+    if native.len() == 2 {
+        native.push('\\');
+    }
+    Some(native)
+}
+
+/// The unencoded URI path for a native absolute path: `C:\dir\f` or
+/// `C:/dir/f` becomes `/C:/dir/f` on Windows; elsewhere the path must start
+/// with `/` and is used as is.
+fn native_to_uri_path(path: &str, windows: bool) -> Option<String> {
+    if !windows {
+        return path.starts_with('/').then(|| path.to_string());
+    }
+    if !starts_with_drive(path, b"/\\") {
+        return None;
+    }
+    Some(format!("/{}", path.replace('\\', "/")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Uri;
+    use super::{native_to_uri_path, uri_path_to_native, Uri};
     use std::str::FromStr;
+
+    #[test]
+    fn windows_drive_paths_convert_both_ways() {
+        assert_eq!(uri_path_to_native("/C:/x/y.rock", true).as_deref(), Some(r"C:\x\y.rock"));
+        assert_eq!(uri_path_to_native("/c:/x", true).as_deref(), Some(r"c:\x"));
+        assert_eq!(uri_path_to_native("/D:", true).as_deref(), Some(r"D:\"));
+        for bad in ["/x/y.rock", "C:/x", "/CC:/x", "/1:/x", "/C:x"] {
+            assert_eq!(uri_path_to_native(bad, true), None, "{bad}");
+        }
+        assert_eq!(native_to_uri_path(r"C:\x\y.rock", true).as_deref(), Some("/C:/x/y.rock"));
+        assert_eq!(native_to_uri_path("c:/x", true).as_deref(), Some("/c:/x"));
+        for bad in [r"\\server\share\a", r"x\y", "/x/y", "C:x"] {
+            assert_eq!(native_to_uri_path(bad, true), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn unix_paths_keep_drive_like_names_verbatim() {
+        assert_eq!(uri_path_to_native("/C:/x", false).as_deref(), Some("/C:/x"));
+        assert_eq!(uri_path_to_native("C:/x", false), None);
+        assert_eq!(native_to_uri_path(r"C:\x", false), None);
+        assert_eq!(native_to_uri_path("/a b/c", false).as_deref(), Some("/a b/c"));
+    }
+
+    #[test]
+    fn windows_file_uris_round_trip_both_colon_spellings() {
+        for s in ["file:///C:/x/a.rock", "file:///C%3A/x/a.rock", "file:///C%3a/x/a.rock"] {
+            assert_eq!(Uri::from_str(s).unwrap().to_file_path_on(true).unwrap(), r"C:\x\a.rock", "{s}");
+        }
+        let uri = Uri::from_file_path_on(r"C:\my dir\a.rock", true).unwrap();
+        assert_eq!(uri.as_str(), "file:///C%3A/my%20dir/a.rock");
+        assert_eq!(uri.to_file_path_on(true).unwrap(), r"C:\my dir\a.rock");
+        assert!(Uri::from_str("file:///x/a.rock").unwrap().to_file_path_on(true).is_err());
+        assert!(Uri::from_file_path_on("/x/a.rock", true).is_err());
+        // The same drive-shaped URI is an ordinary absolute path elsewhere.
+        assert_eq!(Uri::from_str("file:///C%3A/x").unwrap().to_file_path_on(false).unwrap(), "/C:/x");
+    }
 
     #[test]
     fn file_path_round_trips_spaces_and_non_ascii() {
