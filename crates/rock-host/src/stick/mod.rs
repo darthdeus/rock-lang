@@ -517,7 +517,11 @@ impl<'de> serde::Deserialize<'de> for EngineConfig {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "needs" => { needs = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [engine]; known keys: needs"
+                            )));
+                        }
                     }
                 }
                 Ok(EngineConfig { needs })
@@ -727,7 +731,11 @@ impl<'de> serde::Deserialize<'de> for Package {
                         "name" => { name = Some(map.next_value()?); }
                         "version" => { version = map.next_value()?; }
                         "type" => { package_type = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [package]; known keys: name, version, type"
+                            )));
+                        }
                     }
                 }
                 let name = name.ok_or_else(|| serde::de::Error::missing_field("name"))?;
@@ -771,7 +779,12 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         "language" => { language = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
                         "source_groups" => { source_groups = map.next_value()?; }
-                        _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` at top level; known keys: package, build, release, \
+                                 assets, sound, engine, renderer, ios, language, dependencies, source_groups"
+                            )));
+                        }
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
@@ -1490,6 +1503,18 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("sideways"), "error mentions the bad value: {msg}");
         assert!(msg.contains("portrait"), "error suggests the known list: {msg}");
+    }
+
+    #[test]
+    fn top_package_and_engine_reject_unknown_keys() {
+        for (toml, key, table) in [
+            ("[package]\nname = \"x\"\n[dependecies]\n", "dependecies", "top level"),
+            ("[package]\nname = \"x\"\nverison = \"1\"\n", "verison", "[package]"),
+            ("[package]\nname = \"x\"\n[engine]\nneed = []\n", "need", "[engine]"),
+        ] {
+            let msg = format!("{}", StickConfig::new_from_str(toml).expect_err(toml));
+            assert!(msg.contains(&format!("`{key}`")) && msg.contains(table), "{msg}");
+        }
     }
 
     #[test]

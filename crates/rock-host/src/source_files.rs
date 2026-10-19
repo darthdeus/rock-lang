@@ -248,9 +248,15 @@ fn source_file_from_canonical_path(
     let (contents, is_script, is_test, is_test_util, used_packages) =
         preprocess_content(&raw_contents, preprocess)?;
 
+    let utf8_path = path
+        .to_str()
+        .with_context(|| format!("Source path is not valid UTF-8: '{}'", path.display()))?;
+    let filename = path
+        .file_name()
+        .with_context(|| format!("Source path has no file name: '{}'", path.display()))?;
     let file = FileContents::Filesystem {
-        path: path.to_str().unwrap().to_string(),
-        filename: path.file_name().unwrap().to_string_lossy().to_string(),
+        path: utf8_path.to_string(),
+        filename: filename.to_string_lossy().to_string(),
     };
 
     create_source_file(
@@ -307,4 +313,18 @@ pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
 
     create_source_file(file, processed_contents, is_script, is_test, is_test_util, used_packages)
         .unwrap_or_else(|e| panic!("rock: {e:#}"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn non_utf8_source_path_is_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(std::ffi::OsStr::from_bytes(b"bad\xff.rock"));
+        fs_err::write(&path, "fn main() {}\n").unwrap();
+        let err = super::source_file_new(&path).expect_err("non-UTF-8 path must be rejected");
+        assert!(format!("{err:#}").contains("not valid UTF-8"), "{err:#}");
+    }
 }

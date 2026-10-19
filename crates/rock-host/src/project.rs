@@ -7,15 +7,7 @@ use anyhow::Result;
 /// - Dev workspace: has Cargo.toml + crates/
 /// - Release layout: has bin/rock + lib/
 fn is_rock_root(path: &Path) -> bool {
-    // Dev workspace
-    if path.join("Cargo.toml").exists() && path.join("crates").is_dir() {
-        return true;
-    }
-    // Release layout
-    if path.join("lib").is_dir() && path.join("bin").is_dir() {
-        return true;
-    }
-    false
+    (path.join("Cargo.toml").exists() && path.join("crates").is_dir()) || is_release_layout_in(path)
 }
 
 /// Find the Rock workspace root by looking for known layout markers.
@@ -119,7 +111,7 @@ pub fn ensure_workspace_root() -> Result<()> {
     }
     let rock_dir = crate::rock_dir();
     let root = Path::new(&rock_dir);
-    if is_rock_root(root) || root.join("Cargo.toml").exists() || root.join("lib").is_dir() {
+    if is_rock_root(root) || root.join("Cargo.toml").exists() {
         return Ok(());
     }
     Err(anyhow::anyhow!(
@@ -182,7 +174,7 @@ pub fn get_project_id(project_root: &Path) -> Result<String> {
 }
 
 /// Returns true when the rock_dir looks like an extracted release zip
-/// (bin/ + lib/) rather than a dev workspace (Cargo.toml + crates/).
+/// (bin/rock + lib/) rather than a dev workspace (Cargo.toml + crates/).
 ///
 /// In release layout the native libraries are already staged under lib/, so
 /// commands like `rock run` must not shell out to cargo or copy from
@@ -191,8 +183,11 @@ pub fn is_release_layout() -> bool {
     is_release_layout_in(Path::new(&crate::rock_dir()))
 }
 
+/// Requires the `rock` executable itself: system roots such as `/` also hold
+/// bin/ and lib/.
 pub fn is_release_layout_in(root: &Path) -> bool {
-    root.join("lib").is_dir() && root.join("bin").is_dir()
+    root.join("bin").join(format!("rock{}", std::env::consts::EXE_SUFFIX)).is_file()
+        && root.join("lib").is_dir()
         && !root.join("Cargo.toml").exists()
 }
 
@@ -542,6 +537,19 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn release_root_requires_the_rock_executable() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("lib")).unwrap();
+        assert!(!is_rock_root(root));
+        assert!(!is_release_layout_in(root));
+        fs::write(root.join("bin").join(format!("rock{}", std::env::consts::EXE_SUFFIX)), "").unwrap();
+        assert!(is_rock_root(root));
+        assert!(is_release_layout_in(root));
+    }
 
     #[test]
     fn ensure_workspace_root_preserves_cwd() {

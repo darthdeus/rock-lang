@@ -110,15 +110,20 @@ pub fn run_lua_code_with_command(
     // stderr output as failure: the stderr check was compensating for an exit
     // status that was always 0 here, which in turn is why `rock run` exited 0 on
     // a program that died.
+    // On a wait error the child stays registered, so process cleanup can still
+    // kill it; the reader threads are left to end with it.
+    let process_error = |action: &str, error: std::io::Error| {
+        CompilerError::new_no_location(format!("Failed to {action} LuaJIT process {pid}: {error}"))
+    };
     let status = if let Some(timeout_duration) = timeout {
         match child
             .wait_timeout(timeout_duration)
-            .expect("Failed to wait for process")
+            .map_err(|error| process_error("wait for", error))?
         {
             Some(status) => status,
             None => {
-                child.kill().expect("Failed to kill timed out process");
-                child.wait().expect("Failed to wait for killed process");
+                child.kill().map_err(|error| process_error("kill timed out", error))?;
+                child.wait().map_err(|error| process_error("wait for killed", error))?;
                 unregister_child_process(pid);
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
@@ -129,7 +134,7 @@ pub fn run_lua_code_with_command(
             }
         }
     } else {
-        child.wait().expect("Failed to wait for process")
+        child.wait().map_err(|error| process_error("wait for", error))?
     };
 
     unregister_child_process(pid);
