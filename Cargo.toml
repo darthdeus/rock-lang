@@ -129,3 +129,15 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 1
 debug = false
+
+# The browser playground's Wasm module (`--profile wasm-release`): small, no
+# symbol names, and panics abort since the module traps on a panic anyway.
+# opt-level "s" over "z": "z" saved a further 12% gzipped but compiled
+# programs about 1.6x slower, and the page recompiles on every edit.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
