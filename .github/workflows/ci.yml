@@ -1,8 +1,9 @@
 name: CI
 
+# Manual until the repository is public: private-repo Actions minutes are
+# billed, and every change is gated on the build host before it lands.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
