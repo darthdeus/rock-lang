@@ -1998,6 +1998,31 @@ fn main() {
     let c = C { i: 0 }
     let _ = draw(c)
 }
+
+#[test]
+fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
+    let fixture = include_str!("fixtures/cw7_nullable_operator_diagnostic.rock");
+    for section in test_utils::parse_sections(fixture).into_iter().take(3) {
+        let ws = check(section.content).expect("body errors are collected");
+        let errors: Vec<_> = ws.inferences_iter()
+            .flat_map(|(_, inf)| inf.errors.values().flatten())
+            .collect();
+        assert_eq!(errors.len(), 1, "{}: {errors:?}", section.name);
+        let error = errors[0];
+        assert!(!error.message.contains("available overloads"), "{error:?}");
+        let operands = if section.name.starts_with("both_nullable") { 2 } else { 1 };
+        assert_eq!(error.labels.len(), operands, "{error:?}");
+        for label in &error.labels {
+            assert_eq!(label.message, "nullable operand");
+            let (start, end) = label.span.offset_range;
+            let operand = &section.content[start..end];
+            assert!(matches!(operand, "x" | "y"), "{operand:?}");
+            if operands == 1 {
+                assert_eq!(operand, if section.name.starts_with("nullable_right") { "y" } else { "x" });
+            }
+        }
+    }
+}
 "#;
     let ws = check(src).expect("body errors are collected, not aborted");
     let mid = ws
