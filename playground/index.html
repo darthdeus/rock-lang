@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rock Playground</title>
+  <style>
+    :root { --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --line: #d0d7de; --accent: #0969da; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1e1e1e; --fg: #e6edf3; --muted: #9198a1; --line: #3d444d; --accent: #4493f8; }
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; flex-direction: column; background: var(--bg); color: var(--fg);
+      font: 14px/1.4 system-ui, sans-serif;
+    }
+    header, footer { display: flex; gap: 8px; align-items: center; padding: 6px 12px; }
+    header { border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    h1 { font-size: 15px; margin: 0 12px 0 0; }
+    .spacer { flex: 1; }
+    button, select {
+      font: inherit; color: inherit; background: transparent; border: 1px solid var(--line);
+      border-radius: 6px; padding: 3px 10px; cursor: pointer;
+    }
+    button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+    main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+    #editor, #output { min-height: 0; min-width: 0; }
+    #output { border-left: 1px solid var(--line); }
+    @media (max-width: 800px) {
+      main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+      #output { border-left: none; border-top: 1px solid var(--line); }
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script>
+    // Monaco's own editor workers come from the CDN too; a data: URL bootstraps
+    // them from this origin.
+    const monacoBase = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min';
+    window.MonacoEnvironment = {
+      getWorkerUrl: () => 'data:text/javascript;charset=utf-8,' + encodeURIComponent(
+        `self.MonacoEnvironment = { baseUrl: '${monacoBase}/' };` +
+        `importScripts('${monacoBase}/vs/base/worker/workerMain.js');`),
+    };
+    require.config({ paths: { vs: `${monacoBase}/vs` } });
+    window.monacoReady = new Promise((resolve) => require(['vs/editor/editor.main'], resolve));
+  </script>
+  <script type="module" src="main.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Rock Playground</h1>
+    <select id="file" aria-label="File"><option value="main.rock">main.rock</option></select>
+    <button id="format" title="Format main.rock (Shift+Alt+F)">Format</button>
+    <span class="spacer"></span>
+    <button data-tab="lua" aria-selected="true">Lua</button>
+    <button data-tab="glsl" aria-selected="false">GLSL</button>
+    <button data-tab="wgsl" aria-selected="false">WGSL</button>
+  </header>
+  <main>
+    <div id="editor"></div>
+    <div id="output"></div>
+  </main>
+  <footer>
+    <span id="status">loading the editor...</span>
+    <span class="spacer"></span>
+    <span>F12 or Ctrl+click: go to definition</span>
+  </footer>
+</body>
+</html>
