@@ -198,6 +198,10 @@ fn main() {
     check_reserve(partial, 0)
     check_backing(partial)
     check_rows(partial)
+    partial.push(input(64))
+    assert(partial.len() == 65 && partial.capacity() >= partial.len())
+    check_reserve(partial, 0)
+    check_rows(partial)
     let zero: [Ev] = vec_new_with_capacity(0)
     begin_reserve_watch()
     for i in 0..65 { zero.push(input(i)) }
