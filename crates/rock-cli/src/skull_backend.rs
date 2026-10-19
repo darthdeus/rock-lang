@@ -122,6 +122,56 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     }
 }
 
+/// A package test build's [`skull::pipeline::CompileHost`]: the command-line
+/// host with test-rooted emission. The lint scope stays whole-project: the
+/// sources still include the package's own tests.
+struct PackageTestHost<'a> {
+    inner: CliCompileHost<'a>,
+    test_dir: &'a str,
+}
+
+impl skull::pipeline::CompileHost for PackageTestHost<'_> {
+    fn identity_storage_exemptions(&self) -> bone_query::IdentityStorageExemptions {
+        self.inner.identity_storage_exemptions()
+    }
+
+    fn aliases(
+        &mut self,
+        modules: &[skull_parser::Ast],
+    ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
+        self.inner.aliases(modules)
+    }
+
+    fn comptime_inputs(
+        &mut self,
+    ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
+        self.inner.comptime_inputs()
+    }
+
+    fn lint_findings(&mut self, ws: &bone_semantic::inference::Workspace) -> Vec<bone_lints::Finding> {
+        self.inner.lint_findings(ws)
+    }
+
+    fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
+        self.inner.report_soft_findings(soft);
+    }
+
+    fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {
+        self.inner.phase(phase);
+    }
+
+    fn emit(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+        entry: bone_semantic::prelude::ModuleId,
+        _target: skull::pipeline::EmitTarget,
+    ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
+        let test_fns = collect_package_test_fns(ws, self.test_dir)?;
+        let roots = test_fns.iter().map(|(func, _)| *func).collect::<Vec<_>>();
+        skull::mir_emit::emit_workspace_mir_for_package_test(ws, entry, &roots)
+    }
+}
+
 /// Emit the workspace and also discover the user module's `@test` functions
 /// (for execution). Returns `(lua, tests, emits_main)`. `file` is stamped as
 /// the source-file id so spans (and `__SITE__`) carry the real path.
@@ -1426,44 +1476,32 @@ fn skull_build_package_with_limit(
             rendered: format!("{error:#}"),
         })?;
     crate::compile_measurements::phase("discovery");
-    let (mut modules, entry_file) = skull_assemble_project(&sources).map_err(|errs| SkullFailure {
+    let (modules, entry_file) = skull_assemble_project(&sources).map_err(|errs| SkullFailure {
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
     })?;
     crate::compile_measurements::phase("parse+stdlib");
-    let mut ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
-        reason: categorize(&errs[0].message),
-        rendered: render_project_errs(&sources, &errs),
-    })?;
-    crate::compile_measurements::phase("semantic");
-    crate::compile_measurements::timings("bone", &ws.phase_timings);
-    // The workspace owns everything emission reads; the parse trees (about
-    // 1 GB for project) would otherwise stay live through the emit peak.
-    drop(modules);
-    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|e| {
-        SkullFailure {
-            reason: "build var resolution failed".to_string(),
-            rendered: format!("build var resolution failed for {dir}: {e:#}"),
-        }
-    })?;
-    let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
+    let mut host = PackageTestHost {
+        inner: CliCompileHost {
+            sources: &sources,
+            lint_root: std::path::Path::new(dir),
+            lint_scope: crate::lint_pass::Scope::WholeProject,
+            comptime: CliComptime::FromEntry(dir),
+        },
+        test_dir: dir,
+    };
+    let target = skull::pipeline::EmitTarget { project_root: None, renderer: skull::mir_emit::RendererTarget::Gl };
+    let skull::pipeline::Compiled { ws, emission: emit, .. } =
+        skull::pipeline::compile_modules(modules, entry_file, target, &mut host).map_err(|failure| SkullFailure {
+            reason: categorize(&failure.errors[0].message),
+            rendered: render_project_errs(&sources, &failure.errors),
+        })?;
+    crate::compile_measurements::emission(&emit);
+    let lua = emit.lua;
     let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
     })?;
-    let roots = test_fns.iter().map(|(func, _)| *func).collect::<Vec<_>>();
-    let lua = match skull::mir_emit::emit_workspace_mir_for_package_test(&ws, entry_mid, &roots) {
-        Ok(e) => {
-            crate::compile_measurements::emission(&e);
-            e.lua
-        },
-        Err(e) => {
-            return Err(SkullFailure {
-                reason: categorize(&e.message),
-                rendered: render_project_err(&sources, &e),
-            });
-        }
-    };
     let files = test_fns.iter().map(|(func, _)| {
         ws.modules[func.module.index()].file.as_str().to_owned()
     }).collect::<Vec<_>>();
@@ -1484,7 +1522,6 @@ fn skull_build_package_with_limit(
         crate::registry::TestUnit::Package { dir, facts: &facts },
     ).map_err(SkullFailure::from)?;
     let lua = TestProgram { preamble: host.preamble, lua, setup: host.setup };
-    crate::compile_measurements::phase("prepare");
     run_emitted_tests(lua, &tests, &files, limit, shards, filter, true)
 }
 

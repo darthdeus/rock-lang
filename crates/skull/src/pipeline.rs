@@ -157,6 +157,17 @@ pub trait CompileHost {
     fn lint_findings(&mut self, ws: &Workspace) -> Vec<bone_lints::Finding>;
     /// Present the findings that do not refuse the program.
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>);
+    /// Emit the checked program. The host selects the roots: a test build
+    /// roots at its tests, every other build at the program entry. The
+    /// pipeline keeps one check-lint-emit order and never branches on kind.
+    fn emit(
+        &mut self,
+        ws: &Workspace,
+        entry: ModuleId,
+        target: EmitTarget,
+    ) -> Result<MirEmit, CompilerError> {
+        crate::mir_emit::emit_workspace_mir_in_for_renderer(ws, entry, target.project_root, target.renderer)
+    }
     fn phase(&mut self, _phase: Phase<'_>) {}
 }
 
@@ -247,12 +258,7 @@ pub fn compile_modules(
         return Err(CompileFailure::at(Stage::Lint, lint_errors));
     }
     host.phase(Phase::Prepared);
-    let emission = crate::mir_emit::emit_workspace_mir_in_for_renderer(
-        &ws,
-        entry,
-        target.project_root,
-        target.renderer,
-    )
-    .map_err(|e| CompileFailure::at(Stage::Emit, vec![e]))?;
+    let emission =
+        host.emit(&ws, entry, target).map_err(|e| CompileFailure::at(Stage::Emit, vec![e]))?;
     Ok(Compiled { ws, entry, emission })
 }
