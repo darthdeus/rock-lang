@@ -1,7 +1,7 @@
 //! Completion ranking primitives (completion-v2 stage C): the shared fuzzy
 //! DP, the coarse match bands, and the `RankKey` constructors every source
 //! ranks through. `clean_match`/`fz_boundary` stay in `crate::query` -- they
-//! are the centralized matchers (docs/lsp-architecture.md).
+//! are the centralized matchers (shared LSP architecture).
 
 use crate::query::fz_boundary;
 use crate::rank_key::RankKey;
@@ -317,7 +317,7 @@ pub(crate) fn arg_rank_key(type_rank: u8, kind: u8, cand: &str, query: &[u8], di
 }
 
 /// `(exact, band)` match-quality classification for the ranking ladder
-/// (`docs/completion-ranking-design.md`). `exact` = 0 iff `cand` equals the
+/// (completion ranking contract). `exact` = 0 iff `cand` equals the
 /// query case-exact (a whole-name hit outranks everything). `band` is the COARSE
 /// match tier -- 0 case-exact prefix, 1 ci prefix, 2 clean word-boundary
 /// subsequence, 3 scattered -- so the fine `fuzzy_score` no longer leads the

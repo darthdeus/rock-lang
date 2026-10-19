@@ -1,0 +1,27 @@
+struct CursorSample {
+    value: int,
+    label: string,
+}
+
+enum CursorMode {
+    Ready,
+    Waiting,
+}
+
+fn cursor_frontier(sample: CursorSample, mode: CursorMode) -> int {
+    let message = "value {sample.value}, mode {mode}"
+    if sample.value > 0 && mode == CursorMode::Ready {
+        let next = sample.value + 1
+        return next
+    }
+    let fallback = sample.value - 1
+    return fallback
+}
+
+fn cursor_chain(sample: CursorSample) -> int {
+    let text = sample.label
+    if text.len() > 0 {
+        return sample.value * 2
+    }
+    return 0
+}

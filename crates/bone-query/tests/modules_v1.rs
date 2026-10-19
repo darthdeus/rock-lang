@@ -778,15 +778,22 @@ fn renaming_an_alias_renames_only_that_files_uses_of_it() {
 
 /// Type-directed synthesized items (call-throughs such as `f(pos)`, reach
 /// paths such as `pos.f()`) spell workspace function names too; in a v1
-/// file none may spell a DefKey. Pinned on the converted chess-core, where
-/// the prefix `ch_t` inside `ch_type(p)` reached `chess_core::ch_to_fen(pos)`.
+/// file none may spell a DefKey. Pinned on a local chess-core fixture, where
+/// the prefix `ch_t` inside `ch_type(p)` can expose a `chess_core::` spelling.
 #[test]
 fn no_completion_in_a_v1_file_spells_a_def_key() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
-    let file = bone_query::canonicalize_lenient(&repo.join("libs/chess-core/chess_moves.rock").to_string_lossy());
-    let text = std::fs::read_to_string(&file).unwrap();
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/chess_completion");
+    let source = project.join("chess_moves.rock");
+    let file = bone_query::canonicalize_lenient(&source.to_string_lossy());
+    let text = std::fs::read_to_string(&source).expect("chess completion fixture is readable");
     let mut bone = BoneWorkspace::new();
-    bone.update(&file, text.clone());
+    let diags = bone.update(&file, text.clone());
+    let errors: Vec<_> = diags
+        .iter()
+        .flat_map(|(_, ds)| ds)
+        .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .collect();
+    assert!(errors.is_empty(), "fixture package must build clean: {errors:#?}");
     let at = pos_of(&text, "ch_type(p)", 0, 4);
     let items = bone.completion(&file, at);
     assert!(!items.is_empty());

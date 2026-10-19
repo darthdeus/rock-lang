@@ -1,0 +1,5 @@
+use support::bump as bump;
+
+fn main() -> int {
+    bump(1)
+}

@@ -9,6 +9,8 @@ crates listed below.
 
 | Crate | Origin |
 |---|---|
+| `crates/bone-incremental` | Incremental sessions, dependency invalidation and differential fixtures |
+| `crates/bone-query` | IDE queries, completion ranking and the LSP workspace facade |
 | `crates/bone-core` | HIR, annotation registry, module workspace and shared types of the `bone` typechecker |
 | `crates/bone-lints` | Lint catalog, HIR analysis and incremental lint cache |
 | `crates/bone-inference` | Type inference: unification, calls, fields, purity |

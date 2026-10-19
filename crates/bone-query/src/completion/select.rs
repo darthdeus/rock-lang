@@ -69,7 +69,7 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
     }
 }
 
-// === Completion tuning (docs/completion-v2-design.md) =======================
+// === Completion tuning (completion pipeline contract) =======================
 // Every cap/threshold the ranking pipeline exposes, in one block. The fuzzy
 // score weights (FZ_*) live next to the DP above; the RankKey field order is
 // the ladder itself (rank_key.rs).
@@ -77,7 +77,7 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
 /// Default cap on items returned by general (non-member) completion. Generous
 /// headroom over a screenful -- the client narrows within a keystroke and
 /// re-requests (every completion response is `isIncomplete`), so this exists
-/// only to stop serializing the whole workspace (2539 items / ~518 KB on mag at
+/// only to stop serializing the whole workspace (thousands of items / hundreds of KB at
 /// empty prefix) when the client will throw nearly all of it away and ask again.
 /// Override at runtime with `ROCK_LSP_MAX_COMPLETIONS` (see `max_completion_items`).
 pub(crate) const DEFAULT_MAX_COMPLETION_ITEMS: usize = 200;
@@ -115,7 +115,7 @@ pub(crate) const FREQ_WARM: u32 = 3;
 pub(crate) const CALL_THROUGH_CAP: usize = 10;
 pub(crate) const PER_FN_METHOD_CAP: usize = 2;
 
-// === Completion candidate pipeline (docs/completion-v2-design.md, M3) ========
+// === Completion candidate pipeline (completion pipeline contract, M3) ========
 //
 // Stage B/D of completion-v2: every general-path source emits fact-shaped
 // `Cand`s into a `Sink`; ONE select (RankKey order) runs on the facts;

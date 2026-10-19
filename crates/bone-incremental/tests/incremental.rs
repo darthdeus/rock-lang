@@ -1,5 +1,5 @@
 // Incremental == fresh oracle for `bone_semantic::Session` (see
-// `docs/compiler-hygiene-lessons.md`): apply an edit script to a session, batch `semantic_pass` the final
+// incremental compiler invariants): apply an edit script to a session, batch `semantic_pass` the final
 // texts, and assert the two workspaces are equivalent. The comparator itself is
 // validated batch-vs-batch below (equal programs compare equal, injected
 // divergences are detected) so a green oracle run is evidence, not vacuous.
@@ -696,7 +696,7 @@ fn origin_doubled() -> int {
     h.assert_clean();
 }
 
-/// REGRESSION (bitgun/spatial.rock, a 0-byte file): an item-less user file
+/// REGRESSION (a 0-byte source file): an item-less user file
 /// interned BEFORE another user file must not corrupt module-id alignment.
 ///
 /// `Session::new` interns every file, but `combined_unexpanded` omits item-less
@@ -932,7 +932,7 @@ fn shape_change_relowers_only_the_edited_module() {
     // resolve it -- they need only re-inference, not re-lowering. The cascade must
     // re-lower ONLY the edited module; regressing to the conservative closure
     // would re-lower every interface dependent (the perf cliff iter-cascade
-    // measured: mag Mob 22 modules vs 1). Deterministic guard via `relowered`.
+    // measured: a shared type touched 22 modules vs 1). Deterministic guard via `relowered`.
     let a = "struct P { x: int }";
     let b = "fn read(p: P) -> int { p.x }"; // P in signature (interface dep) AND body
     let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
@@ -1571,7 +1571,7 @@ fn type_and_span_at(h: &Harness, path: &str, offset: usize) -> Option<(String, (
 }
 
 /// DETERMINISTIC span-correctness gate for rung 2 (per-body lowering;
-/// `docs/parked/skull.md`). A length-changing edit to an EARLIER body shifts
+/// span relocation invariants). A length-changing edit to an EARLIER body shifts
 /// every node below it. Today the whole module re-lowers, so the later bodies'
 /// spans are re-derived fresh from the new text; once rung 2 keeps unchanged
 /// bodies' HIR, their stored `expr_spans` must be PATCHED by the edit's
@@ -1792,26 +1792,12 @@ fn relower_function_in_place_matches_fresh_lower() {
 // ---------------------------------------------------------------------------
 
 fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
-    // Mirrors rock_host::stdlib_loader::stdlib_files() (the canonical list);
-    // kept as a local `include_str!` table so the warm set stays independent
-    // of the loader's path resolution.
-    const STDLIB: &[(&str, &str)] = &[
-        ("unified.rock", include_str!("../../../stdlib/unified.rock")),
-        ("logging.rock", include_str!("../../../stdlib/logging.rock")),
-        ("vec.rock", include_str!("../../../stdlib/vec.rock")),
-        ("mat.rock", include_str!("../../../stdlib/mat.rock")),
-        ("arena.rock", include_str!("../../../stdlib/arena.rock")),
-        ("scene.rock", include_str!("../../../stdlib/scene.rock")),
-        ("strings.rock", include_str!("../../../stdlib/strings.rock")),
-        ("json.rock", include_str!("../../../stdlib/json.rock")),
-        ("shader.rock", include_str!("../../../stdlib/shader.rock")),
-    ];
-    STDLIB
+    rock_stdlib::stdlib_files()
         .iter()
-        .map(|(name, contents)| {
-            let file = Ustr::from(format!("<bone-stdlib:{name}>").as_str());
-            skull_parser::parse_module_clean(contents, file)
-                .unwrap_or_else(|e| panic!("stdlib {name} must parse: {e:?}"))
+        .map(|f| {
+            let file = Ustr::from(format!("<bone-stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module_clean(f.contents, file)
+                .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
         })
         .collect()
 }
@@ -2506,15 +2492,15 @@ fn fuzz_session_synthetic() {
     }
 }
 
-/// Real-project fuzz over match3 with the full warm stdlib, gated like the
-/// rock-side real fuzz: ROCK_FUZZ_REAL=1. Append/edit/revert text mutations
-/// only (no file deletion - real signatures cross files, and bone's
-/// interface lowering fail-fasts on those; the synthetic fuzz owns
-/// deletion). Coarse profile stride keeps wall time reasonable.
+/// Package-graph fuzz with the full warm stdlib, gated like the rock-side real
+/// fuzz: ROCK_FUZZ_REAL=1. Append/edit/revert text mutations only (no file
+/// deletion - real signatures cross files, and bone's interface lowering
+/// fail-fasts on those; the synthetic fuzz owns deletion). Coarse profile
+/// stride keeps wall time reasonable.
 ///
 /// `true` when `text` carries a `#script` directive line, the files
 /// production dependency discovery skips. A line scan, not the preprocessor
-/// lexer; close enough for a tripwire (the match3 closure has none today).
+/// lexer; close enough for a tripwire (the fixture graph has none today).
 fn is_script_source(text: &str) -> bool {
     text.lines().any(|l| {
         let t = l.trim_start();
@@ -2523,22 +2509,19 @@ fn is_script_source(text: &str) -> bool {
 }
 
 #[test]
-fn fuzz_session_real_match3() {
+fn fuzz_session_fixture_package_graph() {
     if std::env::var("ROCK_FUZZ_REAL").is_err() {
-        eprintln!("fuzz_session_real_match3 skipped (set ROCK_FUZZ_REAL=1)");
+        eprintln!("fuzz_session_fixture_package_graph skipped (set ROCK_FUZZ_REAL=1)");
         return;
     }
 
-    // The same source set `rock watch match3` discovers: the manifest's whole
-    // dependency closure (game + stone engine + cores), each file stamped with
-    // the dialect and owning package the graph assigns it. Mirrors
-    // `rock_cli::unified_compile::discover_sources` (Directory arm). Only the
-    // root package's files get mutated.
-    let workspace_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-    let manifest_dir = format!("{workspace_root}/games/match3");
-    let graph =
-        rock_host::stick::graph::PackageGraph::build(std::path::Path::new(&manifest_dir))
-            .expect("match3 package graph");
+    // This local two-package graph exercises production manifest discovery,
+    // package aliases, file selection, and per-file compiler metadata. Only
+    // root-package files are mutated, as in a real project edit.
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/incremental_package/app");
+    let graph = rock_host::stick::graph::PackageGraph::build(&manifest_dir)
+        .expect("fixture package graph");
     let root = graph.root();
     let mut all_files: Files = Vec::new();
     let mut originals: Files = Vec::new();
@@ -2547,7 +2530,7 @@ fn fuzz_session_real_match3() {
         // The root package loads from the invoked directory; dependencies
         // always load their whole root.
         let load_dir = if *id == root {
-            std::path::PathBuf::from(&manifest_dir)
+            manifest_dir.clone()
         } else {
             node.root.clone()
         };
@@ -2582,9 +2565,9 @@ fn fuzz_session_real_match3() {
     }
     assert!(
         !originals.is_empty(),
-        "real fuzz found no game .rock files under games/match3/ -- path moved? \
-         (guards against a silent skip / div-by-zero on an empty set)"
+        "fixture package graph has no root .rock files (guards against a silent skip)"
     );
+    assert!(all_files.len() > originals.len(), "fixture graph must include a dependency package");
 
     let aliases = bone_query::package_aliases::from_graph(&graph);
     let mut h = Harness::with_warm_aliases(stdlib_warm_modules(), all_files, 13, aliases);

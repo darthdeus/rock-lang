@@ -1,4 +1,4 @@
-//! The completion pipeline (docs/completion-v2-design.md M5): classify the
+//! The completion pipeline (completion pipeline contract M5): classify the
 //! cursor once, sources emit fact-shaped candidates, one rank key, one
 //! select + materialization. `backend.rs` keeps only the workspace/variant
 //! plumbing (`BoneWorkspace::completion`, `ExpectedArg`, Session variants).

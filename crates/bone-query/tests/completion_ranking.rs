@@ -25,7 +25,7 @@ fn labels_at(src: &str) -> Vec<String> {
     bone.update(PATH, s);
     let items = bone.completion(PATH, pos);
     // Every corpus fixture doubles as an invariant-suite position
-    // (docs/completion-v2-design.md M4): the position-blind response
+    // (completion pipeline contract M4): the position-blind response
     // invariants must hold wherever a ranking decision is pinned.
     let prefix = typed_prefix(src);
     let violations = bone_query::invariants::completion_response_violations(&items, &prefix);
@@ -61,7 +61,7 @@ fn prefix_match_on_pascal_name_beats_boundary_match_on_snake_name() {
     // `spellb` is a whole-prefix (+1000) of the struct `SpellBindingX` but only a
     // word-boundary match on the fn `spell_bank` (`spell_` then `b`). The struct
     // must win despite its PascalCase -- pre-fix the leading case penalty buried
-    // it below every case-clean lowercase candidate. (mag: `speba`/`spellb`.)
+    // it below every case-clean lowercase candidate. (a multi-word symbol abbreviation.)
     let labels = labels_at(
         "struct SpellBindingX { key: string }\n\
          fn spell_bank() {}\n\
@@ -79,7 +79,7 @@ fn strong_const_match_beats_weaker_snake_match() {
     // `fon` is a whole-prefix (+1000) of `FONT_SMALL` but only a boundary match
     // on the fn `format_new` (`fo` then `_n`). The const must rank first --
     // pre-fix the leading case penalty demoted it below the case-clean fn even
-    // with the dominant prefix bonus. (mag: lowercase `fon`/`fosma` should
+    // with the dominant prefix bonus. (lowercase `fon`/`fosma` should
     // surface FONT_SMALL, not bury it.)
     let labels = labels_at(
         "const FONT_SMALL: float = 12.0\n\
@@ -120,7 +120,7 @@ fn contiguous_run_beats_interior_word_boundary_hop() {
     // continuation made the DP break the run for that stray boundary, so the
     // longer name -- which the query never mentions `depth` in -- scored +2 and
     // ranked first. A run must never be worth LESS than a one-char boundary hop.
-    // (mag: `HOVERED_EID_SLOT = pixelreadnew` surfaced `_depth_new` on top.)
+    // (an unrelated synthesized candidate used to rank first.)
     let labels = labels_at(
         "fn pixel_readback_new() -> int { 0 }\n\
          fn pixel_readback_depth_new() -> int { 0 }\n\
@@ -139,7 +139,7 @@ fn match_arm_return_ranks_constructor_over_recursive_self_call() {
     // to the fn being defined, promoted by the +5000 confident-autofill firing on
     // the fn's own param `k`. Two coupled bugs: the enclosing fn was promoted
     // inside its own body, and the match-arm body was not recognized as return
-    // position (so wrong-type synths never demoted). (mag blood.rock:16:39.)
+    // position (so wrong-type synths never demoted). (a struct fill inside its own function body.)
     let labels = labels_at(
         "enum PxKind { Blood, Dust }\n\
          value PartitionStyle { gravity: float, damp: float }\n\
@@ -585,7 +585,7 @@ fn member_labels_by_sort(src: &str) -> Vec<String> {
     items.into_iter().map(|c| c.label).collect()
 }
 
-// == Ranking ladder (docs/completion-ranking-design.md) =======================
+// == Ranking ladder (completion ranking contract) =======================
 
 #[test]
 fn expr_position_local_beats_boundary_richer_fn() {
@@ -948,7 +948,7 @@ fn direct_fn_beats_ufcs_method_reach_synths_of_itself() {
     // the first arg pre-filled -- a COMPUTED value, not a stored one -- so the
     // single direct `wisp_trail_new($0)` must outrank the flood, not sink below
     // it. RED pre-fix: method-final reach paths took value-tier 0 + root
-    // (global) locality and buried the direct fn dead last (mag magic.rock:33
+    // (global) locality and buried the direct fn dead last (a call inside an earlier function
     // capture: `DRAG_TRAIL = wisptrailnew`).
     let labels = labels_at(
         "struct Trail { x: int }\n\

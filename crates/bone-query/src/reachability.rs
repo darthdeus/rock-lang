@@ -13,7 +13,7 @@
 //! `reaches` is used as a PRUNING ORACLE: the query is a guided DFS that
 //! descends an edge only when its target still reaches `E`, with a simple-path
 //! cycle guard (no depth cap) and a UX result cap. Heuristic backlog:
-//! `docs/completion-v2-design.md`.
+//! completion pipeline contract.
 
 use bone_core::modules::{FragmentScope, NsVisibility};
 use bone_semantic::prelude::*;

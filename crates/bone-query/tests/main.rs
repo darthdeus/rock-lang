@@ -56,8 +56,6 @@ mod phantom_block_sentinel;
 mod query;
 #[path = "reachability.rs"]
 mod reachability;
-#[path = "repro_camera_crash.rs"]
-mod repro_camera_crash;
 #[path = "semantic_tokens.rs"]
 mod semantic_tokens;
 #[path = "stale_spans_after_body_edit.rs"]

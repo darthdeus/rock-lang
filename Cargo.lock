@@ -163,6 +163,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bone-incremental"
+version = "0.1.0"
+dependencies = [
+ "bone-core",
+ "bone-query",
+ "bone-semantic",
+ "comfy-la-arena",
+ "itertools",
+ "rock-host",
+ "rock-stdlib",
+ "rust-lapper",
+ "rustc-hash",
+ "skull-parser",
+ "smallvec",
+ "ustr",
+]
+
+[[package]]
 name = "bone-inference"
 version = "0.1.0"
 dependencies = [
@@ -201,6 +219,28 @@ dependencies = [
  "smallvec",
  "tracing",
  "ustr",
+]
+
+[[package]]
+name = "bone-query"
+version = "0.1.0"
+dependencies = [
+ "bone-core",
+ "bone-incremental",
+ "bone-lints",
+ "bone-semantic",
+ "fs-err",
+ "log",
+ "lsp-types-manual",
+ "rock-core",
+ "rock-host",
+ "rock-stdlib",
+ "rock-tokenizer",
+ "rust-lapper",
+ "skull-parser",
+ "tempfile",
+ "ustr",
+ "walkdir",
 ]
 
 [[package]]

@@ -1143,23 +1143,10 @@ mod frontier_census {
     use super::*;
 
     fn corpus() -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        for dir in ["../../tests", "../../mag", "../../bitgun"] {
-            let Ok(rd) = std::fs::read_dir(dir) else { continue };
-            let mut files: Vec<_> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "rock"))
-                .collect();
-            files.sort();
-            // A capped, deterministic slice per dir keeps the sweep fast.
-            for p in files.into_iter().take(12) {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    out.push((p.display().to_string(), text));
-                }
-            }
-        }
-        out
+        let fixture = include_str!("../tests/fixtures/cursor_frontier.rock");
+        (0..16)
+            .map(|index| (format!("cursor_frontier_{index}.rock"), fixture.repeat(6)))
+            .collect()
     }
 
     /// One-off, gated: how often does CursorAst::at return None -- the ONLY

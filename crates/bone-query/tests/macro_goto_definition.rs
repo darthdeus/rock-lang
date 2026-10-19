@@ -50,6 +50,33 @@ fn def_macro_invocation_jumps_to_the_macro_decl_cross_file() {
 }
 
 #[test]
+fn public_macro_navigation_survives_namespace_construction() {
+    for language in ["", "\n[language]\nmodules = \"v1\"\n"] {
+        let dir = tempfile::tempdir().expect("macro project");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            format!("[package]\nname = \"macro_navigation\"\nversion = \"0.1.0\"\ntype = \"bin\"\n{language}"),
+        ).expect("project manifest");
+        let declaration = "macro twice(x: expr) { x + x }\n";
+        let invocation = "fn main() { let value = twice(21) }\n";
+        let def_path = dir.path().join("macros.rock");
+        let use_path = dir.path().join("main.rock");
+        std::fs::write(&def_path, declaration).expect("macro source");
+        std::fs::write(&use_path, invocation).expect("consumer source");
+        let mut bone = BoneWorkspace::new();
+        bone.update(use_path.to_str().unwrap(), invocation.to_string());
+        let location = bone.definition(
+            use_path.to_str().unwrap(), pos(invocation, "twice(21)", 2),
+        ).expect("public macro invocation definition");
+        assert_eq!(
+            location.uri.as_str().strip_prefix("file://").unwrap(),
+            def_path.to_str().unwrap(),
+        );
+        assert_eq!(location.range.start, pos(declaration, "twice(x:", 0));
+    }
+}
+
+#[test]
 fn def_macro_overload_resolves_to_the_arity_matching_decl() {
     // A macro name can't collide with a fn (rule: macro names are unique), but
     // it CAN have overloads by arity. Goto-def picks the decl of the overload

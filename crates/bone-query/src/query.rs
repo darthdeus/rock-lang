@@ -59,26 +59,40 @@ pub fn definition_at(
                 .and_then(|sname| struct_field_span(ws, sname, *name))
                 .or_else(|| def_of_name(ws, *name)),
 
-            // A field name in a struct literal -> the struct's field decl;
-            // otherwise the head -> the struct.
             hir::Expr::StructLiteral { name, fields, .. } => {
+                let enum_name = record_literal_enum(ws, def_bi, e, *name);
                 for fidx in fields.clone() {
                     let f = &body.struct_lit_field_arena[fidx];
-                    let (s, e) = f.name_span.offset_range;
-                    if s <= offset && offset < e {
-                        return struct_field_span(ws, *name, f.name);
+                    if span_contains(&f.name_span, offset) {
+                        return match enum_name {
+                            Some(en) => variant_field_span(ws, Some(en), *name, f.name),
+                            None => struct_field_span(ws, *name, f.name),
+                        };
                     }
                 }
-                def_of_name(ws, *name)
+                match enum_name {
+                    Some(en) => variant_def_span(ws, Some(en), *name),
+                    None => struct_def_by_name(ws, *name).map(|s| s.name_span),
+                }
             }
 
             // The variant name -> the variant decl; the enum qualifier -> the
             // enum decl.
-            hir::Expr::EnumVariant { enum_name, variant, variant_span, .. } => {
+            hir::Expr::EnumVariant { enum_name, variant, variant_span, args, .. } => {
+                if let Some(seg) = path_segment_at(ws, mid, offset) {
+                    return segment_target_def(ws, seg.target);
+                }
+                if let hir::VariantArgs::Record(fields) = args {
+                    for fidx in *fields {
+                        let f = &body.struct_lit_field_arena[fidx];
+                        if span_contains(&f.name_span, offset) {
+                            return variant_field_span(ws, Some(*enum_name), *variant, f.name);
+                        }
+                    }
+                }
                 let (vs, ve) = variant_span.offset_range;
                 if vs <= offset && offset < ve {
                     variant_def_span(ws, Some(*enum_name), *variant)
-                        .or_else(|| def_of_name(ws, *enum_name))
                 } else {
                     def_of_name(ws, *enum_name)
                 }
@@ -333,6 +347,7 @@ pub fn hover_at(
                         let span = *body.expr_spans.get(e)?;
                         match &body.expr_arena[e] {
                             hir::Expr::StructLiteral { name, fields, .. } => {
+                                let enum_name = record_literal_enum(ws, Some(bi), e, *name);
                                 // A field name under the cursor -> `field: T
                                 // (field of Struct)`; otherwise the head -> the
                                 // full struct definition.
@@ -348,12 +363,17 @@ pub fn hover_at(
                                         .get(fld.value)
                                         .map_or(fld.name_span.offset_range.1, |s| s.offset_range.0);
                                     if fs <= offset && offset < fe {
-                                        if let Some(s) = render_field_of(ws, *name, fld.name) {
+                                        if let Some(s) = render_record_field(ws, enum_name, Some(*name), fld.name) {
                                             return Some((s, fld.name_span));
                                         }
                                     }
                                 }
-                                if let Some(def) = render_struct_def(ws, *name) {
+                                if let Some(en) = enum_name {
+                                    let head = leading_name_span(&span, name.len());
+                                    if span_contains(&head, offset) {
+                                        return render_variant(ws, Some(en), *name).map(|s| (s, head));
+                                    }
+                                } else if let Some(def) = render_struct_def(ws, *name) {
                                     return Some((def, span));
                                 }
                             }
@@ -376,8 +396,27 @@ pub fn hover_at(
                                 enum_name_span,
                                 variant,
                                 variant_span,
-                                ..
+                                args,
                             } => {
+                                if let Some(seg) = path_segment_at(ws, mid, offset) {
+                                    let text = match seg.target {
+                                        hir::SegmentTarget::Variant { enum_key, variant } => {
+                                            render_variant(ws, Some(enum_key), variant)
+                                        }
+                                        hir::SegmentTarget::Def(key) => render_enum_def(ws, key),
+                                        hir::SegmentTarget::Module { .. } => None,
+                                    }?;
+                                    return Some((text, seg.span));
+                                }
+                                if let hir::VariantArgs::Record(fields) = args {
+                                    for fidx in *fields {
+                                        let f = &body.struct_lit_field_arena[fidx];
+                                        if span_contains(&f.name_span, offset) {
+                                            return render_record_field(ws, Some(*enum_name), Some(*variant), f.name)
+                                                .map(|s| (s, f.name_span));
+                                        }
+                                    }
+                                }
                                 let (vs, ve) = variant_span.offset_range;
                                 if vs <= offset && offset < ve {
                                     if let Some(s) = render_variant(ws, Some(*enum_name), *variant) {
@@ -644,6 +683,29 @@ fn render_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Opt
     Some(fenced(&format!("{}::{}", edef.name, render_variant_payload(ws, v))))
 }
 
+/// Bare record heads retain the struct-literal HIR shape, including in an
+/// incomplete body without an inferred type. Prefer the inferred enum identity;
+/// otherwise use the declaration catalog, without treating a real struct as a variant.
+fn record_literal_enum(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    expr: Idx<hir::Expr>,
+    name: Ustr,
+) -> Option<Ustr> {
+    if struct_def_by_name(ws, name).is_some() {
+        return None;
+    }
+    let inferred = bi
+        .and_then(|bi| bi.expr_types.get(expr).and_then(|ty| deref_ty(ws, Some(bi), *ty)))
+        .and_then(|ty| match ty {
+            hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(en), .. } => Some(*en),
+            _ => None,
+        });
+    let edef = enum_def_for_variant(ws, inferred, name)?;
+    let variant = edef.variants.iter().find(|v| v.name == name)?;
+    matches!(variant.payload, hir::VariantPayload::Record(_)).then_some(edef.name)
+}
+
 /// Declaration span (the variant name) of `Enum::Variant`. None if unknown.
 fn variant_def_span(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<Span> {
     let edef = enum_def_for_variant(ws, enum_name, variant)?;
@@ -728,7 +790,7 @@ fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(Strin
                         return None; // shorthand -> node dispatch renders the binding
                     }
                 }
-                return render_record_pat_field(ws, *enum_name, *name, f.name)
+                return render_record_field(ws, *enum_name, *name, f.name)
                     .map(|t| (t, f.name_span));
             }
         }
@@ -750,9 +812,9 @@ fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(Strin
     None
 }
 
-/// `field: T (field of Point)` for a struct pattern, `value: int (field of
-/// Opt::Some)` for an enum record-variant pattern. `None` if unresolved.
-fn render_record_pat_field(
+/// `field: T (field of Point)` or `value: int (field of Opt::Some)` for a
+/// record construction or pattern. `None` if unresolved.
+fn render_record_field(
     ws: &Workspace,
     enum_name: Option<Ustr>,
     name: Option<Ustr>,
@@ -884,8 +946,8 @@ fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
         }
     }
 
-    // A bare name that's actually an enum variant (`Red`, or a record-variant
-    // literal head `Circle { .. }`) resolves to its enum's name.
+    // A bare value name that's actually an enum variant (`Red`) resolves to
+    // its enum's name. Construction heads resolve their variant separately.
     for m in ws.modules.iter() {
         if let Some((idx, _)) = m
             .enums
@@ -2660,6 +2722,8 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
         K::Int => "int".to_string(),
         K::Uint => "uint".to_string(),
         K::Float => "float".to_string(),
+        K::F64 => "f64".to_string(),
+        K::F32 => "f32".to_string(),
         K::Bool => "bool".to_string(),
         K::Ref(target) => format!("ref {}", render_type_expr(ast, *target)),
         K::Ident(id) => id.name.to_string(),
@@ -4937,7 +5001,7 @@ pub fn completion(
 /// builtins (`Coroutine`, `Map`) and the scalar primitives have no workspace
 /// name-index entry.
 const BUILTIN_TYPE_NAMES: &[&str] =
-    &["Coroutine", "Map", "int", "uint", "float", "string", "bool", "any"];
+    &["Coroutine", "Map", "int", "uint", "float", "f32", "f64", "string", "bool", "any"];
 
 /// Whether the body enclosing `offset` is a `co fn`. Drives `yield`/`await`
 /// keyword completion (and -- in the facade -- coroutine-fn ranking after a

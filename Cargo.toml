@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/bone-core",
+    "crates/bone-incremental",
+    "crates/bone-query",
     "crates/bone-inference",
     "crates/bone-lints",
     "crates/bone-lower",
@@ -26,6 +28,13 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+bone-incremental = { path = "crates/bone-incremental" }
+bone-query = { path = "crates/bone-query" }
+bone-lints = { path = "crates/bone-lints" }
+rock-tokenizer = { path = "crates/rock-tokenizer" }
+rock-stdlib = { path = "crates/rock-stdlib" }
+comfy-la-arena = { path = "crates/la-arena" }
+lsp-types = { package = "lsp-types-manual", path = "crates/lsp-types-manual" }
 bone-core = { path = "crates/bone-core" }
 bone-semantic = { path = "crates/bone-semantic" }
 rock-core = { path = "crates/rock-core" }

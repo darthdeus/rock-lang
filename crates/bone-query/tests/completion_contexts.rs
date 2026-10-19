@@ -1,5 +1,5 @@
 //! Completion contexts on the bone facade: struct-literal fields, and member
-//! access (fields + UFCS methods). See `docs/lsp-bone-migration-plan.md`.
+//! access (fields + UFCS methods). See query facade contract.
 
 use bone_query::BoneWorkspace;
 use lsp_types::{CompletionItem, Position};
@@ -29,7 +29,7 @@ fn item(src: &str, line: u32, ch: u32, label: &str) -> CompletionItem {
 }
 
 /// Every context fixture doubles as an invariant-suite position
-/// (docs/completion-v2-design.md M4): the position-blind response invariants
+/// (completion pipeline contract M4): the position-blind response invariants
 /// must hold in every completion context this file exercises.
 fn check_invariants(src: &str, line: u32, ch: u32, items: &[CompletionItem]) {
     let off: usize =
@@ -1629,7 +1629,7 @@ fn member_completion_shows_underscore_fields_when_typing_underscore() {
 // still surface its UFCS methods, exactly as it already surfaces its fields.
 // Regression: `struct_name_for_path` (methods) lacked the inference-first
 // branch that `struct_fields_for_path` (fields) has, so `m = make_mob()` showed
-// fields but no methods (mag `mobs.rock` `m = e.get().unwrap(); m.resolve_...`).
+// fields but no methods (a handle lookup followed by a receiver-method call).
 
 #[test]
 fn ufcs_methods_resolve_on_an_inferred_local() {
@@ -1644,7 +1644,7 @@ fn ufcs_methods_resolve_on_an_inferred_local() {
 
 #[test]
 fn ufcs_methods_resolve_on_a_chained_inferred_local() {
-    // Mirrors mag exactly: `m = e.get().unwrap()` where get()->T?, unwrap()->T.
+    // Exercises the receiver shape: `m = e.get().unwrap()` where get()->T?, unwrap()->T.
     let src = "struct Mob { hp: int }\n\
                fn resolve_strike(mob: Mob) {}\n\
                fn r(e: Entity<Mob>) {\n  let m = e.get().unwrap()\n  m.resol\n}\n";
@@ -2391,7 +2391,7 @@ fn member_completion_recovers_a_missing_comma_in_a_struct_literal() {
     // `z: st.<cursor>` above the next field with no trailing comma used to return
     // NOTHING -- the unterminated value ran into `vel:` and collapsed the literal
     // parse. Struct-field comma recovery (skull-parser) keeps the literal, so
-    // `st.` still offers its members. (mag blood.rock:111:19.)
+    // `st.` still offers its members. (a shadowed receiver in a struct initializer.)
     let src = "struct St { hp: float, mp: float }\n\
                struct Drop { kind: int, z: float, vel: float }\n\
                fn f(st: St) {\n\
@@ -2412,7 +2412,7 @@ fn reach_insert_does_not_duplicate_an_existing_member_tail() {
     // `push(0, PANE|.rect(),` -- a reach candidate `PANEL.rect()` inserted over
     // the existing `.rect()` tail must not double it into `PANEL.rect().rect()`.
     // The insert drops the shared trailing `.rect()`, leaving `PANEL` before the
-    // buffer's `.rect()`. (mag shop.rock capture 1784164491.)
+    // buffer's `.rect()`. (a receiver captured during an edit.)
     let src = "struct UiRect {}\n\
                struct Panel {}\n\
                fn rect(self: Panel) -> UiRect { UiRect {} }\n\

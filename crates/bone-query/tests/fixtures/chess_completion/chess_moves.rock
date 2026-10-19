@@ -1,0 +1,12 @@
+pub fn ch_type(piece: int) -> int {
+    piece
+}
+
+pub fn ch_to_fen(pos: int) -> int {
+    pos
+}
+
+fn probe(p: int) -> int {
+    let kind = ch_type(p)
+    kind
+}

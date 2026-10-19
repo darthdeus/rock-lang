@@ -51,7 +51,7 @@ fn mixed_shorthands_the_match_and_holes_the_rest() {
 #[test]
 fn fills_a_struct_literal_written_as_a_bare_match_arm_body() {
     // Regression: `=> S { .. }` as a bare arm body used to be a parse error, which
-    // masked the missing-field diagnostic and this fill entirely (mag blood.rock).
+    // masked the missing-field diagnostic and this fill entirely (a struct initializer).
     // With the arm-body parse fixed, the fill offers the missing field `y`.
     let src = "enum K { A, B }\nvalue S { x: float, y: float }\nfn f(k: K) -> S {\n    match k {\n        K::A => S { x: 1.0 }\n        K::B => S { x: 2.0, y: 3.0 }\n    }\n}\n";
     // cursor inside `S { x: 1.0 }` on line 4 (0-indexed).

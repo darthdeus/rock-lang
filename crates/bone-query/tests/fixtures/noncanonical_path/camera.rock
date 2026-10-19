@@ -1,0 +1,7 @@
+struct Camera {
+    center: int,
+}
+
+fn camera_center(camera: Camera) -> int {
+    camera.center
+}

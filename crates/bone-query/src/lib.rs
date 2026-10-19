@@ -10,6 +10,8 @@
 //!
 //! bone remains the pure engine; this crate consumes its public pipeline.
 
+pub use bone_semantic::identity_storage::{IdentityStorageExemptions, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS};
+
 pub mod modules_scope;
 pub mod package_aliases;
 pub mod query;

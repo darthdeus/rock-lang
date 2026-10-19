@@ -12,17 +12,25 @@
 //! `canonicalize` collapses but a verbatim string key preserves.
 
 use bone_query::BoneWorkspace;
+use std::path::Path;
+
+fn camera_fixture() -> (String, String, String) {
+    let project = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/noncanonical_path");
+    let camera = project.join("camera.rock");
+    let canon = fs_err::canonicalize(&camera)
+        .expect("fixture camera canonicalizes")
+        .to_string_lossy()
+        .to_string();
+    let parent = camera.parent().expect("camera has a parent");
+    let name = camera.file_name().expect("camera has a file name").to_string_lossy();
+    let noncanon = format!("{}/./{name}", parent.display());
+    let text = std::fs::read_to_string(camera).expect("fixture camera is readable");
+    (canon, noncanon, text)
+}
 
 #[test]
 fn noncanonical_path_does_not_duplicate_module() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf();
-    let cam = repo.join("stone/engine/systems/camera.rock");
-    let canon = fs_err::canonicalize(&cam).expect("camera.rock canonicalizes").to_string_lossy().to_string();
-    let text = std::fs::read_to_string(&cam).expect("camera.rock is readable");
-
-    // The SAME file, spelled with a redundant `/./` segment -- collapses under
-    // canonicalize, survives a verbatim string key.
-    let noncanon = format!("{}/stone/./engine/systems/camera.rock", repo.to_string_lossy());
+    let (canon, noncanon, text) = camera_fixture();
 
     let mut bone = BoneWorkspace::new();
     bone.load_project(&canon); // session keyed by the canonical path
@@ -34,6 +42,10 @@ fn noncanonical_path_does_not_duplicate_module() {
         .filter(|d| d.message.contains("duplicate struct"))
         .collect();
     assert!(dup.is_empty(), "non-canonical path duplicated the module: {dup:?}");
+    let via_canon = bone.semantic_tokens(&canon).data.len();
+    let via_noncanon = bone.semantic_tokens(&noncanon).data.len();
+    assert!(via_canon > 0, "canonical path should yield tokens");
+    assert_eq!(via_noncanon, via_canon, "non-canonical path must resolve to the same module");
 }
 
 #[test]
@@ -41,11 +53,7 @@ fn read_queries_resolve_via_noncanonical_path() {
     // A read query (semantic_tokens) issued with a non-canonical path spelling
     // must find the module discovery keyed canonically -- else Windows LSP
     // hover/completion/tokens all silently return empty.
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf();
-    let cam = repo.join("stone/engine/systems/camera.rock");
-    let canon = fs_err::canonicalize(&cam).expect("camera.rock canonicalizes").to_string_lossy().to_string();
-    let text = std::fs::read_to_string(&cam).expect("camera.rock is readable");
-    let noncanon = format!("{}/stone/./engine/systems/camera.rock", repo.to_string_lossy());
+    let (canon, noncanon, text) = camera_fixture();
 
     let mut bone = BoneWorkspace::new();
     bone.load_project(&canon);

@@ -3,7 +3,7 @@
 //! These exercise the facade directly (no LSP wire protocol): feed a file in,
 //! query it, assert the LSP-shaped result. Hover + diagnostics are real; the
 //! rest are gap stubs that must return empty (never panic) until bone grows the
-//! query API. See `docs/lsp-bone-migration-plan.md`.
+//! query API. See query facade contract.
 
 use lsp_types::Position;
 use bone_query::BoneWorkspace;
@@ -329,7 +329,7 @@ fn exhaustive_and_catch_all_matches_have_no_diagnostic() {
 #[test]
 fn guarded_variant_arm_does_not_cover_its_variant() {
     // rock parity: `E::A if c =>` may not fire, so A is still missing. This needs
-    // the skull-parser guard fix (`docs/match-guard-parse-ambiguity.md`) -- before
+    // the skull-parser guard fix (match guard parser contract) -- before
     // it, a guarded arm collapsed the whole match at parse time.
     let src = "enum E { A, B }\n\nfn f(e: E, x: bool) {\n    match e {\n        E::A if x => {}\n        E::B => {}\n    }\n}\n";
     let bone = fresh(src);
@@ -853,7 +853,7 @@ fn references_finds_local_decl_and_uses() {
 fn references_on_an_overload_are_specific_to_that_overload() {
     // find-references resolves to the ONE overload under the cursor: only its
     // decl + the calls that resolve to it, NOT other same-named overloads.
-    // (Rename stays name-global -- see rename_overloaded_*.) mag: `Corpse.in_reach`
+    // (Rename stays name-global -- see rename_overloaded_*.) a type-qualified associated function
     // refs wrongly pulled in `Npc`'s unrelated `in_reach`.
     let src = "struct A {}\nstruct B {}\nfn foo(a: A) -> int { 1 }\nfn foo(b: B) -> int { 2 }\nfn main() {\n  let x = A {}\n  let y = B {}\n  let r = foo(x) + foo(y)\n}\n";
     let bone = fresh(src);
@@ -1082,7 +1082,7 @@ fn named_call_args_get_no_positional_param_hint() {
     // hint. A named arg already shows its name, so it gets no hint -- and the
     // positional `param_decls.get(i)` mapping is WRONG for it (pre-fix: `d: 4`
     // at arg-index 2 was labeled `c:`, the third param, misaligning every hint
-    // after a skipped/reordered named arg -- mag trail_new call).
+    // after a skipped/reordered named arg -- a call with skipped named arguments).
     let src = "fn make(a: int, b: int, c: int, d: int) -> int { return a }\n\
                fn r() -> int {\n    return make(1, b: 2, d: 4)\n}\n";
     let bone = fresh(src);

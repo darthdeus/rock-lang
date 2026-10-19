@@ -5,7 +5,7 @@
 //! single early branch into the matching method here; the persistent server
 //! holds one [`BoneWorkspace`] alongside its rock-semantic state. Everything
 //! bone can't answer yet lives in [`gaps`] -- that is the "fill in what's
-//! missing on bone" surface. See `docs/lsp-bone-migration-plan.md`.
+//! missing on bone" surface. See query facade contract.
 //!
 //! Consumes bone's public pipeline (`bone_incremental::session::Session`, `bone_semantic::query`)
 //! plus this crate's IDE-navigation queries (`crate::query`). bone source stays
@@ -67,12 +67,12 @@ fn reparse_user_file(uf: &bone_incremental::session::UserFile, path: &str) -> Op
 fn stdlib_paths() -> &'static [(String, String)] {
     static PATHS: OnceLock<Vec<(String, String)>> = OnceLock::new();
     PATHS.get_or_init(|| {
-        let dir = rock_host::stdlib_loader::stdlib_dir();
-        rock_host::stdlib_loader::stdlib_files()
+        let dir = rock_stdlib::stdlib_dir();
+        rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
                 (
-                    rock_host::stdlib_loader::stdlib_file_id(f.name),
+                    rock_stdlib::stdlib_file_id(f.name),
                     canonicalize_lenient(&dir.join(f.name).to_string_lossy()),
                 )
             })
@@ -107,9 +107,9 @@ pub fn editor_path(id: &str) -> Cow<'_, str> {
 /// `texts` so default-value slicing, `workspace_symbols`, and span->text see
 /// the stdlib like any other file.
 fn stdlib_texts() -> Vec<(String, String)> {
-    rock_host::stdlib_loader::stdlib_files()
+    rock_stdlib::stdlib_files()
         .iter()
-        .map(|f| (rock_host::stdlib_loader::stdlib_file_id(f.name), f.contents.to_string()))
+        .map(|f| (rock_stdlib::stdlib_file_id(f.name), f.contents.to_string()))
         .collect()
 }
 
@@ -121,10 +121,10 @@ fn stdlib_texts() -> Vec<(String, String)> {
 fn warm_stdlib() -> Vec<skull_parser::Ast> {
     static WARM: OnceLock<Vec<skull_parser::Ast>> = OnceLock::new();
     WARM.get_or_init(|| {
-        rock_host::stdlib_loader::stdlib_files()
+        rock_stdlib::stdlib_files()
             .iter()
             .filter_map(|f| {
-                let id = Ustr::from(rock_host::stdlib_loader::stdlib_file_id(f.name).as_str());
+                let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 match skull_parser::parse_module(f.contents, id) {
                     Ok(m) => Some(m),
                     Err(e) => {
@@ -148,6 +148,7 @@ fn warm_stdlib() -> Vec<skull_parser::Ast> {
 /// tracked file (needed because bone queries are keyed on byte offsets, but the
 /// session does not retain raw text).
 struct BoneProject {
+    lint_options: bone_lints::LintOptions,
     session: Session,
     texts: HashMap<String, String>,
     /// Workspace reference counts per name (`build_freq_index`) -- the
@@ -155,7 +156,7 @@ struct BoneProject {
     freq: Option<HashMap<ustr::Ustr, u32>>,
     /// Per-file unfilled-hole diagnostics, cached across edits. `hole_diagnostics_for`
     /// REPARSES a file, so recomputing it for every tracked file on every keystroke
-    /// reparses the whole compilation unit (~130 files on mag) when only the edited
+    /// reparses the whole compilation unit (over a hundred files in a large project) when only the edited
     /// file + its reinferred dependents can have changed holes. Invalidated for
     /// exactly those files in `update`.
     hole_cache: HashMap<String, Vec<Diagnostic>>,
@@ -375,6 +376,8 @@ fn stick_is_bin(root: &Path) -> bool {
 /// modeled here yet -- documented gap, closes as bone grows.
 #[derive(Default)]
 pub struct BoneWorkspace {
+    lint_options: bone_lints::LintOptions,
+    identity_storage_exemptions: bone_semantic::identity_storage::IdentityStorageExemptions,
     projects: HashMap<PathBuf, BoneProject>,
     /// Project roots already batch-indexed from disk. The first `update` for a
     /// file in a `stick.toml` project bulk-loads its siblings so cross-file
@@ -490,8 +493,19 @@ pub fn canonicalize_lenient(path: &str) -> String {
 }
 
 impl BoneWorkspace {
+    /// Set host lint policy before loading any project.
+    pub fn with_lint_options(mut self, options: bone_lints::LintOptions) -> Self {
+        assert!(self.projects.is_empty(), "lint options must precede project loading");
+        self.lint_options = options;
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_identity_storage_exemptions(exemptions: bone_semantic::identity_storage::IdentityStorageExemptions) -> Self {
+        Self { identity_storage_exemptions: exemptions, ..Self::default() }
     }
 
     /// Canonicalize `path` (collapse `/./`, resolve to the OS canonical form),
@@ -563,9 +577,10 @@ impl BoneWorkspace {
                 .map(crate::package_aliases::from_graph)
                 .unwrap_or_default();
             BoneProject {
+                lint_options: self.lint_options.clone(),
                 // Warm-only session is always valid even if the first file
                 // doesn't parse; the file is added by the update_file below.
-                session: Session::new(warm_stdlib(), Vec::new(), &aliases)
+                session: Session::new_with_identity_storage_exemptions(warm_stdlib(), Vec::new(), &aliases, self.identity_storage_exemptions)
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: Default::default(),
@@ -663,7 +678,7 @@ impl BoneWorkspace {
             .as_ref()
             .map(crate::package_aliases::from_graph)
             .unwrap_or_default();
-        match Session::new(warm_stdlib(), files, &aliases) {
+        match Session::new_with_identity_storage_exemptions(warm_stdlib(), files, &aliases, self.identity_storage_exemptions) {
             Ok(session) => {
                 let texts: HashMap<String, String> =
                     stdlib_texts().into_iter().chain(file_texts).collect();
@@ -672,6 +687,7 @@ impl BoneWorkspace {
                 let now = std::time::Instant::now();
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 let mut project = BoneProject {
+                    lint_options: self.lint_options.clone(),
                     session,
                     texts,
                     freq: None,
@@ -1720,7 +1736,7 @@ impl BoneWorkspace {
         // (the fall-through below) uses the live workspace directly.
         // The cursor classification, computed ONCE (CompletionCx: the AST
         // classifier over the munge ladder plus every context consultation;
-        // docs/completion-v2-design.md M2b). The
+        // completion pipeline contract M2b). The
         // dispatch below tries the slots most-specific-first; a `recv.field`
         // even inside a struct-literal field value is member completion.
         let cx = classify(src, offset);
@@ -2094,7 +2110,7 @@ impl BoneWorkspace {
         // PROMOTED as a way to produce a value -- a call-through autofill, a reach
         // path, or a fn-returning-the-slot-type -- because that is a recursive
         // self-call, which buries the direct constructor the user is naming
-        // (mag blood.rock:16:39). It stays offered (plain candidate) for genuine
+        // (a struct fill inside its own function body). It stays offered (plain candidate) for genuine
         // recursion, just not lifted above type-directed candidates.
         let enclosing_fn: Option<Ustr> = ws.modules.get(mid.index()).and_then(|m| {
             match m.body_at(offset) {
@@ -2166,7 +2182,7 @@ impl BoneWorkspace {
                     // Test-scoped symbols (tests/-dir or test_-named) sink to
                     // the bottom kind bucket OUTSIDE test files; the band rung
                     // still leads, so an explicitly typed `test_` prefix
-                    // surfaces them (docs/completion-v2-design.md heuristics).
+                    // surfaces them (completion pipeline contract heuristics).
                     _ if demote_tests && c.test_scoped => 4,
                     SymCat::Local | SymCat::Param => 0,
                     // After `yield`/`await`, a coroutine fn is the expected
@@ -2270,7 +2286,7 @@ impl BoneWorkspace {
                 // A leading contiguous run (you typed the start of the name)
                 // beats a scattered all-boundary match on a longer name -- the
                 // fine score alone over-rewards boundary-rich names
-                // (docs/completion-ranking-design.md Divergence 1). Only reorders
+                // (completion ranking contract Divergence 1). Only reorders
                 // within a band; well below fuzzy_score's whole-prefix +1000.
                 let score = score + (lead as i32) * 100;
                 // Coarse match band + exact-name flag: classified against the
@@ -2472,7 +2488,7 @@ impl BoneWorkspace {
             // ranks with locals (a method on a local yielding the type is a
             // top-tier candidate), a global-rooted path with globals -- so a
             // deep chain off some global can't outrank a direct right-type
-            // global (docs/completion-ranking-design.md, principle 3).
+            // global (completion ranking contract, principle 3).
             let mut roots: Vec<(String, String, u8)> = crate::query::locals_in_scope(ws, mid, inf, offset)
                 .into_iter()
                 .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty, 0))
@@ -4801,7 +4817,7 @@ fn update_lint_cache(
             &session.warm_mids,
             is_bin,
             &sources,
-            &bone_lints::LintOptions::default(),
+            &proj.lint_options,
             change,
         )
         .0
@@ -5142,5 +5158,41 @@ mod tests {
         let [m, _] = completion_munges(src, off);
         assert!(m.contains("__rock_completion__"), "got: {m:?}");
         assert!(m.contains("fn dist(p: P)"), "tail dropped: {m:?}");
+    }
+}
+
+#[cfg(test)]
+mod action_policy_tests {
+    use super::BoneWorkspace;
+    use bone_lints::{ActionLayerPolicy, LintOptions, ACTION_CALLERS};
+
+    static POLICY: ActionLayerPolicy = ActionLayerPolicy {
+        production_root: "game",
+        production_label: "Example",
+        action_prefix: "DO_",
+        raw_input_names: &[],
+        raw_input_classes: &[],
+        registration_functions: &[],
+    };
+
+    #[test]
+    fn host_action_policy_reaches_loaded_and_incremental_lint_caches() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("game");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("stick.toml"), "[package]\nname = \"policy-fixture\"\n").unwrap();
+        let file = project.join("main.rock");
+        let source = "global DO_MOVE: int = 1\nfn main() {}\n";
+        std::fs::write(&file, source).unwrap();
+        let file = file.to_str().unwrap();
+        let mut workspace = BoneWorkspace::new().with_lint_options(
+            LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&POLICY)),
+        );
+        workspace.load_project(file);
+        let diagnostics = workspace.lint_diagnostics(file);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].message, "production Example action `DO_MOVE` has no production caller");
+        workspace.update(file, source.replace("fn main() {}", "fn main() { let value = DO_MOVE }"));
+        assert!(workspace.lint_diagnostics(file).is_empty());
     }
 }

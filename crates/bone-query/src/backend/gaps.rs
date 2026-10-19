@@ -7,7 +7,7 @@
 //! (references: globals/generic-params pending) plus the
 //! inlay-hints profiling wrapper. A future not-yet-answerable feature gets its
 //! stub here again: safe empty result + the `crate::query::*` API to add +
-//! the checkbox in `docs/lsp-bone-migration-plan.md`.
+//! the checkbox in query facade contract.
 //!
 //! Bone-native inputs (`&Workspace`, `ModuleId`, `&InferenceResult`, byte
 //! `offset`) and outputs (`Span`s + neutral structs) only -- these know
@@ -73,7 +73,7 @@ pub fn type_definition(
 /// type params** with name-precise spans, so rename is safe for them.
 /// Not covered (refused, never partial): newtypes, record-variant payload
 /// fields, decorators, macro names, struct/enum-level generics --
-/// `docs/lsp-rename-gaps.md`. Shorthand sites (`S { x }`) carry a
+/// rename behavior contract. Shorthand sites (`S { x }`) carry a
 /// [`crate::query::Shorthand`] tag so rename expands them instead of
 /// replacing the shared token.
 pub fn references<'t>(

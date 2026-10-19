@@ -4,7 +4,7 @@
 //!    bone-lower). A silent miss means the block was allocated through plain
 //!    `alloc_expr` (no markers) instead of `alloc_block_expr`.
 //!  - Tokens: keywords and punctuation resolve to the enclosing construct;
-//!    whitespace resolves to nothing. See `docs/lsp-hover-token-resolution.md`.
+//!    whitespace resolves to nothing. See hover token resolution contract.
 
 use bone_query::BoneWorkspace;
 use lsp_types::{HoverContents, Position};

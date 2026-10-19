@@ -448,7 +448,7 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
 /// The cursor's completion classification, computed ONCE per request by
 /// [`classify`] -- every context consultation lives there, so a new syntax
 /// case is one field + one consultation + one dispatch arm
-/// (docs/completion-v2-design.md M2b). Field order below is the dispatch
+/// (completion pipeline contract M2b). Field order below is the dispatch
 /// precedence. Classification is SYNTACTIC; handlers may still fall through
 /// at runtime (an `X {` head that isn't a struct, a call slot that isn't
 /// FieldRef), which is why the dispatcher keeps an ordered attempt chain

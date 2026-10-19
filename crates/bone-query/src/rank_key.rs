@@ -1,10 +1,10 @@
-//! The ONE completion rank key (docs/completion-v2-design.md, M1). Every
+//! The ONE completion rank key (completion pipeline contract, M1). Every
 //! completion path expresses its ranking as a `RankKey`: `Ord` drives the
 //! in-process top-N select and `encode()` produces the LSP `sort_text`
 //! string, from the same field order -- so the two orderings cannot
 //! disagree, and a ranking rule added here exists in every path at once.
 
-/// Field order IS the ranking ladder (docs/completion-ranking-design.md):
+/// Field order IS the ranking ladder (completion ranking contract):
 /// exact whole-name match, expected-type relevance, coarse match band,
 /// locality/kind, reach distance, non-fn-before-fn, smart case, fine fuzzy
 /// score, shorter-first. The ci name tiebreak lives outside: `encode`

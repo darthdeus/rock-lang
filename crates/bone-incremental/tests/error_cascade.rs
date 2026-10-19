@@ -170,7 +170,7 @@ fn main() {
 // (no `a` cascade); `for x in undefined { let z = ... }` keeps `z` in scope.
 //
 // RED until the failure paths route through the `Error` poison (and, for the
-// nested forms, continue into the body). See docs/error-recovery-design.md.
+// nested forms, continue into the body). See error recovery contract.
 // ======================================================================
 
 // --- destructuring let: cascade, like plain let ---

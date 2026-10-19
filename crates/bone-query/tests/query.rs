@@ -1,6 +1,6 @@
 //! Test-drive for `bone_query::query::definition_at` / `references` -- the
 //! goto-definition + find-references primitives the LSP needs (see
-//! `docs/lsp-bone-migration-plan.md`). Run: `cargo test -p bone-query --test query`.
+//! query facade contract). Run: `cargo test -p bone-query --test query`.
 //!
 //! Each test resolves a *use site* offset and asserts the returned declaration
 //! span contains the *declaration name* -- robust to whether the span is the

@@ -275,7 +275,7 @@ fn cross_file_struct_name_colors_as_struct() {
 fn ufcs_method_call_colors_as_function_not_property() {
     // `m.resolve_strike()` -- a UFCS method call -- must color the method name
     // as FUNCTION, not PROPERTY (the `.`-member heuristic must defer to the
-    // name map for known function names). mag `mobs.rock` reported it as
+    // name map for known function names). a receiver call reported it as
     // `property`.
     let src = "struct Mob { hp: int }\nfn resolve_strike(m: Mob) {}\nfn run(m: Mob) {\n  m.resolve_strike()\n}\n";
     let toks = decode(src);
@@ -647,7 +647,7 @@ fn named_arg_labels_color_as_parameter_not_a_colliding_function() {
     // PARAMETER, and must color as one consistently -- even when a same-named
     // global fn exists (`fn width()`), which the workspace name-map would
     // otherwise claim as FUNCTION. Pre-fix: `width:` colored FUNCTION while
-    // `height:` colored VARIABLE, so the labels were inconsistent (mag
+    // `height:` colored VARIABLE, so the labels were inconsistent (a struct initializer
     // trail_new call: `width` differed from the rest). Both must be PARAMETER.
     let src = "fn width() -> int { return 5 }\n\
                fn make(width: int, height: int) -> int { return width + height }\n\

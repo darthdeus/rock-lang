@@ -724,7 +724,7 @@ pub(crate) fn call_through_param_completions(
         let scoped = &scoped_fns[si];
         let cf = &index.fns[scoped.index];
         // Never autofill a call to the fn being defined -- a recursive self-call
-        // is not what completing its own body means (mag blood.rock:16:39).
+        // is not what completing its own body means (a struct fill inside its own function body).
         if enclosing_fn == Some(cf.key.as_str()) {
             continue;
         }
@@ -777,7 +777,7 @@ pub(crate) fn call_through_param_completions(
     // global/partial-match synth, but a LOCAL-SEEDED confident autofill promotes
     // to 0 -- a fn accepting a local of the right type is what the user reached
     // for, so it ranks among the direct locals, not below every candidate
-    // (docs/completion-ranking-design.md, Divergence 3).
+    // (completion ranking contract, Divergence 3).
     let mut cands: Vec<(i32, usize, &CtArg, u8)> = Vec::new();
     for (si, k) in passing {
         let cf = &index.fns[scoped_fns[si].index];
@@ -876,7 +876,7 @@ pub(crate) fn call_through_param_completions(
         // A local-seeded promotion (0/1) holds only when the synth PRODUCES the
         // expected slot type -- a fn accepting your local but returning the
         // wrong type must not outrank type-directed candidates
-        // (docs/completion-ranking-design.md, principle 3). No expected type ->
+        // (completion ranking contract, principle 3). No expected type ->
         // promotion stands on the local seed alone.
         let type_rank = match expected.as_deref_mut() {
             Some(exp) if type_rank < 4 => {

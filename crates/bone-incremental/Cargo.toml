@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bone-core = { path = "../bone-core" }
-bone-semantic = { path = "../bone-semantic" }
-skull-parser = { path = "../skull-parser" }
+bone-core = { workspace = true }
+bone-semantic = { workspace = true }
+skull-parser = { workspace = true }
 
 rustc-hash = { workspace = true }
 ustr = { workspace = true }
@@ -19,7 +19,8 @@ itertools = { workspace = true }
 # Real-project tests only: graph discovery (rock-host) and the alias tables
 # (bone-query) the session needs for v1 `use` paths. The bone-query edge is a
 # dev-only cycle (bone-query depends on bone-incremental), which Cargo permits.
-rock-host = { path = "../rock-host" }
+rock-host = { workspace = true }
+rock-stdlib = { workspace = true }
 bone-query = { path = "../bone-query" }
 
 [lints]
