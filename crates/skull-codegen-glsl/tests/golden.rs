@@ -1188,6 +1188,90 @@ fn a_nobox_value_local_stays_a_single_glsl_vec() {
     );
 }
 
+/// The stdlib `log2` maps to the GLSL builtin on both pinned profiles. The
+/// library path is pinned in `reject.rs`; this pins the profiled entry path.
+#[test]
+fn log2_float_on_both_pinned_profiles() {
+    let src = r#"
+        @shader(fragment)
+        fn logfrag(scene: Sampler2D, tc: Vec2) -> Vec4 {
+            let t = texture(scene, tc)
+            return v(log2(t.r + 1.0), log2(t.g + 1.0), log2(t.b + 1.0), t.a)
+        }
+    "#;
+    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+        let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
+        assert!(glsl.contains("log2("), "{profile:?} must use the log2 builtin:\n{glsl}");
+        assert!(!glsl.contains("null"), "{profile:?} must not mention null:\n{glsl}");
+    }
+}
+
+/// `log2` over vector data on both pinned profiles. A direct `log2(vec)` call
+/// is a bone type error in every backend (the stdlib declares the float form
+/// only), so the pinnable shape is the per-component helper; the emitter's
+/// (name, arity) mapping itself is type-agnostic.
+#[test]
+fn log2_vector_components_on_both_pinned_profiles() {
+    let src = r#"
+        @pure fn log2v(c: Vec3) -> Vec3 {
+            return v(log2(c.x + 1.0), log2(c.y + 1.0), log2(c.z + 1.0))
+        }
+        @shader(fragment)
+        fn logfrag(scene: Sampler2D, tc: Vec2) -> Vec4 {
+            let t = texture(scene, tc)
+            let l = log2v(v(t.r, t.g, t.b))
+            return v(l, t.a)
+        }
+    "#;
+    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+        let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
+        assert!(
+            glsl.contains("vec3 log2v_Vec3(vec3 c) {"),
+            "{profile:?} must emit the vector helper:\n{glsl}"
+        );
+        assert_eq!(
+            glsl.matches("log2(").count(),
+            3,
+            "{profile:?} must map each component call:\n{glsl}"
+        );
+    }
+}
+
+/// A helper with a float default, called with the argument omitted and
+/// supplied, on both pinned profiles. The call site carries the default value;
+/// no nil guard survives into the GLSL.
+#[test]
+fn helper_float_default_is_carried_on_both_pinned_profiles() {
+    let src = r#"
+        @pure fn shade(c: Vec4, gain: float = 1.0) -> Vec4 {
+            return v(c.r * gain, c.g * gain, c.b * gain, c.a)
+        }
+        @shader(fragment)
+        fn shadefrag(scene: Sampler2D, tc: Vec2) -> Vec4 {
+            return shade(texture(scene, tc))
+        }
+        @shader(fragment)
+        fn shadefrag_exp(scene: Sampler2D, tc: Vec2) -> Vec4 {
+            return shade(texture(scene, tc), 2.0)
+        }
+    "#;
+    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+        let omitted = emit_entry_profile(src, "shadefrag", profile).expect("emit");
+        assert!(
+            omitted.contains("shade_Vec4_float(texture(scene, tc), 1.0)"),
+            "{profile:?} omitted call must carry the default:\n{omitted}"
+        );
+        let explicit = emit_entry_profile(src, "shadefrag_exp", profile).expect("emit");
+        assert!(
+            explicit.contains("shade_Vec4_float(texture(scene, tc), 2.0)"),
+            "{profile:?} explicit call must keep its argument:\n{explicit}"
+        );
+        for glsl in [&omitted, &explicit] {
+            assert!(!glsl.contains("null"), "{profile:?} must not mention null:\n{glsl}");
+        }
+    }
+}
+
 #[test]
 fn glsl_emits_no_double_underscore_for_lua_escaped_names_or_idiv() {
     let src = r#"
