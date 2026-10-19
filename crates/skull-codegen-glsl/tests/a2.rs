@@ -971,6 +971,64 @@ fn reject_isampler_return() {
     reject_pipeline(src, "vt", "fr", "sampler");
 }
 
+/// GLSL samplers are opaque: only uniforms and parameters hold one, and they
+/// cannot be operands of `?:`. A Rock program that copies one into a local or
+/// selects between two must fail here, not in the GPU driver.
+const OPAQUE_PRELUDE: &str = r#"
+    struct Tex { a: Sampler2D, b: Sampler2D }
+    value Quad { aPos: Vec2, aUv: Vec2 }
+    value Vary { position: Vec4, uv: Vec2 }
+    @shader(vertex)
+    fn vs(@attr q: Quad) -> Vary {
+        return Vary { position: v(q.aPos, 0.0, 1.0), uv: q.aUv }
+    }
+"#;
+
+#[test]
+fn reject_sampler_local_copy() {
+    let src = format!(
+        "{OPAQUE_PRELUDE}{}",
+        r#"
+        @shader(fragment)
+        fn fs(vary: Vary, tex: Sampler2D) -> Vec4 {
+            let s = tex
+            return texture(s, vary.uv)
+        }
+    "#
+    );
+    reject_pipeline(&src, "vs", "fs", "local `s` holds a `sampler2D`");
+}
+
+#[test]
+fn reject_sampler_param_select() {
+    let src = format!(
+        "{OPAQUE_PRELUDE}{}",
+        r#"
+        @shader(fragment)
+        fn fs(vary: Vary, tex: Sampler2D, tex2: Sampler2D) -> Vec4 {
+            return texture(if vary.uv.x > 0.5 { tex } else { tex2 }, vary.uv)
+        }
+    "#
+    );
+    reject_pipeline(&src, "vs", "fs", "samplers are opaque");
+}
+
+/// A texture-group field is a bare uniform with no value type; selecting one
+/// used to type the selection as `float` and emit `(c ? a : b)`.
+#[test]
+fn reject_texture_field_select() {
+    let src = format!(
+        "{OPAQUE_PRELUDE}{}",
+        r#"
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: Tex) -> Vec4 {
+            return texture(if vary.uv.x > 0.5 { t.a } else { t.b }, vary.uv)
+        }
+    "#
+    );
+    reject_pipeline(&src, "vs", "fs", "`a` is not a value field of the shader interface");
+}
+
 // --- Attribute locations are RECORDED, not invented while printing ----------
 // Emission consumes the locations
 // classification computed; it does not re-derive them with an enumerate()

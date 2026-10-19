@@ -2424,7 +2424,10 @@ fn emit_explicit_types(
             .find(|(name, _)| *name == field.name)
             .map(|(_, kind)| *kind)
             .ok_or_else(|| err(span, format!("WGSL varying {} is absent from its struct", field.name)))?;
-        let ty = wgsl_value_type(ws, kind).unwrap();
+        // `emit_value_struct` above already rejected every untyped field.
+        let ty = wgsl_value_type(ws, kind).ok_or_else(|| {
+            err(span, format!("internal error: WGSL varying {} has no type after its struct was emitted", field.name))
+        })?;
         let interpolate = if field.flat { "@interpolate(flat) " } else { "" };
         writeln!(
             out,
@@ -5428,7 +5431,12 @@ impl<'a> FunctionEmitter<'a> {
             Inst::Load(cell) if self.sampler_params.contains(&cell) => {
                 Ok(self.sampler_param_flip_name(cell))
             }
-            _ => Ok("false".to_string()),
+            // Callers resolve the texture first (`texture_expression` /
+            // `sampler_expressions`), which admits only these two shapes.
+            _ => Err(err(
+                self.span,
+                "internal error: WGSL texture orientation requested for a value that is neither a texture field nor a sampler parameter",
+            )),
         }
     }
 

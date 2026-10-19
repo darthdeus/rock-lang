@@ -1414,16 +1414,13 @@ impl FnEmit<'_> {
                     })?;
                     concrete_glsl_ty(self.interner, id, self.span(), "local")?
                 } else {
-                    match glsl_ty(
+                    glsl_ty(
                         self.ws,
                         self.subst.as_ref().expect("source GLSL emission has a substitution"),
                         ty,
-                        Span::default(),
+                        self.span(),
                         "local",
-                    ) {
-                        Ok(g) => g,
-                        Err(_) => continue,
-                    }
+                    )?
                 };
                 self.cell_ty.insert(cid, g);
             }
@@ -1439,6 +1436,23 @@ impl FnEmit<'_> {
                         self.cell_ty.insert(cell, ty);
                     }
                 }
+            }
+        }
+        // GLSL samplers are opaque: only uniforms and parameters may hold one,
+        // so a sampler local or a sampler-valued `if` would fail in the driver.
+        for (cid, cell) in self.f.cells.iter() {
+            if self.f.params.contains(&cid) {
+                continue;
+            }
+            if let Some(ty) = self.cell_ty.get(&cid).filter(|ty| ty.is_sampler()) {
+                let what = cell.name.map_or_else(|| "a temporary".to_string(), |n| format!("local `{n}`"));
+                return Err(err(
+                    self.span(),
+                    format!(
+                        "shader profile: {what} holds a `{}`; GLSL samplers are opaque -- pass the sampler parameter or texture field directly",
+                        ty.name()
+                    ),
+                ));
             }
         }
         Ok(())
@@ -1631,7 +1645,12 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Int(_)) => GlslTy::Int,
             Inst::Const(Lit::Uint(_)) => GlslTy::Uint,
             Inst::Const(Lit::Bool(_)) => GlslTy::Bool,
-            Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => GlslTy::Float, // rejected earlier
+            Inst::Const(Lit::Nil) => {
+                return Err(err(self.span(), "shader profile: a null/optional value has no GLSL type"));
+            }
+            Inst::Const(Lit::Str(_)) => {
+                return Err(err(self.span(), "shader profile: string literal is not tier 0"));
+            }
             Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..) => GlslTy::Float,
             Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..) => GlslTy::Int,
             Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..) => GlslTy::Uint,
@@ -1648,17 +1667,35 @@ impl FnEmit<'_> {
             Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..) => GlslTy::Int,
             Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
             | Inst::UintShl(..) | Inst::UintShr(..) => GlslTy::Uint,
-            Inst::Load(c) => self.cell_ty.get(c).copied().unwrap_or(GlslTy::Float),
-            Inst::Global(name) => {
-                const_lit(self.ws, *name).as_ref().map_or(GlslTy::Float, const_lit_ty)
-            }
+            Inst::Load(c) => self.cell_ty.get(c).copied().ok_or_else(|| {
+                err(self.span(), "shader profile: a value is read from a local that has no GLSL type")
+            })?,
+            Inst::Global(name) => match const_lit(self.ws, *name) {
+                Some(lit) => const_lit_ty(&lit),
+                // `profile_body` rejects every non-constant global read first.
+                None => {
+                    return Err(err(
+                        self.span(),
+                        format!("internal error: global `{name}` reached GLSL emission without a constant value; the shader profile pass must reject it"),
+                    ))
+                }
+            },
             Inst::Field { base, field } => {
                 if self.is_uniform_base(*base) {
-                    self.uniform_fields.get(field).copied().unwrap_or(GlslTy::Float)
-                } else if self.ty_of(*base)? == GlslTy::Bvec3 {
-                    GlslTy::Bool // bvec3 component read
+                    self.uniform_fields.get(field).copied().ok_or_else(|| {
+                        err(self.span(), format!("shader profile: `{field}` is not a value field of the shader interface; a sampler field is opaque -- pass it directly to a texture call"))
+                    })?
                 } else {
-                    GlslTy::Float // Vec component
+                    match self.ty_of(*base)? {
+                        GlslTy::Bvec3 => GlslTy::Bool,
+                        GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 => GlslTy::Float,
+                        other => {
+                            return Err(err(
+                                self.span(),
+                                format!("shader profile: field `{field}` read on a `{}` value has no GLSL lowering", other.name()),
+                            ))
+                        }
+                    }
                 }
             }
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => {
@@ -1668,7 +1705,9 @@ impl FnEmit<'_> {
                 "Vec4" | "Vec4f" => GlslTy::Vec4,
                 "Bvec3" => GlslTy::Bvec3,
                 "Mat4" => GlslTy::Mat4,
-                _ => GlslTy::Float,
+                other => {
+                    return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0")))
+                }
                 }
             }
             Inst::Call { func, args } => {
@@ -1691,11 +1730,21 @@ impl FnEmit<'_> {
                         {
                             self.ty_of(args[0])?
                         }
-                        None => GlslTy::Float,
+                        None => {
+                            return Err(err(
+                                self.span(),
+                                format!("shader profile: call to `{}` has no tier-0 GLSL result type", cf.name),
+                            ))
+                        }
                     }
                 }
             }
-            _ => GlslTy::Float,
+            other => {
+                return Err(err(
+                    self.span(),
+                    format!("shader profile: {} has no GLSL value type", inst_kind(other)),
+                ))
+            }
         })
     }
 
