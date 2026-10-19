@@ -133,6 +133,9 @@ pub struct ComptimeInputs {
     /// Normally the path resolves against the nearest stick.toml at or above
     /// the CALLING file. None and no calling file = every embed rejects.
     pub embed_root: Option<std::path::PathBuf>,
+    /// Where `embed_string` reads from: the filesystem natively, or the
+    /// files a host without one supplied.
+    pub embed_files: crate::comptime_files::EmbedFiles,
 }
 
 #[derive(Clone, Debug)]

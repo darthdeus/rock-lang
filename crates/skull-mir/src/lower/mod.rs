@@ -3931,19 +3931,8 @@ pub fn resolve_comptime_value(
             // file's dir: a library embeds its own files. Fall back to the
             // invocation's embed_root for synthetic/test module files.
             let call_file = body.expr_spans[call_expr].file;
-            let package_root = std::path::Path::new(call_file.as_str())
-                .exists()
-                .then(|| {
-                    let mut dir = std::path::Path::new(call_file.as_str()).parent();
-                    while let Some(d) = dir {
-                        if d.join("stick.toml").exists() {
-                            return Some(d.to_path_buf());
-                        }
-                        dir = d.parent();
-                    }
-                    None
-                })
-                .flatten();
+            let files = &ws.comptime_inputs.embed_files;
+            let package_root = files.package_root(call_file.as_str());
             let Some(root) = package_root.or_else(|| ws.comptime_inputs.embed_root.clone()) else {
                 return Err(reject(
                     call_expr,
@@ -3959,26 +3948,20 @@ pub fn resolve_comptime_value(
                     format!("`embed_string` path must be relative to the package root, got {key:?}"),
                 ));
             }
-            let joined = root.join(rel);
-            let file = joined.canonicalize().map_err(|e| {
-                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
-            })?;
-            let canon_root = root.canonicalize().map_err(|e| {
-                reject(call_expr, format!("`embed_string`: package root is unreadable: {e}"))
-            })?;
-            if !file.starts_with(&canon_root) {
-                return Err(reject(
+            use bone_core::comptime_files::EmbedReadError;
+            let (file, value) = files.read(&root, rel).map_err(|e| match e {
+                EmbedReadError::Unreadable(e) => {
+                    reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+                }
+                EmbedReadError::RootUnreadable(e) => {
+                    reject(call_expr, format!("`embed_string`: package root is unreadable: {e}"))
+                }
+                EmbedReadError::EscapesRoot => reject(
                     *arg,
                     format!("`embed_string(\"{key}\")`: path escapes the package root"),
-                ));
-            }
-            let value = std::fs::read_to_string(&file).map_err(|e| {
-                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+                ),
             })?;
-            Ok(ResolvedComptime {
-                value,
-                file_abs: Some(Ustr::from(&file.to_string_lossy())),
-            })
+            Ok(ResolvedComptime { value, file_abs: Some(Ustr::from(&file)) })
         }
         _ => unreachable!(),
     }

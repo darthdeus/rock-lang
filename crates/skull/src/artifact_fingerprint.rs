@@ -594,7 +594,7 @@ fn canonical_reads(
                         "malformed empty embedded comptime path".to_string(),
                     ));
                 }
-                let text = std::fs::read_to_string(path.as_str()).map_err(|error| {
+                let text = ws.comptime_inputs.embed_files.reread(path.as_str()).map_err(|error| {
                     FingerprintError(format!(
                         "embedded comptime input `{path}` is unreadable: {error}"
                     ))

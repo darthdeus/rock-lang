@@ -7613,7 +7613,7 @@ fn comptime_reads_stale(
                 .get(name)
                 .map(|v| comptime_value_hash(&v.value)),
             ComptimeInputId::File(path) => *file_hashes.entry(*path).or_insert_with(|| {
-                let text = std::fs::read_to_string(path.as_str()).ok()?;
+                let text = ws.comptime_inputs.embed_files.reread(path.as_str()).ok()?;
                 Some(comptime_value_hash(&text))
             }),
         };

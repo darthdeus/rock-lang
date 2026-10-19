@@ -154,6 +154,48 @@ fn payload() -> string {
     );
 }
 
+fn memory_inputs(files: &[(&str, &str)]) -> ComptimeInputs {
+    let files = files.iter().map(|(path, text)| (path.to_string(), text.to_string()));
+    ComptimeInputs {
+        embed_files: bone_core::comptime_files::EmbedFiles(std::sync::Arc::new(
+            bone_core::comptime_files::MemoryComptimeFiles::new(files),
+        )),
+        ..ComptimeInputs::default()
+    }
+}
+
+/// A host without a filesystem supplies the embedded files itself: the read,
+/// and the fingerprint's re-read of it, see the supplied text and never the
+/// disk (no file of that name exists on disk here).
+#[test]
+fn embed_string_reads_host_supplied_files() {
+    let src = r#"
+fn greeting() -> string {
+    return embed_string("data/greeting.txt")
+}
+"#;
+    let inputs = memory_inputs(&[("data/greeting.txt", "hello-from-memory")]);
+    let lua = try_emit_module_with(src, inputs).expect("supplied embed expands");
+    let body = function_body(&lua, "greeting");
+    assert!(body.contains("hello-from-memory"), "supplied content inlined:\n{body}");
+}
+
+#[test]
+fn embed_string_of_an_unsupplied_file_names_the_host() {
+    let src = r#"
+fn broken() -> string {
+    return embed_string("absent.txt")
+}
+"#;
+    let err = try_emit_module_with(src, memory_inputs(&[]))
+        .expect_err("an embed the host did not supply must reject");
+    assert!(
+        err.message.contains("absent.txt") && err.message.contains("host supplied no file"),
+        "error names the file and the host: {}",
+        err.message
+    );
+}
+
 // --- incremental invalidation: a comptime input change is a body edit ---
 // bone hashes only source text, so a body whose emitted code depends on a
 // build var's value or an embedded file's content never appears in

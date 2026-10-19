@@ -15,4 +15,5 @@ pub mod escape;
 pub mod identity_storage;
 pub mod suspension;
 pub mod workspace;
+pub mod comptime_files;
 pub mod modules;
