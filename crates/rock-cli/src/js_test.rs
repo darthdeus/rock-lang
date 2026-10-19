@@ -1,6 +1,5 @@
 //! `rock test <path> --backend js` -- execute the `@test` suite under node via
-//! the JS-subset emitter (`skull-codegen-js`), T1 of
-//! `docs/backends.md`.
+//! the JS-subset emitter (`skull-codegen-js`).
 //!
 //! Shares the backend-neutral half of the test driver with the luajit path
 //! (`skull_backend::skull_test`): unit discovery (`collect_test_units`), the
@@ -11,7 +10,7 @@
 //! SKIP(reason) reporting -- a test whose closure hits anything outside the JS
 //! subset reports as SKIP carrying the reject message, never FAIL, never
 //! silently dropped. The end-of-run skip-reason histogram is the emitter work
-//! list (T2+).
+//! list.
 
 use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
@@ -86,7 +85,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
         );
     }
     if !summary.skip_reasons.is_empty() {
-        println!("\n{}", "=== skip reasons (js) -- the T2+ work list ===".bold());
+        println!("\n{}", "=== skip reasons (js) -- the emitter work list ===".bold());
         let shown = summary.skip_reasons.len().min(50);
         for (reason, count) in summary.skip_reasons.iter().take(shown) {
             println!("  {:>5}  {}", count.to_string().yellow(), reason);
@@ -212,7 +211,7 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
 /// One isolated test file: parse + bone type-check with the stdlib, discover
 /// `@test` fns, then run them via the per-test closure emission + node batch.
 fn js_build_file(file: &str) -> JsUnitOutcome {
-    if let Err(error) = crate::package::prepare_test_sound_bank(file) {
+    if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(file) {
         return JsUnitOutcome::UnitFail {
             reason: "sound bank preparation failed".to_string(),
             rendered: format!("sound bank preparation failed for {file}: {error:#}"),
@@ -262,7 +261,7 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
 /// A `stick.toml` package built as ONE workspace (tests included), mirroring
 /// `skull_build_package`; its `@test`s run through the same per-test path.
 fn js_build_package(dir: &str) -> JsUnitOutcome {
-    if let Err(error) = crate::package::prepare_test_sound_bank(dir) {
+    if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(dir) {
         return JsUnitOutcome::UnitFail {
             reason: "sound bank preparation failed".to_string(),
             rendered: format!("sound bank preparation failed for {dir}: {error:#}"),
@@ -424,7 +423,7 @@ fn js_run_tests(
 
     let program = build_node_program(&shared_defs, &meta, shared_has_code_refs);
     let timeout = Some(std::time::Duration::from_secs(15));
-    let run = match rock_host::js_runner::run_node_code_with_timeout(&program, timeout) {
+    let run = match crate::js_runner::run_node_code_with_timeout(&program, timeout) {
         Ok(r) => r,
         Err(e) => {
             return JsUnitOutcome::UnitFail {
@@ -480,9 +479,9 @@ fn js_run_tests(
 /// `rock run <file> --backend js`: emit the whole file (+ stdlib) as ONE node
 /// program via `emit_program`, prepend the runtime preludes + a DIRECT
 /// (unbuffered) `print`/`put`, append `<main>();` when the entry module defines a
-/// nullary `main` (D3), and STREAM it through node with no timeout (D5),
-/// propagating node's exit code. A bone rejection or emit reject prints the
-/// diagnostic and exits non-zero -- never a silent fallback.
+/// nullary `main`, and STREAM it through node with no timeout (a real program
+/// can run arbitrarily long), propagating node's exit code. A bone rejection or
+/// emit reject prints the diagnostic and exits non-zero -- never a silent fallback.
 pub fn js_run(path: &str) -> Result<()> {
     let emitted = if std::path::Path::new(path).is_dir() {
         emit_js_program_project(path).0
@@ -491,7 +490,7 @@ pub fn js_run(path: &str) -> Result<()> {
     };
 
     let program = build_run_program(&emitted);
-    match rock_host::js_runner::run_node_code_streaming(&program) {
+    match crate::js_runner::run_node_code_streaming(&program) {
         Ok(0) => Ok(()),
         Ok(code) => crate::ablation_report::exit_with_census(code),
         Err(e) => {
@@ -501,7 +500,7 @@ pub fn js_run(path: &str) -> Result<()> {
     }
 }
 
-/// Emit the whole program for a single `.rock` file (M1 headless path). Diagnoses
+/// Emit the whole program for a single `.rock` file. Diagnoses
 /// and exits on any parse/check/emit rejection -- never a silent fallback.
 fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     let src = match fs_err::read_to_string(path) {
@@ -579,7 +578,7 @@ pub(crate) fn try_emit_js_program_project_cached(
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec)
         .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
-    let sources = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
+    let sources = if (crate::registry::RuntimeServices::registered().is_game_project)(&PathBuf::from(dir)).unwrap_or(false) {
         sources
             .production_only(std::path::Path::new(dir))
             .map_err(|error| anyhow::anyhow!(error.to_string()))?
@@ -613,9 +612,9 @@ pub(crate) fn try_emit_js_program_project_cached(
     Ok((prog, cache, ws))
 }
 
-/// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and
+/// Node-specific glue for the RNG prelude (`JS_RNG_RUNTIME`) and
 /// `env_var`: `process.env` is node-only, so it lives in the DRIVER, not a
-/// prelude const (D3/D4, a browser bundle swaps a config object at M3). Seeding
+/// prelude const. Seeding
 /// mirrors Lua's per-process rule (`crates/skull/src/lib.rs`): one seed after the
 /// preludes -- `ROCK_TEST_SEED` when set+finite else `Date.now()`; a test needing
 /// determinism calls `random_seed()` itself. `__rock_env_var` maps an unset var
@@ -634,8 +633,7 @@ function __rock_env_var(n) { var v = process.env[n]; return v === undefined ? nu
 /// test harness (`build_node_program`), a scoped `var __G = {}`, a DIRECT
 /// `print`/`put` (unbuffered `process.stdout.write`, no `__buf`/`__SKULL__`
 /// protocol), the whole emitted program, then `<main>();` when the entry defines
-/// one. No `__rock_main_wrapper`: its HOT_RELOAD guard + Ctrl+C pcall are engine-
-/// specific (D3, revisited at M3) -- a bare call matches luajit's single-file path.
+/// one. A bare call matches luajit's single-file path.
 fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);

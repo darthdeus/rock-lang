@@ -12,7 +12,9 @@ autobins = false
 path = "src/lib.rs"
 
 [features]
-default = ["renderer-wgpu"]
+default = ["renderer-wgpu", "backend-js"]
+# node execution of the JS-subset emitter (`rock --backend js`).
+backend-js = ["dep:skull-codegen-js"]
 # Shared Lua execution oracles for downstream compiler integration tests.
 test-support = ["dep:test-utils"]
 # Use sequential compiler passes for sampling without Rayon worker frames.
@@ -35,6 +37,7 @@ bone-incremental = { workspace = true }
 bone-query = { workspace = true }
 skull = { workspace = true }
 skull-codegen-glsl = { workspace = true }
+skull-codegen-js = { workspace = true, optional = true }
 skull-mir = { workspace = true }
 lsp-types = { workspace = true }
 
@@ -80,3 +83,8 @@ workspace = true
 [[bin]]
 name = "rock-plain"
 path = "src/main.rs"
+
+[[test]]
+name = "main_js"
+path = "tests/main_js.rs"
+required-features = ["backend-js"]

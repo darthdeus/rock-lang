@@ -49,6 +49,10 @@ mod iter_completion;
 mod iter_lsp;
 mod iter_parse;
 pub mod glsl_test;
+#[cfg(feature = "backend-js")]
+pub mod js_test;
+#[cfg(feature = "backend-js")]
+mod js_runner;
 pub mod live_project;
 pub mod test_protocol;
 mod lint_cmd;

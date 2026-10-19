@@ -266,9 +266,16 @@ pub static JS: BackendSpec = BackendSpec {
     backend: Backend::Js,
     name: "js",
     tagline: "js is a JS-subset executor (node)",
-    omitted: Some(OmittedBackend::Build),
-    operations: &[],
-    filter_rejection: None,
+    omitted: if cfg!(feature = "backend-js") {
+        None
+    } else {
+        Some(OmittedBackend::Feature {
+            feature: "backend-js",
+            hint: "rebuild with default features or `--features backend-js`",
+        })
+    },
+    operations: &[(Operation::Test, js_test), (Operation::Run, js_run)],
+    filter_rejection: Some("`rock test` filtering is supported only by the skull/bone test runner"),
 };
 
 pub static GLSL: BackendSpec = BackendSpec {
@@ -302,6 +309,31 @@ fn bone_compile(cx: &CommandContext) -> Result<()> {
 fn skull_compile(cx: &CommandContext) -> Result<()> {
     let file = cx.get_required_file("compile")?;
     rock_cli::skull_backend::skull_compile_single(file, cx.get_compile_output()?)
+}
+
+#[cfg(feature = "backend-js")]
+fn js_test(cx: &CommandContext) -> Result<()> {
+    let files = cx.get_test_files()?;
+    rock_cli::js_test::js_test(&files)
+}
+
+#[cfg(feature = "backend-js")]
+fn js_run(cx: &CommandContext) -> Result<()> {
+    let file = cx.get_required_file("run")?;
+    rock_cli::js_test::js_run(file)
+}
+
+// Without the feature the capability gate rejects JS with the omitted-feature
+// message before dispatch; the operations stay registered so the gate and the
+// reject message still know what JS serves.
+#[cfg(not(feature = "backend-js"))]
+fn js_test(_: &CommandContext) -> Result<()> {
+    unreachable!("JS dispatch requires the `backend-js` feature")
+}
+
+#[cfg(not(feature = "backend-js"))]
+fn js_run(_: &CommandContext) -> Result<()> {
+    unreachable!("JS dispatch requires the `backend-js` feature")
 }
 
 pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter];

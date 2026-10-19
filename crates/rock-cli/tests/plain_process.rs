@@ -96,7 +96,7 @@ fn library_uses_plain_services_without_installation() {
 #[test]
 fn private_backends_are_omitted_before_source_discovery() {
     let root = tempfile::tempdir().unwrap();
-    for backend in ["c", "js"] {
+    for backend in ["c"] {
         let spec = rock_cli::BackendSpec::named(backend).unwrap();
         assert!(spec.omitted.is_some());
         assert!(spec.operations.is_empty(), "plain CLI retained a private handler");
@@ -109,11 +109,33 @@ fn private_backends_are_omitted_before_source_discovery() {
     }
     let help = invoke(root.path(), &["--help"]);
     assert!(help.status.success());
-    for backend in ["c", "js"] {
+    for backend in ["c"] {
         assert!(text(&help).contains(&format!("{backend} (not in this build)")), "{}", text(&help));
     }
     assert!(rock_cli::CliCommand::named("mono-manifest").is_none());
     assert!(!root.path().join("tmp").exists(), "omitted backend reached source discovery");
+}
+
+#[cfg(feature = "backend-js")]
+#[test]
+fn js_backend_is_served_by_the_plain_cli() {
+    let root = tempfile::tempdir().unwrap();
+    let spec = rock_cli::BackendSpec::named("js").unwrap();
+    assert!(spec.omitted.is_none());
+    for command in ["test", "run"] {
+        let cmd = rock_cli::CliCommand::named(command).unwrap();
+        assert!(rock_cli::Backend::Js.serves(cmd), "js must serve `{command}`");
+        let out = invoke(root.path(), &[command, "missing.rock", "--backend", "js"]);
+        assert!(!out.status.success());
+        assert!(!text(&out).contains("not included in this build"), "{}", text(&out));
+    }
+    let out = invoke(root.path(), &["compile", "missing.rock", "--backend", "js"]);
+    assert!(!out.status.success());
+    assert!(text(&out).contains("the `js` backend cannot serve `compile`"), "{}", text(&out));
+    assert!(text(&out).contains("Supported commands: test, run"), "{}", text(&out));
+    let help = invoke(root.path(), &["--help"]);
+    assert!(help.status.success());
+    assert!(!text(&help).contains("js (not in this build)"), "{}", text(&help));
 }
 
 #[test]
