@@ -242,10 +242,11 @@ fn changed_keys<V: PartialEq>(old: &FxHashMap<Ustr, V>, new: &FxHashMap<Ustr, V>
 /// it, and it has no fragment scope). But warm and legacy user files share
 /// the bare-name maps a lowering and an inference read -- types and their
 /// generic arity, globals, overload families, decorators, macros -- so a
-/// user definition under a warm name changes the warm lowering in a fresh
-/// build (a user `struct Box` makes the stdlib's `Box<T>` signatures fail),
-/// and a warm body that names something only a user file defines resolves
-/// only in a combined build. A build reuses the warm-alone state only when
+/// user definition under a warm name changes a fresh build (a user
+/// `struct Box` is a cross-module duplicate of the warm `Box<T>`; a user
+/// overload joins its family), and a warm body that names something only a
+/// user file defines resolves only in a combined build. A build reuses the
+/// warm-alone state only when
 /// neither can happen: no user definition or macro takes a warm name
 /// (`Session::apart_from_warm`) and the warm-alone build is clean.
 /// Otherwise it lowers warm and user files together, as a fresh build does.
@@ -1668,6 +1669,22 @@ impl Session {
         self.ws.struct_by_name.retain(|_, id| keep(id.module));
         self.ws.enums_by_name.retain(|_, id| keep(id.module));
         self.ws.newtypes_by_name.retain(|_, id| keep(id.module));
+
+        // The arity/defaults facts owned by evicted modules go with them; a
+        // re-lowered module re-inserts its own. Facts owned by kept modules
+        // stay, so a kept first definer still wins over a re-lowered duplicate.
+        let doomed: Vec<Ustr> = self
+            .ws
+            .type_generic_owner
+            .iter()
+            .filter(|(_, owner)| !keep(**owner))
+            .map(|(name, _)| *name)
+            .collect();
+        for name in doomed {
+            self.ws.type_generic_owner.remove(&name);
+            self.ws.type_generic_arity.remove(&name);
+            self.ws.type_generic_defaults.remove(&name);
+        }
 
         self.ws.functions_by_name.retain(|_, fns| {
             fns.retain(|(mid, _)| keep(*mid));

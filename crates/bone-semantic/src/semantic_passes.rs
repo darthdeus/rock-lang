@@ -157,31 +157,54 @@ pub fn lower_modules(
     // cross-module (other modules aren't in `ws.modules` yet during this
     // parallel lowering; this map is). Insert (not clear) so the incremental
     // single-module re-lower augments rather than wipes other modules' entries.
+    // First declaration wins: a later duplicate (which gets its own `duplicate
+    // ... across modules` error below) must not overwrite the facts the first
+    // module lowers against, or the first module's uses fail first and mask it.
+    // A module refreshes its OWN entries (an arity edit must land); ownership
+    // tells those apart from another module's facts for the same name.
     for rock_mod in rock_modules.iter() {
         // A legacy lookup that could also reach a projected v1 name is
         // decided from this fact, so it is recorded before any body lowers.
         if rock_mod.dialect == skull_parser::Dialect::Legacy {
             ws.ns.legacy_owned.replace_file(rock_mod.file, legacy_owned_names(rock_mod));
         }
+        let mid = ws.intern_module(rock_mod.file);
         let scope = ws.fragment_scopes.get(&rock_mod.file).cloned();
         let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
             let key = |name: &ustr::Ustr| map_key(scope.as_ref(), path, *name);
+            // Whether this module may write `k`'s facts: a vacant slot, or one
+            // this same module owns (its own re-lower refreshing them).
+            let writable = |ws: &Workspace, k: &ustr::Ustr| {
+                ws.type_generic_owner.get(k).is_none_or(|o| *o == mid)
+            };
             match &item.kind {
                 ItemKind::Struct(s) => {
-                    ws.type_generic_arity.insert(key(&s.name.name), s.generics.len());
-                    ws.type_generic_defaults
-                        .insert(key(&s.name.name), trailing_generic_defaults(rock_mod, &s.generics));
+                    let k = key(&s.name.name);
+                    if writable(ws, &k) {
+                        ws.type_generic_arity.insert(k, s.generics.len());
+                        ws.type_generic_defaults
+                            .insert(k, trailing_generic_defaults(rock_mod, &s.generics));
+                        ws.type_generic_owner.insert(k, mid);
+                    }
                     ws.has_nobox_types |= s.is_nobox;
                 }
                 ItemKind::Enum(e) => {
-                    ws.type_generic_arity.insert(key(&e.name.name), e.generics.len());
-                    ws.type_generic_defaults
-                        .insert(key(&e.name.name), trailing_generic_defaults(rock_mod, &e.generics));
+                    let k = key(&e.name.name);
+                    if writable(ws, &k) {
+                        ws.type_generic_arity.insert(k, e.generics.len());
+                        ws.type_generic_defaults
+                            .insert(k, trailing_generic_defaults(rock_mod, &e.generics));
+                        ws.type_generic_owner.insert(k, mid);
+                    }
                 }
                 ItemKind::Newtype(n) => {
-                    ws.type_generic_arity.insert(key(&n.name.name), n.generics.len());
-                    ws.type_generic_defaults
-                        .insert(key(&n.name.name), trailing_generic_defaults(rock_mod, &n.generics));
+                    let k = key(&n.name.name);
+                    if writable(ws, &k) {
+                        ws.type_generic_arity.insert(k, n.generics.len());
+                        ws.type_generic_defaults
+                            .insert(k, trailing_generic_defaults(rock_mod, &n.generics));
+                        ws.type_generic_owner.insert(k, mid);
+                    }
                 }
                 ItemKind::Decorator(d) => {
                     ws.decorator_names.insert(key(&d.name.name));
@@ -275,65 +298,62 @@ pub fn lower_modules(
             // persistent squiggle. A `comp_error!` here aborted the whole pass, so
             // the error never reached `session.diagnostics()` -- it only surfaced
             // transiently as `update_file`'s `Err`, invisible to `diagnostics_for`.
+            // The first declaration keeps the workspace slot: a later duplicate
+            // overwriting it would break the first module's own uses (e.g. a user
+            // `struct Scene` unseating stdlib `Scene<T>`) and mask this error.
             let mut dup_errs: Vec<CompilerError> = Vec::new();
 
             for (name, def) in item.module.struct_by_name.iter() {
-                if ws
-                    .struct_by_name
-                    .insert(
-                        *name,
-                        StructId {
-                            module: mid,
-                            def: *def,
-                        },
-                    )
-                    .is_some()
-                {
+                if ws.struct_by_name.contains_key(name) {
                     let span = item.module.structs[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
                         format!("duplicate struct `{}` across modules", name),
                     ));
+                } else {
+                    ws.struct_by_name.insert(
+                        *name,
+                        StructId {
+                            module: mid,
+                            def: *def,
+                        },
+                    );
                 }
             }
 
             for (name, def) in item.module.enums_by_name.iter() {
-                if ws
-                    .enums_by_name
-                    .insert(
-                        *name,
-                        EnumId {
-                            module: mid,
-                            def: *def,
-                        },
-                    )
-                    .is_some()
-                {
+                if ws.enums_by_name.contains_key(name) {
                     let span = item.module.enums[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
                         format!("duplicate enum `{}` across modules", name),
                     ));
+                } else {
+                    ws.enums_by_name.insert(
+                        *name,
+                        EnumId {
+                            module: mid,
+                            def: *def,
+                        },
+                    );
                 }
             }
 
             for (name, def) in item.module.newtypes_by_name.iter() {
-                if ws
-                    .newtypes_by_name
-                    .insert(
-                        *name,
-                        NewtypeId {
-                            module: mid,
-                            def: *def,
-                        },
-                    )
-                    .is_some()
-                {
+                if ws.newtypes_by_name.contains_key(name) {
                     let span = item.module.newtypes[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
                         format!("duplicate newtype `{}` across modules", name),
                     ));
+                } else {
+                    ws.newtypes_by_name.insert(
+                        *name,
+                        NewtypeId {
+                            module: mid,
+                            def: *def,
+                        },
+                    );
                 }
             }
 

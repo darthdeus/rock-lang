@@ -1143,12 +1143,12 @@ fn a_bad_macro_argument_label_is_refused_like_a_fresh_build_on_every_path() {
     }
 }
 
-/// Warm and user files share the legacy bare-name maps: a user type named
-/// like a warm generic type overwrites its arity before the warm bodies lower
-/// in a fresh build, so the warm signature over it is refused there. A
-/// session that lowered the warm modules alone would not see that, and its
-/// build -- first or rebuilt -- would differ from a fresh one. With such a
-/// collision the session lowers warm and user files together.
+/// Warm and user files share the legacy bare-name maps, so a user type named
+/// like a warm generic type is a cross-module duplicate: the batch pass, a
+/// first session build and a rebuilt one all report `duplicate struct` on the
+/// user file and nothing on the warm one. A session that lowered the warm
+/// modules alone would not see that; with such a collision the session lowers
+/// warm and user files together.
 #[test]
 fn a_user_type_named_like_a_warm_type_builds_like_a_fresh_build() {
     let warm_text = "struct Box<T> {\n    v: T,\n}\n\nfn unbox<T>(b: Box<T>) -> T {\n    b.v\n}\n";
@@ -1158,21 +1158,33 @@ fn a_user_type_named_like_a_warm_type_builds_like_a_fresh_build() {
     };
     let apart = "struct Crate {\n    x: int,\n}\n\nfn f(b: Crate) -> int {\n    b.x\n}\n";
     let collide = "struct Box {\n    x: int,\n}\n\nfn f(b: Box) -> int {\n    b.x\n}\n";
+    let files = vec![legacy("user.rock", collide)];
 
     let mut modules = warm();
-    modules.extend(parse(&[legacy("user.rock", collide)]).expect("parses"));
-    let batch = semantic_pass_with_aliases(&mut modules, &NsAliases::default()).err().expect("the batch pass refuses it");
-    assert!(batch.message.contains("Generic type `Box` expects 0 type argument(s)"), "{}", batch.message);
+    modules.extend(parse(&files).expect("parses"));
+    let batch = semantic_pass_with_aliases(&mut modules, &NsAliases::default()).expect("the batch pass builds it");
+    let reference = snapshot(&batch, &files);
+    assert!(
+        reference
+            .diagnostics
+            .iter()
+            .any(|(file, _, message)| file == "user.rock" && message == "duplicate struct `Box` across modules"),
+        "the batch pass reports the duplicate at the user file: {:?}",
+        reference.diagnostics
+    );
+    assert!(
+        reference.diagnostics.iter().all(|(file, _, _)| !is_stdlib_module_file(file)),
+        "no diagnostic may point at the warm modules: {:?}",
+        reference.diagnostics
+    );
 
-    let first = Session::new(warm(), vec![legacy("user.rock", collide)], &NsAliases::default())
-        .err()
-        .expect("Session::new refuses it too");
-    assert_eq!(first.message, batch.message, "Session::new");
+    let first = Session::new(warm(), files.clone(), &NsAliases::default()).expect("Session::new builds it too");
+    assert_eq!(snapshot(first.workspace(), &files), reference, "Session::new");
 
     let mut session = Session::new(warm(), vec![legacy("user.rock", apart)], &NsAliases::default()).expect("builds");
     session.files.get_mut("user.rock").unwrap().text = collide.to_string();
-    let rebuilt = session.rebuild_users().err().expect("rebuild_users refuses it too");
-    assert_eq!(rebuilt.message, batch.message, "rebuild_users");
+    session.rebuild_users().expect("rebuild_users builds it too");
+    assert_eq!(snapshot(session.workspace(), &files), reference, "rebuild_users");
 }
 
 // ---------------------------------------------------------------------------

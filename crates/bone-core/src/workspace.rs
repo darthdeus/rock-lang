@@ -40,6 +40,11 @@ pub struct Workspace {
     /// classifiable trailing defaults are stored -- the authoritative
     /// validation (with spans) is bone-lower's `validate_generic_defaults`.
     pub type_generic_defaults: FxHashMap<Ustr, Vec<hir::GenericDefault>>,
+    /// Which module's declaration the `type_generic_arity` /
+    /// `type_generic_defaults` entries came from: the first definer wins, and
+    /// the incremental re-lower refreshes only its own modules' entries (a
+    /// later duplicate must neither overwrite nor be refreshed over them).
+    pub type_generic_owner: FxHashMap<Ustr, ModuleId>,
     pub interface_names: FxHashSet<Ustr>,
     pub globals_by_name: FxHashMap<Ustr, TyId>,
     /// Names of `const` globals (read-only). A whole-global assignment to one of
@@ -190,6 +195,7 @@ impl Workspace {
             newtypes_by_name: Default::default(),
             type_generic_arity: Default::default(),
             type_generic_defaults: Default::default(),
+            type_generic_owner: Default::default(),
             interface_names: Default::default(),
             globals_by_name: Default::default(),
             const_globals: Default::default(),

@@ -2896,3 +2896,48 @@ fn annotation_wire_onchange_references_must_resolve() {
     let valid = annotation_resolution_errors(&[("main.rock", "deco init wire {} fn changed() {} @wire(onchange=[changed]) fn probe() {}")]);
     assert!(valid.is_empty(), "{valid:?}");
 }
+
+// A legacy user struct sharing a stdlib type's name is the USER's duplicate,
+// whatever its generic arity: the workspace records `duplicate struct` on the
+// user module and no diagnostic may point into the stdlib. Regression: the
+// user's arity overwrote the workspace-wide arity map, so a stdlib `Scene<T>`
+// use failed first and the fail-fast masked the duplicate -- the only error
+// pointed at `<stdlib>/scene.rock`.
+#[test]
+fn legacy_struct_sharing_a_stdlib_name_reports_the_duplicate_at_the_user_file() {
+    let mut modules = Vec::new();
+    for f in rock_stdlib::stdlib_files() {
+        modules.push(
+            skull_parser::parse_module_clean(f.contents, Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str()))
+                .expect("stdlib parses"),
+        );
+    }
+    let user_src =
+        "struct Scene { name: string }\nfn main() {\n    let s = Scene { name: \"hi\" }\n    print(s.name)\n}\n";
+    modules.push(skull_parser::parse_module_clean(user_src, Ustr::from("user.rock")).expect("user parses"));
+    let ws = match semantic_pass(&mut modules) {
+        Ok(ws) => ws,
+        Err(e) => panic!("expected a recorded duplicate error, got fail-fast: {e}"),
+    };
+    let errs: Vec<&CompilerError> = ws
+        .inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten())
+        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
+        .collect();
+    assert!(
+        errs.iter().any(|e| e.message == "duplicate struct `Scene` across modules"
+            && e.location.file == Ustr::from("user.rock")),
+        "expected the duplicate at the user file, got: {:?}",
+        errs.iter().map(|e| (e.message.as_str(), e.location.file)).collect::<Vec<_>>()
+    );
+    for e in &errs {
+        for file in std::iter::once(e.location.file).chain(e.labels.iter().map(|l| l.span.file)) {
+            assert!(
+                !is_stdlib_module_file(file.as_str()),
+                "no diagnostic may point into the stdlib, got `{}` at {file}",
+                e.message
+            );
+        }
+    }
+}
