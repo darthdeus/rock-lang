@@ -717,7 +717,8 @@ mod macos {
                     && UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32) > self.started;
                 // A newly declared embed may predate this watcher. Its seed
                 // establishes a baseline; an edit since startup still gets through.
-                let declared_seed = old.is_none() && !changed_after_start;
+                let declared_seed = old.is_none() && !changed_after_start
+                    && self.config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path));
                 let relevant = !declared_seed && (old.is_none_or(|old| old.hash != hash || old.stamp.inode != stamp.inode)
                     || !self.config.filter_metadata || self.restart(&path));
                 updates.push((path.clone(), Some(FileState { stamp, hash })));
@@ -859,6 +860,9 @@ mod macos {
             assert!(!observation.directories.keys().any(|path| path.ends_with("target") || path.ends_with(".git") || path.ends_with("tmp")));
             let added = root.join("assets/source.rock");
             std::fs::write(&added, "new source").unwrap();
+            // Model creation within the filesystem clock's startup tick.
+            let stamp = Stamp::read(&added).unwrap();
+            observation.started = UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32);
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([added]), "legitimate new sources in assets remain visible");
         }
         #[test]
