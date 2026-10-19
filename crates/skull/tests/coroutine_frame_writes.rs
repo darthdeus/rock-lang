@@ -67,6 +67,94 @@ fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
         "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2");
 }
 
+/// An `int as float` alias inside a coroutine step still reads a valid slot:
+/// `f` forwards to its operand's register for both its frame store and its
+/// pre-yield use, while a later-defined register (`tag`) shares the segment.
+/// The suspension boundary itself is crossed by frame cells (real lowering
+/// never leaves a conversion value live across a yield); the value-spill
+/// half is `spilled_int_to_float_alias_reads_a_valid_slot_after_resume`.
+const INT_FLOAT_ALIAS_ACROSS_YIELD: &str = r#"
+co fn scaled(n: int) -> Coroutine<float> {
+    let m = n * 2
+    let f = m as float
+    let tag = m + 100
+    yield f + (tag as float)
+    yield f + (tag as float) + 1.0
+}
+
+fn main() {
+    let c = scaled(5)
+    print(c.resume())
+    print(c.resume())
+}
+"#;
+
+#[test]
+fn int_to_float_alias_survives_a_yield() {
+    let lua = common::try_emit_module(INT_FLOAT_ALIAS_ACROSS_YIELD).expect("alias co emits");
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "int_float_alias_yield"),
+        "120\n121"
+    );
+}
+
+/// A conversion VALUE live across a yield keeps a valid slot: the spill store
+/// reads the operand's register and the resume segment reloads from the frame.
+/// Real lowering routes `let`-bound conversions through cells (each use folds
+/// its own), so only a hand-built body reaches the transform's value spill
+/// with a conversion; the step still runs the production transform and
+/// emitter end to end under LuaJIT.
+#[test]
+fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
+    let ws = bone_semantic::prelude::Workspace::new();
+    let ctx = CodegenCtx::new(&ws);
+    let interner = MonoInterner::default();
+    let mut func = MirFunc::new(Ustr::from("spill_alias"));
+    func.is_coroutine = true;
+    let n = func.new_cell(Some(Ustr::from("n")));
+    func.params.push(n);
+    func.resume_arg = Some(func.new_cell(Some(Ustr::from("__resume_arg"))));
+    let entry = func.entry();
+    let resume = func.new_block();
+    let done = func.new_block();
+    let ln = func.emit(entry, Inst::Load(n));
+    let k2 = func.emit(entry, Inst::Const(Lit::Int(2)));
+    let m = func.emit(entry, Inst::IntMul(ln, k2));
+    let conv = func.emit(entry, Inst::IntToFloat(m));
+    let k1 = func.emit(entry, Inst::Const(Lit::Int(1)));
+    let q = func.emit(entry, Inst::IntAdd(m, k1));
+    // Two stores keep `q` materialized in between: without liveness through
+    // the alias it would reuse the operand's register.
+    let qa = func.new_cell(Some(Ustr::from("qa")));
+    let qb = func.new_cell(Some(Ustr::from("qb")));
+    func.emit(entry, Inst::Store { cell: qa, value: q });
+    func.emit(entry, Inst::Store { cell: qb, value: q });
+    func.set_term(entry, Term::Yield { values: vec![conv], resume });
+    let s = func.emit(resume, Inst::FloatAdd(conv, m));
+    func.set_term(resume, Term::Yield { values: vec![s], resume: done });
+    func.set_term(done, Term::Return(vec![]));
+
+    let lowered = skull_transform::transform_coroutine(&func, None, false);
+    let frame = FrameCtx {
+        s_cell: lowered.s_cell,
+        fields: lowered.frame_plan.fields().iter().copied().collect(),
+        slots: lowered.frame_plan.slots().clone(),
+    };
+    let lua = skull_codegen_lua::emit_named_framed(
+        &ws, &ctx, &interner, "spill_alias__step", &lowered.step, Some(&frame), None,
+    );
+    assert!(
+        lowered.frame_plan.spill_values().contains(&conv),
+        "the conversion must cross the yield through the value spill: {lua}"
+    );
+    let n_slot = lowered.frame_plan.slots().get(&n).copied().expect("param is a frame field");
+    let layout = lowered.frame_plan.layout_hash();
+    let driver = format!(
+        "{lua}\nlocal s = {{__state = 0, __layout = {layout}, c{n_slot} = 5}}\nprint(spill_alias__step(s))\nprint(spill_alias__step(s))\n"
+    );
+    assert_eq!(common::run_luajit(&driver, "spill_alias"), "10\n20");
+}
+
 /// A v1 enum has one runtime tag. The erased `resume()` rebuilds the yielded
 /// value from the frame slots, and that box must carry the same `__ty` as a
 /// constructed value (the spelling `__ROCK_TYPE_TABLE` is keyed on), not the
