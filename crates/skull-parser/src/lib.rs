@@ -1796,6 +1796,37 @@ mod modules_items_tests {
         assert!(err.message.contains("first item"), "got: {}", err.message);
     }
 
+    /// Only a `;`-terminated `mod` is a header; an inline `mod name { .. }`
+    /// block may follow any item, including another block.
+    #[test]
+    fn inline_module_blocks_follow_items_in_v1() {
+        for src in ["mod a {}\nmod b {}", "fn f() {}\npub mod b { fn g() {} }", "mod a { mod b {} mod c {} }"] {
+            let ast = parse_v1(src).unwrap_or_else(|e| panic!("{src:?}: {}", e.message));
+            assert!(ast.module_header.is_none(), "{src:?}");
+            assert!(
+                ast.items.iter().all(|i| matches!(i.kind, ItemKind::Module(_))
+                    || matches!(i.kind, ItemKind::Function(_))),
+                "{src:?}"
+            );
+        }
+        let ast = parse_v1("mod a {}\nmod b {}").expect("parse");
+        assert_eq!(ast.items.len(), 2);
+    }
+
+    #[test]
+    fn misplaced_header_after_an_inline_block_rejects_in_v1() {
+        for src in [
+            "mod a {}\nmod combat;",
+            "fn f() {}\nmod combat::casting;",
+            "fn f() {}\npub mod combat;",
+            "mod a { mod b; }",
+            "mod a { mod b::c; }",
+        ] {
+            let err = parse_v1(src).expect_err(src);
+            assert!(err.message.contains("first item"), "{src:?} got: {}", err.message);
+        }
+    }
+
     #[test]
     fn a_second_file_header_rejects_in_v1() {
         for src in ["mod a;\nmod b;\n\nfn f() {}", "mod a;\n// between\npub mod a;\n"] {

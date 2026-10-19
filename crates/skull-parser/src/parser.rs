@@ -353,11 +353,6 @@ impl<'a> Parser<'a> {
                 }
                 self.pos = save;
             }
-            if self.dialect == Dialect::V1 && seen_item && self.at_mod_decl() {
-                return Err(self.err(
-                    "`mod path;` is a file header and must be the file's first item; inline module blocks use `{ .. }`",
-                ));
-            }
             seen_item = true;
             let item_start = self.pos;
             match self.parse_item() {
@@ -914,15 +909,18 @@ impl<'a> Parser<'a> {
                 kind: ItemKind::Use(decl),
             });
         }
-        // `mod name { .. }` — inline module block (v1 only). A `;`-terminated
-        // `mod` here is a misplaced header (headers lead the file only).
+        // `mod name { .. }` — inline module block (v1 only). A `mod path;`
+        // here is a misplaced header (headers lead the file only).
         if self.dialect == Dialect::V1 && self.at_mod_decl() {
             self.advance(); // `mod`
             let name = self.expect_ident()?;
-            if self.kind() == TokenKind::Semicolon {
+            if matches!(self.kind(), TokenKind::Semicolon | TokenKind::DoubleColon) {
                 return Err(self.err(
-                    "`mod name;` is a file header and must be the file's first item; inline module blocks use `{ .. }`",
+                    "`mod path;` is a file header and must be the file's first item; inline module blocks use `{ .. }`",
                 ));
+            }
+            if self.kind() != TokenKind::OpenCurly {
+                return Err(self.err("expected `{` after the inline module name"));
             }
             return self.parse_mod_block(item_start, mods.vis, name);
         }

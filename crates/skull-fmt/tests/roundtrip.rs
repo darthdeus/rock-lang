@@ -42,6 +42,7 @@ fn modules_v1_forms_roundtrip() {
         "fn f() {\n    let t = ((1, 2) : (int, int))\n    print(t)\n}\n",
         "struct S {\n    name: string,\n    private(set) health: float = 100,\n    pub field: int,\n}\n",
         "pub mod combat {\n    pub fn heal() {}\n}\n",
+        "mod a {\n    pub fn f() {}\n}\n\nmod b {\n    pub fn g() {}\n}\n",
         "use a::b::*;\nuse a::b::{Actor, heal as restore};\nuse geo::operator(+);\n\nfn f() {}\n",
         "pub @inline fn a() -> int { 1 }\n\npub(package) @pure\nfn b() -> int {\n    2\n}\n",
     ];
