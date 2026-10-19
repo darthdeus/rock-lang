@@ -4472,7 +4472,7 @@ fn test_limit_bounds_the_reruns_of_a_shard() {
 }
 
 #[cfg(unix)]
-fn wait_for_test_watchdog_fixture(script: &str, limit: Duration) -> crate::common::ProcessResult {
+fn wait_for_test_watchdog_fixture(script: &str, policy: crate::common::WaitPolicy) -> crate::common::ProcessResult {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(script)
@@ -4480,15 +4480,24 @@ fn wait_for_test_watchdog_fixture(script: &str, limit: Duration) -> crate::commo
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn watchdog fixture");
-    crate::common::ProcessManager::wait_with_test_watchdog(
+    let run = crate::common::ProcessManager::wait_with_policy_and_tests::<()>(
         &mut child,
-        limit,
-        crate::common::TestWatch {
+        policy,
+        false,
+        false,
+        Some(crate::common::TestWatch {
             token: "watch-token".to_string(),
             tests: 2,
-        },
+        }),
+        None,
     )
-    .expect("wait for watchdog fixture")
+    .expect("wait for watchdog fixture");
+    // Child::try_wait can reap the child itself; ECHILD proves the watchdog did.
+    let waited = unsafe { libc::waitpid(child.id() as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+    let error = std::io::Error::last_os_error();
+    assert_eq!(waited, -1, "watchdog must reap its child: {run:?}");
+    assert_eq!(error.raw_os_error(), Some(libc::ECHILD), "{error}");
+    run
 }
 
 fn run_lua_watchdog_fixture(source: &str, limit: Duration, tests: usize) -> crate::common::ProcessResult {
@@ -4536,7 +4545,11 @@ printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
 sleep 1.5
 printf '__SKULL__\tTIME\tfirst_test\t1500.0\tpass\twatch-token\t0\n'
 "#;
-    let run = wait_for_test_watchdog_fixture(script, Duration::from_secs(1));
+    let limit = Duration::from_secs(1);
+    let run = wait_for_test_watchdog_fixture(script, crate::common::WaitPolicy::Test {
+        cpu_limit: limit,
+        wall_limit: crate::common::test_watchdog_wall_backstop(limit),
+    });
     assert!(!run.timed_out, "wall time without child CPU must not exhaust the test budget: {run:?}");
     assert!(run.output.status.success(), "the slow but completed test should pass: {run:?}");
 }
@@ -4548,7 +4561,10 @@ fn test_limit_kills_a_blocked_test_at_the_wall_backstop() {
 printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
 exec sleep 600
 "#;
-    let run = wait_for_test_watchdog_fixture(script, Duration::from_millis(100));
+    let run = wait_for_test_watchdog_fixture(script, crate::common::WaitPolicy::Test {
+        cpu_limit: Duration::from_millis(100),
+        wall_limit: Duration::from_secs(1),
+    });
     assert!(run.timed_out, "a blocked child must eventually be bounded: {run:?}");
     assert_eq!(run.timeout_phase, Some(crate::common::TimeoutPhase::TestWall));
     assert_eq!(run.running_test, Some(0));

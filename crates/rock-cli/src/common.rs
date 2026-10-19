@@ -68,7 +68,14 @@ impl ProcessManager {
     /// START and TIME markers reset the CPU budget; a generous wall backstop
     /// still catches a child blocked without consuming CPU.
     pub fn wait_with_test_watchdog(child: &mut Child, limit: Duration, watch: TestWatch) -> Result<ProcessResult> {
-        Self::wait_with_policy_and_tests(child, WaitPolicy::Test(limit), false, false, Some(watch), None)
+        Self::wait_with_policy_and_tests(
+            child,
+            WaitPolicy::Test { cpu_limit: limit, wall_limit: test_watchdog_wall_backstop(limit) },
+            false,
+            false,
+            Some(watch),
+            None,
+        )
     }
 
     fn wait_with_policy(
@@ -80,7 +87,7 @@ impl ProcessManager {
         Self::wait_with_policy_and_tests(child, policy, forward_stdout, forward_stderr, None, None)
     }
 
-    fn wait_with_policy_and_tests<P: Send + 'static>(
+    pub(crate) fn wait_with_policy_and_tests<P: Send + 'static>(
         child: &mut Child,
         policy: WaitPolicy,
         forward_stdout: bool,
@@ -178,7 +185,7 @@ impl ProcessManager {
                             }
                             if let Some(tx) = &progress_tx {
                                 let progress = match policy {
-                                    WaitPolicy::Test(_) => test_token.as_deref()
+                                    WaitPolicy::Test { .. } => test_token.as_deref()
                                         .and_then(|token| parse_test_start(&line, token))
                                         .map(ProcessProgress::TestStart),
                                     _ => decode.and_then(|decode| decode(&line)).map(ProcessProgress::Observed),
@@ -241,7 +248,7 @@ impl ProcessManager {
                         continue;
                     }
                     saw_progress = true;
-                    last_progress_at = if matches!(policy, WaitPolicy::Test(_)) {
+                    last_progress_at = if matches!(policy, WaitPolicy::Test { .. }) {
                         last_progress_at.max(event.at)
                     } else {
                         std::time::Instant::now()
@@ -250,7 +257,7 @@ impl ProcessManager {
                     if let ProcessProgress::Observed(progress) = event.progress {
                         latest_progress = Some(progress);
                     }
-                    if matches!(policy, WaitPolicy::Test(_)) {
+                    if matches!(policy, WaitPolicy::Test { .. }) {
                         if let Some(sample) = event.child_cpu {
                             last_test_cpu = Some(last_test_cpu.map_or(sample, |previous| previous.max(sample)));
                         }
@@ -276,8 +283,7 @@ impl ProcessManager {
                                 (start_time.elapsed(), startup, TimeoutPhase::Startup)
                             }
                         }
-                        WaitPolicy::Test(cpu_limit) => {
-                            let wall_limit = test_watchdog_wall_backstop(cpu_limit);
+                        WaitPolicy::Test { cpu_limit, wall_limit } => {
                             let wall_elapsed = last_progress_at.elapsed();
                             let cpu_elapsed = child_process_cpu_time(child_pid)
                                 .zip(last_test_cpu)
@@ -317,7 +323,7 @@ impl ProcessManager {
                             }
                         }
                     };
-                    if !matches!(policy, WaitPolicy::Test(_)) && elapsed >= limit {
+                    if !matches!(policy, WaitPolicy::Test { .. }) && elapsed >= limit {
                         child.kill()?;
                         status = child.wait()?;
                         timed_out = true;
@@ -334,7 +340,7 @@ impl ProcessManager {
 
         // Reader joins ensure the final markers have arrived. After a timeout
         // retain the test state observed when the budget expired.
-        if !timed_out || !matches!(policy, WaitPolicy::Test(_)) {
+        if !timed_out || !matches!(policy, WaitPolicy::Test { .. }) {
             if let Some(rx) = &progress_rx {
                 for event in rx.try_iter() {
                     match event.progress {
@@ -377,11 +383,11 @@ pub(crate) fn test_watchdog_wall_backstop(cpu_limit: Duration) -> Duration {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum WaitPolicy {
+pub(crate) enum WaitPolicy {
     Total(Duration),
     Progress { startup: Duration, inactivity: Duration },
     ProgressBudget { startup: Duration, budget: Duration },
-    Test(Duration),
+    Test { cpu_limit: Duration, wall_limit: Duration },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
