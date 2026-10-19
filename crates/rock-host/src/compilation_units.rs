@@ -274,7 +274,7 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
                 }
             }
 
-            // Module-load effects, including stone's cimgui prelude, must be
+            // Module-load effects from dependency initializers must be
             // ready before a consuming project's global initializers.
             all_files.extend(files.clone());
 

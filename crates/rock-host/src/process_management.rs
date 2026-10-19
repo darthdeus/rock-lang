@@ -4,6 +4,17 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use sysinfo::{Pid, System};
 
+/// The running executable image, for self-spawn and compiler fingerprints.
+/// Linux keeps this image available even after a build replaces its pathname.
+/// Resource location and launching a newly built replacement use disk paths.
+pub fn current_executable_image() -> std::io::Result<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    let executable = std::path::PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let executable = std::env::current_exe()?;
+    Ok(executable)
+}
+
 /// File a budgeting parent (the rock-cli test harness) names for this
 /// process to report its current phase in, so each phase gets its own cap.
 pub const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";

@@ -1,11 +1,10 @@
 //! Resolution of `[build.vars]` into concrete values, once per session build,
-//! before compilation (a live `rock stone` session re-resolves on every full
+//! before compilation (a live runtime session re-resolves on every full
 //! rebuild, never per incremental update). Precedence: declaration `default` (for a
 //! channel-restricted var outside its channels) < the var's source < explicit
 //! `--var NAME=value` override. There is deliberately NO ambient-env fallback:
-//! the steam release wrapper's whole job was refusing ambient release identity
-//! (tools/telemetry/test_steam_release.py pins that), and the declared
-//! mechanism must not reintroduce the leak.
+//! release identity must come from declared inputs rather than the ambient
+//! environment.
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -16,7 +15,7 @@ use super::StickConfig;
 #[derive(Debug, Clone)]
 pub struct ResolvedVar {
     pub value: String,
-    /// Metadata hygiene, not confidentiality (docs/comptime-plan.md): hashed
+    /// Metadata hygiene, not confidentiality: hashed
     /// into cache keys, ALLOWED in the compiled program payload, and kept out
     /// of logs, diagnostics, manifests and cache metadata.
     pub secret: bool,

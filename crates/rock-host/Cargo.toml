@@ -17,10 +17,10 @@ workspace = true
 sequential = []
 
 [dev-dependencies]
-test-utils = { path = "../test-utils" }
+test-utils = { workspace = true }
 
 [dependencies]
-rock-core = { path = "../rock-core" }
+rock-core = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
 wait-timeout = { workspace = true }

@@ -42,7 +42,7 @@ pub struct PackageNode {
     pub root: PathBuf,
     pub manifest_name: String,
     /// Manifest name with `-` normalized to `_`, case preserved (spec 4.1):
-    /// `name = "Mag"` yields `Mag`, never an invented `mag`.
+    /// `name = "Demo"` yields `Demo`, never an invented `demo`.
     pub self_name: String,
     pub dialect: Dialect,
     /// The package's declared memory class (`[language] memory`), which every

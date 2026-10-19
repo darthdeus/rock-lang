@@ -11,8 +11,7 @@ pub mod graph;
 /// the modules-v1 grammar and scoping rules. Any other value is a load error
 /// rather than a silent legacy fallback.
 ///
-/// `memory` declares the package's memory class
-/// (`docs/state-ownership-plan.md` R2): which store an unannotated `global`
+/// `memory` declares the package's memory class: which store an unannotated `global`
 /// belongs to. Absent = `"game"`, today's Session default, so every package
 /// that does not say otherwise is unchanged.
 /// `globals` declares whether the package may own mutable global storage.
@@ -95,23 +94,19 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
 #[derive(Debug, Clone)]
 pub struct StickConfig {
     pub package: Package,
-    /// Optional engine-side requirements for this game (cdylibs that the
-    /// runner must stage into `tmp/` before luajit boots). Recognised
-    /// entries: `"video"` gates the stone-video crate (ffmpeg-the-third +
-    /// bindgen — slow, only video games need it). Default: empty
-    /// list = stone-rs only.
+    /// Optional runtime requirements, interpreted by the installed host.
     pub engine: Option<EngineConfig>,
     /// The renderer is a build-time choice, independent of optional engine
     /// capabilities such as wgpu compute.
     pub renderer: Option<RendererConfig>,
-    /// Optional iOS bundle settings. Read by the deploy scripts
-    /// (`tools/ios/*.sh`) when they write Info.plist -- orientation is a
+    /// Optional iOS bundle settings. Read by deploy scripts when they write
+    /// Info.plist -- orientation is a
     /// build-time property of the bundle, not something the running game can
     /// choose, so it cannot live in `GameConfig`. Default: landscape.
     pub ios: Option<IosConfig>,
     /// Declared compile-time inputs (`build_var(..)`) and release channels.
     /// Commands are run by the CLI once per session build, before compilation;
-    /// the compiler only ever sees resolved values (docs/comptime-plan.md).
+    /// the compiler only ever sees resolved values.
     pub build: Option<BuildConfig>,
     /// Release asset selection consumed by both `rock package` and `rock web`.
     pub release: Option<ReleaseConfig>,
@@ -386,7 +381,7 @@ pub enum PackageType {
 
 // `[build] target` and `Target` stay removed: Lua was the only codegen
 // target Rock ever shipped, so that field was tautological. Game-vs-lib
-// detection reads `[package] type` (or the `stone` dependency) -- never a
+// detection reads `[package] type` -- never a
 // build target. `[build]` now carries channels and declared compile-time
 // vars instead (BuildConfig above).
 
@@ -404,7 +399,7 @@ pub enum Dependency {
 pub struct DetailedDependency {
     pub path: String,
     /// Channels the dependency compiles into. Empty = every channel. This is
-    /// the declared gate for development-only packages (the MAG agent bridge):
+    /// the declared gate for development-only packages (such as an agent bridge):
     /// a shipping channel excludes the package from the compile set entirely,
     /// so generated shipping code carries none of its symbols.
     pub channels: Vec<String>,
@@ -861,7 +856,7 @@ impl StickConfig {
     /// from "manifest exists but is malformed" (Err), so callers stop
     /// laundering parse errors as "no game config" — a typo in
     /// `[engine] needs = [...]` would otherwise silently skip
-    /// `validate_engine_needs` and surface as a confusing later failure
+    /// runtime validation and surface as a confusing later failure
     /// (silent-errors audit, 2026-05-02).
     pub fn from_path_optional(path: &Path) -> Result<Option<Self>> {
         if !path.exists() {
@@ -875,14 +870,6 @@ impl StickConfig {
             .map_err(|e| anyhow::anyhow!("Failed to parse stick.toml: {}", e))
     }
 
-    /// True if the game's `[engine] needs = [...]` list contains `lib`.
-    /// Used by the stone runner to decide whether to build optional
-    /// engine-side cdylibs (e.g. stone-video) before launching luajit.
-    pub fn needs_engine_lib(&self, lib: &str) -> bool {
-        self.engine.as_ref()
-            .map(|e| e.needs.iter().any(|n| n == lib))
-            .unwrap_or(false)
-    }
 
     pub fn renderer_backend(&self) -> Result<RendererBackend> {
         if let Some(backend) = *renderer_override_slot().lock().expect("renderer override lock") {
@@ -902,21 +889,8 @@ impl StickConfig {
         self.renderer_backend().map(|_| ())
     }
 
-    /// Recognised values for `[engine] needs = [...]`, read off the build table
-    /// rather than restated. A hand-maintained copy drifts silently, and in the
-    /// direction that looks like the user's fault: a need the table can build
-    /// but the validator rejects reads as a typo in their manifest.
-    pub fn known_engine_needs() -> Vec<&'static str> {
-        crate::engine_build::OPTIONAL_ENGINE_LIBS
-            .iter()
-            .map(|l| l.need)
-            .collect()
-    }
 
-    /// Reject typos in `[engine] needs = [...]` (e.g. "vidoe") so the
-    /// build doesn't silently skip an optional cdylib the user asked for.
-    /// Recognised values for `[ios] orientation`. Keep in sync with the case
-    /// arms in `tools/ios/run-game-device.sh`.
+    /// Recognised values for `[ios] orientation` in bundle generation.
     pub const KNOWN_IOS_ORIENTATIONS: [&'static str; 3] = ["landscape", "portrait", "all"];
 
     /// The orientation the iOS bundle should pin, if the manifest sets one.
@@ -928,7 +902,7 @@ impl StickConfig {
     /// Reject a bad `[ios] orientation` at build time. Without this the deploy
     /// script sees an unrecognised string; the failure mode is a phone that
     /// rotates freely, which thrashes canvas re-init hard enough to look like
-    /// a hang (docs/ios-bringup.md).
+    /// a hang.
     pub fn validate_ios(&self) -> Result<()> {
         let Some(orientation) = self.ios_orientation() else {
             return Ok(());
@@ -943,22 +917,6 @@ impl StickConfig {
         Ok(())
     }
 
-    pub fn validate_engine_needs(&self) -> Result<()> {
-        let Some(engine) = self.engine.as_ref() else {
-            return Ok(());
-        };
-        let known = Self::known_engine_needs();
-        for entry in &engine.needs {
-            if !known.contains(&entry.as_str()) {
-                anyhow::bail!(
-                    "stick.toml: unknown [engine] needs entry {:?}. Known: {:?}",
-                    entry,
-                    known
-                );
-            }
-        }
-        Ok(())
-    }
 
     /// Reject a malformed `[build]` section at load time: a var with zero or
     /// two sources, an unknown builtin, or a channel name nothing declares
@@ -1028,124 +986,6 @@ impl StickConfig {
                     }
                 }
             }
-        }
-        Ok(())
-    }
-
-    /// Resolve the release roots once from the already-parsed StickConfig.
-    /// Predefined levels are explicit inputs, independent of the general asset roots.
-    pub fn release_assets(&self, _project_dir: &Path) -> Result<Vec<String>> {
-        let mut assets = self
-            .release
-            .as_ref()
-            .and_then(|release| release.assets.clone())
-            .unwrap_or_else(|| vec!["assets".to_string()]);
-        if let Some(levels) = self
-            .release
-            .as_ref()
-            .and_then(|release| release.predefined_levels.as_ref())
-        {
-            assets.extend(levels.iter().cloned());
-        }
-        for rel in &assets {
-            let path = Path::new(rel);
-            if rel.is_empty()
-                || path.is_absolute()
-                || path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                anyhow::bail!(
-                    "stick.toml: [release].assets entry {:?} must be a non-empty relative path inside the project",
-                    rel
-                );
-            }
-        }
-        Ok(assets)
-    }
-
-    pub fn release_overlay_assets(&self) -> Result<Vec<String>> {
-        let assets = self
-            .release
-            .as_ref()
-            .and_then(|release| release.overlay_assets.clone())
-            .unwrap_or_default();
-        for rel in &assets {
-            let path = Path::new(rel);
-            if !rel.starts_with("assets/")
-                || rel.contains('\\')
-                || path.is_absolute()
-                || path.components().any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                anyhow::bail!(
-                    "stick.toml: [release].overlay_assets entry {:?} must be a canonical assets-relative file",
-                    rel
-                );
-            }
-        }
-        Ok(assets)
-    }
-
-    pub fn asset_overlay_defaults(&self, project_dir: &Path) -> Result<Vec<PathBuf>> {
-        self.asset_overlay_defaults_with_vault(project_dir, &crate::art_vault::root)
-    }
-
-    fn asset_overlay_defaults_with_vault(
-        &self,
-        project_dir: &Path,
-        vault: &dyn Fn() -> Result<PathBuf>,
-    ) -> Result<Vec<PathBuf>> {
-        let Some(assets) = &self.assets else {
-            return Ok(Vec::new());
-        };
-        let base = project_dir.canonicalize().unwrap_or_else(|_| {
-            if project_dir.is_absolute() {
-                project_dir.to_path_buf()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(project_dir)
-            }
-        });
-        assets
-            .overlays
-            .iter()
-            .map(|raw| {
-                if raw.is_empty() {
-                    anyhow::bail!("stick.toml: [assets].overlays entries must not be empty");
-                }
-                let vault_path = crate::art_vault::expand_token(raw, vault).map_err(|e| {
-                    anyhow::anyhow!("stick.toml: cannot expand [assets].overlays entry {raw:?}: {e}")
-                })?;
-                let expanded = if let Some(path) = vault_path {
-                    path
-                } else if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
-                    let home = std::env::var_os("HOME")
-                        .or_else(|| std::env::var_os("USERPROFILE"))
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "stick.toml: cannot expand [assets].overlays entry {raw:?}: no home directory environment"
-                        ))?;
-                    let tail = raw.trim_start_matches('~').trim_start_matches(['/', '\\']);
-                    PathBuf::from(home).join(tail)
-                } else if raw.starts_with('~') {
-                    anyhow::bail!(
-                        "stick.toml: [assets].overlays entry {raw:?} uses unsupported user-home syntax; use ~/path"
-                    );
-                } else {
-                    PathBuf::from(raw)
-                };
-                Ok(if expanded.is_absolute() { expanded } else { base.join(expanded) })
-            })
-            .collect()
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        // Libs shouldn't ship an `[engine] needs` -- that drives the
-        // game runner's cdylib build, which a library would never
-        // legitimately request. Catches the wrong type= annotation
-        // before it confuses the runner.
-        if self.package.package_type() == PackageType::Lib && self.engine.is_some() {
-            anyhow::bail!(
-                "library packages cannot have an [engine] section -- that's a game-runner directive"
-            );
         }
         Ok(())
     }
@@ -1319,7 +1159,7 @@ pub fn get_compiler_sha1() -> Result<String> {
     use std::io::Read;
 
     // Get the path to the current executable
-    let exe_path = std::env::current_exe()
+    let exe_path = crate::process_management::current_executable_image()
         .context("Failed to get current executable path")?;
 
     // Read the executable file
@@ -1622,71 +1462,6 @@ mod tests {
         assert_eq!(cfg.package.version(), "1.2.3");
     }
 
-    /// Every lib the build table can produce must be ACCEPTED by the validator,
-    /// and a non-entry must still be rejected. Asserting the accept side alone
-    /// passes on a validator that accepts everything.
-    #[test]
-    fn the_validator_admits_exactly_the_build_table() {
-        let table = crate::engine_build::OPTIONAL_ENGINE_LIBS;
-        assert!(!table.is_empty(), "no optional libs to check");
-        for lib in table {
-            let cfg = StickConfig::new_from_str(&format!(
-                "[package]\nname = \"x\"\n[engine]\nneeds = [\"{}\"]\n",
-                lib.need
-            ))
-            .unwrap();
-            cfg.validate_engine_needs()
-                .unwrap_or_else(|e| panic!("table lib {:?} rejected: {e}", lib.need));
-            assert!(cfg.needs_engine_lib(lib.need));
-        }
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[engine]\nneeds = [\"not-a-lib\"]\n",
-        )
-        .unwrap();
-        cfg.validate_engine_needs()
-            .expect_err("a need outside the table must be rejected");
-    }
-
-    #[test]
-    fn validate_engine_needs_accepts_wgpu() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[engine]\nneeds = [\"wgpu\"]\n",
-        ).unwrap();
-        cfg.validate_engine_needs().expect("wgpu is a known need");
-        assert!(cfg.needs_engine_lib("wgpu"));
-        assert!(!cfg.needs_engine_lib("video"));
-    }
-
-    #[test]
-    fn validate_engine_needs_accepts_3d() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[engine]\nneeds = [\"3d\"]\n",
-        ).unwrap();
-        cfg.validate_engine_needs().expect("3d is a known need");
-    }
-
-    #[test]
-    fn validate_engine_needs_accepts_known_entry() {
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[engine]\nneeds = [\"video\"]\n",
-        ).unwrap();
-        cfg.validate_engine_needs().expect("video is a known need");
-    }
-
-    #[test]
-    fn validate_engine_needs_rejects_typo() {
-        // Without this check a misspelled `[engine] needs` entry would
-        // silently skip the optional cdylib build, and the game would
-        // hit a less-obvious load failure at runtime.
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[engine]\nneeds = [\"vidoe\"]\n",
-        ).unwrap();
-        let err = cfg.validate_engine_needs().expect_err("typo must be rejected");
-        let msg = format!("{}", err);
-        assert!(msg.contains("vidoe"), "error mentions the bad entry: {msg}");
-        assert!(msg.contains("video"), "error suggests the known list: {msg}");
-    }
-
     #[test]
     fn ios_orientation_round_trips() {
         let cfg = StickConfig::new_from_str(
@@ -1727,11 +1502,6 @@ mod tests {
         assert!(msg.contains("orientaton"), "error names the bad key: {msg}");
     }
 
-    #[test]
-    fn validate_engine_needs_empty_is_ok() {
-        let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
-        cfg.validate_engine_needs().expect("no engine section is fine");
-    }
 
     #[test]
     fn renderer_defaults_to_gl_and_accepts_wgpu() {
@@ -1756,8 +1526,7 @@ mod tests {
 
     // RED-then-GREEN: from_path_optional must distinguish "no manifest"
     // (Ok(None)) from "manifest exists but is malformed" (Err). The old
-    // call sites in rock-cli/stone.rs used .ok() which conflated the two,
-    // silently skipping validate_engine_needs on malformed manifests
+    // Optional loading must distinguish absence from malformed manifests.
     // (silent-errors audit, 2026-05-02).
 
     #[test]
@@ -1818,25 +1587,6 @@ mod tests {
         assert!(format!("{err}").contains("chanels"), "error names the bad key: {err}");
     }
 
-    #[test]
-    fn release_section_parses_assets_through_stick_config() {
-        let cfg = StickConfig::new_from_str(concat!(
-            "[package]\nname = \"x\"\n",
-            "[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
-            "overlay_assets = [\"assets/particles/blood.png\"]\n",
-        ))
-        .expect("release section must parse");
-        assert_eq!(
-            cfg.release.as_ref().unwrap().assets.as_deref(),
-            Some(&["assets".to_string(), "saves/level.json".to_string()][..])
-        );
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(cfg.release_assets(dir.path()).unwrap(), vec!["assets", "saves/level.json"]);
-        assert_eq!(
-            cfg.release_overlay_assets().unwrap(),
-            vec!["assets/particles/blood.png"]
-        );
-    }
 
     #[test]
     fn sound_section_declares_a_project_path() {
@@ -1864,62 +1614,6 @@ mod tests {
         )
         .expect_err("sound project is required");
         assert!(format!("{missing}").contains("project"));
-    }
-
-    #[test]
-    fn release_section_rejects_unknown_keys_and_escape_paths() {
-        let err = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[release]\nasset = [\"assets\"]\n",
-        )
-        .expect_err("unknown release key must reject");
-        assert!(format!("{err}").contains("asset"), "error names the bad release key: {err}");
-
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[release]\nassets = [\"../outside\"]\n",
-        )
-        .expect("path validation happens when selecting assets");
-        let dir = tempfile::tempdir().unwrap();
-        let err = cfg.release_assets(dir.path()).expect_err("asset escape must reject");
-        assert!(format!("{err}").contains("outside"), "error names the escape: {err}");
-
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[release]\noverlay_assets = [\"../outside.png\"]\n",
-        )
-        .expect("overlay path validation happens when selecting assets");
-        let err = cfg.release_overlay_assets().expect_err("overlay asset escape must reject");
-        assert!(format!("{err}").contains("outside.png"), "error names the escape: {err}");
-    }
-
-    #[test]
-    fn asset_overlay_defaults_resolve_relative_and_home_paths() {
-        let project = tempfile::tempdir().unwrap();
-        let project_path = project.path().canonicalize().unwrap();
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[assets]\noverlays = [\"../shared\", \"~/rock-assets\"]\n",
-        )
-        .unwrap();
-        let resolved = cfg.asset_overlay_defaults(project.path()).unwrap();
-        assert_eq!(resolved[0], project_path.join("../shared"));
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap();
-        assert_eq!(resolved[1], PathBuf::from(home).join("rock-assets"));
-    }
-
-    #[test]
-    fn asset_overlay_defaults_expand_the_vault_token() {
-        let project = tempfile::tempdir().unwrap();
-        let cfg = StickConfig::new_from_str(
-            "[package]\nname = \"x\"\n[assets]\noverlays = [\"$GAME_ART_VAULT/mag\"]\n",
-        )
-        .unwrap();
-        let resolved = cfg
-            .asset_overlay_defaults_with_vault(project.path(), &|| Ok(PathBuf::from("/machine/vault")))
-            .unwrap();
-        assert_eq!(resolved, vec![PathBuf::from("/machine/vault/mag")]);
-        let err = cfg
-            .asset_overlay_defaults_with_vault(project.path(), &|| anyhow::bail!("game-art vault not found"))
-            .unwrap_err();
-        // The CLI prints only the outermost message, so the cause must be in it.
-        assert!(err.to_string().contains("game-art vault not found"), "{err}");
     }
 
     #[test]

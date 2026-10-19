@@ -11,6 +11,7 @@ members = [
     "crates/lsp-server-manual",
     "crates/lsp-types-manual",
     "crates/rock-core",
+    "crates/rock-host",
     "crates/rock-log",
     "crates/rock-stdlib",
     "crates/rock-tokenizer",
@@ -28,6 +29,12 @@ repository = "https://github.com/darthdeus/rock-lang"
 bone-core = { path = "crates/bone-core" }
 bone-semantic = { path = "crates/bone-semantic" }
 rock-core = { path = "crates/rock-core" }
+rock-host = { path = "crates/rock-host" }
+test-utils = { path = "crates/test-utils" }
+wait-timeout = "0.2"
+walkdir = "2.5.0"
+parking_lot = "0.12"
+sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
 skull-parser = { path = "crates/skull-parser" }
 anyhow = "1.0"
 ariadne = "0.4.1"

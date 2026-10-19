@@ -34,7 +34,7 @@ pub fn enter_compiler_process() -> io::Result<()> {
     };
     #[cfg(not(target_os = "linux"))]
     let inherited = 0;
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(crate::process_management::current_executable_image()?);
     command.args(std::env::args_os().skip(1))
         .env("MIMALLOC_ALLOW_THP", "0")
         .env(DEFAULT_MARKER, inherited.to_string());

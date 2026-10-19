@@ -18,6 +18,7 @@ crates listed below.
 | `crates/lsp-server-manual` | Fork of `lsp-server` 0.7.9 from rust-analyzer with hand-written serde, MIT OR Apache-2.0 |
 | `crates/lsp-types-manual` | Fork of [`lsp-types`](https://github.com/gluon-lang/lsp-types) 0.97.0, MIT (see its `LICENSE`) |
 | `crates/lsp-serde-test` | Checks that the LSP forks serialize like the upstream crates |
+| `crates/rock-host` | Project discovery, source loading, manifest configuration and compiler process support |
 | `crates/rock-core` | Spans, diagnostics, the type representation, symbols, scopes and node ids |
 | `crates/rock-stdlib` | Runtime source discovery and the Rock standard library in `stdlib/` |
 | `crates/rock-log` | Logger shared by the compiler and its runtime hosts |
