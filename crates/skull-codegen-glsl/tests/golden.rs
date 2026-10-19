@@ -177,6 +177,25 @@ fn call_swizzle_texture_evaluates_once() {
 }
 
 #[test]
+fn fragment_call_swizzles_evaluate_each_call_once() {
+    let src = "fn shade(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), p.x * p.y, 1.0) }
+        @shader(fragment) fn sampled(scene: Sampler2D, tc: Vec2) -> Vec4 {
+            let uv = tc * 0.5
+            let base = texture(scene, tc).rgb
+            let offset = texture(scene, uv).xy
+            let tint = shade(tc).rgb
+            let warp = shade(uv).yx
+            return v(base * tint, offset.x + offset.y + warp.x * warp.y)
+        }";
+    for profile in [skull_codegen_glsl::GlslProfile::Core330, skull_codegen_glsl::GlslProfile::Es300] {
+        let glsl = emit_entry_profile(src, "sampled", profile).expect("emit");
+        for call in ["texture(scene, tc)", "texture(scene, uv)", "shade_Vec2(tc)", "shade_Vec2(uv)"] {
+            assert_eq!(glsl.matches(call).count(), 1, "{call}:\n{glsl}");
+        }
+    }
+}
+
+#[test]
 fn call_swizzle_nested_constructor_keeps_one_source_call() {
     let glsl = emit(
         "fn source(p: Vec2) -> Vec3 { return v(sin(p.x), cos(p.y), p.x * p.y) }
