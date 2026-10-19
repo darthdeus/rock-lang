@@ -214,6 +214,9 @@ impl Builder<'_> {
             base: vec,
             field: Ustr::from("len"),
         });
+        if self.scx.target() == bone_semantic::hir::FnBackend::Lua {
+            self.call_spine("__rock_stride_reserve", vec![vec, len])?;
+        }
         // The appended row is the old length, counted from 0.
         self.strided_store_leaves_at(vec, len, leaves, stride, elem);
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));

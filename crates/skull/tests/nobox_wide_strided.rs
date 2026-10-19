@@ -147,6 +147,95 @@ fn wide_nobox_elements_round_trip_every_leaf_kind() {
     );
 }
 
+const RESERVE_MAIN: &str = r#"
+inline(lua) fn begin_reserve_watch() = "_G.__stride_reservations = {}"
+inline(lua) fn check_reserve(xs: [Ev], count: int) = """
+local calls = _G.__stride_reservations
+assert(#calls == count, 'expected one backing reservation, got ' .. #calls)
+if count > 0 then
+    local h = rawget(xs, '@vec')
+    assert(calls[1].size == h.cap * h.stride, 'reservation must cover declared leaves')
+    assert(calls[1].data == xs._data, 'appends must use the reserved backing')
+end
+"""
+inline(lua) fn remember_backing(xs: [Ev]) = "_G.__stride_backing = xs._data"
+inline(lua) fn check_backing(xs: [Ev]) = "assert(xs._data == _G.__stride_backing)"
+
+fn input(n: int) -> Ev {
+    return Ev { kind: n, pay: Pay::Text("row{n}"), who: Who::Named("who{n}"),
+                label: "label{n}", lethal: false, at: P2 { x: n.to_float(), y: -n.to_float() },
+                follow: () => n.to_float(),
+                space: Id { value: n }, t: 0.5 }
+}
+
+fn check_rows(xs: [Ev]) {
+    for i in 0..xs.len() {
+        let expected = input(i)
+        assert(describe(xs[i]) == describe(expected))
+        assert(xs[i].at.y == expected.at.y)
+    }
+}
+
+fn main() {
+    let xs: [Ev] = vec_new_with_capacity(64)
+    assert(xs.len() == 0 && xs.capacity() == 64)
+    begin_reserve_watch()
+    xs.push(input(0))
+    check_reserve(xs, 1)
+    xs.push(input(1))
+    check_rows(xs)
+    let partial = xs.clone()
+    begin_reserve_watch()
+    for i in 2..64 { partial.push(input(i)) }
+    check_reserve(partial, 1)
+    check_rows(partial)
+    assert(partial.len() == 64 && partial.capacity() == 64)
+    remember_backing(partial)
+    partial.clear()
+    assert(partial.len() == 0 && partial.capacity() == 64)
+    begin_reserve_watch()
+    for i in 0..64 { partial.push(input(i)) }
+    check_reserve(partial, 0)
+    check_backing(partial)
+    check_rows(partial)
+    let zero: [Ev] = vec_new_with_capacity(0)
+    begin_reserve_watch()
+    for i in 0..65 { zero.push(input(i)) }
+    check_reserve(zero, 0)
+    assert(zero.len() == 65 && zero.capacity() >= zero.len())
+    check_rows(zero)
+    print("reserved")
+}
+"#;
+
+#[test]
+fn strided_first_fill_reserves_once_and_refill_reuses_backing() {
+    let lua = try_emit_module(&program(RESERVE_MAIN)).expect("emits");
+    let script = format!(r#"
+local original = require('table.new')
+package.loaded['table.new'] = function(narr, nhash)
+    local data = original(narr, nhash)
+    if _G.__stride_reservations then
+        table.insert(_G.__stride_reservations, {{size = narr, data = data}})
+    end
+    return data
+end
+local ok, err = xpcall(function()
+{lua}
+main()
+end, debug.traceback)
+package.loaded['table.new'] = original
+_G.__stride_reservations, _G.__stride_backing = nil, nil
+assert(require('table.new') == original)
+assert(ok, err)
+"#);
+    assert_eq!(run_luajit(&script, "strided_reservation"), "reserved");
+    let failing = script
+        .replace("main()\nend, debug.traceback)", "main()\nerror('intentional-cleanup')\nend, debug.traceback)")
+        .replace("assert(ok, err)", "assert(not ok and err:find('intentional%-cleanup'), err)");
+    assert_eq!(run_luajit(&failing, "strided_reservation_cleanup"), "reserved");
+}
+
 const SURFACE_MAIN: &str = r#"
 fn kinds(xs: [Ev]) -> string {
     let out = ""
@@ -211,7 +300,7 @@ fn seed(values: [Holder]) {
 fn discard(values: [Holder]) { let _ = values.pop() }
 
 fn main() {
-    let values: [Holder] = []
+    let values: [Holder] = vec_new_with_capacity(4)
     seed(values)
     let held = !released()
     discard(values)
