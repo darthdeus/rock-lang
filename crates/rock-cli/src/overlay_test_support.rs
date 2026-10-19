@@ -1,6 +1,6 @@
 use super::compile_cmd;
 
-pub(crate) fn emit_overlay_checked(
+pub fn emit_overlay_checked(
     ws: &bone_semantic::inference::Workspace,
     cache: &mut skull::mir_emit::SkullEmitCache,
     reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
@@ -8,8 +8,8 @@ pub(crate) fn emit_overlay_checked(
     skull::mir_emit::emit_overlay(ws, cache, reinferred).expect("emit_overlay")
 }
 
-#[cfg(test)]
-pub(crate) enum ExecOutcome {
+#[cfg(any(test, feature = "test-support"))]
+pub enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
     Output(String),
     /// Runtime error, lua load failure, spawn failure, or timeout -- carrying
@@ -19,10 +19,10 @@ pub(crate) enum ExecOutcome {
     Errored(String),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ExecOutcome {
     /// The failure diagnostic, or a panic naming `ctx` if the run succeeded.
-    pub(crate) fn expect_errored(self, ctx: &str) -> String {
+    pub fn expect_errored(self, ctx: &str) -> String {
         match self {
             ExecOutcome::Errored(d) => d,
             ExecOutcome::Output(o) => {
@@ -32,8 +32,8 @@ impl ExecOutcome {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn exec_lua(program: &str) -> ExecOutcome {
+#[cfg(any(test, feature = "test-support"))]
+pub fn exec_lua(program: &str) -> ExecOutcome {
     let timeout = Some(test_utils::HANG_BACKSTOP);
     match compile_cmd::run_lua_code_with_timeout(program, timeout) {
         Ok(out) if !out.success => ExecOutcome::Errored(out.combined()),
@@ -44,8 +44,8 @@ pub(crate) fn exec_lua(program: &str) -> ExecOutcome {
 
 /// Replace `0x<hex>` sequences with `0xADDR`: table/cdata identity prints
 /// differ per-process and would false-positive every diff.
-#[cfg(test)]
-pub(crate) fn normalize_stdout(s: &str) -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub fn normalize_stdout(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -67,8 +67,8 @@ pub(crate) fn normalize_stdout(s: &str) -> String {
 }
 
 /// First line where `lhs` and `rhs` differ, for divergence reporting.
-#[cfg(test)]
-pub(crate) fn first_diff_line(lhs: &str, rhs: &str) -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub fn first_diff_line(lhs: &str, rhs: &str) -> String {
     for (i, (a, b)) in lhs.lines().zip(rhs.lines()).enumerate() {
         if a != b {
             return format!("line {}: {:?} != {:?}", i + 1, a, b);
@@ -84,16 +84,16 @@ pub(crate) fn first_diff_line(lhs: &str, rhs: &str) -> String {
 /// Standalone `@test`/synthetic programs have no engine. Stub the full-reload
 /// registry reset only when a fixture emits one; body overlays refresh the
 /// CodeRefs already stored in registries.
-pub(crate) const SYS_STUB: &str = "function clear_all_systems() end\n";
+pub const SYS_STUB: &str = "function clear_all_systems() end\n";
 
 /// The stub is omitted when a fixture defines its own reset function.
-pub(crate) fn stub_for(full_lua: &str) -> &'static str {
+pub fn stub_for(full_lua: &str) -> &'static str {
     if full_lua.contains("function clear_all_systems") { "" } else { SYS_STUB }
 }
 
 /// `main` is unmangled (no-mangle exception), so a bare `main()` entry runs
 /// it on both sides without computing a mangled name. Append AFTER the
 /// overlay so the overlay's fresh `main` wins over the stale baseline's.
-pub(crate) fn run_parts(parts: &[&str]) -> ExecOutcome {
+pub fn run_parts(parts: &[&str]) -> ExecOutcome {
     exec_lua(&parts.join("\n"))
 }

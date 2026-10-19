@@ -504,3 +504,7 @@ impl Args {
         args
     }
 }
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod overlay_test_support;

@@ -20,7 +20,7 @@
 //! Both profiles (330 core + 300 es) run by default, with per-profile verdicts
 //! (`name [330core]` / `name [300es]`). The heavy lifting -- creating a headless
 //! GL context, compiling the shader, drawing to a 1x1 R32I/R32F target and
-//! reading the pixel back -- lives in the standalone `engine-glsl-runner` binary
+//! reading the pixel back -- lives in the standalone external GLSL runner binary
 //! (spawned per unit+profile), so the `rock` compiler/LSP binary never links
 //! SDL2. The runner is a workspace artifact, so a missing/broken runner is a
 //! hard error (a gate that can't run must not read as green); only a genuine
@@ -826,7 +826,7 @@ fn compile_batch(
     Ok((passed, failed))
 }
 
-/// Locate the `engine-glsl-runner` binary: `ROCK_GLSL_RUNNER` override, then a
+/// Locate the external GLSL runner binary: `ROCK_GLSL_RUNNER` override, then a
 /// sibling of the running `rock` binary (production + release layout), then one
 /// level up (cargo test binaries live in `target/<profile>/deps/`). Missing is
 /// a hard error: the runner is a workspace artifact, and a gate whose executor

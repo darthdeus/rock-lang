@@ -1,19 +1,9 @@
-//! `rock lint --union <lib>` -- closed-world reachability for a LIBRARY.
+//! `rock lint --union <lib>` intersects dead-code findings across the bin
+//! projects under a selected root. Each consumer is checked with its own
+//! dependencies, so a library API used by any consumer remains live.
 //!
-//! `unused_fn` asks "is this function reachable", which is only answerable
-//! against a closed world. A `bin` has one: itself plus its dependencies. A
-//! `lib` does not -- its callers live in consumers it cannot see -- so the
-//! ordinary pass skips libs entirely (`StickConfig::is_bin_at`), and engine gets
-//! no coverage from `rock lint` or the LSP.
-//!
-//! This recovers it by supplying the missing world. Every consumer in the repo
-//! is analyzed on its own, and a function is reported only when it is unreached
-//! in ALL of them -- the intersection. Per-consumer absence proves nothing: half
-//! of engine's API is called by another project and not project, and reporting either half
-//! from one consumer's view is how the LSP came to flag live engine code.
-//!
-//! Sound here because the repo is the whole world: engine has no external users.
-//! A lib with consumers outside the tree cannot be linted this way.
+//! The search root must contain every consumer. A library with callers outside
+//! the selected tree cannot be linted as a closed world this way.
 
 use crate::Result;
 use crate::lint_pass;
