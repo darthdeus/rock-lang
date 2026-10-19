@@ -122,6 +122,101 @@ fn omitted_default_argument_is_available_in_shader_forms() {
     );
 }
 
+fn shader_body<'a>(glsl: &'a str, root: &str) -> &'a str {
+    glsl.split(&format!("vec3 {root}_float(float x) {{")).nth(1)
+        .unwrap_or_else(|| panic!("missing shader root {root}: {glsl}"))
+        .split('}').next().expect("shader body")
+}
+
+fn vector_argument(glsl: &str, root: &str) -> Vec<f64> {
+    let caller = shader_body(glsl, root);
+    let call = "vector_default_float_Vec3_float(";
+    assert_eq!(caller.matches(call).count(), 1, "one direct call: {caller}");
+    let args = caller.split(call).nth(1).expect("call arguments");
+    assert!(args.starts_with("x, vec3("), "vector must be the tint argument: {caller}");
+    args.split("vec3(").nth(1).expect("vector argument")
+        .split(')').next().expect("vector components")
+        .split(',').map(|v| v.trim().parse().expect("constant component")).collect()
+}
+
+#[test]
+fn omitted_vector_default_argument_is_available_in_shader_forms() {
+    let declared = [0.125, 0.375, 0.625];
+    let override_value = [0.25, 0.5, 0.75];
+    let [x, y, z] = declared;
+    for default in [
+        format!("v({x}, {y}, {z})"),
+        format!("v(z: {z}, x: {x}, y: {y})"),
+        format!("Vec3 {{ z: {z}, x: {x}, y: {y} }}"),
+    ] {
+        let [ox, oy, oz] = override_value;
+        let src = format!(r#"
+            @pure fn vector_default(x: float, tint: Vec3 = {default}, gain: float = 0.875) -> Vec3 {{
+                return tint * (x + gain)
+            }}
+            @pure fn shader_vector_default(x: float) -> Vec3 {{
+                let tint = v(9.0, 8.0, 7.0)
+                return vector_default(x)
+            }}
+            @pure fn shader_vector_named(x: float) -> Vec3 {{
+                return vector_default(gain: 0.5, x: x)
+            }}
+            @pure fn shader_vector_explicit(x: float) -> Vec3 {{
+                return vector_default(x, v({x}, {y}, {z}))
+            }}
+            @pure fn shader_vector_override(x: float) -> Vec3 {{
+                return vector_default(tint: v({ox}, {oy}, {oz}), x: x)
+            }}
+            @pure fn supplied_vector(x: float) -> Vec3 {{ return v(x, x + 1.0, x + 2.0) }}
+            @pure fn shader_vector_evaluated(x: float) -> Vec3 {{
+                return vector_default(x, supplied_vector(x))
+            }}
+        "#);
+        let glsl = emit(&src, &[
+            "shader_vector_default", "shader_vector_named", "shader_vector_explicit",
+            "shader_vector_override", "shader_vector_evaluated",
+        ]).unwrap_or_else(|msg| panic!("omitted vector default {default} should lower for GLSL: {msg}"));
+        let explicit = vector_argument(&glsl, "shader_vector_explicit");
+        assert_eq!(explicit, declared, "explicit control must use the declared components");
+        assert_eq!(vector_argument(&glsl, "shader_vector_default"), explicit);
+        assert_eq!(vector_argument(&glsl, "shader_vector_named"), explicit);
+        assert!(shader_body(&glsl, "shader_vector_named").contains(", 0.5)"), "named gain must retain its slot: {glsl}");
+        assert_eq!(vector_argument(&glsl, "shader_vector_override"), override_value);
+        let evaluated = shader_body(&glsl, "shader_vector_evaluated");
+        assert_eq!(evaluated.matches("supplied_vector_float(x)").count(), 1,
+            "an explicit expression is evaluated exactly once: {evaluated}");
+        assert!(!evaluated.contains("vec3("), "explicit expressions must not acquire default components: {evaluated}");
+    }
+}
+
+#[test]
+fn reject_omitted_nonconstant_vector_default_argument() {
+    for (default, diagnostic) in [
+        ("v(x, 0.375, 0.625)", "no concrete plan"),
+        ("v(0.125 + 0.25, 0.375, 0.625)", "null literal"),
+    ] {
+        let src = format!(r#"
+            @pure fn vector_default(x: float, tint: Vec3 = {default}) -> Vec3 {{ return tint * x }}
+            @pure fn shader_vector_default(x: float) -> Vec3 {{ return vector_default(x) }}
+        "#);
+        reject(&src, &["shader_vector_default"], diagnostic);
+    }
+}
+
+#[test]
+fn reject_omitted_effectful_vector_constructor_default() {
+    let src = r#"
+        global calls: int = 0
+        fn make_tint(x: float, y: float, z: float) -> Vec3 {
+            calls = calls + 1
+            return Vec3 { x: x, y: y, z: z }
+        }
+        fn vector_default(x: float, tint: Vec3 = make_tint(0.125, 0.375, 0.625)) -> Vec3 { return tint * x }
+        fn shader_vector_default(x: float) -> Vec3 { return vector_default(x) }
+    "#;
+    reject(src, &["shader_vector_default"], "global read");
+}
+
 #[test]
 fn reject_omitted_expression_default_argument() {
     let src = r#"

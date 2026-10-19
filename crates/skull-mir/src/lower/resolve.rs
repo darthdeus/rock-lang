@@ -871,9 +871,9 @@ impl Builder<'_> {
             slots[pidx] = Some(v);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
-        // A gap or trailing param with a literal default is passed that literal;
+        // A gap or trailing param with a constant default is passed explicitly;
         // any other gap is the callee's default-fill to see as nil.
-        let defaults = self.literal_param_defaults(func);
+        let defaults = self.call_param_defaults(func);
         let hi = defaults
             .iter()
             .take(slots.len())
@@ -884,7 +884,7 @@ impl Builder<'_> {
             out.push(match s {
                 Some(v) => v,
                 None => match defaults.get(i).cloned().flatten() {
-                    Some(lit) => self.emit_cur(Inst::Const(lit)),
+                    Some(default) => self.emit_param_default(&default, &RetSlot::Opaque)?[0],
                     None => self.emit_cur(Inst::Const(Lit::Nil)),
                 },
             });

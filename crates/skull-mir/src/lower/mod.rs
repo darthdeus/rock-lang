@@ -39,6 +39,12 @@ use crate::monoty::{MonoCtor, MonoTy, MonoTyId};
 
 type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, Rc<MonoTy>>>;
 
+#[derive(Clone)]
+pub(crate) enum CallParamDefault {
+    Scalar(Lit),
+    Vector { shape: ValueShape, literals: Vec<Lit> },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum ConcreteMonoConsumer {
@@ -2698,49 +2704,164 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// The callee's parameter defaults that are plain scalar literals, by param
-    /// index, read from the callee body's own arena. A DIRECT call passes these
-    /// explicitly (`trailing_default_args`, `slotted_call_args`,
-    /// `reorder_named_args`), so the callee's default-fill prologue below is
-    /// never the direction a trace takes: with the caller's floats live, that
-    /// nil branch was a doomed side exit at every float-heavy callee with a
-    /// defaulted param (`docs/trace-pressure-work-plan.md`, "Default fill").
-    /// `null` stays `None` -- omitted already IS null -- and a non-literal
-    /// default (a global, a ctor) stays the callee's to evaluate.
-    pub(crate) fn literal_param_defaults(&self, func: FuncRef) -> Vec<Option<Lit>> {
-        let module = self.ws.module(func.module);
-        let decl = &module.functions[func.func];
-        let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else {
-            return Vec::new();
+    /// One admission rule for call-site constants and callee default guards.
+    /// `null` stays omitted; other unsupported expressions stay callee-bound.
+    fn constant_param_default(
+        &self,
+        body: &Body,
+        inf: Option<&BodyInference>,
+        expr: Idx<Expr>,
+        ty: Option<TyId>,
+    ) -> Option<CallParamDefault> {
+        let literal = match body.expr_arena[expr] {
+            Expr::Int(v) if ty == Some(self.ws.builtins.uint()) => Lit::Uint(v as u32),
+            Expr::Int(v) => Lit::Int(v),
+            Expr::Float(v) => Lit::Float(v.0),
+            Expr::Bool(v) => Lit::Bool(v),
+            Expr::String(v) => Lit::Str(v),
+            _ => {
+                let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = static_ty(self.ws, ty?)? else {
+                    return None;
+                };
+                if name.as_str() != "Vec3" { return None; }
+                return self.constant_vector_default(body, inf, expr);
+            }
         };
-        if decl.is_variadic {
-            return Vec::new();
-        }
-        body.param_defaults
-            .iter()
-            .enumerate()
-            .map(|(i, d)| {
-                let e = (*d)?;
-                let pd = decl.param_decls.get(i)?;
-                Some(match body.expr_arena[e] {
-                    Expr::Int(v) => {
-                        if pd.ty == self.ws.builtins.uint() {
-                            Lit::Uint(v as u32)
-                        } else {
-                            Lit::Int(v)
+        Some(CallParamDefault::Scalar(literal))
+    }
+
+    /// Recognize only a complete Vec3 literal or a constructor whose entire
+    /// body returns one. Read both arenas in their lexical owners, never lower
+    /// a foreign expression in the caller. Nonconstant inputs, spread/defaulted
+    /// constructor arguments and bodies with effects remain callee-side.
+    fn constant_vector_default(
+        &self,
+        body: &Body,
+        inf: Option<&BodyInference>,
+        expr: Idx<Expr>,
+    ) -> Option<CallParamDefault> {
+        let number = |body: &Body, e: Idx<Expr>| match body.expr_arena[e] {
+            Expr::Float(v) => Some(Lit::Float(v.0)),
+            Expr::Int(v) => Some(Lit::Float(v as f64)),
+            _ => None,
+        };
+        let mut bindings = HashMap::new();
+        let (body, expr) = match body.expr_arena[expr] {
+            Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
+                let (module, func) = resolve_call_fn(self.ws, inf?, expr, name)?;
+                let target = backend_variant(self.ws, name, FuncRef { module, func }, self.call_scx.target).ok()?;
+                let module = self.ws.module(target.module);
+                let decl = &module.functions[target.func];
+                let ctor = module.bodies.get(&BodyOwner::Function(target.func))?;
+                if decl.is_variadic || decl.is_coroutine || decl.is_extern || decl.inline_body.is_some()
+                    || !decl.generics.is_empty()
+                    || args.len() != decl.param_decls.len()
+                    || ctor.param_bindings.len() != decl.param_decls.len()
+                {
+                    return None;
+                }
+                let params: Vec<_> = ctor.param_bindings.into_iter().collect();
+                let mut next_pos = 0;
+                for arg in args {
+                    if body.spread_args.contains(&arg) { return None; }
+                    let index = match body.arg_names.get(&arg) {
+                        Some(name) => decl.param_decls.iter().position(|pd| pd.name == *name)?,
+                        None => { let i = next_pos; next_pos += 1; i }
+                    };
+                    let binding = *params.get(index)?;
+                    if bindings.insert(binding, number(body, arg)?).is_some() { return None; }
+                }
+                if bindings.len() != params.len() { return None; }
+                let root = ctor.root?;
+                let returned = match ctor.expr_arena[root] {
+                    Expr::Block { statements, tail } => {
+                        let statements: Vec<_> = statements.into_iter()
+                            .filter(|&s| !matches!(ctor.statement_arena[s], Statement::Comment(_)))
+                            .take(2)
+                            .collect();
+                        match (statements.as_slice(), tail) {
+                            ([], Some(tail)) => tail,
+                            ([statement], None) => match ctor.statement_arena[*statement] {
+                                Statement::Return(Some(value)) => value,
+                                _ => return None,
+                            },
+                            _ => return None,
                         }
                     }
-                    Expr::Float(of) => Lit::Float(of.0),
-                    Expr::Bool(b) => Lit::Bool(b),
-                    Expr::String(s) => Lit::Str(s),
-                    _ => return None,
-                })
-            })
-            .collect()
+                    Expr::Return(Some(value)) => value,
+                    _ => root,
+                };
+                (ctor, returned)
+            }
+            _ => (body, expr),
+        };
+        let Expr::StructLiteral { name, fields, bases } = body.expr_arena[expr] else {
+            return None;
+        };
+        if name.as_str() != "Vec3" || !bases.is_empty() { return None; }
+        let shape = value_shape(self.ws, name)?;
+        if shape.nullable || shape.fields.len() != 3 || fields.len() != shape.fields.len()
+            || shape.fields.iter().any(|(_, field)| !matches!(field, FieldShape::Prim))
+        {
+            return None;
+        }
+        let mut values = HashMap::new();
+        for field in fields {
+            let field = &body.struct_lit_field_arena[field];
+            let value = match body.expr_arena[field.value] {
+                Expr::Var(binding) => bindings.get(&binding)?.clone(),
+                _ => number(body, field.value)?,
+            };
+            if values.insert(field.name, value).is_some() { return None; }
+        }
+        let literals = shape.fields.iter().map(|(name, _)| values.remove(name)).collect::<Option<_>>()?;
+        Some(CallParamDefault::Vector { shape, literals })
+    }
+
+    /// Constants read in the callee's lexical owner, independent of its wire ABI.
+    /// Passing them explicitly avoids nil side exits with the caller's floats
+    /// live (`docs/trace-pressure-work-plan.md`, "Default fill").
+    pub(crate) fn call_param_defaults(&self, func: FuncRef) -> Vec<Option<CallParamDefault>> {
+        let module = self.ws.module(func.module);
+        let decl = &module.functions[func.func];
+        let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else { return Vec::new() };
+        if decl.is_variadic { return Vec::new(); }
+        let inf = self.ws.inference(func.module)
+            .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(func.func)));
+        body.param_defaults.iter().enumerate().map(|(i, expr)| {
+            let ty = decl.param_decls.get(i)?.ty;
+            self.constant_param_default(body, inf, (*expr)?, Some(ty))
+        }).collect()
+    }
+
+    pub(crate) fn emit_param_default(
+        &mut self,
+        default: &CallParamDefault,
+        slot: &RetSlot,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        match default {
+            CallParamDefault::Scalar(lit) if slot.slot_count() == 1 => {
+                Ok(vec![self.emit_cur(Inst::Const(lit.clone()))])
+            }
+            CallParamDefault::Vector { shape, literals } => {
+                let leaves: Vec<_> = literals.iter()
+                    .map(|lit| self.emit_cur(Inst::Const(lit.clone()))).collect();
+                match slot {
+                    RetSlot::Leaves(expected) if expected == shape => Ok(leaves),
+                    RetSlot::Opaque => {
+                        let parts = leaves.into_iter().map(ValueRepr::Scalar).collect();
+                        let value = self.pack(ValueRepr::Group { name: shape.name, parts, present: None })?;
+                        Ok(vec![value])
+                    }
+                    _ => Err(self.gap_here("constant vector default does not match its parameter ABI")),
+                }
+            }
+            _ => Err(self.gap_here("constant scalar default does not match its parameter ABI")),
+        }
     }
 
     /// Explicit values for the parameters a positional call left off the end:
-    /// a literal default becomes a constant, a parameter without one keeps its
+    /// a constant default becomes wire literals, a parameter without one keeps its
     /// nil (one per wire slot) so the callee fills it, and the trailing nils Lua
     /// would supply anyway are dropped. `param_shapes` is the scalar ABI's slot
     /// table; `None` is the boxed ABI (one slot each).
@@ -2750,18 +2871,16 @@ impl Builder<'_> {
         provided: usize,
         param_shapes: Option<&[RetSlot]>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let defaults = self.literal_param_defaults(func);
+        let defaults = self.call_param_defaults(func);
         let slots_of = |i: usize| param_shapes.and_then(|s| s.get(i)).map_or(1, |s| s.slot_count());
-        let last = (provided..defaults.len())
-            .rev()
-            .find(|&i| defaults[i].is_some() && slots_of(i) == 1);
+        let last = (provided..defaults.len()).rev().find(|&i| defaults[i].is_some());
         let Some(last) = last else { return Ok(Vec::new()) };
         let mut out = Vec::new();
         for i in provided..=last {
             match &defaults[i] {
-                Some(lit) if slots_of(i) == 1 => {
-                    let lit = lit.clone();
-                    out.push(self.emit_cur(Inst::Const(lit)));
+                Some(default) => {
+                    let slot = param_shapes.and_then(|shapes| shapes.get(i)).unwrap_or(&RetSlot::Opaque);
+                    out.extend(self.emit_param_default(default, slot)?);
                 }
                 _ => {
                     for _ in 0..slots_of(i) {
@@ -2776,16 +2895,19 @@ impl Builder<'_> {
     /// Callee-side default fill: an omitted argument arrives as Lua `nil`, so for
     /// each defaulted param emit `if cell == nil { cell = <default> }` at the top
     /// of the body (rock's convention — the default expr lives in THIS body's
-    /// arena). A direct call passes a literal scalar default itself
-    /// (`literal_param_defaults`), so this prologue is reached with nil only from
-    /// a call the emitter could not see; a `null` default on a scalar cell emits
-    /// nothing, since omitted already is null.
+    /// arena). Direct calls pass supported constants themselves; unsupported
+    /// defaults and callers the emitter cannot see still need this prologue.
+    /// A `null` default on a scalar cell emits nothing: omitted already is null.
     fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         let defaults = self.body.param_defaults.clone();
         for (i, def) in defaults.iter().enumerate() {
             let Some(def) = def else { continue };
             let Some(&pb) = pbs.get(i) else { continue };
+            let ty = self.body.binding_arena[pb].declared_ty.or_else(|| self.binding_ty(pb));
+            if self.constant_param_default(self.body, self.inf, *def, ty).is_some() {
+                self.f.param_default_materialized.insert(i);
+            }
             // A scalarized value param's omitted arg arrives as N nils — guard on
             // the FIRST leaf cell and fill all leaves from the default's leaves.
             if let Some((cells, shape)) = self.group_binds.get(&raw(pb)).cloned() {
@@ -2815,12 +2937,6 @@ impl Builder<'_> {
             let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
             if matches!(self.body.expr_arena[*def], Expr::Null) {
                 continue;
-            }
-            if matches!(
-                self.body.expr_arena[*def],
-                Expr::Int(_) | Expr::Float(_) | Expr::Bool(_)
-            ) {
-                self.f.param_default_materialized.insert(i);
             }
             self.f.mark_default_param(cell);
             let cur = self.emit_cur(Inst::Load(cell));
@@ -3449,7 +3565,7 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
 // recorded as a lenient skip. Layout-dependent checks stay in the concrete
 // expanders, where the retained instance substitution is available.
 
-/// Resolve a direct expansion call through inference first, falling back to a
+/// Resolve a direct call through inference first, falling back to a
 /// unique workspace overload when inference did not record one.
 fn resolve_call_fn(
     ws: &Workspace,
