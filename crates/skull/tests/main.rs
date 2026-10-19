@@ -298,3 +298,5 @@ mod vec_value_columns;
 mod vertex_plan;
 #[path = "removed_global_markers.rs"]
 mod removed_global_markers;
+#[path = "int_float_alias.rs"]
+mod int_float_alias;

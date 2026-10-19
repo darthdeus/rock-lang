@@ -2014,3 +2014,32 @@ value Pair { x: int, y: int }
     let lua = emit_clean(src, "fixed_pair");
     assert!(lua.contains("_ct("), "fixed nullable return changed transport: {lua}");
 }
+
+/// `rN = rM` / `rN = cM` lines: a register filled from another local unchanged.
+fn register_moves(lua: &str) -> Vec<&str> {
+    lua.lines()
+        .map(str::trim)
+        .filter(|line| {
+            let Some((dst, src)) = line.split_once(" = ") else { return false };
+            let local = |s: &str, p: char| {
+                s.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            };
+            local(dst, 'r') && (local(src, 'r') || local(src, 'c'))
+        })
+        .collect()
+}
+
+#[test]
+fn reused_int_to_float_aliases_its_operand() {
+    // `x as float` is the identity on LuaJIT numbers; a conversion read more
+    // than once names its operand's local instead of copying it into its own.
+    let param = "fn f(x: int) -> float { let y = x as float; y * y + y }";
+    let lua = emit_clean(param, "f");
+    assert_eq!(register_moves(&lua), Vec::<&str>::new(), "{lua}");
+    assert_eq!(run(param, "f(3)"), "12");
+
+    let register = "fn g(a: int, b: int) -> float { let s = a * b; let y = s as float; y * y + y + (s + 1) as float }";
+    let lua = emit_clean(register, "g");
+    assert_eq!(register_moves(&lua), Vec::<&str>::new(), "{lua}");
+    assert_eq!(run(register, "g(2, 3)"), "49");
+}

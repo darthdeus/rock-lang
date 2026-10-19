@@ -2040,7 +2040,7 @@ fn emit_named_framed_with_statics_impl(
     } else {
         call_arg_forwards(ws, func)
     };
-    let mut inlinable = compute_inlinable(func, &rpo, params);
+    let (mut inlinable, repeatable) = compute_inlinable(func, &rpo, params);
     for tail in tail_forwards.iter().flatten() {
         for &id in &tail.suppressed[1..] {
             inlinable[raw(id) as usize] = true;
@@ -2052,6 +2052,7 @@ fn emit_named_framed_with_statics_impl(
             inlinable[raw_id] = true;
         }
     }
+    alias_int_to_float(func, &rpo, &mut inlinable, &repeatable);
     // Frame fields map to their dense slots before this table is consulted.
     // Frame accesses name `s` implicitly in the printer rather than through a
     // MIR cell use; reserve its parameter's color so a later local can never
@@ -3061,7 +3062,14 @@ fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cel
 /// The set of values to TREE-FOLD into their use site (no `local rN`). Pure
 /// expressions qualify at one same-block use. Loads of parameters never written
 /// in this scope qualify at every use: the Lua parameter is already their value.
-fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>]) -> Vec<bool> {
+/// Returns the folded values, and the folded loads that may be rendered at any
+/// number of use sites: a parameter never written here, or a cell whose one
+/// write dominates every read.
+fn compute_inlinable(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    params: &[Idx<Cell>],
+) -> (Vec<bool>, Vec<bool>) {
     // Dense side-tables keyed by raw inst id (no hashing): use count, and the
     // block of the (single) use and of the def. `NONE` = unset. Insts outside
     // `scope` (other closures share the arena) stay at 0/NONE and never qualify.
@@ -3118,6 +3126,7 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>])
     // Dense `raw(inst) -> bool` (no hashing); probed per operand in `write_opnd`
     // and per use in `color_values`'s liveness/interference loops.
     let mut inl = vec![false; ni];
+    let mut repeatable = vec![false; ni];
     for &b in scope {
         for &id in &func.blocks[b].insts {
             let k = raw(id) as usize;
@@ -3125,6 +3134,7 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>])
                 &func.insts[id],
                 Inst::Load(cell) if immutable_params.contains(cell) || received.contains(cell)
             );
+            repeatable[k] = parameter_load;
             if parameter_load
                 || (use_count[k] == 1
                     && def_block[k] != NONE
@@ -3147,7 +3157,34 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>], params: &[Idx<Cell>])
             }
         }
     }
-    inl
+    (inl, repeatable)
+}
+
+/// Fold every `IntToFloat` whose operand renders as a bare local (a register
+/// or a `repeatable` load) into its uses, however many: the conversion is the
+/// identity on LuaJIT numbers, and its own register would only copy that
+/// local. Folded reads see through to the operand, so its register stays live
+/// to the last use of the conversion. A value live across a yield is already
+/// spilled to a frame field by the coroutine transform, so a resumed step
+/// reads the field, never the register. An operand folded into the
+/// conversion (`(a + b) as float`) keeps the conversion's register, so it is
+/// still evaluated once.
+fn alias_int_to_float(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    inlinable: &mut [bool],
+    repeatable: &[bool],
+) {
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            if let Inst::IntToFloat(x) = func.insts[id] {
+                let x = raw(x) as usize;
+                if !inlinable[x] || repeatable[x] {
+                    inlinable[raw(id) as usize] = true;
+                }
+            }
+        }
+    }
 }
 
 /// Render `function(<params>) <locals> <blocks> end` for the ordinary MIR
@@ -4248,6 +4285,12 @@ impl Emitter<'_> {
         matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
     }
 
+    /// A folded `IntToFloat` of a plain operand renders as that operand alone,
+    /// so it reads no more and evaluates no more than a plain operand does.
+    fn plain_int_to_float(&self, id: Idx<Inst>) -> bool {
+        matches!(self.func.insts[id], Inst::IntToFloat(x) if self.opnd_is_plain(x))
+    }
+
     /// The inline index shape is selected and both operands may be named twice.
     fn inline_index_operands(&self, base: Idx<Inst>, index: Idx<Inst>) -> bool {
         self.ctx.index_shape() == IndexShape::Inline
@@ -4318,9 +4361,9 @@ impl Emitter<'_> {
         // int->float subsumption is identity on luajit (all doubles): a FOLDED
         // (inlinable) coercion renders exactly as the inner operand in this
         // position -- no register, no extra precedence wrap -- so emitted Lua
-        // stays byte-identical. A MATERIALIZED one (its operand is reused, e.g.
-        // an @inline-spliced arg) keeps its own register (fall through) and the
-        // `rN = <inner>` def carries the identity.
+        // stays byte-identical. A reused one is folded only when its operand is
+        // a bare local (`alias_int_to_float`); otherwise it keeps its own
+        // register (fall through) and the `rN = <inner>` def carries the identity.
         if self.inlinable[raw(id) as usize] {
             if let Inst::IntToFloat(x) = self.func.insts[id] {
                 return self.write_opnd(out, x);
@@ -5253,6 +5296,7 @@ impl Emitter<'_> {
         for id in [a, b] {
             if self.inlinable[raw(id) as usize]
                 && !matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
+                && !self.plain_int_to_float(id)
             { return None; }
         }
         let arm = |bb: Idx<Block>| -> Option<(Option<(Idx<Cell>, Idx<Inst>)>, Idx<Block>)> {
