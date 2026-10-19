@@ -7775,7 +7775,14 @@ impl SkullEmitCache {
     ///. The unit half is load-bearing: all in-tree
     /// production embeds are global initializers (the cimgui prelude).
     pub fn comptime_files(&self) -> Vec<Ustr> {
-        let mut out: FxHashSet<Ustr> = FxHashSet::default();
+        self.comptime_file_hashes().into_iter().map(|(path, _)| path).collect()
+    }
+
+    /// Every `embed_string` input with the hash of the bytes the lowering
+    /// baked in, for watchers that compare against what was compiled rather
+    /// than against the startup instant.
+    pub fn comptime_file_hashes(&self) -> Vec<(Ustr, u64)> {
+        let mut out: FxHashMap<Ustr, u64> = FxHashMap::default();
         let chunk_reads = self
             .chunks
             .values()
@@ -7789,7 +7796,7 @@ impl SkullEmitCache {
             .chain(self.unit_comptime_reads.decorators.iter());
         for read in chunk_reads.chain(unit_reads) {
             if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
-                out.insert(path);
+                out.insert(path, read.value_hash);
             }
         }
         out.into_iter().collect()

@@ -5,10 +5,7 @@ use notify::RecursiveMode;
 use notify::event::ModifyKind;
 #[cfg(not(target_os = "macos"))]
 use notify_debouncer_full::{DebouncedEvent, new_debouncer};
-// `HashMap` serves only the gated `InitialFiles` snapshot and `watch_notify` below.
-#[cfg(any(not(target_os = "macos"), test))]
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 #[cfg(not(target_os = "macos"))]
@@ -68,8 +65,52 @@ pub struct FileWatcherConfig {
     pub ignore_existing_creates: bool,
 }
 
-/// Canonicalized paths consulted by the debounce filter on every event.
-pub type SharedWatchSet = std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>;
+/// Canonicalized paths consulted by the debounce filter on every event, plus
+/// the content hash of each declared input the compiler baked in. The hash
+/// lets a later observation compare against what was compiled rather than
+/// against the startup instant, so an edit within the startup tick is not
+/// seeded silently. Derefs to the path set so existing `lock()` call sites
+/// keep working; hashes are consulted only when present.
+#[derive(Clone, Debug, Default)]
+pub struct SharedWatchSet {
+    paths: std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
+    compiled: std::sync::Arc<parking_lot::Mutex<HashMap<PathBuf, u64>>>,
+}
+
+impl std::ops::Deref for SharedWatchSet {
+    type Target = std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>;
+    fn deref(&self) -> &Self::Target {
+        &self.paths
+    }
+}
+
+impl SharedWatchSet {
+    /// Record the hash of the bytes the compiler baked in for `path`
+    /// (`skull_mir::mir::comptime_value_hash` of the file text).
+    pub fn set_compiled_hash(&self, path: PathBuf, hash: u64) {
+        self.compiled.lock().insert(path, hash);
+    }
+    /// The compiler-baked hash for `path`, if the producer supplied one.
+    pub fn compiled_hash(&self, path: &Path) -> Option<u64> {
+        self.compiled.lock().get(path).copied()
+    }
+    /// Insert `path` with its compiler-baked hash in one step.
+    pub fn insert_with_hash(&self, path: PathBuf, hash: u64) {
+        self.paths.lock().insert(path.clone());
+        self.set_compiled_hash(path, hash);
+    }
+    /// Replace the whole set with `files` and their compiler-baked hashes.
+    pub fn replace_with_hashes(&self, files: Vec<(PathBuf, u64)>) {
+        let mut paths = self.paths.lock();
+        let mut compiled = self.compiled.lock();
+        paths.clear();
+        compiled.clear();
+        for (path, hash) in files {
+            paths.insert(path.clone());
+            compiled.insert(path, hash);
+        }
+    }
+}
 
 // Snapshot filter for the notify backend (`watch_notify`) and its unit test;
 // the macOS watcher polls instead, so this is dead in non-test macOS builds.
@@ -577,6 +618,7 @@ mod macos {
     struct FileState {
         stamp: Stamp,
         hash: [u8; 32],
+        verified_at: SystemTime,
     }
     fn content_hash(path: &Path) -> std::io::Result<[u8; 32]> {
         let mut file = std::fs::File::open(path)?;
@@ -584,10 +626,28 @@ mod macos {
         std::io::copy(&mut file, &mut hash)?;
         Ok(hash.finalize().into())
     }
+    /// Coarsest filesystem timestamp granularity the watcher may meet: exFAT
+    /// stamps modification at 2 s, coarser than HFS+ at 1 s and Linux HZ ticks.
+    /// An equal stamp proves stasis only once the last verification is older.
+    const FILESYSTEM_TICK: Duration = Duration::from_secs(2);
+    fn modified_time(stamp: &Stamp) -> SystemTime {
+        if stamp.modified.0 >= 0 {
+            UNIX_EPOCH + Duration::new(stamp.modified.0 as u64, stamp.modified.1 as u32)
+        } else {
+            UNIX_EPOCH
+        }
+    }
+    fn needs_reverify(verified_at: SystemTime, stamp: &Stamp) -> bool {
+        match verified_at.duration_since(modified_time(stamp)) {
+            Ok(elapsed) => elapsed < FILESYSTEM_TICK,
+            Err(_) => true,
+        }
+    }
     struct Directory {
         stamp: Stamp,
         files: Vec<PathBuf>,
         children: Vec<PathBuf>,
+        verified_at: SystemTime,
     }
     struct Observation {
         config: FileWatcherConfig,
@@ -617,7 +677,7 @@ mod macos {
                 && !is_tmp_scratch_file(path, &self.roots)
                 && !path.file_name().is_some_and(|name| name == ".git" || name == "target")
         }
-        fn collect(&mut self, root: &Path, candidates: &mut HashSet<PathBuf>, visited: &mut HashSet<PathBuf>, ancestors: &mut HashSet<(u64, u64)>) -> Result<()> {
+        fn collect(&mut self, root: &Path, candidates: &mut HashSet<PathBuf>, visited: &mut HashSet<PathBuf>, ancestors: &mut HashSet<(u64, u64)>, now: SystemTime) -> Result<()> {
             let metadata = match std::fs::metadata(root) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -635,7 +695,12 @@ mod macos {
                 }
                 Err(error) => return Err(error.into()),
             };
-            if self.directories.get(root).is_none_or(|directory| directory.stamp != stamp) {
+            let reread = match self.directories.get(root) {
+                None => true,
+                Some(directory) if directory.stamp != stamp => true,
+                Some(directory) => needs_reverify(directory.verified_at, &directory.stamp),
+            };
+            if reread {
                 let mut files = Vec::new();
                 let mut children = Vec::new();
                 #[cfg(test)]
@@ -656,21 +721,22 @@ mod macos {
                         files.push(path);
                     }
                 }
-                self.directories.insert(root.to_path_buf(), Directory { stamp, files, children });
+                self.directories.insert(root.to_path_buf(), Directory { stamp, files, children, verified_at: now });
             }
             let directory = &self.directories[root];
             candidates.extend(directory.files.iter().filter(|path| self.admitted(path)).cloned());
             let children = directory.children.clone();
-            for child in children { self.collect(&child, candidates, visited, ancestors)?; }
+            for child in children { self.collect(&child, candidates, visited, ancestors, now)?; }
             ancestors.remove(&identity);
             Ok(())
         }
         fn scan(&mut self, initial: bool) -> Result<FileChangeEvent> {
+            let now = SystemTime::now();
             let mut candidates = HashSet::new();
             let mut visited = HashSet::new();
             for root in self.roots.clone() {
                 match std::fs::metadata(&root) {
-                    Ok(meta) if meta.is_dir() => self.collect(&root, &mut candidates, &mut visited, &mut HashSet::new())?,
+                    Ok(meta) if meta.is_dir() => self.collect(&root, &mut candidates, &mut visited, &mut HashSet::new(), now)?,
                     Ok(_) if self.admitted(&root) => { candidates.insert(root); },
                     Ok(_) => {},
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
@@ -684,9 +750,9 @@ mod macos {
             }
             candidates.extend(self.config.restart_files.iter().filter(|path| self.admitted(path)).cloned());
             candidates.extend(self.files.keys().filter(|path| self.admitted(path)).cloned());
-            self.observe(candidates.into_iter().collect(), initial)
+            self.observe(candidates.into_iter().collect(), now, initial)
         }
-        fn observe(&mut self, candidates: Vec<PathBuf>, initial: bool) -> Result<FileChangeEvent> {
+        fn observe(&mut self, candidates: Vec<PathBuf>, now: SystemTime, initial: bool) -> Result<FileChangeEvent> {
             let mut event = FileChangeEvent { paths: HashSet::new(), is_restart_trigger: false };
             let mut updates = Vec::new();
             for path in &candidates {
@@ -705,7 +771,8 @@ mod macos {
                     Err(error) => return Err(error.into()),
                 };
                 let old = self.files.get(path);
-                if old.is_some_and(|old| old.stamp == stamp) { continue; }
+                let stamps_equal = old.is_some_and(|old| old.stamp == stamp);
+                if stamps_equal && old.is_some_and(|old| !needs_reverify(old.verified_at, &old.stamp)) { continue; }
                 let hash = match content_hash(&path) {
                     Ok(hash) => hash,
                     // Atomic saves can replace the path between stat and open;
@@ -713,15 +780,27 @@ mod macos {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error.into()),
                 };
-                let changed_after_start = stamp.changed.0 >= 0
-                    && UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32) > self.started;
-                // A newly declared embed may predate this watcher. Its seed
-                // establishes a baseline; an edit since startup still gets through.
-                let declared_seed = old.is_none() && !changed_after_start
-                    && self.config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path));
-                let relevant = !declared_seed && (old.is_none_or(|old| old.hash != hash || old.stamp.inode != stamp.inode)
-                    || !self.config.filter_metadata || self.restart(&path));
-                updates.push((path.clone(), Some(FileState { stamp, hash })));
+                let relevant = if stamps_equal {
+                    old.is_some_and(|old| old.hash != hash)
+                } else {
+                    let changed_after_start = stamp.changed.0 >= 0
+                        && UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32) > self.started;
+                    let declared = self.config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path));
+                    // A newly declared embed may predate this watcher. Its seed
+                    // establishes a baseline; an edit since startup still gets through.
+                    // With a compiler-baked hash the seed compares content, not time.
+                    let declared_seed = old.is_none() && declared && match self.config.extra_files.as_ref().and_then(|extra| extra.compiled_hash(path)) {
+                        Some(compiled) => match std::fs::read_to_string(path).map(|text| skull_mir::mir::comptime_value_hash(&text)) {
+                            Ok(current) => current == compiled,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                            Err(_) => false,
+                        },
+                        None => !changed_after_start,
+                    };
+                    !declared_seed && (old.is_none_or(|old| old.hash != hash || old.stamp.inode != stamp.inode)
+                        || !self.config.filter_metadata || self.restart(&path))
+                };
+                updates.push((path.clone(), Some(FileState { stamp, hash, verified_at: now })));
                 if relevant && !initial {
                     event.is_restart_trigger |= self.restart(&path);
                     event.paths.insert(path.clone());
@@ -794,6 +873,20 @@ mod macos {
             observation.scan(true).unwrap();
             observation
         }
+        fn stamp_ctime(stamp: &Stamp) -> SystemTime {
+            UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
+        }
+        fn set_mtime(path: &Path, time: SystemTime) {
+            let duration = time.duration_since(UNIX_EPOCH).expect("test time after epoch");
+            let times = [
+                libc::timespec { tv_sec: duration.as_secs() as libc::time_t, tv_nsec: duration.subsec_nanos() as _ },
+                libc::timespec { tv_sec: duration.as_secs() as libc::time_t, tv_nsec: duration.subsec_nanos() as _ },
+            ];
+            use std::os::unix::ffi::OsStrExt;
+            let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            let ret = unsafe { libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), times.as_ptr(), 0) };
+            assert_eq!(ret, 0, "utimensat {}: {}", path.display(), std::io::Error::last_os_error());
+        }
         #[test]
         fn initial_files_and_declared_inputs_do_not_create_false_changes() {
             let dir = tempfile::tempdir().unwrap();
@@ -860,6 +953,13 @@ mod macos {
             for i in 0..100 { std::fs::write(root.join("assets").join(format!("image-{i}.png")), [0; 1024]).unwrap(); }
             let mut observation = observation(root.clone(), Default::default());
             assert_eq!(observation.files.len(), 1);
+            // Age directories past the filesystem tick; recent ones are reread
+            // until the tick passes so same-tick changes are not missed.
+            let old = SystemTime::now() - Duration::from_secs(5);
+            for dir in observation.directories.keys().cloned().collect::<Vec<_>>() {
+                set_mtime(&dir, old);
+            }
+            assert!(observation.scan(false).unwrap().paths.is_empty());
             let reads = observation.directory_reads;
             assert!(observation.scan(false).unwrap().paths.is_empty());
             assert_eq!(observation.directory_reads, reads, "unchanged asset directories must not be reread");
@@ -901,7 +1001,7 @@ mod macos {
             std::fs::write(&source, "after").unwrap();
             // A symlink loop is a deterministic metadata IO error even as root.
             std::os::unix::fs::symlink(&broken, &broken).unwrap();
-            assert!(observation.observe(vec![source.clone(), broken.clone()], false).is_err());
+            assert!(observation.observe(vec![source.clone(), broken.clone()], SystemTime::now(), false).is_err());
             std::fs::remove_file(&broken).unwrap();
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([source]));
         }
@@ -916,6 +1016,55 @@ mod macos {
             let mut observation = observation(root.clone(), FileWatcherConfig { watch_all_files: true, ..Default::default() });
             std::fs::write(external.path().join("data.txt"), "after").unwrap();
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([root.join("linked/data.txt")]));
+        }
+        #[test]
+        fn same_size_rewrite_within_filesystem_tick_is_not_missed() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let source = root.join("main.rock");
+            std::fs::write(&source, "AAAA").unwrap();
+            let mut observation = observation(root.clone(), Default::default());
+            std::fs::write(&source, "BBBB").unwrap();
+            let recorded = observation.files.get(&source).unwrap().stamp.clone();
+            set_mtime(&source, modified_time(&recorded));
+            let current = Stamp::read(&source).unwrap();
+            assert_eq!((current.size, current.modified), (recorded.size, recorded.modified));
+            // Linux ctime always advances; a coarse clock would hold it.
+            observation.files.get_mut(&source).unwrap().stamp = current;
+            assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([source]));
+        }
+        #[test]
+        fn directory_change_within_filesystem_tick_is_reread() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let pkg = root.join("pkg");
+            std::fs::create_dir(&pkg).unwrap();
+            std::fs::write(pkg.join("main.rock"), "source").unwrap();
+            let mut observation = observation(root.clone(), Default::default());
+            let added = pkg.join("added.rock");
+            std::fs::write(&added, "added").unwrap();
+            let recorded = observation.directories.get(&pkg).unwrap().stamp.clone();
+            set_mtime(&pkg, modified_time(&recorded));
+            let current = Stamp::read(&pkg).unwrap();
+            // Coarse clock holds ctime/size at the recorded tick.
+            observation.directories.get_mut(&pkg).unwrap().stamp = current;
+            assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([added]));
+        }
+        #[test]
+        fn declared_input_edited_within_startup_tick_is_not_seeded_silently() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let input = root.join("input.txt");
+            std::fs::write(&input, "seedseed").unwrap();
+            let compiled = skull_mir::mir::comptime_value_hash(&std::fs::read_to_string(&input).unwrap());
+            let extra: SharedWatchSet = Default::default();
+            let config = FileWatcherConfig { extra_files: Some(extra.clone()), ..Default::default() };
+            let mut observation = observation(root.clone(), config);
+            std::fs::write(&input, "edited!!").unwrap();
+            let stamp = Stamp::read(&input).unwrap();
+            observation.started = stamp_ctime(&stamp);
+            extra.insert_with_hash(input.clone(), compiled);
+            assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([input]));
         }
         #[test]
         #[ignore = "manual watcher startup and steady-state measurement"]
