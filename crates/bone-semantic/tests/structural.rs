@@ -1998,31 +1998,6 @@ fn main() {
     let c = C { i: 0 }
     let _ = draw(c)
 }
-
-#[test]
-fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
-    let fixture = include_str!("fixtures/cw7_nullable_operator_diagnostic.rock");
-    for section in test_utils::parse_sections(fixture).into_iter().take(3) {
-        let ws = check(section.content).expect("body errors are collected");
-        let errors: Vec<_> = ws.inferences_iter()
-            .flat_map(|(_, inf)| inf.errors.values().flatten())
-            .collect();
-        assert_eq!(errors.len(), 1, "{}: {errors:?}", section.name);
-        let error = errors[0];
-        assert!(!error.message.contains("available overloads"), "{error:?}");
-        let operands = if section.name.starts_with("both_nullable") { 2 } else { 1 };
-        assert_eq!(error.labels.len(), operands, "{error:?}");
-        for label in &error.labels {
-            assert_eq!(label.message, "nullable operand");
-            let (start, end) = label.span.offset_range;
-            let operand = &section.content[start..end];
-            assert!(matches!(operand, "x" | "y"), "{operand:?}");
-            if operands == 1 {
-                assert_eq!(operand, if section.name.starts_with("nullable_right") { "y" } else { "x" });
-            }
-        }
-    }
-}
 "#;
     let ws = check(src).expect("body errors are collected, not aborted");
     let mid = ws
@@ -2050,6 +2025,50 @@ fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
         msgs.iter().any(|m| m.contains("draw(b: B) -> int")),
         "candidate 2 signature must be listed: {msgs:?}"
     );
+}
+
+#[test]
+fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
+    let fixture = include_str!("fixtures/cw7_nullable_operator_diagnostic.rock");
+    for section in test_utils::parse_sections(fixture).into_iter().take(3) {
+        let ws = check(section.content).expect("body errors are collected");
+        let errors: Vec<_> = ws.inferences_iter()
+            .flat_map(|(_, inf)| inf.errors.values().flatten())
+            .collect();
+        assert_eq!(errors.len(), 1, "{}: {errors:?}", section.name);
+        let error = errors[0];
+        let (_, expected) = section.name.split_once(" @fail=").expect("diagnostic contract");
+        assert_eq!(error.message, expected, "{error:?}");
+        let operands = if section.name.starts_with("both_nullable") { 2 } else { 1 };
+        assert_eq!(error.labels.len(), operands, "{error:?}");
+        for label in &error.labels {
+            assert_eq!(label.message, "nullable operand");
+            let (start, end) = label.span.offset_range;
+            let operand = &section.content[start..end];
+            assert!(matches!(operand, "x" | "y"), "{operand:?}");
+            if operands == 1 {
+                assert_eq!(operand, if section.name.starts_with("nullable_right") { "y" } else { "x" });
+            }
+        }
+    }
+}
+
+#[test]
+fn nullable_operator_diagnostic_preserves_accessibility_precedence() {
+    let files = bone_semantic::test_support::parse_embedded_files(r#"
+//-- lib.rock @pkg=lib,1 @v1
+pub value Number { pub n: int }
+pub operator *(a: Number, b: int) -> int { b }
+operator *(a: Number?, b: int) -> int { b }
+//-- app.rock @pkg=app,2 @v1
+use lib::{Number, operator(*)};
+fn multiply(x: Number?, y: int) -> int { x * y }
+"#);
+    let error = bone_semantic::test_support::check_types_embedded_with_stdlib(
+        &files,
+        &[("<stdlib>/operators.rock", "operator *(a: float, b: float) -> float { a }")],
+    ).unwrap_err();
+    assert!(error.contains("matching overload is not accessible"), "{error}");
 }
 
 /// A cost TIE (the ambiguous case) must list the tied candidate signatures,

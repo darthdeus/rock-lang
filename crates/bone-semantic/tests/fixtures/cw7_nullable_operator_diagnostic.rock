@@ -25,10 +25,25 @@ operator(lua) *(a: int, b: float) -> float = "return a * b"
 operator(lua) *(a: float, b: int) -> float = "return a * b"
 fn multiply(x: int?, y: int?) -> float { x * y }
 
+//- competing_nullable_shapes @fail=available overloads:
+operator(lua) *(a: int?, b: int) -> int = "return (a or 0) * b"
+operator(lua) *(a: int, b: int?) -> int = "return a * (b or 0)"
+fn multiply(x: int?, y: int?) -> int { x * y }
+
+//- bound_failure_precedes_nullable @fail=the `Iterator`-bounded candidate was rejected:
+operator *<I: Iterator<T>, T>(a: I, b: int) -> int { b }
+operator(lua) *(a: int, b: int) -> int = "return a * b"
+fn multiply(x: int?, y: int) -> int { x * y }
+
 //- unrelated_mismatch @fail=available overloads:
 operator(lua) *(a: int, b: int) -> int = "return a * b"
 operator(lua) *(a: float, b: float) -> float = "return a * b"
 fn multiply(x: int?, y: string) -> int { x * y }
+
+//- ordinary_function_keeps_menu @fail=available overloads:
+fn multiply(x: int, y: int) -> int { x }
+fn multiply(x: float, y: float) -> float { x }
+fn use_multiply(x: int?, y: int) -> int { multiply(x, y) }
 
 //- nullable_aware_overload
 operator(lua) *(a: int?, b: int) -> int = "return (a or 0) * b"
