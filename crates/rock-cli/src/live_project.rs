@@ -3,7 +3,7 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 #[derive(Debug)]
 pub enum LiveUpdate {

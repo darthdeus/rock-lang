@@ -10,7 +10,7 @@ use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use rock_core::errors::CompilerErrorLevel;
 use std::collections::BTreeSet;
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 /// An `unused-var` finding: a local binding that is never read.
 #[derive(Clone, Debug)]
@@ -2954,7 +2954,7 @@ fn workspace_findings_by_file_census(
 ) -> FxHashMap<Ustr, Vec<Finding>> {
     let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     if is_bin && sel.enabled(UNUSED_FN) {
-        let t = std::time::Instant::now();
+        let t = bone_core::prelude::Instant::now();
         let findings = unused_fns_by_file(ws, warm);
         let derived = findings.values().map(Vec::len).sum();
         record_family(
@@ -2976,7 +2976,7 @@ fn workspace_findings_by_file_census(
     }
     if !sel.enabled(BACKEND_SIBLING_MISMATCH) {
         if sel.enabled(ACTION_CALLERS) && sel.action_policy.is_some() {
-            let t = std::time::Instant::now();
+            let t = bone_core::prelude::Instant::now();
             let findings = action_caller_gaps(ws, warm, sel.action_policy.expect("configured action policy"));
             record_family(
                 census.as_deref_mut(),
@@ -3000,7 +3000,7 @@ fn workspace_findings_by_file_census(
     // Warm modules are SCANNED (half of every backend sibling set is stdlib) but
     // not reported on, like every other lint's treatment of stdlib files.
     let warm_files: FxHashSet<Ustr> = warm.iter().map(|&mid| ws.module(mid).file).collect();
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     let sibling_findings = backend_sibling_mismatches_by_file(ws);
     let derived = sibling_findings.values().map(Vec::len).sum();
     record_family(
@@ -3019,7 +3019,7 @@ fn workspace_findings_by_file_census(
         out.entry(file).or_default().extend(findings.iter().map(Finding::of));
     }
     if sel.enabled(ACTION_CALLERS) && sel.action_policy.is_some() {
-        let t = std::time::Instant::now();
+        let t = bone_core::prelude::Instant::now();
         let findings = action_caller_gaps(ws, warm, sel.action_policy.expect("configured action policy"));
         record_family(
             census.as_deref_mut(),
@@ -3117,7 +3117,7 @@ fn lint_workspace_inner(
     let mut out = Vec::new();
     for module in user_modules(ws, warm) {
         let Some(&src) = sources.get(&module.file) else { continue };
-        let t_flat = std::time::Instant::now();
+        let t_flat = bone_core::prelude::Instant::now();
         let flat = flat_findings_with(
             ws,
             &variants,
@@ -3139,7 +3139,7 @@ fn lint_workspace_inner(
         );
         out.extend(flat);
 
-        let t_inference = std::time::Instant::now();
+        let t_inference = bone_core::prelude::Instant::now();
         let inference = inference_findings_with(
             ws,
             warm,
@@ -3251,7 +3251,7 @@ fn filter_suppressed_findings_census(
     census: Option<&mut LintCensus>,
 ) -> Vec<Finding> {
     let raw = findings.len();
-    let started = std::time::Instant::now();
+    let started = bone_core::prelude::Instant::now();
     let allow = suppression_entries(source);
     let filtered = filter_suppressed_findings_with_entries(findings, &allow);
     if let Some(census) = census {
@@ -3349,7 +3349,7 @@ fn filter_suppressed_census<F: LintFinding>(
     census: Option<&mut LintCensus>,
 ) -> Vec<F> {
     let raw = findings.len();
-    let started = std::time::Instant::now();
+    let started = bone_core::prelude::Instant::now();
     let allow: FxHashSet<usize> = source
         .lines()
         .enumerate()

@@ -16,7 +16,8 @@ use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bone_core::prelude::Instant;
 
 /// Wall-clock split of bone's pipeline stages for one source string. bone fuses
 /// lowering + type-checking into `passes::semantic_pass`, so the split we can

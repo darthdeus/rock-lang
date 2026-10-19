@@ -16,6 +16,7 @@ description = "Cell-based control-flow IR, lowering and backend layout contracts
 # `skull-codegen-*`.
 
 [dependencies]
+bone-core = { workspace = true }
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
 bone-semantic = { workspace = true }

@@ -3882,7 +3882,7 @@ mod force_full_tests {
 mod incremental_lint_snapshot_tests {
     use super::overlay_test_support::{direct_overlay, print_route_profile};
     use super::super::{SkullReload, IncrementalProject};
-    use std::time::Instant;
+    use bone_core::prelude::Instant;
 
     #[test]
     fn incremental_body_edit_uses_one_lint_transaction_snapshot() {
@@ -4372,7 +4372,7 @@ fn test_limit_keeps_completed_file_results() {
 
 #[test]
 fn test_limit_bounds_program_loading() {
-    let start = std::time::Instant::now();
+    let start = bone_core::prelude::Instant::now();
     let result = super::run_emitted_tests("while true do end".to_string(), &[], &[], Duration::from_millis(100), 1, None, false);
     // The program never finishes loading; the bound only leaves room for a
     // loaded host.

@@ -27,7 +27,8 @@ use crate::Result;
 use rock_core::{CompilerError, CompileStats, ModuleId, SourceFiles};
 use rock_tokenizer::{count_source_stats, Token, Tokenizer};
 use ustr::Ustr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bone_core::prelude::Instant;
 
 fn discover(path: &str) -> Result<SourceFiles> {
     let spec = crate::common::path_to_source_spec(path);

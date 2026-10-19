@@ -19,7 +19,8 @@ use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bone_core::prelude::Instant;
 
 /// Parse `src`, type-check it through bone WITH the stdlib injected (so
 /// operators/`print`/`assert` resolve, exactly like `--backend bone`), then emit

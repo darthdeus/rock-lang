@@ -27,7 +27,7 @@ use bone_semantic::hir::TyId;
 use bone_semantic::prelude::Span;
 use comfy_la_arena::{Arena, Idx};
 use std::sync::Arc;
-use std::time::Instant;
+use bone_core::prelude::Instant;
 use ustr::Ustr;
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";

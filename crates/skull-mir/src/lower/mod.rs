@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::OnceLock;
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 use bone_semantic::hir::{
     BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
@@ -660,7 +660,7 @@ impl ScalarCtx {
         self.abi_plans.store(key, plan);
     }
 
-    pub(crate) fn abi_plan_record_derivation(&self, started: Option<std::time::Instant>) {
+    pub(crate) fn abi_plan_record_derivation(&self, started: Option<bone_core::prelude::Instant>) {
         self.abi_plans.record_derivation(started);
     }
 

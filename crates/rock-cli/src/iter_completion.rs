@@ -20,7 +20,7 @@
 use anyhow::Result;
 use bone_query::{last_completion_phase_timings, offset_to_position, BoneWorkspace};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 pub(crate) fn collect_rock_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();

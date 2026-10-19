@@ -1902,7 +1902,7 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
     let watchdog_done = test_done.clone();
     let watchdog_name = test.name.clone();
     std::thread::spawn(move || {
-        let start = std::time::Instant::now();
+        let start = bone_core::prelude::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(timeout_secs) {
             if watchdog_done.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
@@ -2423,7 +2423,7 @@ fn check_hover_response(
 /// Run all tests (single-shot + edit_sequence) in a single .rock.lsp file.
 /// Returns a `FileTestResult` for the shared parallel runner.
 fn run_lsp_file(file: &Path, display_name: &str, backend: crate::Backend) -> FileTestResult {
-    let start_time = std::time::Instant::now();
+    let start_time = bone_core::prelude::Instant::now();
 
     let tests = match parse_lsp_test_file(file) {
         Ok(t) => t,
@@ -2603,7 +2603,7 @@ pub fn run_lsp_tests(
         return Ok((0, 0, 0, 0));
     }
 
-    let start_time = std::time::Instant::now();
+    let start_time = bone_core::prelude::Instant::now();
 
     let (total, passed, failed, ignored) = parallel_runner::run_files_parallel(
         lsp_files,

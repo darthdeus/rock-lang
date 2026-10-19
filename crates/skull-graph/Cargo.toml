@@ -17,6 +17,7 @@ test-hooks = []
 # depends on none of them. Roots are an INPUT -- deciding what a build roots
 # from is the driver's job, so `emission_roots` stays in `skull`.
 [dependencies]
+bone-core = { workspace = true }
 bone-semantic = { workspace = true }
 skull-mir = { workspace = true }
 skull-parser = { workspace = true }

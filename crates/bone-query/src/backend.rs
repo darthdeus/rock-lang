@@ -240,7 +240,7 @@ struct BoneProject {
     /// every file at load and for the `update.reinferred` set on each edit, so
     /// `rock/modules` can render "how long ago did this recompile" -- the
     /// incremental-perf watch view. Modules never yet touched are absent.
-    module_touched: HashMap<String, std::time::Instant>,
+    module_touched: HashMap<String, bone_core::prelude::Instant>,
     /// The package graph of this root's manifest, built once when the
     /// project is created. It supplies the resolver's alias tables and the
     /// dialect and package of a file that enters after the load (see
@@ -667,7 +667,7 @@ impl BoneWorkspace {
     /// server, but a session can hold several (scratch files keyed by parent
     /// dir), so this returns all of them as separate contexts.
     pub fn projects_summary(&self) -> Vec<(String, Vec<ModuleRecency>)> {
-        let now = std::time::Instant::now();
+        let now = bone_core::prelude::Instant::now();
         let mut out: Vec<(String, Vec<ModuleRecency>)> = self
             .projects
             .iter()
@@ -737,7 +737,7 @@ impl BoneWorkspace {
                     stdlib_texts().into_iter().chain(file_texts).collect();
                 // Baseline every loaded file at load time, so `ago_ms` is
                 // meaningful for modules not yet re-inferred by an edit.
-                let now = std::time::Instant::now();
+                let now = bone_core::prelude::Instant::now();
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 let mut project = BoneProject {
                     fallbacks: Default::default(),
@@ -874,7 +874,7 @@ impl BoneWorkspace {
         // Holes can only change in files that were re-typechecked, so collect
         // the changed set (edited file + reinferred dependents) to drive the
         // hole cache below.
-        let t_uf = std::time::Instant::now();
+        let t_uf = bone_core::prelude::Instant::now();
         let mut this_file_parse_err: Option<CompilerError> = None;
         let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut lint_changed_files = FxHashSet::default();
@@ -926,7 +926,7 @@ impl BoneWorkspace {
                     .iter()
                     .map(|(mid, _)| ws.module(*mid).file.as_str().to_string())
                     .collect();
-                let now = std::time::Instant::now();
+                let now = bone_core::prelude::Instant::now();
                 for file in touched {
                     proj.module_touched.insert(file.clone(), now);
                     changed.insert(file);
@@ -952,7 +952,7 @@ impl BoneWorkspace {
         }
         if rebuild_type_caches {
             proj.scoped_call_through.clear();
-            let t_reach = std::time::Instant::now();
+            let t_reach = bone_core::prelude::Instant::now();
             let idx = crate::reachability::ReachabilityIndex::build(proj.session.workspace());
             if prof {
                 eprintln!(
@@ -962,7 +962,7 @@ impl BoneWorkspace {
                 );
             }
             proj.reach = Some(idx);
-            let t_sigs = std::time::Instant::now();
+            let t_sigs = bone_core::prelude::Instant::now();
             let sigs = build_fn_sigs(proj.session.workspace());
             if prof {
                 eprintln!(
@@ -972,7 +972,7 @@ impl BoneWorkspace {
                 );
             }
             proj.fn_sigs = Some(sigs);
-            let t_ct = std::time::Instant::now();
+            let t_ct = bone_core::prelude::Instant::now();
             let ct = build_call_through(proj.session.workspace(), proj.reach.as_ref().unwrap());
             if prof {
                 eprintln!(
@@ -987,7 +987,7 @@ impl BoneWorkspace {
         }
         let uf_ms = t_uf.elapsed().as_secs_f64() * 1000.0;
 
-        let t_diag = std::time::Instant::now();
+        let t_diag = bone_core::prelude::Instant::now();
         let mut by_file: HashMap<String, Vec<Diagnostic>> = HashMap::new();
         // Seed every tracked file with an empty vec so clean files get a
         // clearing publish.
@@ -1030,7 +1030,7 @@ impl BoneWorkspace {
         // `None` from hole_diagnostics_for means "couldn't compute" (no
         // inference / parse fail) -- never cached, so it isn't mistaken for a
         // known-hole-free file.
-        let t_holes = std::time::Instant::now();
+        let t_holes = bone_core::prelude::Instant::now();
         let mut reparsed = 0usize;
         for (p, diags) in by_file.iter_mut() {
             if p == path && this_file_parse_err.is_some() {
@@ -1771,7 +1771,7 @@ impl BoneWorkspace {
         // Every early-return path below reports its total under BONE_LSP_PROFILE;
         // the fall-through path has its own phase breakdown further down.
         let prof = lsp_profile_enabled();
-        let t_total = std::time::Instant::now();
+        let t_total = bone_core::prelude::Instant::now();
         let path_ms = |label: &str, n: usize| {
             if prof {
                 eprintln!(
@@ -1958,7 +1958,7 @@ impl BoneWorkspace {
         });
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
-            let t = std::time::Instant::now();
+            let t = bone_core::prelude::Instant::now();
             // A half-typed arm HEAD (`match s { co`) is what broke the parse:
             // complete it (` => {}` at the cursor) so the recovery reparse
             // keeps the match -- and its scrutinee, which the pattern rung
@@ -2048,7 +2048,7 @@ impl BoneWorkspace {
         }
         // The prefix filter happens inside `crate::query::completion`, before per-candidate
         // detail rendering -- so typing narrows the work, not just the result.
-        let t_cands = std::time::Instant::now();
+        let t_cands = bone_core::prelude::Instant::now();
         let mut cands = crate::query::completion(ws, mid, inf, offset, &prefix, expr_position);
         // Macros are expanded away before bone lowering, so `ws` has no record
         // of them -- without this every macro in the tree is invisible to
@@ -2171,7 +2171,7 @@ impl BoneWorkspace {
                 _ => None,
             }
         });
-        let t_build = std::time::Instant::now();
+        let t_build = bone_core::prelude::Instant::now();
         // The signature cache (rebuilt only on non-`BodyOnly` edits) supplies fn
         // `detail` for the survivors below. The one-shot CLI path has no cached
         // build, so render a throwaway one from the same workspace.
@@ -2511,7 +2511,7 @@ impl BoneWorkspace {
         // edits), so this is O(in-scope roots) guided lookups against a prebuilt
         // table, not the old per-root O(functions) `ufcs_methods` scan. Ranked
         // with the type-matching variables (rank 0), shortest paths first.
-        let t_reach = std::time::Instant::now();
+        let t_reach = bone_core::prelude::Instant::now();
         // Reach and call-through indexes retain canonical DefKeys internally;
         // their readers apply the fragment resolver before materializing names.
         let synthesize = true;
@@ -2628,7 +2628,7 @@ impl BoneWorkspace {
         // Whole-call-through-first-param candidates (`rejtanog` ->
         // `reject_target(TargetError::NotGround)`). Expression position only
         // (a value slot), additive to the normal candidates.
-        let t_ct = std::time::Instant::now();
+        let t_ct = bone_core::prelude::Instant::now();
         let mut ct_counts = CtCounts::default();
         // Skip call-through entirely when the general (+ reach) candidates already
         // fill the cap: MOST call-through items are bucket 4 (sort_text "1..."),
@@ -3287,7 +3287,7 @@ impl BoneWorkspace {
             return SemanticTokens::default();
         };
         let prof = lsp_profile_enabled();
-        let t = std::time::Instant::now();
+        let t = bone_core::prelude::Instant::now();
         let Some(toks) = proj.fallbacks.result(
             rock_tokenizer::Tokenizer::new(src, Ustr::from(path)).tokenize(),
             "semantic tokens", path, "tokenize source", "empty token response",
@@ -3296,7 +3296,7 @@ impl BoneWorkspace {
         };
         let tok_ms = t.elapsed().as_secs_f64() * 1000.0;
         let ws = proj.session.workspace();
-        let t = std::time::Instant::now();
+        let t = bone_core::prelude::Instant::now();
         let mut names = semantic_name_map(ws);
         // Macros are expanded away before bone lowering, so the workspace HIR
         // has no record of them; the Session's parse-time capture supplies the
@@ -3305,7 +3305,7 @@ impl BoneWorkspace {
             names.entry(md.name).or_insert(TT_MACRO);
         }
         let names_ms = t.elapsed().as_secs_f64() * 1000.0;
-        let t = std::time::Instant::now();
+        let t = bone_core::prelude::Instant::now();
         let hir = user_module_for_path(ws, path)
             .map(|mid| semantic_classifications(ws, mid, range))
             // A missing HIR module still permits lexical tokens for a partial buffer.
@@ -4602,7 +4602,7 @@ fn reparse_with_project(
 ) -> Option<Workspace> {
     let combined = proj.fallbacks.result(proj.session.combined_unexpanded(),
         request, path, "combined-module parse", "use live workspace")?;
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     let out = reparse_with_project_inner(&combined, path, munged, &proj.fallbacks, request);
     if lsp_profile_enabled() {
         eprintln!(

@@ -15,6 +15,7 @@ description = "Lua emission, local allocation and frame limits"
 # never to look up an operand's type.
 
 [dependencies]
+bone-core = { workspace = true }
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
 skull-mir = { workspace = true }

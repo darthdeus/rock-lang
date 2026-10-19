@@ -102,10 +102,10 @@ pub fn inlay_hints(
     end: usize,
 ) -> Vec<HintEntry> {
     let prof = crate::backend::lsp_profile_enabled();
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     let lets = crate::query::inferred_let_bindings(ws, mid, inf, start, end);
     let let_ms = t.elapsed().as_secs_f64() * 1000.0;
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     let params = crate::query::call_param_hints(ws, mid, inf, start, end);
     let param_ms = t.elapsed().as_secs_f64() * 1000.0;
     if prof {

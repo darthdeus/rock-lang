@@ -35,7 +35,7 @@ use colored::Colorize;
 use skull::ValueExpect;
 use skull_codegen_glsl::{emit_value_test, GlslProfile, ValueTestShaders};
 use skull_mir::mir::FuncRef;
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 /// GLSL is validated widely enough that f32 arithmetic and the R32F round-trip
 /// introduce error well above the 1e-12 luajit/node tolerance -- ~1e-6 is f32

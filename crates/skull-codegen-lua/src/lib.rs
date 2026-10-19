@@ -504,7 +504,7 @@ fn color_cells_timed_with_pins(
     inlinable: &[bool],
     extra_pinned: &[Idx<Cell>],
 ) -> Vec<u32> {
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     let colors = regalloc::color_cells_with_inlined_loads_and_pinned_cells(
         func,
         Some(inlinable),
@@ -3186,7 +3186,7 @@ fn render_scope(
         LoopShape::Goto => HashMap::default(),
         LoopShape::Structured => recognize_structured_loops(func, entry, rpo, &loops),
     };
-    let t_ra = std::time::Instant::now();
+    let t_ra = bone_core::prelude::Instant::now();
     // Counted-loop regions partition the coloring so loop-body temps get
     // body-scoped `local`s (see `ValueAlloc::color_scope`). Partitioning trades
     // some color sharing for scoping; if a monster function's palette total

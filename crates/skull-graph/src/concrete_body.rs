@@ -1350,7 +1350,7 @@ fn concrete_struct_field_types(
     timing_enabled: bool,
 ) -> Result<ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>, MonoTyReason> {
     let mut out = ArenaMap::default();
-    let started = timing_enabled.then(std::time::Instant::now);
+    let started = timing_enabled.then(bone_core::prelude::Instant::now);
     for (expr, node) in body.expr_arena.iter() {
         let Expr::StructLiteral { name, .. } = node else { continue };
         stats.struct_literals_examined += 1;
@@ -1429,7 +1429,7 @@ fn concrete_ty_types(
         }
     }
     stats.type_nodes_examined += nodes.len();
-    let started = timing_enabled.then(std::time::Instant::now);
+    let started = timing_enabled.then(bone_core::prelude::Instant::now);
     g.interner().with_mut(|arena| {
         nodes
             .into_iter()
@@ -1678,7 +1678,7 @@ fn publish_signatures(
             }
         }
     }
-    let started = std::time::Instant::now();
+    let started = bone_core::prelude::Instant::now();
     let mut published = FxHashMap::default();
     for instance in instances {
         let result = g
@@ -1822,7 +1822,7 @@ fn publish_foreign_domains(
     stats: &mut ConcreteBuildStats,
     timing_enabled: bool,
 ) -> PublishedDomains {
-    let started = timing_enabled.then(std::time::Instant::now);
+    let started = timing_enabled.then(bone_core::prelude::Instant::now);
     let mut published = BTreeMap::new();
     for domain in domains {
         let result = match domain.clone() {
@@ -1895,7 +1895,7 @@ fn prepare_instance(
     inst: Instance,
     timing_enabled: bool,
 ) -> PreparedInstanceResult {
-    let t_inst = std::time::Instant::now();
+    let t_inst = bone_core::prelude::Instant::now();
     if g.has_bound_tree_disagreement(&inst) {
         return PreparedInstanceResult::Gap(MissingBody {
             instance: inst,
@@ -1948,7 +1948,7 @@ fn prepare_instance(
     } else {
         (0, 0)
     };
-    let started = std::time::Instant::now();
+    let started = bone_core::prelude::Instant::now();
     let converted = g.interner().with_mut(|arena| convert_body(arena, ws, inf, body, &subst));
     let convert_time = started.elapsed();
     facts.expr_examined = converted.expr_examined;
@@ -2158,7 +2158,7 @@ fn foreign_domains_from_publication<I>(
 where
     I: IntoIterator<Item = SiteDomain>,
 {
-    let started = timing_enabled.then(std::time::Instant::now);
+    let started = timing_enabled.then(bone_core::prelude::Instant::now);
     let mut out = BTreeMap::new();
     for domain in domains {
         stats.foreign_domain_requests += 1;
@@ -2193,7 +2193,7 @@ fn concrete_plan_from_publication(
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
     let mut candidate_refs = FxHashSet::default();
-    let signature_started = timing_enabled.then(std::time::Instant::now);
+    let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
     let callee_rows = counted_callees(body, stats);
     for (site, callee) in &callee_rows {
         let instance = callee.instance().clone();
@@ -2264,7 +2264,7 @@ fn produce_instance(
     domains: &PublishedDomains,
     timing_enabled: bool,
 ) -> BuiltInstance {
-    let started_instance = std::time::Instant::now();
+    let started_instance = bone_core::prelude::Instant::now();
     let PreparedInstance {
         instance: inst,
         types,
@@ -2283,7 +2283,7 @@ fn produce_instance(
         iterator_ops: BTreeMap::new(),
         synthesized_calls: BTreeMap::new(),
     };
-    let started = std::time::Instant::now();
+    let started = bone_core::prelude::Instant::now();
     callee_tables(ws, g, &inst, &mut concrete, &mut facts);
     let callee_time = started.elapsed();
     let keys: BTreeSet<Idx<Expr>> = counted_callees(&concrete, &mut facts.build_stats)
@@ -2306,7 +2306,7 @@ fn produce_instance(
         + concrete.iterator_ops.len()
         + concrete.synthesized_calls.len()
         + 1;
-    let started = std::time::Instant::now();
+    let started = bone_core::prelude::Instant::now();
     facts.build_stats.plan_attempts += 1;
     let (plan, candidate_refs) = match concrete_plan_from_publication(
         g,
@@ -2408,7 +2408,7 @@ fn produce_always(
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
     let mut failed_sites = BTreeMap::new();
-    let signature_started = timing_enabled.then(std::time::Instant::now);
+    let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
     for (site, record) in &contribution.always_call_sites {
         match &record.outcome {
             SiteOutcome::Resolved(instance) => {
@@ -2922,10 +2922,10 @@ fn build_published_impl(
     #[cfg(not(feature = "test-hooks"))]
     let _ = order;
     BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
-    let t_build = std::time::Instant::now();
+    let t_build = bone_core::prelude::Instant::now();
     let intern_before = g.interner().stats();
     let timing_enabled = log::log_enabled!(log::Level::Debug);
-    let t_expansion = std::time::Instant::now();
+    let t_expansion = bone_core::prelude::Instant::now();
     let expanded: Vec<Instance> = g.expanded().cloned().collect();
     let mut unique_decls: FxHashSet<FuncRef> = FxHashSet::default();
     for instance in &expanded {
@@ -2933,7 +2933,7 @@ fn build_published_impl(
     }
     let expansion_time = t_expansion.elapsed();
 
-    let t_preparation = std::time::Instant::now();
+    let t_preparation = bone_core::prelude::Instant::now();
     #[allow(unused_mut)]
     let mut prepared = expanded
         .iter()
@@ -2963,12 +2963,12 @@ fn build_published_impl(
         .map(PreparedInstanceResult::instance)
         .cloned()
         .collect::<Vec<_>>();
-    let t_signature_publication = std::time::Instant::now();
+    let t_signature_publication = bone_core::prelude::Instant::now();
     let (signatures, signature_derivations, signature_time) =
         publish_signatures(ws, g, &publication_instances);
     let signature_publication_time = t_signature_publication.elapsed();
     let mut publication_stats = ConcreteBuildStats::default();
-    let t_foreign_publication = std::time::Instant::now();
+    let t_foreign_publication = bone_core::prelude::Instant::now();
     let domains = collect_foreign_domains(g, &publication_instances);
     let published_domains = publish_foreign_domains(
         ws,
@@ -2980,7 +2980,7 @@ fn build_published_impl(
     publication_stats.signature_ns += signature_time.as_nanos() as u64;
     let foreign_publication_time = t_foreign_publication.elapsed();
 
-    let t_partition = std::time::Instant::now();
+    let t_partition = bone_core::prelude::Instant::now();
     #[cfg(feature = "test-hooks")]
     if matches!(order, BuildResultOrder::Reverse) {
         prepared.reverse();
@@ -3002,7 +3002,7 @@ fn build_published_impl(
     }
     let partition_time = t_partition.elapsed();
     let ordinary_census = WorkerCensus::default();
-    let t_ordinary_parallel = std::time::Instant::now();
+    let t_ordinary_parallel = bone_core::prelude::Instant::now();
     #[cfg(feature = "test-hooks")]
     let (mut results, completion_trace) = produce_instances(
         ws,
@@ -3029,7 +3029,7 @@ fn build_published_impl(
     results.extend(gaps.into_iter().map(InstanceResult::Gap));
     results.sort_by(|left, right| left.instance().cmp(right.instance()));
 
-    let t_ordinary_merge = std::time::Instant::now();
+    let t_ordinary_merge = bone_core::prelude::Instant::now();
     let mut out = ConcreteBodies::default();
     out.global_build_stats = publication_stats;
     let mut plans = skull_mir::concrete::ConcretePlans::new();
@@ -3064,28 +3064,28 @@ fn build_published_impl(
                 let candidate_refs = built.candidate_refs;
                 candidate_ref_rows += candidate_refs.len();
                 if let Ok(plan) = built.plan {
-                    let started = timing_enabled.then(std::time::Instant::now);
+                    let started = timing_enabled.then(bone_core::prelude::Instant::now);
                     out.install_candidate_refs_owned(&instance, candidate_refs);
                     if let Some(started) = started {
                         candidate_install_time += started.elapsed();
                     }
-                    let started = timing_enabled.then(std::time::Instant::now);
+                    let started = timing_enabled.then(bone_core::prelude::Instant::now);
                     plans.insert(instance.clone(), std::sync::Arc::new(plan));
                     if let Some(started) = started {
                         plan_insert_time += started.elapsed();
                     }
                 }
-                let started = timing_enabled.then(std::time::Instant::now);
+                let started = timing_enabled.then(bone_core::prelude::Instant::now);
                 out.bodies.insert(instance.clone(), built.concrete);
                 if let Some(started) = started {
                     body_insert_time += started.elapsed();
                 }
-                let started = timing_enabled.then(std::time::Instant::now);
+                let started = timing_enabled.then(bone_core::prelude::Instant::now);
                 out.install_failure_index(&facts);
                 if let Some(started) = started {
                     failure_index_time += started.elapsed();
                 }
-                let started = timing_enabled.then(std::time::Instant::now);
+                let started = timing_enabled.then(bone_core::prelude::Instant::now);
                 out.instance_facts.insert(instance, facts);
                 if let Some(started) = started {
                     owner_fact_insert_time += started.elapsed();
@@ -3095,7 +3095,7 @@ fn build_published_impl(
     }
     let ordinary_merge_time = t_ordinary_merge.elapsed();
 
-    let t_always_parallel = std::time::Instant::now();
+    let t_always_parallel = bone_core::prelude::Instant::now();
     let always_census = WorkerCensus::default();
     let mut always_results = concrete_map(always_inputs, &always_census, |prepared| {
         produce_always(
@@ -3108,7 +3108,7 @@ fn build_published_impl(
         )
     });
     let always_parallel_time = t_always_parallel.elapsed();
-    let t_always_merge = std::time::Instant::now();
+    let t_always_merge = bone_core::prelude::Instant::now();
     always_results.sort_by_key(|result| result.order);
     for result in always_results {
         let owner = result.owner.clone();

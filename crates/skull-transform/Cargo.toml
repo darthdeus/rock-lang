@@ -13,6 +13,7 @@ description = "Control-flow transforms, inlining and coroutine lowering"
 # skull-codegen-lua (emit the transformed step + the constructor).
 
 [dependencies]
+bone-core = { workspace = true }
 rustc-hash = { workspace = true }
 comfy-la-arena = { workspace = true }
 skull-mir = { workspace = true }

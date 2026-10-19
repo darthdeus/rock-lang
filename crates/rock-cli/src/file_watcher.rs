@@ -12,7 +12,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 #[cfg(not(target_os = "macos"))]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bone_core::prelude::Instant;
 
 #[cfg(not(target_os = "macos"))]
 type DebouncerCacheType = notify_debouncer_full::RecommendedCache;
@@ -909,7 +910,7 @@ mod macos {
         #[test]
         #[ignore = "manual watcher startup and steady-state measurement"]
         fn measure_source_watch_population() {
-            use std::time::Instant;
+            use bone_core::prelude::Instant;
             let root = PathBuf::from(std::env::var_os("ROCK_WATCH_MEASURE_ROOT")
                 .expect("set ROCK_WATCH_MEASURE_ROOT to the source tree to measure"));
             for (name, roots) in [("source", vec![root, rock_stdlib::stdlib_dir()])] {

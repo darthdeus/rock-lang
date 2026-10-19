@@ -31,7 +31,7 @@
 //! instantiation reached.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 use bone_semantic::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
 use bone_semantic::inference::{BodyInference, Workspace};
@@ -1563,19 +1563,19 @@ pub fn build_in(
 ) -> InstanceGraph {
     #[cfg(feature = "test-hooks")]
     BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
-    let t_build = std::time::Instant::now();
+    let t_build = bone_core::prelude::Instant::now();
     let intern_before = interner.stats();
     let mut g = InstanceGraph::empty_in(interner);
     g.verify_whole_graph = std::env::var_os("ROCK_GRAPH_VERIFY").is_some();
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     g.seed_roots(ws, canonical_roots(ws, roots, perturb));
     let pending = g.always_emitted_owners(ws);
     let t_seed = t.elapsed();
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     let stats = g.run(ws, pending, true, false);
     g.run_stats = stats;
     let t_run = t.elapsed();
-    let t = std::time::Instant::now();
+    let t = bone_core::prelude::Instant::now();
     g.derive(ws, false);
     let t_derive = t.elapsed();
     if log::log_enabled!(log::Level::Debug) {

@@ -140,7 +140,7 @@ impl ProcessManager {
                                         if !line_overflow {
                                             if let Some(ordinal) = parse_test_time_progress(&line, token) {
                                                 let _ = tx.send(ProgressEvent {
-                                                    at: std::time::Instant::now(),
+                                                    at: bone_core::prelude::Instant::now(),
                                                     progress: ProcessProgress::TestTime(ordinal),
                                                     child_cpu: child_process_cpu_time(child_pid),
                                                 });
@@ -197,7 +197,7 @@ impl ProcessManager {
                                         None
                                     };
                                     let _ = tx.send(ProgressEvent {
-                                        at: std::time::Instant::now(),
+                                        at: bone_core::prelude::Instant::now(),
                                         progress,
                                         child_cpu,
                                     });
@@ -215,7 +215,7 @@ impl ProcessManager {
         });
         drop(progress_tx);
 
-        let start_time = std::time::Instant::now();
+        let start_time = bone_core::prelude::Instant::now();
         let mut last_progress_at = start_time;
         let mut first_progress_at = None;
         let mut latest_progress = None;
@@ -251,7 +251,7 @@ impl ProcessManager {
                     last_progress_at = if matches!(policy, WaitPolicy::Test { .. }) {
                         last_progress_at.max(event.at)
                     } else {
-                        std::time::Instant::now()
+                        bone_core::prelude::Instant::now()
                     };
                     first_progress_at.get_or_insert(last_progress_at);
                     if let ProcessProgress::Observed(progress) = event.progress {
@@ -418,7 +418,7 @@ impl std::fmt::Display for TimeoutPhase {
 }
 
 struct ProgressEvent<P> {
-    at: std::time::Instant,
+    at: bone_core::prelude::Instant,
     progress: ProcessProgress<P>,
     child_cpu: Option<Duration>,
 }

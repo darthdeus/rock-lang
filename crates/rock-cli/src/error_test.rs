@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 use fs_err as fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use bone_core::prelude::Instant;
 use walkdir::WalkDir;
 
 #[derive(Debug)]

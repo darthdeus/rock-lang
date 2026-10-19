@@ -14,7 +14,7 @@ use rock_core::{CompilerError, SourceFiles, source_file_from_path_and_contents};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 #[derive(Clone, Debug, Default)]
 pub struct LintPassCensus {

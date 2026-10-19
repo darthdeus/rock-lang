@@ -19,7 +19,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::Cell as ThreadCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{BoundTree, CompilerError};

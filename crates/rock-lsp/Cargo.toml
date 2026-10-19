@@ -20,6 +20,7 @@ sequential = ["bone-query/sequential"]
 workspace = true
 
 [dependencies]
+bone-core = { workspace = true }
 rock-host = { workspace = true }
 bone-query = { workspace = true }
 bone-lints = { workspace = true }
@@ -34,7 +35,6 @@ serde_json = { workspace = true }
 
 ustr = { workspace = true }
 log = { workspace = true }
-crossterm = "0.28"
 
 env_logger = { workspace = true }
 lsp-server = { workspace = true }
@@ -53,3 +53,6 @@ tempfile = "3.0"
 [[test]]
 name = "bone"
 path = "tests/bone/main.rs"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+crossterm = "0.28"

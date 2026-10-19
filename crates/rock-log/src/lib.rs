@@ -10,7 +10,8 @@ use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use bone_core::prelude::Instant;
 
 // 0=error 1=warn 2=info 3=debug 4=trace. Default info (2). Single
 // source of truth for the whole process; external level bridges delegate here.

@@ -31,7 +31,8 @@ use skull_parser::CompilerError;
 use skull_parser::CompilerErrorKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bone_core::prelude::Instant;
 use ustr::Ustr;
 
 /// Map `f` over `items`, in PARALLEL by default (rayon work-stealing pool) or
@@ -9378,7 +9379,8 @@ mod wgpu_projection_tests {
 mod setup_parallel_tests {
     use super::*;
     use std::sync::{Condvar, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use bone_core::prelude::Instant;
 
     /// How long a setup branch waits for its peer to start before calling the
     /// branches serialized. Generous so a loaded gate host still passes.

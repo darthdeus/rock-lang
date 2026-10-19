@@ -19,7 +19,8 @@ use std::cell::RefCell;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use bone_core::prelude::Instant;
 
 pub const SLOT_DIR_ENV: &str = "ROCK_COMPILE_SLOT_DIR";
 pub const SLOTS_ENV: &str = "ROCK_COMPILE_SLOTS";

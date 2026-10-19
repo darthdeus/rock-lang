@@ -27,7 +27,7 @@ use lsp_types::{Position, Range};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 use crate::skull_backend::{body_digit_flip, ms};
 

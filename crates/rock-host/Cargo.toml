@@ -27,7 +27,6 @@ test-utils = { workspace = true }
 rock-core = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
-wait-timeout = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -42,3 +41,6 @@ tempfile = "3.0"
 ustr = { workspace = true }
 atomic_refcell = { workspace = true }
 rayon = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+wait-timeout = { workspace = true }

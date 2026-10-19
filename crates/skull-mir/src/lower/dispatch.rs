@@ -316,7 +316,7 @@ impl<'a> DispatchCtx<'a> {
         }
         let interner = self.interner?;
         if let Some(cache) = self.concrete_type_cache {
-            let cache_lookup_start = timing.then(std::time::Instant::now);
+            let cache_lookup_start = timing.then(bone_core::prelude::Instant::now);
             let hit = cache.borrow().get(&id).map(Rc::clone);
             let cache_lookup_ns = cache_lookup_start
                 .map(|start| start.elapsed().as_nanos() as u64)
@@ -338,7 +338,7 @@ impl<'a> DispatchCtx<'a> {
                 }
                 return Some(ty);
             }
-            let lookup_start = timing.then(std::time::Instant::now);
+            let lookup_start = timing.then(bone_core::prelude::Instant::now);
             let (ty, interner_cold) = interner.get_shared_with_status(id);
             let lookup_ns = lookup_start
                 .map(|start| start.elapsed().as_nanos() as u64)
@@ -367,7 +367,7 @@ impl<'a> DispatchCtx<'a> {
                 stats.borrow_mut().concrete_mono_timed_requests += 1;
             }
         }
-        let lookup_start = timing.then(std::time::Instant::now);
+        let lookup_start = timing.then(bone_core::prelude::Instant::now);
         let (ty, interner_cold) = interner.get_shared_with_status(id);
         let lookup_ns = lookup_start
             .map(|start| start.elapsed().as_nanos() as u64)

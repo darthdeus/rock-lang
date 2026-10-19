@@ -45,13 +45,16 @@ use lsp_types::{
     WorkDoneProgressOptions,
 };
 
+#[cfg(not(target_family = "wasm"))]
 pub mod cli;
 mod code_actions;
 pub mod semantic_tokens;
+#[cfg(not(target_family = "wasm"))]
 pub mod server_cli;
 pub mod workspace;
 mod workspace_adapters;
 
+#[cfg(not(target_family = "wasm"))]
 pub use server_cli::run_cli;
 
 pub use code_actions::*;
@@ -112,7 +115,7 @@ fn lsp_timing_enabled() -> bool {
 struct ReqTiming {
     method: String,
     id: lsp_server::RequestId,
-    start: std::time::Instant,
+    start: bone_core::prelude::Instant,
 }
 
 impl Drop for ReqTiming {
@@ -460,7 +463,7 @@ fn main_loop(connection: Connection, params: serde_json::Value, policy: crate::C
                 let _timing = ReqTiming {
                     method: req.method.clone(),
                     id: req.id.clone(),
-                    start: std::time::Instant::now(),
+                    start: bone_core::prelude::Instant::now(),
                 };
 
                 // Deterministic panic trigger for the wedge-recovery test. Inert
@@ -1070,7 +1073,7 @@ fn bone_reload_and_publish(
     // Compile-on-open/edit cost (ROCK_LSP_TIMING=1). This is the notification
     // path (didOpen/didChange) that head-of-line-blocks every queued request
     // behind it, so it's the number to watch when first-paint feels slow.
-    let _t = std::time::Instant::now();
+    let _t = bone_core::prelude::Instant::now();
     let per_file = workspace.bone.update(&file_path, contents);
     if lsp_timing_enabled() {
         log::info!(

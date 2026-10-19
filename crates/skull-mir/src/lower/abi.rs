@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 use bone_semantic::hir::{FnBackend, Function};
 use bone_semantic::inference::Workspace;

@@ -1594,6 +1594,7 @@ dependencies = [
 name = "rock-log"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "log",
  "once_cell",
 ]
@@ -1603,6 +1604,7 @@ name = "rock-lsp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bone-core",
  "bone-lints",
  "bone-query",
  "clap",
@@ -1845,6 +1847,7 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 name = "skull"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-incremental",
  "bone-semantic",
  "comfy-la-arena",
@@ -1886,6 +1889,7 @@ dependencies = [
 name = "skull-codegen-lua"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-semantic",
  "comfy-la-arena",
  "log",
@@ -1946,6 +1950,7 @@ dependencies = [
 name = "skull-graph"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-semantic",
  "comfy-la-arena",
  "log",
@@ -1960,6 +1965,7 @@ dependencies = [
 name = "skull-mir"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-semantic",
  "comfy-la-arena",
  "rock-stdlib",
@@ -1986,6 +1992,7 @@ dependencies = [
 name = "skull-transform"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-semantic",
  "comfy-la-arena",
  "log",

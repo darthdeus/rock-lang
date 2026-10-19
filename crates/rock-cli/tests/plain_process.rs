@@ -148,7 +148,8 @@ fn plain_reports_identity_storage_in_private_package_names() {
 #[test]
 fn plain_watch_resolves_project_outside_workspace() {
     use std::process::{Child, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use bone_core::prelude::Instant;
     struct StopOnDrop<'a>(&'a mut Child);
     impl Drop for StopOnDrop<'_> {
         fn drop(&mut self) {

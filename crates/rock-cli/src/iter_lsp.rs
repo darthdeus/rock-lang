@@ -24,7 +24,7 @@ use anyhow::Result;
 use bone_query::{offset_to_position, BoneWorkspace};
 use lsp_types::{Position, Range};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use bone_core::prelude::Instant;
 
 use crate::skull_backend::{body_digit_flip, body_touch, ms};
 

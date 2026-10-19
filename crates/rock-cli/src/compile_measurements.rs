@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use bone_core::prelude::Instant;
 
 static COMMAND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 

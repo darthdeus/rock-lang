@@ -15,7 +15,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use bone_core::prelude::Instant;
 
 const SCHEMA: u64 = 1;
 const LOG_ENV: &str = "ROCK_INVOCATION_LOG";
