@@ -13,3 +13,4 @@ mod bone_server_highlight;
 mod bone_server_symbols;
 mod bone_struct_fields_action;
 mod bone_suppress_lint_action;
+mod bone_uri_paths;

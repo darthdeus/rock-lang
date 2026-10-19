@@ -46,9 +46,10 @@ fn semantic_token_failure_reports_cause_once_and_recovers() {
 fn workspace_symbol_uri_failure_reports_cause_once_and_keeps_other_files() {
     let capture = Recording::start();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("invalid\nsymbol.rock").to_string_lossy().into_owned();
+    // A relative path is the one spelling a file: URI cannot carry.
+    let path = "relative-symbol.rock".to_string();
     let good_path = dir.path().join("good.rock").to_string_lossy().into_owned();
-    let cause = format!("file://{path}").parse::<lsp_types::Uri>().unwrap_err().to_string();
+    let cause = lsp_types::Uri::from_file_path(&path).unwrap_err().to_string();
     let mut bone = BoneWorkspace::new();
     bone.update(&path, "fn omitted_symbol() {}".into());
     bone.update(&good_path, "fn retained_symbol() {}".into());

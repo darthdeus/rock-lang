@@ -95,3 +95,20 @@ fn default_policy_reports_identity_storage_for_named_packages() {
     server.bone.update(path, source.to_owned());
     assert!(server.bone.diagnostics_for(path).iter().any(|d| d.message.contains("cannot store identity struct `Actor`")));
 }
+
+#[test]
+fn unreadable_file_fails_the_dir_report_by_name() {
+    // A .rock file that is not UTF-8 cannot be read; the walk must name it and
+    // fail rather than report a clean project with the file silently dropped.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.path().join("bad.rock"), b"fn main() {}\n\xff\xfe\n").unwrap();
+    let path = dir.path().to_str().unwrap();
+    for (what, res) in [
+        ("diagnostics", rock_lsp::cli::bone_lsp::diagnostics(path)),
+        ("lint", rock_lsp::cli::bone_lsp::lint(path)),
+    ] {
+        let err = res.expect_err(what).to_string();
+        assert!(err.contains("bad.rock") && !err.contains("a.rock,"), "{what}: {err}");
+    }
+}

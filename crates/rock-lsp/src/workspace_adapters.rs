@@ -3,17 +3,8 @@ use crate::*;
 use anyhow::Result;
 use lsp_types::*;
 
-fn file_path_from_uri(uri: &lsp_types::Uri) -> String {
-    let s = uri.as_str();
-    s.strip_prefix("file://").unwrap_or(s).to_string()
-}
-
 fn get_file_path_from_params(params: &TextDocumentPositionParams) -> Result<String> {
-    Ok(file_path_from_uri(&params.text_document.uri))
-}
-
-pub fn get_file_path_from_code_action_params(params: &CodeActionParams) -> Result<String> {
-    Ok(file_path_from_uri(&params.text_document.uri))
+    Ok(params.text_document.uri.to_file_path()?)
 }
 
 /// Workspace-aware go to definition
@@ -65,11 +56,9 @@ pub fn do_document_highlight_workspace(
     params: &DocumentHighlightParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
     crate::scope!("do_document_highlight_workspace");
-    // Plain `file://` strip to match the key bone.update registers on didChange.
-    let uri_str = params.text_document_position_params.text_document.uri.as_str();
-    let file_path = uri_str.strip_prefix("file://").unwrap_or(uri_str);
+    let file_path = params.text_document_position_params.text_document.uri.to_file_path()?;
     let pos = params.text_document_position_params.position;
-    let hl = workspace.bone.document_highlight(file_path, pos);
+    let hl = workspace.bone.document_highlight(&file_path, pos);
     Ok((!hl.is_empty()).then_some(hl))
 }
 
@@ -101,9 +90,8 @@ pub fn do_document_symbols_workspace(
     params: &DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
     crate::scope!("do_document_symbols_workspace");
-    let uri_str = params.text_document.uri.as_str();
-    let file_path = uri_str.strip_prefix("file://").unwrap_or(uri_str);
-    let symbols = workspace.bone.document_symbols(file_path);
+    let file_path = params.text_document.uri.to_file_path()?;
+    let symbols = workspace.bone.document_symbols(&file_path);
     Ok(Some(DocumentSymbolResponse::Nested(symbols)))
 }
 
@@ -125,13 +113,8 @@ pub fn do_inlay_hints_workspace(
 ) -> Result<Option<Vec<InlayHint>>> {
     crate::scope!("do_inlay_hints_workspace");
     let _span = tracing::debug_span!("do_inlay_hints_workspace").entered();
-    let uri_str = params.text_document.uri.as_str();
-    let file_path = if uri_str.starts_with("file://") {
-        &uri_str[7..]
-    } else {
-        uri_str
-    };
-    Ok(Some(workspace.bone.inlay_hints(file_path, params.range)))
+    let file_path = params.text_document.uri.to_file_path()?;
+    Ok(Some(workspace.bone.inlay_hints(&file_path, params.range)))
 }
 
 /// Workspace-aware completion

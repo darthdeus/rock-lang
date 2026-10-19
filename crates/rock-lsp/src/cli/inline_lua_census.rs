@@ -26,11 +26,14 @@ pub struct FileStat {
 }
 
 /// The whole census: every file that has any inline(lua) fn, plus grand totals.
+/// `unreadable` names each file (display path, reason) that could not be read
+/// or parsed, so is missing from the totals.
 #[derive(Debug, Clone, Default)]
 pub struct Census {
     pub files: Vec<FileStat>,
     pub total_fns: usize,
     pub total_lines: usize,
+    pub unreadable: Vec<(String, String)>,
 }
 
 /// Meaningful = non-blank, non-pure-`--`-comment lines. Same definition the old
@@ -50,7 +53,7 @@ fn count_meaningful_lines(src: &str) -> usize {
 /// against a file's display path drops the whole file; a match against a fn
 /// name drops that fn. Files with no surviving inline(lua) fn are omitted.
 pub fn census_report(path: &str, ignores: &[String]) -> Result<Census> {
-    let files = if fs_err::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
+    let files = if fs_err::metadata(path)?.is_dir() {
         rock_host::project::find_rock_files_at_path(path)?
     } else {
         vec![path.to_string()]
@@ -63,8 +66,21 @@ pub fn census_report(path: &str, ignores: &[String]) -> Result<Census> {
         if ignores.iter().any(|ig| disp.contains(ig.as_str())) {
             continue;
         }
-        let Ok(src) = fs_err::read_to_string(&file) else { continue };
-        let Some(file_stat) = file_stat(&disp, &src, ignores) else { continue };
+        let src = match fs_err::read_to_string(&file) {
+            Ok(src) => src,
+            Err(e) => {
+                census.unreadable.push((disp, e.to_string()));
+                continue;
+            }
+        };
+        let file_stat = match file_stat(&disp, &src, ignores) {
+            Ok(Some(file_stat)) => file_stat,
+            Ok(None) => continue,
+            Err(e) => {
+                census.unreadable.push((disp, e));
+                continue;
+            }
+        };
         census.total_fns += file_stat.fns.len();
         census.total_lines += file_stat.total_lines;
         census.files.push(file_stat);
@@ -73,9 +89,10 @@ pub fn census_report(path: &str, ignores: &[String]) -> Result<Census> {
 }
 
 /// Parse one file's source and collect its inline(lua) fns (fn-name ignores
-/// applied). Returns `None` when nothing survives, so the file is omitted.
-fn file_stat(disp: &str, src: &str, ignores: &[String]) -> Option<FileStat> {
-    let ast = skull_parser::parse_module(src, Ustr::from(disp)).ok()?;
+/// applied). Returns `None` when nothing survives, so the file is omitted, and
+/// the parse error when the file does not parse.
+fn file_stat(disp: &str, src: &str, ignores: &[String]) -> Result<Option<FileStat>, String> {
+    let ast = skull_parser::parse_module_clean(src, Ustr::from(disp)).map_err(|e| format!("parse error: {e}"))?;
     let mut fns: Vec<FnStat> = Vec::new();
     for item in &ast.items {
         let ItemKind::Function(func) = &item.kind else { continue };
@@ -87,11 +104,11 @@ fn file_stat(disp: &str, src: &str, ignores: &[String]) -> Option<FileStat> {
         fns.push(FnStat { name: name.to_string(), lines: count_meaningful_lines(body) });
     }
     if fns.is_empty() {
-        return None;
+        return Ok(None);
     }
     fns.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.name.cmp(&b.name)));
     let total_lines = fns.iter().map(|s| s.lines).sum();
-    Some(FileStat { file: disp.to_string(), fns, total_lines })
+    Ok(Some(FileStat { file: disp.to_string(), fns, total_lines }))
 }
 
 /// Path relative to `cwd` when the file lives under it, else the path as given.
@@ -113,8 +130,12 @@ pub fn render(census: &Census, summary: bool) -> String {
         census.total_lines,
         census.files.len()
     );
+    let mut unreadable = String::new();
+    for (file, why) in &census.unreadable {
+        unreadable.push_str(&format!("UNREADABLE: {file}: {why}\n"));
+    }
     if summary {
-        return format!("{total}\n");
+        return format!("{unreadable}{total}\n");
     }
     let mut out = String::new();
     for f in &census.files {
@@ -130,14 +151,16 @@ pub fn render(census: &Census, summary: bool) -> String {
             f.total_lines
         ));
     }
+    out.push_str(&unreadable);
     out.push_str(&total);
     out.push('\n');
     out
 }
 
 /// CLI handler. Multiple paths are censused into one report (one grand TOTAL),
-/// so the whole standard surface yields a single trend number. Exit is always 0
-/// (a census, not a gate).
+/// so the whole standard surface yields a single trend number. A census, not a
+/// gate, except that a file it could not read or parse fails the run: the
+/// totals would silently undercount.
 pub fn inline_lua_census(paths: &[String], ignores: &[String], summary: bool) -> Result<()> {
     let mut census = Census::default();
     for path in paths {
@@ -145,7 +168,12 @@ pub fn inline_lua_census(paths: &[String], ignores: &[String], summary: bool) ->
         census.total_fns += part.total_fns;
         census.total_lines += part.total_lines;
         census.files.extend(part.files);
+        census.unreadable.extend(part.unreadable);
     }
     print!("{}", render(&census, summary));
+    if !census.unreadable.is_empty() {
+        let names: Vec<&str> = census.unreadable.iter().map(|(f, _)| f.as_str()).collect();
+        anyhow::bail!("{} files could not be read or parsed: {}", names.len(), names.join(", "));
+    }
     Ok(())
 }

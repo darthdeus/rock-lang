@@ -1347,10 +1347,14 @@ impl BoneWorkspace {
     pub fn document_highlight(&self, path: &str, pos: Position) -> Vec<DocumentHighlight> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
-        let want = format!("file://{}", editor_path(path));
+        // A path with no URI has no locations either: `references` reports
+        // that failure when it builds them.
+        let Ok(want) = Uri::from_file_path(&editor_path(path)) else {
+            return Vec::new();
+        };
         self.references(path, pos)
             .into_iter()
-            .filter(|loc| loc.uri.as_str() == want)
+            .filter(|loc| loc.uri == want)
             .map(|loc| DocumentHighlight { range: loc.range, kind: None })
             .collect()
     }
@@ -2857,7 +2861,7 @@ impl BoneWorkspace {
                 let Some(mid) = user_module_for_path(ws, file) else {
                     continue;
                 };
-                let uri = match <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))) {
+                let uri = match Uri::from_file_path(&editor_path(file)) {
                     Ok(uri) => uri,
                     Err(error) => {
                         proj.fallbacks.report("workspace symbols", file, "construct URI",
@@ -3198,7 +3202,7 @@ impl BoneWorkspace {
         span: &Span,
     ) -> Option<(Uri, Cow<'a, str>)> {
         let file = span.file.as_str();
-        let uri = match <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))) {
+        let uri = match Uri::from_file_path(&editor_path(file)) {
             Ok(uri) => uri,
             Err(error) => {
                 proj.fallbacks.report("span location", file, "construct URI",
@@ -5116,10 +5120,10 @@ mod tests {
         let main = dir.path().join("main.rock").to_string_lossy().into_owned();
         let bone = span_test_workspace(&main);
         let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
-        let target = "/invalid\nspan.rock";
+        let target = "relative-span.rock";
         let mut span = Span::unknown();
         span.file = Ustr::from(target);
-        let cause = format!("file://{target}").parse::<Uri>().unwrap_err().to_string();
+        let cause = Uri::from_file_path(target).unwrap_err().to_string();
         capture.take();
         assert!(bone.location_from_span(proj, &span).is_none());
         let records = capture.take();
@@ -5153,7 +5157,7 @@ mod tests {
             assert!(matches!(text, Cow::Borrowed(_)));
             assert_eq!(text, source);
             let location = bone.location_from_span(proj, &span).unwrap();
-            assert_eq!(location.uri, format!("file://{path}").parse::<Uri>().unwrap());
+            assert_eq!(location.uri, Uri::from_file_path(&path).unwrap());
             assert_eq!(location.range, Range::new(Position::new(1, 3), Position::new(1, 7)));
             assert_eq!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()), Some(location));
         }

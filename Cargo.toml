@@ -60,6 +60,7 @@ skull-transform = { path = "crates/skull-transform" }
 rock-lsp = { path = "crates/rock-lsp" }
 lsp-server = { package = "lsp-server-manual", path = "crates/lsp-server-manual" }
 env_logger = { version = "0.11.5", default-features = false, features = ["auto-color"] }
+env_filter = { version = "2.0.0", default-features = false, features = ["std"] }
 tracing-flame = "0.2"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = ["std", "registry"] }
 tracing-perfetto = "0.1"

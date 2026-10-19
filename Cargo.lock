@@ -1609,6 +1609,7 @@ dependencies = [
  "bone-query",
  "clap",
  "crossterm",
+ "env_filter",
  "env_logger",
  "fs-err",
  "log",

@@ -11,9 +11,7 @@ pub fn compute_code_actions_workspace(
     params: &CodeActionParams,
 ) -> anyhow::Result<Option<Vec<CodeAction>>> {
     let uri = &params.text_document.uri;
-    let uri_str = uri.as_str();
-    // Plain `file://` strip to match the key bone.update registers.
-    let path = uri_str.strip_prefix("file://").unwrap_or(uri_str);
+    let path = &uri.to_file_path()?;
 
     let mut actions: Vec<CodeAction> = Vec::new();
 

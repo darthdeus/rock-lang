@@ -155,9 +155,8 @@ pub fn compute_semantic_tokens_range_workspace(
     workspace: &mut crate::LspWorkspace,
     params: SemanticTokensRangeParams,
 ) -> anyhow::Result<Option<SemanticTokensRangeResult>> {
-    let uri_str = params.text_document.uri.as_str();
-    let file_path = uri_str.strip_prefix("file://").unwrap_or(uri_str);
-    let mut tokens = workspace.bone.semantic_tokens_range(file_path, params.range);
+    let file_path = params.text_document.uri.to_file_path()?;
+    let mut tokens = workspace.bone.semantic_tokens_range(&file_path, params.range);
     remap_bone_token_types(&mut tokens);
     Ok(Some(SemanticTokensRangeResult::Tokens(tokens)))
 }
@@ -169,13 +168,8 @@ pub fn compute_semantic_tokens_workspace(
     workspace: &mut crate::LspWorkspace,
     params: SemanticTokensParams,
 ) -> anyhow::Result<Option<SemanticTokensResult>> {
-    let uri_str = params.text_document.uri.as_str();
-    let file_path = if uri_str.starts_with("file://") {
-        &uri_str[7..]
-    } else {
-        uri_str
-    };
-    let mut tokens = workspace.bone.semantic_tokens(file_path);
+    let file_path = params.text_document.uri.to_file_path()?;
+    let mut tokens = workspace.bone.semantic_tokens(&file_path);
     remap_bone_token_types(&mut tokens);
     Ok(Some(SemanticTokensResult::Tokens(tokens)))
 }

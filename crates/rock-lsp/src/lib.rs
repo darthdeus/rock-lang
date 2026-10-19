@@ -871,7 +871,7 @@ fn main_loop(connection: Connection, params: serde_json::Value, policy: crate::C
                         // Just log that we received the save notification
                         log::debug!(
                             "got textDocument/didSave notification for {}",
-                            uri.path().as_str()
+                            uri.as_str()
                         );
 
                         // Regenerate the project's `.rock.tags` on save (the
@@ -895,6 +895,9 @@ fn main_loop(connection: Connection, params: serde_json::Value, policy: crate::C
                             .ok_or_else(|| {
                                 anyhow::anyhow!("Failed to get uri from didOpen notification")
                             })?;
+                        let Some(file_path) = notification_path(&connection, &uri, "didOpen")? else {
+                            continue;
+                        };
 
                         let version = not
                             .params
@@ -923,18 +926,21 @@ fn main_loop(connection: Connection, params: serde_json::Value, policy: crate::C
                         // Set initial document version
                         workspace.update_document_version(&uri.to_string(), version);
 
-                        bone_reload_and_publish(&connection, &uri, contents, &mut workspace)?;
+                        bone_reload_and_publish(&connection, &file_path, contents, &mut workspace)?;
                         // Opening a project file is the LSP's "full build": the
                         // first open batch-loads the whole compilation unit, so
                         // regenerate the workspace-wide `.rock.tags` now (and on
                         // every restart, which re-opens the buffers). Without
                         // this a freshly opened / restarted project had NO tags
                         // until the first save.
-                        regenerate_ctags(&workspace, &uri, "open");
+                        regenerate_ctags(&workspace, &file_path, "open");
                     }
 
                     "textDocument/didChange" => {
                         let uri = notification_uri(&not)?;
+                        let Some(file_path) = notification_path(&connection, &uri, "didChange")? else {
+                            continue;
+                        };
 
                         // Extract document version and contents
                         let params = not.params.as_object().ok_or_else(|| {
@@ -998,16 +1004,17 @@ fn main_loop(connection: Connection, params: serde_json::Value, policy: crate::C
                         //     uri.to_string(), old_version, version
                         // );
 
-                        bone_reload_and_publish(&connection, &uri, contents, &mut workspace)?;
+                        bone_reload_and_publish(&connection, &file_path, contents, &mut workspace)?;
                     }
 
                     "textDocument/didClose" => {
                         let _span = tracing::debug_span!("lsp_did_close_notification").entered();
                         let uri = notification_uri(&not)?;
                         log::debug!("got textDocument/didClose for {}", uri.as_str());
-                        let uri_s = uri.as_str();
-                        let path = uri_s.strip_prefix("file://").unwrap_or(uri_s);
-                        workspace.bone.remove(path);
+                        let Some(path) = notification_path(&connection, &uri, "didClose")? else {
+                            continue;
+                        };
+                        workspace.bone.remove(&path);
                         workspace.close_document(uri.as_str());
                     }
 
@@ -1032,9 +1039,7 @@ fn main_loop(connection: Connection, params: serde_json::Value, policy: crate::C
 /// via its own didOpen -- no cross-root fan-out here, which would rewrite every
 /// root once per reopened buffer. Best-effort: a failure is logged, never
 /// propagated -- ctags must not break editing.
-fn regenerate_ctags(workspace: &LspWorkspace, uri: &Uri, when: &str) {
-    let uri_s = uri.as_str();
-    let file_path = uri_s.strip_prefix("file://").unwrap_or(uri_s);
+fn regenerate_ctags(workspace: &LspWorkspace, file_path: &str, when: &str) {
     match workspace.bone.write_ctags(file_path) {
         Ok(n) => log::debug!("wrote .rock.tags on {when} ({n} symbols)"),
         Err(e) => log::warn!("ctags: failed to write .rock.tags: {e}"),
@@ -1063,18 +1068,16 @@ fn regenerate_all_ctags(workspace: &LspWorkspace, when: &str) {
 /// clearing publish). Used on didOpen/didChange when `backend == Bone`.
 fn bone_reload_and_publish(
     connection: &Connection,
-    uri: &Uri,
+    file_path: &str,
     contents: String,
     workspace: &mut LspWorkspace,
 ) -> Result<()> {
-    let uri_s = uri.as_str();
-    let file_path = uri_s.strip_prefix("file://").unwrap_or(uri_s).to_string();
 
     // Compile-on-open/edit cost (ROCK_LSP_TIMING=1). This is the notification
     // path (didOpen/didChange) that head-of-line-blocks every queued request
     // behind it, so it's the number to watch when first-paint feels slow.
     let _t = bone_core::prelude::Instant::now();
-    let per_file = workspace.bone.update(&file_path, contents);
+    let per_file = workspace.bone.update(file_path, contents);
     if lsp_timing_enabled() {
         log::info!(
             target: "lsp_timing",
@@ -1095,9 +1098,12 @@ fn bone_reload_and_publish(
         if !workspace.diagnostics_changed(&path, &diagnostics) {
             continue;
         }
-        let Ok(file_uri) = Uri::from_str(&format!("file://{path}")) else {
-            log::error!("bone LSP: cannot build URI for diagnostics: {path}");
-            continue;
+        let file_uri = match Uri::from_file_path(&path) {
+            Ok(uri) => uri,
+            Err(e) => {
+                log::error!("bone LSP: cannot publish diagnostics: {e}");
+                continue;
+            }
         };
         let params = lsp_types::PublishDiagnosticsParams {
             uri: file_uri,
@@ -1122,6 +1128,25 @@ where
     R::Params: serde::de::DeserializeOwned,
 {
     seen.extract(R::METHOD)
+}
+
+/// The file a document notification is about. A URI that names no local file
+/// (an unsaved `untitled:` buffer, a remote scheme) is not an error that should
+/// stop the server: the notification is skipped and the client is told why.
+fn notification_path(connection: &Connection, uri: &Uri, method: &str) -> Result<Option<String>> {
+    match uri.to_file_path() {
+        Ok(path) => Ok(Some(path)),
+        Err(e) => {
+            let message = format!("rock-lsp: ignoring {method}: {e}");
+            log::warn!("{message}");
+            let params = lsp_types::ShowMessageParams { typ: lsp_types::MessageType::WARNING, message };
+            connection.sender.send(lsp_server::Message::Notification(lsp_server::Notification {
+                method: lsp_types::notification::ShowMessage::METHOD.to_string(),
+                params: serde_json::to_value(params)?,
+            }))?;
+            Ok(None)
+        }
+    }
 }
 
 fn notification_uri(not: &lsp_server::Notification) -> Result<Uri> {

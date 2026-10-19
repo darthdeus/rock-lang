@@ -73,15 +73,29 @@ type DiagFn = fn(&BoneWorkspace, &str) -> Vec<lsp_types::Diagnostic>;
 /// `rock-lsp diagnostics <path> --backend bone`. `path` may be a single file or
 /// a directory (whole-project diagnostics -- see [`diagnostics_report`]).
 pub fn diagnostics(path: &str) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&diagnostics_report(path)?)?);
-    Ok(())
+    print_report(diagnostics_report(path)?)
 }
 
 /// `rock-lsp lint <path> --backend bone`. Lint findings only (`unused_var`,
 /// `unused_fn`) -- no typecheck errors or holes. File or directory, like
 /// `diagnostics`.
 pub fn lint(path: &str) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&lint_report(path)?)?);
+    print_report(lint_report(path)?)
+}
+
+/// Print a diagnostics report, then fail when the directory walk could not read
+/// some files: their diagnostics are missing, so the report is not a clean bill.
+fn print_report(report: serde_json::Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    let unreadable: Vec<&str> = report["unreadable"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| u["file"].as_str())
+        .collect();
+    if !unreadable.is_empty() {
+        anyhow::bail!("{} file(s) could not be read: {}", unreadable.len(), unreadable.join(", "));
+    }
     Ok(())
 }
 
@@ -97,21 +111,20 @@ pub fn lint_report(path: &str) -> Result<serde_json::Value> {
 }
 
 pub fn diagnostics_with_policy(path: &str, policy: crate::CompilerPolicy) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&report_with(path, BoneWorkspace::diagnostics_for, policy)?)?);
-    Ok(())
+    print_report(report_with(path, BoneWorkspace::diagnostics_for, policy)?)
 }
 
 pub fn lint_with_policy(path: &str, policy: crate::CompilerPolicy) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&report_with(path, BoneWorkspace::lint_diagnostics, policy)?)?);
-    Ok(())
+    print_report(report_with(path, BoneWorkspace::lint_diagnostics, policy)?)
 }
 
 /// Diagnostics JSON for a file or a directory, using `diag_fn` to select which
 /// diagnostics to report. A directory walks every `.rock` under it, loads each
 /// one's project once (whole-compilation-unit, so cross-file symbols and the
-/// whole-project `unused_fn` lint resolve), and reports the files that have any.
+/// whole-project `unused_fn` lint resolve), and reports the files that have any,
+/// plus an `unreadable` list naming each file it could not read.
 fn report_with(path: &str, diag_fn: DiagFn, policy: crate::CompilerPolicy) -> Result<serde_json::Value> {
-    if fs_err::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
+    if fs_err::metadata(path)?.is_dir() {
         return dir_report(path, diag_fn, policy);
     }
     let file_path = canonical(path);
@@ -130,6 +143,7 @@ fn dir_report(dir: &str, diag_fn: DiagFn, policy: crate::CompilerPolicy) -> Resu
     files.sort();
 
     let mut bone = policy.workspace();
+    let mut unreadable = Vec::new();
     for f in &files {
         // Idempotent per project root: once a file's compilation unit is loaded,
         // its siblings already have buffer text, so skip the reload. A file with
@@ -139,8 +153,11 @@ fn dir_report(dir: &str, diag_fn: DiagFn, policy: crate::CompilerPolicy) -> Resu
         }
         bone.load_project(f);
         if bone.file_text(f).is_none() {
-            if let Ok(src) = fs_err::read_to_string(f) {
-                bone.update(f, src);
+            match fs_err::read_to_string(f) {
+                Ok(src) => {
+                    bone.update(f, src);
+                }
+                Err(e) => unreadable.push(json!({ "file": f, "error": e.to_string() })),
             }
         }
     }
@@ -162,6 +179,7 @@ fn dir_report(dir: &str, diag_fn: DiagFn, policy: crate::CompilerPolicy) -> Resu
         "file_count": files.len(),
         "diagnostic_count": total,
         "files": file_reports,
+        "unreadable": unreadable,
     }))
 }
 
@@ -202,18 +220,18 @@ fn emit_definitions(
     column: u32,
     loc: Option<lsp_types::Location>,
 ) -> Result<()> {
-    let definitions: Vec<serde_json::Value> = loc
+    let definitions = loc
         .into_iter()
-        .map(|loc| {
-            json!({
-                "file": loc.uri.path().as_str(),
+        .map(|loc| -> Result<serde_json::Value> {
+            Ok(json!({
+                "file": loc.uri.to_file_path()?,
                 "range": {
                     "start": { "line": loc.range.start.line, "character": loc.range.start.character },
                     "end":   { "line": loc.range.end.line,   "character": loc.range.end.character },
                 },
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let output = json!({
         "file": file_path,

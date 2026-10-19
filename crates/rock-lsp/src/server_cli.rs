@@ -103,6 +103,7 @@ fn build_cli() -> Command {
                 .arg(
                     Arg::new("top")
                         .long("top")
+                        .value_parser(clap::value_parser!(usize))
                         .help("Rows per policy column (default 10)."),
                 )
                 .arg(
@@ -148,6 +149,39 @@ fn bone_position(m: &ArgMatches) -> Result<(String, u32, u32)> {
     cli::parse_position(arg_str(m, "position"))
 }
 
+fn open_debug_log(log_path: &str) -> Result<fs_err::File> {
+    fs_err::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| anyhow::anyhow!("ROCK_LSP_DEBUG: cannot open {log_path}: {e}"))
+}
+
+fn top_arg(m: &ArgMatches) -> usize {
+    m.get_one::<usize>("top").copied().unwrap_or(10)
+}
+
+/// Stderr logger at a warn floor, refined by `RUST_LOG` directives
+/// (`info`, `rock_lsp=debug,warn`, ...). An unparsable `RUST_LOG` is an error:
+/// env_logger alone would print a warning and drop the bad directives.
+fn stderr_log_builder(rust_log: Option<&str>, timing: bool) -> Result<env_logger::Builder> {
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(log::LevelFilter::Warn).format_timestamp(None);
+    if let Some(spec) = rust_log {
+        env_filter::Builder::new()
+            .try_parse(spec)
+            .map_err(|e| anyhow::anyhow!("RUST_LOG={spec:?} is not a valid log filter: {e}"))?;
+        builder.parse_filters(spec);
+    }
+    // ROCK_LSP_TIMING=1: surface the per-request handle timer (info on
+    // the `lsp_timing` target) without lifting the default warn floor
+    // for everything else, so `:LspLog` shows timing and nothing else.
+    if timing {
+        builder.filter(Some("lsp_timing"), log::LevelFilter::Info);
+    }
+    Ok(builder)
+}
+
 /// Install the LSP logger and run the requested `rock lsp` subcommand.
 ///
 /// `args` is the full argv for the LSP CLI with `argv[0]` a display name
@@ -169,11 +203,7 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
             } else {
                 val
             };
-            let file = fs_err::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .unwrap_or_else(|e| panic!("ROCK_LSP_DEBUG: cannot open {log_path}: {e}"));
+            let file = open_debug_log(&log_path)?;
             env_logger::Builder::new()
                 .filter_level(log::LevelFilter::Trace)
                 .target(env_logger::Target::Pipe(Box::new(file)))
@@ -182,19 +212,8 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
             log::trace!("LSP_MAIN_STARTED (logging to {log_path})");
         }
         Err(_) => {
-            let log_level = match std::env::var("RUST_LOG") {
-                Ok(level) => level.parse().unwrap_or(log::LevelFilter::Warn),
-                Err(_) => log::LevelFilter::Warn,
-            };
-            let mut builder = env_logger::builder();
-            builder.filter_level(log_level).format_timestamp(None);
-            // ROCK_LSP_TIMING=1: surface the per-request handle timer (info on
-            // the `lsp_timing` target) without lifting the default warn floor
-            // for everything else, so `:LspLog` shows timing and nothing else.
-            if std::env::var_os("ROCK_LSP_TIMING").is_some() {
-                builder.filter(Some("lsp_timing"), log::LevelFilter::Info);
-            }
-            builder.init();
+            let rust_log = std::env::var("RUST_LOG").ok();
+            stderr_log_builder(rust_log.as_deref(), std::env::var_os("ROCK_LSP_TIMING").is_some())?.init();
         }
     }
 
@@ -244,10 +263,7 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
                         bone_query::MatchPolicy::Subseq3,
                     ],
                 };
-                let top = m
-                    .get_one::<String>("top")
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(10);
+                let top = top_arg(m);
                 if repl {
                     cli::bone_lsp::completion_repl(&file, line, col, &policies, top, policy)
                 } else {
@@ -290,5 +306,58 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
         }
 
         Some((name, _)) => unreachable!("unhandled subcommand: {}", name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::{Level, Log, Metadata};
+
+    /// Which of `(target, level)` the logger built from these settings enables.
+    fn enabled(rust_log: Option<&str>, timing: bool, probes: &[(&str, Level)]) -> Vec<bool> {
+        let logger = stderr_log_builder(rust_log, timing).unwrap().build();
+        probes
+            .iter()
+            .map(|(target, level)| logger.enabled(&Metadata::builder().target(target).level(*level).build()))
+            .collect()
+    }
+
+    #[test]
+    fn rust_log_accepts_standard_directives() {
+        use Level::*;
+        assert_eq!(enabled(Some("rock_lsp=debug"), false,
+            &[("rock_lsp", Debug), ("other", Warn), ("other", Info)]), [true, true, false]);
+        assert_eq!(enabled(Some("info,bone_query=trace"), false,
+            &[("x", Info), ("x", Debug), ("bone_query", Trace)]), [true, false, true]);
+        assert_eq!(enabled(None, true,
+            &[("x", Warn), ("x", Info), ("lsp_timing", Info)]), [true, false, true]);
+    }
+
+    #[test]
+    fn rust_log_rejects_unparsable_directives() {
+        for bad in ["rock_lsp=loud", "a=b=c"] {
+            let err = stderr_log_builder(Some(bad), false).err().expect(bad).to_string();
+            assert!(err.contains("RUST_LOG") && err.contains(bad), "{err}");
+        }
+    }
+
+    #[test]
+    fn top_must_be_a_number() {
+        fn args(top: &str) -> [&str; 6] {
+            ["rock lsp", "completion", "a.rock:1:1", "x", "--top", top]
+        }
+        assert!(build_cli().try_get_matches_from(args("abc")).is_err());
+        let m = build_cli().try_get_matches_from(args("3")).unwrap();
+        let (_, m) = m.subcommand().unwrap();
+        assert_eq!(top_arg(m), 3);
+    }
+
+    #[test]
+    fn unopenable_debug_log_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-dir").join("lsp.log");
+        let err = open_debug_log(path.to_str().unwrap()).err().expect("open must fail").to_string();
+        assert!(err.contains("ROCK_LSP_DEBUG") && err.contains("missing-dir"), "{err}");
     }
 }

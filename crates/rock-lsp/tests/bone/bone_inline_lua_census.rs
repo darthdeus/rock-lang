@@ -71,3 +71,15 @@ fn summary_renders_only_total_line() {
     assert!(full.contains("big"), "full render lists fns: {full}");
     assert!(full.contains("TOTAL: 2 fns, 4 meaningful lines across 1 files"), "{full}");
 }
+
+#[test]
+fn unreadable_and_unparsable_files_fail_the_census_by_name() {
+    let dir = fixture();
+    std::fs::write(dir.path().join("bad_utf8.rock"), b"fn f() {}\n\xff\n").unwrap();
+    std::fs::write(dir.path().join("bad_parse.rock"), "fn (((\n").unwrap();
+    let path = dir.path().to_str().unwrap().to_string();
+    let err = rock_lsp::cli::inline_lua_census::inline_lua_census(&[path], &[], true)
+        .expect_err("census must fail when files are left out")
+        .to_string();
+    assert!(err.contains("2 files") && err.contains("bad_utf8.rock") && err.contains("bad_parse.rock"), "{err}");
+}
