@@ -127,14 +127,14 @@ impl Uri {
 
     /// The `file:` URI for an absolute filesystem path, percent-encoding every
     /// byte outside the unreserved set and `/`. On Windows the path must start
-    /// with a drive (`C:\x` or `C:/x`); UNC paths are not supported.
+    /// with a drive (`C:\x`, `C:/x`, or the verbatim `\\?\C:\x` that
+    /// `std::fs::canonicalize` returns); UNC paths are not supported.
     pub fn from_file_path(path: &str) -> Result<Uri, FileUriError> {
         Self::from_file_path_on(path, cfg!(windows))
     }
 
     fn from_file_path_on(path: &str, windows: bool) -> Result<Uri, FileUriError> {
-        let uri_path = native_to_uri_path(path, windows)
-            .ok_or_else(|| FileUriError(format!("path is not absolute: {path}")))?;
+        let uri_path = native_to_uri_path(path, windows).map_err(|why| FileUriError(format!("{why}: {path}")))?;
         let mut s = String::with_capacity(uri_path.len() + 7);
         s.push_str("file://");
         for &b in uri_path.as_bytes() {
@@ -172,17 +172,26 @@ fn uri_path_to_native(path: &str, windows: bool) -> Option<String> {
     Some(native)
 }
 
-/// The unencoded URI path for a native absolute path: `C:\dir\f` or
-/// `C:/dir/f` becomes `/C:/dir/f` on Windows; elsewhere the path must start
-/// with `/` and is used as is.
-fn native_to_uri_path(path: &str, windows: bool) -> Option<String> {
+/// The unencoded URI path for a native absolute path: `C:\dir\f`, `C:/dir/f`
+/// or `\\?\C:\dir\f` becomes `/C:/dir/f` on Windows; elsewhere the path must
+/// start with `/` and is used as is. The error says why the path has no URI.
+fn native_to_uri_path(path: &str, windows: bool) -> Result<String, &'static str> {
     if !windows {
-        return path.starts_with('/').then(|| path.to_string());
+        return if path.starts_with('/') { Ok(path.to_string()) } else { Err("path is not absolute") };
     }
+    let path = match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.get(..4).is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\")) => {
+            return Err("verbatim UNC paths are not supported");
+        }
+        Some(rest) if starts_with_drive(rest, b"\\") => rest,
+        Some(_) => return Err("verbatim path without a drive is not supported"),
+        None if path.starts_with(r"\\") => return Err("UNC paths are not supported"),
+        None => path,
+    };
     if !starts_with_drive(path, b"/\\") {
-        return None;
+        return Err("path is not absolute");
     }
-    Some(format!("/{}", path.replace('\\', "/")))
+    Ok(format!("/{}", path.replace('\\', "/")))
 }
 
 #[cfg(test)]
@@ -198,10 +207,10 @@ mod tests {
         for bad in ["/x/y.rock", "C:/x", "/CC:/x", "/1:/x", "/C:x"] {
             assert_eq!(uri_path_to_native(bad, true), None, "{bad}");
         }
-        assert_eq!(native_to_uri_path(r"C:\x\y.rock", true).as_deref(), Some("/C:/x/y.rock"));
-        assert_eq!(native_to_uri_path("c:/x", true).as_deref(), Some("/c:/x"));
+        assert_eq!(native_to_uri_path(r"C:\x\y.rock", true).as_deref(), Ok("/C:/x/y.rock"));
+        assert_eq!(native_to_uri_path("c:/x", true).as_deref(), Ok("/c:/x"));
         for bad in [r"\\server\share\a", r"x\y", "/x/y", "C:x"] {
-            assert_eq!(native_to_uri_path(bad, true), None, "{bad}");
+            assert!(native_to_uri_path(bad, true).is_err(), "{}", bad);
         }
     }
 
@@ -209,8 +218,8 @@ mod tests {
     fn unix_paths_keep_drive_like_names_verbatim() {
         assert_eq!(uri_path_to_native("/C:/x", false).as_deref(), Some("/C:/x"));
         assert_eq!(uri_path_to_native("C:/x", false), None);
-        assert_eq!(native_to_uri_path(r"C:\x", false), None);
-        assert_eq!(native_to_uri_path("/a b/c", false).as_deref(), Some("/a b/c"));
+        assert!(native_to_uri_path(r"C:\x", false).is_err());
+        assert_eq!(native_to_uri_path("/a b/c", false).as_deref(), Ok("/a b/c"));
     }
 
     #[test]
@@ -225,6 +234,33 @@ mod tests {
         assert!(Uri::from_file_path_on("/x/a.rock", true).is_err());
         // The same drive-shaped URI is an ordinary absolute path elsewhere.
         assert_eq!(Uri::from_str("file:///C%3A/x").unwrap().to_file_path_on(false).unwrap(), "/C:/x");
+    }
+
+    #[test]
+    fn windows_verbatim_drive_paths_convert_like_plain_drive_paths() {
+        for path in [r"\\?\C:\proj\a.rock", r"\\?\c:\proj\a.rock"] {
+            let uri = Uri::from_file_path_on(path, true).unwrap();
+            assert_eq!(uri, Uri::from_file_path_on(&path[4..], true).unwrap(), "{}", path);
+        }
+        let uri = Uri::from_file_path_on(r"\\?\C:\my dir\a.rock", true).unwrap();
+        assert_eq!(uri.as_str(), "file:///C%3A/my%20dir/a.rock");
+        assert_eq!(uri.to_file_path_on(true).unwrap(), r"C:\my dir\a.rock");
+        // Unix has no verbatim prefix: the same string is a relative path.
+        assert!(Uri::from_file_path_on(r"\\?\C:\proj\a.rock", false).is_err());
+    }
+
+    #[test]
+    fn windows_verbatim_unc_and_non_drive_paths_are_rejected_by_name() {
+        for path in [r"\\?\UNC\server\share\a.rock", r"\\?\unc\server\share\a.rock"] {
+            let e = Uri::from_file_path_on(path, true).unwrap_err().to_string();
+            assert!(e.contains("verbatim UNC") && e.contains(path), "{}", e);
+        }
+        let path = r"\\?\Volume{0}\a.rock";
+        let e = Uri::from_file_path_on(path, true).unwrap_err().to_string();
+        assert!(e.contains("verbatim path without a drive") && e.contains(path), "{}", e);
+        let path = r"\\server\share\a.rock";
+        let e = Uri::from_file_path_on(path, true).unwrap_err().to_string();
+        assert!(e.contains("UNC") && e.contains(path), "{}", e);
     }
 
     #[test]
