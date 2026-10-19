@@ -18,10 +18,9 @@ fn incr_vs_restart(
     decl_b: &str,
     user_src: &str,
 ) -> (Vec<String>, Vec<String>) {
-    let dir = std::env::temp_dir().join(subdir);
-    let _ = std::fs::create_dir_all(&dir);
-    let decl = dir.join("decl.rock");
-    let user = dir.join("user.rock");
+    let dir = tempfile::Builder::new().prefix(subdir).tempdir().unwrap();
+    let decl = dir.path().join("decl.rock");
+    let user = dir.path().join("user.rock");
     let dp = decl.to_str().unwrap();
     let up = user.to_str().unwrap();
 

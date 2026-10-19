@@ -83,10 +83,9 @@ fn const_to_global_clears_assign_error_cross_file() {
     // The real scenario: the global is declared in one file, the assigning fn
     // lives in another. Flipping const->global must re-infer the DEPENDENT
     // module's body (it writes the global) and clear its diagnostic.
-    let dir = std::env::temp_dir().join("rock_lsp_bone_const_xfile");
-    let _ = std::fs::create_dir_all(&dir);
-    let decl = dir.join("decl.rock");
-    let user = dir.join("user.rock");
+    let dir = tempfile::Builder::new().prefix("rock_lsp_bone_const_xfile").tempdir().unwrap();
+    let decl = dir.path().join("decl.rock");
+    let user = dir.path().join("user.rock");
     let dp = decl.to_str().unwrap();
     let up = user.to_str().unwrap();
 
