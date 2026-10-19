@@ -2,7 +2,13 @@
 //! types, field accesses as `property` (not bare `variable`).
 
 use bone_query::{semantic_tokens_legend, semantic_tokens_modifiers_legend, BoneWorkspace};
-use lsp_types::{Position, Range, SemanticTokenModifier, SemanticTokenType};
+use lsp_types::{Position, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType};
+
+/// Seeded adversarial mutation harness for this module's token surface. Declared
+/// here (not in `main.rs`) so its cases keep the `semantic_tokens::` name prefix
+/// that `just lsp-fuzz` selects.
+#[path = "semantic_token_mutations.rs"]
+mod mutations;
 
 /// `semantic_tokens_range` must agree with `semantic_tokens` over the whole file
 /// (same tokens, same delta encoding) and emit strictly fewer for a viewport --
@@ -27,14 +33,24 @@ fn range_matches_full_over_whole_file_and_subsets_for_a_viewport() {
 
 const PATH: &str = "/tmp/rock_lsp_bone_semtok.rock";
 
-/// Decode the delta-encoded tokens to `(line, col, type)`.
-fn decode(src: &str) -> Vec<(u32, u32, SemanticTokenType)> {
-    let mut bone = BoneWorkspace::new();
-    bone.update(PATH, src.to_string());
-    let legend = semantic_tokens_legend();
+/// One decoded semantic token: absolute 0-based `(line, char-col)`, its char
+/// length, the legend index of its type and its raw modifier bitset.
+///
+/// Absolute decoding is the shared adapter: the per-kind tests project type or
+/// modifiers out of it, and the mutation harness reads token ranges off it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecodedToken {
+    line: u32,
+    col: u32,
+    length: u32,
+    token_type: u32,
+    modifiers: u32,
+}
+
+/// Walk a delta-encoded stream into absolute tokens.
+fn decode_tokens(tokens: Vec<SemanticToken>) -> Vec<DecodedToken> {
     let (mut line, mut col) = (0u32, 0u32);
-    bone.semantic_tokens(PATH)
-        .data
+    tokens
         .into_iter()
         .map(|t| {
             if t.delta_line != 0 {
@@ -43,8 +59,30 @@ fn decode(src: &str) -> Vec<(u32, u32, SemanticTokenType)> {
             } else {
                 col += t.delta_start;
             }
-            (line, col, legend[t.token_type as usize].clone())
+            DecodedToken {
+                line,
+                col,
+                length: t.length,
+                token_type: t.token_type,
+                modifiers: t.token_modifiers_bitset,
+            }
         })
+        .collect()
+}
+
+/// Decode a file's full token stream through an existing workspace.
+fn decode_workspace(bone: &BoneWorkspace, path: &str) -> Vec<DecodedToken> {
+    decode_tokens(bone.semantic_tokens(path).data)
+}
+
+/// Decode the delta-encoded tokens to `(line, col, type)`.
+fn decode(src: &str) -> Vec<(u32, u32, SemanticTokenType)> {
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let legend = semantic_tokens_legend();
+    decode_workspace(&bone, PATH)
+        .into_iter()
+        .map(|t| (t.line, t.col, legend[t.token_type as usize].clone()))
         .collect()
 }
 
@@ -132,24 +170,16 @@ fn decode_full(src: &str) -> Vec<(u32, u32, SemanticTokenType, Vec<SemanticToken
     bone.update(PATH, src.to_string());
     let legend = semantic_tokens_legend();
     let mods_legend = semantic_tokens_modifiers_legend();
-    let (mut line, mut col) = (0u32, 0u32);
-    bone.semantic_tokens(PATH)
-        .data
+    decode_workspace(&bone, PATH)
         .into_iter()
         .map(|t| {
-            if t.delta_line != 0 {
-                line += t.delta_line;
-                col = t.delta_start;
-            } else {
-                col += t.delta_start;
-            }
             let mods = mods_legend
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| t.token_modifiers_bitset & (1 << i) != 0)
+                .filter(|(i, _)| t.modifiers & (1 << i) != 0)
                 .map(|(_, m)| m.clone())
                 .collect();
-            (line, col, legend[t.token_type as usize].clone(), mods)
+            (t.line, t.col, legend[t.token_type as usize].clone(), mods)
         })
         .collect()
 }
