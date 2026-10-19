@@ -1254,19 +1254,18 @@ impl Emitter<'_> {
 
     /// A `Branch` block whose insts are all pure, non-erroring, side-effect-free
     /// (`Store`/`Call`/`Index`-bounds-check excluded), so its condition can be
-    /// folded into an enclosing `&&`/`||` -- any statement it materializes (a
-    /// tuple/struct projection) is hoisted before the `if` and computed
-    /// unconditionally, which is observably identical for a pure read. Returns the
-    /// branch's `(cond, then, else)`.
+    /// folded into an enclosing `&&`/`||` -- any statement it materializes is
+    /// hoisted before the `if` and computed unconditionally, which is
+    /// observably identical for a pure read. `Field`/`TupleIndex`/`Len` fault
+    /// on null/undefined, so they stay out: hoisting one above the null check
+    /// that guards it miscompiles safe-nav chains. Returns the branch's
+    /// `(cond, then, else)`.
     fn foldable_branch(&self, b: Idx<Block>) -> Option<(Idx<Inst>, Idx<Block>, Idx<Block>)> {
         let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[b].term else {
             return None;
         };
         let pure = self.mf.blocks[b].insts.iter().all(|&i| {
-            matches!(
-                &self.mf.insts[i],
-                Inst::Load(_) | Inst::TupleIndex { .. } | Inst::Field { .. } | Inst::Len { .. }
-            ) || always_inlinable(&self.mf.insts[i])
+            matches!(&self.mf.insts[i], Inst::Load(_)) || always_inlinable(&self.mf.insts[i])
         });
         pure.then_some((cond, then_bb, else_bb))
     }
@@ -1288,7 +1287,7 @@ impl Emitter<'_> {
         // relooper cannot structure the doubly-reached `S`. Recognizing the chain
         // (`A && B`; the `||` dual for a shared success arm) collapses it to a
         // clean diamond that rejoins at the ipost-dominator. A folded inner
-        // block's pure projections hoist before the `if`.
+        // block's pure reads hoist before the `if`.
         let (cond_s, then_bb, else_bb) = {
             let mut cond_s = self.render_val(cond)?;
             let (mut then_bb, mut else_bb) = (then_bb, else_bb);

@@ -1,7 +1,8 @@
 //! Short-circuit fold + exhaustive-match structuring (T6). A `match` range/tuple
 //! pattern lowers to nested branches whose failure arms share one tail block; the
 //! fold collapses the chain into one `&&`/`||` diamond (a folded inner block's
-//! pure projections hoist before the `if`). An EXHAUSTIVE match (enum, or a
+//! pure reads hoist before the `if`; faulting projections stay put). An
+//! EXHAUSTIVE match (enum, or a
 //! literal set with a proven-dead default) ends its impossible arm in
 //! `Term::Unreachable`, which -- unlike a `Return` -- does NOT connect to the
 //! post-dom virtual exit, so the real return block stays the join instead of the
@@ -55,7 +56,8 @@ fn range_match_three_arm() {
 
 #[test]
 fn tuple_pattern_folds() {
-    // The inner `tuple_index` projection is hoisted before the folded `&&`.
+    // The inner `tuple_index` projection faults on null, so it no longer folds
+    // into the `&&`; the chain nests and still executes correctly.
     let src = "fn f(a: int) -> int { match (a, a + 1) { (1, 2) => 100, _ => 200 } }";
     eval1(src, 1, 100);
     eval1(src, 5, 200);

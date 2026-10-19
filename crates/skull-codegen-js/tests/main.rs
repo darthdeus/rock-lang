@@ -126,3 +126,5 @@ mod native_buffer_element_admission_js;
 mod stdlib_sibling_location;
 #[path = "host.rs"]
 mod host;
+#[path = "safenav_fold.rs"]
+mod safenav_fold;
