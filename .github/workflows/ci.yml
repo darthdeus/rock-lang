@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install LuaJIT
+        run: sudo apt-get update && sudo apt-get install -y luajit
+      - name: Check public content
+        shell: bash
+        run: |
+          git grep -I -h . -- . ':!crates/lsp-types-manual/Cargo.toml' ':!crates/lsp-types-manual/Cargo.toml.orig' > "$RUNNER_TEMP/public-content.txt"
+          .githooks/check-public "$RUNNER_TEMP/public-content.txt"
+      - name: Build workspace
+        run: cargo build --locked --workspace
+      - name: Test workspace
+        run: cargo test --locked --workspace
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Check wasm libraries
+        run: cargo check --locked --lib --target wasm32-unknown-unknown -p skull-fmt -p skull -p skull-codegen-glsl -p skull-codegen-wgsl -p rock-stdlib -p bone-incremental -p bone-lints -p rock-lsp
