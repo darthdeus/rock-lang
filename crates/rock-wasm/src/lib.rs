@@ -19,6 +19,10 @@
 //!   `diagnostics`, or `stage` and `diagnostics` on failure.
 //! - `format` `{source}`: returns `source`.
 //! - `info`: returns `nesting_limit`.
+//! - `lsp` `{message}`: one JSON-RPC message from the editor (after
+//!   `install_stdlib`); returns `messages`, the responses and notifications
+//!   the language server sends back. `initialize` starts a server and `exit`
+//!   drops it; stdlib locations are `file:///stdlib/<name>`.
 
 use std::sync::Arc;
 
@@ -28,6 +32,7 @@ use bone_semantic::inference::{ComptimeInputs, Workspace};
 use bone_semantic::prelude::{FxHashMap, Ustr};
 use rock_core::CompilerError;
 use rock_core::errors::CompilerErrorLevel;
+use lsp_server::{ErrorCode, Message, Response};
 use serde_json::{Value, json};
 use skull::mir_emit::{RendererTarget, ShaderLanguage};
 use skull::pipeline::{CompileHost, EmitTarget, Stage};
@@ -61,6 +66,7 @@ fn dispatch(request: &Value) -> Result<Value, String> {
             }
         }
         "info" => Ok(json!({"ok": true, "nesting_limit": rock_core::nesting::MAX_NESTING_DEPTH})),
+        "lsp" => lsp(request),
         op => Err(format!("unknown op `{op}`")),
     }
 }
@@ -121,6 +127,46 @@ fn compile(request: &Value) -> Result<Value, String> {
             }
             json!({"ok": false, "stage": stage, "diagnostics": diagnostics})
         }
+    })
+}
+
+thread_local! {
+    static LSP: std::cell::RefCell<Option<rock_lsp::LspServer>> = const { std::cell::RefCell::new(None) };
+}
+
+fn lsp(request: &Value) -> Result<Value, String> {
+    if !stdlib_installed() {
+        return Err("install_stdlib must run before lsp".to_string());
+    }
+    let message = request.get("message").ok_or("missing field `message`")?;
+    let message: Message =
+        serde_json::from_value(message.clone()).map_err(|e| format!("`message` is not JSON-RPC: {e}"))?;
+    let mut out = Vec::new();
+    let handled = LSP.with_borrow_mut(|server| -> anyhow::Result<()> {
+        match (server.as_mut(), message) {
+            (None, Message::Request(req)) if req.method == "initialize" => {
+                let (started, response) = rock_lsp::LspServer::initialize(rock_lsp::CompilerPolicy::default(), req)?;
+                *server = Some(started);
+                out.push(response);
+            }
+            (Some(running), message) => {
+                let handled = running.handle(message, &mut out);
+                if running.exited() {
+                    *server = None;
+                }
+                handled?;
+            }
+            (None, Message::Request(req)) => out.push(
+                Response::new_err(req.id, ErrorCode::ServerNotInitialized as i32, "initialize first".to_string()).into(),
+            ),
+            (None, _) => {}
+        }
+        Ok(())
+    });
+    let messages = serde_json::to_value(&out).map_err(|e| e.to_string())?;
+    Ok(match handled {
+        Ok(()) => json!({"ok": true, "messages": messages}),
+        Err(e) => json!({"ok": false, "error": format!("{e:#}"), "messages": messages}),
     })
 }
 

@@ -18,6 +18,9 @@ bone-core = { workspace = true }
 bone-lints = { workspace = true }
 bone-semantic = { workspace = true }
 rock-core = { workspace = true }
+rock-lsp = { workspace = true }
+lsp-server = { workspace = true }
+anyhow = { workspace = true }
 rock-stdlib = { workspace = true }
 skull = { workspace = true, features = ["renderer-wgpu"] }
 skull-fmt = { workspace = true }

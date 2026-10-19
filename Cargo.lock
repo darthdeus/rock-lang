@@ -1634,10 +1634,13 @@ dependencies = [
 name = "rock-wasm"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bone-core",
  "bone-lints",
  "bone-semantic",
+ "lsp-server-manual",
  "rock-core",
+ "rock-lsp",
  "rock-stdlib",
  "serde_json",
  "skull",
