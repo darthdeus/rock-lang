@@ -1112,7 +1112,7 @@ fn bone_reload_and_publish(
         };
         connection.sender.send(lsp_server::Message::Notification(lsp_server::Notification {
             method: lsp_types::notification::PublishDiagnostics::METHOD.to_string(),
-            params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
+            params: serde_json::to_value(params)?,
         }))?;
     }
     Ok(())
@@ -1163,23 +1163,26 @@ fn send_response<T>(connection: &Connection, id: RequestId, t: Result<T, anyhow:
 where
     T: serde::Serialize,
 {
-    let (result, error) = match t {
-        Ok(value) => (Some(serde_json::to_value(&value).unwrap_or_else(|e| {
-                log::error!("Failed to serialize response: {}", e);
-                serde_json::Value::Null
-            })), None),
-        Err(failure) => {
-            error!("error: {}", failure);
-            let error = lsp_server::ResponseError {
-                code: lsp_server::ErrorCode::RequestFailed as i32,
-                message: failure.to_string(),
-                data: None,
-            };
-            (None, Some(error))
+    let outcome = match t {
+        Ok(t) => serde_json::to_value(&t).map_err(|e| {
+            let message = format!("failed to serialize response: {e}");
+            error!("{message}");
+            (lsp_server::ErrorCode::InternalError, message)
+        }),
+        Err(err) => {
+            error!("error: {}", err);
+            Err((lsp_server::ErrorCode::RequestFailed, err.to_string()))
+        }
+    };
+    let resp = match outcome {
+        Ok(result) => Response { id, result: Some(result), error: None },
+        Err((code, message)) => Response {
+            id,
+            result: None,
+            error: Some(lsp_server::ResponseError { code: code as i32, message, data: None }),
         },
     };
-    let reply = Response { id, result, error };
-    connection.sender.send(Message::Response(reply))?;
+    connection.sender.send(Message::Response(resp))?;
     Ok(())
 }
 
@@ -1204,6 +1207,33 @@ fn notify(_msg: impl AsRef<str>) {
     // }
 }
 
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    struct Unserializable;
+
+    impl serde::Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("refused by test"))
+        }
+    }
+
+    #[test]
+    fn unserializable_result_is_an_internal_error_response() {
+        let (server, client) = Connection::memory();
+        send_response(&server, RequestId::from(7), Ok(Unserializable)).unwrap();
+        let Message::Response(resp) = client.receiver.try_recv().unwrap() else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.id, RequestId::from(7));
+        assert!(resp.result.is_none(), "{:?}", resp.result);
+        let err = resp.error.expect("serialization failure must be an error response");
+        assert_eq!(err.code, lsp_server::ErrorCode::InternalError as i32);
+        assert!(err.message.contains("refused by test"), "{}", err.message);
+    }
+}
 
 fn text_sync_options() -> TextDocumentSyncOptions {
     let mut options = TextDocumentSyncOptions::default();
