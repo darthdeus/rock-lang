@@ -1136,23 +1136,25 @@ fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) 
     })
 }
 
-/// Lower a single function to a [`MirFunc`]. Errors (a `gap`) when the body uses
-/// a construct Phase 1 doesn't lower yet.
-/// Owner segment of a `static`'s cell name. Stable across body edits (depends
-/// only on the fn name + rendered param types), distinct per overload. Not the
-/// mangled name -- skull-mir is upstream of the mangler -- but mir_emit reads
-/// the resulting cell names back verbatim from `MirFunc::statics`, so exact
-/// equality with the mangled name is not needed.
+/// Physical owner shared by a concrete callable and its flat variants.
+/// Declaration names + rendered param types preserve non-generic cell names;
+/// generic instances use their canonical concrete symbol to keep cells distinct.
 fn static_owner_tag(
     ws: &Workspace,
+    scx: &ScalarCtx,
     inf: Option<&BodyInference>,
-    name: Ustr,
-    params: &[bone_semantic::hir::ParamDecl],
+    inst: &crate::instance::Instance,
 ) -> Ustr {
     use std::hash::{Hash, Hasher};
+    let func = &ws.module(inst.func.module).functions[inst.func.func];
+    let name = if inst.args.is_empty() {
+        func.name
+    } else {
+        Ustr::from(&inst.symbol(ws, scx.interner()))
+    };
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.as_str().hash(&mut h);
-    for pd in params {
+    for pd in &func.param_decls {
         ws.render(inf, pd.ty).hash(&mut h);
     }
     Ustr::from(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
@@ -1650,7 +1652,7 @@ fn lower_body(
             .iter()
             .any(|(_, s)| matches!(s, Statement::Static { .. } | Statement::Fn { .. }))
         {
-            static_owner_tag(ws, inf, func.name, &func.param_decls)
+            static_owner_tag(ws, scx, inf, &subject)
         } else {
             func.name
         },

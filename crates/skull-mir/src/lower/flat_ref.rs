@@ -903,10 +903,6 @@ impl<'a> Builder<'a> {
         let Some(body) = module.bodies.get(&BodyOwner::Function(inst.func.func)) else {
             return unsupported("it has no body");
         };
-        // A variant is a second copy of the body; a static local would split.
-        if body.statement_arena.iter().any(|(_, s)| matches!(s, Statement::Static { .. })) {
-            return unsupported("it has a `static` local");
-        }
         let Some(concrete_plan) = self.concrete_plans.get(inst) else {
             return unsupported("it has no concrete body plan");
         };
@@ -955,7 +951,7 @@ impl<'a> Builder<'a> {
         child.ret_rep = dc.plan.representation().result();
         child.fn_name_span = Some(decl.name_span);
         child.site_owner = Some(inst.clone());
-        child.static_owner = hoisted;
+        child.static_owner = static_owner_tag(self.ws, self.scx, inf, inst);
         child.flat_variants = self.flat_variants.clone();
         child.flat_ret = plan.ret;
         let params: Vec<Idx<BindingInfo>> = body.param_bindings.into_iter().collect();
@@ -998,6 +994,11 @@ impl<'a> Builder<'a> {
         child.fill_param_defaults()?;
         child.copy_ref_borrowed_params(&params)?;
         child.lower_root()?;
+        // Code belongs to the generated variant; persistent state belongs to
+        // the concrete callable whose body it implements.
+        for cell in &mut child.f.statics {
+            cell.owner = Some(crate::code_identity::CodeIdentity::Named(inst.clone()));
+        }
         let stats = child.lower_attribution.into_inner();
         let child_f = finish_lower_attribution(child.f, stats);
         self.lower_attribution.borrow_mut().add_assign(&child_f.lower_attribution);
