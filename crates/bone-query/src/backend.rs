@@ -3184,11 +3184,26 @@ impl BoneWorkspace {
         span: &Span,
     ) -> Option<(Uri, Cow<'a, str>)> {
         let file = span.file.as_str();
-        let uri = <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))).ok()?;
-        match proj.texts.get(file) {
-            Some(t) => Some((uri, Cow::Borrowed(t))),
-            None => Some((uri, Cow::Owned(fs_err::read_to_string(file).ok()?))),
-        }
+        let uri = match <Uri as std::str::FromStr>::from_str(&format!("file://{}", editor_path(file))) {
+            Ok(uri) => uri,
+            Err(error) => {
+                proj.fallbacks.report("span location", file, "construct URI",
+                    &error.to_string(), "omit location");
+                return None;
+            }
+        };
+        let text = match proj.texts.get(file) {
+            Some(text) => Cow::Borrowed(text.as_str()),
+            None => match fs_err::read_to_string(file) {
+                Ok(text) => Cow::Owned(text),
+                Err(error) => {
+                    proj.fallbacks.report("span location", file, "read source",
+                        &error.to_string(), "omit location");
+                    return None;
+                }
+            },
+        };
+        Some((uri, text))
     }
 
     /// Convert a bone span to an LSP [`Location`]. Single-span use (definition);
@@ -5029,6 +5044,128 @@ mod failure_log;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn span_test_workspace(path: &str) -> BoneWorkspace {
+        let mut bone = BoneWorkspace::new();
+        bone.update(path, "fn main() {}".into());
+        bone
+    }
+
+    #[test]
+    fn span_location_source_failure_reports_cause_once_and_recovers() {
+        let capture = super::failure_log::Recording::start();
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.rock").to_string_lossy().into_owned();
+        let target = dir.path().join("target.rock").to_string_lossy().into_owned();
+        let mut bone = span_test_workspace(&main);
+        let mut span = Span::unknown();
+        span.file = Ustr::from(target.as_str());
+        span.offset_range = (0, 6);
+        capture.take();
+
+        // Both a disappearing target and unreadable source must keep the cause.
+        for unreadable in [false, true] {
+            let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
+            fs_err::write(&target, if unreadable { &b"\xff"[..] } else { &b"target"[..] }).unwrap();
+            if !unreadable {
+                fs_err::remove_file(&target).unwrap();
+            }
+            let cause = fs_err::read_to_string(&target).unwrap_err().to_string();
+            assert!(bone.location_from_span(proj, &span).is_none());
+            let records = capture.take();
+            assert_eq!(records.len(), 1, "missing source failure: {records:?}");
+            assert!(records[0].contains("LSP") && records[0].contains("span location")
+                && records[0].contains(&target) && records[0].contains("read source")
+                && records[0].contains(&cause) && records[0].contains("omit location"),
+                "source failure lost context: {records:?}");
+            assert!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()).is_none());
+            assert!(capture.take().is_empty(), "unchanged failure must not repeat");
+            fs_err::write(&target, "target").unwrap();
+            assert!(bone.location_from_span(proj, &span).is_some());
+            assert!(capture.take().is_empty());
+            // Text changes release the existing project-scoped report keys.
+            bone.update(&main, if unreadable { "fn main() {}" } else { "fn main() { let x = 1 }" }.into());
+            capture.take();
+        }
+    }
+
+    #[test]
+    fn span_location_invalid_uri_reports_cause_once() {
+        let capture = super::failure_log::Recording::start();
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.rock").to_string_lossy().into_owned();
+        let bone = span_test_workspace(&main);
+        let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
+        let target = "/invalid\nspan.rock";
+        let mut span = Span::unknown();
+        span.file = Ustr::from(target);
+        let cause = format!("file://{target}").parse::<Uri>().unwrap_err().to_string();
+        capture.take();
+        assert!(bone.location_from_span(proj, &span).is_none());
+        let records = capture.take();
+        assert_eq!(records.len(), 1, "missing URI failure: {records:?}");
+        assert!(records[0].contains("span location") && records[0].contains(target)
+            && records[0].contains("construct URI") && records[0].contains(&cause)
+            && records[0].contains("omit location"), "URI failure lost context: {records:?}");
+        assert!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()).is_none());
+        assert!(capture.take().is_empty());
+    }
+
+    #[test]
+    fn span_location_tracked_unsaved_source_wins_over_disk() {
+        let capture = super::failure_log::Recording::start();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.rock").to_string_lossy().into_owned();
+        let source = "\nfn main() {}";
+        fs_err::write(&path, "different disk source").unwrap();
+        let mut bone = BoneWorkspace::new();
+        bone.update(&path, source.into());
+        let proj = bone.projects.get(&BoneWorkspace::root_for(&path)).unwrap();
+        let mut span = Span::unknown();
+        span.file = Ustr::from(path.as_str());
+        span.offset_range = (4, 8);
+        capture.take();
+        for deleted in [false, true] {
+            if deleted {
+                fs_err::remove_file(&path).unwrap();
+            }
+            let (_, text) = bone.span_uri_and_text(proj, &span).unwrap();
+            assert!(matches!(text, Cow::Borrowed(_)));
+            assert_eq!(text, source);
+            let location = bone.location_from_span(proj, &span).unwrap();
+            assert_eq!(location.uri, format!("file://{path}").parse::<Uri>().unwrap());
+            assert_eq!(location.range, Range::new(Position::new(1, 3), Position::new(1, 7)));
+            assert_eq!(bone.location_from_span_indexed(proj, &span, &mut HashMap::new()), Some(location));
+        }
+        assert!(capture.take().is_empty());
+    }
+
+    #[test]
+    fn span_location_recording_and_temp_target_are_released_on_unwind() {
+        let mut target = PathBuf::new();
+        let mut reached_assertion = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _capture = super::failure_log::Recording::start();
+            let dir = tempfile::tempdir().unwrap();
+            target = dir.path().join("target.rock");
+            fs_err::write(&target, "temporary source").unwrap();
+            let main = dir.path().join("main.rock").to_string_lossy().into_owned();
+            let bone = span_test_workspace(&main);
+            let proj = bone.projects.get(&BoneWorkspace::root_for(&main)).unwrap();
+            let mut span = Span::unknown();
+            span.file = Ustr::from("/invalid\nspan.rock");
+            assert!(bone.location_from_span(proj, &span).is_none());
+            reached_assertion = true;
+            assert!(false, "intentional assertion failure to verify cleanup");
+        }));
+        assert!(result.is_err());
+        assert!(reached_assertion, "cleanup probe failed before its intentional assertion");
+        assert!(!target.parent().unwrap().exists(), "temporary directory survived unwind");
+        let capture = super::failure_log::Recording::start();
+        assert!(capture.take().is_empty(), "recording survived unwind");
+        log::warn!(target: "LSP", "fresh recording after unwind");
+        assert_eq!(capture.take().len(), 1);
+    }
 
     #[test]
     fn combined_parse_failure_reports_cause_and_repaired_request_succeeds() {
