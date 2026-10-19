@@ -1,7 +1,8 @@
 //! The Rock stdlib source files: their names, load order, ids and where they
-//! come from at runtime (they are not embedded). A native process reads them
-//! from a directory; a host without a filesystem installs them from memory
-//! with [`install_stdlib`] before the first compile.
+//! come from at runtime. A native process reads them from a directory when one
+//! resolves ([`stdlib_dir`]) and otherwise serves the copy compiled into the
+//! binary; a host without a filesystem installs them from memory with
+//! [`install_stdlib`] before the first compile.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -106,12 +107,31 @@ pub const STDLIB_NAMES: &[&str] = &[
 /// The `stdlib/` of the source checkout this crate was built from.
 const BUILD_CHECKOUT_STDLIB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib");
 
+/// Where the stdlib sources come from: a directory on disk, or the copy
+/// compiled into the binary.
+#[derive(Debug, PartialEq, Eq)]
+enum StdlibSource {
+    Dir(PathBuf),
+    Embedded,
+}
+
 /// Directory the stdlib `.rock` files are read from. A fresh process (or LSP
 /// restart) picks up stdlib edits. Order: `ROCK_STDLIB_DIR`; else
 /// `<root>/stdlib` when the running exe is `<root>/bin/<exe>` (the release
-/// packaged installation layout); else the build checkout's `stdlib/`.
+/// packaged installation layout); else the build checkout's `stdlib/` when
+/// that directory exists; else the stdlib embedded in the binary. The embedded
+/// rung has no directory, so this then names the build checkout's `stdlib/`
+/// whether or not it exists; stdlib contents always come from
+/// [`stdlib_files`], which serves the embedded copy in that case.
 pub fn stdlib_dir() -> PathBuf {
-    resolve_stdlib_dir(
+    match resolve_for_this_process() {
+        StdlibSource::Dir(dir) => dir,
+        StdlibSource::Embedded => PathBuf::from(BUILD_CHECKOUT_STDLIB),
+    }
+}
+
+fn resolve_for_this_process() -> StdlibSource {
+    resolve_stdlib(
         std::env::var_os("ROCK_STDLIB_DIR").map(PathBuf::from),
         std::env::current_exe().ok().as_deref(),
         Path::new(BUILD_CHECKOUT_STDLIB),
@@ -119,14 +139,14 @@ pub fn stdlib_dir() -> PathBuf {
     )
 }
 
-fn resolve_stdlib_dir(
+fn resolve_stdlib(
     override_dir: Option<PathBuf>,
     exe: Option<&Path>,
     build_checkout_stdlib: &Path,
     is_dir: impl Fn(&Path) -> bool,
-) -> PathBuf {
+) -> StdlibSource {
     if let Some(dir) = override_dir {
-        return dir;
+        return StdlibSource::Dir(dir);
     }
     let release_stdlib = exe
         .and_then(Path::parent)
@@ -134,19 +154,25 @@ fn resolve_stdlib_dir(
         .and_then(Path::parent)
         .map(|root| root.join("stdlib"))
         .filter(|dir| is_dir(dir));
-    release_stdlib.unwrap_or_else(|| build_checkout_stdlib.to_path_buf())
+    if let Some(dir) = release_stdlib {
+        return StdlibSource::Dir(dir);
+    }
+    if is_dir(build_checkout_stdlib) {
+        return StdlibSource::Dir(build_checkout_stdlib.to_path_buf());
+    }
+    StdlibSource::Embedded
 }
 
-/// All stdlib files: the ones [`install_stdlib`] supplied, else read from
-/// [`stdlib_dir`] on first call; cached for the process lifetime. Contents are leaked to `&'static str`: the stdlib is resident for
+/// All stdlib files: the ones [`install_stdlib`] supplied, else the first
+/// rung of [`stdlib_dir`]'s order that resolves on this machine, else the copy
+/// embedded in the binary; cached for the process lifetime. Contents are leaked to `&'static str`: the stdlib is resident for
 /// the whole process, so a one-time leak of a bounded, always-live buffer is
-/// not an unbounded leak. Panics with the resolved path if a file can't be
-/// read (the stdlib is not optional; a clear failure beats a thousand
-/// downstream "callee not found"s).
+/// not an unbounded leak. Panics with the resolved path if an on-disk rung
+/// names files that can't be read (the stdlib is not optional; a clear failure
+/// beats a thousand downstream "callee not found"s).
 pub fn stdlib_files() -> &'static [StdlibFile] {
-    FILES.get_or_init(|| {
-        let dir = stdlib_dir();
-        STDLIB_NAMES
+    FILES.get_or_init(|| match resolve_for_this_process() {
+        StdlibSource::Dir(dir) => STDLIB_NAMES
             .iter()
             .map(|&name| {
                 let path = dir.join(name);
@@ -164,7 +190,8 @@ pub fn stdlib_files() -> &'static [StdlibFile] {
                     display_path: Box::leak(path.to_string_lossy().into_owned().into_boxed_str()),
                 }
             })
-            .collect()
+            .collect(),
+        StdlibSource::Embedded => embedded_files(),
     })
 }
 
@@ -186,14 +213,44 @@ pub fn stdlib_file_id(name: &str) -> String {
     format!("<stdlib>/{name}")
 }
 
+/// The stdlib compiled into the binary: what [`stdlib_files`] serves when no
+/// rung resolves on disk. `display_path` names no real file; diagnostics show
+/// the `<embedded-stdlib>/` prefix.
+fn embedded_files() -> Vec<StdlibFile> {
+    STDLIB_NAMES
+        .iter()
+        .map(|&name| StdlibFile {
+            name,
+            contents: embedded_source(name),
+            display_path: Box::leak(format!("<embedded-stdlib>/{name}").into_boxed_str()),
+        })
+        .collect()
+}
+
+fn embedded_source(name: &str) -> &'static str {
+    match name {
+        "unified.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/unified.rock")),
+        "logging.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/logging.rock")),
+        "vec.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/vec.rock")),
+        "mat.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/mat.rock")),
+        "arena.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/arena.rock")),
+        "scene.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/scene.rock")),
+        "strings.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/strings.rock")),
+        "json.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/json.rock")),
+        "shader.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/shader.rock")),
+        "js.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/js.rock")),
+        _ => panic!("rock: `{name}` is not a stdlib file (see STDLIB_NAMES)"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const CHECKOUT: &str = "/build/rock/stdlib";
 
-    fn resolve(override_dir: Option<&str>, exe: Option<&str>, dirs: &[&str]) -> PathBuf {
-        resolve_stdlib_dir(
+    fn resolve(override_dir: Option<&str>, exe: Option<&str>, dirs: &[&str]) -> StdlibSource {
+        resolve_stdlib(
             override_dir.map(PathBuf::from),
             exe.map(Path::new),
             Path::new(CHECKOUT),
@@ -204,16 +261,30 @@ mod tests {
     #[test]
     fn release_layout_stdlib_wins_over_build_checkout() {
         assert_eq!(
-            resolve(None, Some("/opt/rock/bin/rock"), &["/opt/rock/stdlib"]),
-            PathBuf::from("/opt/rock/stdlib")
+            resolve(None, Some("/opt/rock/bin/rock"), &["/opt/rock/stdlib", CHECKOUT]),
+            StdlibSource::Dir(PathBuf::from("/opt/rock/stdlib"))
         );
     }
 
     #[test]
     fn override_wins_over_release_layout_and_build_checkout() {
         assert_eq!(
-            resolve(Some("/controlled/stdlib"), Some("/opt/rock/bin/rock"), &["/opt/rock/stdlib"]),
-            PathBuf::from("/controlled/stdlib")
+            resolve(
+                Some("/controlled/stdlib"),
+                Some("/opt/rock/bin/rock"),
+                &["/opt/rock/stdlib", CHECKOUT]
+            ),
+            StdlibSource::Dir(PathBuf::from("/controlled/stdlib"))
+        );
+    }
+
+    #[test]
+    fn override_names_its_dir_even_when_missing() {
+        // An explicit override that points nowhere stays a loud read error,
+        // never a silent fallthrough to another rung.
+        assert_eq!(
+            resolve(Some("/controlled/stdlib"), Some("/opt/rock/bin/rock"), &[]),
+            StdlibSource::Dir(PathBuf::from("/controlled/stdlib"))
         );
     }
 
@@ -222,11 +293,22 @@ mod tests {
         // A dev exe under target/ and a bin/ without a sibling stdlib/ both
         // fall through to the checkout the crate was built from.
         assert_eq!(
-            resolve(None, Some("/work/rock/target/debug/rock"), &["/work/rock/target/stdlib"]),
-            PathBuf::from(CHECKOUT)
+            resolve(None, Some("/work/rock/target/debug/rock"), &["/work/rock/target/stdlib", CHECKOUT]),
+            StdlibSource::Dir(PathBuf::from(CHECKOUT))
         );
-        assert_eq!(resolve(None, Some("/usr/bin/rock"), &[]), PathBuf::from(CHECKOUT));
-        assert_eq!(resolve(None, None, &[]), PathBuf::from(CHECKOUT));
+        assert_eq!(
+            resolve(None, Some("/usr/bin/rock"), &[CHECKOUT]),
+            StdlibSource::Dir(PathBuf::from(CHECKOUT))
+        );
+    }
+
+    #[test]
+    fn no_stdlib_on_disk_falls_back_to_embedded() {
+        // No override, no release-layout sibling, no checkout: an installed
+        // binary outside any checkout serves the compiled-in stdlib.
+        assert_eq!(resolve(None, Some("/usr/bin/rock"), &[]), StdlibSource::Embedded);
+        assert_eq!(resolve(None, None, &[]), StdlibSource::Embedded);
+        assert_eq!(resolve(None, Some("/opt/rock/bin/rock"), &[]), StdlibSource::Embedded);
     }
 
     fn memory_files(names: &[&str]) -> Vec<(String, String)> {
@@ -269,6 +351,15 @@ mod tests {
         for name in STDLIB_NAMES {
             let path = Path::new(BUILD_CHECKOUT_STDLIB).join(name);
             assert!(path.is_file(), "missing {}", path.display());
+        }
+    }
+
+    #[test]
+    fn embedded_stdlib_matches_the_checkout() {
+        for name in STDLIB_NAMES {
+            let on_disk = std::fs::read_to_string(Path::new(BUILD_CHECKOUT_STDLIB).join(name))
+                .expect("checkout stdlib readable");
+            assert_eq!(embedded_source(name), on_disk, "{name} drifted from the checkout");
         }
     }
 }

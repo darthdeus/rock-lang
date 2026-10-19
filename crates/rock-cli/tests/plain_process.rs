@@ -396,6 +396,31 @@ fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
 }
 
 #[test]
+fn plain_rock_runs_relocated_outside_any_checkout() {
+    // An installed binary has no checkout and no stdlib beside it: copy the
+    // built binary into a bare temp dir (no bin/ layout, no stdlib sibling)
+    // and compile + run a small program from another temp dir.
+    let home = tempfile::tempdir().unwrap();
+    let exe = home.path().join(if cfg!(windows) { "rock.exe" } else { "rock" });
+    std::fs::copy(env!("CARGO_BIN_EXE_rock"), &exe).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("main.rock"), "fn main() { print(6 * 7) }\n").unwrap();
+    let run = |args: &[&str]| {
+        Command::new(&exe)
+            .current_dir(root.path()).args(args)
+            .env("ROCK_DIR", root.path()).env("ROCK_INVOCATION_LOG", "off")
+            .env_remove("ROCK_STDLIB_DIR").env_remove("LUA_PATH").env_remove("LUA_CPATH")
+            .output().expect("start relocated rock")
+    };
+    let compiled = run(&["compile-single", "main.rock"]);
+    assert!(compiled.status.success(), "{}", text(&compiled));
+    assert!(String::from_utf8_lossy(&compiled.stdout).contains("print"), "no Lua emitted");
+    let ran = run(&["run", "main.rock"]);
+    assert!(ran.status.success(), "{}", text(&ran));
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "42\n");
+}
+
+#[test]
 fn plain_rejects_a_thread_count_that_is_not_a_count() {
     let root = tempfile::tempdir().unwrap();
     for var in ["ROCK_NUM_THREADS", "RAYON_NUM_THREADS"] {
