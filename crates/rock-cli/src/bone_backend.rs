@@ -942,34 +942,68 @@ fn sig_edit(text: &str, name: &str) -> Option<String> {
     Some(out)
 }
 
-/// Add a defaulted field to `struct <name>`'s body -- an interface change (the
-/// struct's shape shifts, so its interface_snapshot moves and the cascade
-/// re-lowers its dependents) that keeps existing `Struct { .. }` literals valid
-/// (the default fills the new field), so the profile isolates re-lower cost from
-/// missing-field constructor errors.
-/// Byte offset of the `struct <name>` declaration, requiring a word boundary
-/// after the name so `Mob` doesn't match `struct MobSpawner` (substring).
-fn struct_decl_pos(text: &str, name: &str) -> Option<usize> {
-    let needle = format!("struct {name}");
-    let mut from = 0;
-    while let Some(rel) = text[from..].find(&needle) {
-        let pos = from + rel;
-        let after = pos + needle.len();
-        let boundary = text[after..]
-            .chars()
-            .next()
-            .map_or(true, |c| !c.is_alphanumeric() && c != '_');
-        if boundary {
-            return Some(pos);
-        }
-        from = after;
-    }
-    None
+#[derive(Debug)]
+struct CascadeTarget<'a> {
+    key: ustr::Ustr,
+    file: &'a bone_incremental::session::SessionFile,
+    source_name: &'a str,
+    body_search: std::ops::Range<usize>,
+    iface_deps: usize,
 }
 
-fn field_edit(text: &str, name: &str) -> Option<String> {
-    let spos = struct_decl_pos(text, name)?;
-    let brace = text[spos..].find('{')? + spos;
+fn cascade_target<'a>(
+    session: &bone_incremental::session::Session,
+    files: &'a [bone_incremental::session::SessionFile],
+    proj_marker: &str,
+    requested: Option<&str>,
+) -> Result<CascadeTarget<'a>> {
+    let mut candidates = Vec::new();
+    for module in session.ws.modules.iter() {
+        if session.warm_mids.contains(&module.id) || !module.file.as_str().contains(proj_marker) {
+            continue;
+        }
+        let file = files.iter().find(|f| f.path == module.file.as_str())
+            .ok_or_else(|| anyhow::anyhow!("no source file for cascade module `{}`", module.file))?;
+        for (&key, &idx) in &module.struct_by_name {
+            let def = &module.structs[idx];
+            let (start, end) = def.name_span.offset_range;
+            let source_name = file.text.get(start..end)
+                .ok_or_else(|| anyhow::anyhow!("invalid source name span for `{key}`"))?;
+            candidates.push(CascadeTarget {
+                key,
+                file,
+                source_name,
+                // Start after the actual name, so annotations and same-spelled
+                // declarations in other namespaces cannot redirect the edit.
+                body_search: end..def.span.offset_range.1,
+                iface_deps: session.dependents_iface.get(&key).map_or(0, |s| s.len()),
+            });
+        }
+    }
+    candidates.sort_by_key(|t| t.key);
+    if let Some(name) = requested {
+        let mut matches = candidates.into_iter().filter(|t| {
+            if name.contains("::") { t.key.as_str() == name } else { t.source_name == name }
+        });
+        let target = matches.next()
+            .ok_or_else(|| anyhow::anyhow!("no project struct matches `{name}`"))?;
+        let others: Vec<_> = matches.map(|t| t.key.to_string()).collect();
+        if !others.is_empty() {
+            anyhow::bail!("ambiguous cascade type `{name}`: {}, {}; use a qualified key",
+                target.key, others.join(", "));
+        }
+        Ok(target)
+    } else {
+        candidates.into_iter().filter(|t| t.iface_deps > 0).max_by_key(|t| t.iface_deps)
+            .ok_or_else(|| anyhow::anyhow!("no project struct with interface dependents under `{proj_marker}`"))
+    }
+}
+
+/// Add a defaulted field to the selected declaration. Existing literals remain
+/// valid, so alternating this edit measures the interface re-lower cascade.
+fn field_edit(target: &CascadeTarget<'_>) -> Option<String> {
+    let text = &target.file.text;
+    let brace = text.get(target.body_search.clone())?.find('{')? + target.body_search.start;
     let after = brace + 1;
     let insert = "\n    __cascade_probe: int = 0,";
     let mut out = String::with_capacity(text.len() + insert.len());
@@ -979,11 +1013,10 @@ fn field_edit(text: &str, name: &str) -> Option<String> {
     Some(out)
 }
 
-/// `rock iter-cascade <project>` -- tight loop benching the Interface-tier
-/// RE-LOWER cascade: a field edit on a high-fan-in TYPE re-lowers every module
-/// whose interface references it. The re-lower sibling of `iter-reinfer` (which
-/// edits a fn signature and only re-infers). Auto-picks the project struct with
-/// the most `dependents_iface` entries; `ITER_CASCADE_TYPE=<name>` overrides.
+/// `rock iter-cascade <project>` -- tight loop measuring Interface-tier updates:
+/// a field edit re-lowers the owner and re-infers its dependents. Auto-picks the
+/// project struct with the most `dependents_iface` entries;
+/// `ITER_CASCADE_TYPE=<bare name or qualified key>` overrides.
 pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> {
     use std::path::PathBuf;
 
@@ -1001,38 +1034,14 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
             .unwrap_or_else(|| path.to_string())
     );
 
-    // Target the project struct with the most INTERFACE dependents (the edit that
-    // re-lowers the widest closure).
-    let tname = if let Ok(t) = std::env::var("ITER_CASCADE_TYPE") {
-        t
-    } else {
-        let mut best = (String::new(), 0usize);
-        for module in session.ws.modules.iter() {
-            let file = module.file.as_str();
-            if session.warm_mids.contains(&module.id) || !file.contains(&proj_marker) {
-                continue;
-            }
-            for name in module.struct_by_name.keys() {
-                let c = session.dependents_iface.get(name).map(|s| s.len()).unwrap_or(0);
-                if c > best.1 {
-                    best = (name.as_str().to_string(), c);
-                }
-            }
-        }
-        if best.0.is_empty() {
-            anyhow::bail!("no project struct with interface dependents under `{path}`");
-        }
-        best.0
-    };
-    let iface_deps = session.dependents_iface.get(&ustr::Ustr::from(&tname)).map(|s| s.len()).unwrap_or(0);
-
-    let (target, orig) = files
-        .iter()
-        .find(|f| f.path.contains(&proj_marker) && struct_decl_pos(&f.text, &tname).is_some())
-        .map(|f| (f.path.clone(), f.text.clone()))
-        .ok_or_else(|| anyhow::anyhow!("no project file defines `struct {tname}`"))?;
-    let edited =
-        field_edit(&orig, &tname).ok_or_else(|| anyhow::anyhow!("no field edit for `struct {tname}`"))?;
+    let requested = std::env::var("ITER_CASCADE_TYPE").ok();
+    let selected = cascade_target(&session, &files, &proj_marker, requested.as_deref())?;
+    let tname = selected.key;
+    let iface_deps = selected.iface_deps;
+    let target = &selected.file.path;
+    let orig = &selected.file.text;
+    let edited = field_edit(&selected)
+        .ok_or_else(|| anyhow::anyhow!("no field edit for `struct {}` ({tname})", selected.source_name))?;
 
     let iters = iters.max(1);
     let mut samples: Vec<f64> = Vec::with_capacity(iters);
@@ -1040,10 +1049,10 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
     let mut last_reinferred = 0usize;
     let mut last_tier = String::new();
     for i in 0..(warmup + iters) {
-        let text = if i % 2 == 0 { &edited } else { &orig };
+        let text = if i % 2 == 0 { &edited } else { orig };
         let t = Instant::now();
         let upd = session
-            .update_file(&target, text)
+            .update_file(target, text)
             .map_err(|e| anyhow::anyhow!("update_file: {}", e.message))?;
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         if i >= warmup {
@@ -1064,7 +1073,7 @@ pub fn bone_iter_cascade(path: &str, iters: usize, warmup: usize) -> Result<()> 
     let mut sorted = samples.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let pct = |p: f64| sorted[((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize];
-    let target_name = Path::new(&target)
+    let target_name = Path::new(target)
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| target.clone());
@@ -1325,6 +1334,77 @@ pub fn short_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cascade_targets_edit_the_indexed_declaration_and_update_its_users() {
+        use bone_incremental::session::{Session, SessionFile, UpdateTier};
+        use skull_parser::{Dialect, PackageTag};
+
+        let files: Vec<_> = [
+            ("fixture/a.rock", "mod a;\npub struct Hub { pub x: int }\npub struct Twin { pub x: int }\nfn marker() -> int { 0 }\n"),
+            ("fixture/b.rock", "mod b;\npub struct Twin { pub x: int }\npub mod inner {\n    pub struct Twin { pub x: int }\n}\nfn marker() -> int { 0 }\n"),
+            ("fixture/one.rock", "mod one;\nfn hub(p: cascade::a::Hub) -> int { p.x }\nfn twin(p: cascade::a::Twin) -> int { p.x }\n"),
+            ("fixture/two.rock", "mod two;\nfn hub(p: cascade::a::Hub) -> int { p.x }\nfn twin(p: cascade::b::Twin) -> int { p.x }\nfn inner(p: cascade::b::inner::Twin) -> int { p.x }\n"),
+        ].into_iter().map(|(path, text)| SessionFile {
+            dialect: Dialect::V1,
+            package: Some(PackageTag { id: 1, self_name: "cascade".into() }),
+            ..SessionFile::legacy(path, text)
+        }).collect();
+        let new_session = || Session::new(vec![], files.clone(), &Default::default()).unwrap();
+        let session = new_session();
+        assert!(session.diagnostics().is_empty(), "{:?}", session.diagnostics());
+
+        let auto = cascade_target(&session, &files, "fixture/", None).unwrap();
+        let bare = cascade_target(&session, &files, "fixture/", Some("Hub")).unwrap();
+        assert_eq!(auto.key.as_str(), "cascade::a::Hub");
+        assert_eq!(auto.key, bare.key);
+        assert_eq!(auto.file.path, bare.file.path);
+        assert_eq!(auto.body_search, bare.body_search);
+        assert_eq!(auto.source_name, "Hub");
+        assert_eq!(auto.iface_deps, 2);
+        assert_eq!(bare.iface_deps, auto.iface_deps);
+        let err = cascade_target(&session, &files, "fixture/", Some("Twin")).unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        for key in ["cascade::a::Twin", "cascade::b::Twin", "cascade::b::inner::Twin"] {
+            assert!(err.contains(key), "{err}");
+        }
+        assert!(cascade_target(&session, &files, "fixture/", Some("Missing")).is_err());
+        assert!(cascade_target(&session, &files, "fixture/", Some("cascade::missing::Twin")).is_err());
+
+        for (requested, key, owner, dependents) in [
+            (None, "cascade::a::Hub", "fixture/a.rock", vec!["fixture/one.rock", "fixture/two.rock"]),
+            (Some("Hub"), "cascade::a::Hub", "fixture/a.rock", vec!["fixture/one.rock", "fixture/two.rock"]),
+            (Some("cascade::a::Twin"), "cascade::a::Twin", "fixture/a.rock", vec!["fixture/one.rock"]),
+            (Some("cascade::b::Twin"), "cascade::b::Twin", "fixture/b.rock", vec!["fixture/two.rock"]),
+            (Some("cascade::b::inner::Twin"), "cascade::b::inner::Twin", "fixture/b.rock", vec!["fixture/two.rock"]),
+        ] {
+            let mut session = new_session();
+            let selected = cascade_target(&session, &files, "fixture/", requested).unwrap();
+            assert_eq!(selected.key.as_str(), key);
+            assert_eq!(selected.file.path, owner);
+            assert_eq!(selected.iface_deps, dependents.len());
+            let edited = field_edit(&selected).expect("selected declaration is editable");
+            assert_eq!(edited.matches("__cascade_probe").count(), 1);
+            let update = session.update_file(&selected.file.path, &edited).unwrap();
+            assert_eq!(update.tier, UpdateTier::Interface, "{key}");
+            assert!(!update.relowered.is_empty(), "{key}");
+            for path in dependents {
+                let mid = session.ws.modules.iter().find(|m| m.file.as_str() == path).unwrap().id;
+                assert!(update.reinferred.iter().any(|(id, _)| *id == mid), "{key}: {path} must re-infer");
+            }
+            for module in session.ws.modules.iter() {
+                for (_, def) in module.structs.iter() {
+                    let has_probe = def.fields.iter().any(|f| f.name.as_str() == "__cascade_probe");
+                    assert_eq!(has_probe, def.name.as_str() == key, "{}: wrong declaration edited", def.name);
+                }
+            }
+            assert!(session.diagnostics().is_empty(), "{:?}", session.diagnostics());
+            let restored = session.update_file(&selected.file.path, &selected.file.text).unwrap();
+            assert_eq!(restored.tier, UpdateTier::Interface, "{key}: restore");
+            assert!(!restored.relowered.is_empty(), "{key}: restore");
+            assert!(session.diagnostics().is_empty(), "{:?}", session.diagnostics());
+        }
+    }
 
     // A program is REJECTED if the check fails (syntax, semantic-pass, or any
     // collected body/interface error).
