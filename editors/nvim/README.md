@@ -1,8 +1,9 @@
 # rock.nvim
 
 Neovim integration and live debug dashboard for the Rock language server.
-Lives inside the rock monorepo; loaded from source via lazy.nvim's `dev =
-true` so you iterate on it alongside the server.
+It is part of the [rock-lang](https://github.com/darthdeus/rock-lang)
+repository; load it from a checkout with lazy.nvim's `dev = true` so you
+iterate on it alongside the compiler and the server.
 
 ## What it gives you
 
@@ -10,7 +11,7 @@ true` so you iterate on it alongside the server.
   live binary info, client state, per-buffer attachment, `rock/stats`
   snapshot, last-completion summary, a tail of the LSP log, and a
   newest-first event ring of every JSON-RPC frame in both directions.
-- **Worktree/binary mismatch detection** — auto-picks the `target/debug/rock-lsp`
+- **Worktree/binary mismatch detection** — auto-picks the `target/debug/rock`
   that lives in the cwd's worktree when `ROCK_LSP_DIR` is unset, and
   warns when the active binary comes from a *different* worktree.
 - **Binary fs-watch** — panel id flips the second a `cargo build`
@@ -35,14 +36,23 @@ true` so you iterate on it alongside the server.
 
 ## Install (lazy.nvim)
 
+The plugin drives the server through `rock lsp serve`, so it needs a `rock`
+build that carries the language server. Build one from your rock-lang
+checkout:
+
+```sh
+git clone git@github.com:darthdeus/rock-lang.git ~/projects/rock-lang
+cd ~/projects/rock-lang && cargo build --bin rock
+```
+
 ```lua
 {
-  dir = vim.fn.expand('~/projects/rock-nvim-lsp/editors/nvim'),
+  dir = vim.fn.expand('~/projects/rock-lang/editors/nvim'),
   name = 'rock.nvim',
   ft = 'rock',
   config = function()
     require('rock').setup({
-      -- binary = '/path/to/rock-lsp',  -- optional; see Binary resolution
+      -- binary = '/path/to/rock',  -- optional; see Binary resolution
       capabilities = require('cmp_nvim_lsp').default_capabilities(),
       on_attach = function(client, bufnr)
         -- your keymaps, e.g. buf_set_keymap(bufnr, 'n', 'gd', ...)
@@ -57,6 +67,32 @@ true` so you iterate on it alongside the server.
 
 **Remove** any existing inline `vim.lsp.config('rock', ...)` /
 `lspconfig.rock.setup` in your dotfiles — this plugin owns that now.
+
+## Tests
+
+The suite is `tests/*_spec.lua`, each one a headless nvim process driven
+by `tests/run.sh`:
+
+```sh
+tests/run.sh        # against the host nvim
+```
+
+Specs that need a real server key off `$ROCK_LSP_BIN` and print `SKIP`
+(often `SKIP: $ROCK_LSP_BIN not set`) when it is unset. To run them:
+
+```sh
+ROCK_LSP_BIN=~/projects/rock-lang/target/debug/rock tests/run.sh
+```
+
+`tests/docker-run.sh` is the clean-room variant: it builds
+`tests/Dockerfile` (nvim pinned to the version in `M.min_nvim`), builds or
+reuses a cached `rock` via `tests/build-rock-lsp.sh`, and runs the same
+runner inside the container.
+
+## Licence
+
+MIT OR Apache-2.0, the same as the rest of the rock-lang repository
+(`LICENSE-MIT`, `LICENSE-APACHE`).
 
 ## Backend
 
@@ -80,6 +116,11 @@ it documents the `:RockSemTokens*` commands and the known failure modes.
 | `:RockPerf` | toggle the per-method latency floater (histograms + percentiles) |
 | `:RockModules` | toggle the loaded-modules floater (refetches on open) |
 | `:RockLspDoctor` | health check (binary, worktree match, client, capabilities, log, rock/stats + rock/modules probes) |
+| `:RockColorPick` | highlight groups and hex colors under the cursor |
+| `:RockCapture [note]` | write a bug snapshot (buffer, position, LSP state) for a report |
+| `:RockSemTokens` / `:RockSemTokensAll` | dump the semantic tokens Neovim holds for the current line / whole buffer |
+| `:RockSemTokensDebug` / `:RockSemTokensHook` / `:RockSemTokensTrace` | semantic-token highlighter internals (see `semantic-tokens-debugging.md`) |
+| `:RockCompletionLog [on\|off\|toggle]` | runtime switch for the JSONL completion log |
 | `:RockDump [path]` | write a JSON snapshot of state + events + timings to `/tmp/rock-nvim-<ts>.json` (or given path) |
 | `:RockRestart` | stop+reattach rock clients (also `<Tab>`, `<F3>`) |
 
@@ -93,6 +134,8 @@ Global (all configurable via `setup()`):
 | `<leader>rc` | toggle completion-debug floater |
 | `<leader>rt` | toggle per-method latency floater |
 | `<leader>rm` | toggle loaded-modules floater |
+| `<leader>rk` | color pick under cursor |
+| `<C-g>c` | capture a bug snapshot (insert mode too) |
 | `<Tab>` / `<F3>` | restart LSP (expected to be wired in your dotfiles to call `require('rock').restart()`) |
 
 Inside the sidebar panel:
@@ -196,7 +239,7 @@ EVENTS (N, newest first)
 ## `rock/stats` fields
 
 The server answers a custom `rock/stats` request (implemented in
-`rock-lsp/src/lib.rs`) with counts and compile metrics:
+`crates/rock-lsp/src/lib.rs`) with counts and compile metrics:
 
 | Field | Meaning |
 |-------|---------|
@@ -313,14 +356,15 @@ Renders `●rock 8edb6ccf up 12m r2`:
 In priority order:
 
 1. `opts.binary` passed to `setup()`.
-2. `$ROCK_LSP_DIR/target/debug/rock-lsp` (if env var set).
-3. The current worktree's `target/debug/rock-lsp`, found by walking up
-   from `cwd` looking for a `rock-lsp/Cargo.toml`.
-4. `$HOME/projects/rock/target/debug/rock-lsp` (matches `rerock.sh`'s hardcoded path).
+2. `$ROCK_LSP_DIR/target/debug/rock` (if env var set).
+3. The current worktree's `target/debug/rock`, found by walking up
+   from `cwd` looking for a `crates/rock-cli/Cargo.toml`.
+4. `$HOME/projects/rock-lang/target/debug/rock` (the dev checkout).
+5. `rock` on `PATH`, so an installed compiler works with no checkout.
 
 If the resolved path is a shell script, we peek inside for a line
-matching `*/target/*/rock-lsp` and use that instead, so `rerock.sh`
-works but we still fs-watch a real binary.
+matching `*/target/*/rock` and use that instead, so a wrapper around a
+debug build still gets fs-watched as a real binary.
 
 ## Architecture
 
@@ -355,19 +399,18 @@ any state change plus a 1-second wall-clock ticker (for the `up` field).
 - **Module load/unload timeline** — currently we show a point-in-time
   snapshot. A true timeline would track load/unload events over time.
 - **Event filter keybinds** inside the panel (`f` to toggle `$/progress`).
-- **Configurable panel width**, persisted side across sessions.
-- **`:RockLspDoctor`** — one-shot health check (binary exists, compiles,
-  version matches repo, handler set registered).
+- **Persisted panel side** across sessions (currently per-session).
 
 ## Troubleshooting
 
 - **"binary does not exist"** — either your worktree hasn't built
-  rock-lsp yet (`cargo build -p rock-lsp`) or the resolution picked a
-  stale path. Check the BINARY section; the `configured_path` in
-  `state.binary.configured_path` tells you what was asked for.
+  rock yet (`cargo build --bin rock` in a rock-lang checkout) or the
+  resolution picked a stale path. Check the BINARY section; the
+  `configured_path` in `state.binary.configured_path` tells you what was
+  asked for.
 - **"MISMATCH"** — you're editing files in one worktree but the active
   binary is from another. Either `export ROCK_LSP_DIR=$(pwd)` and
-  restart nvim, or delete `~/projects/rock/target/debug/rock-lsp` so
+  restart nvim, or delete `~/projects/rock-lang/target/debug/rock` so
   resolution falls through to the cwd-local build.
 - **Completion floater shows stale data** — it shows the last
   completion captured; trigger a new one in a rock buffer and re-open.
