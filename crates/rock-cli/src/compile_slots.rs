@@ -315,7 +315,10 @@ impl Ticket {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => return Err(error).with_context(|| format!("reading {}", seq_path.display())),
         } + 1;
-        fs_err::write(&seq_path, format!("{seq}\n"))?;
+        // Replaced, not rewritten in place: a kill between truncate and write
+        // would leave an empty sequence that every later enqueue refuses.
+        rock_host::project::write_atomic(&seq_path, format!("{seq}\n"))
+            .with_context(|| format!("writing compile slot sequence {}", seq_path.display()))?;
         let name = format!("{seq:012}");
         let path = dir.join(QUEUE_DIR).join(&name);
         let file = open_slot(&path)?;
@@ -757,6 +760,22 @@ mod tests {
         let (small, _) = finish_slot_waiter(barrier, waiter, waiting);
         assert!(small.unwrap().slot.is_some());
         assert!(dir.path().join("batch-0").exists(), "an unlocked foreign file is left alone");
+    }
+
+    #[test]
+    fn the_ticket_sequence_is_replaced_never_truncated_in_place() {
+        // A compile killed between truncate and write left an empty `seq`
+        // that every later enqueue refused; the old inode must stay whole.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(QUEUE_DIR)).unwrap();
+        let seq = dir.path().join(QUEUE_DIR).join("seq");
+        std::fs::write(&seq, "1\n").unwrap();
+        let previous = dir.path().join("seq-previous");
+        std::fs::hard_link(&seq, &previous).unwrap();
+        let ticket = Ticket::enqueue(dir.path(), "compile", 0).unwrap();
+        assert_eq!(ticket.name, "000000000002");
+        assert_eq!(std::fs::read_to_string(&seq).unwrap(), "2\n");
+        assert_eq!(std::fs::read_to_string(&previous).unwrap(), "1\n", "seq was rewritten in place");
     }
 
     #[test]
