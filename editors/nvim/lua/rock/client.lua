@@ -234,11 +234,11 @@ local function build_cmd(bin_path)
       if missing_binary_reported ~= bin_path then
         missing_binary_reported = bin_path
         vim.schedule(function()
-          vim.notify(('rock-lsp binary not found: %s'):format(tostring(bin_path)),
+          vim.notify(('rock binary not found: %s'):format(tostring(bin_path)),
             vim.log.levels.ERROR, { title = 'rock.nvim' })
         end)
       end
-      fail_start('rock-lsp binary missing: ' .. tostring(bin_path))
+      fail_start('rock binary missing: ' .. tostring(bin_path))
     end
     missing_binary_reported = nil
 
@@ -292,7 +292,7 @@ local function build_cmd(bin_path)
     if not rpc then
       state.set_client({ state = 'crashed' })
       state.record_event('local', 'server/start_failed', { bin = bin_path })
-      fail_start('rock-lsp failed to start: ' .. tostring(bin_path))
+      fail_start('rock failed to start: ' .. tostring(bin_path))
     end
 
     -- Wrap outgoing. vim.lsp.rpc clients expose request(method, params, cb) and notify(method, params).
@@ -476,7 +476,7 @@ function M.restart()
   local bin_info = state.get().binary
   if not bin_info.exists then
     vim.notify(
-      ('rock-lsp binary not found at %s -- not restarting LSP.\nBuild it (`cargo build --bin rock`) and run :RockRestart.')
+      ('rock binary not found at %s -- not restarting LSP.\nBuild it (`cargo build --bin rock` in a rock-lang checkout) and run :RockRestart.')
         :format(bin_info.path or '<unresolved>'),
       vim.log.levels.ERROR, { title = 'rock.nvim' })
     return

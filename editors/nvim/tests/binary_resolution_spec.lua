@@ -1,14 +1,13 @@
 -- Verifies rock.binary.resolve()'s precedence rules and shell-script peek.
 --
--- Resolution order documented in the doctor: opts.binary > $ROCK_LSP_DIR
--- > cwd-walk-find crates/rock-cli/Cargo.toml > $HOME default. We exercise each
--- branch in isolation by manipulating the relevant input and clearing
--- the others.
+-- Resolution order: opts.binary > $ROCK_LSP_DIR > cwd-walk find of
+-- crates/rock-cli/Cargo.toml > the rock-lang checkout's debug build >
+-- `rock` on PATH. We exercise each branch in isolation by manipulating
+-- the relevant input and clearing the others.
 --
--- The shell-script peek lets the user point `binary` at a wrapper like
--- rerock.sh; resolve() should read the script's first 4 KiB and pull
--- out the embedded `*/target/*/rock` path so fs-watch tracks the
--- real binary, not the script.
+-- The shell-script peek lets the user point `binary` at a wrapper; resolve()
+-- should read the script's first 4 KiB and pull out the embedded
+-- `*/target/*/rock` path so fs-watch tracks the real binary, not the script.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
@@ -89,21 +88,55 @@ do
   end
 end
 
--- Phase 4: $HOME default when nothing else matches.
+-- Phase 4: checkout and PATH fallbacks when nothing else matches. PATH is
+-- swapped per assertion so a `rock` installed on the host can't decide the
+-- result.
 do
   vim.cmd('cd ' .. vim.fn.fnameescape(neutral_cwd))
   vim.env.ROCK_LSP_DIR = nil
   vim.env.HOME = tmp_root .. '/fakehome'
-  local _, configured = binary.resolve(nil)
-  local expected = tmp_root .. '/fakehome/projects/rock/target/debug/rock'
-  if configured ~= expected then
-    restore(); fail('$HOME default mismatch: ' .. tostring(configured))
+  local checkout = tmp_root .. '/fakehome/projects/rock-lang/target/debug/rock'
+  local bin_dir = tmp_root .. '/bin'
+  local empty_dir = tmp_root .. '/emptybin'
+  vim.fn.mkdir(empty_dir, 'p')
+  write_file(bin_dir .. '/rock', '#!/bin/sh\nexec /bin/true\n', 493)
+
+  local function with_path(dir, fn)
+    local orig_path = vim.env.PATH
+    vim.env.PATH = dir
+    fn()
+    vim.env.PATH = orig_path
   end
+
+  -- 4a: no checkout build, no PATH rock -> report the checkout path.
+  with_path(empty_dir, function()
+    local _, configured = binary.resolve(nil)
+    if configured ~= checkout then
+      restore(); fail('checkout default mismatch: ' .. tostring(configured))
+    end
+  end)
+
+  -- 4b: PATH rock wins when the checkout has no build.
+  with_path(bin_dir, function()
+    local _, configured = binary.resolve(nil)
+    if vim.fn.resolve(configured) ~= vim.fn.resolve(bin_dir .. '/rock') then
+      restore(); fail('PATH fallback not used: ' .. tostring(configured))
+    end
+  end)
+
+  -- 4c: the checkout's own build beats an installed rock.
+  write_file(checkout, 'fake-elf', 493)
+  with_path(bin_dir, function()
+    local _, configured = binary.resolve(nil)
+    if vim.fn.resolve(configured) ~= vim.fn.resolve(checkout) then
+      restore(); fail('checkout build did not beat PATH: ' .. tostring(configured))
+    end
+  end)
 end
 
 -- Phase 5: shell-script peek extracts the embedded binary path.
 do
-  local script_path = tmp_root .. '/rerock.sh'
+  local script_path = tmp_root .. '/rock-debug.sh'
   local real_bin = tmp_root .. '/realtree/target/release/rock'
   write_file(real_bin, 'fake-elf', 493)
   -- Use $HOME expansion to also exercise the gsub.
@@ -144,5 +177,5 @@ do
 end
 
 restore()
-print('OK: binary resolution covers explicit / env / cwd-walk / $HOME / script-peek / refresh')
+print('OK: binary resolution covers explicit / env / cwd-walk / checkout / PATH / script-peek / refresh')
 os.exit(0)

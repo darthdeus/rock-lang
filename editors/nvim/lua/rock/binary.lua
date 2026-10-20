@@ -1,7 +1,7 @@
 -- Resolve, inspect, and watch the `rock` binary (the LSP runs as
 -- `rock lsp serve`; there is no separate rock-lsp binary).
 -- Detects the worktree mismatch that bites when a shared hardcoded path
--- (like rerock.sh's $HOME/projects/rock/target/debug/rock) is used
+-- (like an editor config pointing at $HOME/projects/rock-lang/... ) is used
 -- from a different rock checkout.
 
 local state = require('rock.state')
@@ -50,8 +50,9 @@ end
 -- Resolve the configured cmd spec into a concrete binary path.
 -- Accepts:
 --   - absolute path to a binary
---   - a shell script (e.g. rerock.sh) -- we try to extract the binary
---     inside it by looking for a line matching */target/*/rock
+--   - a shell script (e.g. a wrapper that re-execs a debug build) -- we
+--     try to extract the binary inside it by looking for a line matching
+--     */target/*/rock
 function M.resolve(configured)
   if not configured then
     if vim.env.ROCK_LSP_DIR and vim.env.ROCK_LSP_DIR ~= '' then
@@ -63,7 +64,14 @@ function M.resolve(configured)
       if local_bin and uv.fs_stat(local_bin) then
         configured = local_bin
       else
-        configured = vim.env.HOME .. '/projects/rock/target/debug/rock'
+        -- Then the dev checkout's debug build, then whatever `rock` is
+        -- installed on PATH. The checkout path is also what the
+        -- missing-binary warning names when nothing exists at all.
+        configured = vim.env.HOME .. '/projects/rock-lang/target/debug/rock'
+        if not uv.fs_stat(configured) then
+          local on_path = vim.fn.exepath('rock')
+          if on_path ~= '' then configured = on_path end
+        end
       end
     end
   end

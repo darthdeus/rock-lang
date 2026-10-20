@@ -1,14 +1,15 @@
 -- rock.nvim - editor integration for the Rock language server.
 --
 -- Usage (lazy.nvim, pointing at this directory):
---   { dir = '~/projects/rock/editors/nvim', name = 'rock.nvim', dev = true,
+--   { dir = '~/projects/rock-lang/editors/nvim', name = 'rock.nvim', dev = true,
 --     ft = 'rock', config = function() require('rock').setup({}) end }
 
 local M = {}
 
 M.defaults = {
-  -- Absolute path to the rock-lsp binary. If nil, resolved from
-  -- $ROCK_LSP_DIR/target/debug/rock or $HOME/projects/rock/...
+  -- Absolute path to the `rock` binary. If nil, resolved from
+  -- $ROCK_LSP_DIR/target/debug/rock, the cwd worktree, the rock-lang
+  -- checkout, or `rock` on PATH (see binary.lua).
   binary = nil,
   -- Additional capabilities to merge in (e.g. cmp_nvim_lsp's).
   capabilities = nil,
