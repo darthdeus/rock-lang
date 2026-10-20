@@ -46,7 +46,12 @@ jobs:
           "$HOME/luajit/bin/luajit" -v
       - name: Check public content
         shell: bash
+        env:
+          ROCK_LANG_DENYLIST: ${{ secrets.ROCK_LANG_DENYLIST }}
         run: |
+          mkdir -p "$HOME/.config/rock-lang"
+          printf '%s\n' "$ROCK_LANG_DENYLIST" > "$HOME/.config/rock-lang/denylist"
+          test -n "$ROCK_LANG_DENYLIST" || { echo "ROCK_LANG_DENYLIST secret is not set" >&2; exit 1; }
           git grep -I -h . -- . ':!crates/lsp-types-manual/Cargo.toml' ':!crates/lsp-types-manual/Cargo.toml.orig' > "$RUNNER_TEMP/public-content.txt"
           .githooks/check-public "$RUNNER_TEMP/public-content.txt"
       - name: Show LuaJIT

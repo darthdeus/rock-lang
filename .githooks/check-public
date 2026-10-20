@@ -15,7 +15,9 @@ if [[ -f "$denylist" ]]; then
     [[ -n "$line" && "$line" != \#* ]] && patterns+=("$line")
   done < "$denylist"
 else
-  echo "check-public: warning: no private deny-list at $denylist" >&2
+  # Without the private names the check passes leaks, so it refuses to run.
+  echo "check-public: no private deny-list at $denylist; install it before committing" >&2
+  exit 1
 fi
 status=0
 for p in "${patterns[@]}"; do
