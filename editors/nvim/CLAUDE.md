@@ -96,6 +96,9 @@ seconds.
   with the inversion-comment shape the existing sentinel files use:
   state the limitation, the fix, and the assertion to flip.
 
+`scripts/semtok_caps.lua` reports the semantic-token capabilities nvim
+declares and the request kinds it sends, driven through a real server.
+
 Manual testing still works: open a `.rock` file with the plugin loaded
 and use `:RockLspDoctor`. Build the binary with
 `cargo build --bin rock` (from the repository root) for live use.

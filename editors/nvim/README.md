@@ -89,6 +89,15 @@ ROCK_LSP_BIN=~/projects/rock-lang/target/debug/rock tests/run.sh
 reuses a cached `rock` via `tests/build-rock-lsp.sh`, and runs the same
 runner inside the container.
 
+`scripts/semtok_caps.lua` answers capability questions by observation: it
+drives a real server through the plugin and prints what nvim declares for
+semantic tokens and which request kinds it actually sent:
+
+```sh
+ROCK_LSP_BIN=~/projects/rock-lang/target/debug/rock \
+  nvim --headless --clean -u NONE -l scripts/semtok_caps.lua
+```
+
 ## Licence
 
 MIT OR Apache-2.0, the same as the rest of the rock-lang repository
