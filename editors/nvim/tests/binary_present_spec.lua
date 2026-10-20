@@ -1,8 +1,8 @@
 -- Inverse of missing_binary_spec: with a fake-but-existing rock-lsp,
 -- the cmd() path should NOT short-circuit at the missing-binary gate.
 --
--- We use `/usr/bin/true` (or `/bin/true`) as the fake binary. It exits
--- 0 immediately, which means: (a) the missing-binary branch in cmd()
+-- The fake binary is a script that exits 0 immediately (see
+-- tests/_lib/fake_server.lua). That means: (a) the missing-binary branch in cmd()
 -- is NOT taken; (b) vim.lsp.rpc.start spawns it; (c) the on_exit
 -- dispatcher fires with code=0 and we end in state='detached', NOT
 -- state='crashed'. Crucially, we should NOT get the "binary not found"
@@ -17,15 +17,9 @@ local function fail(msg)
   os.exit(1)
 end
 
-local function find_true_bin()
-  for _, p in ipairs({ '/usr/bin/true', '/bin/true' }) do
-    if (vim.uv or vim.loop).fs_stat(p) then return p end
-  end
-  return nil
-end
-
-local fake_bin = find_true_bin()
-if not fake_bin then fail('no /usr/bin/true or /bin/true on this system') end
+package.path = package.path .. ';' .. vim.fn.getcwd() .. '/tests/?.lua'
+local fake_server = require('_lib.fake_server')
+local fake_bin = fake_server.write(vim.fn.tempname(), 'rock', 0)
 
 local notifications = {}
 vim.notify = function(msg, level, opts)

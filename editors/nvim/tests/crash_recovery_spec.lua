@@ -1,32 +1,29 @@
 -- Crash-and-recover loop.
 --
 -- Pinned behavior:
---   1. Spawning a binary that exits non-zero (`/usr/bin/false`) drives
+--   1. Spawning a binary that exits non-zero drives
 --      cmd() past the missing-binary gate, into vim.lsp.rpc.start, and
 --      the on_exit dispatcher fires with code != 0. State should
 --      transition to 'crashed' and last_exit.code should be 1.
 --   2. The crash notification fires.
 --   3. mark_buffers_crashed sets a diagnostic in the rock.nvim.crash
 --      namespace on every rock buffer that was tracked.
---   4. After client.restart() with a working binary (/usr/bin/true),
+--   4. After client.restart() with a working binary (exits 0),
 --      crash diagnostics are cleared on the rock buffer.
 --
--- We do NOT need a real LSP for this spec — /usr/bin/false +
--- /usr/bin/true are enough to drive the spawn-and-exit machinery.
+-- We do NOT need a real LSP for this spec — a fake server that exits 0 or 1
+-- is enough to drive the spawn-and-exit machinery (tests/_lib/fake_server.lua).
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')
   os.exit(1)
 end
 
-local function pick(paths)
-  for _, p in ipairs(paths) do
-    if (vim.uv or vim.loop).fs_stat(p) then return p end
-  end
-end
-local false_bin = pick({ '/usr/bin/false', '/bin/false' })
-local true_bin = pick({ '/usr/bin/true', '/bin/true' })
-if not false_bin or not true_bin then fail('need /usr/bin/{true,false}') end
+package.path = package.path .. ';' .. vim.fn.getcwd() .. '/tests/?.lua'
+local fake_server = require('_lib.fake_server')
+local fake_dir = vim.fn.tempname()
+local false_bin = fake_server.write(fake_dir, 'rock-crash', 1)
+local true_bin = fake_server.write(fake_dir, 'rock-ok', 0)
 
 local notifications = {}
 vim.notify = function(msg, level)
@@ -47,7 +44,7 @@ local buf = vim.api.nvim_create_buf(true, false)
 vim.api.nvim_buf_set_name(buf, '/tmp/crash-recovery-spec.rock')
 vim.api.nvim_set_option_value('filetype', 'rock', { buf = buf })
 
--- Wait for spawn + on_exit. /usr/bin/false exits 1 immediately, so
+-- Wait for spawn + on_exit. The fake exits 1 immediately, so
 -- the on_exit dispatcher should fire and set state.client.state.
 vim.wait(1500, function()
   local s = state.get().client.state
@@ -99,7 +96,7 @@ for _, n in ipairs(notifications) do
   end
 end
 
--- Phase 2: recovery. Swap the configured binary to /usr/bin/true and
+-- Phase 2: recovery. Swap the configured binary to one that exits 0 and
 -- restart. The "not restarting" gate must NOT fire (binary exists),
 -- and after restart state should reset to 'starting' or 'detached'
 -- (true exits 0).
