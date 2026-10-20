@@ -8,10 +8,22 @@ pub fn main_with(registrations: &'static crate::registry::Registrations) {
     // The command runs on its own thread because the main thread's stack is
     // fixed by the OS (often 8 MiB) and compiler passes recurse over the
     // source tree; see `rock_core::nesting` for the bound.
+    #[cfg(target_os = "linux")]
+    let binding = crate::child_lifetime::ParentDeathSignal::capture().unwrap_or_else(|error| {
+        eprintln!("Error: cannot read the parent-death binding: {error}");
+        std::process::exit(1);
+    });
     let command = std::thread::Builder::new()
         .name("rock".into())
         .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
-        .spawn(move || run_process(registrations))
+        .spawn(move || {
+            #[cfg(target_os = "linux")]
+            binding.arm().unwrap_or_else(|error| {
+                eprintln!("Error: cannot preserve the parent-death binding: {error}");
+                std::process::exit(1);
+            });
+            run_process(registrations)
+        })
         .unwrap_or_else(|error| {
             eprintln!("Error: cannot start the compiler thread: {error}");
             std::process::exit(1);

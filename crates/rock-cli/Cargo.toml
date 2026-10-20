@@ -90,3 +90,8 @@ path = "src/main.rs"
 name = "main_js"
 path = "tests/main_js.rs"
 required-features = ["backend-js"]
+
+[[test]]
+name = "child_lifetime"
+path = "tests/child_lifetime.rs"
+harness = false

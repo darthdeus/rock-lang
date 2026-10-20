@@ -68,6 +68,37 @@ fn bind_slot(pid: u32) -> Result<(), io::Error> {
     )))
 }
 
+/// Linux keeps this binding on the calling thread; a new thread starts unbound.
+/// Preserve it before that thread can exec and replace the original leader.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+pub(crate) struct ParentDeathSignal {
+    parent: libc::pid_t,
+    signal: libc::c_int,
+}
+
+#[cfg(target_os = "linux")]
+impl ParentDeathSignal {
+    pub(crate) fn capture() -> io::Result<Self> {
+        let mut signal = 0;
+        if unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &mut signal) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { parent: unsafe { libc::getppid() }, signal })
+    }
+
+    pub(crate) fn arm(self) -> io::Result<()> {
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, self.signal) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Arming after the original parent exits would miss its death.
+        if self.signal != 0 && unsafe { libc::getppid() } != self.parent {
+            unsafe { libc::raise(self.signal); }
+        }
+        Ok(())
+    }
+}
+
 /// Spawn `cmd` so that it does not outlive this process.
 pub fn spawn_bound_child(cmd: &mut Command) -> io::Result<Child> {
     #[cfg(unix)]
@@ -75,20 +106,13 @@ pub fn spawn_bound_child(cmd: &mut Command) -> io::Result<Child> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let launcher = unsafe { libc::getpid() };
-        // Runs in the forked child before exec. The parent-death signal is
-        // armed first; if the launcher already died in the window between
-        // fork and prctl, getppid no longer matches and the child ends now.
+        let binding = ParentDeathSignal {
+            parent: unsafe { libc::getpid() },
+            signal: libc::SIGTERM,
+        };
+        // Only async-signal-safe scalar syscalls run between fork and exec.
         unsafe {
-            cmd.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::getppid() != launcher {
-                    libc::raise(libc::SIGTERM);
-                }
-                Ok(())
-            });
+            cmd.pre_exec(move || binding.arm());
         }
     }
     let child = cmd.spawn()?;
