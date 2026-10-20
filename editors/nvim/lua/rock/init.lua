@@ -126,7 +126,7 @@ function M.setup(user)
     vim.lsp.enable('rock')
   else
     vim.notify(
-      ('rock-lsp binary not found at %s\nBuild it (`cargo build --bin rock`) and restart nvim.')
+      ('rock binary not found at %s\nBuild it (`cargo build --bin rock` in a rock-lang checkout) and restart nvim.')
         :format(bin_info.path or '<unresolved>'),
       vim.log.levels.WARN, { title = 'rock.nvim' }
     )
@@ -260,40 +260,6 @@ function M.setup(user)
     nargs = '?',
     complete = function() return { 'on', 'off', 'toggle' } end,
     desc = 'rock.nvim: toggle completion logging at runtime',
-  })
-
-  -- Live A/B switch for the LSP completion fuzzy scorer.
-  -- `:RockFuzzyScorer` (no arg)        -> reports current
-  -- `:RockFuzzyScorer hybrid`          -> activates hybrid (default)
-  -- `:RockFuzzyScorer numeric`         -> legacy single-pass + magic weights
-  -- `:RockFuzzyScorer fzf`             -> fzf FuzzyMatchV2 DP wrapped in bands
-  -- Round-trip is a `rock/setFuzzyScorer` custom request — the
-  -- atomic on the server side flips immediately, no restart needed.
-  vim.api.nvim_create_user_command('RockFuzzyScorer', function(args)
-    local clients = vim.lsp.get_clients({ name = 'rock' })
-    if #clients == 0 then
-      vim.notify('rock.nvim: no rock LSP client attached', vim.log.levels.WARN)
-      return
-    end
-    local params = {}
-    if args.args ~= '' then params.scorer = args.args end
-    clients[1]:request('rock/setFuzzyScorer', params, function(err, result)
-      if err then
-        vim.notify('rock.nvim: setFuzzyScorer failed: ' .. vim.inspect(err),
-          vim.log.levels.ERROR)
-        return
-      end
-      if result and result.error then
-        vim.notify('rock.nvim: ' .. result.error, vim.log.levels.ERROR)
-        return
-      end
-      vim.notify('rock.nvim: fuzzy scorer = ' .. tostring(result and result.scorer),
-        vim.log.levels.INFO)
-    end)
-  end, {
-    nargs = '?',
-    complete = function() return { 'hybrid', 'numeric', 'fzf' } end,
-    desc = 'rock.nvim: switch LSP fuzzy scorer (hybrid|numeric|fzf)',
   })
 end
 
