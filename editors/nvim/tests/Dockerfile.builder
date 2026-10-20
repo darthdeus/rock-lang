@@ -1,4 +1,5 @@
-# Builder image for rock-lsp. Used by tests/build-rock-lsp.sh.
+# Builder image for the `rock` binary the LSP runs from. Used by
+# tests/build-rock-lsp.sh.
 #
 # Stays separate from the test runtime image so the test container can
 # remain lean (~70 MB) while this one carries the full rust toolchain

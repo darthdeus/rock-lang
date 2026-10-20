@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build (or reuse a cached) `rock` binary for the test container.
-# The LSP runs as `rock lsp serve`; there is no separate rock-lsp binary.
+# The LSP runs as `rock lsp serve`; there is no separate rock-lsp binary,
+# so the one artifact the specs get is the compiler's.
 #
 # The resulting linux binary lives at:
 #   ~/.cache/rock-lsp/builds/<arch>/<sha>/rock
@@ -19,9 +20,9 @@
 set -euo pipefail
 
 ROCK_DIR=${ROCK_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}
-if [ ! -f "$ROCK_DIR/Cargo.lock" ] || [ ! -d "$ROCK_DIR/crates/rock-dev-cli" ]; then
+if [ ! -f "$ROCK_DIR/Cargo.lock" ] || [ ! -d "$ROCK_DIR/crates/rock-cli" ]; then
     echo "build-rock-lsp.sh: \$ROCK_DIR=$ROCK_DIR does not look like a rock workspace" >&2
-    echo "  (missing Cargo.lock or crates/rock-dev-cli/)" >&2
+    echo "  (missing Cargo.lock or crates/rock-cli/)" >&2
     exit 1
 fi
 
@@ -78,7 +79,7 @@ docker run --rm \
     -e CARGO_TARGET_DIR=/target \
     -w /workspace \
     rock-lsp-builder \
-    cargo build -p rock-dev-cli --bin rock >&2
+    cargo build -p rock-cli --bin rock >&2
 
 mkdir -p "$OUT_DIR"
 # The mounted target dir was /target inside the container, so the
@@ -91,7 +92,7 @@ cp "$TARGET_DIR/debug/rock" "$OUT_BIN"
 chmod +x "$OUT_BIN"
 
 # Update a `latest` symlink for ad-hoc use (`docker run -v
-# ~/.cache/rock-lsp/builds/<arch>/latest/rock-lsp:...`).
+# ~/.cache/rock-lsp/builds/<arch>/latest/rock:/usr/local/bin/rock:ro`).
 ln -sfn "$OUT_DIR" "$BUILDS_ROOT/latest"
 
 echo "build-rock-lsp.sh: built $OUT_BIN" >&2

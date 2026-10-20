@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build the test image, build (or reuse a cached) `rock` binary,
 # and run tests/run.sh inside the container with the binary mounted
-# at /usr/local/bin/rock (LSP runs as `rock lsp serve`). No host nvim, no host toolchain involved.
+# at /usr/local/bin/rock (the LSP runs as `rock lsp serve`). No host nvim,
+# no host toolchain involved; set ROCK_DIR to build a checkout other than
+# this repository's root.
 #
 # Set ROCK_LSP_SKIP=1 to skip the rock build and run only specs
 # that don't need a real LSP.
