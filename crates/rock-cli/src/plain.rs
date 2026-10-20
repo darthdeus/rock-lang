@@ -386,6 +386,34 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
     }
 }
 
+pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
+    // `rock lsp <subcommand>` is the LSP server + one-shot CLI handlers (there
+    // is no separate `rock-lsp` binary: folding it in keeps a single `rock`
+    // artifact that can't go stale against the embedded stdlib). It is an early
+    // entry because the LSP path installs its own env_logger (ROCK_LSP_DEBUG ->
+    // file) and a global logger can only be set once. The synthetic argv[0]
+    // makes its clap usage/errors read as `rock lsp ...`. The compiler policy
+    // comes from the installed registrations, so private hosts keep their own
+    // action-layer and identity-storage policy through this same entry.
+    registry::EarlyEntry {
+        name: "lsp",
+        run: |rest| {
+            let mut forwarded = vec!["rock lsp".to_string()];
+            forwarded.extend(rest);
+            match rock_lsp::server_cli::run_cli_with_policy(forwarded, rock_lsp::CompilerPolicy {
+                action_layer: registry::registered().action_layer_policy,
+                identity_storage: registry::registered().identity_storage_exemptions,
+            }) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        },
+    },
+];
+
 pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     identity_storage_exemptions: bone_query::IdentityStorageExemptions {
         packages: &[bone_query::STDLIB_PACKAGE, bone_query::UNPACKAGED_PROGRAMS],
@@ -405,7 +433,7 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
         packages: crate::identity_storage_census::packages_under(root, |_| false),
         programs: Vec::new(),
     },
-    early_entries: &[],
+    early_entries: EARLY_ENTRIES,
     fixes: &[],
     sim_environment: None,
     runtime_services: &RUNTIME_SERVICES,

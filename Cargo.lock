@@ -1519,6 +1519,7 @@ dependencies = [
  "rock-core",
  "rock-host",
  "rock-log",
+ "rock-lsp",
  "rock-stdlib",
  "rock-tokenizer",
  "rustc-hash 2.1.3",

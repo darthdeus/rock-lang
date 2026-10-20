@@ -16,6 +16,59 @@ fn text(out: &Output) -> String {
 }
 
 #[test]
+fn plain_lsp_serve_answers_initialize_over_stdio() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+    use std::time::Duration;
+    let root = tempfile::tempdir().unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .current_dir(root.path()).args(["lsp", "serve"])
+        .env("ROCK_DIR", root.path()).env("ROCK_INVOCATION_LOG", "off")
+        .env_remove("ROCK_STDLIB_DIR").env_remove("LUA_PATH").env_remove("LUA_CPATH")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().expect("spawn public rock lsp serve");
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = KillOnDrop(child);
+    let mut stdin = child.0.stdin.take().unwrap();
+    let stdout = BufReader::new(child.0.stdout.take().unwrap());
+    let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"processId\":null,\"capabilities\":{}}}";
+    write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    stdin.flush().unwrap();
+    // Read the one framed response on a thread so a silent server fails as a
+    // timeout instead of hanging the suite.
+    let (done, response) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut length = None;
+        let mut line = String::new();
+        let body = (|| {
+            loop {
+                line.clear();
+                if stdout.read_line(&mut line).ok()? == 0 { return None; }
+                if line == "\r\n" { break; }
+                if let Some(value) = line.strip_prefix("Content-Length:") {
+                    length = value.trim().parse::<usize>().ok();
+                }
+            }
+            let mut body = vec![0u8; length?];
+            stdout.read_exact(&mut body).ok()?;
+            String::from_utf8(body).ok()
+        })();
+        let _ = done.send(body);
+    });
+    let body = response.recv_timeout(Duration::from_secs(30)).expect("server answered initialize").expect("framed response");
+    assert!(body.contains("\"id\":1"), "{body}");
+    assert!(body.contains("\"result\""), "{body}");
+    assert!(body.contains("capabilities"), "{body}");
+}
+
+#[test]
 fn plain_fix_rejects_unregistered_recipe() {
     let root = tempfile::tempdir().unwrap();
     let out = invoke(root.path(), &["fix", "--across-yield", "missing.rock"]);
