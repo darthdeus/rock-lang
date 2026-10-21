@@ -6,8 +6,9 @@ This repository will be public. Treat every commit, file and commit message
 as published the moment it is written.
 
 - Never write private information: home-directory or machine-specific paths,
-  host names, email addresses, credentials, or details of games and projects
-  that use Rock. Describe a change by what it does to the compiler.
+  host names, email addresses, credentials, or details of games and other
+  private projects that use Rock. The Stone engine is published with Rock,
+  so naming it is fine. Describe a change by what it does to the compiler.
 - Install the hook once per clone: `git config core.hooksPath .githooks`.
   It checks staged changes and commit messages; do not bypass it. A private
   deny-list is read from `~/.config/rock-lang/denylist` when present (one
