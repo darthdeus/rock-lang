@@ -317,8 +317,11 @@ pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(not(target_os = "macos"))]
     use std::os::unix::ffi::OsStrExt;
 
+    // APFS/HFS+ cannot create filenames containing invalid UTF-8 bytes.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn non_utf8_source_path_is_an_error() {
         let dir = tempfile::TempDir::new().unwrap();
