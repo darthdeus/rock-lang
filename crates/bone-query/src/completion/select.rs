@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use bone_semantic::prelude::Workspace;
+
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemLabelDetails, InsertTextFormat,
 };
@@ -248,6 +250,7 @@ pub(crate) fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
 /// `Enum::|` qualified path applies).
 pub(crate) fn materialize_cand(
     cand: Cand,
+    ws: &Workspace,
     fn_sigs: &HashMap<ustr::Ustr, String>,
     strip_call: bool,
     pattern: bool,
@@ -255,9 +258,9 @@ pub(crate) fn materialize_cand(
     let sort_text = Some(cand.key.encode(cand.name.as_str()));
     match cand.shape {
         CandShape::Entry(c) => {
-            // Function `detail` is the cached signature, materialized HERE
-            // for survivors only; non-fn kinds carry their (cheap) detail
-            // already.
+            // Function detail is materialized HERE for survivors only. V1
+            // entries retain the exact accessible overload; legacy entries
+            // use the cached signature. Non-fn kinds carry their detail already.
             let detail = match c.kind {
                 // `name` is presentation spelling and may be an imported
                 // alias. Every function candidate carries its canonical HIR
@@ -265,6 +268,15 @@ pub(crate) fn materialize_cand(
                 // unrelated same-named function if the cache ever drifted.
                 SymCat::Function => c
                     .detail
+                    .or_else(|| {
+                        c.deferred_signature.map(|(mid, fid)| {
+                            crate::query::render_fn_signature(
+                                ws,
+                                c.name,
+                                &ws.module(mid).functions[fid],
+                            )
+                        })
+                    })
                     .or_else(|| c.signature_key.and_then(|key| fn_sigs.get(&key).cloned())),
                 _ => c.detail,
             };

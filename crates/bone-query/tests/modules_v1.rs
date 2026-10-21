@@ -658,6 +658,70 @@ fn changing_v1_visibility_invalidates_synthesis_cache() {
 }
 
 #[test]
+fn changing_v1_visibility_invalidates_bound_completion_cache() {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let shapes = project.path("shapes.rock");
+    let anchor = "    let a = shapes::inner::depth()\n";
+    let text = MAIN.replace(anchor, &format!("{anchor}    let q = perim\n"));
+    bone.update(&main, text.clone());
+    let pos = pos_of(&text, "let q = perim", 0, "let q = perim".len());
+    let before = labels(&bone.completion(&main, pos));
+    assert!(
+        before.iter().any(|label| label == "perimeter"),
+        "fixture did not seed cache: {before:?}"
+    );
+
+    let changed = SHAPES.replace("pub fn perimeter", "fn perimeter");
+    bone.update(&shapes, changed);
+    let after = labels(&bone.completion(&main, pos));
+    assert!(
+        !after.iter().any(|label| label == "perimeter"),
+        "private glob member survived bound cache: {after:?}"
+    );
+}
+
+#[test]
+fn changing_v1_import_alias_invalidates_bound_completion_cache() {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let anchor = "    let a = shapes::inner::depth()\n";
+    let text = MAIN.replace(anchor, &format!("{anchor}    let q = surf\n"));
+    bone.update(&main, text.clone());
+    let pos = pos_of(&text, "let q = surf", 0, "let q = surf".len());
+    let before = bone.completion(&main, pos);
+    assert!(
+        before.iter().any(|item| item.label == "surface"),
+        "fixture did not seed alias cache"
+    );
+
+    let body_changed = text.replace("surface(2)", "surface(3)");
+    bone.update(&main, body_changed.clone());
+    let after_body = bone.completion(
+        &main,
+        pos_of(&body_changed, "let q = surf", 0, "let q = surf".len()),
+    );
+    assert_eq!(after_body, before, "body-only edit changed bound completion output");
+
+    let changed = body_changed
+        .replace("use shapes::area as surface;", "use shapes::area as surf;")
+        .replace("surface(3)", "surf(3)");
+    bone.update(&main, changed.clone());
+    let after = bone.completion(
+        &main,
+        pos_of(&changed, "let q = surf", 0, "let q = surf".len()),
+    );
+    assert!(
+        !after.iter().any(|item| item.label == "surface"),
+        "old alias survived bound cache"
+    );
+    let surf = after.iter().find(|item| item.label == "surf").expect("new alias is offered");
+    assert_eq!(surf.detail.as_deref(), Some("fn surf(w: int) -> int"));
+}
+
+#[test]
 fn aliased_callable_completion_carries_signature_detail() {
     let items = complete_in_main("let q = surf");
     let surface = items

@@ -219,6 +219,10 @@ struct BoneProject {
     /// Fragment-scoped spellings and visibility for `call_through`. Reused on
     /// body edits and cleared with the type caches when a scope can change.
     scoped_call_through: HashMap<Ustr, ScopedCallThroughIndex>,
+    /// Clean module-v1 bare bindings for completion, keyed by fragment file.
+    /// The resolver produces these once per file; body-only updates keep the
+    /// namespace fixed, while every interface/scope rebuild clears the cache.
+    visible_bindings: HashMap<Ustr, Vec<(Ustr, Ustr)>>,
     /// Whether this project is a `bin` (executable/game), from its `stick.toml`
     /// `type` (default `bin`). The `unused_fn` lint is closed-world -- a `lib`'s
     /// public API has no in-project caller yet isn't dead -- so it runs only
@@ -635,6 +639,7 @@ impl BoneWorkspace {
                 fn_sigs: None,
                 call_through: None,
                 scoped_call_through: HashMap::new(),
+                visible_bindings: HashMap::new(),
                 is_bin,
                 root: root.to_path_buf(),
                 module_touched: HashMap::new(),
@@ -746,6 +751,7 @@ impl BoneWorkspace {
                     fn_sigs: None,
                     call_through: None,
                     scoped_call_through: HashMap::new(),
+                    visible_bindings: HashMap::new(),
                     is_bin,
                     root: root.clone(),
                     module_touched,
@@ -947,6 +953,7 @@ impl BoneWorkspace {
         }
         if rebuild_type_caches {
             proj.scoped_call_through.clear();
+            proj.visible_bindings.clear();
             let t_reach = bone_core::prelude::Instant::now();
             let idx = crate::reachability::ReachabilityIndex::build(proj.session.workspace());
             if prof {
@@ -1125,6 +1132,7 @@ impl BoneWorkspace {
                     proj.fn_sigs = None;
                     proj.call_through = None;
                     proj.scoped_call_through.clear();
+                    proj.visible_bindings.clear();
                     proj.freq = None;
                 }
                 Ok(_) => {}
@@ -2045,10 +2053,25 @@ impl BoneWorkspace {
                 }
             }
         }
-        // The prefix filter happens inside `crate::query::completion`, before per-candidate
+        // The prefix filter happens inside the completion query before per-candidate
         // detail rendering -- so typing narrows the work, not just the result.
         let t_cands = bone_core::prelude::Instant::now();
-        let mut cands = crate::query::completion(ws, mid, inf, offset, &prefix, expr_position);
+        let visible_bindings = crate::modules_scope::fragment(ws, ws.module(mid).file).map(|frag| {
+            let file = ws.module(mid).file;
+            proj.visible_bindings
+                .entry(file)
+                .or_insert_with(|| crate::modules_scope::bound_names(ws, frag, |_| true))
+                .as_slice()
+        });
+        let mut cands = crate::query::completion_with_visible_bindings(
+            ws,
+            mid,
+            inf,
+            offset,
+            &prefix,
+            expr_position,
+            visible_bindings,
+        );
         // Macros are expanded away before bone lowering, so `ws` has no record
         // of them -- without this every macro in the tree is invisible to
         // completion. The Session's parse-time capture is the only source (the
@@ -2086,6 +2109,7 @@ impl BoneWorkspace {
                     kind: SymCat::Macro,
                     detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
                     signature_key: None,
+                    deferred_signature: None,
                     ty: None,
                     takes_params: !md.params.is_empty(),
                     variant_shape: None,
@@ -2721,7 +2745,7 @@ impl BoneWorkspace {
         let mut items: Vec<CompletionItem> = sink
             .cands
             .into_iter()
-            .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren, pattern_pos))
+            .map(|c| materialize_cand(c, ws, fn_sigs, next_is_open_paren, pattern_pos))
             .collect();
         if !import_edits.is_empty() {
             for item in &mut items {
