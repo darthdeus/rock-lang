@@ -411,7 +411,7 @@ fn main() {
     assert!(full.lua.contains("global-embed-payload"), "control: the embed landed");
 
     let canonical = payload.canonicalize().unwrap();
-    let files = cache.comptime_files();
+    let files: Vec<_> = cache.comptime_file_hashes().into_iter().map(|(path, _)| path).collect();
     assert!(
         files.iter().any(|f| std::path::Path::new(f.as_str()) == canonical),
         "a global initializer's embed must join the watch set, got {files:?}"
@@ -506,7 +506,7 @@ fn main() {
     );
     let first_canonical = first_path.canonicalize().unwrap();
     let second_canonical = second_path.canonicalize().unwrap();
-    let files = cache.comptime_files();
+    let files: Vec<_> = cache.comptime_file_hashes().into_iter().map(|(path, _)| path).collect();
     assert!(
         files.iter().any(|file| std::path::Path::new(file.as_str()) == second_canonical)
             && !files.iter().any(|file| std::path::Path::new(file.as_str()) == first_canonical),

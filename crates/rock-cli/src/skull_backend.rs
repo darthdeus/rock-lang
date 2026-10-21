@@ -4215,17 +4215,13 @@ impl IncrementalProject {
         &self.project.sources().package_roots
     }
 
-    /// Absolute paths of every `embed_string` input baked into the current
-    /// program -- files the engine watcher must treat as sources: an edit to
-    /// one routes as a changed non-source path, which forces the full rebuild
-    /// that re-reads it (the compiler contract).
-    pub fn comptime_watch_files(&self) -> Vec<std::path::PathBuf> {
-        self.comptime_watch_files_with_hashes().into_iter().map(|(path, _)| path).collect()
-    }
-
-    /// Every `embed_string` input with the hash of the bytes the lowering
-    /// baked in, so a watcher seeding the input compares against what was
-    /// compiled rather than against the startup instant.
+    /// Absolute path of every `embed_string` input baked into the current
+    /// program, with the hash of the bytes the lowering baked in. The engine
+    /// watcher treats these files as sources: an edit to one routes as a
+    /// changed non-source path, which forces the full rebuild that re-reads it
+    /// (the compiler contract). The hash lets a watcher seeding the input
+    /// compare against what was compiled rather than against the startup
+    /// instant.
     pub fn comptime_watch_files_with_hashes(&self) -> Vec<(std::path::PathBuf, u64)> {
         // File ids are already the absolute canonical path the resolver read.
         self.cache

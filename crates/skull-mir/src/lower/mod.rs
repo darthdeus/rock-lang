@@ -4005,7 +4005,7 @@ pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
 /// by the SAME resolution emission uses (`resolve_comptime_value` -- one
 /// oracle, so this cannot drift from what actually gets baked). For watchers
 /// over emitters that keep no chunk cache (the JS web watch); the Lua side
-/// reads its `SkullEmitCache::comptime_files` instead.
+/// reads its `SkullEmitCache::comptime_file_hashes` instead.
 pub fn comptime_embed_files(ws: &Workspace) -> Vec<Ustr> {
     let mut out: Vec<Ustr> = Vec::new();
     for module in ws.modules.iter() {

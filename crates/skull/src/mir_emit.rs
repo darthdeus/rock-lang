@@ -3005,7 +3005,7 @@ pub struct SkullEmitCache {
     fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
     /// Comptime reads of the always-emitted units (global initializers,
     /// decorator defs), which have no Chunk. Feeds the watch set
-    /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
+    /// (`comptime_file_hashes`) and the overlay's stale-const re-init; refreshed by
     /// every `assemble` (full and incremental reassembly re-lower all units).
     unit_comptime_reads: UnitComptimeReads,
     renderer_target: RendererTarget,
@@ -7779,18 +7779,12 @@ impl SkullEmitCache {
         self.concrete.candidate_keys_by_func()
     }
 
-    /// The ABSOLUTE path of every `embed_string` input baked into the program
-    /// -- function chunks AND the always-emitted units (global initializers,
-    /// decorator defs) -- the files a watcher must treat as sources
-    ///. The unit half is load-bearing: all in-tree
-    /// production embeds are global initializers (the cimgui prelude).
-    pub fn comptime_files(&self) -> Vec<Ustr> {
-        self.comptime_file_hashes().into_iter().map(|(path, _)| path).collect()
-    }
-
-    /// Every `embed_string` input with the hash of the bytes the lowering
-    /// baked in, for watchers that compare against what was compiled rather
-    /// than against the startup instant.
+    /// The absolute path of every `embed_string` input baked into the program,
+    /// with the hash of the bytes the lowering baked in: the files a watcher
+    /// must treat as sources. Covers function chunks and the always-emitted
+    /// units (global initializers, decorator defs); the units matter because
+    /// all in-tree production embeds are global initializers (the cimgui
+    /// prelude).
     pub fn comptime_file_hashes(&self) -> Vec<(Ustr, u64)> {
         let mut out: FxHashMap<Ustr, u64> = FxHashMap::default();
         let chunk_reads = self

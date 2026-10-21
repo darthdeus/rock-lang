@@ -69,22 +69,17 @@ pub struct FileWatcherConfig {
 /// the content hash of each declared input the compiler baked in. The hash
 /// lets a later observation compare against what was compiled rather than
 /// against the startup instant, so an edit within the startup tick is not
-/// seeded silently. Derefs to the path set so existing `lock()` call sites
-/// keep working; hashes are consulted only when present.
+/// seeded silently. Hashes are consulted only when present.
 #[derive(Clone, Debug, Default)]
 pub struct SharedWatchSet {
     paths: std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
     compiled: std::sync::Arc<parking_lot::Mutex<HashMap<PathBuf, u64>>>,
 }
 
-impl std::ops::Deref for SharedWatchSet {
-    type Target = std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>;
-    fn deref(&self) -> &Self::Target {
-        &self.paths
-    }
-}
-
 impl SharedWatchSet {
+    fn paths(&self) -> parking_lot::MutexGuard<'_, HashSet<PathBuf>> {
+        self.paths.lock()
+    }
     /// Record the hash of the bytes the compiler baked in for `path`
     /// (`skull_mir::mir::comptime_value_hash` of the file text).
     pub fn set_compiled_hash(&self, path: PathBuf, hash: u64) {
@@ -96,12 +91,12 @@ impl SharedWatchSet {
     }
     /// Insert `path` with its compiler-baked hash in one step.
     pub fn insert_with_hash(&self, path: PathBuf, hash: u64) {
-        self.paths.lock().insert(path.clone());
+        self.paths().insert(path.clone());
         self.set_compiled_hash(path, hash);
     }
     /// Replace the whole set with `files` and their compiler-baked hashes.
     pub fn replace_with_hashes(&self, files: Vec<(PathBuf, u64)>) {
-        let mut paths = self.paths.lock();
+        let mut paths = self.paths();
         let mut compiled = self.compiled.lock();
         paths.clear();
         compiled.clear();
@@ -355,7 +350,7 @@ impl FileWatcher {
         let mut input_parents: HashSet<PathBuf> = restart_files.iter()
             .filter_map(|path| path.parent().map(Path::to_path_buf)).collect();
         if let Some(extra) = &config.extra_files {
-            input_parents.extend(extra.lock().iter()
+            input_parents.extend(extra.paths().iter()
                 .filter_map(|path| path.parent().map(Path::to_path_buf)));
         }
         let directory_roots: Vec<PathBuf> = scratch_roots.iter()
@@ -371,7 +366,7 @@ impl FileWatcher {
         let initial_files = config.ignore_existing_creates.then(|| {
             let mut extra_files = restart_files.clone();
             if let Some(extra) = &config.extra_files {
-                extra_files.extend(extra.lock().iter().cloned());
+                extra_files.extend(extra.paths().iter().cloned());
             }
             InitialFiles::capture(&scratch_roots, &config.watch_extensions, &extra_files, &ignored_roots)
         });
@@ -400,7 +395,7 @@ impl FileWatcher {
                                         && !initial_files.as_ref().is_some_and(|initial| initial.is_unchanged_create(&event.kind, path))
                                         && (scratch_roots.iter().any(|root| path.starts_with(root))
                                             || restart_files.contains(path.as_path())
-                                            || config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path.as_path())))
+                                            || config.extra_files.as_ref().is_some_and(|extra| extra.paths().contains(path.as_path())))
                                 })
                                 .collect();
                             if event_paths.is_empty() {
@@ -419,7 +414,7 @@ impl FileWatcher {
                                     return !path.to_string_lossy().ends_with('~');
                                 }
                                 if let Some(extra) = config.extra_files.as_ref() {
-                                    let member = extra.lock().contains(path.as_path());
+                                    let member = extra.paths().contains(path.as_path());
                                     if member {
                                         return true;
                                     }
@@ -555,10 +550,10 @@ mod tests {
         let set: SharedWatchSet = Default::default();
         let writer = set.clone();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            writer.lock().insert(PathBuf::from("held"));
+            writer.paths().insert(PathBuf::from("held"));
             panic!("poison probe");
         }));
-        assert!(set.lock().contains(&PathBuf::from("held")));
+        assert!(set.paths().contains(&PathBuf::from("held")));
     }
 
     #[test]
@@ -666,7 +661,7 @@ mod macos {
                 return false;
             }
             self.restart(path) || self.config.watch_all_files
-                || self.config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path))
+                || self.config.extra_files.as_ref().is_some_and(|extra| extra.paths().contains(path))
                 || path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| self.config.watch_extensions.iter().any(|wanted| wanted == ext))
         }
         fn restart(&self, path: &Path) -> bool {
@@ -745,7 +740,7 @@ mod macos {
             }
             self.directories.retain(|path, _| visited.contains(path));
             if let Some(extra) = &self.config.extra_files {
-                let inputs = extra.lock().clone();
+                let inputs = extra.paths().clone();
                 candidates.extend(inputs.into_iter().filter(|path| self.admitted(path)));
             }
             candidates.extend(self.config.restart_files.iter().filter(|path| self.admitted(path)).cloned());
@@ -785,7 +780,7 @@ mod macos {
                 } else {
                     let changed_after_start = stamp.changed.0 >= 0
                         && UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32) > self.started;
-                    let declared = self.config.extra_files.as_ref().is_some_and(|extra| extra.lock().contains(path));
+                    let declared = self.config.extra_files.as_ref().is_some_and(|extra| extra.paths().contains(path));
                     // A newly declared embed may predate this watcher. Its seed
                     // establishes a baseline; an edit since startup still gets through.
                     // With a compiler-baked hash the seed compares content, not time.
@@ -902,7 +897,7 @@ mod macos {
             assert!(observation.scan(false).unwrap().paths.is_empty());
             std::fs::write(&source, "after").unwrap();
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([source]));
-            extra.lock().insert(input.clone());
+            extra.paths().insert(input.clone());
             assert!(observation.scan(false).unwrap().paths.is_empty(), "declaring an unchanged input must not manufacture a reload");
             // A different size keeps the edit visible even when the filesystem
             // clock gives it the seed's timestamp.
@@ -914,7 +909,7 @@ mod macos {
             // startup instant; pin startup just before it.
             let stamp = Stamp::read(&pending).unwrap();
             observation.started = UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32) - Duration::from_nanos(1);
-            extra.lock().insert(pending.clone());
+            extra.paths().insert(pending.clone());
             assert_eq!(observation.scan(false).unwrap().paths, HashSet::from([pending]));
         }
         #[test]

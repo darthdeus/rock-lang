@@ -55,21 +55,6 @@ pub fn stdlib_origin() -> StdlibSource {
     resolve_for_this_process()
 }
 
-/// Directory the stdlib `.rock` files are read from.
-///
-/// Kept only for the private caller until its next pin bump; new code uses
-/// [`stdlib_origin`], which names the embedded rung truthfully instead of a
-/// checkout path that may not exist. When the stdlib is embedded this names
-/// the build checkout's `stdlib/` whether or not it exists; stdlib contents
-/// always come from [`stdlib_files`], which serves the embedded copy in that
-/// case.
-pub fn stdlib_dir() -> PathBuf {
-    match resolve_for_this_process() {
-        StdlibSource::Dir(dir) => dir,
-        StdlibSource::Embedded => PathBuf::from(BUILD_CHECKOUT_STDLIB),
-    }
-}
-
 fn resolve_for_this_process() -> StdlibSource {
     #[cfg(target_arch = "wasm32")]
     {
