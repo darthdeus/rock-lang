@@ -258,9 +258,9 @@ pub(crate) fn materialize_cand(
     let sort_text = Some(cand.key.encode(cand.name.as_str()));
     match cand.shape {
         CandShape::Entry(c) => {
-            // Function detail is materialized HERE for survivors only. V1
+            // Function/global detail is materialized HERE for survivors only. V1
             // entries retain the exact accessible overload; legacy entries
-            // use the cached signature. Non-fn kinds carry their detail already.
+            // use the cached signature. Other kinds carry their detail already.
             let detail = match c.kind {
                 // `name` is presentation spelling and may be an imported
                 // alias. Every function candidate carries its canonical HIR
@@ -278,6 +278,12 @@ pub(crate) fn materialize_cand(
                         })
                     })
                     .or_else(|| c.signature_key.and_then(|key| fn_sigs.get(&key).cloned())),
+                SymCat::Global => c.detail.or_else(|| {
+                    c.ty.and_then(|ty| {
+                        let rendered = ws.render(None, ty);
+                        (!rendered.is_empty()).then_some(rendered)
+                    })
+                }),
                 _ => c.detail,
             };
             // The full detail goes in the panel; a concise form renders

@@ -4762,7 +4762,6 @@ pub(crate) fn key_entries_in_scope(
         }
     } else if let Some(&ty) = ws.globals_by_name.get(&key) {
         if expr_position && matches(name.as_str()) {
-            let rendered = ws.render(None, ty);
             let def_file = global_def_file.unwrap_or_else(|| {
                 ws.modules
                     .iter()
@@ -4770,7 +4769,7 @@ pub(crate) fn key_entries_in_scope(
                     .map_or_else(|| ustr::Ustr::from("<builtin>"), |m| m.file)
             });
             out.push(CompletionEntry {
-                detail: (!rendered.is_empty()).then_some(rendered),
+                detail: None,
                 ty: Some(ty),
                 ..entry(name, SymCat::Global, def_file)
             });
@@ -4796,6 +4795,11 @@ pub fn completion(
                 entry.name,
                 &ws.module(fmid).functions[fid],
             ));
+        } else if entry.kind == SymCat::Global && entry.detail.is_none() {
+            entry.detail = entry
+                .ty
+                .map(|ty| ws.render(None, ty))
+                .filter(|detail| !detail.is_empty());
         }
     }
     entries

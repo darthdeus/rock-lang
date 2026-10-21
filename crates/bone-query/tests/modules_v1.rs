@@ -734,6 +734,44 @@ fn aliased_callable_completion_carries_signature_detail() {
 }
 
 #[test]
+fn v1_global_completion_detail_survives_body_updates() {
+    let project = V1Project::new();
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let anchor = "    let a = shapes::inner::depth()\n";
+    let text = MAIN.replace(anchor, &format!("{anchor}    let q = LIM\n"));
+    bone.update(&main, text.clone());
+    let marker = "let q = LIM";
+    let before = bone.completion(&main, pos_of(&text, marker, 0, marker.len()));
+    let limit = before
+        .iter()
+        .find(|item| item.label == "LIMIT")
+        .expect("the public global is offered");
+    assert_eq!(limit.detail.as_deref(), Some("int"));
+    assert_eq!(
+        limit.label_details.as_ref().and_then(|details| details.detail.as_deref()),
+        Some(": int")
+    );
+
+    let body_changed = text.replace("surface(2)", "surface(3)");
+    bone.update(&main, body_changed.clone());
+    let after = bone.completion(
+        &main,
+        pos_of(&body_changed, marker, 0, marker.len()),
+    );
+    assert_eq!(after, before, "body-only edit changed global completion details");
+    let limit = after
+        .iter()
+        .find(|item| item.label == "LIMIT")
+        .expect("the public global remains offered");
+    assert_eq!(limit.detail.as_deref(), Some("int"));
+    assert_eq!(
+        limit.label_details.as_ref().and_then(|details| details.detail.as_deref()),
+        Some(": int")
+    );
+}
+
+#[test]
 fn callable_completion_uses_the_accessible_overload_not_the_family_first() {
     let project = V1Project::new();
     let shapes = format!(
