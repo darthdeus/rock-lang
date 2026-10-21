@@ -2894,16 +2894,19 @@ impl BoneWorkspace {
 
     // -- Feature: workspace symbols -----------------------------------------
 
-    /// All top-level symbols across every loaded project whose name matches
-    /// `query` (case-insensitive substring; empty query = everything). Rock has
-    /// no modules -- "workspace" is every tracked `.rock` file (stdlib/builtin
-    /// modules aren't in `texts`, so they're naturally excluded). Reuses the
-    /// per-module `crate::query::document_symbols` walk, one pass per file. Spans every
+    /// All top-level symbols across every loaded project whose own name matches
+    /// `query` (case-insensitive substring; empty query = everything). Queries
+    /// containing `::` match the qualified name instead. Builtin `@test`
+    /// functions follow non-test symbols, preserving order within each group.
+    /// Returned names retain their qualification. Visits every tracked `.rock`
+    /// file, reusing the per-module `crate::query::document_symbols` walk. Spans every
     /// project the session has loaded (the one-shot CLI loads exactly one; the
     /// interactive server accumulates each opened root).
     pub fn workspace_symbols(&self, query: &str) -> Vec<SymbolInformation> {
         let needle = query.to_lowercase();
+        let qualified = needle.contains("::");
         let mut out = Vec::new();
+        let mut tests = Vec::new();
         for proj in self.projects.values() {
             let ws = proj.session.workspace();
             for (file, src) in proj.texts.iter() {
@@ -2922,14 +2925,30 @@ impl BoneWorkspace {
                 // skips most files, so don't index a file with no hit. Without it
                 // every matched symbol re-scanned from the file start (O(offset)).
                 let mut line_index: Option<LineIndex> = None;
+                let test_spans: FxHashSet<_> = ws.modules[mid.index()].functions.iter()
+                    .filter(|(_, f)| f.annotations.iter().any(|a| a.is_builtin("test")))
+                    .map(|(_, f)| f.span.offset_range)
+                    .collect();
                 for s in crate::query::document_symbols(ws, mid) {
-                    if !needle.is_empty() && !s.name.to_lowercase().contains(&needle) {
+                    let name = if qualified {
+                        s.name.as_str()
+                    } else {
+                        s.name.rsplit_once("::").map_or(s.name.as_str(), |(_, name)| name)
+                    };
+                    if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
                         continue;
                     }
                     let li = line_index.get_or_insert_with(|| LineIndex::new(src));
                     let range = li.range(src, s.span.offset_range.0, s.span.offset_range.1);
+                    let target = if matches!(s.kind, SymCat::Function)
+                        && test_spans.contains(&s.span.offset_range)
+                    {
+                        &mut tests
+                    } else {
+                        &mut out
+                    };
                     #[allow(deprecated)]
-                    out.push(SymbolInformation {
+                    target.push(SymbolInformation {
                         name: s.name,
                         kind: symbol_kind(s.kind),
                         tags: None,
@@ -2940,6 +2959,7 @@ impl BoneWorkspace {
                 }
             }
         }
+        out.extend(tests);
         out
     }
 

@@ -108,6 +108,9 @@ MIT OR Apache-2.0, the same as the rest of the rock-lang repository
 The server runs the **bone** typechecker (the skull/bone LSP) — the only
 backend. It serves hover, completion, goto-definition, references, rename,
 signature help, inlay hints, semantic tokens, and document/workspace symbols.
+Workspace symbol queries match the symbol's own name (case-insensitive
+substring), or its qualified name when the query contains `::`; an empty query
+returns everything, with tests ranked last.
 
 When semantic token highlighting misbehaves (fields wrong colors, type
 names split, no highlighting despite valid server output), see
