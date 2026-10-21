@@ -4660,6 +4660,7 @@ fn v1_scope_entries(
                 || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
     };
     let mut scratch = Vec::new();
+    let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
     let mut emit_binding = |name, key, global_def_file| {
         key_entries_in_scope(
             ws,
@@ -4671,6 +4672,7 @@ fn v1_scope_entries(
             show_private,
             global_def_file,
             &mut scratch,
+            &mut test_path_cache,
         );
         for e in scratch.drain(..) {
             if seen.insert(e.name) {
@@ -4703,11 +4705,12 @@ pub(crate) fn key_entries_in_scope(
     show_private: bool,
     global_def_file: Option<Ustr>,
     out: &mut Vec<CompletionEntry>,
+    test_path_cache: &mut FxHashMap<Ustr, bool>,
 ) {
     let visible = |n: &str| !n.starts_with('_') || show_private;
     let matches = |n: &str| visible(n) && crate::completion::match_policy::admit(n.as_bytes(), pfx);
     let file_of = |mid: ModuleId| ws.module(mid).file;
-    let entry = |name: ustr::Ustr, kind: SymCat, def_file: ustr::Ustr| CompletionEntry {
+    let mut entry = |name: ustr::Ustr, kind: SymCat, def_file: ustr::Ustr| CompletionEntry {
         name,
         kind,
         detail: None,
@@ -4716,7 +4719,10 @@ pub(crate) fn key_entries_in_scope(
         ty: None,
         takes_params: false,
         variant_shape: None,
-        test_scoped: is_test_path(def_file.as_str()) || name.as_str().starts_with("test_"),
+        test_scoped: *test_path_cache
+            .entry(def_file)
+            .or_insert_with(|| is_test_path(def_file.as_str()))
+            || name.as_str().starts_with("test_"),
         def_file,
         rec: 0,
     };
