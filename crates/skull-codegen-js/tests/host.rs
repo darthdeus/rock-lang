@@ -77,7 +77,7 @@ fn coroutine_defer_failure_goes_to_the_host_error_stream() {
 }
 
 const PROGRAM: &str = r#"
-@inline inline(lua) fn put(s: string) = "io.write(s)"
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
 
 fn main() {
     print("a", 1, 2.5)

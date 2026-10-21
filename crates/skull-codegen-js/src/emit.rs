@@ -4536,7 +4536,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         let plan = match self.st.concrete.get(&Instance::base(fr)) {
             Some(plan) => plan,
             None => {
-                self.st.reject(&name, err("JS: no concrete plan for the retained function body"));
+                self.st.reject(&name, err(format!("JS: no concrete plan for retained function `{}`", f.name)));
                 return Ok(());
             }
         };
@@ -7066,205 +7066,6 @@ pub fn required_arg_count(
     arity.saturating_sub(n_defaults)
 }
 
-/// Whether `cf` renders via the JS template table: it must both HAVE a table
-/// entry and be a stdlib `@intrinsic` declaration -- a user fn that merely
-/// shares an entry's (name, arity) must not silently become `Math.min`.
-fn is_mapped_intrinsic(cf: &bone_semantic::hir::Function) -> bool {
-    cf.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
-        && JsIntrinsics.lookup(cf).is_some()
-}
-
-/// The variadic `print` extern: rendered as the harness-provided `print`
-/// global (Lua-parity stdout capture), not co-emitted.
-fn is_host_print(cf: &bone_semantic::hir::Function) -> bool {
-    cf.is_extern && cf.name.as_str() == "print"
-}
-
-/// The test-local `put` idiom: `@inline inline(lua) fn put(s: string) =
-/// "io.write(s)"` -- a raw stdout write with no trailing newline. Rendered as the
-/// harness-provided `put` global (which appends to the same per-test buffer as
-/// `print`, raw), not co-emitted. Gated on the `io.write` body so a plain-Rock
-/// user `put` co-emits normally.
-fn is_host_put(cf: &bone_semantic::hir::Function) -> bool {
-    cf.name.as_str() == "put"
-        && cf.param_decls.len() == 1
-        && cf.inline_body.is_some_and(|(_, b)| b.as_str().contains("io.write"))
-}
-
-/// The logging dedup/throttle impls (`@nomangle inline(lua)` in
-/// `stdlib/logging.rock`): rendered by their original name to the JS runtime port
-/// (`crate::JS_LOG_RUNTIME`), not co-emitted. The (name, arity) set matches the
-/// stdlib decls; the host-body gate keeps a plain-Rock same-name user fn on the
-/// co-emit path. `log_error`/`log_warn`/... and `log_get_level` are pure Rock and
-/// co-emit over `__rock_log`/`__rock_log_init` normally.
-fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
-    const LOG_FNS: &[(&str, usize)] = &[
-        ("__rock_log_init", 0),
-        ("__rock_log_emit", 4),
-        ("__rock_log", 3),
-        ("__rock_log_wall_clock", 3),
-        ("log_set_level", 1),
-        ("_log_once_impl", 4),
-        ("_log_throttled_with_now_impl", 7),
-        ("log_set_now", 1),
-        ("log_clear_now", 0),
-        ("__rock_log_now", 0),
-        ("_log_throttled_impl", 6),
-        ("log_reset_dedup", 0),
-        ("log_dedup_count", 0),
-        ("log_suppression_summary", 0),
-    ];
-    (cf.is_extern || cf.inline_body.is_some())
-        && LOG_FNS.iter().any(|(n, a)| *n == cf.name.as_str() && *a == cf.param_decls.len())
-}
-
-/// A fixed-arity, host-bodied stdlib fn (extern or inline(lua)) with a
-/// hand-written JS binding the emitter substitutes for the Lua body. The gate
-/// is the host-body flag PLUS the (name, arity) match, so a plain-Rock user fn
-/// of the same name co-emits normally and is never captured here.
-fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
-    if !(cf.is_extern || cf.inline_body.is_some()) {
-        return None;
-    }
-    match (cf.name.as_str(), cf.param_decls.len()) {
-        ("tostring", 1) => Some("lua_tostring($1)"),
-        ("__rock_format_float", 1) => Some("__rock_format_float($1)"),
-        // `int_to_float`/`to_float` are pure `$1` identities (JS numbers are all
-        // doubles): a call-site host template inlines with zero cost and neither
-        // is ever taken as a value, so a co-emitted identity fn would be strictly
-        // worse. `float_to_int` (taken as a value in tests/function_ref_cross_module)
-        // is an inline(js) sibling in the stdlib instead -- the fn-value path now
-        // collapses backend siblings, so it needs a real bound fn, not a template.
-        ("int_to_float", 1) => Some("$1"),
-        ("to_float", 1) => Some("$1"),
-        // `phantom<T>()` is a nil placeholder (iterator `done`, post-`error`
-        // unreachable). `is_null` mirrors `== nil`.
-        ("phantom", 0) => Some("null"),
-        ("is_null", 1) => Some("($1 == null)"),
-        // `cast`/`transmute` are runtime identities (type recovery only).
-        ("cast", 1) | ("transmute", 1) => Some("$1"),
-        // Untyped table primitives, runtime-polymorphic: in Lua a Map IS a raw
-        // table, so `table_get(m, k)` and `m[k]` must agree -- but on JS a Map is
-        // a real `Map` (`.get`/`.set`) while an array/object indexes directly.
-        // `__table_get`/`__table_set` dispatch on `instanceof Map`.
-        ("table_get", 2) => Some("__table_get($1, $2)"),
-        ("table_set", 3) => Some("__table_set($1, $2, $3)"),
-        // `t[k] = nil`: a Map key delete or an array/object hole, dispatched on
-        // `instanceof Map`. Returns undefined -> Rock nil if the result is stored.
-        ("table_unset", 2) => Some("__table_unset($1, $2)"),
-        ("table_len", 1) => Some("__table_len($1)"),
-        // Base-agnostic Vec `_data` accessors (`__vec_data_*`): a logical 0-based
-        // element index over the 0-based hole-free `_data` array (never a Map, so
-        // index directly). `unset` writes `undefined` (the drain callers only
-        // touch the tail; the len-aware `__op_eq` Vec branch and len-bounded
-        // readers ignore the trailing slot, matching luajit's pairs-walk).
-        ("__vec_data_get", 2) => Some("$1._data[$2]"),
-        ("__vec_data_set", 3) => Some("$1._data[$2] = $3"),
-        ("__vec_data_unset", 2) => Some("$1._data[$2] = undefined"),
-        // The COLD half of the same boundary (allocate / measure / shift / copy
-        // / reorder the backing as a whole), in its BOXED form -- a column vec
-        // never reaches these, because the lowering intercepts each one and
-        // decomposes it per column before a callee is chosen.
-        // `lua_index` arrives 1-based from the shared Rock body; JS is 0-based.
-        ("__vec_data_alloc", 1) => Some("({_data: new Array($1).fill(false), len: 0, __ty: \"Vec\"})"),
-        ("__vec_data_capacity", 1) => Some("$1._data.length"),
-        ("__vec_data_insert", 3) => Some("$1._data.splice($2 - 1, 0, $3)"),
-        ("__vec_data_clone", 1) => Some("({_data: $1._data.slice(), len: $1.len, __ty: \"Vec\"})"),
-        ("__vec_data_sort", 2) => Some("__vec_sort($1, $2)"),
-        ("table_new", 0) => Some("({})"),
-        // Vec: `{_data, len, __ty}` 0-based. `vec_new` builds it; `vec_push`
-        // writes `_data[len]` (the new tail slot) THEN increments `len` -- the
-        // reverse of the 1-based Lua order (comma operator so it stays an
-        // expression; `$1` is a cell load, safe to re-evaluate).
-        ("vec_new", 0) => Some("({_data: [], len: 0, __ty: \"Vec\"})"),
-        ("vec_push", 2) => Some("($1._data[$1.len] = $2, $1.len = $1.len + 1)"),
-        // Structural equality (deep, matching Rock's `__op_eq`: structs, enums,
-        // newtypes, tuples by contents; primitives by value). Runtime helper in
-        // JS_STRUCTURAL_EQ.
-        ("__op_eq", 2) => Some("__op_eq($1, $2)"),
-        ("__op_ne", 2) => Some("(!__op_eq($1, $2))"),
-        // Lua `//` floored integer division.
-        ("__op_idiv", 2) => Some("Math.floor($1 / $2)"),
-        // `string.len` counts bytes; in the ASCII-only string subset that equals
-        // JS `.length` (UTF-16 units). `float(int)` is an identity (all doubles).
-        ("len", 1) => Some("$1.length"),
-        ("float", 1) => Some("$1"),
-        // `from_codepoint(cp)` -> the byte-faithful UTF-8 encoder in
-        // JS_STRING_RUNTIME: each output JS char code is one UTF-8 byte, matching
-        // luajit's byte-string, so `chars()` (which UTF-8-decodes over `unit_at`)
-        // round-trips a code point identically on both backends.
-        ("from_codepoint", 1) => Some("__from_codepoint($1)"),
-        // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
-        ("parse_float", 1) => Some("__parse_float($1)"),
-        // `parse_float_at(s, start, end)` reads a pre-validated literal in place.
-        // luajit skips the slice via strtod over an offset; JS has no such call,
-        // so it slices -- the win is luajit-only, the semantics are the contract.
-        // `Number` is locale-independent here, which is the property the luajit
-        // side has to pin a "C" locale to get.
-        ("parse_float_at", 3) => Some("__parse_float($1.slice($2, $3))"),
-        // RNG -> the `JS_RNG_RUNTIME` mulberry32 port (stream differs from Lua's
-        // splitmix by doctrine; the seedable/deterministic/serializable semantics
-        // hold). `env_var` -> `JS_HOST_RUNTIME`, which asks the embedder's host.
-        ("random", 0) => Some("__rock_random()"),
-        ("random_int", 2) => Some("__rock_random_int($1, $2)"),
-        ("random_seed", 1) => Some("__rock_rng_seed($1)"),
-        ("random_get_state", 0) => Some("__rock_rng_state_get()"),
-        ("random_set_state", 1) => Some("__rock_rng_state_set($1)"),
-        ("presentation_random", 0) => Some("__rock_presentation_random()"),
-        ("presentation_random_int", 2) => Some("__rock_presentation_random_int($1, $2)"),
-        ("presentation_random_seed", 1) => Some("__rock_presentation_rng_seed($1)"),
-        ("presentation_random_get_state", 0) => Some("__rock_presentation_rng_state_get()"),
-        ("presentation_random_set_state", 1) => Some("__rock_presentation_rng_state_set($1)"),
-        ("env_var", 1) => Some("__rock_env_var($1)"),
-        // `deepcopy(obj)` -> the recursive clone runtime (`JS_DEEPCOPY_RUNTIME`).
-        ("deepcopy", 1) => Some("deepcopy($1)"),
-        ("__rock_deepcopy_value", 2) => Some("__rock_deepcopy_value($1, $2)"),
-        // `inspect`/`inspect_formatted` -> the pretty-printer runtime
-        // (`JS_INSPECT_RUNTIME`). The 3-arg `inspect` (obj, cycle_detect,
-        // precision) is the mangled form; the defaulted trailing args are padded
-        // to `undefined` above and defaulted inside the runtime.
-        ("inspect", 3) => Some("inspect($1, $2, $3)"),
-        ("inspect_formatted", 2) => Some("inspect_formatted($1, $2)"),
-        // The `{x:spec}` interpolation format helpers -> their JS runtime ports.
-        ("__rock_fmt_pad", 4) => Some("__rock_fmt_pad($1, $2, $3, $4)"),
-        ("__rock_fmt_grouping", 3) => Some("__rock_fmt_grouping($1, $2, $3)"),
-        ("__rock_fmt_binary", 1) => Some("__rock_fmt_binary($1)"),
-        ("__rock_fmt_percent", 2) => Some("__rock_fmt_percent($1, $2)"),
-        // `format_float(v, width, decimals)` reconstructs the `%W.Df` printf spec.
-        ("format_float", 3) => Some("__rock_sprintf(\"%\" + $2 + \".\" + $3 + \"f\", $1)"),
-        // A tuple is a 0-based JS array; Lua `tuple[1]`/`[2]` are `[0]`/`[1]`.
-        ("tuple_first", 1) => Some("$1[0]"),
-        ("tuple_second", 1) => Some("$1[1]"),
-        // Materialized `a..b` range -> a Vec-shaped object (runtime helper).
-        ("__range", 2) => Some("__range($1, $2)"),
-        ("__range_uint", 2) => Some("__range($1, $2)"),
-        // `pcall(f); return not ok` -- did `f` error? A JS throw is the failure.
-        ("try_call", 1) => Some("__try_call($1)"),
-        // Coroutine consumers (stdlib inline(lua) readers of the frame object).
-        // IIFEs where an arg is read twice; `undefined -> null` normalization so
-        // an unset frame field reads as Rock null (Lua nil parity). `resume` has
-        // two arities (overload-by-arity: `c.resume()` vs `c.resume(arg)`).
-        ("resume", 1) => Some("(function(c){var v=__rock_call(c.__resume,c);return v===undefined?null:v;})($1)"),
-        ("resume", 2) => Some("(function(c,a){var v=__rock_call(c.__resume,c,a);return v===undefined?null:v;})($1, $2)"),
-        ("result", 1) => Some("(function(c){var v=c.__return;return v===undefined?null:v;})($1)"),
-        ("status", 1) => Some("(function(c){return c.__state === -2 ? \"errored\" : (c.__state < 0 ? \"dead\" : \"suspended\");})($1)"),
-        ("completed", 1) => Some("($1.__state === -3)"),
-        ("last_error", 1) => Some("(function(c){var v=c.__error;return v===undefined?null:v;})($1)"),
-        ("kill", 1) => Some("__rock_coroutine_kill($1)"),
-        ("fire_hot_reload", 1) => Some("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) __rock_call(c.__on_hot_reload,c); })($1)"),
-        // `error(msg)` diverges; the message is already a string. Wrapped in a
-        // throwing IIFE so it is a valid EXPRESSION -- the lowering stores a
-        // diverging call's (dead) result into an if-result cell, and a bare
-        // `throw` is a statement, not an expression. The node harness catch turns
-        // the throw into a FAIL carrying the message -- Lua's behavior for an
-        // errored test. luajit prepends a `file:line:` position; no in-scope test
-        // compares that (it is on the error object, not stdout), so JS reproduces
-        // only the message. `assert` is pure Rock over `error`.
-        ("error", 1) => Some("(() => { throw new Error($1); })()"),
-        _ => None,
-    }
-}
-
 /// What the JS backend renders for a call it supplies ITSELF.
 ///
 /// Two shapes, because the surface has two: a fixed-arity expression template,
@@ -7274,62 +7075,17 @@ pub enum JsSupply {
     /// A `$1..$n` expression template.
     Template(&'static str),
     /// A bare JS global, called with every rendered argument.
-    Global(Ustr),
+    Global(&'static str),
 }
 
-/// **The one JS backend realization oracle**: how the JS backend supplies a
-/// callee ITSELF, ahead of any declared body, in the ONE precedence
-/// [`Emitter::render_call`] renders and graph discovery skips on.
-///
-/// Everything the backend supplies is here -- the builtin-`Map` receiver
-/// interceptions, the `print`/`put`/logging globals, the hand-written host
-/// templates, and the `@intrinsic` table -- because "how does this artifact
-/// supply this declaration" is ONE question. Splitting it produced answers that
-/// disagreed: `nb_get` (1,127 sites) is an `@intrinsic` template while
-/// `phantom` (2,433 sites) is a host template with no marker at all, and a
-/// consumer that knew about one severed the other.
-///
-/// **The ORDER is load-bearing, not a preference.** `map_new` is a PURE ROCK
-/// body rendered as `new Map()`, so anything that asks about the declaration's
-/// body first classifies it as a Rock body and walks into callees this backend
-/// never emits.
-///
-/// The mono artifact view reads this through
-/// [`crate::JsBackendRealization`], so its realization report is this emitter's
-/// behavior rather than a description of it.
+/// The one JS realization oracle, shared by rendering, callee discovery and
+/// the artifact view. Declaration-keyed mappings win before any declared body,
+/// including the portable `map_new` body. Unmarked same-name user functions
+/// remain ordinary callees.
 pub fn js_supply(ws: &Workspace, cf: &bone_semantic::hir::Function) -> Option<JsSupply> {
-    // The overloaded `get`/2 dispatches on its receiver: only the BUILTIN Map
-    // (`TypeCtor::Map`) renders inline as `.get` -- a user struct named `Map`
-    // with its own `get` fn is a plain callee and co-emits, and NativeBuffer
-    // falls to its intrinsic template below.
-    if is_builtin_map_get(ws, cf) {
-        return Some(JsSupply::Template("$1.get($2)"));
-    }
-    // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
-    // binding: `print` (variadic -> the harness global), `put` (raw write), the
-    // logging dedup/throttle runtime ports, and the fixed-arity templates.
-    if is_host_print(cf) {
-        return Some(JsSupply::Global(Ustr::from("print")));
-    }
-    if is_host_put(cf) {
-        return Some(JsSupply::Global(Ustr::from("put")));
-    }
-    if is_host_log_fn(cf) {
-        return Some(JsSupply::Global(cf.name));
-    }
-    if let Some(tmpl) = host_fn_template(cf) {
-        return Some(JsSupply::Template(tmpl));
-    }
-    // `map_new` is pure Rock (`transmute(table_new())`) but must be a real JS
-    // `Map`, not a plain object -- a plain object coerces keys to strings, so
-    // Lua's 1 vs "1" distinction would be lost.
-    if is_map_new(cf) {
-        return Some(JsSupply::Template("new Map()"));
-    }
-    // Templates apply only to stdlib @intrinsic decls: a user fn sharing an
-    // entry's (name, arity) must co-emit, not become `Math.abs`.
-    match if is_mapped_intrinsic(cf) { JsIntrinsics.lookup(cf) } else { None } {
+    match JsIntrinsics(ws).lookup(cf) {
         Some(Emission::Template(tmpl)) => Some(JsSupply::Template(tmpl)),
+        Some(Emission::Global(name)) => Some(JsSupply::Global(name)),
         _ => None,
     }
 }
@@ -7354,19 +7110,6 @@ fn render_supply(supply: JsSupply, args: &[String], declared_arity: usize) -> St
         }
         JsSupply::Global(name) => format!("{name}({})", args.join(", ")),
     }
-}
-
-/// The overloaded `get`/2 on a builtin `Map` receiver, which renders as
-/// `.get(k)` rather than co-emitting. Factored out of `render_call` so
-/// [`host_binding`] and the call site cannot disagree.
-fn is_builtin_map_get(ws: &Workspace, cf: &bone_semantic::hir::Function) -> bool {
-    cf.name.as_str() == "get" && cf.param_decls.len() == 2 && first_param_is_builtin_map(ws, cf)
-}
-
-/// `map_new()`: pure Rock (`transmute(table_new())`), but intercepted to a real
-/// JS `Map` rather than co-emitted to a plain object (which coerces keys).
-fn is_map_new(cf: &bone_semantic::hir::Function) -> bool {
-    cf.name.as_str() == "map_new" && cf.param_decls.is_empty()
 }
 
 /// The cells an inst writes: a `Store`'s target, or a multi-value call's dests.
@@ -7399,23 +7142,6 @@ fn is_native_buffer(name: &str) -> bool {
     )
 }
 
-
-/// Whether `f`'s first declared param is the BUILTIN `Map<K,V>` (`TypeCtor::Map`),
-/// distinguishing it from a user struct named `Map` (a `Nominal`). The `get`/2
-/// receiver dispatch renders inline `.get` ONLY for the builtin.
-fn first_param_is_builtin_map(ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
-    use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
-    let Some(pd) = f.param_decls.first() else {
-        return false;
-    };
-    let TyId::Static(mid, idx) = pd.ty else {
-        return false;
-    };
-    matches!(
-        &ws.module(mid).ty_arena[idx],
-        TypeExpr::App { ctor: TypeCtor::Map, .. }
-    )
-}
 
 /// Invoke `f` for each inst used as an operand by `inst`. The match is
 /// EXHAUSTIVE on purpose: a new Inst variant must decide its operands here or

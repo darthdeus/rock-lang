@@ -1,4 +1,4 @@
-//! `put` emission (T8d): the test-local `@inline inline(lua) fn put(s: string) =
+//! `put` emission (T8d): the test-local `@intrinsic @inline inline(lua) fn put(s: string) =
 //! "io.write(s)"` idiom maps to a `put($1)` call the harness routes into the same
 //! per-test output buffer as `print` -- raw, no trailing newline. Node execution
 //! is the correctness oracle; `tests/js_put.rock` cross-checks against luajit.
@@ -26,7 +26,7 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
 // buffer is the exact output.
 #[test]
 fn put_writes_raw_no_newline() {
-    let src = "@inline inline(lua) fn put(s: string) = \"io.write(s)\"\n\
+    let src = "@intrinsic @inline inline(lua) fn put(s: string) = \"io.write(s)\"\n\
                fn root() { put(\"a\"); put(\"b\"); put(\"\\n\"); put(\"c\") }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("put emits");

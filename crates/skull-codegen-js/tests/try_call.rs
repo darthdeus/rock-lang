@@ -46,7 +46,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
     assert_eq!(got, expect, "wrong result\n{program}");
 }
 
-const TRY_CALL: &str = "@nomangle inline(lua) fn try_call(f: fn()) -> bool = \"\"\"\n    local ok, err = pcall(f)\n    return not ok\n\"\"\"\n";
+const TRY_CALL: &str = "@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = \"\"\"\n    local ok, err = pcall(f)\n    return not ok\n\"\"\"\n";
 
 // A thrown error is caught and reported as `true`; success as `false`.
 #[test]

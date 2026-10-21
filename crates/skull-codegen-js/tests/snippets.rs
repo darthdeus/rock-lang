@@ -1,7 +1,7 @@
 //! Snippet-emission unit tests for the toy JS intrinsic table (slice 4). No
 //! runtime, no program emission -- just the rendered `Math.*` strings and the
 //! fail-closed end-to-end check that every JS entry is backed by a stdlib
-//! `@intrinsic` declaration.
+//! `@intrinsic` declaration (stdlib or the real test-local host fixtures).
 
 use skull_codegen_js::{fill_template, JsIntrinsics, JS_INTRINSICS};
 use skull_mir::intrinsics::{declared_intrinsics, unbacked_entries};
@@ -10,7 +10,7 @@ fn template(name: &str, arity: usize) -> &'static str {
     JS_INTRINSICS
         .iter()
         .find(|(n, a, _)| *n == name && *a == arity)
-        .map(|(_, _, t)| *t)
+        .and_then(|(_, _, t)| match t { skull_mir::intrinsics::Emission::Template(t) => Some(*t), _ => None })
         .unwrap_or_else(|| panic!("no JS entry {name}/{arity}"))
 }
 
@@ -97,10 +97,10 @@ fn table_entries_are_distinct_keys() {
     }
 }
 
-// Every JS table key, including the string primitives, must have a matching
-// stdlib @intrinsic declaration. A source rename or arity drift fails here.
+// Every JS table key must have a matching declaration in the stdlib or the
+// real test-local put/try_call fixtures. A source rename or arity drift fails here.
 #[test]
-fn every_js_entry_is_backed_by_a_stdlib_intrinsic() {
+fn every_js_entry_is_backed_by_a_declared_intrinsic() {
     let modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
@@ -109,13 +109,16 @@ fn every_js_entry_is_backed_by_a_stdlib_intrinsic() {
         })
         .collect();
     let mut modules = modules;
-    modules.push(skull_parser::parse_module_clean("fn main() {}", ustr::Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(include_str!("fixtures/js_put.rock"), ustr::Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(
+        include_str!("fixtures/js_try_call.rock"), ustr::Ustr::from("<try-call>"),
+    ).expect("parse try_call fixture"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
 
     let declared = declared_intrinsics(&ws);
-    let unbacked = unbacked_entries(&JsIntrinsics, &declared);
+    let unbacked = unbacked_entries(&JsIntrinsics(&ws), &declared);
     assert!(
         unbacked.is_empty(),
-        "toy JS table has entries no stdlib @intrinsic declaration backs (drift): {unbacked:?}"
+        "JS table has entries no @intrinsic declaration backs (drift): {unbacked:?}"
     );
 }

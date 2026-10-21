@@ -23,59 +23,60 @@ use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 pub mod emit;
 mod structure;
 
-/// (name, arity) -> `$1..$n` JS expression template. Single source for both
+/// (declaration key, arity) -> JS emission. Keys are source names or declared
+/// signature mangles for independently mapped overloads. Single source for both
 /// [`JsIntrinsics::lookup`] and [`JsIntrinsics::entries`]. Every entry is backed
-/// by an `@intrinsic` stdlib declaration (pinned by
-/// `every_js_entry_is_backed_by_a_stdlib_intrinsic`).
-pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
+/// by an `@intrinsic` declaration in the stdlib or the test-local `put`
+/// fixture (pinned by `every_js_entry_is_backed_by_a_declared_intrinsic`).
+pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     // base math
-    ("sin", 1, "Math.sin($1)"),
-    ("cos", 1, "Math.cos($1)"),
-    ("tan", 1, "Math.tan($1)"),
-    ("sqrt", 1, "Math.sqrt($1)"),
-    ("exp", 1, "Math.exp($1)"),
+    ("sin", 1, Emission::Template("Math.sin($1)")),
+    ("cos", 1, Emission::Template("Math.cos($1)")),
+    ("tan", 1, Emission::Template("Math.tan($1)")),
+    ("sqrt", 1, Emission::Template("Math.sqrt($1)")),
+    ("exp", 1, Emission::Template("Math.exp($1)")),
     // `log` is the NATURAL log on both hosts (Lua `math.log`, JS `Math.log`).
     // `log2` gets `Math.log2` rather than a mirror of luajit's
     // `math.log(x) / 0.6931471805599453`: it is the same function computed
     // better, exact on powers of two where the division is a bit short.
-    ("log", 1, "Math.log($1)"),
-    ("log2", 1, "Math.log2($1)"),
-    ("abs", 1, "Math.abs($1)"),
-    ("floor", 1, "Math.floor($1)"),
-    ("ceil", 1, "Math.ceil($1)"),
-    ("pow", 2, "Math.pow($1, $2)"),
-    ("atan2", 2, "Math.atan2($1, $2)"),
+    ("log", 1, Emission::Template("Math.log($1)")),
+    ("log2", 1, Emission::Template("Math.log2($1)")),
+    ("abs", 1, Emission::Template("Math.abs($1)")),
+    ("floor", 1, Emission::Template("Math.floor($1)")),
+    ("ceil", 1, Emission::Template("Math.ceil($1)")),
+    ("pow", 2, Emission::Template("Math.pow($1, $2)")),
+    ("atan2", 2, Emission::Template("Math.atan2($1, $2)")),
     // conformance differential set
-    ("min", 2, "Math.min($1, $2)"),
-    ("max", 2, "Math.max($1, $2)"),
-    ("clamp", 3, "Math.min(Math.max($1, $2), $3)"),
-    ("lerp", 3, "($1 * (1 - $3) + $2 * $3)"),
-    ("smoothstep", 3, "(function(e0,e1,x){var t=Math.min(Math.max((x-e0)/(e1-e0),0),1);return t*t*(3-2*t);})($1, $2, $3)"),
-    ("round", 1, "Math.floor($1 + 0.5)"),
-    ("sign", 1, "Math.sign($1)"),
-    ("fract", 1, "($1 - Math.floor($1))"),
+    ("min", 2, Emission::Template("Math.min($1, $2)")),
+    ("max", 2, Emission::Template("Math.max($1, $2)")),
+    ("clamp", 3, Emission::Template("Math.min(Math.max($1, $2), $3)")),
+    ("lerp", 3, Emission::Template("($1 * (1 - $3) + $2 * $3)")),
+    ("smoothstep", 3, Emission::Template("(function(e0,e1,x){var t=Math.min(Math.max((x-e0)/(e1-e0),0),1);return t*t*(3-2*t);})($1, $2, $3)")),
+    ("round", 1, Emission::Template("Math.floor($1 + 0.5)")),
+    ("sign", 1, Emission::Template("Math.sign($1)")),
+    ("fract", 1, Emission::Template("($1 - Math.floor($1))")),
     // `join` over a `[string]`: the backing array IS the input both hosts want,
     // so this is one `Array.prototype.join` here and one `table.concat` on
     // luajit. `_data` is 0-based and may be longer than `len`, hence the slice.
-    ("join", 2, "$1._data.slice(0, $1.len).join($2)"),
+    ("join", 2, Emission::Template("$1._data.slice(0, $1.len).join($2)")),
     // String primitives declared in stdlib/unified.rock. Indices are native
     // units (Lua bytes, JS UTF-16); substring bounds are end-exclusive.
     // `find` returns a 0-based index, or -1 when the needle is absent.
-    ("find", 3, "$1.indexOf($2, $3)"),
-    ("substring", 3, "$1.slice($2, $3)"),
-    ("unit_at", 2, "($1.charCodeAt($2) || 0)"),
-    ("upper", 1, "$1.toUpperCase()"),
-    ("lower", 1, "$1.toLowerCase()"),
-    ("string_char", 1, "String.fromCharCode($1)"),
+    ("find", 3, Emission::Template("$1.indexOf($2, $3)")),
+    ("substring", 3, Emission::Template("$1.slice($2, $3)")),
+    ("unit_at", 2, Emission::Template("($1.charCodeAt($2) || 0)")),
+    ("upper", 1, Emission::Template("$1.toUpperCase()")),
+    ("lower", 1, Emission::Template("$1.toLowerCase()")),
+    ("string_char", 1, Emission::Template("String.fromCharCode($1)")),
     // Reference identity (stdlib `same_ref`). `===` on two objects is JS
     // identity, the same question luajit's `rawequal` answers; on primitives
     // both reduce to value equality, which is also what identity means there.
-    ("same_ref", 2, "($1 === $2)"),
-    // IEEE non-finite predicates (shader bvec tier). isinf excludes NaN
+    ("same_ref", 2, Emission::Template("($1 === $2)")),
+    // IEEE non-finite predicates. isinf excludes NaN
     // (a NaN is neither finite nor infinite). any/greater_than/to_vec3 co-emit
     // their portable Rock bodies -- no JS row.
-    ("isnan", 1, "Number.isNaN($1)"),
-    ("isinf", 1, "(!Number.isFinite($1) && !Number.isNaN($1))"),
+    ("isnan", 1, Emission::Template("Number.isNaN($1)")),
+    ("isinf", 1, Emission::Template("(!Number.isFinite($1) && !Number.isNaN($1))")),
     // NativeBuffer four-fn surface:
     // `Ptr<T>` IS the TypedArray on JS, so `.ptr` indexes with brackets exactly
     // like the luajit cdata. TypedArray store conversion wraps mod 2^n, matching
@@ -83,24 +84,115 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     // `int`/`float` allocs no longer route through a named intrinsic -- they lower
     // to the `FfiNewArray` MIR node (`native_buffer_alloc<T>`), rendered in
     // `emit.rs`; only the phantom-width variants keep a per-type template here.
-    ("__nb_alloc_u8", 1, "new Uint8Array($1)"),
-    ("__nb_alloc_i8", 1, "new Int8Array($1)"),
-    ("__nb_alloc_u16", 1, "new Uint16Array($1)"),
-    ("__nb_alloc_i16", 1, "new Int16Array($1)"),
-    ("__nb_alloc_u32", 1, "new Uint32Array($1)"),
-    ("native_buffer_uint", 1, "({ptr: new Uint32Array($1), len: $1})"),
-    ("nb_get", 2, "$1.ptr[$2]"),
-    ("nb_set", 3, "($1.ptr[$2] = $3)"),
+    ("__nb_alloc_u8", 1, Emission::Template("new Uint8Array($1)")),
+    ("__nb_alloc_i8", 1, Emission::Template("new Int8Array($1)")),
+    ("__nb_alloc_u16", 1, Emission::Template("new Uint16Array($1)")),
+    ("__nb_alloc_i16", 1, Emission::Template("new Int16Array($1)")),
+    ("__nb_alloc_u32", 1, Emission::Template("new Uint32Array($1)")),
+    ("native_buffer_uint", 1, Emission::Template("({ptr: new Uint32Array($1), len: $1})")),
+    ("nb_get", 2, Emission::Template("$1.ptr[$2]")),
+    ("nb_set", 3, Emission::Template("($1.ptr[$2] = $3)")),
     // StringBuilder: a Lua table used as an array accumulator IS a JS array.
     // `sb_new` -> `[]`, `sb_push` -> `.push` (Lua `sb[#sb+1] = s`; the returned
     // length is discarded), `sb_build` -> `.join("")` (Lua `table.concat`).
-    ("sb_new", 0, "[]"),
-    ("sb_push", 2, "$1.push($2)"),
-    ("sb_build", 1, "$1.join(\"\")"),
+    ("sb_new", 0, Emission::Template("[]")),
+    ("sb_push", 2, Emission::Template("$1.push($2)")),
+    ("sb_build", 1, Emission::Template("$1.join(\"\")")),
+    // A declared-signature key keeps Map get independently checked from
+    // NativeBuffer get. It also wins before the latter's name/arity key.
+    ("get_map_K_V_K", 2, Emission::Template("$1.get($2)")),
     // The safe accessor: an IIFE so the receiver/index evaluate exactly once
     // (the template reads each twice), mirroring the inline(lua) body's
     // param-binding. Null on miss = Rock `T?` null.
-    ("get", 2, "(function(b, i) { return (i >= 0 && i < b.len) ? b.ptr[i] : null; })($1, $2)"),
+    ("get", 2, Emission::Template("(function(b, i) { return (i >= 0 && i < b.len) ? b.ptr[i] : null; })($1, $2)")),
+    // Host runtime bindings; declarations opt in with @intrinsic.
+    ("tostring", 1, Emission::Template("lua_tostring($1)")),
+    ("__rock_format_float", 1, Emission::Template("__rock_format_float($1)")),
+    ("int_to_float", 1, Emission::Template("$1")),
+    ("to_float", 1, Emission::Template("$1")),
+    ("phantom", 0, Emission::Template("null")),
+    ("is_null", 1, Emission::Template("($1 == null)")),
+    ("cast", 1, Emission::Template("$1")),
+    ("transmute", 1, Emission::Template("$1")),
+    // Raw table helpers dispatch on Map versus array/object storage.
+    ("table_get", 2, Emission::Template("__table_get($1, $2)")),
+    ("table_set", 3, Emission::Template("__table_set($1, $2, $3)")),
+    ("table_unset", 2, Emission::Template("__table_unset($1, $2)")),
+    ("table_len", 1, Emission::Template("__table_len($1)")),
+    // Vec backing indices are 0-based on JS, including shifted Lua indices.
+    ("__vec_data_get", 2, Emission::Template("$1._data[$2]")),
+    ("__vec_data_set", 3, Emission::Template("$1._data[$2] = $3")),
+    ("__vec_data_unset", 2, Emission::Template("$1._data[$2] = undefined")),
+    ("__vec_data_alloc", 1, Emission::Template("({_data: new Array($1).fill(false), len: 0, __ty: \"Vec\"})")),
+    ("__vec_data_capacity", 1, Emission::Template("$1._data.length")),
+    ("__vec_data_insert", 3, Emission::Template("$1._data.splice($2 - 1, 0, $3)")),
+    ("__vec_data_clone", 1, Emission::Template("({_data: $1._data.slice(), len: $1.len, __ty: \"Vec\"})")),
+    ("__vec_data_sort", 2, Emission::Template("__vec_sort($1, $2)")),
+    ("table_new", 0, Emission::Template("({})")),
+    ("vec_new", 0, Emission::Template("({_data: [], len: 0, __ty: \"Vec\"})")),
+    ("vec_push", 2, Emission::Template("($1._data[$1.len] = $2, $1.len = $1.len + 1)")),
+    ("__op_eq", 2, Emission::Template("__op_eq($1, $2)")),
+    ("__op_ne", 2, Emission::Template("(!__op_eq($1, $2))")),
+    ("len", 1, Emission::Template("$1.length")),
+    ("float", 1, Emission::Template("$1")),
+    // The runtime encoder preserves Lua UTF-8 byte-string units.
+    ("from_codepoint", 1, Emission::Template("__from_codepoint($1)")),
+    ("parse_float", 1, Emission::Template("__parse_float($1)")),
+    ("parse_float_at", 3, Emission::Template("__parse_float($1.slice($2, $3))")),
+    // RNG streams are seedable/serializable; JS and Lua algorithms differ.
+    ("random", 0, Emission::Template("__rock_random()")),
+    ("random_int", 2, Emission::Template("__rock_random_int($1, $2)")),
+    ("random_seed", 1, Emission::Template("__rock_rng_seed($1)")),
+    ("random_get_state", 0, Emission::Template("__rock_rng_state_get()")),
+    ("random_set_state", 1, Emission::Template("__rock_rng_state_set($1)")),
+    ("presentation_random", 0, Emission::Template("__rock_presentation_random()")),
+    ("presentation_random_int", 2, Emission::Template("__rock_presentation_random_int($1, $2)")),
+    ("presentation_random_seed", 1, Emission::Template("__rock_presentation_rng_seed($1)")),
+    ("presentation_random_get_state", 0, Emission::Template("__rock_presentation_rng_state_get()")),
+    ("presentation_random_set_state", 1, Emission::Template("__rock_presentation_rng_state_set($1)")),
+    ("env_var", 1, Emission::Template("__rock_env_var($1)")),
+    ("deepcopy", 1, Emission::Template("deepcopy($1)")),
+    ("__rock_deepcopy_value", 2, Emission::Template("__rock_deepcopy_value($1, $2)")),
+    // Omitted optional arguments default inside the runtime.
+    ("inspect", 3, Emission::Template("inspect($1, $2, $3)")),
+    ("inspect_formatted", 2, Emission::Template("inspect_formatted($1, $2)")),
+    ("__rock_fmt_pad", 4, Emission::Template("__rock_fmt_pad($1, $2, $3, $4)")),
+    ("__rock_fmt_grouping", 3, Emission::Template("__rock_fmt_grouping($1, $2, $3)")),
+    ("__rock_fmt_binary", 1, Emission::Template("__rock_fmt_binary($1)")),
+    ("__rock_fmt_percent", 2, Emission::Template("__rock_fmt_percent($1, $2)")),
+    ("format_float", 3, Emission::Template("__rock_sprintf(\"%\" + $2 + \".\" + $3 + \"f\", $1)")),
+    ("tuple_first", 1, Emission::Template("$1[0]")),
+    ("tuple_second", 1, Emission::Template("$1[1]")),
+    ("__range", 2, Emission::Template("__range($1, $2)")),
+    ("__range_uint", 2, Emission::Template("__range($1, $2)")),
+    ("try_call", 1, Emission::Template("__try_call($1)")),
+    // Coroutine fields normalize unset JS values to Rock null.
+    ("resume", 1, Emission::Template("(function(c){var v=__rock_call(c.__resume,c);return v===undefined?null:v;})($1)")),
+    ("resume", 2, Emission::Template("(function(c,a){var v=__rock_call(c.__resume,c,a);return v===undefined?null:v;})($1, $2)")),
+    ("result", 1, Emission::Template("(function(c){var v=c.__return;return v===undefined?null:v;})($1)")),
+    ("status", 1, Emission::Template("(function(c){return c.__state === -2 ? \"errored\" : (c.__state < 0 ? \"dead\" : \"suspended\");})($1)")),
+    ("completed", 1, Emission::Template("($1.__state === -3)")),
+    ("last_error", 1, Emission::Template("(function(c){var v=c.__error;return v===undefined?null:v;})($1)")),
+    ("kill", 1, Emission::Template("__rock_coroutine_kill($1)")),
+    ("fire_hot_reload", 1, Emission::Template("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) __rock_call(c.__on_hot_reload,c); })($1)")),
+    ("error", 1, Emission::Template("(() => { throw new Error($1); })()")),
+    ("print", 1, Emission::Global("print")),
+    ("put", 1, Emission::Global("put")),
+    ("__rock_log_init", 0, Emission::Global("__rock_log_init")),
+    ("__rock_log_emit", 4, Emission::Global("__rock_log_emit")),
+    ("__rock_log", 3, Emission::Global("__rock_log")),
+    ("__rock_log_wall_clock", 3, Emission::Global("__rock_log_wall_clock")),
+    ("log_set_level", 1, Emission::Global("log_set_level")),
+    ("_log_once_impl", 4, Emission::Global("_log_once_impl")),
+    ("_log_throttled_with_now_impl", 7, Emission::Global("_log_throttled_with_now_impl")),
+    ("log_set_now", 1, Emission::Global("log_set_now")),
+    ("log_clear_now", 0, Emission::Global("log_clear_now")),
+    ("__rock_log_now", 0, Emission::Global("__rock_log_now")),
+    ("_log_throttled_impl", 6, Emission::Global("_log_throttled_impl")),
+    ("log_reset_dedup", 0, Emission::Global("log_reset_dedup")),
+    ("log_dedup_count", 0, Emission::Global("log_dedup_count")),
+    ("log_suppression_summary", 0, Emission::Global("log_suppression_summary")),
+    ("map_new", 0, Emission::Template("new Map()")),
 ];
 
 /// JS bodies for the debug-mode bounds-checked NativeBuffer access the
@@ -1844,20 +1936,29 @@ pub fn assemble_prelude(
     p
 }
 
-/// The toy JS backend's [`IntrinsicTable`].
-pub struct JsIntrinsics;
+/// The JS intrinsic table, with the workspace needed to match signature keys.
+pub struct JsIntrinsics<'a>(pub &'a bone_semantic::inference::Workspace);
 
-impl IntrinsicTable for JsIntrinsics {
+impl IntrinsicTable for JsIntrinsics<'_> {
     fn backend(&self) -> &'static str {
         "js"
     }
     fn lookup(&self, f: &Function) -> Option<Emission> {
+        if !skull_mir::intrinsics::is_intrinsic(f) {
+            return None;
+        }
         let n = f.name.as_str();
         let arity = f.param_decls.len();
+        let signature = std::cell::OnceCell::new();
         JS_INTRINSICS
             .iter()
-            .find(|(name, ar, _)| *name == n && *ar == arity)
-            .map(|(_, _, tmpl)| Emission::Template(tmpl))
+            .find(|(key, ar, _)| {
+                *ar == arity
+                    && (*key == n
+                        || (key.strip_prefix(n).is_some_and(|tail| tail.starts_with('_'))
+                            && *key == signature.get_or_init(|| skull_mir::mangle::mangle_fn(self.0, f))))
+            })
+            .map(|(_, _, emission)| *emission)
     }
     fn entries(&self) -> Vec<IntrinsicEntry> {
         JS_INTRINSICS

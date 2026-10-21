@@ -59,7 +59,7 @@ fn eval_mapping(name: &str, arity: usize, args: &[f64]) -> f64 {
     let tmpl = JS_INTRINSICS
         .iter()
         .find(|(n, a, _)| *n == name && *a == arity)
-        .map(|(_, _, t)| *t)
+        .and_then(|(_, _, t)| match t { skull_mir::intrinsics::Emission::Template(t) => Some(*t), _ => None })
         .unwrap_or_else(|| panic!("no JS mapping for `{name}`/{arity}"));
     let lits: Vec<String> = args.iter().map(|a| arg_lit(*a)).collect();
     let refs: Vec<&str> = lits.iter().map(|s| s.as_str()).collect();

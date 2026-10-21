@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "host_supply_keys.rs"]
+mod host_supply_keys;
+
 #[path = "abi_plan_memo.rs"]
 mod abi_plan_memo;
 #[path = "backend_externs.rs"]

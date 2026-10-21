@@ -1,0 +1,43 @@
+// try_call corpus for the `--backend js` ratchet (T8d). `try_call(f)` is the
+// test-local `pcall(f); return not ok` -- did `f` error? On JS `__try_call`
+// wraps `__rock_call(f)` in try/catch. Critically this pins the checked-index
+// side-effect rule: an UNUSED `xs[oob]` read must still be emitted (its bounds
+// check throws), so `try_call(|| { let _ = xs[oob] })` reports the error luajit
+// raises -- dropping the dead read as pure would silently diverge. Pins
+// crates/skull-codegen-js/tests/try_call.rs.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test(returns = 1)
+fn test_catches_error() -> int {
+    if try_call(() => { error("boom") }) { 1 } else { 0 }
+}
+
+@test(returns = 0)
+fn test_success_is_false() -> int {
+    if try_call(() => { let x = 1 + 1 }) { 1 } else { 0 }
+}
+
+// An out-of-bounds Vec read throws even when the value is discarded.
+@test(returns = 1)
+fn test_vec_oob_read_errors() -> int {
+    let xs = [1, 2, 3]
+    if try_call(() => { let _ = xs[10] }) { 1 } else { 0 }
+}
+
+// An in-bounds Vec read does not error.
+@test(returns = 0)
+fn test_vec_inbounds_ok() -> int {
+    let xs = [1, 2, 3]
+    if try_call(() => { let _ = xs[0] }) { 1 } else { 0 }
+}
+
+// A negative index also throws.
+@test(returns = 1)
+fn test_vec_negative_errors() -> int {
+    let xs = [1, 2, 3]
+    if try_call(() => { let _ = xs[-1] }) { 1 } else { 0 }
+}

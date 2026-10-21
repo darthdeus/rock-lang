@@ -1,0 +1,31 @@
+// JS backend `put` (T8d): the test-local `io.write` idiom -- write a string to
+// stdout with NO trailing newline. The JS harness captures `print`/`put` into
+// one per-test buffer and byte-compares against `@test(output=..)`; `put` must
+// append into THAT buffer raw (no newline, no tab join), unlike `print`. Runs
+// under BOTH executors so the buffer semantics are luajit-checked.
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+// Bare `put` writes with no separators or newline: three calls -> "abc".
+@test(output = "abc")
+fn put_no_newline() {
+    put("a")
+    put("b")
+    put("c")
+}
+
+// Embedded `\n` from a `put` is preserved (only leading/trailing whitespace is
+// trimmed by the harness compare).
+@test(output = "x=1\ny=2")
+fn put_embedded_newline() {
+    put("x=1")
+    put("\n")
+    put("y=2")
+}
+
+// `put` and `print` share one buffer, in call order (`print` adds its newline).
+@test(output = "head\ntail")
+fn put_and_print_interleave() {
+    put("head\n")
+    print("tail")
+}
