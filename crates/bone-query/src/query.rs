@@ -4645,7 +4645,7 @@ pub struct SignatureEntry {
 fn v1_scope_entries(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
-    visible_bindings: Option<&[(Ustr, Ustr)]>,
+    visible_bindings: Option<&[(Ustr, Ustr, Option<Ustr>)]>,
     expr_position: bool,
     pfx: &[u8],
     show_private: bool,
@@ -4659,12 +4659,28 @@ fn v1_scope_entries(
             && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
                 || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
     };
-    let bindings: Vec<(Ustr, Ustr)> = match visible_bindings {
-        Some(bindings) => bindings.iter().copied().filter(|(name, _)| admit(name.as_str())).collect(),
-        None => crate::modules_scope::bound_names(ws, frag, admit),
+    let bindings: Vec<(Ustr, Ustr, Option<Ustr>)> = match visible_bindings {
+        Some(bindings) => bindings
+            .iter()
+            .copied()
+            .filter(|(name, _, _)| admit(name.as_str()))
+            .collect(),
+        None => crate::modules_scope::bound_names(ws, frag, admit)
+            .into_iter()
+            .map(|(name, key)| (name, key, None))
+            .collect(),
     };
-    for (name, key) in bindings {
-        for e in key_entries_in_scope(ws, Some(frag), name, key, expr_position, pfx, show_private) {
+    for (name, key, global_def_file) in bindings {
+        for e in key_entries_in_scope(
+            ws,
+            Some(frag),
+            name,
+            key,
+            expr_position,
+            pfx,
+            show_private,
+            global_def_file,
+        ) {
             if seen.insert(e.name) {
                 out.push(e);
             }
@@ -4682,6 +4698,7 @@ pub(crate) fn key_entries_in_scope(
     expr_position: bool,
     pfx: &[u8],
     show_private: bool,
+    global_def_file: Option<Ustr>,
 ) -> Vec<CompletionEntry> {
     let visible = |n: &str| !n.starts_with('_') || show_private;
     let matches = |n: &str| visible(n) && crate::completion::match_policy::admit(n.as_bytes(), pfx);
@@ -4746,11 +4763,12 @@ pub(crate) fn key_entries_in_scope(
     } else if let Some(&ty) = ws.globals_by_name.get(&key) {
         if expr_position && matches(name.as_str()) {
             let rendered = ws.render(None, ty);
-            let def_file = ws
-                .modules
-                .iter()
-                .find(|m| m.global_by_name.contains_key(&key))
-                .map_or_else(|| ustr::Ustr::from("<builtin>"), |m| m.file);
+            let def_file = global_def_file.unwrap_or_else(|| {
+                ws.modules
+                    .iter()
+                    .find(|m| m.global_by_name.contains_key(&key))
+                    .map_or_else(|| ustr::Ustr::from("<builtin>"), |m| m.file)
+            });
             out.push(CompletionEntry {
                 detail: (!rendered.is_empty()).then_some(rendered),
                 ty: Some(ty),
@@ -4790,7 +4808,7 @@ pub(crate) fn completion_with_visible_bindings(
     offset: usize,
     prefix: &str,
     expr_position: bool,
-    visible_bindings: Option<&[(Ustr, Ustr)]>,
+    visible_bindings: Option<&[(Ustr, Ustr, Option<Ustr>)]>,
 ) -> Vec<CompletionEntry> {
     let mut seen: std::collections::HashSet<ustr::Ustr> = std::collections::HashSet::new();
     let mut out = Vec::new();

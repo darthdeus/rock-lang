@@ -222,7 +222,7 @@ struct BoneProject {
     /// Clean module-v1 bare bindings for completion, keyed by fragment file.
     /// The resolver produces these once per file; body-only updates keep the
     /// namespace fixed, while every interface/scope rebuild clears the cache.
-    visible_bindings: HashMap<Ustr, Vec<(Ustr, Ustr)>>,
+    visible_bindings: HashMap<Ustr, Vec<(Ustr, Ustr, Option<Ustr>)>>,
     /// Whether this project is a `bin` (executable/game), from its `stick.toml`
     /// `type` (default `bin`). The `unused_fn` lint is closed-world -- a `lib`'s
     /// public API has no in-project caller yet isn't dead -- so it runs only
@@ -2060,7 +2060,23 @@ impl BoneWorkspace {
             let file = ws.module(mid).file;
             proj.visible_bindings
                 .entry(file)
-                .or_insert_with(|| crate::modules_scope::bound_names(ws, frag, |_| true))
+                .or_insert_with(|| {
+                    // Preserve the public query's first-module owner choice, but
+                    // carry it with the cached binding so every global candidate
+                    // does not rescan all modules to recover its def_file.
+                    let mut global_def_files = HashMap::new();
+                    for module in &ws.modules {
+                        for key in module.global_by_name.keys() {
+                            global_def_files.entry(*key).or_insert(module.file);
+                        }
+                    }
+                    crate::modules_scope::bound_names(ws, frag, |_| true)
+                        .into_iter()
+                        .map(|(name, key)| {
+                            (name, key, global_def_files.get(&key).copied())
+                        })
+                        .collect()
+                })
                 .as_slice()
         });
         let mut cands = crate::query::completion_with_visible_bindings(
@@ -2144,6 +2160,7 @@ impl BoneWorkspace {
                         expr_position,
                         pfx,
                         show_private,
+                        None,
                     );
                     for entry in entries {
                         if !offered.insert(entry.name) {
