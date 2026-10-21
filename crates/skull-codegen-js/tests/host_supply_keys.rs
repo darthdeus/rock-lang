@@ -110,3 +110,18 @@ fn logging_global_remains_callable_as_a_value() {
     "#, &format!("var __G = {{}};\n{}{}", skull_codegen_js::JS_CALL_HELPER, skull_codegen_js::JS_LOG_RUNTIME),
     "for (const level of [0, 2, 4]) { root(level); if (__G.__rock_log_level !== level) throw Error('callable global'); }");
 }
+
+#[test]
+fn user_inspection_bodies_bypass_the_host_value_formatter() {
+    for (declaration, call) in [
+        (r#"inline(js) fn inspect(p: UserInspected, cycle_detect: bool = true, precision: int = -1) -> int = "return p.value;""#,
+         "inspect(UserInspected { value: input })"),
+        (r#"inline(js) fn inspect_formatted(p: UserInspected, precision: int) -> int = "return p.value;""#,
+         "inspect_formatted(UserInspected { value: input }, 2)"),
+    ] {
+        let src = format!("value UserInspected {{ value: int }}\n{declaration}\nfn root(input: int) -> int {{ {call} }}");
+        run_root(&src, &format!("{}{}{}", skull_codegen_js::JS_CALL_HELPER,
+            skull_codegen_js::JS_STRING_RUNTIME, skull_codegen_js::JS_INSPECT_RUNTIME),
+            "for (const input of [0, 17, -9]) { if (root(input) !== input) throw Error('user inspection body replaced'); }");
+    }
+}

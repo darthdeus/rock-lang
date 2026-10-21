@@ -2563,6 +2563,8 @@ impl Emitter<'_> {
         args: &[Idx<Inst>],
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
+        // Resolve once so typed inspection also obeys declaration supply.
+        let supply = js_supply(self.ws, cf);
         // `inspect`/`inspect_formatted` of a GC-FREE value struct still diverges:
         // it is cdata on luajit, rendered `Name { f: v }` (colon, via the cdata
         // `__tostring`) where the JS `{__ty,..}`-object walker emits `f = v`
@@ -2578,7 +2580,7 @@ impl Emitter<'_> {
         // structs (no strings/GC by the C-layout rule), so an emit-time recursive
         // colon renderer is exact -- primitive leaves go through the generic
         // `inspect` (lua_tostring / precision parity), nested value structs recurse.
-        if matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
+        if supply.is_some() && matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
                 if let Inst::MakeValueStruct { name, representation, .. } = &self.mf.insts[arg0] {
                     if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
@@ -2613,12 +2615,7 @@ impl Emitter<'_> {
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().map(|a| self.render_val(*a)).collect();
         let rargs = rargs?;
-        // THE ONE ORACLE. Everything this backend supplies itself -- the
-        // builtin-`Map` interceptions, the host globals, the hand-written
-        // templates and the `@intrinsic` table -- in one precedence, shared
-        // with graph discovery and with the mono artifact view. A callee it
-        // answers for is never co-emitted, whatever body the declaration has.
-        if let Some(supply) = js_supply(self.ws, cf) {
+        if let Some(supply) = supply {
             return Ok(render_supply(supply, &rargs, cf.param_decls.len()));
         }
         match self.callee_name(iid, func) {
