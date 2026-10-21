@@ -4573,12 +4573,9 @@ pub struct CompletionEntry {
     pub name: ustr::Ustr,
     pub kind: SymCat,
     pub detail: Option<String>,
-    /// Canonical function key used by the legacy path's signature-cache lookup.
-    /// This differs from `name` for an imported alias in a modules-v1 scope.
+    /// Canonical function key used to resolve a signature. This differs from
+    /// `name` for an imported alias in a modules-v1 scope.
     pub signature_key: Option<ustr::Ustr>,
-    /// The exact accessible overload to render after completion selection.
-    /// The display name in `name` may be an imported alias.
-    pub deferred_signature: Option<(ModuleId, Idx<Function>)>,
     /// The candidate's type when one is knowable: locals/params carry their
     /// inferred/declared TyId (Locals index the cursor body's inference --
     /// only resolvable against a Gamma seeded from that body), globals their
@@ -4605,6 +4602,49 @@ pub struct CompletionEntry {
     /// Scope-recency rank for locals (closest declaration above the cursor
     /// = 0, capped at 9); 0 for every other kind.
     pub rec: u8,
+}
+
+/// Resolved modules-v1 binding metadata cached per fragment. These facts
+/// contain no workspace-local IDs. Candidate emission refreshes current global
+/// types and overloaded-function metadata after body-only module reordering.
+#[derive(Clone, Debug)]
+pub(crate) struct VisibleBinding {
+    pub(crate) name: ustr::Ustr,
+    pub(crate) key: ustr::Ustr,
+    pub(crate) kind: VisibleBindingKind,
+    pub(crate) file_is_test: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum VisibleBindingKind {
+    Function {
+        def_file: ustr::Ustr,
+        takes_params: bool,
+        multiple_overloads: bool,
+    },
+    Struct { def_file: ustr::Ustr },
+    Enum { def_file: ustr::Ustr, variants: Vec<VisibleEnumVariant> },
+    Newtype { def_file: ustr::Ustr },
+    Global { def_file: ustr::Ustr },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct VisibleEnumVariant {
+    pub(crate) suffix: ustr::Ustr,
+    pub(crate) qualified: ustr::Ustr,
+    pub(crate) shape: VariantShape,
+}
+
+impl VisibleBindingKind {
+    fn def_file(&self) -> ustr::Ustr {
+        match self {
+            Self::Function { def_file, .. }
+            | Self::Struct { def_file }
+            | Self::Enum { def_file, .. }
+            | Self::Newtype { def_file }
+            | Self::Global { def_file } => *def_file,
+        }
+    }
 }
 
 pub struct SymbolEntry {
@@ -4645,15 +4685,15 @@ pub struct SignatureEntry {
 fn v1_scope_entries(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
-    visible_bindings: Option<&[(Ustr, Ustr, Option<Ustr>)]>,
+    visible_bindings: Option<&[VisibleBinding]>,
     expr_position: bool,
     pfx: &[u8],
     show_private: bool,
-    seen: &mut std::collections::HashSet<ustr::Ustr>,
+    seen: &mut FxHashSet<ustr::Ustr>,
     out: &mut Vec<CompletionEntry>,
 ) {
     // A type name may match through its variants' names, so it passes here
-    // and `key_entries` filters per variant.
+    // and `emit_visible_binding_entries` filters per variant.
     let admit = |name: &str| {
         (!name.starts_with('_') || show_private)
             && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
@@ -4661,18 +4701,17 @@ fn v1_scope_entries(
     };
     let mut scratch = Vec::new();
     let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
-    let mut emit_binding = |name, key, global_def_file| {
-        key_entries_in_scope(
+    let mut emit_binding = |binding: &VisibleBinding,
+                            test_path_cache: &mut FxHashMap<Ustr, bool>| {
+        emit_visible_binding_entries(
             ws,
+            binding,
             Some(frag),
-            name,
-            key,
             expr_position,
             pfx,
             show_private,
-            global_def_file,
+            test_path_cache,
             &mut scratch,
-            &mut test_path_cache,
         );
         for e in scratch.drain(..) {
             if seen.insert(e.name) {
@@ -4681,14 +4720,200 @@ fn v1_scope_entries(
         }
     };
     if let Some(bindings) = visible_bindings {
-        for &(name, key, global_def_file) in bindings {
-            if admit(name.as_str()) {
-                emit_binding(name, key, global_def_file);
+        for binding in bindings {
+            if admit(binding.name.as_str()) {
+                emit_binding(binding, &mut test_path_cache);
             }
         }
     } else {
         for (name, key) in crate::modules_scope::bound_names(ws, frag, admit) {
-            emit_binding(name, key, None);
+            if let Some(binding) = resolve_visible_binding(
+                ws,
+                Some(frag),
+                name,
+                key,
+                None,
+                &mut test_path_cache,
+            ) {
+                emit_binding(&binding, &mut test_path_cache);
+            }
+        }
+    }
+}
+
+/// Find the current first overload admitted at this access site.
+fn first_callable_in_scope(
+    ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    key: Ustr,
+) -> Option<(ModuleId, Idx<Function>)> {
+    ws.functions_by_name.get(&key).and_then(|functions| {
+        functions.iter().copied().find(|&(mid, fid)| {
+            frag.is_none_or(|frag| {
+                crate::modules_scope::callable_member_admitted(ws, frag, key, mid, fid)
+            })
+        })
+    })
+}
+
+/// Resolve the same first usable category as completion emission, retaining
+/// only stable declaration facts in the per-fragment cache.
+pub(crate) fn resolve_visible_binding(
+    ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    name: ustr::Ustr,
+    key: ustr::Ustr,
+    global_def_file: Option<Ustr>,
+    test_path_cache: &mut FxHashMap<Ustr, bool>,
+) -> Option<VisibleBinding> {
+    let function_family = ws.functions_by_name.get(&key);
+    let kind = if let Some((fmid, fid)) = first_callable_in_scope(ws, frag, key) {
+        VisibleBindingKind::Function {
+            def_file: ws.module(fmid).file,
+            takes_params: !ws.module(fmid).functions[fid].param_decls.is_empty(),
+            multiple_overloads: function_family.is_some_and(|functions| functions.len() > 1),
+        }
+    } else if let Some(sid) = ws.struct_by_name.get(&key) {
+        VisibleBindingKind::Struct { def_file: ws.module(sid.module).file }
+    } else if let Some(eid) = ws.enums_by_name.get(&key) {
+        let def_file = ws.module(eid.module).file;
+        let variants = ws.module(eid.module).enums[eid.def]
+            .variants
+            .iter()
+            .map(|variant| {
+                let qualified = format!("{name}::{}", variant.name);
+                VisibleEnumVariant {
+                    suffix: variant.name,
+                    qualified: ustr::Ustr::from(qualified.as_str()),
+                    shape: VariantShape::of(&variant.payload),
+                }
+            })
+            .collect();
+        VisibleBindingKind::Enum { def_file, variants }
+    } else if let Some(nid) = ws.newtypes_by_name.get(&key) {
+        VisibleBindingKind::Newtype { def_file: ws.module(nid.module).file }
+    } else if ws.globals_by_name.contains_key(&key) {
+        let def_file = global_def_file.unwrap_or_else(|| {
+            ws.modules
+                .iter()
+                .find(|module| module.global_by_name.contains_key(&key))
+                .map_or_else(|| ustr::Ustr::from("<builtin>"), |module| module.file)
+        });
+        VisibleBindingKind::Global { def_file }
+    } else {
+        return None;
+    };
+    let def_file = kind.def_file();
+    let file_is_test = *test_path_cache
+        .entry(def_file)
+        .or_insert_with(|| is_test_path(def_file.as_str()));
+    Some(VisibleBinding { name, key, kind, file_is_test })
+}
+
+/// Emit one resolved binding using the existing prefix, soft-private, enum,
+/// and expression/type-slot rules. The global type is read from the current
+/// workspace so the cache never retains a `TyId` across updates.
+fn emit_visible_binding_entries(
+    ws: &Workspace,
+    binding: &VisibleBinding,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    expr_position: bool,
+    pfx: &[u8],
+    show_private: bool,
+    test_path_cache: &mut FxHashMap<Ustr, bool>,
+    out: &mut Vec<CompletionEntry>,
+) {
+    let visible = |candidate: &str| !candidate.starts_with('_') || show_private;
+    let matches = |candidate: &str| {
+        visible(candidate) && crate::completion::match_policy::admit(candidate.as_bytes(), pfx)
+    };
+    let mut def_file = binding.kind.def_file();
+    let mut file_is_test = binding.file_is_test;
+    let mut current_takes_params = None;
+    if let VisibleBindingKind::Function {
+        takes_params,
+        multiple_overloads,
+        ..
+    } = &binding.kind
+    {
+        current_takes_params = Some(*takes_params);
+        if *multiple_overloads && expr_position && matches(binding.name.as_str()) {
+            let Some((mid, fid)) = first_callable_in_scope(ws, frag, binding.key) else {
+                return;
+            };
+            def_file = ws.module(mid).file;
+            file_is_test = *test_path_cache
+                .entry(def_file)
+                .or_insert_with(|| is_test_path(def_file.as_str()));
+            current_takes_params = Some(!ws.module(mid).functions[fid].param_decls.is_empty());
+        }
+    }
+    let entry = |name: Ustr, kind: SymCat| CompletionEntry {
+        name,
+        kind,
+        detail: None,
+        signature_key: None,
+        ty: None,
+        takes_params: false,
+        variant_shape: None,
+        test_scoped: file_is_test || name.as_str().starts_with("test_"),
+        def_file,
+        rec: 0,
+    };
+    match &binding.kind {
+        VisibleBindingKind::Function {
+            takes_params,
+            multiple_overloads: _,
+            ..
+        } => {
+            if expr_position && matches(binding.name.as_str()) {
+                out.push(CompletionEntry {
+                    signature_key: Some(binding.key),
+                    takes_params: current_takes_params.unwrap_or(*takes_params),
+                    ..entry(binding.name, SymCat::Function)
+                });
+            }
+        }
+        VisibleBindingKind::Struct { .. } => {
+            if matches(binding.name.as_str()) {
+                out.push(entry(binding.name, SymCat::Struct));
+            }
+        }
+        VisibleBindingKind::Enum { def_file, variants } => {
+            if expr_position && !def_file.as_str().starts_with('<') {
+                for variant in variants {
+                    let suffix = variant.suffix.as_str();
+                    let qualified = variant.qualified.as_str();
+                    let hit = pfx.is_empty()
+                        || crate::completion::match_policy::admit(suffix.as_bytes(), pfx)
+                        || crate::completion::match_policy::admit(qualified.as_bytes(), pfx);
+                    if hit && visible(suffix) {
+                        out.push(CompletionEntry {
+                            name: variant.qualified,
+                            detail: Some(binding.name.to_string()),
+                            variant_shape: Some(variant.shape),
+                            ..entry(variant.qualified, SymCat::Variant)
+                        });
+                    }
+                }
+            } else if matches(binding.name.as_str()) {
+                out.push(entry(binding.name, SymCat::Enum));
+            }
+        }
+        VisibleBindingKind::Newtype { .. } => {
+            if matches(binding.name.as_str()) {
+                out.push(entry(binding.name, SymCat::Newtype));
+            }
+        }
+        VisibleBindingKind::Global { .. } => {
+            if expr_position && matches(binding.name.as_str()) {
+                if let Some(&ty) = ws.globals_by_name.get(&binding.key) {
+                    out.push(CompletionEntry {
+                        ty: Some(ty),
+                        ..entry(binding.name, SymCat::Global)
+                    });
+                }
+            }
         }
     }
 }
@@ -4707,82 +4932,17 @@ pub(crate) fn key_entries_in_scope(
     out: &mut Vec<CompletionEntry>,
     test_path_cache: &mut FxHashMap<Ustr, bool>,
 ) {
-    let visible = |n: &str| !n.starts_with('_') || show_private;
-    let matches = |n: &str| visible(n) && crate::completion::match_policy::admit(n.as_bytes(), pfx);
-    let file_of = |mid: ModuleId| ws.module(mid).file;
-    let mut entry = |name: ustr::Ustr, kind: SymCat, def_file: ustr::Ustr| CompletionEntry {
-        name,
-        kind,
-        detail: None,
-        signature_key: None,
-        deferred_signature: None,
-        ty: None,
-        takes_params: false,
-        variant_shape: None,
-        test_scoped: *test_path_cache
-            .entry(def_file)
-            .or_insert_with(|| is_test_path(def_file.as_str()))
-            || name.as_str().starts_with("test_"),
-        def_file,
-        rec: 0,
-    };
-    if let Some((fmid, fid)) = ws.functions_by_name.get(&key).and_then(|l| {
-        l.iter().copied().find(|&(fmid, fid)| {
-            frag.is_none_or(|frag| {
-                crate::modules_scope::callable_member_admitted(ws, frag, key, fmid, fid)
-            })
-        })
-    }) {
-        if expr_position && matches(name.as_str()) {
-            out.push(CompletionEntry {
-                detail: None,
-                signature_key: Some(key),
-                deferred_signature: Some((fmid, fid)),
-                takes_params: !ws.module(fmid).functions[fid].param_decls.is_empty(),
-                ..entry(name, SymCat::Function, file_of(fmid))
-            });
-        }
-    } else if let Some(sid) = ws.struct_by_name.get(&key) {
-        if matches(name.as_str()) {
-            out.push(entry(name, SymCat::Struct, file_of(sid.module)));
-        }
-    } else if let Some(eid) = ws.enums_by_name.get(&key) {
-        let def_file = file_of(eid.module);
-        if expr_position && !def_file.as_str().starts_with('<') {
-            for v in ws.module(eid.module).enums[eid.def].variants.iter() {
-                let qualified = format!("{name}::{}", v.name);
-                let hit = pfx.is_empty()
-                    || crate::completion::match_policy::admit(v.name.as_bytes(), pfx)
-                    || crate::completion::match_policy::admit(qualified.as_bytes(), pfx);
-                if hit && visible(v.name.as_str()) {
-                    out.push(CompletionEntry {
-                        detail: Some(name.to_string()),
-                        variant_shape: Some(VariantShape::of(&v.payload)),
-                        ..entry(ustr::Ustr::from(qualified.as_str()), SymCat::Variant, def_file)
-                    });
-                }
-            }
-        } else if matches(name.as_str()) {
-            out.push(entry(name, SymCat::Enum, def_file));
-        }
-    } else if let Some(nid) = ws.newtypes_by_name.get(&key) {
-        if matches(name.as_str()) {
-            out.push(entry(name, SymCat::Newtype, file_of(nid.module)));
-        }
-    } else if let Some(&ty) = ws.globals_by_name.get(&key) {
-        if expr_position && matches(name.as_str()) {
-            let def_file = global_def_file.unwrap_or_else(|| {
-                ws.modules
-                    .iter()
-                    .find(|m| m.global_by_name.contains_key(&key))
-                    .map_or_else(|| ustr::Ustr::from("<builtin>"), |m| m.file)
-            });
-            out.push(CompletionEntry {
-                detail: None,
-                ty: Some(ty),
-                ..entry(name, SymCat::Global, def_file)
-            });
-        }
+    if let Some(binding) = resolve_visible_binding(ws, frag, name, key, global_def_file, test_path_cache) {
+        emit_visible_binding_entries(
+            ws,
+            &binding,
+            frag,
+            expr_position,
+            pfx,
+            show_private,
+            test_path_cache,
+            out,
+        );
     }
 }
 
@@ -4794,20 +4954,32 @@ pub fn completion(
     prefix: &str,
     expr_position: bool,
 ) -> Vec<CompletionEntry> {
+    let req_file = ws.modules.get(mid.index()).map_or_else(ustr::Ustr::default, |m| m.file);
+    let fragment_file = crate::modules_scope::fragment(ws, req_file).map(|_| req_file);
     let mut entries =
         completion_with_visible_bindings(ws, mid, inf, offset, prefix, expr_position, None);
     for entry in &mut entries {
-        if let Some((fmid, fid)) = entry.deferred_signature.take() {
-            entry.detail = Some(render_fn_signature(
-                ws,
-                entry.name,
-                &ws.module(fmid).functions[fid],
-            ));
-        } else if entry.kind == SymCat::Global && entry.detail.is_none() {
-            entry.detail = entry
-                .ty
-                .map(|ty| ws.render(None, ty))
-                .filter(|detail| !detail.is_empty());
+        if entry.detail.is_some() {
+            continue;
+        }
+        match entry.kind {
+            SymCat::Function => {
+                if let (Some(fragment_file), Some(key)) = (fragment_file, entry.signature_key) {
+                    entry.detail = render_deferred_signature(
+                        ws,
+                        Some(fragment_file),
+                        key,
+                        entry.name,
+                    );
+                }
+            }
+            SymCat::Global => {
+                entry.detail = entry
+                    .ty
+                    .map(|ty| ws.render(None, ty))
+                    .filter(|detail| !detail.is_empty());
+            }
+            _ => {}
         }
     }
     entries
@@ -4820,9 +4992,9 @@ pub(crate) fn completion_with_visible_bindings(
     offset: usize,
     prefix: &str,
     expr_position: bool,
-    visible_bindings: Option<&[(Ustr, Ustr, Option<Ustr>)]>,
+    visible_bindings: Option<&[VisibleBinding]>,
 ) -> Vec<CompletionEntry> {
-    let mut seen: std::collections::HashSet<ustr::Ustr> = std::collections::HashSet::new();
+    let mut seen: FxHashSet<ustr::Ustr> = FxHashSet::default();
     let mut out = Vec::new();
 
     // Filter by the identifier query HERE, before rendering any per-candidate
@@ -4880,7 +5052,6 @@ pub(crate) fn completion_with_visible_bindings(
                     },
                     detail: (!ty.is_empty()).then_some(ty),
                     signature_key: None,
-                    deferred_signature: None,
                     ty: ty_id,
                     takes_params: false,
                     variant_shape: None,
@@ -4896,7 +5067,21 @@ pub(crate) fn completion_with_visible_bindings(
     // they bind it under -- not every definition of the workspace by key.
     let v1 = crate::modules_scope::fragment(ws, req_file);
     if let Some(frag) = v1 {
-        v1_scope_entries(ws, frag, visible_bindings, expr_position, pfx, show_private, &mut seen, &mut out);
+        let capacity_hint = seen
+            .len()
+            .saturating_add(visible_bindings.map_or(0, |bindings| bindings.len()));
+        seen.reserve(capacity_hint.saturating_sub(seen.len()));
+        out.reserve(capacity_hint.saturating_sub(out.len()));
+        v1_scope_entries(
+            ws,
+            frag,
+            visible_bindings,
+            expr_position,
+            pfx,
+            show_private,
+            &mut seen,
+            &mut out,
+        );
     }
     for m in ws.modules.iter().filter(|_| v1.is_none()) {
         // Test-scoped iff defined under a `tests/` path segment or
@@ -4922,7 +5107,6 @@ pub(crate) fn completion_with_visible_bindings(
                 // not rendered or cloned for every workspace function here.
                 detail: None,
                 signature_key: Some(*name),
-                deferred_signature: None,
                 ty: None,
                 takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
                 variant_shape: None,
@@ -4933,7 +5117,7 @@ pub(crate) fn completion_with_visible_bindings(
         }
         for name in m.struct_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, signature_key: None, deferred_signature: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         // A user enum in an expression slot is offered as its qualified
@@ -4966,7 +5150,6 @@ pub(crate) fn completion_with_visible_bindings(
                             kind: SymCat::Variant,
                             detail: Some(name.to_string()),
                             signature_key: None,
-                            deferred_signature: None,
                             ty: None,
                             takes_params: false,
                             variant_shape: Some(VariantShape::of(&v.payload)),
@@ -4977,12 +5160,12 @@ pub(crate) fn completion_with_visible_bindings(
                     }
                 }
             } else if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, signature_key: None, deferred_signature: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for name in m.newtypes_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, signature_key: None, deferred_signature: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, signature_key: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for (name, gidx) in m.global_by_name.iter() {
@@ -4999,7 +5182,6 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Global,
                     detail: (!ty.is_empty()).then_some(ty),
                     signature_key: None,
-                    deferred_signature: None,
                     ty: Some(m.globals[*gidx].ty),
                     takes_params: false,
                     variant_shape: None,
@@ -5025,7 +5207,6 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Struct,
                     detail: None,
                     signature_key: None,
-                    deferred_signature: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -5048,7 +5229,6 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Keyword,
                     detail: None,
                     signature_key: None,
-                    deferred_signature: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -5096,6 +5276,23 @@ pub(crate) fn render_fn_signature(ws: &Workspace, name: ustr::Ustr, f: &bone_sem
         // No declared return type means no return annotation in the signature.
         .unwrap_or_default();
     format!("fn {}({}){}", name, params.join(", "), ret)
+}
+
+/// Resolve the current first overload admitted at `fragment_file`, then render
+/// it under the candidate's display spelling. The entry carries only a
+/// canonical key; workspace-local IDs are looked up after selection.
+pub(crate) fn render_deferred_signature(
+    ws: &Workspace,
+    fragment_file: Option<Ustr>,
+    key: Ustr,
+    display_name: Ustr,
+) -> Option<String> {
+    let frag = match fragment_file {
+        Some(file) => Some(crate::modules_scope::fragment(ws, file)?),
+        None => None,
+    };
+    let (mid, fid) = first_callable_in_scope(ws, frag, key)?;
+    Some(render_fn_signature(ws, display_name, &ws.module(mid).functions[fid]))
 }
 
 /// File-path-keyed source map (the LSP's per-project `texts`), threaded into the

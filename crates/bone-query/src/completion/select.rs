@@ -251,6 +251,7 @@ pub(crate) fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
 pub(crate) fn materialize_cand(
     cand: Cand,
     ws: &Workspace,
+    fragment_file: Option<ustr::Ustr>,
     fn_sigs: &HashMap<ustr::Ustr, String>,
     strip_call: bool,
     pattern: bool,
@@ -258,26 +259,25 @@ pub(crate) fn materialize_cand(
     let sort_text = Some(cand.key.encode(cand.name.as_str()));
     match cand.shape {
         CandShape::Entry(c) => {
-            // Function/global detail is materialized HERE for survivors only. V1
-            // entries retain the exact accessible overload; legacy entries
-            // use the cached signature. Other kinds carry their detail already.
+            // Function/global detail is materialized HERE for survivors only.
+            // V1 requests resolve the exact accessible overload; legacy
+            // requests use the cached signature. Other kinds carry detail already.
             let detail = match c.kind {
                 // `name` is presentation spelling and may be an imported
                 // alias. Every function candidate carries its canonical HIR
                 // key, so falling back to the spelling could show an
                 // unrelated same-named function if the cache ever drifted.
-                SymCat::Function => c
-                    .detail
-                    .or_else(|| {
-                        c.deferred_signature.map(|(mid, fid)| {
-                            crate::query::render_fn_signature(
-                                ws,
-                                c.name,
-                                &ws.module(mid).functions[fid],
-                            )
-                        })
+                SymCat::Function => c.detail.or_else(|| {
+                    c.signature_key.and_then(|key| match fragment_file {
+                        Some(fragment_file) => crate::query::render_deferred_signature(
+                            ws,
+                            Some(fragment_file),
+                            key,
+                            c.name,
+                        ),
+                        None => fn_sigs.get(&key).cloned(),
                     })
-                    .or_else(|| c.signature_key.and_then(|key| fn_sigs.get(&key).cloned())),
+                }),
                 SymCat::Global => c.detail.or_else(|| {
                     c.ty.and_then(|ty| {
                         let rendered = ws.render(None, ty);

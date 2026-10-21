@@ -1089,7 +1089,7 @@ pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<Complet
                     detail: (!params.is_empty()).then(|| format!("deco ({})", params.join(", "))),
                 },
             );
-            out.push(materialize_cand(cand, ws, &no_sigs, false, false));
+            out.push(materialize_cand(cand, ws, None, &no_sigs, false, false));
         }
     }
     out.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));

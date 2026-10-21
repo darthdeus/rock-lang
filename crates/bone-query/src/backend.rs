@@ -219,10 +219,10 @@ struct BoneProject {
     /// Fragment-scoped spellings and visibility for `call_through`. Reused on
     /// body edits and cleared with the type caches when a scope can change.
     scoped_call_through: HashMap<Ustr, ScopedCallThroughIndex>,
-    /// Clean module-v1 bare bindings for completion, keyed by fragment file.
-    /// The resolver produces these once per file; body-only updates keep the
-    /// namespace fixed, while every interface/scope rebuild clears the cache.
-    visible_bindings: HashMap<Ustr, Vec<(Ustr, Ustr, Option<Ustr>)>>,
+    /// Resolved module-v1 bare bindings and declaration metadata for
+    /// completion, keyed by fragment file. Body-only updates keep the
+    /// namespace fixed; interface/scope rebuilds clear the cache.
+    visible_bindings: HashMap<Ustr, Vec<crate::query::VisibleBinding>>,
     /// Whether this project is a `bin` (executable/game), from its `stick.toml`
     /// `type` (default `bin`). The `unused_fn` lint is closed-world -- a `lib`'s
     /// public API has no in-project caller yet isn't dead -- so it runs only
@@ -2070,10 +2070,18 @@ impl BoneWorkspace {
                             global_def_files.entry(*key).or_insert(module.file);
                         }
                     }
+                    let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
                     crate::modules_scope::bound_names(ws, frag, |_| true)
                         .into_iter()
-                        .map(|(name, key)| {
-                            (name, key, global_def_files.get(&key).copied())
+                        .filter_map(|(name, key)| {
+                            crate::query::resolve_visible_binding(
+                                ws,
+                                Some(frag),
+                                name,
+                                key,
+                                global_def_files.get(&key).copied(),
+                                &mut test_path_cache,
+                            )
                         })
                         .collect()
                 })
@@ -2125,7 +2133,6 @@ impl BoneWorkspace {
                     kind: SymCat::Macro,
                     detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
                     signature_key: None,
-                    deferred_signature: None,
                     ty: None,
                     takes_params: !md.params.is_empty(),
                     variant_shape: None,
@@ -2761,12 +2768,14 @@ impl BoneWorkspace {
                 sink.cands.len()
             );
         }
+        let fragment_file = crate::modules_scope::fragment(ws, ws.module(mid).file)
+            .map(|_| ws.module(mid).file);
         sink.cands.sort_by(cand_cmp);
         sink.cands.truncate(max_items);
         let mut items: Vec<CompletionItem> = sink
             .cands
             .into_iter()
-            .map(|c| materialize_cand(c, ws, fn_sigs, next_is_open_paren, pattern_pos))
+            .map(|c| materialize_cand(c, ws, fragment_file, fn_sigs, next_is_open_paren, pattern_pos))
             .collect();
         if !import_edits.is_empty() {
             for item in &mut items {

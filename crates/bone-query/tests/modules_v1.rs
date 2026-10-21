@@ -774,24 +774,88 @@ fn v1_global_completion_detail_survives_body_updates() {
 #[test]
 fn callable_completion_uses_the_accessible_overload_not_the_family_first() {
     let project = V1Project::new();
-    let shapes = format!(
-        "{SHAPES}\nfn family(s: string) -> string {{\n    s\n}}\n\npub fn family(n: int) -> int {{\n    n\n}}\n"
+    let public_overload = "pub fn family(n: int, scale: int) -> int {\n    n * scale\n}\n";
+    let shapes_text = format!(
+        "{SHAPES}\nfn family(s: string) -> string {{\n    s\n}}\n\n{public_overload}"
     );
-    std::fs::write(project.dir.path().join("shapes.rock"), shapes).unwrap();
+    std::fs::write(project.dir.path().join("shapes.rock"), &shapes_text).unwrap();
 
     let mut bone = project.open();
     let main = project.path("main.rock");
+    let shapes_path = project.path("shapes.rock");
     let anchor = "    let a = shapes::inner::depth()\n";
-    let text = MAIN.replace(anchor, &format!("{anchor}    let q = family\n"));
+    let text = MAIN
+        .replace("use shapes::*;", "use shapes::*;\nuse shapes::family as fam;")
+        .replace(anchor, &format!("{anchor}    let q = fam\n"));
     bone.update(&main, text.clone());
-    let items = bone.completion(&main, pos_of(&text, "family", 0, "family".len()));
-    let family = items
-        .iter()
-        .find(|item| item.label == "family")
-        .expect("the public overload is offered");
-    let detail = family.detail.as_deref().unwrap_or("");
-    assert!(detail.contains("(n: int) -> int"), "accessible overload detail: {detail:?}");
-    assert!(!detail.contains("string"), "private overload leaked into completion: {detail:?}");
+    let marker = "let q = fam";
+    let completion = |bone: &mut BoneWorkspace, text: &str| {
+        bone.completion(&main, pos_of(text, marker, 0, marker.len()))
+            .into_iter()
+            .find(|item| item.label == "fam")
+            .expect("the aliased accessible overload is offered")
+    };
+    let before = completion(&mut bone, &text);
+    assert_eq!(before.detail.as_deref(), Some("fn fam(n: int, scale: int) -> int"));
+    assert_eq!(before.insert_text.as_deref(), Some("fam($0)"));
+    assert_eq!(before.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+
+    let body_changed = shapes_text.replace("    n * scale\n", "    n * scale + 1\n");
+    bone.update(&shapes_path, body_changed.clone());
+    let after_body = completion(&mut bone, &text);
+    assert_eq!(after_body, before, "body-only edit changed aliased overload completion");
+
+    let signature_changed = body_changed.replace(
+        "pub fn family(n: int, scale: int) -> int {\n    n * scale + 1\n}\n",
+        "pub fn family() -> int {\n    0\n}\n",
+    );
+    assert_ne!(signature_changed, body_changed, "the signature edit must match the selected overload");
+    bone.update(&shapes_path, signature_changed);
+    let after_signature = completion(&mut bone, &text);
+    assert_ne!(after_signature, before, "signature edit left cached overload metadata in place");
+    assert_eq!(after_signature.detail.as_deref(), Some("fn fam() -> int"));
+    assert_eq!(after_signature.insert_text.as_deref(), Some("fam()"));
+    assert_eq!(after_signature.insert_text_format, None);
+}
+
+#[test]
+fn body_only_module_rebuild_refreshes_cached_callable_metadata_across_fragments() {
+    let project = V1Project::new();
+    // Both files contribute to the same v1 module and both overloads are
+    // public. The first file's zero-arg declaration is initially first in the
+    // module's callable family; rebuilding its multiple item bodies moves the
+    // one-arg overload from the second file to the front.
+    let first = "pub mod shapes;\n\npub fn family() -> int {\n    0\n}\n\npub fn first_helper() -> int {\n    1\n}\n";
+    let second = "pub mod shapes;\n\npub fn family(n: int) -> int {\n    n\n}\n";
+    std::fs::write(project.dir.path().join("a.rock"), first).unwrap();
+    std::fs::write(project.dir.path().join("b.rock"), second).unwrap();
+
+    let mut bone = project.open();
+    let main = project.path("main.rock");
+    let text = "use shapes::family as fam;\n\nfn main() {\n    let q = fam\n}\n";
+    bone.update(&main, text.to_string());
+    let marker = "let q = fam";
+    let completion = |bone: &mut BoneWorkspace| {
+        bone.completion(&main, pos_of(text, marker, 0, marker.len()))
+            .into_iter()
+            .find(|item| item.label == "fam")
+            .expect("the accessible aliased family is offered")
+    };
+
+    let before = completion(&mut bone);
+    assert_eq!(before.detail.as_deref(), Some("fn fam() -> int"));
+    assert_eq!(before.insert_text.as_deref(), Some("fam()"));
+    assert_eq!(before.insert_text_format, None);
+
+    // Change two bodies while keeping the module's item/signature layout.
+    // This takes the session's BodyOnly module-rebuild path.
+    let first_body_edit = first.replace("    0\n", "    10\n").replace("    1\n", "    2\n");
+    bone.update(&project.path("a.rock"), first_body_edit);
+
+    let after = completion(&mut bone);
+    assert_eq!(after.detail.as_deref(), Some("fn fam(n: int) -> int"));
+    assert_eq!(after.insert_text.as_deref(), Some("fam($0)"));
+    assert_eq!(after.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
 }
 
 // -- rename -------------------------------------------------------------------
