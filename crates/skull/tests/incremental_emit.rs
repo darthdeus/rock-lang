@@ -83,18 +83,76 @@ fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&
     assert_eq!(incremental.lua, fresh.lua, "incremental assembly != fresh emit after editing {edited:?}");
 }
 
+fn residual_inline_budget_fixture(helper_value: i32, caller_locals: usize) -> String {
+    let mut src = format!(
+        "@inline @nomangle fn helper() -> int {{ {helper_value} }}\n\
+         @nomangle fn caller() -> int {{\n"
+    );
+    for i in 0..caller_locals {
+        src.push_str(&format!("let unused_{i} = {i}\n"));
+    }
+    src.push_str("return helper()\n}\n@nomangle fn other() -> int { 7 }\n");
+    src
+}
+
 #[test]
 fn body_edit_to_inlined_callee_reemits_callers() {
     // `helper` is a tiny straight callee -> inlined into `use_it`. Editing its
     // body must re-emit `use_it` (its chunk holds the inlined value), not just
     // `helper`. `other` is untouched and reused from cache.
-    let v1 = "@inline\nfn helper() -> int { 3 }\n\
-              fn use_it() -> float { helper() }\n\
-              fn other() -> int { 7 }";
-    let v2 = "@inline\nfn helper() -> int { 5 }\n\
-              fn use_it() -> float { helper() }\n\
-              fn other() -> int { 7 }";
-    check_edit(v1, v2, &["helper"]);
+    let v1 = "@inline @nomangle fn helper() -> int { 3 }\n\
+              @nomangle fn use_it() -> float { helper() }\n\
+              @nomangle fn other() -> int { 7 }";
+    let v2 = "@inline @nomangle fn helper() -> int { 5 }\n\
+              @nomangle fn use_it() -> float { helper() }\n\
+              @nomangle fn other() -> int { 7 }";
+    let ws1 = ws_of(v1);
+    let (full1, mut cache) = emit_full_global(&ws1, skull::user_module_id(&ws1).unwrap())
+        .expect("emit_full v1");
+    let caller_v1 = crate::common::function_body(&full1.lua, "use_it");
+    assert!(!caller_v1.contains("helper("), "the fixture's call must be inlined:\n{caller_v1}");
+
+    let ws2 = ws_of(v2);
+    let incremental = emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")])
+        .expect("emit_incremental");
+    let stats = cache.repair_stats();
+    assert_eq!(stats.chunks_rebuilt, 2, "the edited helper and its inliner must rebuild: {stats:?}");
+    assert_eq!(stats.chunk_rebuild_requests, 2, "the untouched `other` chunk must stay cached: {stats:?}");
+    assert!(incremental.lua.contains("function other("), "the reused sibling must remain in the assembly");
+    let caller_v2 = crate::common::function_body(&incremental.lua, "use_it");
+    assert!(!caller_v2.contains("helper("), "the updated call must still be inlined:\n{caller_v2}");
+    let fresh = emit_full_global(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("emit_full v2")
+        .0;
+    assert_eq!(incremental.lua, fresh.lua, "incremental assembly != fresh emit after editing helper");
+}
+
+#[test]
+fn body_edit_to_still_residual_inline_callee_rebuilds_only_the_callee() {
+    // The caller starts over the 400-cell splice budget, so the @inline call
+    // stays residual both before and after this literal-only helper edit. The
+    // caller's emitted text is unchanged and must be reused; `other` is a second
+    // untouched chunk to keep the reuse population explicit.
+    let v1 = residual_inline_budget_fixture(3, 401);
+    let v2 = residual_inline_budget_fixture(5, 401);
+    let ws1 = ws_of(&v1);
+    let (full1, mut cache) = emit_full_global(&ws1, skull::user_module_id(&ws1).unwrap())
+        .expect("emit_full v1");
+    let caller_v1 = crate::common::function_body(&full1.lua, "caller");
+    assert!(caller_v1.contains("helper("), "the over-budget call must remain residual:\n{caller_v1}");
+    assert!(full1.lua.contains("function other("), "the fixture must retain its reuse-control chunk");
+
+    let ws2 = ws_of(&v2);
+    let incremental = emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")])
+        .expect("emit_incremental");
+    let stats = cache.repair_stats();
+    assert_eq!(stats.chunks_rebuilt, 1, "a still-residual caller should be reused: {stats:?}");
+    let caller_v2 = crate::common::function_body(&incremental.lua, "caller");
+    assert!(caller_v2.contains("helper("), "the call should remain residual:\n{caller_v2}");
+    let fresh = emit_full_global(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("emit_full v2")
+        .0;
+    assert_eq!(incremental.lua, fresh.lua, "incremental assembly != fresh emit after editing helper");
 }
 
 #[test]
