@@ -2151,8 +2151,9 @@ impl BoneWorkspace {
                 };
                 let contribution = proj.session.files.get(path).map(|uf| &uf.contribution);
                 let mut offered: std::collections::HashSet<Ustr> = cands.iter().map(|c| c.name).collect();
+                let mut entries = Vec::new();
                 for cand in crate::modules_scope::import_candidates(ws, frag, admit) {
-                    let entries = crate::query::key_entries_in_scope(
+                    crate::query::key_entries_in_scope(
                         ws,
                         Some(frag),
                         cand.name,
@@ -2161,8 +2162,9 @@ impl BoneWorkspace {
                         pfx,
                         show_private,
                         None,
+                        &mut entries,
                     );
-                    for entry in entries {
+                    for entry in entries.drain(..) {
                         if !offered.insert(entry.name) {
                             continue;
                         }

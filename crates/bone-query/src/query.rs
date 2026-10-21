@@ -4659,19 +4659,9 @@ fn v1_scope_entries(
             && (crate::completion::match_policy::admit(name.as_bytes(), pfx)
                 || (expr_position && name.starts_with(|c: char| c.is_ascii_uppercase())))
     };
-    let bindings: Vec<(Ustr, Ustr, Option<Ustr>)> = match visible_bindings {
-        Some(bindings) => bindings
-            .iter()
-            .copied()
-            .filter(|(name, _, _)| admit(name.as_str()))
-            .collect(),
-        None => crate::modules_scope::bound_names(ws, frag, admit)
-            .into_iter()
-            .map(|(name, key)| (name, key, None))
-            .collect(),
-    };
-    for (name, key, global_def_file) in bindings {
-        for e in key_entries_in_scope(
+    let mut scratch = Vec::new();
+    let mut emit_binding = |name, key, global_def_file| {
+        key_entries_in_scope(
             ws,
             Some(frag),
             name,
@@ -4680,10 +4670,23 @@ fn v1_scope_entries(
             pfx,
             show_private,
             global_def_file,
-        ) {
+            &mut scratch,
+        );
+        for e in scratch.drain(..) {
             if seen.insert(e.name) {
                 out.push(e);
             }
+        }
+    };
+    if let Some(bindings) = visible_bindings {
+        for &(name, key, global_def_file) in bindings {
+            if admit(name.as_str()) {
+                emit_binding(name, key, global_def_file);
+            }
+        }
+    } else {
+        for (name, key) in crate::modules_scope::bound_names(ws, frag, admit) {
+            emit_binding(name, key, None);
         }
     }
 }
@@ -4699,7 +4702,8 @@ pub(crate) fn key_entries_in_scope(
     pfx: &[u8],
     show_private: bool,
     global_def_file: Option<Ustr>,
-) -> Vec<CompletionEntry> {
+    out: &mut Vec<CompletionEntry>,
+) {
     let visible = |n: &str| !n.starts_with('_') || show_private;
     let matches = |n: &str| visible(n) && crate::completion::match_policy::admit(n.as_bytes(), pfx);
     let file_of = |mid: ModuleId| ws.module(mid).file;
@@ -4716,7 +4720,6 @@ pub(crate) fn key_entries_in_scope(
         def_file,
         rec: 0,
     };
-    let mut out = Vec::new();
     if let Some((fmid, fid)) = ws.functions_by_name.get(&key).and_then(|l| {
         l.iter().copied().find(|&(fmid, fid)| {
             frag.is_none_or(|frag| {
@@ -4775,7 +4778,6 @@ pub(crate) fn key_entries_in_scope(
             });
         }
     }
-    out
 }
 
 pub fn completion(
