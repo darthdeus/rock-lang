@@ -231,6 +231,37 @@ fn main() {}
 }
 
 #[test]
+#[ignore = "known red (os-m3-js-pure-rock): __weak_cache_retire is not a mapped JS intrinsic"]
+fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery_in_js() {
+    let ws = ws_with(r#"
+struct Room { ticks: int }
+@lifecycle(phase="update", owner="scene") deco init scene_update {}
+@scene_update fn tick(root: Room) { root.ticks += 1 }
+global ROOT: Scene<Room>? = null
+fn load() -> Scene<Room> {
+    return scene_create((_b) => {
+        let root: Room? = Room { ticks: 0 }
+        return root
+    }).unwrap()
+}
+fn main() { ROOT = load() }
+"#);
+    let js = emit_program(&ws);
+    let scene_create_body = js
+        .split("\nfunction ")
+        .find(|part| part.starts_with("scene_create"))
+        .unwrap_or_else(|| panic!("no emitted scene_create specialization:\n{js}"));
+    assert!(
+        scene_create_body.contains("a_n4_Room_0_z"),
+        "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
+    );
+    assert!(
+        !scene_create_body.contains("__rock_get_type"),
+        "Scene construction must not discover its root type from the published value: {scene_create_body}"
+    );
+}
+
+#[test]
 fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
     let ws = ws_with(r#"
         @lifecycle(phase="wire", owner="session") deco init wire {}

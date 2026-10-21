@@ -1,13 +1,4 @@
-// Cross-backend NativeBuffer conformance fixture: every fn runs on BOTH
-// backends (skull->luajit and the JS emitter->node) and the results are
-// compared numerically by tests/nb_differential.rs. Pinned luajit-side
-// semantics: tests/intrinsics/native_required.rock; store-edge contract:
-// docs/nativebuffer-portability-design.md.
-//
-// Every fn is `test_`-prefixed (unmangled in emitted Lua), zero-arg, loop-free,
-// and returns a scalar or nullable scalar.
-
-// --- alloc + .len, all 7 variants -------------------------------------------
+// NativeBuffer results exercised by both the Lua and JavaScript backends.
 
 fn test_nb_len_float() -> int { return native_buffer_float(3).len }
 fn test_nb_len_int() -> int { return native_buffer_int(5).len }
@@ -16,8 +7,6 @@ fn test_nb_len_i8() -> int { return native_buffer_i8(2).len }
 fn test_nb_len_u16() -> int { return native_buffer_u16(4).len }
 fn test_nb_len_i16() -> int { return native_buffer_i16(6).len }
 fn test_nb_len_u32() -> int { return native_buffer_u32(8).len }
-
-// --- checked `buf[i]` sugar roundtrip, in-bounds ----------------------------
 
 fn test_nb_sugar_float() -> float {
     let b = native_buffer_float(2)
@@ -31,15 +20,11 @@ fn test_nb_sugar_int() -> int {
     b[1] = 32
     return b[0] + b[1]
 }
-// float storage is 32-bit on both hosts (C float / Float32Array): both round
-// 0.1 to the same f32.
 fn test_nb_f32_rounding() -> float {
     let b = native_buffer_float(1)
     b[0] = 0.1
     return b[0]
 }
-
-// --- direct nb_get/nb_set (the raw intrinsic mapping, no checked shim) ------
 
 fn test_nb_direct_float() -> float { let b = native_buffer_float(1); nb_set(b, 0, 2.5); return nb_get(b, 0) }
 fn test_nb_direct_int() -> int { let b = native_buffer_int(1); nb_set(b, 0, 42); return nb_get(b, 0) }
@@ -48,8 +33,6 @@ fn test_nb_direct_i8() -> int { let b = native_buffer_i8(1); nb_set(b, 0, 129); 
 fn test_nb_direct_u16() -> int { let b = native_buffer_u16(1); nb_set(b, 0, 60000); return nb_get(b, 0) }
 fn test_nb_direct_i16() -> int { let b = native_buffer_i16(1); nb_set(b, 0, -300); return nb_get(b, 0) }
 fn test_nb_direct_u32() -> int { let b = native_buffer_u32(1); nb_set(b, 0, 4000000000); return nb_get(b, 0) }
-
-// --- get() bounds contract: hit and miss per variant ------------------------
 
 fn test_nb_get_hit_float() -> float? { let b = native_buffer_float(2); b[1] = 4.5; return b.get(b.len - 1) }
 fn test_nb_get_hit_index0() -> float? { let b = native_buffer_float(2); b[0] = 3.25; return b.get(0) }
@@ -68,11 +51,6 @@ fn test_nb_get_miss_i16() -> int? { let b = native_buffer_i16(2); return b.get(-
 fn test_nb_get_hit_u32() -> int? { let b = native_buffer_u32(2); b[1] = 16; return b.get(1) }
 fn test_nb_get_miss_u32() -> int? { let b = native_buffer_u32(2); return b.get(2) }
 
-// --- sized-store wrap through the checked sugar (mod 2^n) -------------------
-// The design doc's claim that TypedArray store conversion matches LuaJIT's
-// native truncation is exactly what these test. The +5 / -6 edges distinguish
-// true mod-2^n wrap from x86 cvttsd2si saturation (INT_MIN).
-
 fn test_nb_wrap_u8_256() -> int { let b = native_buffer_u8(1); b[0] = 256; return b[0] }
 fn test_nb_wrap_u8_300() -> int { let b = native_buffer_u8(1); b[0] = 300; return b[0] }
 fn test_nb_wrap_u8_neg1() -> int { let b = native_buffer_u8(1); b[0] = -1; return b[0] }
@@ -87,8 +65,6 @@ fn test_nb_wrap_u32_neg1() -> int { let b = native_buffer_u32(1); b[0] = -1; ret
 fn test_nb_wrap_int_2p31() -> int { let b = native_buffer_int(1); b[0] = 2147483648; return b[0] }
 fn test_nb_wrap_int_2p31p5() -> int { let b = native_buffer_int(1); b[0] = 2147483653; return b[0] }
 fn test_nb_wrap_int_neg() -> int { let b = native_buffer_int(1); b[0] = -2147483654; return b[0] }
-
-// --- checked OOB errors (run individually; both backends must abort) --------
 
 fn test_nb_oob_read() -> float { let b = native_buffer_float(1); return b[1] }
 fn test_nb_oob_read_neg() -> float { let b = native_buffer_float(1); return b[-1] }

@@ -16,6 +16,22 @@ fn bad(n: int) -> NativeBuffer<GcValue> { return native_buffer_alloc(n) }
 fn main() { let b = bad(2); print("{b.len}") }
 "#;
 
+const VALID_CONTROLS: &str = r#"
+value Pair { x: float, y: int }
+fn int_buffer(n: int) -> NativeBuffer<int> { return native_buffer_alloc(n) }
+fn uint_buffer(n: int) -> NativeBuffer<uint> { return native_buffer_alloc(n) }
+fn float_buffer(n: int) -> NativeBuffer<float> { return native_buffer_alloc(n) }
+fn bool_buffer(n: int) -> NativeBuffer<bool> { return native_buffer_alloc(n) }
+fn pair_buffer(n: int) -> NativeBuffer<Pair> { return native_buffer_alloc(n) }
+fn main() {
+    let _ = int_buffer(1)
+    let _ = uint_buffer(1)
+    let _ = float_buffer(1)
+    let _ = bool_buffer(1)
+    let _ = pair_buffer(1)
+}
+"#;
+
 fn emit_main(src: &str) -> Result<String, skull_parser::CompilerError> {
     let ws = ws_with(src);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
@@ -58,4 +74,12 @@ fn flat_vec_string_rejects_through_its_allocation_route() {
 fn gc_carrying_value_rejects_with_its_concrete_name() {
     let msg = reject(GC_VALUE);
     assert_planner_rejection(&msg, "GcValue");
+}
+
+#[test]
+#[ignore = "known red (os-m3-js-pure-rock): NativeBuffer has no owned representation plan"]
+fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
+    let js = emit_main(VALID_CONTROLS).expect("valid c-mappable elements must emit");
+    assert!(js.contains("Int32Array") && js.contains("Uint32Array") && js.contains("Float32Array"));
+    assert!(js.contains("Uint8Array"), "bool must have a concrete JS byte storage");
 }

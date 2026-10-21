@@ -76,3 +76,93 @@ fn a_stdlib_sibling_pair_agrees_on_arity() {
          its params to the wrong arguments: {drifted:?}"
     );
 }
+
+fn sibling_facts_with(
+    src: &str,
+    id: &str,
+    want_js: bool,
+    native_side: bool,
+) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
+    let ast = skull_parser::parse_module_clean(src, Ustr::from(id)).expect("parse");
+    assert!(ast.recovery_errors.is_empty(), "{id} must parse cleanly");
+    let mut out = std::collections::HashMap::new();
+    for item in &ast.items {
+        let ItemKind::Function(f) = &item.kind else { continue };
+        let is_js = matches!(
+            f.body,
+            FunctionBody::ExternJs | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _)
+        );
+        let is_lua = matches!(f.body, FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _))
+            || (native_side && matches!(f.body, FunctionBody::Ffi(..)));
+        if is_js != want_js || (!is_js && !is_lua) {
+            continue;
+        }
+        let anns: std::collections::BTreeSet<String> = item
+            .annotations
+            .iter()
+            .map(|a| a.name.name.to_string())
+            // `@inline` is an optimization annotation, not a boundary or ABI
+            // discriminator. A sibling carrying it and one not carrying it
+            // must therefore behave identically here.
+            // `@allow` is a lint suppression -- it scopes a diagnostic over the
+            // body it sits on, so it is expected to differ between two bodies
+            // written in different languages (`long_inline_lua` cannot apply to
+            // a JS body) and says nothing about how a caller emits the call.
+            .filter(|n| n != "inline" && n != "allow")
+            .collect();
+        out.insert(f.name.name.to_string(), (f.params.len(), anns));
+    }
+    out
+}
+
+fn sibling_facts(
+    src: &str,
+    id: &str,
+    want_js: bool,
+) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
+    sibling_facts_with(src, id, want_js, false)
+}
+
+#[test]
+fn a_sibling_pair_agrees_on_arity_and_annotations() {
+    let mut stdlib_lua = std::collections::HashMap::new();
+    let mut stdlib_js = std::collections::HashMap::new();
+    for f in rock_stdlib::stdlib_files() {
+        stdlib_lua.extend(sibling_facts(f.contents, f.name, false));
+        stdlib_js.extend(sibling_facts(f.contents, f.name, true));
+    }
+    let pairs: Vec<(&str, _, _, &[&str])> = vec![
+        ("stdlib", stdlib_lua, stdlib_js, &[][..]),
+    ];
+
+    let mut drifted: Vec<String> = Vec::new();
+    for (label, lua, js, ignored) in &pairs {
+        let paired: Vec<&String> = js.keys().filter(|n| lua.contains_key(*n)).collect();
+        assert!(
+            paired.len() >= 10,
+            "{label}: only {} sibling pairs found -- the scan is broken, not the source",
+            paired.len()
+        );
+        for n in paired {
+            let (la, laa) = &lua[n];
+            let (ja, jaa) = &js[n];
+            if la != ja {
+                drifted.push(format!("{label}::{n} arity lua={la} js={ja}"));
+            }
+            let keep = |s: &std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
+                s.iter().filter(|a| !ignored.contains(&a.as_str())).cloned().collect()
+            };
+            let (laa, jaa) = (keep(laa), keep(jaa));
+            if laa != jaa {
+                let lua_only: Vec<&String> = laa.difference(&jaa).collect();
+                let js_only: Vec<&String> = jaa.difference(&laa).collect();
+                drifted.push(format!("{label}::{n} lua-only={lua_only:?} js-only={js_only:?}"));
+            }
+        }
+    }
+    assert!(
+        drifted.is_empty(),
+        "these lua/js siblings disagree, so the JS body binds its params or takes its \
+         ABI differently from its luajit twin: {drifted:#?}"
+    );
+}

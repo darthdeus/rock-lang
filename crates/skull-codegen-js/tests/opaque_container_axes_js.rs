@@ -42,6 +42,36 @@ fn main() {
 }
 "#;
 
+const NATIVEBUFFER_PRIMITIVE: &str = r#"
+@nomangle inline(lua) fn probe(b: NativeBuffer<float>) -> int = """
+    return b.len
+"""
+@nomangle inline(js) fn probe(b: NativeBuffer<float>) -> int = """
+    return b.len;
+"""
+
+fn main() {
+    let b: NativeBuffer<float> = native_buffer_alloc(2)
+    print("{probe(b)}")
+}
+"#;
+
+const EXPANSION_INTRINSIC: &str = r#"
+value G { x: float, y: float }
+
+@vertex_expand inline(lua) fn probe_stride(buf: NativeBuffer<G>) -> int = """
+    error("probe_stride is compiler-expanded")
+"""
+@vertex_expand inline(js) fn probe_stride(buf: NativeBuffer<G>) -> int = """
+    throw new Error("probe_stride is compiler-expanded");
+"""
+
+fn main() {
+    let b: NativeBuffer<G> = native_buffer_alloc(2)
+    print("{probe_stride(b)}")
+}
+"#;
+
 /// Emit the `main` closure for the JS target.
 fn js(src: &str) -> Result<(), String> {
     let ws = crate::common::ws_with(src);
@@ -87,4 +117,18 @@ fn a_native_buffer_at_a_leaf_addressed_element_rejects_on_js() {
 #[test]
 fn the_same_native_buffer_body_is_admitted_on_lua() {
     assert!(lua(NATIVEBUFFER_PARAM).is_ok());
+}
+
+#[test]
+#[ignore = "known red (os-m3-js-pure-rock): NativeBuffer has no owned representation plan"]
+fn a_primitive_element_buffer_is_admitted_on_js() {
+    let result = js(NATIVEBUFFER_PRIMITIVE);
+    assert!(result.is_ok(), "no leaf plan means no representation the boxed form does not have: {result:?}");
+}
+
+#[test]
+#[ignore = "known red (os-m3-js-pure-rock): vertex plan rejects a float attribute with a double leaf"]
+fn an_expansion_intrinsic_over_a_native_buffer_is_admitted() {
+    assert!(js(EXPANSION_INTRINSIC).is_ok(), "js: {:?}", js(EXPANSION_INTRINSIC));
+    assert!(lua(EXPANSION_INTRINSIC).is_ok());
 }

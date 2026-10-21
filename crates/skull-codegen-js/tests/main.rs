@@ -56,6 +56,8 @@ mod multi_rejection;
 
 #[path = "multivalue.rs"]
 mod multivalue;
+#[path = "nb_leaf_layout_premise.rs"]
+mod nb_leaf_layout_premise;
 #[path = "nb_differential.rs"]
 mod nb_differential;
 #[path = "no_inline_function.rs"]
@@ -81,6 +83,8 @@ mod polymorphic_recursion;
 mod program;
 #[path = "put.rs"]
 mod put;
+#[path = "release_mode_deleted.rs"]
+mod release_mode_deleted;
 #[path = "ret_bank_sizing.rs"]
 mod ret_bank_sizing;
 #[path = "rng.rs"]
