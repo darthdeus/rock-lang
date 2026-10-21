@@ -2499,10 +2499,12 @@ pub fn emit_workspace_mir_for_package_test(
 struct Chunk {
     lua: String,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
-    /// Callee bodies whose SOURCE or inline-eligibility affects this chunk:
-    /// everything inlined in (transitive) plus every callee still called (its
-    /// body could flip eligibility). Re-emit this chunk if any of them re-infer.
+    /// Source and eligibility dependencies, including residual callees.
     deps: FxHashSet<FuncRef>,
+    /// Bodies embedded in this chunk, including transitive and hoisted splices.
+    /// These always invalidate on a body edit; residual edges can instead use
+    /// the old/new inline candidate's eligibility facts.
+    embedded_deps: FxHashSet<FuncRef>,
     /// Global-init ordering facts (globals read + functions called).
     direct_globals: Vec<Ustr>,
     direct_calls: Vec<Ustr>,
@@ -3382,6 +3384,7 @@ fn emit_coroutine_chunk(
     Ok(Chunk {
         lua,
         allocation_bodies,
+        embedded_deps: deps.clone(),
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
@@ -3616,6 +3619,7 @@ fn emit_body_chunk_with_mutation(
         scx.interner(),
     );
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    let embedded_deps = deps.clone();
     collect_callee_frefs(&mf, &mut deps);
     let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
         &mf,
@@ -3677,6 +3681,7 @@ fn emit_body_chunk_with_mutation(
         lua,
         allocation_bodies,
         deps,
+        embedded_deps,
         direct_globals,
         direct_calls,
         times,
@@ -4091,6 +4096,7 @@ fn emit_spec_chunk(
     Ok(Chunk {
         lua,
         allocation_bodies,
+        embedded_deps: deps.clone(),
         deps,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
@@ -4294,6 +4300,10 @@ fn inline_hoisted_bodies(
     work: &mut InlineWork,
 ) -> Result<(), String> {
     for nf in nested.iter_mut() {
+        // Flat variants embed source without going through an inline splice.
+        if let Some(source) = nf.flat_variant_source {
+            deps.insert(source);
+        }
         let before = (nf.insts.len(), nf.blocks.len(), nf.cells.len());
         let ti = Instant::now();
         let (spliced, records, scan_stats) = skull_transform::inline_functions_with_plans(
@@ -8539,6 +8549,29 @@ fn update_chunk_cache(
         Some(&concrete_update.candidate_keys_removed),
         &mut candidate_census,
     )?;
+    // A residual call embeds no callee body. It can keep its chunk when every
+    // concrete candidate for that declaration has the same decision inputs.
+    // Unknown/rejected candidates and graph/ABI transitions stay conservative.
+    let mut stable_residual_frefs = FxHashSet::default();
+    if let Some(previous) = previous_candidate_table.as_ref() {
+        for fref in &changed {
+            if flipped_frefs.contains(fref)
+                || update.added.iter().chain(&update.removed).any(|key| key.func == *fref)
+                || concrete_update.candidate_keys_added.iter()
+                    .chain(&concrete_update.candidate_keys_removed)
+                    .any(|key| key.func == *fref)
+            {
+                continue;
+            }
+            if let Some(keys) = cache.candidate_index_by_func().get(fref) {
+                if !keys.is_empty() && keys.iter().all(|key| {
+                    previous.residual_eligibility_matches(&candidate_table, key)
+                }) {
+                    stable_residual_frefs.insert(*fref);
+                }
+            }
+        }
+    }
     cache.inline_cache.replace_candidate_table(candidate_table);
     cache.repair_stats.candidate_entries_requested = candidate_entries_requested;
     cache.repair_stats.candidate_entries_invalidated = candidate_entries_invalidated;
@@ -8571,7 +8604,11 @@ fn update_chunk_cache(
         if let Some(deps) = cache.dependents.get(c) {
             cache.repair_stats.dependent_requests += 1;
             cache.repair_stats.dependents_visited += deps.len();
-            affected.extend(deps.iter().cloned());
+            affected.extend(deps.iter().filter(|body| {
+                !stable_residual_frefs.contains(c)
+                    || !matches!(cache.chunks.get(*body), Some(Ok(chunk))
+                        if !chunk.embedded_deps.contains(c))
+            }).cloned());
         }
     }
     // REMOVAL is the graph's to report and emission's alone cannot see it:

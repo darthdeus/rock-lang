@@ -187,6 +187,18 @@ fn body_id(
     panic!("no fn named {name}");
 }
 
+fn over_budget_inline_caller_fixture(helper_value: i32) -> String {
+    let mut src = format!(
+        "@inline @nomangle fn helper(flag: bool) -> int {{ {helper_value} }}\n\
+         @nomangle fn caller() -> int {{\n"
+    );
+    for i in 0..401 {
+        src.push_str(&format!("let unused_{i} = {i}\n"));
+    }
+    src.push_str("return helper(false)\n}\n");
+    src
+}
+
 #[test]
 fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
     let v1 = format!("{SRC}\n@nomangle fn saved() -> fn(int) -> int {{ top }}\n");
@@ -202,6 +214,30 @@ fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
         full.lua, overlay.lua,
     );
     let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP)).expect("loaded overlay");
+    assert!(out.success, "{}", out.combined());
+    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+}
+
+#[test]
+fn bound_overlay_rebinds_a_residual_inline_caller_without_rebuilding_its_chunk() {
+    let v1 = over_budget_inline_caller_fixture(3);
+    let ws1 = ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) =
+        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+
+    let v2 = over_budget_inline_caller_fixture(5);
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("overlay");
+    let stats = cache.repair_stats();
+    assert_eq!(stats.chunks_rebuilt, 1, "the residual caller chunk should be reused: {stats:?}");
+
+    let script = format!(
+        "{}\nassert(caller() == 3)\n{}\nassert(caller() == 5)\nprint('PASS')\n",
+        full.lua, overlay.lua,
+    );
+    let out = rock_host::lua_runner::run_lua_code_with_timeout(&script, Some(test_utils::HANG_BACKSTOP))
+        .expect("loaded residual-caller overlay");
     assert!(out.success, "{}", out.combined());
     assert!(out.stdout.contains("PASS"), "{}", out.combined());
 }

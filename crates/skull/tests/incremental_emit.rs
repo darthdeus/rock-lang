@@ -95,6 +95,26 @@ fn residual_inline_budget_fixture(helper_value: i32, caller_locals: usize) -> St
     src
 }
 
+fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
+    let mut src = String::from("@inline @nomangle fn helper(flag: bool) -> int {\n");
+    if large_helper {
+        for i in 0..64 {
+            src.push_str(&format!(
+                "let value_{i} = {i}\nif flag {{ return value_{i} }}\n"
+            ));
+        }
+        src.push_str("return 17\n}\n");
+    } else {
+        src.push_str("if flag { return 3 }\nreturn 5\n}\n");
+    }
+    src.push_str("@nomangle fn caller() -> int {\n");
+    for i in 0..380 {
+        src.push_str(&format!("let unused_{i} = {i}\n"));
+    }
+    src.push_str("return helper(false)\n}\n@nomangle fn other() -> int { 7 }\n");
+    src
+}
+
 #[test]
 fn body_edit_to_inlined_callee_reemits_callers() {
     // `helper` is a tiny straight callee -> inlined into `use_it`. Editing its
@@ -153,6 +173,30 @@ fn body_edit_to_still_residual_inline_callee_rebuilds_only_the_callee() {
         .expect("emit_full v2")
         .0;
     assert_eq!(incremental.lua, fresh.lua, "incremental assembly != fresh emit after editing helper");
+}
+
+#[test]
+fn shrinking_inline_callee_flips_residual_call_to_inline_and_rebuilds_caller() {
+    let v1 = inline_budget_eligibility_flip_fixture(true);
+    let v2 = inline_budget_eligibility_flip_fixture(false);
+    let ws1 = ws_of(&v1);
+    let (full1, mut cache) = emit_full_global(&ws1, skull::user_module_id(&ws1).unwrap())
+        .expect("emit_full v1");
+    let caller_v1 = crate::common::function_body(&full1.lua, "caller");
+    assert!(caller_v1.contains("helper("), "the large helper must remain residual:\n{caller_v1}");
+
+    let ws2 = ws_of(&v2);
+    let incremental = emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")])
+        .expect("emit_incremental");
+    let stats = cache.repair_stats();
+    assert_eq!(stats.chunks_rebuilt, 2, "the smaller helper should make its caller newly eligible: {stats:?}");
+    assert_eq!(stats.chunk_rebuild_requests, 2, "the untouched `other` chunk should stay cached: {stats:?}");
+    let caller_v2 = crate::common::function_body(&incremental.lua, "caller");
+    assert!(!caller_v2.contains("helper("), "the smaller helper should now inline:\n{caller_v2}");
+    let fresh = emit_full_global(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("emit_full v2")
+        .0;
+    assert_eq!(incremental.lua, fresh.lua, "incremental assembly != fresh emit after shrinking helper");
 }
 
 #[test]

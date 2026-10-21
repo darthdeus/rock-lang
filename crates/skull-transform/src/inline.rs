@@ -737,6 +737,24 @@ impl InlineCandidateTable {
         self.lookup(key).is_some()
     }
 
+    /// Whether a previously residual call remains a candidate with the same
+    /// candidate-side eligibility facts after a body edit. `self` is the prior
+    /// table and `other` is its replacement. Only two eligible entries can
+    /// prove stability; missing or rejected entries conservatively return
+    /// `false`. Body contents may differ because callers track embedded bodies
+    /// separately when an earlier inline pass spliced them.
+    pub fn residual_eligibility_matches(&self, other: &Self, key: &Instance) -> bool {
+        let (Some(Some(before)), Some(Some(after))) = (self.lookup(key), other.lookup(key)) else {
+            return false;
+        };
+
+        before.subject == after.subject
+            && before.abi == after.abi
+            && before.func.params.len() == after.func.params.len()
+            && before.ret_arity == after.ret_arity
+            && before.template.source_cells == after.template.source_cells
+    }
+
     pub fn keys(&self) -> Vec<Instance> {
         let mut keys = self
             .parent
