@@ -110,7 +110,7 @@ backend. It serves hover, completion, goto-definition, references, rename,
 signature help, inlay hints, semantic tokens, and document/workspace symbols.
 Workspace symbol queries match the symbol's own name (case-insensitive
 substring), or its qualified name when the query contains `::`; an empty query
-returns everything, with tests ranked last.
+returns everything. Test functions are listed after other symbols.
 
 When semantic token highlighting misbehaves (fields wrong colors, type
 names split, no highlighting despite valid server output), see
