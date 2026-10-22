@@ -415,6 +415,18 @@ impl<'a> Gamma<'a> {
     }
 }
 
+/// The default shapes a foreign function's Lua wrapper can render
+/// (`render_default_lit` in skull's `mir_emit.rs`).
+fn is_literal_default(body: &bone_core::hir::Body, e: Idx<Expr>) -> bool {
+    match body.expr_arena[e] {
+        Expr::Null | Expr::Unit | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => {
+            true
+        }
+        Expr::UnaryMinus(inner, _) => is_literal_default(body, inner),
+        _ => false,
+    }
+}
+
 pub fn check_function(
     ws: &Workspace,
     module: &Module,
@@ -496,8 +508,23 @@ pub fn check_function(
         }
     }
 
+    let is_foreign = f.inline_body.is_some() || f.is_extern;
     for (i, pb) in body.param_bindings.into_iter().enumerate() {
         if let Some(Some(dexpr)) = body.param_defaults.get(i) {
+            // A foreign wrapper has no Rock prologue to evaluate a default, and
+            // a spliced inline(lua) call has no wrapper at all: only a literal
+            // a call site or `default_fill_prologue` can render arrives.
+            if is_foreign && !is_literal_default(c.body, *dexpr) {
+                gamma.body_errors.push(CompilerError::new_with_label(
+                    c.body.expr_spans[*dexpr],
+                    format!(
+                        "default of `{}` on a foreign function must be a literal; \
+                         declare it nullable with a `null` default and resolve it \
+                         in a Rock wrapper",
+                        c.body.binding_arena[pb].name
+                    ),
+                ));
+            }
             let dty = infer_expr(c, &mut gamma, *dexpr)?;
 
             if let Some(declared) = c.body.binding_arena[pb].declared_ty {
@@ -507,7 +534,8 @@ pub fn check_function(
     }
 
     let Some(body) = body.root else {
-        return Ok(Some((BodyOwner::Function(f_id), gamma.out, Vec::new())));
+        let errors = std::mem::take(&mut gamma.body_errors);
+        return Ok(Some((BodyOwner::Function(f_id), gamma.out, errors)));
     };
 
     if let (Some(ret_ty), false) = (f.return_ty, f.is_coroutine) {

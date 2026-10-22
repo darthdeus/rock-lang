@@ -102,18 +102,18 @@ fn main() {
 }
 "#;
 
-/// A DEFAULTED slot the call never supplies. The declared type is still the
-/// question, and there is no argument expression to have zipped against.
+/// A call that omits a DEFAULTED slot. The argument list is shorter than the
+/// declared slots, and the column slot is still reached.
 const DEFAULTED_SLOT: &str = r#"
 value G { x: float, y: float }
 
-@nomangle inline(lua) fn probe<T>(token: int, sink: [T] = []) -> int = """
+@nomangle inline(lua) fn probe<T>(sink: [T], token: int = 0) -> int = """
     return #sink._data + token
 """
 
 fn main() {
     let xs: [G] = [G { x: 1.0, y: 2.0 }]
-    print("{probe(0, xs)}")
+    print("{probe(xs)}")
 }
 "#;
 

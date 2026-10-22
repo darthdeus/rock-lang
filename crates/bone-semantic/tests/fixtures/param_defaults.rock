@@ -127,3 +127,34 @@ fn use_seeded2() -> int {
       //^ int
     return seeded2(7)
 }
+
+// A foreign function's default must be a literal: its Lua wrapper and Rock
+// call sites can only supply a literal, so `h: H = H { v: 3 }` would arrive
+// as nil when omitted.
+//- param_default_inline_lua_non_literal_rejected @fail=default of `h` on a foreign function must be a literal
+struct H { v: int }
+inline(lua) fn lua_h(h: H = H { v: 3 }) -> int = "return h.v"
+fn use_lua_h() -> int {
+    let r = lua_h()
+      //^ int
+    return r
+}
+
+//- param_default_extern_ffi_non_literal_rejected @fail=default of `n` on a foreign function must be a literal
+fn base() -> int {
+    return 4
+}
+extern(ffi, "c") fn ffi_n(n: int = base()) -> int
+fn use_ffi_n() -> int {
+    let r = ffi_n()
+      //^ int
+    return r
+}
+
+//- param_default_foreign_literal_accepted
+inline(lua) fn lua_lits(a: int = -1, b: float = 0.5, c: bool = true, d: string = "x", e: int? = null) -> int = "return a"
+fn use_lua_lits() -> int {
+    let r = lua_lits()
+      //^ int
+    return r
+}
