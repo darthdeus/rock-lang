@@ -5651,6 +5651,8 @@ impl Emitter<'_> {
     fn selection_float_literal(&self, bb: Idx<Block>, operand: Idx<Inst>) -> Option<f64> {
         if let Inst::Const(Lit::Float(value)) = self.func.insts[operand] { return Some(value); }
         let Inst::Load(cell) = self.func.insts[operand] else { return None; };
+        // Captured frame fields can change through callbacks without a cell def.
+        if self.cell_is_frame_field(cell) { return None; }
         let preds = self.selection_preds.get_or_init(|| predecessors(self.func, self.rpo).0);
         let mut block = bb;
         let mut limit = self.func.blocks[bb].insts.iter().position(|id| *id == operand)?;

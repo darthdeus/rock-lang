@@ -130,6 +130,44 @@ fn numeric_selection_clamp_with_ordered_bounds_uses_native_minmax() {
     }
 }
 
+#[test]
+fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
+    use skull_mir::mir::Inst;
+    let ast = skull_parser::parse_module_clean(
+        "fn choose(a: float) -> float { let lo = -1.0; return if a < lo { lo } else if a > 1.0 { 1.0 } else { a } }",
+        ustr::Ustr::from("<test>"),
+    ).expect("parse");
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let fid = ws.module(mid).functions.iter().find(|(_, f)| f.name == "choose").unwrap().0;
+    let (mut func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
+    let lo = func.cells.iter().find(|(_, c)| c.name.is_some_and(|n| n == "lo")).unwrap().0;
+    // Frame reads stay as Load while a converted callback writes the state table.
+    let state = func.new_cell(Some(ustr::Ustr::from("state")));
+    func.params.insert(0, state);
+    let callee = func.alloc_inst(Inst::Global(ustr::Ustr::from("mutate")));
+    let receiver = func.alloc_inst(Inst::Load(state));
+    let call = func.alloc_inst(Inst::CallValue { callee, args: vec![receiver] });
+    let entry = func.entry();
+    let at = func.blocks[entry].insts.iter().position(|id| {
+        matches!(func.insts[*id], Inst::Store { cell, .. } if cell == lo)
+    }).expect("bound initialization") + 1;
+    func.blocks[entry].insts.splice(at..at, [callee, receiver, call]);
+    let frame = skull_codegen_lua::FrameCtx {
+        s_cell: state,
+        fields: [lo].into_iter().collect(),
+        slots: [(lo, 0)].into_iter().collect(),
+    };
+    let lua = skull_codegen_lua::emit_named_framed(
+        &ws, &CodegenCtx::new(&ws), &interner, "choose", &func, Some(&frame), None,
+    );
+    common::require_luajit();
+    let driver = format!("local flushes = 0\njit.attach(function(what) if what == 'flush' then flushes = flushes + 1 end end, 'trace')\nfunction mutate(s) s.c0 = 0 end\n{lua}\nassert(choose({{}}, -0.5) == 0)\nprint('frame-ok flushes=' .. flushes)");
+    let run = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("frame-bound semantics");
+    assert!(run.status.success(), "{lua}\n{}", String::from_utf8_lossy(&run.stderr));
+    eprint!("{}", String::from_utf8_lossy(&run.stdout));
+}
+
 fn check_selection_values(lua: &str, reference: &str) {
     common::require_luajit();
     let driver = format!(r#"{lua}
