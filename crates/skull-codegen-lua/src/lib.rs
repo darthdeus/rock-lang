@@ -129,6 +129,50 @@ function __rock_artifact_plan_publish()
 end
 "#;
 
+/// Shared validation for numeric uint conversions and shift counts.
+pub const UINT_CHECK_PRELUDE: &str = r#"
+function __rock_checked_u32(value)
+  if value >= 0 and value <= 4294967295 then
+    return math.floor(value)
+  else
+    error("uint conversion out of range")
+  end
+end
+function __rock_u32_shift_count(count)
+  if count <= 31 then return count else error('uint shift count out of range') end
+end
+"#;
+
+fn checked_u32_constant(func: &MirFunc, x: Idx<Inst>) -> Option<f64> {
+    let value = match func.insts[x] {
+        Inst::Const(Lit::Int(value)) => value as f64,
+        Inst::Const(Lit::Uint(value)) => value as f64,
+        Inst::Const(Lit::Float(value)) => value,
+        _ => return None,
+    };
+    (0.0..=4294967295.0).contains(&value).then(|| value.floor())
+}
+
+#[cfg(test)]
+mod uint_constant_tests {
+    use super::*;
+
+    #[test]
+    fn uint_constant_folding_keeps_invalid_values_checked() {
+        let mut func = MirFunc::new(ustr::Ustr::from("checked"));
+        for value in [
+            Lit::Int(-1), Lit::Int(4294967296), Lit::Float(-0.1),
+            Lit::Float(4294967295.5), Lit::Float(f64::NAN),
+            Lit::Float(f64::INFINITY), Lit::Float(f64::NEG_INFINITY),
+        ] {
+            let x = func.alloc_inst(Inst::Const(value));
+            assert_eq!(checked_u32_constant(&func, x), None);
+        }
+        let x = func.alloc_inst(Inst::Const(Lit::Float(-0.0)));
+        assert_eq!(checked_u32_constant(&func, x).unwrap().to_bits(), (-0.0f64).to_bits());
+    }
+}
+
 /// Runtime support for callable CodeRefs and capturing environment records.
 /// Slots are mutated in place only by the publish step, so existing values see
 /// a compatible body edit while a failed stage leaves the previous body live.
@@ -1676,6 +1720,8 @@ pub fn call_target_symbol(
 ///
 /// A call THROUGH a function value (`CallValue`) has no statically known callee
 /// and is never bound.
+/// Runtime uint validators are initialized by the prelude and can be bound
+/// even when the caller has no edges in the call graph.
 pub fn callee_binding_plan(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -1687,17 +1733,28 @@ pub fn callee_binding_plan(
     if ctx.callee_binding != CalleeBindingMode::Upvalue {
         return None;
     }
-    let rank = ctx.scc_of(self_ref)?;
+    let rank = ctx.scc_of(self_ref);
     let mut captures: Vec<String> = Vec::new();
     for (id, inst) in func.insts.iter() {
+        match inst {
+            Inst::IntToUint(x) | Inst::FloatToUint(x)
+                if checked_u32_constant(func, *x).is_none() =>
+            {
+                captures.push("__rock_checked_u32".to_string());
+            }
+            Inst::UintShl(..) | Inst::UintShr(..) => {
+                captures.push("__rock_u32_shift_count".to_string());
+            }
+            _ => {}
+        }
         let callee = match inst {
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
             _ => continue,
         };
         // Ranks remain fixed through body edits. New backedges must stay
         // global so the retained factory order remains acyclic.
-        match ctx.scc_of(callee) {
-            Some(theirs) if theirs < rank => {}
+        match (rank, ctx.scc_of(callee)) {
+            (Some(ours), Some(theirs)) if theirs < ours => {}
             _ => continue,
         }
         let decl = func_of(ws, callee);
@@ -1739,7 +1796,9 @@ pub fn callee_binding_plan(
         factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
         name: name.to_string(),
         captures,
-        rank,
+        // Runtime validators have no body dependencies, including for a leaf
+        // function absent from the call-edge inventory.
+        rank: rank.unwrap_or(0),
         capped,
     })
 }
@@ -4826,7 +4885,7 @@ impl Emitter<'_> {
                 out.push(')');
             }
             Inst::IntToUint(x) | Inst::FloatToUint(x) => {
-                self.write_checked_u32(out, *x, "uint conversion out of range")
+                self.write_checked_u32(out, *x)
             }
             Inst::UintBitcastInt(x) => {
                 out.push_str("(((");
@@ -4883,11 +4942,11 @@ impl Emitter<'_> {
             Inst::UintBitXor(a, b) => self.write_u32_bitfn(out, "bit.bxor", a, b),
             Inst::UintShl(a, b) => self.write_u32_shift(out, "bit.lshift", a, b),
             Inst::UintShr(a, b) => {
-                out.push_str("(function(value, count) return math.floor(value / (2 ^ (count <= 31 and count or error('uint shift count out of range')))) end)(");
+                out.push_str("math.floor(");
                 self.write_opnd(out, *a);
-                out.push_str(", ");
+                out.push_str(" / (2 ^ __rock_u32_shift_count(");
                 self.write_opnd(out, *b);
-                out.push(')');
+                out.push_str(")))");
             }
 
             Inst::Call { func, args } => {
@@ -5213,13 +5272,12 @@ impl Emitter<'_> {
     }
 
     fn write_u32_shift(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
-        out.push_str("(function(value, count) return ");
         out.push_str(f);
-        out.push_str("(value, (count <= 31 and count or error('uint shift count out of range'))) % 4294967296 end)(");
+        out.push('(');
         self.write_opnd(out, *a);
-        out.push_str(", ");
+        out.push_str(", __rock_u32_shift_count(");
         self.write_opnd(out, *b);
-        out.push(')');
+        out.push_str(")) % 4294967296");
     }
 
     fn write_u32_mul(&self, out: &mut String, a: &Idx<Inst>, b: &Idx<Inst>) {
@@ -5240,10 +5298,16 @@ impl Emitter<'_> {
         out.push_str(" / 65536)) % 65536) * 65536) % 4294967296");
     }
 
-    fn write_checked_u32(&self, out: &mut String, x: Idx<Inst>, message: &str) {
-        out.push_str("(function(value) if value >= 0 and value <= 4294967295 then return math.floor(value) else error(");
-        write_lua_string(out, message);
-        out.push_str(") end end)(");
+    fn write_checked_u32(&self, out: &mut String, x: Idx<Inst>) {
+        if let Some(value) = checked_u32_constant(self.func, x) {
+            if value == 0.0 && value.is_sign_negative() {
+                out.push_str("-0.0");
+            } else {
+                let _ = write!(out, "{value:.0}");
+            }
+            return;
+        }
+        out.push_str("__rock_checked_u32(");
         self.write_opnd(out, x);
         out.push(')');
     }

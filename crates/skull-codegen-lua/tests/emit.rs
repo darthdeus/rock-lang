@@ -419,8 +419,9 @@ fn run_shaped_bound_looped(
     // runtime prelude, which this bare harness does not emit -- pull in the
     // canonical definition (one copy, shared with `skull::runtime_prelude`).
     let mut lua = format!(
-        "local bit = require('bit')\nlocal ffi = require('ffi')\n{}\n{}\nfunction __nb_checked_get(b, i) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end return b.ptr[i] end\nfunction __nb_checked_set(b, i, v) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end b.ptr[i] = v end\n",
+        "local bit = require('bit')\nlocal ffi = require('ffi')\n{}\n{}\n{}\nfunction __nb_checked_get(b, i) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end return b.ptr[i] end\nfunction __nb_checked_set(b, i, v) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end b.ptr[i] = v end\n",
         skull_codegen_lua::FN_MT_PRELUDE,
+        skull_codegen_lua::UINT_CHECK_PRELUDE,
         skull_codegen_lua::VEC_CHECK_SHIMS
     );
     for inst in graph.expanded() {
@@ -869,6 +870,90 @@ fn exec_cast_float_to_int() {
     assert_eq!(run("fn f(x: float) -> int { x as int }", "f(3.9)"), "3");
     assert_eq!(run("fn f(x: float) -> int { x as int }", "f(-1.2)"), "-2");
     assert_eq!(run("fn f(x: int) -> float { x as float }", "f(5)"), "5");
+}
+
+#[test]
+fn uint_checked_casts_emit_no_closure() {
+    for ty in ["int", "float"] {
+        let lua = emit(&format!("fn cast(value: {ty}) -> uint {{ value as uint }}"), "cast");
+        assert!(!lua.lines().skip(1).any(|line| line.contains("function")), "{lua}");
+    }
+}
+
+#[test]
+fn uint_checked_shifts_emit_no_closure() {
+    for op in ["<<", ">>"] {
+        let lua = emit(&format!("fn shift(value: uint, count: uint) -> uint {{ value {op} count }}"), "shift");
+        assert!(!lua.lines().skip(1).any(|line| line.contains("function")), "{lua}");
+    }
+}
+
+#[test]
+fn uint_constant_casts_emit_folded_numbers() {
+    for (value, expected) in [("0", "0"), ("4294967295", "4294967295"), ("3.9", "3")] {
+        let lua = emit(&format!("fn cast() -> uint {{ {value} as uint }}"), "cast");
+        assert!(lua.contains(&format!("do return ({expected}) end")), "{lua}");
+    }
+}
+
+#[test]
+fn uint_checks_bind_shared_helpers_as_upvalues() {
+    let lua = emit_clean_bound(
+        "fn checked(value: float, count: uint) -> uint { (value as uint) << count }",
+        "checked",
+        CalleeBindingMode::Upvalue,
+    );
+    assert!(lua.contains("function(__rock_checked_u32, __rock_u32_shift_count) return function"), "{lua}");
+}
+
+#[test]
+fn exec_uint_checks_preserve_ranges_and_single_evaluation() {
+    let src = r#"
+fn cast(value: float) -> uint { value as uint }
+fn from_int(value: int) -> uint { value as uint }
+fn left(value: uint, count: uint) -> uint { value << count }
+fn right(value: uint, count: uint) -> uint { value >> count }
+fn take(values: [uint]) -> uint {
+    let value = values[0]
+    values[0] += 1
+    value
+}
+fn cast_once(values: [uint]) -> uint { (take(values) as float) as uint }
+fn left_once(values: [uint]) -> uint { take(values) << take(values) }
+fn right_once(values: [uint]) -> uint { take(values) >> take(values) }
+"#;
+    let driver = r#"(function()
+local function rejects(fn, message, ...)
+  local ok, err = pcall(fn, ...)
+  assert(not ok and tostring(err):sub(-#message) == message, tostring(err))
+end
+assert(cast(0) == 0 and cast(3.9) == 3 and cast(4294967295) == 4294967295)
+assert(1 / cast(-0.0) == -math.huge)
+assert(from_int(0) == 0 and from_int(4294967295) == 4294967295)
+for _, value in ipairs({-1, 4294967296}) do
+  rejects(from_int, 'uint conversion out of range', value)
+end
+for _, value in ipairs({-0.1, 4294967295.5, 0/0, math.huge, -math.huge}) do
+  rejects(cast, 'uint conversion out of range', value)
+end
+assert(left(1, 0) == 1 and left(1, 31) == 2147483648)
+assert(right(4294967295, 0) == 4294967295 and right(4294967295, 31) == 1)
+for _, fn in ipairs({left, right}) do
+  for _, count in ipairs({32, 4294967295}) do
+    rejects(fn, 'uint shift count out of range', 0, count)
+  end
+end
+local values = {_data={1}, len=1}
+assert(cast_once(values) == 1 and values._data[1] == 2)
+values._data[1] = 1
+assert(left_once(values) == 4 and values._data[1] == 3)
+values._data[1] = 1
+assert(right_once(values) == 0 and values._data[1] == 3)
+return true
+end)()"#;
+    for binding in [CalleeBindingMode::Global, CalleeBindingMode::Upvalue] {
+        assert_eq!(run_shaped_bound(src, driver, TailCallShape::All, binding), "true");
+    }
 }
 
 #[test]

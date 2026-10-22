@@ -476,6 +476,7 @@ fn runtime_prelude() -> &'static str {
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", "")
+            .replace("{UINT_CHECK}", skull_codegen_lua::UINT_CHECK_PRELUDE)
             .replace("{SESSION_CELL_BINDING}\n", SESSION_CELL_BINDING)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
@@ -525,6 +526,7 @@ do
 -- Chunk-level cells every bound function reads a mutable global through
 --. Seated by __rock_session_publish below.
 local __rock_state_cell, __rock_initialized_cell
+{UINT_CHECK}
 local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
@@ -2650,6 +2652,20 @@ mod tests {
     #[test]
     fn exec_as_cast_identity() {
         exec_eq("fn w(x: int) -> float { x as float }", "print(w(5))", "5");
+    }
+
+    #[test]
+    fn exec_checked_uint_helpers_from_runtime_prelude() {
+        exec_eq(
+            "fn cast(value: float) -> uint { value as uint }\n\
+             fn left(value: uint, count: uint) -> uint { value << count }\n\
+             fn right(value: uint, count: uint) -> uint { value >> count }",
+            "assert(cast(3.9) == 3)\n\
+             assert(left(1, 31) == 2147483648)\n\
+             assert(right(4294967295, 31) == 1)\n\
+             print('PASS')",
+            "PASS",
+        );
     }
 
 
