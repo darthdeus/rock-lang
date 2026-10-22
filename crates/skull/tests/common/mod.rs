@@ -240,21 +240,24 @@ pub fn try_emit_module_enforcing_identity_storage(src: &str) -> Result<String, s
 /// boundary-agreement test needs it: without the Lua there is nothing to ask
 /// `loadfile` about, and "the compiler rejected it" would be unfalsifiable.
 pub fn emit_module_without_frame_limits(src: &str) -> String {
+    emit_module_shaped(
+        src,
+        "<test>",
+        skull::mir_emit::ShapeOverrides { frame_limits: Some(false), ..Default::default() },
+    )
+}
+
+/// The full program of `src`, parsed as module FILE `file`, under explicit
+/// emitted shapes.
+pub fn emit_module_shaped(src: &str, file: &str, shapes: skull::mir_emit::ShapeOverrides) -> String {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull::mir_emit::emit_full_with_shapes(
-        &ws,
-        mid,
-        skull::mir_emit::ShapeOverrides {
-            frame_limits: Some(false),
-            ..Default::default()
-        },
-    )
-    .map(|(emit, _cache)| emit.lua)
-    .expect("emit with the frame-limit check off")
+    let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
+    skull::mir_emit::emit_full_with_shapes(&ws, mid, shapes)
+        .map(|(emit, _cache)| emit.lua)
+        .expect("emit under explicit shapes")
 }
 
 /// Whether the bundled LuaJIT can LOAD `prog` (parse only -- the chunk is never

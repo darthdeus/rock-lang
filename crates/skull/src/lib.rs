@@ -26,6 +26,9 @@ pub use skull_codegen_lua::{callee_binding_is_bound, callee_binding_mode, Callee
 
 pub use skull_codegen_lua::emitted_body_name;
 
+/// Whether emitted Lua carries LuaJIT line directives (`ROCK_SKULL_LINE_DIRECTIVES`).
+pub use skull_codegen_lua::line_directives_mode;
+
 // The shared graph layer, re-exported under its original paths. It moved BELOW
 // the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
 // graph the luajit driver does; consumers name it the same way either side of

@@ -13,34 +13,16 @@ use skull_mir::mir::FuncRef;
 
 
 /// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
-fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("user module id");
-    let m = ws.module(mid);
-    let (fid, _) = m
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
-        .expect("function by name");
-    let (func, interner) = common::lower_test_ref(&ws, mid, fid)
-        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
-    let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
+fn emit_dump(modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
+    emit_dump_with(modules, fn_name, |_| {})
 }
 
-/// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
-fn emit(src: &str, fn_name: &str) -> String {
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    emit_dump(vec![ast], fn_name)
-}
-
-/// [`emit`] under an explicit bounds-checked index shape.
-fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) -> String {
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let mut modules = vec![ast];
+/// [`emit_dump`] under a context `configure` adjusts first.
+fn emit_dump_with(
+    mut modules: Vec<skull_parser::Ast>,
+    fn_name: &str,
+    configure: impl FnOnce(&mut CodegenCtx),
+) -> String {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws
         .module_ids
@@ -55,8 +37,20 @@ fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) 
     let (func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let mut ctx = CodegenCtx::new(&ws);
-    ctx.set_index_shape(shape);
+    configure(&mut ctx);
     emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
+}
+
+/// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
+fn emit(src: &str, fn_name: &str) -> String {
+    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
+    emit_dump(vec![ast], fn_name)
+}
+
+/// [`emit`] under an explicit bounds-checked index shape.
+fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) -> String {
+    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
+    emit_dump_with(vec![ast], fn_name, |ctx| ctx.set_index_shape(shape))
 }
 
 #[test]
@@ -191,6 +185,11 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
 
 /// [`emit_clean`] with an explicit emitted tail-call shape.
 fn emit_clean_shaped(src: &str, fn_name: &str, shape: TailCallShape) -> String {
+    emit_clean_with(src, fn_name, |ctx| ctx.set_tail_call_shape(shape))
+}
+
+/// [`emit_clean`] under a context `configure` adjusts first.
+fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut CodegenCtx)) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_stdlib::stdlib_files()
@@ -215,8 +214,8 @@ fn emit_clean_shaped(src: &str, fn_name: &str, shape: TailCallShape) -> String {
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func).unwrap();
     let mut ctx = CodegenCtx::new(&ws);
-    ctx.set_tail_call_shape(shape);
     ctx.set_recursive_callees(common::cycle_callees(&graph));
+    configure(&mut ctx);
     emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func, None)
 }
 
@@ -2063,4 +2062,64 @@ assert(tostring(err):find("unreachable", 1, true), tostring(err))
     let run = std::process::Command::new("luajit").arg("-e").arg(driver).output()
         .expect("run unreachable trap");
     assert!(run.status.success(), "{lua}\n{}", String::from_utf8_lossy(&run.stderr));
+}
+
+/// The (line, chunk name) LuaJIT 2.1's lexer assigns to each line of `lua`,
+/// `None` for a line directive itself. The rule, from LuaJIT's `lex_linedir`:
+/// `# <line> ["<file>"]` at column 0 numbers the NEXT line `<line>` and, with
+/// a file, renames the chunk to `@<file>`; every other line is one more than
+/// the line before it.
+fn lexer_lines(lua: &str) -> Vec<Option<(u32, String)>> {
+    let mut line = 1;
+    let mut chunk = String::from("=chunk");
+    let mut out = Vec::new();
+    for text in lua.lines() {
+        let directive = text.strip_prefix('#').map(str::trim_start).filter(|rest| {
+            rest.starts_with(|c: char| c.is_ascii_digit())
+        });
+        let Some(rest) = directive else {
+            out.push(Some((line, chunk.clone())));
+            line += 1;
+            continue;
+        };
+        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        line = rest[..digits].parse().expect("directive line");
+        let file = rest[digits..].trim();
+        if !file.is_empty() {
+            let name = file.strip_prefix('"').and_then(|f| f.strip_suffix('"')).expect("quoted file");
+            chunk = if name.starts_with(['=', '@', ' ']) { name.to_string() } else { format!("@{name}") };
+        }
+        out.push(None);
+    }
+    out
+}
+
+const LINE_DIRECTIVE_SRC: &str = "fn f(a: int) -> int {
+    let x = a * 3
+    if x > 10 {
+        return x - 7
+    }
+    return x + 5
+}";
+
+#[test]
+fn line_directives_number_each_statement_with_its_rock_line() {
+    let lua = emit_clean_with(LINE_DIRECTIVE_SRC, "f", |ctx| ctx.set_line_directives(true));
+    let lines = lexer_lines(&lua);
+    let at = |needle: &str| -> (u32, String) {
+        let index = lua.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("`{needle}` in\n{lua}"));
+        lines[index].clone().expect("a statement, not a directive")
+    };
+    let chunk = String::from("@<test>");
+    assert_eq!(at("* (3)"), (2, chunk.clone()), "{lua}");
+    assert_eq!(at("- (7)"), (4, chunk.clone()), "{lua}");
+    assert_eq!(at("+ (5)"), (6, chunk.clone()), "{lua}");
+    // The header opens the prototype, so its line is in the function too.
+    assert_eq!(at("function ").1, chunk, "{lua}");
+}
+
+#[test]
+fn line_directives_off_writes_no_directive() {
+    let lua = emit_clean_with(LINE_DIRECTIVE_SRC, "f", |ctx| ctx.set_line_directives(false));
+    assert!(lexer_lines(&lua).iter().all(Option::is_some), "{lua}");
 }

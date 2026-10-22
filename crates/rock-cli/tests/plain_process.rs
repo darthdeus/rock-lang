@@ -8,6 +8,7 @@ fn invoke(root: &std::path::Path, args: &[&str]) -> Output {
         .current_dir(root).args(args)
         .env("ROCK_DIR", root).env("ROCK_INVOCATION_LOG", "off").env("ROCK_TEST_VERBOSE", "1")
         .env_remove("ROCK_STDLIB_DIR").env_remove("LUA_PATH").env_remove("LUA_CPATH")
+        .env_remove("ROCK_SKULL_LINE_DIRECTIVES")
         .output().expect("start public plain CLI")
 }
 
@@ -519,4 +520,35 @@ fn plain_rejects_a_thread_count_that_is_not_a_count() {
         assert_eq!(out.status.code(), Some(2), "{var}: {}", text(&out));
         assert!(text(&out).contains(&format!("invalid value 'eight' for '{var}'")), "{}", text(&out));
     }
+}
+
+fn line_directive_project() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("main.rock"), "fn main() {\n    print(\"hi\")\n}\n").unwrap();
+    std::fs::write(root.path().join("stick.toml"), "[package]\nname = \"lines\"\ntype = \"bin\"\n").unwrap();
+    root
+}
+
+#[test]
+fn plain_compile_numbers_lua_with_rock_lines_under_lua_line_directives() {
+    let root = line_directive_project();
+    let out = invoke(root.path(), &["compile", ".", "numbered.lua", "--lua-line-directives"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let numbered = std::fs::read_to_string(root.path().join("numbered.lua")).unwrap();
+    assert!(
+        numbered.lines().any(|line| line.starts_with("# ") && line.contains("main.rock")),
+        "{numbered}"
+    );
+    let out = invoke(root.path(), &["compile", ".", "plain.lua"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let plain = std::fs::read_to_string(root.path().join("plain.lua")).unwrap();
+    assert!(!plain.lines().any(|line| line.starts_with('#')), "{plain}");
+}
+
+#[test]
+fn plain_lua_line_directives_reject_a_release_channel() {
+    let root = line_directive_project();
+    let out = invoke(root.path(), &["compile", ".", "out.lua", "--lua-line-directives", "--channel", "steam"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("Lua line directives are a development option"), "{}", text(&out));
 }

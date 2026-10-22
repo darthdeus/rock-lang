@@ -95,6 +95,19 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     if let Some(command) = metadata.build_command {
         unsafe { std::env::set_var("ROCK_BUILD_COMMAND", command) };
     }
+    // The emitter reads the switch from the environment once per process, and
+    // a child `rock` inherits it.
+    if args.lua_line_directives {
+        unsafe { std::env::set_var("ROCK_SKULL_LINE_DIRECTIVES", "1") };
+    }
+    // Line directives need a LuaJIT that reads them, which a release channel
+    // does not promise; a release build keeps them off.
+    if skull::line_directives_mode() {
+        if let Some(channel) = args.channel.as_deref().filter(|channel| *channel != "dev") {
+            eprintln!("Error: Lua line directives are a development option; channel `{channel}` is a release channel");
+            rock_cli::invocation_log::exit(1);
+        }
+    }
 
     // Record the invocation's --channel/--var selection before dispatch; the
     // compile chokepoints resolve [build.vars] against it per project

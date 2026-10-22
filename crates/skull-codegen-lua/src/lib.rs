@@ -664,6 +664,9 @@ pub struct CodegenCtx {
     /// a program the check rejects cannot load, so shipping an escape hatch
     /// would only trade a Rock diagnostic for LuaJIT's.
     frame_limits: bool,
+    /// Whether emitted functions carry LuaJIT `# <line> "<file>"` directives
+    /// mapping their statements to Rock source ([`line_directives_mode`]).
+    line_directives: bool,
 }
 
 impl Clone for CodegenCtx {
@@ -681,6 +684,7 @@ impl Clone for CodegenCtx {
             index_shape: self.index_shape,
             call_sccs: self.call_sccs.clone(),
             frame_limits: self.frame_limits,
+            line_directives: self.line_directives,
         }
     }
 }
@@ -763,6 +767,7 @@ impl CodegenCtx {
             index_shape: index_shape(),
             call_sccs: HashMap::default(),
             frame_limits: true,
+            line_directives: line_directives_mode(),
         }
     }
 
@@ -845,6 +850,16 @@ impl CodegenCtx {
 
     pub fn frame_limits(&self) -> bool {
         self.frame_limits
+    }
+
+    /// Override the line-directive switch this context was built with. The
+    /// production path takes it from `ROCK_SKULL_LINE_DIRECTIVES`.
+    pub fn set_line_directives(&mut self, on: bool) {
+        self.line_directives = on;
+    }
+
+    pub fn line_directives(&self) -> bool {
+        self.line_directives
     }
 
     /// Record every function's call-graph strongly connected component. The
@@ -1247,6 +1262,14 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
         Ok("global") => CalleeBindingMode::Global,
         _ => DEFAULT_CALLEE_BINDING,
     })
+}
+
+/// `ROCK_SKULL_LINE_DIRECTIVES=1` writes LuaJIT line directives into every
+/// emitted function (see [`write_line_directives`]). Off otherwise: a LuaJIT
+/// without directive support rejects them as a syntax error.
+pub fn line_directives_mode() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| matches!(std::env::var("ROCK_SKULL_LINE_DIRECTIVES").as_deref(), Ok("1")))
 }
 
 /// The global holding the `Lit::Omitted` marker: a private table, so no Rock
@@ -2086,6 +2109,9 @@ fn emit_named_framed_with_statics_impl(
         name,
         ctx,
     );
+    // An unnamed definition is an expression its caller embeds mid-line, where
+    // a directive (which must start a line) cannot go.
+    let line_marks = (ctx.line_directives() && !name.is_empty()).then(|| RefCell::new(Vec::new()));
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out =
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
@@ -2137,13 +2163,137 @@ fn emit_named_framed_with_statics_impl(
         &tail_forwards,
         &call_arg_forwards,
         &suppressed,
+        line_marks.as_ref(),
         &mut out,
     );
     if bound.is_some() {
         out.push_str(" end");
     }
     out.push('\n');
-    (out, header_offset)
+    let Some(marks) = line_marks else {
+        return (out, header_offset);
+    };
+    let Some((lua, inserted)) = write_line_directives(&out, header_offset, &marks.into_inner()) else {
+        return (out, header_offset);
+    };
+    // A directive goes in front of a line, so an offset at that line's start
+    // moves past it.
+    let shift = |offset: usize| {
+        offset + inserted.iter().take_while(|(at, _)| *at <= offset).map(|(_, len)| len).sum::<usize>()
+    };
+    if let Some(allocation) = allocation {
+        for site in allocation.sites.borrow_mut().iter_mut() {
+            site.lua_byte_offset = shift(site.lua_byte_offset);
+        }
+    }
+    (lua, shift(header_offset))
+}
+
+/// A statement's start offset in a function's emitted text, and the span of
+/// the instruction it renders.
+type LineMark = (usize, Span);
+
+/// The line LuaJIT reads after [`LINE_DIRECTIVE_RESET`] until the assembler
+/// resolves it ([`resolve_line_directive_resets`]).
+pub const LINE_DIRECTIVE_RESET: &str = "# 0 \"=[generated]\"";
+
+/// Number the lines of one emitted definition with Rock source lines.
+///
+/// LuaJIT 2.1 (since commit c41d727d) reads `# <line> ["<file>"]` at column 0
+/// as "the next line is `<line>` of `<file>`". A prototype keeps only the last
+/// file it saw, so the definition is numbered against ONE file, the one most of
+/// its marks come from; instructions inlined from other files keep the line of
+/// the statement before them. Every line from the header on carries the line
+/// of the latest mark at or before it, so the nil kills, jumps and loop heads
+/// that follow a statement report that statement. Label lines produce no
+/// bytecode and get no directive. Text before the header (hoisted constants)
+/// belongs to the enclosing chunk and is left alone, and the definition ends
+/// with [`LINE_DIRECTIVE_RESET`] so code after it is not numbered as Rock.
+///
+/// Returns the new text and each insertion as (offset in `lua`, bytes), in
+/// ascending order, or `None` when no mark names a source file.
+fn write_line_directives(
+    lua: &str,
+    header_offset: usize,
+    marks: &[LineMark],
+) -> Option<(String, Vec<(usize, usize)>)> {
+    let unknown = Span::unknown().file;
+    let known = |span: &Span| span.file != unknown;
+    let mut counts: Vec<(ustr::Ustr, usize)> = Vec::new();
+    for (_, span) in marks.iter().filter(|(_, span)| known(span)) {
+        match counts.iter_mut().find(|(file, _)| *file == span.file) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((span.file, 1)),
+        }
+    }
+    // `max_by_key` keeps the last maximum; reversing makes a tie go to the
+    // file seen first.
+    let (file, _) = counts.iter().rev().max_by_key(|(_, count)| *count).copied()?;
+    let own: Vec<(usize, u32)> = marks
+        .iter()
+        .filter(|(_, span)| span.file == file)
+        .map(|(offset, span)| (*offset, span.line_range.0 as u32 + 1))
+        .collect();
+
+    let header_line = lua[..header_offset].rfind('\n').map_or(0, |at| at + 1);
+    let mut out = String::with_capacity(lua.len() + lua.len() / 4);
+    out.push_str(&lua[..header_line]);
+    let mut inserted = Vec::new();
+    let mut next_mark = 0;
+    let mut target = own[0].1;
+    // The line LuaJIT gives the next line, once a directive has set it.
+    let mut current: Option<u32> = None;
+    let mut start = header_line;
+    while start < lua.len() {
+        let end = lua[start..].find('\n').map_or(lua.len(), |at| start + at + 1);
+        while next_mark < own.len() && own[next_mark].0 < end {
+            target = own[next_mark].1;
+            next_mark += 1;
+        }
+        let line = &lua[start..end];
+        if current != Some(target) && !line.trim_start().starts_with("::") {
+            let before = out.len();
+            let _ = write!(out, "# {target}");
+            if current.is_none() {
+                out.push(' ');
+                if file.as_str().starts_with(['=', '@', ' ']) {
+                    write_lua_string(&mut out, &format!("@{file}"));
+                } else {
+                    write_lua_string(&mut out, file.as_str());
+                }
+            }
+            out.push('\n');
+            inserted.push((start, out.len() - before));
+            current = Some(target);
+        }
+        out.push_str(line);
+        current = current.map(|line| line + 1);
+        start = end;
+    }
+    let before = out.len();
+    out.push_str(LINE_DIRECTIVE_RESET);
+    out.push('\n');
+    inserted.push((lua.len(), out.len() - before));
+    Some((out, inserted))
+}
+
+/// Replace every [`LINE_DIRECTIVE_RESET`] in an assembled chunk with a
+/// directive that numbers the following lines by their position in the chunk,
+/// under the file name `chunk`. Code outside Rock definitions then reports
+/// where it sits in the generated file.
+pub fn resolve_line_directive_resets(lua: &str, chunk: &str) -> String {
+    let mut out = String::with_capacity(lua.len());
+    for (index, line) in lua.split_inclusive('\n').enumerate() {
+        if line.trim_end_matches('\n') == LINE_DIRECTIVE_RESET {
+            // `index` is zero-based, so the next line is `index + 2`.
+            let _ = write!(out, "# {} ", index + 2);
+            write_lua_string(&mut out, chunk);
+            out.push('\n');
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 fn static_slots_for(
@@ -3217,6 +3367,7 @@ fn render_scope(
     tail_forwards: &[Option<TailForward>],
     call_arg_forwards: &[Option<CallArgForward>],
     suppressed: &[bool],
+    line_marks: Option<&RefCell<Vec<LineMark>>>,
     out: &mut String,
 ) {
     // RPO drives both block layout (preheader-before-header, for the relooper)
@@ -3469,6 +3620,7 @@ fn render_scope(
         call_arg_forwards,
         suppressed,
         kills,
+        line_marks,
     };
     for &bb in rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -3792,6 +3944,9 @@ struct Emitter<'a> {
     suppressed: &'a [bool],
     /// Death point of every declared local, written as `<local> = nil`.
     kills: regalloc::NilKills,
+    /// Where each statement starts and which instruction it renders, when the
+    /// definition is numbered with line directives.
+    line_marks: Option<&'a RefCell<Vec<LineMark>>>,
 }
 
 /// `ROCK_SKULL_NIL_KILL=0` turns the nil-kill emission off, so an abort census
@@ -3802,6 +3957,22 @@ fn nil_kill_enabled() -> bool {
 }
 
 impl Emitter<'_> {
+    /// Record that the line starting at the end of `out` renders `id`.
+    fn mark_line(&self, out: &str, id: Idx<Inst>) {
+        if let (Some(marks), Some(span)) = (self.line_marks, self.func.inst_spans.get(id)) {
+            marks.borrow_mut().push((out.len(), *span));
+        }
+    }
+
+    /// [`Self::mark_line`] for an operand a terminator renders in place. A
+    /// register operand was computed by an earlier statement and is not this
+    /// line's source.
+    fn mark_inline_operand(&self, out: &str, id: Idx<Inst>) {
+        if self.inlinable[raw(id) as usize] {
+            self.mark_line(out, id);
+        }
+    }
+
     fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
         for local in locals {
             out.push_str("  ");
@@ -4025,6 +4196,9 @@ impl Emitter<'_> {
     }
 
     fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
+        if let TailForwardCall::Direct { call, .. } = &tail.call {
+            self.mark_line(out, *call);
+        }
         out.push_str("  do return ");
         self.write_forward_call(out, &tail.call);
         out.push_str(" end\n");
@@ -4165,6 +4339,7 @@ impl Emitter<'_> {
         if self.hoist.contains_key(&id) {
             return;
         }
+        self.mark_line(out, id);
         if let Some(forward) = &self.call_arg_forwards[raw(id) as usize] {
             self.emit_call_arg_forward(out, forward);
             return;
@@ -5364,6 +5539,12 @@ impl Emitter<'_> {
     }
 
     fn emit_term(&self, out: &mut String, term: &Term, bb: Idx<Block>) {
+        match term {
+            Term::Return(vals) if !vals.is_empty() => self.mark_inline_operand(out, vals[0]),
+            Term::Branch { cond, .. } => self.mark_inline_operand(out, *cond),
+            Term::Switch { discr, .. } => self.mark_inline_operand(out, *discr),
+            _ => {}
+        }
         match term {
             // luajit rule 2: `return` wrapped `do ... end` so it is never the
             // block's mid-sequence statement (and is legal as the last one too).

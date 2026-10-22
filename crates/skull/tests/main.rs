@@ -180,6 +180,8 @@ mod shader_artifact;
 mod intrinsics;
 #[path = "lambda_static.rs"]
 mod lambda_static;
+#[path = "line_directives.rs"]
+mod line_directives;
 #[path = "leaf_form_invariant.rs"]
 mod leaf_form_invariant;
 #[path = "loop_scoped_locals.rs"]

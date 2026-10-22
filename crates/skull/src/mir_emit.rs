@@ -6371,6 +6371,11 @@ fn assemble(
         &artifact_reads,
         cache.renderer_target,
     )?;
+    // The file name a host writes the program to; generated code after a
+    // numbered definition reports its position in that file.
+    if cache.cg.line_directives() {
+        out = skull_codegen_lua::resolve_line_directive_resets(&out, "main.lua");
+    }
     Ok((
         MirEmit {
             release_stats,
@@ -6898,6 +6903,9 @@ pub struct ShapeOverrides {
     /// body so it can ask the bundled LuaJIT whether that Lua really fails to
     /// load (`skull_codegen_lua::CodegenCtx::set_frame_limits`).
     pub frame_limits: Option<bool>,
+    /// Overrides `ROCK_SKULL_LINE_DIRECTIVES`
+    /// (`skull_codegen_lua::CodegenCtx::set_line_directives`).
+    pub line_directives: Option<bool>,
 }
 
 /// [`emit_full`] under explicit emitted shapes, overriding every
@@ -7444,6 +7452,9 @@ fn emit_full_in_with_mutation(
     }
     if let Some(on) = shapes.frame_limits {
         cg.set_frame_limits(on);
+    }
+    if let Some(on) = shapes.line_directives {
+        cg.set_line_directives(on);
     }
     let setup_lanes = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
@@ -9074,6 +9085,9 @@ fn assemble_overlay(
     }
     let d_fingerprint = t_fingerprint.elapsed();
     out.push_str("end\n");
+    if cache.cg.line_directives() {
+        out = skull_codegen_lua::resolve_line_directive_resets(&out, "=[overlay]");
+    }
 
     Ok((
         MirEmit {

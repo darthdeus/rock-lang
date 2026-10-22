@@ -207,6 +207,8 @@ pub struct Args {
     pub app_args: Vec<String>,
 
     pub jv: bool,
+    /// `--lua-line-directives`: sugar for `ROCK_SKULL_LINE_DIRECTIVES=1`.
+    pub lua_line_directives: bool,
     pub agent_headless: bool,
     pub agent_access: bool,
     pub level: Option<String>,
@@ -336,6 +338,8 @@ impl Args {
                 .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
             .arg(Arg::new("target-os").long("target-os").value_name("OS")
                 .help("Artifact target for the `platform` builtin (linux, osx, windows, ios, web). Cross-builds package on one OS for another; default infers from channel, then the host."))
+            .arg(Arg::new("lua-line-directives").long("lua-line-directives").action(ArgAction::SetTrue)
+                .help("Number emitted Lua with Rock file:line through LuaJIT line directives, so errors, tracebacks and jit.util report Rock source. Needs a LuaJIT 2.1 from commit c41d727d (2026-10-20) or later. A development option: rejected with a --channel other than dev. Same as ROCK_SKULL_LINE_DIRECTIVES=1."))
             .arg(Arg::new("trace").long("trace").action(ArgAction::SetTrue)
                 .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling"))
             .arg(Arg::new("timeout").long("timeout").default_value("60")
@@ -456,6 +460,7 @@ impl Args {
             sim_plan: Default::default(),
             app_args: many_str("app_args"),
             jv: Default::default(),
+            lua_line_directives: m.get_flag("lua-line-directives"),
             agent_headless: Default::default(),
             agent_access: Default::default(),
             level: Default::default(),
