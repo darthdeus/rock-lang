@@ -415,6 +415,37 @@ impl<'a> Gamma<'a> {
     }
 }
 
+/// EXPLICIT_NULL_DEFAULT: a nullable parameter's default must be the literal
+/// `null`. On Lua an omitted argument lowers as nil and the callee fills nil
+/// with the default, so an explicit `null` argument would arrive as the
+/// default instead.
+fn reject_non_null_nullable_default(
+    c: &BodyCtx,
+    gamma: &mut Gamma,
+    param: Idx<BindingInfo>,
+    declared: TyId,
+    default: Idx<Expr>,
+) {
+    if matches!(c.body.expr_arena[default], Expr::Null) {
+        return;
+    }
+    let binding = &c.body.binding_arena[param];
+    let resolved = resolve(gamma, declared, binding.span);
+    if !matches!(gamma.get(resolved), TypeExpr::Nullable(_)) {
+        return;
+    }
+    let ty = gamma.workspace.render(Some(&gamma.out), declared);
+    let name = binding.name;
+    gamma.body_errors.push(CompilerError::new_with_label(
+        c.body.expr_spans[default],
+        format!(
+            "nullable parameter `{name}` has a non-null default; an explicit `null` \
+             argument would receive the default. Declare `{name}: {ty} = null` and \
+             write `{name} ?? <default>` in the body"
+        ),
+    ));
+}
+
 pub fn check_function(
     ws: &Workspace,
     module: &Module,
@@ -502,6 +533,7 @@ pub fn check_function(
 
             if let Some(declared) = c.body.binding_arena[pb].declared_ty {
                 coerce(&mut gamma, dty, declared, f.span)?;
+                reject_non_null_nullable_default(&c, &mut gamma, pb, declared, *dexpr);
             }
         }
     }
