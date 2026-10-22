@@ -5367,8 +5367,13 @@ impl Emitter<'_> {
                 self.write_csv(out, vals);
                 out.push_str(" end\n");
             }
-            Term::Return(_) | Term::Unreachable => {
+            Term::Return(_) => {
                 out.push_str("  do return end\n");
+            }
+            // Bone proves these blocks dead; reaching one is a compiler bug,
+            // which a bare return would turn into a silent early exit.
+            Term::Unreachable => {
+                out.push_str("  error(\"rock: reached an unreachable block\")\n");
             }
             Term::Goto(b) => {
                 self.write_goto(out, *b);

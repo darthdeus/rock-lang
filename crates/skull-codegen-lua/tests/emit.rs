@@ -2043,3 +2043,24 @@ fn reused_int_to_float_aliases_its_operand() {
     assert_eq!(register_moves(&lua), Vec::<&str>::new(), "{lua}");
     assert_eq!(run(register, "g(2, 3)"), "49");
 }
+
+#[test]
+fn unreachable_block_traps_instead_of_returning() {
+    common::require_luajit();
+    let lua = emit_clean(
+        "enum Dir { Up, Down } fn pick(d: Dir) -> int { match d { Dir::Up => { return 1 } Dir::Down => { return 2 } } }",
+        "pick",
+    );
+    let symbol = lua.lines().find_map(|line| line.strip_prefix("function "))
+        .expect("function definition").split('(').next().unwrap();
+    // A value outside the enum reaches the arm chain's dead end; it must not
+    // read as an early return of nil.
+    let driver = format!(r#"{lua}
+local ok, err = pcall({symbol}, "Sideways")
+assert(not ok, "an unreachable block returned")
+assert(tostring(err):find("unreachable", 1, true), tostring(err))
+"#);
+    let run = std::process::Command::new("luajit").arg("-e").arg(driver).output()
+        .expect("run unreachable trap");
+    assert!(run.status.success(), "{lua}\n{}", String::from_utf8_lossy(&run.stderr));
+}
