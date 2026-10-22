@@ -74,6 +74,8 @@ mod mixed_enum_boxing;
 mod enum_flat_equality;
 #[path = "enum_format_packages.rs"]
 mod enum_format_packages;
+#[path = "enum_flat_nullable_format.rs"]
+mod enum_flat_nullable_format;
 #[path = "enum_flat_field_spread.rs"]
 mod enum_flat_field_spread;
 #[path = "enum_payload_sroa.rs"]

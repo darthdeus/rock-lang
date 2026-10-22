@@ -85,6 +85,17 @@ impl Builder<'_> {
                 let group = ValueRepr::Group { name, parts, present: None };
                 self.render_structural_route(&route, group, Some(present))
             }
+            // A flat enum has no presence leaf: a nil tag is its null.
+            ValueRepr::Group { name, parts, present: None }
+                if self.expr_is_nullable(expr)
+                    && EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                let Some(&ValueRepr::Scalar(tag)) = parts.first() else {
+                    return Err(self.gap_here("nullable flat enum hole lost its tag"));
+                };
+                let group = ValueRepr::Group { name, parts, present: None };
+                self.nil_guarded_render(tag, |s| s.render_structural_route(&route, group, None))
+            }
             repr => self.render_structural_route(&route, repr, None),
         }
     }
