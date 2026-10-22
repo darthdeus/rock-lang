@@ -159,6 +159,29 @@ impl Builder<'_> {
         self.reject_concrete_column_container_opaque_slots(e, concrete_callee.func, signature)
     }
 
+    /// A present `[T]?` and a tuple's element are the same container by
+    /// reference, so a PARAM wrapping a column container hands the body the same
+    /// representation. Results do not look through: `Map<K, V>.get -> V?` only
+    /// passes a stored value out, and the declared type cannot tell that from
+    /// a body that builds one.
+    fn param_slot_hazard_mono(
+        &self,
+        mono: &crate::monoty::MonoTy,
+    ) -> Result<Option<(String, &'static str)>, CompilerError> {
+        match mono {
+            crate::monoty::MonoTy::Nullable(inner) => self.param_slot_hazard_mono(inner),
+            crate::monoty::MonoTy::Tuple(elems) => {
+                for elem in elems {
+                    if let Some(hazard) = self.param_slot_hazard_mono(elem)? {
+                        return Ok(Some(hazard));
+                    }
+                }
+                Ok(None)
+            }
+            _ => self.slot_hazard_mono(mono),
+        }
+    }
+
     fn slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
@@ -244,7 +267,7 @@ impl Builder<'_> {
                 continue;
             }
             let mono = self.concrete_mono_view(*id, ConcreteMonoConsumer::NoboxBoundary);
-            if let Some((rendered, physical)) = self.slot_hazard_mono(&mono)? {
+            if let Some((rendered, physical)) = self.param_slot_hazard_mono(&mono)? {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(

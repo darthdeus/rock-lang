@@ -244,3 +244,72 @@ fn an_irrelevant_unbound_generic_does_not_disarm_the_rule() {
 fn an_irrelevant_unbound_generic_still_admits_a_boxed_element() {
     assert_eq!(run(IRRELEVANT_UNBOUND_GENERIC_BOXED, "decl_unbound_boxed"), "1");
 }
+
+/// A NULLABLE slot. `[T]?` names the same boxed representation once the value
+/// is present, so a column vec reaching it meets the same nil `_data`.
+const NULLABLE_SLOT: &str = r#"
+value G { x: float, y: float }
+
+@nomangle inline(lua) fn probe<T>(sink: [T]? = null) -> int = """
+    if sink == nil then return 0 end
+    return #sink._data
+"""
+
+fn main() {
+    let xs: [G] = [G { x: 1.0, y: 2.0 }]
+    print("{probe(xs)}")
+}
+"#;
+
+/// The nullable slot at a BOXED element: still valid.
+const NULLABLE_SLOT_BOXED: &str = r#"
+struct B { s: string }
+
+@nomangle inline(lua) fn probe<T>(sink: [T]? = null) -> int = """
+    if sink == nil then return 0 end
+    return #sink._data
+"""
+
+fn main() {
+    let xs: [B] = [B { s: "a" }]
+    print("{probe(xs)}")
+}
+"#;
+
+/// A TUPLE slot carries its element by reference, so the column vec inside it
+/// reaches the body exactly as a bare one would.
+const TUPLE_SLOT: &str = r#"
+value G { x: float, y: float }
+
+@nomangle inline(lua) fn probe<T>(pair: ([T], int)) -> int = """
+    return #pair[1]._data
+"""
+
+fn main() {
+    let xs: [G] = [G { x: 1.0, y: 2.0 }]
+    print("{probe((xs, 0))}")
+}
+"#;
+
+#[test]
+fn a_nullable_slot_is_reached() {
+    let msg = outcome(NULLABLE_SLOT).expect_err("must reject");
+    assert!(
+        msg.contains("column-stored `[G]`") && msg.contains("probe"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn a_nullable_slot_at_a_boxed_element_is_admitted() {
+    assert_eq!(run(NULLABLE_SLOT_BOXED, "decl_nullable_boxed"), "1");
+}
+
+#[test]
+fn a_tuple_slot_is_reached() {
+    let msg = outcome(TUPLE_SLOT).expect_err("must reject");
+    assert!(
+        msg.contains("column-stored `[G]`") && msg.contains("probe"),
+        "got: {msg}"
+    );
+}
