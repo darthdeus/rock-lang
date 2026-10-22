@@ -69,3 +69,24 @@ fn range_materializes_vec() {
     assert!(js.contains("__range"), "renders the range runtime:\n{js}");
     eval_int(&js, "root", 93); // 2+3+4 = 9, len 3
 }
+
+// `tuple_first`/`tuple_second` templates project ONE element of the array, but
+// the generic `A`/`B` may itself be a tuple: the call then returns as many lanes
+// as that tuple has, and the caller rebuilds the value from them. A lane read
+// that goes to the return bank instead of the projected element leaves every
+// lane past the first undefined, so a nested tuple element reads as
+// `(1, 2, nil)`.
+#[test]
+fn a_tuple_intrinsic_result_decomposes_into_all_of_its_lanes() {
+    let src = "fn root() -> int {\n\
+                   let nested = [((1, 2), (3, 4))]\n\
+                   let item = nested[0]\n\
+                   let left = tuple_first(item)\n\
+                   let right = tuple_second(item)\n\
+                   return tuple_first(left) * 1000 + tuple_second(left) * 100\n\
+                       + tuple_first(right) * 10 + tuple_second(right)\n\
+               }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("nested tuple element emits");
+    eval_int(&js, "root", 1234);
+}

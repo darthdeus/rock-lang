@@ -1513,6 +1513,81 @@ impl Emitter<'_> {
         }
     }
 
+    /// JS access paths of an INTRINSIC call's result lanes, or `None` when the
+    /// callee is a real function (its callee packs the return bank) or its result
+    /// layout cannot be projected lane-by-lane from one JS value.
+    fn intrinsic_lane_paths(
+        &self,
+        iid: Idx<Inst>,
+        func: FuncRef,
+        lanes: usize,
+    ) -> Result<Option<Vec<String>>, CompilerError> {
+        if lanes < 2 {
+            return Ok(None);
+        }
+        let cf = &self.ws.module(func.module).functions[func.func];
+        if js_supply(self.ws, cf).is_none() {
+            return Ok(None);
+        }
+        let Some(plan) = self.mf.call_abi_plans.get(&iid) else {
+            return Ok(None);
+        };
+        let Some(result) = plan.representation().result() else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        if !self.collect_lane_paths(plan, result, String::new(), &mut out) || out.len() != lanes {
+            return Ok(None);
+        }
+        Ok(Some(out))
+    }
+
+    /// Depth-first lane paths of one representation, in the scalar-ABI lane order
+    /// (`RepArena::ret_slot` flattens the same way). `false` when a lane cannot be
+    /// addressed on a JS value: a nullable tuple threads a presence lane, and a
+    /// dotted leaf path has no single-key spelling the box agrees on.
+    fn collect_lane_paths(
+        &self,
+        plan: &skull_mir::lower::BackendFnAbiPlan,
+        rep: skull_mir::lower::RepId,
+        prefix: String,
+        out: &mut Vec<String>,
+    ) -> bool {
+        let rep_plan = plan.rep_plan(rep);
+        match rep_plan.layout() {
+            skull_mir::lower::RepLayout::Tuple { slots, nullable } => {
+                if *nullable {
+                    return false;
+                }
+                for (i, slot) in slots.iter().enumerate() {
+                    if !self.collect_lane_paths(plan, *slot, format!("{prefix}[{i}]"), out) {
+                        return false;
+                    }
+                }
+                true
+            }
+            skull_mir::lower::RepLayout::Leaves(_) => {
+                let Some(paths) = rep_plan.leaf_paths() else {
+                    return false;
+                };
+                if paths.iter().any(|path| path.as_str().contains('.')) {
+                    return false;
+                }
+                for path in paths {
+                    let Ok(key) = js_string_lit(path.as_str()) else {
+                        return false;
+                    };
+                    out.push(format!("{prefix}[{key}]"));
+                }
+                true
+            }
+            skull_mir::lower::RepLayout::Opaque | skull_mir::lower::RepLayout::Foreign { .. } => {
+                out.push(prefix);
+                true
+            }
+        }
+    }
+
     /// A multi-value capture: `d0 = <call>; d1 = __rock_ret1; ...` -- leaf 0 from
     /// the call's own return value, leaves 1..N from the scratch bank
     /// ([`Self::emit_return`] is the publishing half). A single dest is a plain
@@ -1630,7 +1705,24 @@ impl Emitter<'_> {
                 // read back via `Load` of each dest.
                 Inst::CallMulti { dests, func, args } => {
                     let call = self.render_call(iid, *func, args)?;
-                    let line = self.multi_assign(dests, &call);
+                    // An intrinsic is ONE JS expression: when its result type has
+                    // more than one lane (a tuple-typed `A` from `tuple_first`),
+                    // the lanes are read off that value rather than the callee's
+                    // return bank, which no intrinsic ever writes.
+                    let line = match self.intrinsic_lane_paths(iid, *func, dests.len())? {
+                        Some(paths) => {
+                            let temp = format!("__rock_mv{}", raw(iid));
+                            let mut line = format!("let {temp} = {call};");
+                            for (dest, path) in dests.iter().zip(paths) {
+                                line.push_str(&format!(
+                                    " {} = {temp}{path};",
+                                    cell_name(self.mf, *dest)
+                                ));
+                            }
+                            line
+                        }
+                        None => self.multi_assign(dests, &call),
+                    };
                     self.push(&line);
                 }
                 Inst::CallValueMulti { dests, callee, args } => {
@@ -2052,7 +2144,7 @@ impl Emitter<'_> {
                             "`{name}` leaf-form constructor does not match its supplied plan: {got:?} vs {canonical:?}"
                         )));
                     }
-                    return self.render_leaf_form_value_struct(*name, fields);
+                    return self.render_leaf_form_value_struct(*name, *representation, fields);
                 }
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
@@ -2411,39 +2503,67 @@ impl Emitter<'_> {
         (exact, groups)
     }
 
+    /// A value constructor that arrives as its leaf paths (`pos.x`, `pos.y`, a
+    /// presence tag at an inline child's own name). A CData value's box is a
+    /// plain nested JS object -- its dotted paths are only the luajit byte
+    /// layout -- so a child's leaves are rebuilt as its own box under the field
+    /// name. A TABLE value's box keys the leaf paths themselves, so the same
+    /// leaves stay flat: that is where the lowering reads `pos.x` from, and a
+    /// nested child under `pos` leaves every read through it undefined.
     fn render_leaf_form_value_struct(
         &self,
         name: ustr::Ustr,
+        representation: skull_mir::lower::RepId,
         fields: &[(ustr::Ustr, Idx<Inst>)],
     ) -> Result<String, CompilerError> {
+        let arena = self.mf.rep_arena.as_ref().ok_or_else(|| {
+            err(format!(
+                "JS subset: `{name}` value constructor has no representation arena"
+            ))
+        })?;
+        let cdata = arena
+            .try_get(representation)
+            .and_then(|plan| plan.value_storage())
+            == Some(skull_mir::lower::ValueStorage::CData);
+        if !cdata {
+            let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
+            for (key, value) in fields {
+                parts.push(format!("{}: {}", js_key(key)?, self.render_val(*value)?));
+            }
+            return Ok(format!("({{{}}})", parts.join(", ")));
+        }
         // Nested groups in first-seen order, so the emitted object matches the
         // declared field order the non-leaf path produces.
         let mut top: Vec<(ustr::Ustr, String)> = Vec::new();
-        let mut groups: Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
-        for (f, v) in fields {
-            match f.as_str().split_once('.') {
-                None => top.push((*f, self.render_val(*v)?)),
+        let mut groups: Vec<(ustr::Ustr, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
+        for (key, value) in fields {
+            match key.as_str().split_once('.') {
+                None => top.push((*key, self.render_val(*value)?)),
                 Some((head, rest)) => {
+                    let head = ustr::Ustr::from(head);
                     let rest = ustr::Ustr::from(rest);
-                    match groups.iter_mut().find(|(h, _)| h == head) {
-                        Some((_, sub)) => sub.push((rest, *v)),
-                        None => groups.push((head.to_string(), vec![(rest, *v)])),
+                    match groups.iter_mut().find(|(h, _)| *h == head) {
+                        Some((_, sub)) => sub.push((rest, *value)),
+                        None => groups.push((head, vec![(rest, *value)])),
                     }
                 }
             }
         }
         let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
-        for (f, rendered) in &top {
-            parts.push(format!("{}: {rendered}", js_key(f)?));
+        for (key, rendered) in &top {
+            parts.push(format!("{}: {rendered}", js_key(key)?));
         }
         for (head, sub) in &groups {
-            let sub_name = self.nested_field_struct_name(name, head)?.ok_or_else(|| {
+            let child = self.nested_field_struct_name(name, head.as_str())?.ok_or_else(|| {
                 CompilerError::new_no_location(format!(
                     "leaf-form ctor for `{name}`: field `{head}` is not a value struct"
                 ))
             })?;
-            let inner = self.render_leaf_form_value_struct(sub_name, sub)?;
-            parts.push(format!("{}: {inner}", js_key(&ustr::Ustr::from(head))?));
+            let child_rep = arena
+                .plan_nominal_value(self.ws, bone_semantic::hir::FnBackend::Js, child)
+                .map_err(|e| err(e.message))?;
+            let inner = self.render_leaf_form_value_struct(child, child_rep, sub)?;
+            parts.push(format!("{}: {inner}", js_key(head)?));
         }
         Ok(format!("({{{}}})", parts.join(", ")))
     }
@@ -2803,8 +2923,12 @@ pub fn emit_with_closure(
     if has_state_transaction {
         out.push_str("if (typeof __rock_state_transaction_begin !== \"undefined\") __rock_state_transaction_begin();\n");
     }
+    // The init lines run LATE, after the code slots are staged (see below): a
+    // global initialized from a lambda stores that lambda's CodeRef, so resolving
+    // it needs the staged slot.
+    let mut init_js = String::new();
     for init in &init_lines {
-        out.push_str(&init.js);
+        init_js.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
         let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
@@ -2834,6 +2958,7 @@ pub fn emit_with_closure(
             st.names.get(&body.instance).expect("emitted body has a name"),
         )?);
     }
+    out.push_str(&init_js);
     out.push_str(code_slot_publish_js(
         &code_artifact,
         false,
@@ -3454,7 +3579,9 @@ fn assemble_program_core(
             stable.push_str(&init.js);
         }
     }
-    out.push_str("}\n__rock_state_initialize();\n");
+    // A global initialized from a lambda stores that lambda's CodeRef, so the
+    // initializers run at the CALL below, after the code slots are staged.
+    out.push_str("}\n");
     stable.push_str("}\n");
     for init in init_lines {
         if let Some(chunk) = const_chunks.get_mut(&init.name) {
@@ -3479,6 +3606,9 @@ fn assemble_program_core(
     {
         out.push_str("__rock_code_slot_begin();\n");
     }
+    // Global initializers run once the slots they may reference are staged, and
+    // before the definition plan materializes (a materializer may read them).
+    out.push_str("__rock_state_initialize();\n");
     let definition_stage = definition_plan_stage_js(ws, scx, &st.concrete, &definition_plan)?;
     out.push_str(&definition_stage);
     stable.push_str(&definition_stage);

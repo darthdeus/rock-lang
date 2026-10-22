@@ -152,3 +152,30 @@ fn ordinary_value_with_a_flat_enum_return_crosses_as_leaves() {
     assert!(!js.contains("__ty: \"Row\""), "the returned row materialized an object:\n{js}");
     eval_int(&js, "root", 19);
 }
+
+// A `value` struct goes OFF cdata once it carries a nullable `nobox` child, so
+// its box keys every inline child's leaves by dotted path (`pos.x`, `pos.y`, and
+// a presence tag at the child's own name). Readers are lowered against exactly
+// those keys (`Inst::Field { field: "pos.x" }`), so a box that escapes -- a Vec
+// element, an argument -- must be BUILT with them: a nested object under `pos`
+// leaves every read undefined.
+#[test]
+fn a_leaf_table_value_box_keys_its_inline_children_by_dotted_path() {
+    let src = "nobox value Id { value: int }\n\
+               value V2 { x: int, y: int }\n\
+               value Row { id: int, tag: Id? = null, pos: V2 }\n\
+               fn root() -> int {\n\
+                   let rows: [Row] = []\n\
+                   rows.push(Row { id: 1, tag: Id { value: 5 }, pos: V2 { x: 2, y: 3 } })\n\
+                   let p = rows[0].pos\n\
+                   let tag = rows[0].tag.unwrap()\n\
+                   return p.x * 100 + p.y * 10 + tag.value + rows[0].id\n\
+               }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("leaf-table value stored in a Vec emits");
+    assert!(
+        js.contains("\"pos.x\""),
+        "the box must key the inline child by leaf path, not box it under `pos`:\n{js}"
+    );
+    eval_int(&js, "root", 236);
+}

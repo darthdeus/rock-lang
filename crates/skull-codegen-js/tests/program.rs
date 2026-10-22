@@ -513,3 +513,36 @@ fn main() { print("{XS.len}") }
         "standalone decorator specialization lost the concrete push operation: {push}"
     );
 }
+
+// The whole-program path defines `__rock_state_initialize()` and then calls it;
+// the code-slot registry is staged after the bodies, so the CALL has to come
+// after the staging. Called before it, a global initialized from a lambda throws
+// "missing Rock code slot" at load and the program never runs.
+#[test]
+fn a_program_global_lambda_initializes_after_the_code_slots_are_staged() {
+    let ws = ws_with(r#"
+global SQUARE: fn(int) -> int = (x: int) => x * x
+const OPS: [fn(int) -> int] = [(x: int) => x + 1]
+fn main() -> int {
+    assert(SQUARE(7) == 49)
+    assert(OPS[0](4) == 5)
+    return SQUARE(3) + OPS[0](1)
+}
+"#);
+    let js = emit_program(&ws);
+    let source = format!(
+        "var __G = {{}};\n{}{}{}\n{}\n{}\nconsole.log(main());",
+        skull_codegen_js::JS_NB_CHECK_SHIMS,
+        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        skull_codegen_js::JS_SESSION_RUNTIME,
+        skull_codegen_js::JS_CALL_HELPER,
+        js
+    );
+    let output = node().arg("-e").arg(&source).output().expect("run global-lambda program");
+    assert!(
+        output.status.success(),
+        "node failed: {}\n--- js ---\n{js}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "11");
+}

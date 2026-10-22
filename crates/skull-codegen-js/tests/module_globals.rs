@@ -138,3 +138,18 @@ fn a_nobox_global_initializes_its_leaves() {
     );
     eval_int(&js, "root", 34);
 }
+
+// A global initialized from a lambda stores the lambda's CodeRef, and the code
+// slot registry it resolves through is only STAGED once every body is emitted.
+// The init lines therefore have to run after that staging: running them first
+// makes `__rock_code_slot_ref` throw "missing Rock code slot" at load, and every
+// in-unit `@test` reports as an invalid-JS unit rather than a failure.
+#[test]
+fn a_global_lambda_initializer_runs_after_the_code_slots_are_staged() {
+    let src = "global SQUARE: fn(int) -> int = (x: int) => x * x\n\
+               const OPS: [fn(int) -> int] = [(x: int) => x + 1]\n\
+               fn root() -> int { return SQUARE(7) + OPS[0](4) }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("global lambda emits");
+    eval_int(&js, "root", 54);
+}
