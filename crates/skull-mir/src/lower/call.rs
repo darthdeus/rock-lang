@@ -1432,7 +1432,7 @@ impl Builder<'_> {
             slots[pidx] = Some(r);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
-        // A trailing param with a constant default is passed explicitly too.
+        // A trailing param with a caller-supplied default is passed explicitly too.
         let hi = defaults
             .iter()
             .take(slots.len())

@@ -927,6 +927,7 @@ impl BodyHasher {
                 }
             }
             Lit::Nil => self.tag(5),
+            Lit::Omitted => self.tag(7),
         }
     }
 

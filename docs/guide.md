@@ -347,9 +347,8 @@ type is written `fn(int) -> int`. Several functions may share one
 name with different signatures; a call that matches two of them
 equally well is rejected as ambiguous.
 
-A nullable parameter defaults to `null` or nothing: `seed: int? = 42`
-is rejected, because an explicit `null` argument would receive the
-default. Write `seed: int? = null` and `seed ?? 42` in the body.
+An explicit `null` argument overrides a default: with
+`seed: int? = 42`, `f()` receives 42 and `f(null)` receives null.
 
 ```rock
 // Parameters can have defaults, and callers can pass any argument by

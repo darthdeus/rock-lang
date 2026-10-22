@@ -104,6 +104,12 @@ pub enum Lit {
     Bool(bool),
     Str(Ustr),
     Nil,
+    /// The argument a call passes for an omitted parameter that is declared
+    /// `T?` with a non-null default (EXPLICIT_NULL_DEFAULT): the callee fills
+    /// the default only on this marker, so an explicit `null` stays null.
+    /// Every other omitted argument is `Nil`. See
+    /// [`crate::lower::param_null_overrides_default`].
+    Omitted,
 }
 
 /// How a collection is represented in the target, so index/length ops emit the

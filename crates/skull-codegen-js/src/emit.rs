@@ -21,6 +21,9 @@ use skull_mir::code_identity::{
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
+
+/// The `Lit::Omitted` marker, defined in [`crate::JS_TABLE_PRIM`].
+const OMITTED_ARG: &str = "__rock_omitted";
 use skull_graph::artifact::{self, ArtifactView};
 use skull_graph::instance_graph::{InstanceGraph, Site, SiteOutcome};
 use skull_graph::target_projection;
@@ -1749,6 +1752,7 @@ impl Emitter<'_> {
                 for (lit, bb) in &cases {
                     let cmp = match lit {
                         Lit::Nil => format!("{d} == null"),
+                        Lit::Omitted => format!("{d} === {OMITTED_ARG}"),
                         Lit::Int(i) => format!("{d} === {i}"),
                         Lit::Uint(i) => format!("{d} === {i}"),
                         Lit::Bool(v) => format!("{d} === {v}"),
@@ -1835,6 +1839,7 @@ impl Emitter<'_> {
             Inst::Const(Lit::Float(f)) => js_number(*f)?,
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => "null".to_string(),
+            Inst::Const(Lit::Omitted) => OMITTED_ARG.to_string(),
             Inst::Const(Lit::Str(s)) => js_string_lit(s.as_str())?,
             Inst::Load(c) => cell_name(self.mf, *c),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
@@ -5646,12 +5651,15 @@ pub fn annotation_value_js(v: &bone_semantic::hir::AnnoValue) -> Option<String> 
 /// only literal rendering (`annotation_value_js`) and the `null` default token
 /// are JS-specific.
 fn decorator_call_args_js(
-    d: &bone_semantic::hir::DecoratorDef,
+    ws: &Workspace,
+    module: bone_semantic::prelude::ModuleId,
+    decorator: Idx<bone_semantic::hir::DecoratorDef>,
     ann: &bone_semantic::hir::Annotation,
 ) -> Result<Vec<String>, CompilerError> {
     use skull_mir::decorator::DecoArg;
+    let d = &ws.module(module).decorators[decorator];
     let mut args = Vec::new();
-    for choice in skull_mir::decorator::select_decorator_args(d, ann)? {
+    for choice in skull_mir::decorator::select_decorator_args(ws, module, decorator, ann)? {
         args.push(match choice {
             DecoArg::Value(v) => annotation_value_js(v).ok_or_else(|| {
                 err(format!(
@@ -5660,6 +5668,7 @@ fn decorator_call_args_js(
                 ))
             })?,
             DecoArg::Default => "null".to_string(),
+            DecoArg::Omitted => OMITTED_ARG.to_string(),
         });
     }
     Ok(args)
@@ -5717,7 +5726,7 @@ fn decorator_application_lines_js(
                     js_string_lit(f.name.as_str())?
                 );
                 let mut call_args = vec![descriptor];
-                call_args.extend(decorator_call_args_js(d, ann)?);
+                call_args.extend(decorator_call_args_js(ws, dmid, did, ann)?);
                 out.push_str(&format!("{}({});\n", decorator_js_name(ann.name.name.as_str()), call_args.join(", ")));
             }
         }

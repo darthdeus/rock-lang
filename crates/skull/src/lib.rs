@@ -380,19 +380,23 @@ pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String>
 }
 
 /// The Lua argument list for one `@deco` application: each `deco` param gets its
-/// named annotation arg if present, else its default (`nil` — filled callee-side
+/// named annotation arg if present, else its default (`nil`, or the omitted
+/// marker where an explicit `null` overrides the default -- filled callee-side
 /// in `__deco_<name>`'s prologue). Required params without an arg, and
 /// non-literal args/defaults, error. The selection (named/default/required) is
 /// the backend-agnostic `skull_mir::decorator::select_decorator_args`, shared
 /// with the JS backend's `decorator_call_args_js`; only the literal rendering
-/// (`annotation_value_lua`) and the `nil` default token are Lua-specific.
+/// (`annotation_value_lua`) and the default tokens are Lua-specific.
 pub fn decorator_call_args(
-    d: &bone_semantic::hir::DecoratorDef,
+    ws: &Workspace,
+    module: ModuleId,
+    decorator: bone_semantic::prelude::Idx<bone_semantic::hir::DecoratorDef>,
     ann: &bone_semantic::hir::Annotation,
 ) -> Result<Vec<String>, CompilerError> {
     use skull_mir::decorator::DecoArg;
+    let d = &ws.module(module).decorators[decorator];
     let mut args = Vec::new();
-    for choice in skull_mir::decorator::select_decorator_args(d, ann)? {
+    for choice in skull_mir::decorator::select_decorator_args(ws, module, decorator, ann)? {
         args.push(match choice {
             DecoArg::Value(v) => annotation_value_lua(v).ok_or_else(|| {
                 CompilerError::new_no_location(format!(
@@ -401,6 +405,7 @@ pub fn decorator_call_args(
                 ))
             })?,
             DecoArg::Default => "nil".to_string(),
+            DecoArg::Omitted => skull_codegen_lua::OMITTED_ARG.to_string(),
         });
     }
     Ok(args)
@@ -528,6 +533,11 @@ local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
+-- skull_codegen_lua::OMITTED_ARG: what a call passes for an omitted argument
+-- whose nullable parameter has a non-null default (EXPLICIT_NULL_DEFAULT).
+if not _G.__rock_omitted then
+  _G.__rock_omitted = setmetatable({}, { __tostring = function() return "<omitted argument>" end })
+end
 _G.__ROCK_ENUM_UNITS = {}
 -- Ordinary-fn `defer` unwinding (skull_mir::mir::DEFER_PUSH). Registering a
 -- defer pushes its cleanup closure and every scope-exit splice pops it, so the

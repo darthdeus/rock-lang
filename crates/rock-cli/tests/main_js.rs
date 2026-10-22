@@ -16,5 +16,7 @@ mod js_test_harness_globals_lua;
 mod js_test_harness_globals_sentinel;
 #[path = "js_support/js_value_tests.rs"]
 mod js_value_tests;
+#[path = "js_support/param_default_explicit_null.rs"]
+mod param_default_explicit_null;
 #[path = "js_support/test_exit_status_gate_js.rs"]
 mod test_exit_status_gate_js;

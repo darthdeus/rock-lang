@@ -1249,6 +1249,11 @@ pub fn callee_binding_mode() -> CalleeBindingMode {
     })
 }
 
+/// The global holding the `Lit::Omitted` marker: a private table, so no Rock
+/// value compares equal to it. The runtime prelude creates it once per Lua
+/// state, so reloaded code compares against the same table.
+pub const OMITTED_ARG: &str = "__rock_omitted";
+
 /// Chunk-level local that every emitted function reads a mutable global through
 /// under the bound shape: the active Session's `__rock_state` table. Declared
 /// at the top of the runtime prelude, assigned by `__rock_session_publish`.
@@ -5548,6 +5553,7 @@ fn write_lit(out: &mut String, l: &Lit) {
         }
         Lit::Str(s) => write_lua_string(out, s.as_str()),
         Lit::Nil => out.push_str("nil"),
+        Lit::Omitted => out.push_str(OMITTED_ARG),
     }
 }
 

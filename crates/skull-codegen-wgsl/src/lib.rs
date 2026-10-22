@@ -2838,7 +2838,7 @@ fn lit_value_kind(lit: &Lit) -> Option<ValueKind> {
         Lit::Int(_) => Some(ValueKind::I32),
         Lit::Uint(_) => Some(ValueKind::U32),
         Lit::Bool(_) => Some(ValueKind::Bool),
-        Lit::Nil | Lit::Str(_) => None,
+        Lit::Nil | Lit::Omitted | Lit::Str(_) => None,
     }
 }
 
@@ -4160,7 +4160,7 @@ impl<'a> FunctionEmitter<'a> {
             Inst::Const(Lit::Bool(_)) => Ok(ValueKind::Bool),
             Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
                 self.span,
-                "WGSL emission does not support null or string literals",
+                "WGSL emission does not support null, omitted-argument or string literals",
             )),
             Inst::Global(name) => self
                 .stage
@@ -4815,9 +4815,9 @@ impl<'a> FunctionEmitter<'a> {
             Lit::Int(value) => Ok(value.to_string()),
             Lit::Uint(value) => Ok(format!("{value}u")),
             Lit::Bool(value) => Ok(value.to_string()),
-            Lit::Nil | Lit::Str(_) => Err(err(
+            Lit::Nil | Lit::Omitted | Lit::Str(_) => Err(err(
                 self.span,
-                "WGSL emission does not support null or string literals",
+                "WGSL emission does not support null, omitted-argument or string literals",
             )),
         }
     }

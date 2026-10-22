@@ -274,6 +274,10 @@ function __range(a, b) {
 /// `Map` (keys not string-coerced) while arrays/objects index directly, so these
 /// dispatch on `instanceof Map` to keep the two access paths consistent.
 pub const JS_TABLE_PRIM: &str = r#"
+// `Lit::Omitted`: what a call passes for an omitted argument whose nullable
+// parameter has a non-null default (EXPLICIT_NULL_DEFAULT). Every program
+// assembly includes these primitives, so the marker lives here.
+var __rock_omitted = Object.freeze({});
 function __table_get(t, k) { return (t instanceof Map) ? t.get(k) : t[k]; }
 function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v; }
 function __table_unset(t, k) { if (t instanceof Map) t.delete(k); else delete t[k]; }

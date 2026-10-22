@@ -70,20 +70,25 @@ fn paint(color2: Color2 = color2(7)) -> int {
     return r
 }
 
-// A nullable parameter's default is the literal `null` or nothing
-// (EXPLICIT_NULL_DEFAULT): an explicit `null` argument lowers like an omitted
-// one on Lua, so `seed: int? = 42` would turn a caller's `null` into 42.
-//- param_default_nullable_non_null_rejected @fail=nullable parameter `seed` has a non-null default
-fn seeded(seed: int? = 42) -> int {
-    return seed ?? 0
+// An explicit `null` overrides a nullable parameter's non-null default
+// (EXPLICIT_NULL_DEFAULT, option A): `seed: int? = 42` is accepted and both
+// `seeded()` and `seeded(null)` typecheck.
+//- param_default_nullable_non_null_accepted
+fn seeded(seed: int? = 42) -> int? {
+    return seed
 }
 fn use_seeded() -> int {
-    let r = seeded(null)
-      //^ int
-    return r
+    let a = seeded()
+      //^ int?
+    let b = seeded(null)
+      //^ int?
+    let s: int? = null
+    let c = seeded(s)
+      //^ int?
+    return a ?? b ?? c ?? 0
 }
 
-//- param_default_nullable_struct_rejected @fail=nullable parameter `hint` has a non-null default
+//- param_default_nullable_struct_accepted
 struct Hint { v: int }
 fn hinted(hint: Hint? = Hint { v: 1 }) -> int {
     return (hint ?? Hint { v: 0 }).v
@@ -91,10 +96,12 @@ fn hinted(hint: Hint? = Hint { v: 1 }) -> int {
 fn use_hinted() -> int {
     let r = hinted()
       //^ int
-    return r
+    let n = hinted(null)
+      //^ int
+    return n
 }
 
-//- param_default_nullable_method_rejected @fail=nullable parameter `n` has a non-null default
+//- param_default_nullable_method_accepted
 struct Counter { c: int }
 fn Counter.bump(self, n: int? = 1) -> int {
     return n ?? self.c
@@ -102,7 +109,9 @@ fn Counter.bump(self, n: int? = 1) -> int {
 fn use_counter() -> int {
     let r = Counter { c: 0 }.bump()
       //^ int
-    return r
+    let n = Counter { c: 0 }.bump(null)
+      //^ int
+    return n
 }
 
 //- param_default_nullable_null_accepted

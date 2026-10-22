@@ -23,6 +23,7 @@ fn fmt_lit(l: &Lit) -> String {
         Lit::Bool(b) => format!("{b}"),
         Lit::Str(s) => format!("{:?}", s.as_str()),
         Lit::Nil => "nil".to_string(),
+        Lit::Omitted => "omitted".to_string(),
     }
 }
 

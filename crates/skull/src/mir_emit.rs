@@ -347,7 +347,8 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
 /// wrapper. A Rock direct call already passes a literal default at the site;
 /// this covers an indirect or Lua call that omitted it. `inline(lua)` and
 /// `extern(ffi)` share the same fill because both wrappers are the body the
-/// omitted argument actually arrives at.
+/// omitted argument actually arrives at. A nullable parameter with a non-null
+/// default gets no fill: its nil is an explicit `null` (EXPLICIT_NULL_DEFAULT).
 fn default_fill_prologue(
     ws: &Workspace,
     mid: ModuleId,
@@ -360,6 +361,9 @@ fn default_fill_prologue(
     };
     for (i, def) in fbody.param_defaults.iter().enumerate() {
         if let (Some(d), Some(pd)) = (def, f.param_decls.get(i)) {
+            if skull_mir::lower::param_null_overrides_default(ws, fbody, i, pd.ty) {
+                continue;
+            }
             if let Some(lit) = render_default_lit(fbody, *d) {
                 let p = pd.name.as_str();
                 let _ = writeln!(prologue, "if {p} == nil then {p} = {lit} end");
@@ -4604,7 +4608,7 @@ fn decorator_application_lines(
                     f.name.as_str(),
                     key
                 );
-                match crate::decorator_call_args(d, ann) {
+                match crate::decorator_call_args(ws, dmid, did, ann) {
                     Ok(args) => {
                         let mut call_args = vec![target];
                         call_args.extend(args);

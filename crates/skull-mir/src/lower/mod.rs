@@ -2822,7 +2822,10 @@ impl Builder<'_> {
 
     /// Constants read in the callee's lexical owner, independent of its wire ABI.
     /// Passing them explicitly avoids nil side exits with the caller's floats
-    /// live.
+    /// live. A default that is not a constant stays the callee's to evaluate:
+    /// `None` passes nil, except that a nullable parameter with a non-null
+    /// default gets [`Lit::Omitted`], because nil is its explicit `null`
+    /// ([`param_null_overrides_default`]).
     pub(crate) fn call_param_defaults(&self, func: FuncRef) -> Vec<Option<CallParamDefault>> {
         let module = self.ws.module(func.module);
         let decl = &module.functions[func.func];
@@ -2830,9 +2833,15 @@ impl Builder<'_> {
         if decl.is_variadic { return Vec::new(); }
         let inf = self.ws.inference(func.module)
             .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(func.func)));
+        // A foreign wrapper fills only literal defaults and has no Rock
+        // prologue to test the marker (`default_fill_prologue`).
+        let rock_body = decl.inline_body.is_none() && !decl.is_extern;
         body.param_defaults.iter().enumerate().map(|(i, expr)| {
             let ty = decl.param_decls.get(i)?.ty;
-            self.constant_param_default(body, inf, (*expr)?, Some(ty))
+            self.constant_param_default(body, inf, (*expr)?, Some(ty)).or_else(|| {
+                (rock_body && param_null_overrides_default(self.ws, body, i, ty))
+                    .then_some(CallParamDefault::Scalar(Lit::Omitted))
+            })
         }).collect()
     }
 
@@ -2844,6 +2853,11 @@ impl Builder<'_> {
         match default {
             CallParamDefault::Scalar(lit) if slot.slot_count() == 1 => {
                 Ok(vec![self.emit_cur(Inst::Const(lit.clone()))])
+            }
+            // A scalarized nullable value tells omitted from null by its
+            // presence leaf, so an omitted one is nil in every leaf.
+            CallParamDefault::Scalar(Lit::Omitted) => {
+                Ok((0..slot.slot_count()).map(|_| self.emit_cur(Inst::Const(Lit::Nil))).collect())
             }
             CallParamDefault::Vector { shape, literals } => {
                 let leaves: Vec<_> = literals.iter()
@@ -2863,7 +2877,7 @@ impl Builder<'_> {
     }
 
     /// Explicit values for the parameters a positional call left off the end:
-    /// a constant default becomes wire literals, a parameter without one keeps its
+    /// a caller-supplied default ([`Self::call_param_defaults`]) becomes wire literals, a parameter without one keeps its
     /// nil (one per wire slot) so the callee fills it, and the trailing nils Lua
     /// would supply anyway are dropped. `param_shapes` is the scalar ABI's slot
     /// table; `None` is the boxed ABI (one slot each).
@@ -2900,6 +2914,10 @@ impl Builder<'_> {
     /// arena). Direct calls pass supported constants themselves; unsupported
     /// defaults and callers the emitter cannot see still need this prologue.
     /// A `null` default on a scalar cell emits nothing: omitted already is null.
+    /// A nullable param with a non-null default tests for [`Lit::Omitted`]
+    /// instead, so an explicit `null` stays null. A scalarized value param
+    /// needs no marker: an explicit null value arrives with a `false` presence
+    /// leaf, an omitted one with nil.
     fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         let defaults = self.body.param_defaults.clone();
@@ -2940,14 +2958,18 @@ impl Builder<'_> {
             if matches!(self.body.expr_arena[*def], Expr::Null) {
                 continue;
             }
+            let omitted = match self.body.binding_arena[pb].declared_ty {
+                Some(ty) if param_null_overrides_default(self.ws, self.body, i, ty) => Lit::Omitted,
+                _ => Lit::Nil,
+            };
             self.f.mark_default_param(cell);
             let cur = self.emit_cur(Inst::Load(cell));
-            let nil = self.emit_cur(Inst::Const(Lit::Nil));
-            let is_nil = self.emit_cur(Inst::Eq(cur, nil));
-            self.f.param_default_guards.insert(is_nil, i);
+            let marker = self.emit_cur(Inst::Const(omitted));
+            let is_omitted = self.emit_cur(Inst::Eq(cur, marker));
+            self.f.param_default_guards.insert(is_omitted, i);
             let then_bb = self.f.new_block();
             let join = self.f.new_block();
-            self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
+            self.f.set_term(self.cur, Term::Branch { cond: is_omitted, then_bb, else_bb: join });
             self.cur = then_bb;
             let expected = self.binding_ty(pb).and_then(|ty| self.concrete_ty_id(ty));
             let dv = self.lower_expr_with_expected(*def, expected.as_deref())?;
@@ -3331,6 +3353,34 @@ impl Builder<'_> {
         self.arg_values_for_slot(slot, arg)
     }
 
+}
+
+/// EXPLICIT_NULL_DEFAULT: whether parameter `index` of `body`, declared `ty`,
+/// is nullable with a default other than `null`. Only such a parameter tells
+/// an omitted argument from an explicit `null`: its callers pass
+/// [`Lit::Omitted`] (or the constant default) when they omit it, and its
+/// default fill tests for that marker instead of nil. Any other omitted
+/// argument is nil, because nil and the default agree there.
+pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, ty: TyId) -> bool {
+    let Some(Some(default)) = body.param_defaults.get(index) else { return false };
+    if matches!(body.expr_arena[*default], Expr::Null) {
+        return false;
+    }
+    match ty {
+        TyId::Static(mid, idx) => matches!(ws.module(mid).ty_arena[idx], TypeExpr::Nullable(_)),
+        // Declared parameter types are lowered into the module's static arena.
+        TyId::Local(_) => false,
+    }
+}
+
+/// [`param_null_overrides_default`] for a declared function's parameter.
+pub fn function_param_null_overrides_default(ws: &Workspace, func: FuncRef, index: usize) -> bool {
+    let module = ws.module(func.module);
+    let Some(body) = module.bodies.get(&BodyOwner::Function(func.func)) else { return false };
+    module.functions[func.func]
+        .param_decls
+        .get(index)
+        .is_some_and(|pd| param_null_overrides_default(ws, body, index, pd.ty))
 }
 
 // -- Map value-struct key rejection (a fatal emit-time pass; see

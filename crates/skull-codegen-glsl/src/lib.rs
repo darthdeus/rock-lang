@@ -298,7 +298,7 @@ fn render_const_lit(lit: &Lit) -> Option<String> {
         Lit::Int(i) => Some(i.to_string()),
         Lit::Uint(i) => Some(i.to_string()),
         Lit::Bool(b) => Some(b.to_string()),
-        Lit::Nil | Lit::Str(_) => None,
+        Lit::Nil | Lit::Omitted | Lit::Str(_) => None,
     }
 }
 
