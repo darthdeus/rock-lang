@@ -53,6 +53,26 @@ fn check_edit(v1: &str, v2: &str, edited: &[&str]) {
 }
 
 #[test]
+fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
+    let v1 = "const BASE: float = 1.5\nconst ALIAS: float = BASE\n@nomangle fn choose() -> float { ALIAS }";
+    let v2 = v1.replace("1.5", "-0.0");
+    let ws1 = ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut incremental_cache) = emit_full_global(&ws1, mid).unwrap();
+    let (_, mut overlay_cache) = emit_full_global(&ws1, mid).unwrap();
+    assert!(crate::common::function_body(&full.lua, "choose").contains("1.5"));
+    let ws2 = ws_of(&v2);
+    let gid = ws2.module(mid).globals.iter().find(|(_, g)| g.name.as_str() == "BASE").unwrap().0;
+    let edited = [(mid, BodyOwner::Global(gid))];
+    let incremental = emit_incremental(&ws2, &mut incremental_cache, &edited).unwrap();
+    let fresh = emit_full_global(&ws2, mid).unwrap().0;
+    assert_eq!(incremental.lua, fresh.lua);
+    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
+    let body = crate::common::function_body(&overlay.lua, "choose");
+    assert!(body.contains("-0.0") && !body.contains("ALIAS"), "{body}");
+}
+
+#[test]
 fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
     let v1 = "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
     let v2 = v1.replace("a < b", "a > b");

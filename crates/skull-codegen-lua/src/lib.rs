@@ -624,6 +624,7 @@ pub struct CodegenCtx {
     rejections: Mutex<Vec<(String, CompilerError)>>,
     /// Compiler-assigned Session slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
+    scalar_constants: HashMap<ustr::Ustr, Lit>,
     /// Every function that lies on a call cycle, from the whole-program instance
     /// graph projected onto declarations. Read ONLY by
     /// [`TailCallShape::Cycles`]; empty on any path that never populated it,
@@ -675,6 +676,7 @@ impl Clone for CodegenCtx {
             reserved: self.reserved.clone(),
             rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
             state_slots: self.state_slots.clone(),
+            scalar_constants: self.scalar_constants.clone(),
             recursive_callees: self.recursive_callees.clone(),
             tail_calls: self.tail_calls,
             callee_binding: self.callee_binding,
@@ -730,7 +732,59 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
     sink.push((name.to_string(), CompilerError::new_with_label(span, msg)));
 }
 
+fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
+    use bone_semantic::hir::{Body, BodyOwner, Expr};
+    fn fold(body: &Body, id: Idx<Expr>, known: &HashMap<ustr::Ustr, Lit>) -> Option<Lit> {
+        match body.expr_arena[id] {
+            Expr::Int(v) => Some(Lit::Int(v)),
+            Expr::Float(v) => Some(Lit::Float(v.into_inner())),
+            Expr::Bool(v) => Some(Lit::Bool(v)),
+            Expr::String(v) => Some(Lit::Str(v)),
+            Expr::Global(name) => known.get(&name).cloned(),
+            Expr::UnaryMinus(inner, _) => match fold(body, inner, known)? {
+                Lit::Int(v) => v.checked_neg().map(Lit::Int),
+                Lit::Float(v) => Some(Lit::Float(-v)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    let mut pending: Vec<_> = ws.modules.iter().flat_map(|module| {
+        module.globals.iter().filter_map(|(id, global)| {
+            if !global.is_const { return None; }
+            module.bodies.get(&BodyOwner::Global(id)).map(|body| (global.name, body))
+        })
+    }).collect();
+    let mut known = HashMap::default();
+    loop {
+        let before = pending.len();
+        pending.retain(|(name, body)| {
+            if let Some(lit) = body.root.and_then(|root| fold(body, root, &known)) {
+                known.insert(*name, lit);
+                false
+            } else {
+                true
+            }
+        });
+        if pending.len() == before { return known; }
+    }
+}
+
 impl CodegenCtx {
+    /// Refresh baked scalar values after a constant initializer edit. Readers of
+    /// every returned name need new emitted text, including readers of aliases.
+    pub fn refresh_scalar_constants(&mut self, ws: &Workspace) -> HashSet<ustr::Ustr> {
+        let next = scalar_constants(ws);
+        let changed = self.scalar_constants.keys().chain(next.keys()).filter(|name| {
+            match (self.scalar_constants.get(name), next.get(name)) {
+                (Some(Lit::Float(x)), Some(Lit::Float(y))) => x.to_bits() != y.to_bits(),
+                (a, b) => a != b,
+            }
+        }).copied().collect();
+        self.scalar_constants = next;
+        changed
+    }
+
     pub fn new(ws: &Workspace) -> Self {
         Self::new_with_state(ws, HashMap::default())
     }
@@ -758,6 +812,7 @@ impl CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
             state_slots,
+            scalar_constants: scalar_constants(ws),
             recursive_callees: HashSet::default(),
             tail_calls: tail_call_shape(),
             callee_binding: callee_binding_mode(),
@@ -2057,6 +2112,16 @@ fn emit_named_framed_with_statics_impl(
     bound: Option<&CalleeBindingPlan>,
     allocation: Option<AllocationEmission<'_>>,
 ) -> (String, usize) {
+    let mut literals = None;
+    for (id, inst) in func.insts.iter() {
+        if let Inst::Global(name) = inst {
+            if let Some(lit) = ctx.scalar_constants.get(name) {
+                let rewritten = literals.get_or_insert_with(|| func.clone());
+                rewritten.insts[id] = Inst::Const(lit.clone());
+            }
+        }
+    }
+    let func = literals.as_ref().unwrap_or(func);
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
@@ -3597,6 +3662,7 @@ fn render_scope(
 
     let mut em = Emitter {
         enum_box_groups: RefCell::new(HashMap::default()),
+        selection_preds: std::cell::OnceCell::new(),
         ws,
         ctx,
         interner,
@@ -3894,6 +3960,7 @@ type EnumBoxGroups = Vec<(Vec<ustr::Ustr>, (usize, Vec<ustr::Ustr>))>;
 
 struct Emitter<'a> {
     enum_box_groups: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxGroups>>>,
+    selection_preds: std::cell::OnceCell<PredMap>,
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,
     /// The build's one arena, so the symbol a call spells comes from the same
@@ -5463,6 +5530,55 @@ impl Emitter<'_> {
         }
     }
 
+    fn selection_arm(&self, bb: Idx<Block>)
+        -> Option<(Option<(Idx<Cell>, Idx<Inst>)>, Idx<Block>)>
+    {
+        let block = &self.func.blocks[bb];
+        let Term::Goto(join) = block.term else { return None; };
+        let store = match block.insts.as_slice() {
+            [] => None,
+            [s] => match self.func.insts[*s] {
+                Inst::Store { cell, value } => Some((cell, value)),
+                _ => return None,
+            },
+            [l, s] if matches!(self.func.insts[*l], Inst::Load(_) | Inst::Const(_)) => {
+                match self.func.insts[*s] {
+                    Inst::Store { cell, value } if value == *l => Some((cell, value)),
+                    _ => return None,
+                }
+            },
+            _ => return None,
+        };
+        Some((store, join))
+    }
+
+    fn selection_cell_matches(&self, bb: Idx<Block>, cond: Idx<Inst>, cell: Idx<Cell>, operand: Idx<Inst>) -> bool {
+        // A selected cell can still hold the captured comparison operand after
+        // copy propagation. Do not carry that equivalence across effects.
+        let insts = &self.func.blocks[bb].insts;
+        for &id in insts.iter().rev() {
+            match self.func.insts[id] {
+                Inst::Store { cell: target, value } if target == cell => return value == operand,
+                Inst::Load(source) if id == operand && source == cell => return true,
+                Inst::Load(_) | Inst::Const(_) => {},
+                _ if id == cond => {},
+                _ => return false,
+            }
+        }
+        matches!(self.func.insts[operand], Inst::Load(source) if source == cell)
+            && self.inlinable[raw(operand) as usize]
+    }
+
+    fn selection_matches(&self, bb: Idx<Block>, cond: Idx<Inst>, value: Idx<Inst>, operand: Idx<Inst>) -> bool {
+        if value == operand { return true; }
+        match (&self.func.insts[value], &self.func.insts[operand]) {
+            (Inst::Const(Lit::Float(x)), Inst::Const(Lit::Float(y))) => x.to_bits() == y.to_bits(),
+            (Inst::Const(x), Inst::Const(y)) => x == y,
+            (Inst::Load(cell), _) => self.selection_cell_matches(bb, cond, *cell, operand),
+            _ => false,
+        }
+    }
+
     fn numeric_selection(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
         -> Option<(Idx<Cell>, Idx<Inst>, Idx<Inst>, &'static str, Idx<Block>)>
     {
@@ -5479,53 +5595,17 @@ impl Emitter<'_> {
                 && !self.plain_int_to_float(id)
             { return None; }
         }
-        let arm = |bb: Idx<Block>| -> Option<(Option<(Idx<Cell>, Idx<Inst>)>, Idx<Block>)> {
-            let block = &self.func.blocks[bb];
-            let Term::Goto(join) = block.term else { return None; };
-            let store = match block.insts.as_slice() {
-                [] => None,
-                [s] => match self.func.insts[*s] {
-                    Inst::Store { cell, value } => Some((cell, value)),
-                    _ => return None,
-                },
-                [l, s] if self.inlinable[raw(*l) as usize]
-                    && matches!(self.func.insts[*l], Inst::Load(_)) => {
-                    match self.func.insts[*s] {
-                        Inst::Store { cell, value } if value == *l => Some((cell, value)),
-                        _ => return None,
-                    }
-                },
-                _ => return None,
-            };
-            Some((store, join))
-        };
-        let (yes_store, join) = arm(yes)?;
-        let (no_store, no_join) = arm(no)?;
+        let (yes_store, join) = self.selection_arm(yes)?;
+        let (no_store, no_join) = self.selection_arm(no)?;
         if join != no_join { return None; }
         let cell = yes_store.or(no_store)?.0;
         if yes_store.is_some_and(|s| s.0 != cell) || no_store.is_some_and(|s| s.0 != cell) {
             return None;
         }
-        let current_load = |id: Idx<Inst>| {
-            if self.inlinable[raw(id) as usize] { return true; }
-            let insts = &self.func.blocks[bb].insts;
-            let Some(pos) = insts.iter().rposition(|i| *i == id) else { return false; };
-            // A captured comparison operand may stand for the unchanged cell,
-            // but never carry that equivalence across a write or call.
-            insts[pos + 1..].iter().all(|i| *i == cond
-                || matches!(self.func.insts[*i], Inst::Load(_) | Inst::Const(_)))
-        };
         let matches = |store: Option<(Idx<Cell>, Idx<Inst>)>, operand: Idx<Inst>| {
             match store {
-                Some((_, value)) if value == operand => true,
-                Some((_, value)) => match (&self.func.insts[value], &self.func.insts[operand]) {
-                    (Inst::Load(x), Inst::Load(y)) => x == y
-                        && self.inlinable[raw(value) as usize]
-                        && current_load(operand),
-                    _ => false,
-                },
-                None => matches!(self.func.insts[operand], Inst::Load(c) if c == cell)
-                    && current_load(operand),
+                Some((_, value)) => self.selection_matches(bb, cond, value, operand),
+                None => self.selection_cell_matches(bb, cond, cell, operand),
             }
         };
         if matches(yes_store, a) && matches(no_store, b) {
@@ -5535,6 +5615,64 @@ impl Emitter<'_> {
             Some((cell, b, a, if less { "max" } else { "min" }, join))
         } else {
             None
+        }
+    }
+
+    fn numeric_clamp(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
+        -> Option<(Idx<Cell>, Idx<Inst>, f64, f64, Idx<Block>)>
+    {
+        if !self.inlinable[raw(cond) as usize] { return None; }
+        let Inst::FloatLt(value, lower) = self.func.insts[cond] else { return None; };
+        let (Some((cell, low_value)), join) = self.selection_arm(yes)? else { return None; };
+        if !self.selection_matches(bb, cond, low_value, lower) { return None; }
+        let block = &self.func.blocks[no];
+        let Term::Branch { cond: inner, then_bb, else_bb } = block.term else { return None; };
+        if !block.insts.iter().all(|id| *id == inner
+            || matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_))) { return None; }
+        let (inner_cell, upper, inner_value, "min", tail) =
+            self.numeric_selection(no, inner, then_bb, else_bb)? else { return None; };
+        let lo = self.selection_float_literal(bb, lower)?;
+        let hi = self.selection_float_literal(no, upper)?;
+        // The source tests the lower bound first; an inverted range would lose
+        // that priority in a nested min/max expression.
+        if !(lo <= hi) || !self.selection_matches(bb, cond, inner_value, value) { return None; }
+        if tail != join || inner_cell != cell {
+            let (Some((target, forwarded)), end) = self.selection_arm(tail)? else { return None; };
+            if end != join || target != cell
+                || !matches!(self.func.insts[forwarded], Inst::Load(c) if c == inner_cell)
+            { return None; }
+        }
+        if self.inlinable[raw(value) as usize]
+            && !matches!(self.func.insts[value], Inst::Load(_) | Inst::Const(_))
+        { return None; }
+        Some((cell, value, lo, hi, join))
+    }
+
+    fn selection_float_literal(&self, bb: Idx<Block>, operand: Idx<Inst>) -> Option<f64> {
+        if let Inst::Const(Lit::Float(value)) = self.func.insts[operand] { return Some(value); }
+        let Inst::Load(cell) = self.func.insts[operand] else { return None; };
+        let preds = self.selection_preds.get_or_init(|| predecessors(self.func, self.rpo).0);
+        let mut block = bb;
+        let mut limit = self.func.blocks[bb].insts.iter().position(|id| *id == operand)?;
+        let mut seen = HashSet::default();
+        loop {
+            if !seen.insert(block) { return None; }
+            for &id in self.func.blocks[block].insts[..limit].iter().rev() {
+                let mut writes = false;
+                regalloc::cell_defs(&self.func.insts[id], &mut |target| writes |= target == cell);
+                if writes {
+                    return match self.func.insts[id] {
+                        Inst::Store { value, .. } => match self.func.insts[value] {
+                            Inst::Const(Lit::Float(value)) => Some(value),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                }
+            }
+            let [parent] = preds.get(&block)?.as_slice() else { return None; };
+            block = *parent;
+            limit = self.func.blocks[block].insts.len();
         }
     }
 
@@ -5569,6 +5707,16 @@ impl Emitter<'_> {
                 then_bb,
                 else_bb,
             } => {
+                if let Some((cell, value, lo, hi, join)) = self.numeric_clamp(bb, *cond, *then_bb, *else_bb) {
+                    out.push_str("  ");
+                    write_cellname(out, self.func, self.frame, self.cell_colors, cell);
+                    write!(out, " = math.max({lo:?}, math.min({hi:?}, ").unwrap();
+                    self.write_opnd(out, value);
+                    out.push_str("))\n");
+                    self.write_kills(out, &self.kills.on_edge(bb, join));
+                    self.write_goto(out, join);
+                    return;
+                }
                 if let Some((cell, a, b, op, join)) = self.numeric_selection(bb, *cond, *then_bb, *else_bb) {
                     out.push_str("  ");
                     write_cellname(out, self.func, self.frame, self.cell_colors, cell);

@@ -93,6 +93,84 @@ fn non_nil_constant_field_store_keeps_direct_assignment() {
 }
 
 #[test]
+fn numeric_selection_through_local_copies_uses_native_minmax() {
+    for (comparison, yes, no, native) in [
+        ("<", "d", "b", "min"), ("<", "b", "d", "max"),
+        (">", "d", "b", "max"), (">", "b", "d", "min"),
+    ] {
+        let lua = emit_clean(&format!("@nomangle fn choose(a: float, b: float) -> float {{ let d = a + 1.0; return if d {comparison} b {{ {yes} }} else {{ {no} }} }}"), "choose");
+        assert!(lua.contains(&format!("math.{native}(")), "{lua}");
+        check_selection_values(&lua, &format!("local d = a + 1.0; if d {comparison} b then expected = {yes} else expected = {no} end"));
+    }
+    let lua = emit_clean("@nomangle fn choose(a: float, b: float) -> float { let d = if a > b { a } else { b }; return if d < 0.0 { d } else { 0.0 } }", "choose");
+    assert!(lua.contains("math.min(") && lua.contains("math.max("), "{lua}");
+    check_selection_values(&lua, "local d; if a > b then d = a else d = b end; if d < 0 then expected = d else expected = 0 end");
+}
+
+#[test]
+fn numeric_selection_clamp_with_ordered_bounds_uses_native_minmax() {
+    let lua = emit_clean("@nomangle fn choose(a: float) -> float { return if a < -1.0 { -1.0 } else if a > 1.0 { 1.0 } else { a } }", "choose");
+    assert!(lua.contains("math.max(-1.0, math.min(1.0, "), "{lua}");
+    check_selection_values(&lua, "if a < -1 then expected = -1 elseif a > 1 then expected = 1 else expected = a end");
+    let lua = emit_inlined("@nomangle fn choose(a: float) -> float { clamp(a, -1.0, 1.0) }", "choose");
+    assert!(lua.contains("math.max(-1.0, math.min(1.0, "), "{lua}");
+    check_selection_values(&lua, "if a < -1 then expected = -1 elseif a > 1 then expected = 1 else expected = a end");
+    for (lo, hi) in [("0.0", "0.0"), ("-0.0", "0.0"), ("0.0", "-0.0")] {
+        let lua = emit_clean(&format!("@nomangle fn choose(a: float) -> float {{ return if a < {lo} {{ {lo} }} else if a > {hi} {{ {hi} }} else {{ a }} }}"), "choose");
+        assert!(lua.contains("math.max(") && lua.contains("math.min("), "{lua}");
+        check_selection_values(&lua, &format!("if a < {lo} then expected = {lo} elseif a > {hi} then expected = {hi} else expected = a end"));
+    }
+    for src in [
+        "@nomangle fn choose(a: float) -> float { return if a < 1.0 { 1.0 } else if a > -1.0 { -1.0 } else { a } }",
+        "@nomangle fn choose(a: float, b: float) -> float { return if a < b { b } else if a > 1.0 { 1.0 } else { a } }",
+        "@nomangle fn choose(a: float, log: [float]) -> float { return if a < -1.0 { log.push(a); -1.0 } else if a > 1.0 { 1.0 } else { a } }",
+    ] {
+        let lua = emit_clean(src, "choose");
+        assert!(!lua.contains("math.max("), "{lua}");
+    }
+}
+
+fn check_selection_values(lua: &str, reference: &str) {
+    common::require_luajit();
+    let driver = format!(r#"{lua}
+local flushes = 0
+jit.attach(function(what) if what == 'flush' then flushes = flushes + 1 end end, 'trace')
+local values = {{0/0, math.huge, -math.huge, 0.0, -0.0, 1, -1, 1.5, -1.5}}
+for pass = 1,2000 do for _,a in ipairs(values) do for _,b in ipairs(values) do
+  local expected
+  {reference}
+  local got = choose(a,b)
+  assert((got ~= got and expected ~= expected) or
+    (got == expected and (got ~= 0 or 1/got == 1/expected)))
+end end end
+print('selection-ok flushes=' .. flushes)
+"#);
+    let run = std::process::Command::new("luajit").args(["-e", &driver]).output().expect("selection semantics");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.starts_with("selection-ok flushes="), "{stdout}");
+    eprint!("{stdout}");
+}
+
+#[test]
+fn scalar_constants_are_literals_at_use_sites() {
+    for (declarations, result, literal) in [
+        ("const NUMBER: float = -2.5", "float", "-2.5"),
+        ("const ORIGINAL: int = 42; const NUMBER: int = ORIGINAL", "int", "42"),
+        ("const NUMBER: bool = true", "bool", "true"),
+        ("const NUMBER: string = \"literal\"", "string", "\"literal\""),
+    ] {
+        let lua = emit_clean(&format!("{declarations}\nfn choose() -> {result} {{ return NUMBER }}"), "choose");
+        assert!(!lua.contains("NUMBER") && !lua.contains("ORIGINAL"), "{lua}");
+        assert!(lua.contains(literal), "{lua}");
+    }
+    let lua = emit_clean("global NUMBER: int = 42\nfn choose() -> int { NUMBER }", "choose");
+    assert!(lua.contains("NUMBER"), "{lua}");
+    let lua = emit_clean("fn init() -> int { 42 }\nconst NUMBER: int = init()\nfn choose() -> int { NUMBER }", "choose");
+    assert!(lua.contains("NUMBER"), "{lua}");
+}
+
+#[test]
 fn numeric_selection_uses_native_minmax() {
     let lua = emit_clean("fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }", "choose");
     assert!(lua.contains("math.min("), "{lua}");
@@ -111,6 +189,8 @@ fn numeric_selection_rejects_effectful_and_inclusive_branches() {
         "fn choose(a: float, b: float) -> float { return if a < b { a + 1.0 } else { b } }",
         "fn choose(a: float, b: float, log: [float]) -> float { return if a < b { log.push(a); a } else { b } }",
         "fn choose(a: float, b: float) -> float { let smaller = a < b; a += 10.0; return if smaller { a } else { b } }",
+        "fn choose(a: float) -> float { return if a < 0.0 { a } else { -0.0 } }",
+        "fn choose(a: float, b: float) -> float { return if a < b { b = 7.0; a } else { b } }",
     ] {
         let lua = emit_clean(src, "choose");
         assert!(!lua.contains("math.min(") && !lua.contains("math.max("), "{lua}");

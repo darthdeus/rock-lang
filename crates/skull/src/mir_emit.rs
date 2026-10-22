@@ -2502,6 +2502,8 @@ pub fn emit_workspace_mir_for_package_test(
 #[derive(Clone)]
 struct Chunk {
     lua: String,
+    /// Includes hoisted closures and spliced bodies, unlike init-ordering refs.
+    literal_globals: Vec<Ustr>,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     /// Source and eligibility dependencies, including residual callees.
     deps: FxHashSet<FuncRef>,
@@ -3387,6 +3389,7 @@ fn emit_coroutine_chunk(
     // bodies this chunk's TEXT contains.
     Ok(Chunk {
         lua,
+        literal_globals: skull_mir::reach::global_ref_names(mf),
         allocation_bodies,
         embedded_deps: deps.clone(),
         deps,
@@ -3683,6 +3686,7 @@ fn emit_body_chunk_with_mutation(
     let calls = skull_mir::reach::call_targets(&mf);
     Ok(Chunk {
         lua,
+        literal_globals: skull_mir::reach::global_ref_names(&mf),
         allocation_bodies,
         deps,
         embedded_deps,
@@ -4082,6 +4086,7 @@ fn emit_spec_chunk(
     times.regalloc += regalloc;
     times.regalloc_work |= regalloc > Duration::ZERO;
     let mut statics = mf.statics.clone();
+    let literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
     emit_pass_nested_fns(
@@ -4102,6 +4107,7 @@ fn emit_spec_chunk(
         allocation_bodies,
         embedded_deps: deps.clone(),
         deps,
+        literal_globals,
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
@@ -8295,6 +8301,11 @@ fn update_chunk_cache(
     FxHashSet<skull_mir::code_identity::CodeIdentity>,
 ), CompilerError> {
     let cache = self;
+    let changed_literals = if reinferred.iter().any(|(_, owner)| matches!(owner, BodyOwner::Global(_))) {
+        cache.cg.refresh_scalar_constants(ws)
+    } else {
+        FxHashSet::default()
+    };
     let mut fingerprint_identities = FxHashSet::default();
     let shader_delta_requests = cache.repair_stats.shader_delta_requests;
     let shader_roots_examined = cache.repair_stats.shader_roots_examined;
@@ -8597,6 +8608,12 @@ fn update_chunk_cache(
     // IS its base instance, and a declaration the graph never reached still has
     // a chunk here that an edit can invalidate.
     let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
+    if !changed_literals.is_empty() {
+        affected.extend(cache.chunks.iter().filter_map(|(body, chunk)| {
+            chunk.as_ref().ok().filter(|chunk| chunk.literal_globals.iter()
+                .any(|name| changed_literals.contains(name))).map(|_| body.clone())
+        }));
+    }
     cache.repair_stats.declaration_lookup_requests = changed.len();
     for c in &changed {
         let instances: Vec<Instance> = cache.graph.instances_of(*c).cloned().collect();
@@ -8898,10 +8915,9 @@ fn assemble_overlay(
     // use -- `BodyInference.deps` (the names each body references). Globals are
     // ALWAYS re-inferred on a body edit, so these deps are fresh (no caching, no
     // staleness). Each affected const emits an UNGUARDED
-    // `<NAME> = __skull_ginit_<NAME>()` line in dependency order; a CHANGED const
-    // also re-emits its `__skull_ginit_<NAME>` fn (new value), while an unchanged
-    // dependent reuses the ginit already in main.lua and only re-runs its line
-    // (after its upstream is reassigned). Mutable globals are never re-emitted:
+    // `<NAME> = __skull_ginit_<NAME>()` line in dependency order. A dependent's
+    // ginit can embed an upstream scalar literal, so its definition is refreshed
+    // along with the edited const. Mutable globals are never re-emitted:
     // their guard preserves the live value across reload.
     let t_const_inits = Instant::now();
     if !cache.changed_consts_since_full.is_empty() {
@@ -8935,7 +8951,6 @@ fn assemble_overlay(
             mid: ModuleId,
             gid: Idx<bone_semantic::hir::GlobalDef>,
             name: Ustr,
-            changed: bool,
             reach: FxHashSet<Ustr>,
         }
         let mut const_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
@@ -8957,17 +8972,17 @@ fn assemble_overlay(
             let reach = forward_reach(&deps, name);
             let changed = changed_names.contains(&name);
             if changed || reach.iter().any(|n| changed_names.contains(n)) {
-                affected.push(Affected { mid, gid, name, changed, reach });
+                affected.push(Affected { mid, gid, name, reach });
             }
         }
         let affected_names: FxHashSet<Ustr> = affected.iter().map(|a| a.name).collect();
 
-        // Emit each affected const's ginit fn (changed only) now; build its init
+        // Emit each affected const's ginit fn now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<GlobalInit> = Vec::new();
         let mut definitions = LuaDefinitionBuffer::new(true);
         for a in &affected {
-            let line = if a.changed {
+            let line = {
                 let unit = emit_global_unit(
                     ws,
                     &cache.scx,
@@ -8998,16 +9013,6 @@ fn assemble_overlay(
                             a.name
                         ))
                     })?
-            } else {
-                // Unchanged dependent: its ginit is already in main.lua; re-run only
-                // the line so it recomputes from the upstream's new value.
-                let g = &ws.module(a.mid).globals[a.gid];
-                let target = global_init_target(ws, &cache.scx, &cache.cg, g)?;
-                format!(
-                    "{} = {}()\n",
-                    target,
-                    crate::global_init_fn_name(skull_mir::mangle::symbol_of_key(a.name).as_str())
-                )
             };
             let edges: Vec<Ustr> = a
                 .reach
@@ -9160,7 +9165,7 @@ pub fn emit_overlay_with_span_edits(
 ) -> Result<MirEmit, CompilerError> {
     cache.concrete.detach_plan_store();
     let t0 = Instant::now();
-    // `cg` is cached (interface-derived, identical on body edits) -- no rebuild.
+    // The retained context refreshes scalar values inside update_chunk_cache.
     let t_cg = t0.elapsed();
     let t1 = Instant::now();
     // `scx` is maintained incrementally inside `update_chunk_cache` (per-body diff)
