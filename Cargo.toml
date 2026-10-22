@@ -5,6 +5,7 @@ members = [
     "crates/skull",
     "crates/skull-codegen-shader",
     "crates/skull-codegen-glsl",
+    "crates/stone-glsl-runner",
     "crates/skull-codegen-wgsl",
     "crates/skull-codegen-lua",
     "crates/skull-codegen-js",

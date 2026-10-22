@@ -139,6 +139,7 @@ pub struct Args {
     pub test_filter: Option<String>,
     pub test_filter_explicit: bool,
     pub show_passing: bool,
+    pub skip_gpu: bool,
     pub all_rejections: bool,
     pub rejections_out: Option<String>,
     pub output: Option<String>,
@@ -300,6 +301,8 @@ impl Args {
             .arg(Arg::new("files").num_args(0..))
             .arg(Arg::new("filter").long("filter").value_name("PAT")
                 .help("For `rock test`: run @tests whose function name or source path contains a comma-separated substring."))
+            .arg(Arg::new("skip-gpu").long("skip-gpu").action(ArgAction::SetTrue)
+                .help("For GLSL tests and shader-validate: skip profiles with no display or GL driver; available profiles still run."))
             .arg(Arg::new("output").long("output").alias("out"))
             .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
@@ -404,6 +407,7 @@ impl Args {
             test_filter: test_filter.clone().or_else(|| std::env::var("ROCK_TEST_FILTER").ok()),
             test_filter_explicit: test_filter.is_some(),
             show_passing: Default::default(),
+            skip_gpu: m.get_flag("skip-gpu"),
             all_rejections: Default::default(),
             rejections_out: Default::default(),
             output: m.get_one::<String>("output").cloned(),

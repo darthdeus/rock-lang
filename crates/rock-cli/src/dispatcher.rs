@@ -262,6 +262,15 @@ impl CommandContext {
                     }
                 }
                 OptionRule::TestFilter => self.require_test_filter_support()?,
+                OptionRule::SkipGpu => {
+                    if self.args.skip_gpu
+                        && self.args.command.cli_name() != "shader-validate"
+                        && !(self.args.command.operation() == Some(Operation::Test)
+                            && self.args.backend == Backend::Glsl)
+                    {
+                        anyhow::bail!("`--skip-gpu` is supported only by `rock test --backend glsl` and `rock shader-validate`");
+                    }
+                }
             }
         }
         Ok(())

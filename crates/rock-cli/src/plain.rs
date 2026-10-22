@@ -130,7 +130,7 @@ pub static COMMANDS: &[&CliCommand] = &[
     }) },
     &SHADER,
     &CliCommand { name: "shader-validate", route: Route::Direct(|cx| {
-        rock_cli::glsl_test::shader_validate(&cx.args.files)
+        rock_cli::glsl_test::shader_validate(&cx.args.files, cx.args.skip_gpu)
     }) },
     &CliCommand { name: "docs-index", route: Route::Direct(|cx| {
         rock_cli::docs_index::run(&cx.args.files, cx.args.output.as_deref())
@@ -285,7 +285,7 @@ pub static GLSL: BackendSpec = BackendSpec {
         omitted: None,
         operations: &[(Operation::Test, |cx| {
             let files = cx.get_test_files()?;
-            rock_cli::glsl_test::glsl_test(&files)
+            rock_cli::glsl_test::glsl_test(&files, cx.args.skip_gpu)
         })],
         filter_rejection: Some("`rock test` filtering is supported only by the skull/bone test runner"),
     };
@@ -336,7 +336,7 @@ fn js_run(_: &CommandContext) -> Result<()> {
     unreachable!("JS dispatch requires the `backend-js` feature")
 }
 
-pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter];
+pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter, OptionRule::SkipGpu];
 
 pub const RUNTIME_SERVICES: registry::RuntimeServices = registry::RuntimeServices {
     resolve_project_dir: |path| Ok(std::path::PathBuf::from(path)),

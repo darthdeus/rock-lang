@@ -1,0 +1,18 @@
+[package]
+name = "stone-glsl-runner"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "stone-glsl-runner"
+path = "src/main.rs"
+
+[dependencies]
+sdl2 = { version = "0.38" }
+glow = "0.17"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

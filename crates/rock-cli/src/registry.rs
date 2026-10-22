@@ -409,6 +409,8 @@ pub enum OptionRule {
     /// `--filter` / ROCK_TEST_FILTER: only `rock test`, and only on a backend
     /// without a `filter_rejection`.
     TestFilter,
+    /// `--skip-gpu`: GLSL tests and shader validation only.
+    SkipGpu,
 }
 
 impl OptionRule {

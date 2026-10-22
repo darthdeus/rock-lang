@@ -24,9 +24,9 @@
 //! (spawned per unit+profile), so the `rock` compiler/LSP binary never links
 //! SDL2. The runner is a workspace artifact, so a missing/broken runner is a
 //! hard error (a gate that can't run must not read as green); only a genuine
-//! no-display/driver environment (runner exit 2) skips-with-log, and the CLI
-//! still exits non-zero when that leaves zero verdicts. A GL error mid-run is
-//! a loud FAIL, never a silent skip.
+//! no-display/driver environment (runner exit 2) may be skipped with the explicit
+//! `--skip-gpu` option. Without it, every profile requires a display and GL
+//! driver. A GL error mid-run is a loud FAIL, never a silent skip.
 
 use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{compare_value, parse_skull_markers, reason_histogram};
@@ -56,7 +56,7 @@ pub struct GlslProfileSummary {
     /// Tier-2 SKIP reasons (emission rejected), bucketed count-desc.
     pub skip_reasons: Vec<(String, usize)>,
     /// True once a GL context was created for this profile; false = no display
-    /// / driver -> the value verdicts were skipped-with-log.
+    /// / driver -> explicitly skipped GPU verdicts.
     pub gl_available: bool,
 }
 
@@ -83,9 +83,9 @@ impl GlslSuiteSummary {
 
 /// `rock test --backend glsl` entry: run, print per-profile lines + the
 /// end-of-run summary, exit non-zero on any FAIL or unit failure.
-pub fn glsl_test(paths: &[String]) -> Result<()> {
+pub fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let start = Instant::now();
-    let summary = glsl_test_run(paths, true)?;
+    let summary = glsl_test_run(paths, true, skip_gpu)?;
 
     let total_failed: usize = summary.per_profile.iter().map(|p| p.failed.len()).sum();
     println!(
@@ -134,14 +134,7 @@ pub fn glsl_test(paths: &[String]) -> Result<()> {
             summary.unit_failures.to_string().red()
         );
     }
-    let zero_verdicts = summary.per_profile.iter().all(|p| !p.gl_available);
-    if zero_verdicts {
-        println!(
-            "{}",
-            "no GL context for any profile -- zero GLSL verdicts ran".red()
-        );
-    }
-    if total_failed > 0 || summary.unit_failures > 0 || zero_verdicts {
+    if total_failed > 0 || summary.unit_failures > 0 {
         crate::ablation_report::exit_with_census(1);
     }
     Ok(())
@@ -149,16 +142,16 @@ pub fn glsl_test(paths: &[String]) -> Result<()> {
 
 /// Run the suite; optionally print per-unit lines as they complete. Public for
 /// the ratchet test (`print = false`).
-pub fn glsl_test_run(paths: &[String], print: bool) -> Result<GlslSuiteSummary> {
+pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<GlslSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
     // A missing runner is a hard error (workspace artifact -- build it). Probe
-    // once per profile: exit-2 (no display/driver) -> that profile's verdicts
-    // skip-with-log; any other probe anomaly is a hard error.
+    // once per profile: exit 2 requires an explicit GPU opt-out; any other
+    // probe anomaly is a hard error.
     let runner = locate_runner()?;
     let mut gl_available: [bool; 2] = [false, false];
     for (i, (pname, _)) in PROFILES.iter().enumerate() {
-        gl_available[i] = probe_gl(&runner, pname)?;
+        gl_available[i] = probe_gl(&runner, pname, skip_gpu)?;
     }
 
     let mut summary = GlslSuiteSummary {
@@ -510,15 +503,21 @@ fn jobs_json(runnable: &[(String, ValueExpect, ValueTestShaders)]) -> String {
 
 /// Probe: can the runner create a GL context for `profile` here? An empty job
 /// exercises context creation and exits 0 on success, 2 on no-display/driver.
-/// Exit 2 is the one sanctioned skip; a spawn failure or any other exit code is
-/// a broken harness -> hard error, never a skip.
-fn probe_gl(runner: &std::path::Path, profile: &str) -> Result<bool> {
+/// Only an explicit GPU opt-out permits skipping exit 2. A spawn failure or
+/// any other exit code remains a hard error.
+fn probe_gl(runner: &std::path::Path, profile: &str, skip_gpu: bool) -> Result<bool> {
     match spawn_runner(runner, profile, "[]") {
         Ok((Some(0), _, _)) => Ok(true),
         Ok((Some(2), _, stderr)) => {
+            if !skip_gpu {
+                crate::bail!(
+                    "no display or GL driver for profile {profile}: {}. Install a display/GL driver or pass --skip-gpu to skip unavailable GPU profiles",
+                    stderr.trim()
+                );
+            }
             log::warn!(
                 target: "GLSL",
-                "no GL context for profile {profile}: {}; verdicts skipped",
+                "no GL context for profile {profile}: {}; verdicts skipped (--skip-gpu)",
                 stderr.trim()
             );
             Ok(false)
@@ -572,7 +571,7 @@ pub struct ValidateProfileSummary {
     pub passed: usize,
     /// FAIL detail lines (driver compile/link log, or a harness breach).
     pub failed: Vec<String>,
-    /// False = no GL context for this profile (skipped-with-log).
+    /// False = no GL context for this profile (explicitly skipped).
     pub gl_available: bool,
 }
 
@@ -584,13 +583,13 @@ pub struct ValidateSummary {
 }
 
 /// `rock shader-validate <project>...`: print verdicts, exit non-zero on any
-/// FAIL or when zero verdicts ran (no GL for either profile).
-pub fn shader_validate(dirs: &[String]) -> Result<()> {
+/// FAIL; missing GL profiles require the explicit GPU opt-out.
+pub fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
     if dirs.is_empty() {
         crate::bail!("rock shader-validate: usage: rock shader-validate <project-dir> [project-dir...]");
     }
     let start = Instant::now();
-    let summary = shader_validate_run(dirs, true)?;
+    let summary = shader_validate_run(dirs, true, skip_gpu)?;
 
     let shader_total: usize = summary.projects.iter().map(|(_, n)| n).sum();
     println!(
@@ -620,11 +619,7 @@ pub fn shader_validate(dirs: &[String]) -> Result<()> {
             println!("    {} {}", "FAIL".red(), detail);
         }
     }
-    let zero_verdicts = summary.per_profile.iter().all(|p| !p.gl_available);
-    if zero_verdicts {
-        println!("{}", "no GL context for any profile -- zero shader verdicts ran".red());
-    }
-    if any_failed || zero_verdicts {
+    if any_failed {
         crate::ablation_report::exit_with_census(1);
     }
     Ok(())
@@ -634,11 +629,11 @@ pub fn shader_validate(dirs: &[String]) -> Result<()> {
 /// (missing runner, a project that fails to build, a pair that fails to EMIT)
 /// are `Err` -- the same pairs emit inside every game build, so an emit failure
 /// here is a regression or a profile-specific emitter gap, never a skip.
-pub fn shader_validate_run(dirs: &[String], print: bool) -> Result<ValidateSummary> {
+pub fn shader_validate_run(dirs: &[String], print: bool, skip_gpu: bool) -> Result<ValidateSummary> {
     let runner = locate_runner()?;
     let mut gl_available: [bool; 2] = [false, false];
     for (i, (pname, _)) in PROFILES.iter().enumerate() {
-        gl_available[i] = probe_gl(&runner, pname)?;
+        gl_available[i] = probe_gl(&runner, pname, skip_gpu)?;
     }
 
     let mut summary = ValidateSummary {
