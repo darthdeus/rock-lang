@@ -105,3 +105,42 @@ fn number_tostring_parity_luajit_vs_node() {
         "number formatting diverged between luajit and node"
     );
 }
+
+fn json_float_roundtrip(backend: &str) {
+    if !both_backends_available("json_float_roundtrip") {
+        return;
+    }
+    let ws = crate::common::ws_with_named(
+        FIXTURE_MOD,
+        include_str!("fixtures/json_float_roundtrip.rock"),
+    );
+    let name = "test_json_float_roundtrip";
+    let lines = if backend == "lua" {
+        let mid = *ws.module_ids.get(&ustr::Ustr::from(FIXTURE_MOD)).expect("fixture module id");
+        let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("lua emit").lua;
+        lua.push_str(&format!("\n{name}()\n"));
+        run_lines("luajit", "json_roundtrip", "lua", &lua)
+    } else {
+        let roots = [(find_fn(&ws, name), name.to_string())];
+        let defs = skull_codegen_js::emit::emit_with_closure(&ws, &roots)
+            .unwrap_or_else(|e| panic!("closure emit: {}", e.message));
+        let prelude = skull_codegen_js::assemble_prelude(
+            &defs, true, skull_codegen_js::JS_NODE_HOST, &[],
+        );
+        let js = format!("{prelude}\n{defs}\n{name}();\n");
+        run_lines("node", "json_roundtrip", "js", &js)
+    };
+    let mut expected = vec!["true".to_string(); 14 * 4 + 6 + 4];
+    expected.push(if backend == "lua" { "0.10000000000000001" } else { "0.1" }.to_string());
+    assert_eq!(lines, expected, "{backend} JSON must recover the exact input float");
+}
+
+#[test]
+fn json_float_roundtrip_luajit() {
+    json_float_roundtrip("lua");
+}
+
+#[test]
+fn json_float_roundtrip_node() {
+    json_float_roundtrip("js");
+}

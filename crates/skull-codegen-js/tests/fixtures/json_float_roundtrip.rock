@@ -1,0 +1,26 @@
+fn test_json_float_roundtrip() {
+    let values = [0.12345678901234566, -0.12345678901234566, 1.0 / 3.0,
+        0.1, 1.2345678901234567e-200, -1.2345678901234567e-200, 5e-324,
+        123456789012345.0, -123456789012345.0, 9007199254740992.0,
+        1.7976931348623157e308, 0.0, -0.0, 42.0]
+    for value in values {
+        let scalar = json_float(value)
+        print(json_as_float(json_decode(json_encode(scalar)).unwrap()).unwrap() == value)
+        print(json_as_float(json_decode(json_encode_pretty(scalar)).unwrap()).unwrap() == value)
+        let nested = json_array([json_array([scalar])])
+        for text in [json_encode(nested), json_encode_pretty(nested)] {
+            let outer = json_as_array(json_decode(text).unwrap()).unwrap()
+            let inner = json_as_array(outer[0]).unwrap()
+            print(json_as_float(inner[0]).unwrap() == value)
+        }
+    }
+    for value in [0.0 / 0.0, 1.0 / 0.0, -1.0 / 0.0] {
+        print(json_encode(json_float(value)) == "null")
+        print(json_encode_pretty(json_float(value)) == "null")
+    }
+    print(json_encode(json_int(42)) == "42")
+    print(json_encode(json_float(42.0)) == "42")
+    print(json_encode(json_float(-0.0)) == "-0")
+    print(json_encode(json_float(1e15)) == "1e+15")
+    print(json_encode(json_float(0.1)))
+}

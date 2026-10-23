@@ -13,6 +13,8 @@
 // Engine-owned fns keep their siblings in `js_ffi.rock`; only stdlib-owned ones
 // belong here.
 
+@inline inline(js) fn format_float_roundtrip(value: float) -> string = "return String(value);"
+
 // The shared slot core. Its luajit sibling in `unified.rock` is the contract;
 // this is the same free list over a 0-based JS array. Column Maps are a luajit
 // storage form, so on this backend the only consumer is `Arena<T>`.

@@ -314,9 +314,13 @@ fn format_float(f: float) -> string {
     if f == 1.0 / 0.0 || f == -1.0 / 0.0 { return "null" }
     let i = f as int
     if (i as float) == f {
-        return "{i}"
+        let text = "{i}"
+        // Large integers can lose digits through the backend's tostring.
+        if (f > -1e14 && f < 1e14) || text.parse_float().unwrap() == f {
+            return text
+        }
     }
-    return "{f}"
+    return format_float_roundtrip(f)
 }
 
 // ---------------------------------------------------------------------------
