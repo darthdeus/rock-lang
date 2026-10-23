@@ -25,6 +25,7 @@ test-utils = { workspace = true }
 
 [dependencies]
 rock-core = { workspace = true }
+rock-stdlib = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
 rustc-hash = { workspace = true }

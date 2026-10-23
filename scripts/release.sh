@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the release archive: a --release `rock` binary plus the stdlib and
-# docs, laid out as bin/rock beside stdlib/ so the binary resolves its
+# docs, laid out as bin/rock beside stdlib/ and packages/ so the binary resolves its
 # runtime sources without a checkout.
 #
 #   scripts/release.sh
@@ -20,6 +20,7 @@ rm -rf "$stage"
 mkdir -p "$stage/bin"
 cp "$target_dir/release/rock" "$stage/bin/rock"
 cp -r "$root/stdlib" "$stage/stdlib"
+cp -r "$root/packages" "$stage/packages"
 cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$root/README.md" "$stage/"
 tar -czf "$stage.tar.gz" -C "$root/dist" "$name"
 ls -l "$stage.tar.gz"

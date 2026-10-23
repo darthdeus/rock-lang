@@ -80,12 +80,7 @@ fn resolve_stdlib(
     if let Some(dir) = override_dir {
         return StdlibSource::Dir(dir);
     }
-    let release_stdlib = exe
-        .and_then(Path::parent)
-        .filter(|bin| bin.file_name().is_some_and(|n| n == "bin"))
-        .and_then(Path::parent)
-        .map(|root| root.join("stdlib"))
-        .filter(|dir| is_dir(dir));
+    let release_stdlib = install_sources(exe, "stdlib").filter(|dir| is_dir(dir));
     if let Some(dir) = release_stdlib {
         return StdlibSource::Dir(dir);
     }
@@ -93,6 +88,58 @@ fn resolve_stdlib(
         return StdlibSource::Dir(build_checkout_stdlib.to_path_buf());
     }
     StdlibSource::Embedded
+}
+
+/// Resolve a named package from this toolchain's sources. An explicit override
+/// or existing install package directory is authoritative: a missing package
+/// there must not borrow sources from a different version's checkout.
+pub fn package_dir(name: &str) -> Result<PathBuf, String> {
+    resolve_package(
+        name,
+        std::env::var_os("ROCK_PACKAGES_DIR").map(PathBuf::from),
+        std::env::current_exe().ok().as_deref(),
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages")),
+    )
+}
+
+fn resolve_package(
+    name: &str,
+    override_dir: Option<PathBuf>,
+    exe: Option<&Path>,
+    checkout: &Path,
+) -> Result<PathBuf, String> {
+    if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+        return Err(format!("invalid package name `{name}`; expected letters, digits, '-' or '_'"));
+    }
+    let mut tried = Vec::new();
+    let mut lookup = |root: &Path| {
+        let package = root.join(name);
+        tried.push(package.join("stick.toml"));
+        package
+    };
+    let package = if let Some(root) = override_dir {
+        lookup(&root)
+    } else if let Some(root) = install_sources(exe, "packages").filter(|root| root.is_dir()) {
+        lookup(&root)
+    } else {
+        // Include an absent install location in diagnostics before source lookup.
+        if let Some(root) = install_sources(exe, "packages") {
+            lookup(&root);
+        }
+        lookup(checkout)
+    };
+    if package.join("stick.toml").is_file() {
+        return Ok(package);
+    }
+    Err(format!("cannot resolve package `{name}`; looked for {}",
+        tried.iter().map(|p| format!("`{}`", p.display())).collect::<Vec<_>>().join(", ")))
+}
+
+fn install_sources(exe: Option<&Path>, directory: &str) -> Option<PathBuf> {
+    exe.and_then(Path::parent)
+        .filter(|bin| bin.file_name().is_some_and(|n| n == "bin"))
+        .and_then(Path::parent)
+        .map(|root| root.join(directory))
 }
 
 /// All stdlib files: the first rung of [`stdlib_origin`]'s order that resolves
@@ -183,6 +230,56 @@ fn embedded_source(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn package_fixture(root: &Path, value: &str) -> PathBuf {
+        let package = root.join("probe");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("stick.toml"), value).unwrap();
+        package
+    }
+
+    #[test]
+    fn packages_use_override_then_install_then_build_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("install/bin/rock");
+        let checkout = temp.path().join("checkout/packages");
+        let built = package_fixture(&checkout, "build");
+        assert_eq!(resolve_package("probe", None, Some(&exe), &checkout).unwrap(), built);
+        let installed = package_fixture(&temp.path().join("install/packages"), "install");
+        assert_eq!(resolve_package("probe", None, Some(&exe), &checkout).unwrap(), installed);
+        let override_root = temp.path().join("override");
+        let overridden = package_fixture(&override_root, "override");
+        assert_eq!(resolve_package("probe", Some(override_root), Some(&exe), &checkout).unwrap(), overridden);
+    }
+
+    #[test]
+    fn a_missing_package_never_borrows_from_another_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("install/bin/rock");
+        let checkout = temp.path().join("checkout/packages");
+        package_fixture(&checkout, "build");
+        let installed = temp.path().join("install/packages");
+        std::fs::create_dir_all(&installed).unwrap();
+        let error = resolve_package("probe", None, Some(&exe), &checkout).unwrap_err();
+        assert!(error.contains("probe") && error.contains(&installed.join("probe/stick.toml").display().to_string()), "{error}");
+        let override_root = temp.path().join("missing-override");
+        let error = resolve_package("probe", Some(override_root.clone()), Some(&exe), &checkout).unwrap_err();
+        assert!(error.contains(&override_root.join("probe/stick.toml").display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn missing_packages_name_every_searched_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("install/bin/rock");
+        let checkout = temp.path().join("checkout/packages");
+        let error = resolve_package("absent", None, Some(&exe), &checkout).unwrap_err();
+        for path in [temp.path().join("install/packages/absent/stick.toml"), checkout.join("absent/stick.toml")] {
+            assert!(error.contains(&path.display().to_string()), "{error}");
+        }
+        for name in ["", "..", "../escape", "/absolute", "a/b", "a\\b"] {
+            assert!(resolve_package(name, None, Some(&exe), &checkout).unwrap_err().contains("invalid package name"));
+        }
+    }
 
     const CHECKOUT: &str = "/build/rock/stdlib";
 

@@ -1,0 +1,5 @@
+[package]
+name = "package-probe"
+type = "lib"
+[language]
+modules = "v1"

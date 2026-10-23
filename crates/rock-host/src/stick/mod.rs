@@ -397,7 +397,7 @@ pub enum Dependency {
 
 #[derive(Debug, Clone)]
 pub struct DetailedDependency {
-    pub path: String,
+    pub source: DependencySource,
     /// Channels the dependency compiles into. Empty = every channel. This is
     /// the declared gate for development-only packages (such as an agent bridge):
     /// a shipping channel excludes the package from the compile set entirely,
@@ -407,6 +407,13 @@ pub struct DetailedDependency {
     /// (modules spec 3.2). Rejected when the edge lacks it; a removable
     /// warning when the provider is already v1.
     pub allow_legacy: bool,
+}
+
+/// A dependency has exactly one source; package names refer to this toolchain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DependencySource {
+    Path(String),
+    Package(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -440,26 +447,36 @@ impl<'de> serde::Deserialize<'de> for DetailedDependency {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = DetailedDependency;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a table with a path key")
+                write!(f, "a table with exactly one path or package key")
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<DetailedDependency, A::Error> {
-                let mut path: Option<String> = None;
+                let mut source = None;
                 let mut channels: Vec<String> = Vec::new();
                 let mut allow_legacy = false;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "path" => { path = Some(map.next_value()?); }
+                        "path" | "package" => {
+                            if source.is_some() {
+                                return Err(serde::de::Error::custom("dependency requires exactly one path or package key"));
+                            }
+                            let value: String = map.next_value()?;
+                            source = Some(if key == "path" {
+                                DependencySource::Path(value)
+                            } else {
+                                DependencySource::Package(value)
+                            });
+                        }
                         "channels" => { channels = map.next_value()?; }
                         "allow_legacy" => { allow_legacy = map.next_value()?; }
                         other => {
                             return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in dependency; known keys: path, channels, allow_legacy"
+                                "unknown key `{other}` in dependency; known keys: path, package, channels, allow_legacy"
                             )));
                         }
                     }
                 }
-                let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(DetailedDependency { path, channels, allow_legacy })
+                let source = source.ok_or_else(|| serde::de::Error::custom("dependency requires exactly one path or package key"))?;
+                Ok(DetailedDependency { source, channels, allow_legacy })
             }
         }
         d.deserialize_map(Vis)
@@ -472,7 +489,7 @@ impl<'de> serde::Deserialize<'de> for Dependency {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = Dependency;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a path string or table with a path key")
+                write!(f, "a path string or table with exactly one path or package key")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Dependency, E> {
                 Ok(Dependency::Path(s.to_string()))
@@ -480,24 +497,9 @@ impl<'de> serde::Deserialize<'de> for Dependency {
             fn visit_string<E: serde::de::Error>(self, s: String) -> Result<Dependency, E> {
                 Ok(Dependency::Path(s))
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Dependency, A::Error> {
-                let mut path: Option<String> = None;
-                let mut channels: Vec<String> = Vec::new();
-                let mut allow_legacy = false;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "path" => { path = Some(map.next_value()?); }
-                        "channels" => { channels = map.next_value()?; }
-                        "allow_legacy" => { allow_legacy = map.next_value()?; }
-                        other => {
-                            return Err(serde::de::Error::custom(format!(
-                                "unknown key `{other}` in dependency; known keys: path, channels, allow_legacy"
-                            )));
-                        }
-                    }
-                }
-                let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(Dependency::Detailed(DetailedDependency { path, channels, allow_legacy }))
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Dependency, A::Error> {
+                <DetailedDependency as serde::Deserialize>::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(Dependency::Detailed)
             }
         }
         d.deserialize_any(Vis)
@@ -1200,6 +1202,25 @@ mod tests {
     }
 
     #[test]
+    fn toolchain_package_dependencies_resolve_through_the_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"consumer\"\n[language]\nmodules = \"v1\"\n[dependencies]\nprobe = { package = \"package-probe\" }\n"
+        ).unwrap();
+        let graph = graph::PackageGraph::build_with_channel(temp.path(), &cfg, "dev").unwrap();
+        let provider = graph.packages().iter().find(|p| p.manifest_name == "package-probe").unwrap();
+        assert_eq!(provider.root, std::fs::canonicalize(rock_stdlib::package_dir("package-probe").unwrap()).unwrap());
+    }
+
+    #[test]
+    fn dependency_tables_require_exactly_one_source() {
+        for source in ["", "path = \"../x\", package = \"x\"", "package = \"x\", package = \"y\""] {
+            let text = format!("[package]\nname = \"consumer\"\n[dependencies]\nx = {{ {source} }}\n");
+            assert!(StickConfig::new_from_str(&text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
     fn a_channel_scoped_dependency_parses_its_channel_list() {
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[dependencies]\ndev-only = { path = \"../dep\", channels = [\"dev\"] }\n",
@@ -1208,7 +1229,7 @@ mod tests {
         let Dependency::Detailed(dep) = &cfg.dependencies["dev-only"] else {
             panic!("inline table dependency must parse as detailed");
         };
-        assert_eq!(dep.path, "../dep");
+        assert_eq!(dep.source, DependencySource::Path("../dep".into()));
         assert_eq!(dep.channels, vec!["dev".to_string()]);
     }
 

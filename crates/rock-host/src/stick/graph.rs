@@ -9,7 +9,7 @@
 //! compilation-unit loader, watch, StateSchema metadata) reads facts from
 //! here instead of re-walking manifests.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -168,15 +168,19 @@ impl Builder {
             .collect();
         direct.sort_by(|a, b| a.0.cmp(b.0));
         for (key, dep) in direct {
-            let dep_path = match dep {
-                super::Dependency::Path(path) => path,
-                super::Dependency::Detailed(detailed) => detailed.path.as_str(),
+            let (dep_manifest_dir, dep_allow_legacy, package_name) = match dep {
+                super::Dependency::Path(path) => (manifest_dir.join(path), false, None),
+                super::Dependency::Detailed(detailed) => {
+                    let (dir, name) = match &detailed.source {
+                        super::DependencySource::Path(path) => (manifest_dir.join(path), None),
+                        super::DependencySource::Package(name) => (
+                            rock_stdlib::package_dir(name).map_err(|e| anyhow!("dependency `{key}`: {e}"))?,
+                            Some(name),
+                        ),
+                    };
+                    (dir, detailed.allow_legacy, name)
+                }
             };
-            let dep_allow_legacy = match dep {
-                super::Dependency::Path(_) => false,
-                super::Dependency::Detailed(detailed) => detailed.allow_legacy,
-            };
-            let dep_manifest_dir = manifest_dir.join(dep_path);
             let dep_manifest = dep_manifest_dir.join("stick.toml");
             if !dep_manifest.exists() {
                 return Err(anyhow!(
@@ -184,7 +188,16 @@ impl Builder {
                     dep_manifest_dir.display()
                 ));
             }
-            let dep_config = StickConfig::from_path(&dep_manifest)?;
+            let dep_config = StickConfig::from_path(&dep_manifest)
+                .with_context(|| format!("dependency `{key}` at `{}`", dep_manifest.display()))?;
+            if let Some(name) = package_name {
+                if dep_config.package.name != *name {
+                    return Err(anyhow!(
+                        "package `{name}` at `{}` declares name `{}`",
+                        dep_manifest.display(), dep_config.package.name
+                    ));
+                }
+            }
             let target = self.visit(&dep_manifest_dir, &dep_config, channel)?;
             dependencies.push(PackageEdge {
                 alias: normalize_dep_key(key)?,
