@@ -51,6 +51,8 @@ mod match_fold;
 mod misc_intrinsics;
 #[path = "module_globals.rs"]
 mod module_globals;
+#[path = "qualified_globals.rs"]
+mod qualified_globals;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
 

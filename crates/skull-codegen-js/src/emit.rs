@@ -20,6 +20,7 @@ use skull_mir::code_identity::{
 };
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
+use skull_mir::mangle::{ident_of_key, symbol_of_key};
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 
 /// The `Lit::Omitted` marker, defined in [`crate::JS_TABLE_PRIM`].
@@ -58,7 +59,7 @@ fn collect_nested_code_identities(
 /// [`emit_with_closure`]; empty for the standalone [`emit_fn`] entry.
 #[derive(Clone, Default)]
 pub struct GlobalCtx {
-    /// Compiler-assigned Session slots for mutable globals and statics.
+    /// Compiler-assigned Session slots, keyed by physical symbols rather than DefKeys.
     state: HashMap<ustr::Ustr, String>,
     /// Compile-time globals remain artifact constants in the backend runtime.
     const_globals: HashSet<ustr::Ustr>,
@@ -1749,7 +1750,7 @@ impl Emitter<'_> {
                 // program's state set (`emit_with_closure` registers it before
                 // emit); an unregistered write is a backend bug, not a skip.
             Inst::StoreGlobal { name, value } => {
-                    let Some(slot) = self.globals.state.get(name) else {
+                    let Some(slot) = self.globals.state.get(&symbol_of_key(*name)) else {
                         return Err(err(format!(
                             "JS subset: write to unregistered global `{name}`"
                         )));
@@ -2067,11 +2068,11 @@ impl Emitter<'_> {
                 self.globals.fns[name].clone()
             }
             Inst::Global(name) if self.globals.const_globals.contains(name) => {
-                format!("__G.{name}")
+                js_member("__G", name.as_str())?
             }
             // Module-level `let`/`global` state: scoped so no body local can
             // collide with or shadow it.
-            Inst::Global(name) => match self.globals.state.get(name) {
+            Inst::Global(name) => match self.globals.state.get(&symbol_of_key(*name)) {
                 Some(slot) => format!("__rock_state_get({})", js_string_lit(slot)?),
                 None if self.globals.enum_globals.contains(name) => name.to_string(),
                 None => return Err(err(format!("JS subset: global read `{name}` not supported"))),
@@ -3589,6 +3590,7 @@ fn assemble_program_core(
     }
     // 4. load-time init lines (dependency-ordered).
     let mut const_order = Vec::new();
+    let mut const_init_lines = HashMap::new();
     let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
     out.push_str("function __rock_state_initialize() {\n");
     stable.push_str("function __rock_state_initialize() {\n");
@@ -3606,6 +3608,7 @@ fn assemble_program_core(
         if let Some(chunk) = const_chunks.get_mut(&init.name) {
             chunk.push_str(&init.js);
             const_order.push(init.name);
+            const_init_lines.insert(init.name, init.js);
         }
     }
     mark_generated_code_values(ws, &mut code_artifact);
@@ -3680,6 +3683,7 @@ fn assemble_program_core(
         state_schema,
         const_chunks,
         const_order,
+        const_init_lines,
     })
 }
 
@@ -3901,6 +3905,7 @@ struct ProgramBuild {
     state_schema: skull_mir::state_schema::StateSchema,
     const_chunks: HashMap<ustr::Ustr, String>,
     const_order: Vec<ustr::Ustr>,
+    const_init_lines: HashMap<ustr::Ustr, String>,
 }
 
 #[derive(Clone)]
@@ -4194,7 +4199,7 @@ pub fn emit_overlay_with_span_edits(
         if changed_consts.contains(name) {
             out.push_str(&current.const_chunks[name]);
         } else {
-            out.push_str(&format!("__G.{name} = __ginit_{name}();\n"));
+            out.push_str(&current.const_init_lines[name]);
         }
     }
     let mut reset_cells = HashSet::new();
@@ -4953,7 +4958,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         let gdecl = &self.ws.module(site.module).globals[site.gid];
         let is_const = gdecl.is_const;
         let leaves = match skull_mir::lower::GlobalPlan::for_declared_type(self.ws, self.scx, gdecl.ty) {
-            Ok(plan) => plan.leaf_names(gdecl.name),
+            Ok(plan) => plan.leaf_names(symbol_of_key(gdecl.name)),
             Err(error) => {
                 self.st.reject(
                     &init_name,
@@ -6021,12 +6026,10 @@ struct GlobalInitLine {
     js: String,
 }
 
-/// Deterministic init-fn name for a module global. Global names are unique
-/// workspace-wide (`Workspace::globals_by_name` is a flat map), so a bare
-/// `__ginit_<name>` cannot collide across independently-emitted test programs
-/// (byte-identical definitions dedup under JS function-decl hoisting).
+/// Use the shared symbol spelling: a qualified logical name is not a JS
+/// identifier, and flattening its separators would merge distinct namespaces.
 fn global_init_js_name(name: ustr::Ustr) -> String {
-    format!("__ginit_{name}")
+    format!("__ginit_{}", ident_of_key(name.as_str()))
 }
 
 /// Global names referenced by any `deco` body. A decorator runs at MODULE LOAD
@@ -6073,7 +6076,7 @@ fn build_const_global_names(
         for (_, global) in module.globals.iter().filter(|(_, g)| g.is_const) {
             names.insert(global.name);
             if let Ok(plan) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty) {
-                if let Some(leaves) = plan.leaf_names(global.name) {
+                if let Some(leaves) = plan.leaf_names(symbol_of_key(global.name)) {
                     names.extend(leaves);
                 }
             }
@@ -6100,7 +6103,7 @@ fn build_nobox_leaf_globals(
         for (_gid, g) in module.globals.iter() {
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
-            if let Some(leaves) = plan.leaf_names(g.name) {
+            if let Some(leaves) = plan.leaf_names(symbol_of_key(g.name)) {
                 for leaf in leaves {
                     m.insert(leaf, g.name);
                 }
@@ -6325,7 +6328,7 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
         } else if st.enum_defs.contains_key(&name) {
             st.gctx.enum_globals.insert(name);
         } else if let Some(&base) = st.nobox_leaf_globals.get(&name) {
-            if !st.gctx.state.contains_key(&name) && !st.gctx.const_globals.contains(&name) {
+            if !st.gctx.state.contains_key(&symbol_of_key(name)) && !st.gctx.const_globals.contains(&name) {
                 return Err(err(format!(
                     "JS: nobox leaf `{name}` has no compiler-owned Session slot"
                 )));
@@ -6342,7 +6345,7 @@ fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -
                      (module-load side effect not emitted)"
                 )));
             }
-            if !st.gctx.state.contains_key(&name) && !st.gctx.const_globals.contains(&name) {
+            if !st.gctx.state.contains_key(&symbol_of_key(name)) && !st.gctx.const_globals.contains(&name) {
                 return Err(err(format!(
                     "JS: global `{name}` has no compiler-owned Session slot"
                 )));
@@ -6568,14 +6571,20 @@ fn order_global_inits(
                     name: g.name,
                     js: match (g.is_const, &g.leaves) {
                         (true, Some(leaves)) => {
-                            let mut js = format!("__G.{} = {}();", leaves[0], g.init_name);
+                            let mut js = format!(
+                                "{} = {}();", js_member("__G", leaves[0].as_str())?, g.init_name
+                            );
                             for (i, leaf) in leaves.iter().enumerate().skip(1) {
-                                js.push_str(&format!(" __G.{leaf} = __rock_ret{i};"));
+                                js.push_str(&format!(
+                                    " {} = __rock_ret{i};", js_member("__G", leaf.as_str())?
+                                ));
                             }
                             js.push('\n');
                             js
                         }
-                        (true, None) => format!("__G.{} = {}();\n", g.name, g.init_name),
+                        (true, None) => format!(
+                            "{} = {}();\n", js_member("__G", g.name.as_str())?, g.init_name
+                        ),
                         // Leaf storage: the ginit splats, so the extra leaves come
                         // back through the scratch bank and must be read off it
                         // before anything else can call and clobber it.
@@ -6603,7 +6612,7 @@ fn order_global_inits(
                             js
                         }
                         (false, None) => {
-                            let key = state_slots.get(&g.name).ok_or_else(|| {
+                            let key = state_slots.get(&symbol_of_key(g.name)).ok_or_else(|| {
                                 err(format!(
                                     "JS: global `{}` has no compiler-owned Session slot",
                                     g.name
