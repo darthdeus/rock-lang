@@ -67,10 +67,51 @@ fn run(tool: &str, program: &str) -> String {
 
 fn js_runtime() -> String {
     format!(
-        "{}\n{}\nvar __G = {{}};\n",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\nvar __G = {{}};\n",
         skull_codegen_js::JS_SESSION_RUNTIME,
-        skull_codegen_js::JS_CALL_HELPER
+        skull_codegen_js::JS_CALL_HELPER,
+        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        skull_codegen_js::JS_TABLE_PRIM,
+        skull_codegen_js::JS_STRING_RUNTIME,
+        skull_codegen_js::JS_INSPECT_RUNTIME,
+        skull_codegen_js::JS_DEEPCOPY_RUNTIME,
     )
+}
+
+#[test]
+fn qualified_enum_display_globals_match_luajit() {
+    differential(
+        "enum Shade { Dark, Light }\n\
+         fn root() -> string { let shade = Shade::Light; \"{shade}\" }",
+        "app::Shade::Light",
+    );
+    differential(
+        "enum Choice { Empty, Full(string) }\n\
+         fn root() -> string { let choice = Choice::Empty; \"{choice}\" }",
+        "app::Choice::Empty",
+    );
+    differential(
+        r#"fn root() -> string { __rock_quote_string("line\n\t\r\"\\") }"#,
+        r#""line\n\t\r\"\\""#,
+    );
+}
+
+#[test]
+fn clone_into_preserves_argument_effects_and_owns_mutable_storage() {
+    differential(r#"
+struct Counter { calls: int }
+fn destination(counter: Counter) -> Map<string, int> {
+    counter.calls = counter.calls + 1
+    return map_new()
+}
+fn root() -> int {
+    let counter = Counter { calls: 0 }
+    let original = [1, 2]
+    let copy = original.clone_into(map_storage(destination(counter)))
+    original.set(0, 9)
+    return counter.calls * 1000 + original[0] * 100 + copy[0]
+}
+"#, "1901");
 }
 
 fn lua_value(ws: &Workspace) -> String {

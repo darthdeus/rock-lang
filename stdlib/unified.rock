@@ -2731,6 +2731,18 @@ const EPSILON: float = 0.0000001
     return "\"" .. escaped .. "\""
 """
 
+@nomangle inline(js) fn __rock_quote_string(s: string) -> string = """
+    var escaped = s.replace(/[\u0000-\u001F\u007F"\\]/g, function(c) {
+        if (c === "\\") return "\\\\";
+        if (c === "\"") return "\\\"";
+        if (c === "\n") return "\\n";
+        if (c === "\t") return "\\t";
+        if (c === "\r") return "\\r";
+        return "\\u{" + c.charCodeAt(0).toString(16).toUpperCase() + "}";
+    });
+    return "\"" + escaped + "\"";
+"""
+
 // Smart float formatting for `"{x}"` interpolation: scientific for
 // very small/large magnitudes; up to 4 decimals otherwise, trailing
 // zeros and trailing decimal point trimmed. Module-level (not an

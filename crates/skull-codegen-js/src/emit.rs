@@ -6638,8 +6638,9 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
             }
             let all_unit = !e.variants.is_empty()
                 && e.variants.iter().all(|v| matches!(v.payload, VariantPayload::Unit));
+            let symbol = skull_mir::mangle::type_symbol(ws, e.name);
             if all_unit {
-                let name = ustr::Ustr::from(format!("__rock_enum_{}_names", e.name).as_str());
+                let name = ustr::Ustr::from(format!("__rock_enum_{symbol}_names").as_str());
                 let items: Vec<String> = e
                     .variants
                     .iter()
@@ -6651,7 +6652,7 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
                         let name =
-                            ustr::Ustr::from(format!("__rock_enum_{}_{}", e.name, v.name).as_str());
+                            ustr::Ustr::from(format!("__rock_enum_{}_{}", symbol, v.name).as_str());
                         out.insert(
                             name,
                             format!(

@@ -152,6 +152,10 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     ("presentation_random_set_state", 1, Emission::Template("__rock_presentation_rng_state_set($1)")),
     ("env_var", 1, Emission::Template("__rock_env_var($1)")),
     ("deepcopy", 1, Emission::Template("deepcopy($1)")),
+    // Like LuaJIT, JS uses GC storage; a destination token does not change the copy.
+    ("clone_into", 2, Emission::Template("deepcopy($1)")),
+    ("map_storage", 1, Emission::Template("null")),
+    ("storage", 1, Emission::Template("null")),
     ("__rock_deepcopy_value", 2, Emission::Template("__rock_deepcopy_value($1, $2)")),
     // Omitted optional arguments default inside the runtime.
     ("inspect", 3, Emission::Template("inspect($1, $2, $3)")),
