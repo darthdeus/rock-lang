@@ -3086,6 +3086,8 @@ fn js_root_plan(
             }
         }
     }
+    // Driver registration calls are outside MIR, so root their target under
+    // the bare symbol the driver calls, before building the artifact graph.
     if let Some(fr) = shader_register_sibling(ws)? {
         if seen.insert(fr) {
             named.push((fr, "__rock_shader_register".to_string()));
@@ -3366,8 +3368,6 @@ fn assemble_program_core(
     )?;
     let lifecycle_skeleton = skull_mir::lifecycle::collect(ws)?;
     queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle_skeleton)?;
-
-    force_shader_register_sibling(ws, &mut st)?;
 
     // Decorator DEFINITION bodies (`deco <kind> <name> { .. }` -> `__deco_<name>`),
     // for the APPLIED decorators only (D1 reachability: an unapplied `deco` -- e.g.
@@ -3838,36 +3838,6 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
     ))
 }
 
-/// `rock_shader(vert, frag)` collapses to a pipeline key const; the driver emits
-/// one top-level `__rock_shader_register(key, glsl)` per distinct pair (the JS
-/// assembler mirrors skull's Lua `shader_registration_lines`). Those calls are
-/// raw driver text, not MIR, so the register fn is never discovered
-/// transitively -- force its js sibling into the program under its bare
-/// `@nomangle` name whenever a pair exists, so the register lines resolve. The
-/// registration body must be portable Rock or have a JS sibling, so a
-/// program with a shader pair but no JS-servable declaration REJECTS rather than
-/// silently dropping the registration.
-fn force_shader_register_sibling(
-    ws: &Workspace,
-    st: &mut WorklistState,
-) -> Result<(), CompilerError> {
-    let Some(fr) = shader_register_sibling(ws)? else { return Ok(()) };
-    let key = st.names.base_instance(ws, fr).ok_or_else(|| {
-        err("JS: the shader register sibling is absent from the artifact view")
-    })?;
-    if st.seen.insert(fr) {
-        // Bare @nomangle name: the driver register lines call it verbatim.
-        st.names.insert(key.clone(), "__rock_shader_register".to_string());
-        let cf = &ws.module(fr.module).functions[fr.func];
-        if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
-            add_inline_js_body(&mut st.inline_js, key, fr);
-        } else if cf.inline_body.is_none() && !cf.is_extern {
-            st.queue.push(fr);
-        }
-        // extern(js): runtime provides the global -- no def emitted.
-    }
-    Ok(())
-}
 /// A whole-program JS emission plus the entry fn's JS name (`None` when the entry
 /// module has no nullary `main`; the driver then appends nothing and the program
 /// is module-load effects only, matching luajit).
