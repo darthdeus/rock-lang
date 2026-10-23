@@ -1,0 +1,59 @@
+struct Item { value: int }
+
+fn cached(owner: Entity<Item>) -> int {
+    let value: int? = weak_cache_get("finite", owner)
+    return value ?? 0
+}
+
+fn bench(n: int) -> int {
+    let arena: Arena<Item> = arena_new()
+    let owner = arena.insert(Item { value: 1 })
+    weak_cache_put("finite", owner, 1)
+    let total = 0
+    for _i in 0..n {
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+        total += cached(owner)
+    }
+    arena_destroy(arena)
+    return total
+}
+
+fn cache_controls() {
+    let arena: Arena<Item> = arena_new()
+    let owner = arena.insert(Item { value: 1 })
+    assert(cached(owner) == 0)
+    weak_cache_put("flag", owner, false)
+    let flag: bool? = weak_cache_get("flag", owner)
+    assert(flag != null)
+    assert(!flag.unwrap())
+    weak_cache_put("finite", owner, 7)
+    assert(cached(owner) == 7)
+    owner.remove()
+    assert(cached(owner) == 0)
+    let next = arena.insert(Item { value: 2 })
+    assert(cached(next) == 0)
+    weak_cache_put("finite", next, 9)
+    assert(cached(owner) == 0)
+    assert(cached(next) == 9)
+    arena_destroy(arena)
+    assert(cached(next) == 0)
+}
+
+fn main() {
+    cache_controls()
+    print(bench(2000))
+}

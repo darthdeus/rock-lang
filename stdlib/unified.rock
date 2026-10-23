@@ -661,18 +661,6 @@ value SceneBuilder {
 // an image replaces storage while retaining logical handle fields. Owner-first
 // directories let retirement evict all names without scanning unrelated caches.
 // Scene names and numeric Arena keys share each Scene directory.
-@nomangle inline(lua) fn __weak_cache_read(name: string, scene: int, arena: int, slot: int, generation: int, backing: any) -> any? = """
-    local owners = _G.__rock_weak_cache_owners
-    local scenes = owners and owners[scene]
-    local slots = scenes and scenes[arena]
-    local entries = arena == -1 and scenes or (slots and slots[slot])
-    local entry = entries and entries[name]
-    if entry and entry.generation == generation and entry.backing == backing then
-        return entry.value
-    end
-    return nil
-"""
-
 @nomangle inline(lua) fn __weak_cache_write(name: string, scene: int, arena: int, slot: int, generation: int, backing: any, value: any) = """
     local owners = _G.__rock_weak_cache_owners
     if not owners then owners = {}; _G.__rock_weak_cache_owners = owners end
@@ -713,12 +701,22 @@ fn weak_cache_get<T, V>(name: string, owner: Entity<T>) -> V? {
     return value
 }
 
+// Keep validation and the read in one frame: sibling lookups would otherwise
+// consume LuaJIT's cumulative tail-call budget.
 inline(lua) fn __weak_cache_entity_get<V>(name: string, scene: int, arena: int, slot: int, generation: int) -> V? = """
     local backing = __arena_store_any(scene, arena)
     if not backing or backing.generations._data[slot + 1] ~= generation then
         return nil
     end
-    return __weak_cache_read(name, scene, arena, slot, generation, backing)
+    local owners = _G.__rock_weak_cache_owners
+    local scenes = owners and owners[scene]
+    local slots = scenes and scenes[arena]
+    local entries = arena == -1 and scenes or (slots and slots[slot])
+    local entry = entries and entries[name]
+    if entry and entry.generation == generation and entry.backing == backing then
+        return entry.value
+    end
+    return nil
 """
 
 @inline

@@ -55,3 +55,40 @@ fn main() {
     assert_eq!(run_luajit(&format!("{lua}\nmain()\nprint(select('#', {discard}(1)))\nprint(select('#', {foreign_scalar}(1)))\nprint(select('#', {foreign_unit}(1)))\n"), "direct_tail_calls"),
         "41\n42\n42\n43\n12244\n0\n1\n0");
 }
+
+#[test]
+fn finite_sibling_cache_queries_do_not_exhaust_tailcall_budget() {
+    let lua = emit_module(include_str!("fixtures/finite_cache_siblings.rock"));
+    let bench = mangled_name(&lua, "bench");
+    let controls = mangled_name(&lua, "cache_controls");
+    let getter = crate::common::definition_names(&lua).into_iter()
+        .find(|name| name.starts_with("__weak_cache_entity_get_"))
+        .expect("the typed cache getter must be emitted");
+    let driver = format!(r#"
+local jit = require("jit")
+local util = require("jit.util")
+local vm = require("jit.vmdef")
+local aborts, stops = 0, 0
+local function trace(what, tr, fn, pc, err)
+    if what == "stop" then stops = stops + 1 end
+    if what == "abort" and vm.traceerr[err] == "loop unroll limit reached" then
+        aborts = aborts + 1
+    end
+end
+jit.flush()
+jit.attach(trace, "trace")
+local result = {bench}(2000)
+jit.attach(trace)
+assert(stops > 0, "the finite sibling path must compile")
+print(result .. ":" .. aborts)
+{controls}()
+for pc = 1, util.funcinfo({getter}).bytecodes - 1 do
+    local ins = util.funcbc({getter}, pc)
+    local index = bit.band(ins, 255) * 6
+    local op = vm.bcnames:sub(index + 1, index + 6)
+    assert(op ~= "CALLT " and op ~= "CALLMT", "cache lookup must not tail-forward")
+end
+"#);
+    assert_eq!(run_luajit(&format!("{lua}\n{driver}"), "finite_cache_siblings"), "32000:0");
+    assert!(!lua.contains("function __weak_cache_read("), "the single-use forwarding helper must be removed");
+}
