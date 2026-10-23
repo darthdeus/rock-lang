@@ -126,3 +126,20 @@ fn a_lone_rejection_has_no_siblings() {
     );
     assert_eq!(all.len(), 1, "expected exactly one rejection, got:\n{}", all.join("\n"));
 }
+
+#[test]
+fn a_rejected_registration_target_names_the_unsupported_callee() {
+    let ws = crate::common::ws_with(r#"
+deco init hook() {}
+inline(lua) fn unsupported_callback_leaf() = "print('native')"
+@hook fn callback() { unsupported_callback_leaf() }
+fn main() {}
+"#);
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let error = skull_codegen_js::emit::emit_program(&ws, mid).err().expect("callback must reject");
+    let messages: Vec<_> = std::iter::once(&error)
+        .chain(error.siblings.iter())
+        .map(|error| error.message.as_str()).collect();
+    assert!(messages.iter().any(|message| message.contains("unsupported_callback_leaf")),
+        "callback rejection was hidden by staging: {messages:?}");
+}

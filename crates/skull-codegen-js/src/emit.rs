@@ -3611,6 +3611,9 @@ fn assemble_program_core(
             const_init_lines.insert(init.name, init.js);
         }
     }
+    // Rejected callback bodies have no code entry; report their named errors
+    // before staging would replace them with an incomplete-census error.
+    combine_rejections(rejections)?;
     mark_generated_code_values(ws, &mut code_artifact);
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
@@ -3651,11 +3654,6 @@ fn assemble_program_core(
     if !has_state_publication {
         out.push_str("if (typeof __rock_state_transaction_commit !== \"undefined\") __rock_state_transaction_commit();\n");
     }
-
-    // Every definition has been visited, so this is the earliest point where the
-    // whole rejection list exists. A non-empty list fails the build and the
-    // assembled program is discarded with it.
-    combine_rejections(rejections)?;
 
     let state_schema = skull_mir::state_schema::StateSchema::collect(
         ws,
