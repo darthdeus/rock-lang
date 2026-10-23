@@ -423,25 +423,18 @@ fn runtime_prelude() -> &'static str {
     // Runtime setup has two parts:
     //   1. LuaJIT mcode/trace tuning. skull (like rock-codegen) emits more Lua
     //      than LuaJIT's small-script defaults assume (32 KB mcode blocks /
-    //      512 KB total / 1000 traces). A real game's hot traces overflow the
-    //      mcode arena -> "failed to allocate mcode memory" -> a GLOBAL trace
-    //      flush wipes every good trace -> the hot loop drops to the interpreter
-    //      and re-traces on a cliff/spiral (application floors_walls: ~2.6 ms vs ~0.5
-    //      with this). A trace must fit one `sizemcode` block. On arm64 macOS,
-    //      dyld leaves room for the first block near the VM but later mappings
-    //      prevent a second one, so that first block must hold the hot set --
-    //      which is why size == max on both arches: one block, not several.
-    //      The budget is arch-split because the jump range is: x64 reaches
-    //      +/-2GB, arm64 only +/-128MB, so arm64 keeps the 16 MB figure from
-    //      the code-cache limit while x64 takes
-    //      64 MB. 8 MB was sized against `application floors_walls` and is far too
-    //      small for the live game: a 60 s session of real play (summons,
-    //      combat, multiple spaces) flushed 31 times -- once every ~0.7 s --
-    //      and flush-plus-recovery accounted for 94% of all frame time over
-    //      budget. Evidence and the per-frame join are in
-    //      ROCK_JIT_MCODE_KB overrides both, so the budget can be swept
-    //      without a rebuild; this prelude runs at chunk load and beats any
-    //      -O flag passed on the command line.
+    //      512 KB total / 1000 traces). Exhausting the mcode arena triggers a
+    //      global trace flush, dropping hot loops back to the interpreter.
+    //      A trace must fit one `sizemcode` block. On arm64 macOS, later
+    //      mappings can prevent a second block near the VM, so the first one
+    //      must hold the hot set: size == max on both arches, one 64 MB block.
+    //      x64 has a +/-2 GB jump range; arm64's +/-128 MB range still permits
+    //      a 64 MB block, with placement checked by LuaJIT's allocator. A 32 MB
+    //      budget still causes global flushes on larger hot sets; 64 MB avoids
+    //      them and has been validated on arm64 macOS.
+    //      ROCK_JIT_MCODE_KB overrides the shared default, so the budget can
+    //      be swept without a rebuild; this prelude runs at chunk load and
+    //      beats any -O flag passed on the command line.
     //      `hotexit` is raised from LuaJIT's default 10 to 100 because a side
     //      trace that FAILS is never penalised or blacklisted
     //      (lj_trace.c:596-606) and snap->count only saturates on success, so a
@@ -520,7 +513,7 @@ __rock_initialized_cell = _G.__rock_active_session.__rock_initialized
 "#;
 
 const PRELUDE_TEMPLATE: &str =
-    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or (jit.arch == "arm64" and 32768 or 65536) local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
+    r#"if jit and jit.opt then local __mc = tonumber(os.getenv("ROCK_JIT_MCODE_KB") or "") or 65536 local __he = tonumber(os.getenv("ROCK_JIT_HOTEXIT") or "") or 100 local __hl = tonumber(os.getenv("ROCK_JIT_HOTLOOP") or "") or 56 local __lu = tonumber(os.getenv("ROCK_JIT_LOOPUNROLL") or "") or 15 local __mt = tonumber(os.getenv("ROCK_JIT_MAXTRACE") or "") or 32000 local __mk = tonumber(os.getenv("ROCK_JIT_MAXIRCONST") or "") or 500 jit.opt.start("maxmcode=" .. __mc, "sizemcode=" .. __mc, "maxtrace=" .. __mt, "maxrecord=32000", "maxsnap=4000", "maxirconst=" .. __mk, "hotexit=" .. __he, "hotloop=" .. __hl, "loopunroll=" .. __lu) end
 -- Everything up to the entry call runs inside one block, so the block's locals
 -- -- the Session cells first of all -- are CLOSED upvalues (UREFC: one guard,
 -- no constant) by the time an emitted function runs under the JIT. Left open,
@@ -2237,11 +2230,9 @@ mod tests {
             .lua
     }
 
-    /// The budget itself is tuning and moves with measurement, so this pins the
-    /// shape and the floor rather than a literal. LuaJIT's own defaults (512 KB
-    /// total, 32 KB blocks) flush the trace arena thousands of times in a real
-    /// application session; 8 MB still flushed it 31 times in 60 s of play. Neither
-    /// architecture may regress below that.
+    /// The hot trace working set needs one 64 MB block on either architecture;
+    /// smaller arenas cause global trace flushes. Keep the environment override
+    /// so the budget can still be swept without rebuilding.
     #[test]
     fn runtime_prelude_keeps_the_application_trace_working_set() {
         let prelude = super::runtime_prelude();
@@ -2277,23 +2268,14 @@ mod tests {
             hotexit > 10,
             "hot-exit default {hotexit} is back at or below LuaJIT's, which re-records doomed exits"
         );
-        let picked = prelude
-            .split("jit.arch == \"arm64\" and ")
+        let kb: u32 = prelude
+            .split("ROCK_JIT_MCODE_KB\") or \"\") or ")
             .nth(1)
-            .expect("prelude no longer selects an mcode budget by architecture");
-        let (arm64, rest) = picked
-            .split_once(" or ")
-            .expect("arch-selected mcode budget is not an `arm64 and A or B` pick");
-        let x64 = rest
-            .split(')')
-            .next()
-            .expect("arch-selected mcode budget has no x64 arm");
-        for (arch, kb) in [("arm64", arm64.trim()), ("x64", x64.trim())] {
-            let kb: u32 = kb
-                .parse()
-                .unwrap_or_else(|_| panic!("{arch} mcode budget is not a literal KB count: {kb:?}"));
-            assert!(kb >= 8192, "{arch} mcode budget {kb} KB is below the 8 MB floor");
-        }
+            .and_then(|rest| rest.split_whitespace().next())
+            .expect("prelude no longer defaults the sweepable mcode budget")
+            .parse()
+            .expect("mcode default is not one architecture-independent literal KB count");
+        assert_eq!(kb, 65536, "both architectures need a 64 MB mcode default");
     }
 
     #[test]
