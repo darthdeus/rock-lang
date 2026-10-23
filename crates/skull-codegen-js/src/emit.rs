@@ -977,6 +977,10 @@ impl Emitter<'_> {
         self.out.push('\n');
     }
 
+    fn emit_unreachable(&mut self) {
+        self.push("throw new Error(\"rock: reached an unreachable block\");");
+    }
+
     /// A block that emits no statement and just forwards (`Some(target)`): an
     /// empty `if`/`else` arm.
     fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
@@ -1071,7 +1075,10 @@ impl Emitter<'_> {
                     self.emit_return(&vs)?;
                     return Ok(());
                 }
-                Term::Unreachable => return Ok(()),
+                Term::Unreachable => {
+                    self.emit_unreachable();
+                    return Ok(());
+                }
                 Term::Goto(t) => {
                     if Some(t) == ctx.cont {
                         self.push("continue;");
@@ -1218,7 +1225,10 @@ impl Emitter<'_> {
                     self.emit_return(&vs)?;
                     return Ok(());
                 }
-                Term::Unreachable => return Ok(()),
+                Term::Unreachable => {
+                    self.emit_unreachable();
+                    return Ok(());
+                }
                 Term::Goto(t) => {
                     if Some(t) == ctx.cont {
                         self.push("continue;");
@@ -1902,7 +1912,7 @@ impl Emitter<'_> {
                 }
                 _ => return Err(err("JS subset: multi-value coroutine return")),
             },
-            Term::Unreachable => self.push("return;"),
+            Term::Unreachable => self.emit_unreachable(),
             Term::Yield { .. } => {
                 return Err(err(
                     "trampoline: Term::Yield must not survive transform_coroutine (pass bug)",

@@ -1596,9 +1596,9 @@ fn reject_candidate(
 }
 
 /// Lower `fref` and classify it as an inline candidate. Hard exclusions: extern,
-/// `inline(lua)`, `co fn`, lambda-bearing, self-recursive, or any reachable
-/// non-`Return`/`Goto`/`Branch`/`Switch` terminator (a reachable
-/// `Unreachable`/`Yield` would mis-lower to a bare
+/// `inline(lua)`, `co fn`, lambda-bearing, self-recursive, or reachable `Yield`.
+/// General splices preserve `Unreachable` traps and route only `Return` to the
+/// caller continuation.
 fn classify(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1696,12 +1696,11 @@ fn classify(
     }
 
     let source_reachable = top_level_blocks(&mf);
-    // A reachable terminator must be one the splice can route. `Unreachable`
-    // lowers to a bare `return` and `Yield` is coroutine-only; either reachable
-    // here would corrupt caller control flow.
+    // Yield requires coroutine state that an ordinary caller cannot supply.
+    // Unreachable is a terminal trap, including an exhaustive match's fallback;
+    // the general splice preserves it without routing it to the continuation.
     for &b in &source_reachable {
         match &mf.blocks[b].term {
-            Term::Unreachable => return reject_candidate(&mut timing, "unreachable_terminator"),
             Term::Yield { .. } => return reject_candidate(&mut timing, "yield_terminator"),
             _ => {}
         }
