@@ -446,7 +446,6 @@ fn retained_named_and_capture_free_values_refresh_through_slots() {
 }
 
 #[test]
-#[ignore = "known red (os-m3-js-pure-rock): concrete callee body plan is missing for DirectCall"]
 fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     let source = |tail: i32| {
         format!(
@@ -459,7 +458,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
              @nomangle fn invoke() -> int {{\n\
                let f = CALLBACK\n\
                if f != null {{ return f() }}\n\
-               -1\n\
+               return -1\n\
              }}\n\
              fn main() {{ start(); invoke() }}\n"
         )

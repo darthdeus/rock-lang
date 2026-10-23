@@ -1513,9 +1513,10 @@ impl Emitter<'_> {
         }
     }
 
-    /// JS access paths of an INTRINSIC call's result lanes, or `None` when the
-    /// callee is a real function (its callee packs the return bank) or its result
-    /// layout cannot be projected lane-by-lane from one JS value.
+    /// JS access paths of an intrinsic call's result lanes. `None` means the
+    /// callee is a real function, which packs its result into the return bank;
+    /// a mapped intrinsic with an unprojectable multi-lane result is an error,
+    /// because no intrinsic writes that bank.
     fn intrinsic_lane_paths(
         &self,
         iid: Idx<Inst>,
@@ -1530,14 +1531,23 @@ impl Emitter<'_> {
             return Ok(None);
         }
         let Some(plan) = self.mf.call_abi_plans.get(&iid) else {
-            return Ok(None);
+            return Err(err(format!(
+                "JS subset: intrinsic `{}` has no call ABI plan for its multi-lane result",
+                cf.name
+            )));
         };
         let Some(result) = plan.representation().result() else {
-            return Ok(None);
+            return Err(err(format!(
+                "JS subset: intrinsic `{}` has no ABI result for its multi-lane call",
+                cf.name
+            )));
         };
         let mut out = Vec::new();
         if !self.collect_lane_paths(plan, result, String::new(), &mut out) || out.len() != lanes {
-            return Ok(None);
+            return Err(err(format!(
+                "JS subset: intrinsic `{}` has a multi-lane result that cannot be projected from one JS value",
+                cf.name
+            )));
         }
         Ok(Some(out))
     }
@@ -2227,9 +2237,11 @@ impl Emitter<'_> {
                             format!("{b}[{i}]")
                         }
                     }
-                    // Map miss returns nil (raw VM op in Lua); JS Map.get returns
-                    // undefined on miss, which `== null` treats as nil.
-                    ContainerKind::Map => format!("{b}.get({i})"),
+                    // Keyed MIR reads also address reflected struct leaves.
+                    // Evaluate the owner and selector once in either case.
+                    ContainerKind::Map => format!(
+                        "(function(t, k) {{ return t instanceof Map ? t.get(k) : t[k]; }})({b}, {i})"
+                    ),
                 }
             }
             Inst::Len { base, kind } => match kind {
@@ -2898,6 +2910,7 @@ pub fn emit_with_closure(
     let mut out = String::new();
     let mut code_artifact = CodeArtifact::default();
     out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
+    out.push_str(&emit_inspect_enum_payloads(ws)?);
     out.push_str(&emit_vt_eq(ws, struct_registry.as_ref())?);
     out.push_str(&emit_inspect_ty(ws, struct_registry.as_ref())?);
     out.push_str(&emit_col_mat(ws, struct_registry.as_ref())?);
@@ -3479,6 +3492,9 @@ fn assemble_program_core(
     let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
     out.push_str(&enum_singletons);
     stable.push_str(&enum_singletons);
+    let inspect_enum_payloads = emit_inspect_enum_payloads(ws)?;
+    out.push_str(&inspect_enum_payloads);
+    stable.push_str(&inspect_enum_payloads);
     let vt_eq = emit_vt_eq(ws, struct_registry.as_ref())?;
     out.push_str(&vt_eq);
     stable.push_str(&vt_eq);
@@ -5561,6 +5577,120 @@ fn emit_inspect_ty(
     build_inspect_ty_defs(ws, registry.arena(), registry.value_plans(), registry.names())
 }
 
+/// Per-type, per-variant descriptors for flat enum tuple payloads whose
+/// scalarized nominal value has a direct record-field walk. They are emitted
+/// from declarations, independently of which enum constructors need singleton
+/// globals, so an inspect reached through a flattened field always has metadata.
+fn emit_inspect_enum_payloads(ws: &Workspace) -> Result<String, CompilerError> {
+    use bone_semantic::hir::{TypeCtor, TypeExpr, VariantPayload};
+    use bone_semantic::prelude::TyId;
+
+    let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let mut out = String::new();
+    for name in names {
+        let Some(flat) = skull_mir::lower::EnumPlan::for_name(ws, name)
+            .and_then(|plan| plan.flat().cloned())
+        else {
+            continue;
+        };
+        let Some(eid) = ws.enums_by_name.get(&name) else {
+            continue;
+        };
+        let ed = &ws.modules[eid.module.index()].enums[eid.def];
+        let mut variants = Vec::new();
+        for variant in &ed.variants {
+            let VariantPayload::Tuple(types) = &variant.payload else {
+                continue;
+            };
+            let mut positions = Vec::with_capacity(types.len());
+            let mut any_record = false;
+            for (position, ty) in types.iter().enumerate() {
+                let nominal = match *ty {
+                    TyId::Static(module, index) => match ws.module(module).ty_arena[index] {
+                        TypeExpr::App {
+                            ctor: TypeCtor::Nominal(child),
+                            ..
+                        } => Some(child),
+                        _ => None,
+                    },
+                    TyId::Local(_) => None,
+                };
+                let fields = nominal.and_then(|child| {
+                    let sid = ws.struct_by_name.get(&child)?;
+                    let structure = &ws.modules[sid.module.index()].structs[sid.def];
+                    // Lua's enum payload-name helper refuses a record walk
+                    // when any declared field type is itself nominal, even if
+                    // that field happens to occupy one direct scalar slot.
+                    let has_nominal_field = structure.fields.iter().any(|field| match field.ty {
+                        TyId::Static(module, index) => matches!(
+                            ws.module(module).ty_arena[index],
+                            TypeExpr::App {
+                                ctor: TypeCtor::Nominal(_),
+                                ..
+                            }
+                        ),
+                        TyId::Local(_) => false,
+                    });
+                    if !structure.is_value
+                        || structure.fields.is_empty()
+                        || has_nominal_field
+                    {
+                        return None;
+                    }
+                    let leaves = flat.position_leaf_paths(position, child)?;
+                    if leaves.len() != structure.fields.len()
+                        || leaves.iter().zip(&structure.fields).any(|(leaf, field)| {
+                            leaf.as_str().contains('.') || *leaf != field.name
+                        })
+                    {
+                        return None;
+                    }
+                    Some(leaves)
+                });
+                if fields.is_some() {
+                    any_record = true;
+                }
+                positions.push(fields);
+            }
+            if any_record {
+                variants.push((variant.name, positions));
+            }
+        }
+        if variants.is_empty() {
+            continue;
+        }
+        if out.is_empty() {
+            out.push_str(
+                "var __rock_enum_inspect_payloads = __rock_enum_inspect_payloads || Object.create(null);\n",
+            );
+        }
+        let enum_name = js_string_lit(name.as_str())?;
+        out.push_str(&format!(
+            "__rock_enum_inspect_payloads[{enum_name}] = __rock_enum_inspect_payloads[{enum_name}] || Object.create(null);\n"
+        ));
+        for (variant_name, positions) in variants {
+            let variant_name = js_string_lit(variant_name.as_str())?;
+            let positions = positions
+                .into_iter()
+                .map(|fields| match fields {
+                    Some(fields) => fields
+                        .iter()
+                        .map(|field| js_string_lit(field.as_str()))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|fields| format!("[{}]", fields.join(", "))),
+                    None => Ok("null".to_string()),
+                })
+                .collect::<Result<Vec<_>, CompilerError>>()?;
+            out.push_str(&format!(
+                "__rock_enum_inspect_payloads[{enum_name}][{variant_name}] = [{}];\n",
+                positions.join(", ")
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// Per-type `__rock_col_mat` registry for every element type the program stores
 /// as columns: the JS half of luajit's `__rock_materialize_column_type`, which
 /// reads `_G.__ROCK_TYPE_TABLE` for the field walk. JS has no type table and is
@@ -6617,7 +6747,7 @@ fn build_inspect_ty_defs(
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
         }
         let header = js_string_lit(name.as_str())?;
-        let value_plan = if s.is_value {
+        let value_plan = if skull_mir::lower::has_value_plan(s) {
             let representation = plans.get(name).ok_or_else(|| {
                 err(format!(
                     "JS subset: inspected value `{name}` has no owned representation plan"

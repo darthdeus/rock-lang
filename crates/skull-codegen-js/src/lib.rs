@@ -139,7 +139,7 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     ("from_codepoint", 1, Emission::Template("__from_codepoint($1)")),
     ("parse_float", 1, Emission::Template("__parse_float($1)")),
     ("parse_float_at", 3, Emission::Template("__parse_float($1.slice($2, $3))")),
-    // RNG streams are seedable/serializable; JS and Lua algorithms differ.
+    // RNG streams share LuaJIT's seedable, serializable transition.
     ("random", 0, Emission::Template("__rock_random()")),
     ("random_int", 2, Emission::Template("__rock_random_int($1, $2)")),
     ("random_seed", 1, Emission::Template("__rock_rng_seed($1)")),
@@ -681,6 +681,7 @@ function __rock_make_enum(variant, ty, kv) {
 pub const JS_INSPECT_RUNTIME: &str = r#"
 var __rock_inspect_ty = {};
 var __rock_col_mat = {};
+var __rock_enum_inspect_payloads = Object.create(null);
 // A column-stored Vec has no `_data`: one plain array per leaf, sharing the
 // Vec's `len`. Rendering its own keys would show the PHYSICAL layout (`@vec`,
 // `x = { 1 }`), so materialize each element first -- luajit's
@@ -741,6 +742,54 @@ function __rock_inspect_value_struct(header, pairs) {
   if (pairs.length === 0) return header + " { }";
   var parts = pairs.map(function(kv) { return kv[0] + ": " + inspect(kv[1]); });
   return header + " { " + parts.join(", ") + " }";
+}
+// Recover names for a tuple payload widened from a direct value-record leaf
+// group. Keep this exact: a missing, extra, sparse, or colliding key makes the
+// whole enum payload fall back to its positional labels.
+function __rock_enum_payload_names(pairs, positions) {
+  var max = -1, numeric = 0;
+  var seen = Object.create(null);
+  for (var i = 0; i < pairs.length; i++) {
+    var key = String(pairs[i][0]);
+    if (/^(0|[1-9][0-9]*)$/.test(key)) {
+      var index = Number(key);
+      if (!Number.isSafeInteger(index)) return null;
+      numeric++;
+      if (index > max) max = index;
+    } else {
+      seen["$" + key] = true;
+    }
+  }
+  if (numeric === 0 || numeric !== max + 1) return null;
+  var expected = 0;
+  for (var p = 0; p < positions.length; p++) {
+    var fields = positions[p];
+    if (fields === null) {
+      expected++;
+    } else if (Array.isArray(fields) && fields.length > 0) {
+      expected += fields.length;
+    } else {
+      return null;
+    }
+  }
+  if (numeric !== expected) return null;
+  var names = new Array(numeric);
+  var slot = 0;
+  for (var p = 0; p < positions.length; p++) {
+    var fields = positions[p];
+    if (fields === null) {
+      slot++;
+      continue;
+    }
+    for (var j = 0; j < fields.length; j++) {
+      var name = fields[j];
+      if (typeof name !== "string" || seen["$" + name] === true) return null;
+      seen["$" + name] = true;
+      names[slot++] = name;
+    }
+  }
+  if (slot !== numeric) return null;
+  return names;
 }
 function __rock_inspect_value(v, indent, path, visited, precision) {
   if (v === null || v === undefined) return "nil";
@@ -809,6 +858,13 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   }
   pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
   var variant = t.__variant;
+  var enumBox = variant !== undefined;
+  var payloadNames = null;
+  if (enumBox && type_name !== undefined) {
+    var enumPayloads = __rock_enum_inspect_payloads[type_name];
+    var positions = enumPayloads && enumPayloads[variant];
+    if (positions !== undefined) payloadNames = __rock_enum_payload_names(pairs, positions);
+  }
   if (type_name !== undefined && variant !== undefined && pairs.length === 0) {
     if (visited) visited.delete(t);
     return type_name + "::" + variant;
@@ -819,21 +875,31 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   // A boxed enum's positional payload takes native 0-based keys ("0".., for `==`
   // and `TupleIndex`); luajit's box uses 1-based array keys and inspect renders
   // them `[1]`.. So display an enum-box numeric key as `[<n+1>]` -- byte-parity
-  // with luajit over a 0-based runtime. Record-variant fields (string keys) and
-  // struct fields are unaffected.
-  var enumBox = variant !== undefined;
+  // with luajit over a 0-based runtime. A proven flat value-record payload
+  // overrides that label with its declared field name.
   var keyStr = function(k) {
-    if (enumBox && typeof k === "string" && /^[0-9]+$/.test(k)) return "[" + (parseInt(k, 10) + 1) + "]";
+    if (enumBox && typeof k === "string" && /^(0|[1-9][0-9]*)$/.test(k)) {
+      var index = parseInt(k, 10);
+      if (payloadNames && payloadNames[index] !== undefined) return payloadNames[index];
+      return "[" + (index + 1) + "]";
+    }
     return typeof k === "string" ? k : ("[" + lua_tostring(k) + "]");
+  };
+  var pathKey = function(k) {
+    if (enumBox && typeof k === "string" && /^(0|[1-9][0-9]*)$/.test(k)) {
+      var index = parseInt(k, 10);
+      if (payloadNames && payloadNames[index] !== undefined) return payloadNames[index];
+    }
+    return lua_tostring(k);
   };
   if (pairs.length <= 2) {
     var cparts = pairs.map(function(kv) {
-      return keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent, path + "." + lua_tostring(kv[0]), visited, precision);
+      return keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent, path + "." + pathKey(kv[0]), visited, precision);
     });
     result = header !== "" ? header + " { " + cparts.join(", ") + " }" : "{ " + cparts.join(", ") + " }";
   } else {
     var lines = pairs.map(function(kv) {
-      return indent + "  " + keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent + "  ", path + "." + lua_tostring(kv[0]), visited, precision);
+      return indent + "  " + keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent + "  ", path + "." + pathKey(kv[0]), visited, precision);
     });
     var body = lines.join(",\n");
     result = header !== "" ? header + " {\n" + body + "\n" + indent + "}" : "{\n" + body + "\n" + indent + "}";
@@ -1007,15 +1073,13 @@ function log_reset_dedup() {
 function log_dedup_count() { return Object.keys(__rock_log_dedup).length; }
 "#;
 
-/// The RNG runtime: mulberry32 over a single 32-bit state word (`>>> 0` keeps it
-/// unsigned; `Math.imul` for the 32-bit multiplies) -- zero allocation. The fn
-/// surface mirrors the Lua splitmix prelude (`rock-lang/crates/skull/src/lib.rs`):
-/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` for gameplay, and
-/// `__rock_presentation_rng_*` for presentation. Streams differ per backend by doctrine
-/// (Lua splitmix64, JS mulberry32) -- bit-parity is a non-goal; the SEMANTIC
-/// (seedable + deterministic + independent serializable streams) is upheld. Seeding
-/// is done by [`JS_HOST_RUNTIME`] (it reads `ROCK_TEST_SEED` through the host), not
-/// here. `random()` draws one 32-bit word / 2^32 in [0,1); `random_int(min,max)`
+/// The RNG runtime mirrors LuaJIT's 32-bit state transition: add `0x9E3779B9`,
+/// apply xorshift 13/17/5, and return the unsigned state XOR its logical shift
+/// by 16. State is stored as a signed 32-bit word, while draws are unsigned.
+/// The fn surface provides `__rock_rng_seed`, `__rock_rng_state_get`/`_set` for
+/// gameplay, and `__rock_presentation_rng_*` for presentation. Seeding is done
+/// by [`JS_HOST_RUNTIME`] (it reads `ROCK_TEST_SEED` through the host), not here.
+/// `random()` draws one 32-bit word / 2^32 in [0,1); `random_int(min,max)`
 /// is `[min,max)` exclusive (`r=max-min`, `r<=0 -> min`), single draw for
 /// `r<=2^32` else two draws composed into 53 bits then `% r` (range coverage is
 /// a semantic, not a nicety).
@@ -1027,19 +1091,19 @@ function __rock_rng_current() {
   return __rock_rng_state;
 }
 function __rock_rng_store(s) {
-  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_rng_state = s >>> 0;
-  else __rock_rng_state = s >>> 0;
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_rng_state = s | 0;
+  else __rock_rng_state = s | 0;
 }
 function __rock_rng_seed(s) { __rock_rng_store(s); }
 function __rock_rng_state_get() { return __rock_rng_current(); }
 function __rock_rng_state_set(s) { __rock_rng_store(s); }
 function __rock_rng_next32() {
-  var state = (__rock_rng_current() + 0x6D2B79F5) >>> 0;
+  var state = (__rock_rng_current() + 0x9E3779B9) | 0;
+  state = (state ^ (state << 13)) | 0;
+  state = (state ^ (state >>> 17)) | 0;
+  state = (state ^ (state << 5)) | 0;
   __rock_rng_store(state);
-  var t = state;
-  t = Math.imul(t ^ (t >>> 15), t | 1);
-  t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
-  return (t ^ (t >>> 14)) >>> 0;
+  return (state ^ (state >>> 16)) >>> 0;
 }
 function __rock_random() { return __rock_rng_next32() / 4294967296; }
 function __rock_random_int(min, max) {
@@ -1056,19 +1120,19 @@ function __rock_presentation_rng_current() {
   return __rock_presentation_rng_state;
 }
 function __rock_presentation_rng_store(s) {
-  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_presentation_rng_state = s >>> 0;
-  else __rock_presentation_rng_state = s >>> 0;
+  if (typeof __rock_active_session !== "undefined" && __rock_active_session) __rock_active_session.__rock_presentation_rng_state = s | 0;
+  else __rock_presentation_rng_state = s | 0;
 }
 function __rock_presentation_rng_seed(s) { __rock_presentation_rng_store(s); }
 function __rock_presentation_rng_state_get() { return __rock_presentation_rng_current(); }
 function __rock_presentation_rng_state_set(s) { __rock_presentation_rng_store(s); }
 function __rock_presentation_rng_next32() {
-  var state = (__rock_presentation_rng_current() + 0x6D2B79F5) >>> 0;
+  var state = (__rock_presentation_rng_current() + 0x9E3779B9) | 0;
+  state = (state ^ (state << 13)) | 0;
+  state = (state ^ (state >>> 17)) | 0;
+  state = (state ^ (state << 5)) | 0;
   __rock_presentation_rng_store(state);
-  var t = state;
-  t = Math.imul(t ^ (t >>> 15), t | 1);
-  t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
-  return (t ^ (t >>> 14)) >>> 0;
+  return (state ^ (state >>> 16)) >>> 0;
 }
 function __rock_presentation_random() { return __rock_presentation_rng_next32() / 4294967296; }
 function __rock_presentation_random_int(min, max) {

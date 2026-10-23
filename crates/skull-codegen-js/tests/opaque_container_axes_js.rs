@@ -120,7 +120,6 @@ fn the_same_native_buffer_body_is_admitted_on_lua() {
 }
 
 #[test]
-#[ignore = "known red (os-m3-js-pure-rock): NativeBuffer has no owned representation plan"]
 fn a_primitive_element_buffer_is_admitted_on_js() {
     let result = js(NATIVEBUFFER_PRIMITIVE);
     assert!(result.is_ok(), "no leaf plan means no representation the boxed form does not have: {result:?}");

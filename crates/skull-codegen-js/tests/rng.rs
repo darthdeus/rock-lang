@@ -1,8 +1,6 @@
-//! Pin the `JS_RNG_RUNTIME` mulberry32 stream.
-//! The JS stream differs from Lua's splitmix by doctrine (bit-parity is a
-//! non-goal); this pins the JS stream INDEPENDENT of node's own PRNG so a
-//! refactor of the prelude can't silently shift it. Runs the ACTUAL prelude
-//! const under node, node-gated with a skip-log (never a silent pass).
+//! Pin the `JS_RNG_RUNTIME` stream to LuaJIT's 32-bit RNG contract.
+//! Runs the ACTUAL prelude const under node, node-gated with a skip-log (never
+//! a silent pass).
 
 use skull_codegen_js::JS_RNG_RUNTIME;
 
@@ -31,15 +29,50 @@ fn node_run(body: &str) -> String {
 }
 
 #[test]
-fn mulberry32_seed42_first4_draws() {
+fn xorshift32_seed42_matches_luajit_draws_and_signed_state() {
     if !node_available() {
-        eprintln!("SKIP mulberry32_seed42_first4_draws: node not found");
+        eprintln!("SKIP xorshift32_seed42_matches_luajit_draws_and_signed_state: node not found");
         return;
     }
     let got = node_run(
-        "__rock_rng_seed(42); var d=[]; for (var i=0;i<4;i++) d.push(__rock_rng_next32()); console.log(d.join(\",\"));",
+        "__rock_rng_seed(42); var d=[]; \
+         d.push(__rock_rng_next32()); d.push(__rock_rng_next32()); \
+         var secondState=__rock_rng_state_get(); \
+         d.push(__rock_rng_next32()); d.push(__rock_rng_next32()); \
+         console.log(d.join(\",\")+\"|\"+secondState);",
     );
-    assert_eq!(got, "2581720956,1925393290,3661312704,2876485805");
+    assert_eq!(got, "1349475785,4158816443,2940726184,3486860168|-136153255");
+}
+
+#[test]
+fn signed_seed_and_state_set_wrap_to_luajit_state() {
+    if !node_available() {
+        eprintln!("SKIP signed_seed_and_state_set_wrap_to_luajit_state: node not found");
+        return;
+    }
+    let got = node_run(
+        "__rock_rng_seed(-1); var seeded=__rock_rng_state_get(); \
+         __rock_rng_state_set(4294967295); var restored=__rock_rng_state_get(); \
+         console.log(seeded+\",\"+restored);",
+    );
+    assert_eq!(got, "-1,-1");
+}
+
+#[test]
+fn presentation_stream_is_independent_and_matches_luajit_sequence() {
+    if !node_available() {
+        eprintln!("SKIP presentation_stream_is_independent_and_matches_luajit_sequence: node not found");
+        return;
+    }
+    let got = node_run(
+        "__rock_rng_seed(42); __rock_presentation_rng_seed(42); \
+         var gameplayFirst=__rock_rng_next32(); \
+         var presentationFirst=__rock_presentation_rng_next32(); \
+         var presentationSecond=__rock_presentation_rng_next32(); \
+         var gameplaySecond=__rock_rng_next32(); \
+         console.log([gameplayFirst,presentationFirst,presentationSecond,gameplaySecond].join(\",\"));",
+    );
+    assert_eq!(got, "1349475785,1349475785,4158816443,4158816443");
 }
 
 #[test]
@@ -51,7 +84,7 @@ fn random_int_seed42_first5() {
     let got = node_run(
         "__rock_rng_seed(42); var d=[]; for (var i=0;i<5;i++) d.push(__rock_random_int(0,6)); console.log(d.join(\",\"));",
     );
-    assert_eq!(got, "0,4,0,5,0");
+    assert_eq!(got, "5,5,4,2,4");
 }
 
 #[test]

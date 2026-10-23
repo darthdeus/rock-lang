@@ -303,7 +303,10 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-        if self.scx.target() == bone_semantic::hir::FnBackend::Lua {
+        if matches!(
+            self.scx.target(),
+            bone_semantic::hir::FnBackend::Lua | bone_semantic::hir::FnBackend::Js
+        ) {
             if let Callee::Unresolved { name, .. } = callee {
                 if name.as_str() == "field_get" {
                     if let Some(repr) = self.lower_nullable_field_get(e, name, &arg_idxs)? {

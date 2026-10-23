@@ -125,3 +125,27 @@ fn user_inspection_bodies_bypass_the_host_value_formatter() {
             "for (const input of [0, 17, -9]) { if (root(input) !== input) throw Error('user inspection body replaced'); }");
     }
 }
+
+#[test]
+fn weak_cache_retirement_removes_only_the_selected_owner() {
+    run_root(
+        "fn root(scene: int, arena: int, slot: int) { __weak_cache_retire(scene, arena, slot) }",
+        "",
+        r#"
+root(1, -1, -1);
+var __rock_weak_cache_owners = {
+  1: { 2: { 3: { a: 1 }, 4: { b: 2 } }, 5: { 6: { c: 3 } } },
+  7: { 8: { 9: { d: 4 } } }
+};
+root(1, 2, 3);
+if (__rock_weak_cache_owners[1][2][3] !== undefined ||
+    __rock_weak_cache_owners[1][2][4].b !== 2) throw new Error("slot retire");
+root(1, 2, 4);
+if (__rock_weak_cache_owners[1][2] !== undefined) throw new Error("empty arena");
+root(1, 5, -1);
+if (__rock_weak_cache_owners[1] !== undefined) throw new Error("empty scene");
+root(7, -1, -1);
+if (Object.keys(__rock_weak_cache_owners).length !== 0) throw new Error("scene retire");
+"#,
+    );
+}

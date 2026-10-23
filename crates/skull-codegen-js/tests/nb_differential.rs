@@ -220,7 +220,6 @@ fn nb_value_differential() {
 }
 
 #[test]
-#[ignore = "known red (os-m3-js-pure-rock): NativeBuffer has no owned representation plan"]
 fn nb_checked_oob_errors_on_both_backends() {
     if !both_backends_available("nb_checked_oob_errors_on_both_backends") {
         return;

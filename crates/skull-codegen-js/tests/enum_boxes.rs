@@ -151,6 +151,106 @@ fn inspect_byte_matches_luajit() {
     assert_eq!(eval(src, "unit", "console.log(unit());"), "Msg::Ping");
 }
 
+// A flat enum widens a tuple payload's `nobox value` leaves into its positional
+// slots. Inspect restores those names when the active payload layout is exact.
+// This enum has no unit variant, so the metadata must not depend on a singleton
+// global being emitted for it.
+#[test]
+fn inspect_flat_enum_nobox_record_payload_names() {
+    let src = "nobox value Pos { x: int, y: int }\n\
+               enum Event { At(Pos), Text(string) }\n\
+               struct Holder { event: Event }\n\
+               fn root() -> string { inspect(Holder { event: Event::At(Pos { x: 4, y: 9 }) }.event) }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("flat enum inspection emits");
+    assert_eq!(
+        eval(src, "root", "console.log(root());"),
+        "Event::At { x = 4, y = 9 }"
+    );
+    assert!(
+        js.contains("__rock_enum_inspect_payloads[\"Event\"]")
+            && !js.contains("__rock_enum_Event_"),
+        "emits per-enum inspect metadata independently of enum singleton globals:\n{js}"
+    );
+}
+
+// The same leaf names appear twice, so no positional slot can be labeled
+// unambiguously. Lua inspect falls back for the entire payload walk.
+#[test]
+fn inspect_flat_enum_duplicate_payload_names_fall_back_to_positions() {
+    let src = "nobox value Pos { x: int, y: int }\n\
+               enum Event { Both(Pos, Pos), Text(string) }\n\
+               struct Holder { event: Event }\n\
+               fn root() -> string { inspect(Holder { event: Event::Both(Pos { x: 1, y: 2 }, Pos { x: 3, y: 4 }) }.event) }";
+    assert_eq!(
+        eval(src, "root", "console.log(root());"),
+        "Event::Both {\n  [1] = 1,\n  [2] = 2,\n  [3] = 3,\n  [4] = 4\n}"
+    );
+}
+
+// A nested nominal payload does not have a flat record-name walk. Keep the
+// positional fallback even though the outer value is itself a `nobox` record.
+#[test]
+fn inspect_flat_enum_nested_nominal_payload_falls_back_to_positions() {
+    let src = "nobox value Inner { x: int, y: int }\n\
+               nobox value Pos { p: Inner, z: int }\n\
+               enum Event { At(Pos), Text(string) }\n\
+               struct Holder { event: Event }\n\
+               fn root() -> string { inspect(Holder { event: Event::At(Pos { p: Inner { x: 1, y: 2 }, z: 3 }) }.event) }";
+    assert_eq!(
+        eval(src, "root", "console.log(root());"),
+        "Event::At {\n  [1] = 1,\n  [2] = 2,\n  [3] = 3\n}"
+    );
+}
+
+// The declared leaf type still controls the Lua fallback: a direct enum field
+// must not be renamed merely because its flat enum slot path has no dot.
+#[test]
+fn inspect_flat_enum_nominal_field_falls_back_to_positions() {
+    let src = "enum Mode { A, B }\n\
+               nobox value Pos { mode: Mode, y: int }\n\
+               enum Event { At(Pos), Text(string) }\n\
+               struct Holder { event: Event }\n\
+               fn root() -> string { inspect(Holder { event: Event::At(Pos { mode: Mode::A, y: 9 }) }.event) }";
+    assert_eq!(
+        eval(src, "root", "console.log(root());"),
+        "Event::At { [1] = 0, [2] = 9 }"
+    );
+}
+
+// A stray slot, a colliding named key, or an inactive trailing descriptor makes
+// the active walk ambiguous; keep all labels positional rather than partially
+// renaming it.
+#[test]
+fn inspect_flat_enum_payload_names_require_exact_leaf_count() {
+    let src = "nobox value Pos { x: int, y: int }\n\
+               enum Event { At(Pos), Maybe(Pos, int?), Named { x: int }, Text(string) }\n\
+               fn root() -> int { 0 }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("flat enum metadata emits");
+    let program = format!(
+        "{}{}\n{js}\nconsole.log(inspect({{__ty: \"Event\", __variant: \"At\", 0: 1, 1: 2, 2: 3}}));\n\
+         console.log(inspect({{__ty: \"Event\", __variant: \"Maybe\", 0: 1, 1: 2}}));\n\
+         console.log(inspect({{__ty: \"Event\", __variant: \"At\", 0: 1, 1: 2, x: 99}}));",
+        preamble(),
+        skull_codegen_js::JS_STRING_RUNTIME,
+    );
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Event::At {\n  [1] = 1,\n  [2] = 2,\n  [3] = 3\n}\nEvent::Maybe { [1] = 1, [2] = 2 }\nEvent::At {\n  [1] = 1,\n  [2] = 2,\n  x = 99\n}"
+    );
+}
+
 // A payload-free enum keeps its int repr; `{x}` interpolation reads the
 // `__rock_enum_<E>_names` Map by ordinal, yielding the `<E>::<V>` display string.
 #[test]

@@ -381,3 +381,21 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 @nomangle inline(js) fn __map_col_spine(m: any) -> any = """
   return m.spine;
 """
+
+@nomangle inline(js) fn __weak_cache_retire(scene: int, arena: int, slot: int) = """
+    var owners = typeof __rock_weak_cache_owners === "undefined" ? null : __rock_weak_cache_owners;
+    var scenes = owners && owners[scene];
+    if (!scenes) return;
+    if (arena === -1) {
+        delete owners[scene];
+    } else {
+        var slots = scenes[arena];
+        if (!slots) return;
+        if (slot === -1) delete scenes[arena];
+        else {
+            delete slots[slot];
+            if (Object.keys(slots).length === 0) delete scenes[arena];
+        }
+        if (Object.keys(scenes).length === 0) delete owners[scene];
+    }
+"""

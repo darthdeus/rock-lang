@@ -231,7 +231,6 @@ fn main() {}
 }
 
 #[test]
-#[ignore = "known red (os-m3-js-pure-rock): __weak_cache_retire is not a mapped JS intrinsic"]
 fn scene_creation_uses_the_monomorphized_type_key_without_runtime_discovery_in_js() {
     let ws = ws_with(r#"
 struct Room { ticks: int }

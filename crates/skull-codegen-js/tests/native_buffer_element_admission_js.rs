@@ -77,7 +77,6 @@ fn gc_carrying_value_rejects_with_its_concrete_name() {
 }
 
 #[test]
-#[ignore = "known red (os-m3-js-pure-rock): NativeBuffer has no owned representation plan"]
 fn native_buffer_primitives_and_ffi_value_are_valid_controls() {
     let js = emit_main(VALID_CONTROLS).expect("valid c-mappable elements must emit");
     assert!(js.contains("Int32Array") && js.contains("Uint32Array") && js.contains("Float32Array"));

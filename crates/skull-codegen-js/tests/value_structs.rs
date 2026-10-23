@@ -31,11 +31,12 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         return;
     }
     let program = format!(
-        "{}{}{}{}\n{defs}\nconsole.log({root}());",
+        "{}{}{}{}{}\n{defs}\nconsole.log({root}());",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
         skull_codegen_js::JS_TABLE_PRIM,
         skull_codegen_js::JS_STRUCTURAL_EQ,
+        skull_codegen_js::JS_STRING_RUNTIME,
     );
     let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
@@ -178,4 +179,69 @@ fn a_leaf_table_value_box_keys_its_inline_children_by_dotted_path() {
         "the box must key the inline child by leaf path, not box it under `pos`:\n{js}"
     );
     eval_int(&js, "root", 236);
+}
+
+const REFLECTED_NULLABLE: &str = r#"
+nobox value Place { area: int, x: int, y: int }
+struct Owner { place: Place?, other: Place?, reads: int }
+nobox value Flag { enabled: bool, place: Place? }
+struct Flags { flag: Flag? }
+fn reflected_read<T, V>(owner: T, field: ReadFieldRef<T, V>) -> V {
+    return field_get(owner, field)
+}
+fn owner_once(owner: Owner) -> Owner {
+    owner.reads += 1
+    return owner
+}
+"#;
+
+#[test]
+fn nullable_field_get_evaluates_owner_once_and_copies() {
+    let src = format!("{REFLECTED_NULLABLE}{}", r#"
+fn root() -> int {
+    let owner = Owner { place: Place { area: 3, x: 5, y: 7 }, other: null, reads: 0 }
+    let snapshot = field_get(f: .place, o: owner_once(owner)).unwrap()
+    owner.place = Place { area: 11, x: 13, y: 17 }
+    if owner.reads == 1 && snapshot.area == 3 && snapshot.x == 5 && snapshot.y == 7 { 1 } else { 0 }
+}
+"#);
+    let ws = ws_with(&src);
+    eval_int(&emit_closure(&ws, "root").expect("nullable field_get emits"), "root", 1);
+}
+
+#[test]
+fn nullable_field_get_preserves_false_and_nested_presence() {
+    let src = format!("{REFLECTED_NULLABLE}{}", r#"
+fn root() -> int {
+    let owner = Flags { flag: Flag { enabled: false, place: null } }
+    let read = reflected_read(owner, .flag).unwrap()
+    if read.enabled || read.place != null { return 0 }
+    owner.flag = Flag { enabled: true, place: Place { area: 19, x: 23, y: 29 } }
+    let present = reflected_read(owner, .flag).unwrap()
+    if !present.enabled || present.place.unwrap().x != 23 { return 0 }
+    owner.flag = null
+    if reflected_read(owner, .flag) == null { 1 } else { 0 }
+}
+"#);
+    let ws = ws_with(&src);
+    eval_int(&emit_closure(&ws, "root").expect("nested nullable field_get emits"), "root", 1);
+}
+
+#[test]
+fn nullable_field_get_reads_present_absent_and_reassigned_payloads() {
+    let src = format!("{REFLECTED_NULLABLE}{}", r#"
+fn root() -> int {
+    let owner = Owner { place: Place { area: 7, x: 11, y: 13 }, other: null, reads: 0 }
+    let read = reflected_read(owner, .place).unwrap()
+    if read.area != 7 || read.x != 11 || read.y != 13 { return 0 }
+    if reflected_read(owner, .other) != null { return 0 }
+    owner.place = null
+    if reflected_read(owner, .place) != null { return 0 }
+    owner.place = Place { area: 17, x: 19, y: 23 }
+    let reread = reflected_read(owner, .place).unwrap()
+    if reread.area == 17 && reread.x == 19 && reread.y == 23 { 1 } else { 0 }
+}
+"#);
+    let ws = ws_with(&src);
+    eval_int(&emit_closure(&ws, "root").expect("nullable field_get emits"), "root", 1);
 }
