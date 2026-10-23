@@ -19,6 +19,7 @@
 //! is a later refinement.)
 
 mod frame_limits;
+mod trace_frames;
 mod regalloc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -668,6 +669,7 @@ pub struct CodegenCtx {
     /// Whether emitted functions carry LuaJIT `# <line> "<file>"` directives
     /// mapping their statements to Rock source ([`line_directives_mode`]).
     line_directives: bool,
+    trace_frames: Option<Mutex<trace_frames::Contributors>>,
 }
 
 impl Clone for CodegenCtx {
@@ -687,6 +689,7 @@ impl Clone for CodegenCtx {
             call_sccs: self.call_sccs.clone(),
             frame_limits: self.frame_limits,
             line_directives: self.line_directives,
+            trace_frames: self.trace_frames.as_ref().map(|rows| Mutex::new(rows.lock().expect("trace frame sink").clone())),
         }
     }
 }
@@ -823,6 +826,7 @@ impl CodegenCtx {
             call_sccs: HashMap::default(),
             frame_limits: true,
             line_directives: line_directives_mode(),
+            trace_frames: trace_frames::enabled().then(|| Mutex::new(Default::default())),
         }
     }
 
@@ -915,6 +919,26 @@ impl CodegenCtx {
 
     pub fn line_directives(&self) -> bool {
         self.line_directives
+    }
+
+    /// Opt-in trace-slot diagnostic over the final assembled Lua. The selected
+    /// LuaJIT parses the chunk without running its initializers or user code.
+    /// Diagnostic failures remain warnings and never change parse-limit checks.
+    pub fn report_trace_frames(&self, lua: &str) {
+        let Some(rows) = &self.trace_frames else { return; };
+        let result = trace_frames::report(lua, &rows.lock().expect("trace frame sink"));
+        match result {
+            Ok(report) => {
+                if let Some(path) = std::env::var_os("ROCK_LUA_TRACE_FRAME_REPORT") {
+                    if let Err(error) = std::fs::write(path, report) {
+                        eprintln!("warning: cannot write LuaJIT emitted-call frame report: {error}");
+                    }
+                } else {
+                    eprint!("{report}");
+                }
+            }
+            Err(error) => eprintln!("warning: LuaJIT emitted-call frame report unavailable: {error}"),
+        }
     }
 
     /// Record every function's call-graph strongly connected component. The
@@ -2125,6 +2149,38 @@ fn emit_named_framed_with_statics_impl(
     let entry = func.entry();
     let params = func.params.as_slice();
     let rpo = reverse_postorder(func, entry);
+    if let Some(rows) = &ctx.trace_frames {
+        let mut contributors = Vec::new();
+        if let Some(abi) = &func.abi_plan {
+            let decl = func_of(ws, abi.decl());
+            let subst = abi.subject.subst(ws, interner);
+            let type_name = |ty| skull_mir::monoty::convert_decl(ws, ty, &subst)
+                .map(|ty| ty.render()).unwrap_or_else(|_| ws.render(None, ty));
+            if let Some(widths) = abi.param_leaf_widths() {
+                for (i, width) in widths.into_iter().enumerate().filter(|(_, width)| *width > 1) {
+                    let rep = abi.representation().params()[i];
+                    let nobox = abi.rep_plan(rep).nobox();
+                    let param = &decl.param_decls[i];
+                    contributors.push(format!("input `{}` of `{}` has type `{}` and is {width} scalar lanes{}",
+                        param.name, func.name, type_name(param.ty), if nobox { " (nobox: cannot be boxed)" } else { "" }));
+                }
+            }
+            if abi.result_lanes() > 1 {
+                let nobox = abi.representation().result().is_some_and(|rep| abi.rep_plan(rep).nobox());
+                let ty = decl.return_ty.map(type_name).unwrap_or_else(|| "unit".into());
+                contributors.push(format!("return of `{}` has type `{ty}` and is {} scalar lanes{}",
+                    func.name, abi.result_lanes(), if nobox { " (nobox: cannot be boxed)" } else { "" }));
+            }
+        }
+        for &block in &rpo {
+            for &id in &func.blocks[block].insts {
+                for line in wide_call_contributors(ws, func, id) {
+                    if !contributors.contains(&line) { contributors.push(line); }
+                }
+            }
+        }
+        rows.lock().expect("trace frame sink").insert(name.to_string(), contributors);
+    }
     let tail_forwards = tail_forwards(ws, ctx, func, frame.is_none());
     let (call_arg_forwards, suppressed) = if frame.is_some() {
         // Coroutine lifting moves later uses into frame fields, outside the

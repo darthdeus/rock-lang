@@ -306,3 +306,5 @@ mod vertex_plan;
 mod removed_global_markers;
 #[path = "int_float_alias.rs"]
 mod int_float_alias;
+#[path = "trace_frames.rs"]
+mod trace_frames;

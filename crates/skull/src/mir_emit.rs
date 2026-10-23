@@ -6382,6 +6382,7 @@ fn assemble(
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "main.lua");
     }
+    cg.report_trace_frames(&out);
     Ok((
         MirEmit {
             release_stats,

@@ -709,6 +709,16 @@ to JavaScript instead and runs it with `node`, which must be on `PATH`;
 `rock compile` emits the Lua without running it; `rock shader`
 emits GLSL as described above.
 
+Set `ROCK_LUA_TRACE_FRAMES=1` to report final emitted Lua function frames,
+direct call register prefixes, and non-tail call-chain slot pressure. Select
+the target VM with `ROCK_LUAJIT`, or put `luajit` on `PATH`. The diagnostic
+parses the generated Lua without running it and leaves emitted code unchanged.
+It writes to stderr, or to `ROCK_LUA_TRACE_FRAME_REPORT` when set. Warnings
+name wide scalar parameters and returns, including `nobox` contributors.
+Recursion, indirect calls and tail calls leave the full chain unknown;
+branches, trace entry and LuaJIT's inlining choices also affect actual aborts.
+The report does not change compile errors or the default boxing policy.
+
 ## What Rock does not have
 
 A short list for readers coming from other languages:
