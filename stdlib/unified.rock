@@ -3103,6 +3103,7 @@ fn Map<K, V>.clear(map) {
 
 fn Map<K, V>.keys_into(map, result: [K]) -> [K] {
     result.clear()
+    if map.is_empty() { return result }
     for (k, v) in map {
         vec_push(result, k)
     }
@@ -3116,6 +3117,7 @@ fn Map<K, V>.keys(map) -> [K] {
 }
 
 fn Map<K, V>.values(map) -> [V] {
+    if map.is_empty() { return [] }
     let keys = keys(map)
     let values: [V] = []
     for k in keys {
@@ -3125,6 +3127,7 @@ fn Map<K, V>.values(map) -> [V] {
 }
 
 fn Map<K, V>.to_array(map) -> [(K, V)] {
+    if map.is_empty() { return [] }
     let keys = keys(map)
     let result: [(K, V)] = []
     for k in keys {
