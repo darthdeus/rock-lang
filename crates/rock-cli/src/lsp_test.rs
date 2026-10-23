@@ -292,6 +292,21 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 continue;
             };
 
+            // A TYPE the harness cannot decode is refused here, naming itself: a
+            // dropped fixture is a vacuous pass, and comparing its raw reply
+            // would accept output the server never shaped. `edit_sequence`
+            // fixtures are read by `parse_edit_sequence_tests`, and `code_action`
+            // is skipped below because no subcommand answers it.
+            let type_kind = fixture_reply_kind(&test_type);
+            if type_kind.is_none() && test_type != "edit_sequence" && test_type != "code_action" {
+                return Err(anyhow::anyhow!(
+                    "{}: test '{}' has TYPE '{}', which has no reply decoder",
+                    path.display(),
+                    name,
+                    test_type
+                ));
+            }
+
             // Multi-file mode: `FILES:` after `TYPE:` instead of a code block.
             let is_multi_file =
                 lines.peek().map(|l| l.trim() == "FILES:").unwrap_or(false);
@@ -352,9 +367,11 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             }
 
             // Parse operation
+            let operation_text;
             let operation = if let Some(op_line) = lines.next() {
                 if op_line.starts_with("OPERATION:") {
                     let op_type = op_line.strip_prefix("OPERATION:").unwrap().trim();
+                    operation_text = op_type.to_string();
 
                     // Some operations don't need positions
                     match op_type {
@@ -432,7 +449,14 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                                         LspOperation::Rename { line, character, new_name: "renamed".to_string() }
                                     }
                                 }
-                                _ => continue,
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "{}: test '{}' has OPERATION '{}', which has no reply decoder",
+                                        path.display(),
+                                        name,
+                                        op_type
+                                    ));
+                                }
                             }
                         }
                     }
@@ -442,6 +466,22 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             } else {
                 continue;
             };
+
+            // The TYPE names the decoder and the OPERATION names the request; a
+            // fixture whose halves disagree would run one request through another
+            // type's validator.
+            if let Some(type_kind) = type_kind {
+                if type_kind != operation.reply_kind() {
+                    return Err(anyhow::anyhow!(
+                        "{}: test '{}' has TYPE '{}' but OPERATION '{}' answers a {:?} reply",
+                        path.display(),
+                        name,
+                        test_type,
+                        operation_text,
+                        operation.reply_kind()
+                    ));
+                }
+            }
 
             // Skip separator if present
             if let Some(line) = lines.peek() {
@@ -919,6 +959,65 @@ fn lsp_server_bin() -> Result<PathBuf> {
     })
 }
 
+/// The shape a fixture's reply must have, one variant per decoder. The
+/// comparison in `run_lsp_test` matches on this, so a new request cannot be
+/// added without a decoder to compare its reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyKind {
+    Completion,
+    Definition,
+    References,
+    SemanticTokens,
+    SignatureHelp,
+    InlayHints,
+    Hover,
+    Symbols,
+    Rename,
+}
+
+impl LspOperation {
+    /// The decoder for the reply this request answers with. Total over the
+    /// operations, so no request can reach the comparison without a shape.
+    fn reply_kind(&self) -> ReplyKind {
+        match self {
+            LspOperation::Completion { .. } => ReplyKind::Completion,
+            LspOperation::GotoDefinition { .. } | LspOperation::GotoTypeDefinition { .. } => {
+                ReplyKind::Definition
+            }
+            LspOperation::Hover { .. } => ReplyKind::Hover,
+            LspOperation::References { .. } => ReplyKind::References,
+            LspOperation::InlayHints => ReplyKind::InlayHints,
+            LspOperation::Rename { .. } => ReplyKind::Rename,
+            LspOperation::SemanticTokens => ReplyKind::SemanticTokens,
+            LspOperation::SignatureHelp { .. } => ReplyKind::SignatureHelp,
+            LspOperation::DocumentSymbols | LspOperation::WorkspaceSymbols { .. } => {
+                ReplyKind::Symbols
+            }
+        }
+    }
+}
+
+/// The decoder a fixture's `TYPE:` names, or `None` when the harness has none.
+/// `edit_sequence` fixtures are read by `parse_edit_sequence_tests` instead, and
+/// `code_action` has no `rock lsp` subcommand to answer it, so both are skipped
+/// by name rather than compared.
+fn fixture_reply_kind(test_type: &str) -> Option<ReplyKind> {
+    Some(match test_type {
+        "completion" => ReplyKind::Completion,
+        "goto_definition" | "goto_type_definition" => ReplyKind::Definition,
+        "references" => ReplyKind::References,
+        // `full_document` is the older name for a whole-file token request; it
+        // builds the same operation as `semantic_tokens`.
+        "semantic_tokens" | "full_document" => ReplyKind::SemanticTokens,
+        "signature_help" => ReplyKind::SignatureHelp,
+        "inlay_hints" => ReplyKind::InlayHints,
+        "hover" => ReplyKind::Hover,
+        "document_symbols" | "workspace_symbols" => ReplyKind::Symbols,
+        "rename" => ReplyKind::Rename,
+        _ => return None,
+    })
+}
+
 /// Decode a fixture reply. A reply is JSON by contract, so one that does not
 /// decode is a server bug: it fails the fixture and quotes the raw text.
 /// Falling back to a substring match would pass malformed output that happens
@@ -1077,599 +1176,602 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
     let request = format!("{} test '{}'", test.test_type, test.name);
     let mut all_found = true;
 
-    if test.test_type == "completion" {
-        // `completions` must decode as an array before any label is compared.
-        let json = decode_reply(&request, &stdout)?;
-        let completions = reply_array(&request, &stdout, &json, "completions")?;
-        let labels: Vec<String> = completions
-            .iter()
-            .filter_map(|c| c.get("label").and_then(|l| l.as_str()))
-            .map(|s| s.to_string())
-            .collect();
+    // Dispatch on the request, not the `TYPE:` spelling: a fixture that
+    // reached `TYPE: full_document` used to fall through to a raw-output
+    // substring match. `ReplyKind` has one arm per decoder.
+    match test.operation.reply_kind() {
+        ReplyKind::Completion => {
+            // `completions` must decode as an array before any label is compared.
+            let json = decode_reply(&request, &stdout)?;
+            let completions = reply_array(&request, &stdout, &json, "completions")?;
+            let labels: Vec<String> = completions
+                .iter()
+                .filter_map(|c| c.get("label").and_then(|l| l.as_str()))
+                .map(|s| s.to_string())
+                .collect();
 
-        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-            eprintln!("    Checking completions for test '{}'", test.name);
-            eprintln!("    Available completions: {:?}", labels);
-            eprintln!("    Expected items: {:?}", test.expected);
-        }
-        for expected_item in &test.expected {
-            let found = labels.iter().any(|label| label.contains(expected_item));
-            if !found {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Expected '{}' not found in completions", expected_item);
-                    eprintln!("    Available completions: {:?}", labels);
-                }
-            } else if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Found expected item: '{}'", expected_item);
+            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                eprintln!("    Checking completions for test '{}'", test.name);
+                eprintln!("    Available completions: {:?}", labels);
+                eprintln!("    Expected items: {:?}", test.expected);
             }
-        }
-    } else if test.test_type == "goto_definition" || test.test_type == "goto_type_definition" {
-        // For goto_definition / goto_type_definition, check the output format
-        // (both emit the same `definitions` array shape).
-        let json = decode_reply(&request, &stdout)?;
-        let definitions = reply_array(&request, &stdout, &json, "definitions")?;
-        // The actual LSP output has definitions[0].range.start.{line,character}
-        let definition = definitions.first();
-
-        // Support `EXPECTED: none` — assert that goto-def found no targets.
-        // Useful for built-in types, keywords, and positions that have no
-        // definition to navigate to (the LSP should return [] not an error).
-        let expects_none = test
-            .expected
-            .iter()
-            .any(|e| e.trim().eq_ignore_ascii_case("none"));
-        if expects_none {
-            if !definitions.is_empty() {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Expected no definitions, got {:?}", definitions);
-                }
-            }
-        } else if let Some(def) = definition {
-            // Check file, line, character in the definition
             for expected_item in &test.expected {
-                if expected_item.starts_with("file:") {
-                    // For goto_definition tests, we're actually testing the same file,
-                    // so we can skip the file check since it will be the temp file
-                    // The test expectations use "main.rock" but that's just a placeholder
-                    continue;
-                } else if expected_item.starts_with("line:") {
-                    let expected_line: usize = expected_item.strip_prefix("line:").unwrap().trim().parse().unwrap_or(0);
-                    if let Some(line) = def.get("range")
-                        .and_then(|r| r.get("start"))
-                        .and_then(|s| s.get("line"))
-                        .and_then(|l| l.as_u64()) {
-                        if line != expected_line as u64 {
-                            all_found = false;
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    Expected line {}, got {}", expected_line, line);
-                            }
-                        }
-                    } else {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    No line field found in definition range");
-                        }
-                    }
-                } else if expected_item.starts_with("character:") {
-                    let expected_char: usize = expected_item.strip_prefix("character:").unwrap().trim().parse().unwrap_or(0);
-                    if let Some(character) = def.get("range")
-                        .and_then(|r| r.get("start"))
-                        .and_then(|s| s.get("character"))
-                        .and_then(|c| c.as_u64()) {
-                        if character != expected_char as u64 {
-                            all_found = false;
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    Expected character {}, got {}", expected_char, character);
-                            }
-                        }
-                    } else {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    No character field found in definition range");
-                        }
-                    }
-                }
-            }
-        } else {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    No definitions found in output");
-                eprintln!("    Actual output: {}", stdout);
-            }
-        }
-    } else if test.test_type == "references" {
-        // Strict set-equality: the (line, character) pairs returned by the
-        // LSP must equal exactly the pairs expected — no extras, no missing,
-        // order ignored. `file:` lines in EXPECTED are treated as
-        // placeholders and ignored, mirroring the goto_definition validator
-        // (the harness writes a single tempfile named after the test, not
-        // `main.rock`; multi-file `.rock.lsp` is unsupported, so cross-file
-        // assertions live in `rock-lang/crates/rock-lsp/tests/bone/` instead).
-        //
-        // `EXPECTED:` entries come in groups of three consecutive lines:
-        // `file: ...`, `line: N`, `character: N`. A single line containing
-        // `none` (case-insensitive) asserts the empty set.
-        //
-        // The `references` array must decode before the set is built: an
-        // undecodable or shapeless reply is a server bug, never an empty
-        // result, so it cannot satisfy `EXPECTED: none`.
-        let json = decode_reply(&request, &stdout)?;
-        let actual_refs: Vec<(u64, u64)> = reply_array(&request, &stdout, &json, "references")?
-            .iter()
-            .filter_map(|loc| {
-                let start = loc.get("range")?.get("start")?;
-                let line = start.get("line")?.as_u64()?;
-                let character = start.get("character")?.as_u64()?;
-                Some((line, character))
-            })
-            .collect();
-
-        let expects_none = test
-            .expected
-            .iter()
-            .any(|e| e.trim().eq_ignore_ascii_case("none"));
-
-        if expects_none {
-            if !actual_refs.is_empty() {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Expected no references, got {:?}", actual_refs);
-                }
-            }
-        } else {
-            // Group flat EXPECTED lines into (line, character) pairs.
-            // `file:` lines act as group separators / placeholders.
-            let mut expected_refs: Vec<(u64, u64)> = Vec::new();
-            let mut cur_line: Option<u64> = None;
-            for item in &test.expected {
-                let item = item.trim();
-                if item.starts_with("file:") {
-                    cur_line = None;
-                } else if let Some(l) = item.strip_prefix("line:") {
-                    cur_line = l.trim().parse().ok();
-                } else if let Some(c) = item.strip_prefix("character:") {
-                    if let (Some(l), Ok(ch)) = (cur_line, c.trim().parse::<u64>()) {
-                        expected_refs.push((l, ch));
-                    }
-                }
-            }
-
-            let mut a = actual_refs.clone();
-            let mut e = expected_refs.clone();
-            a.sort();
-            e.sort();
-            if a != e {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    let actual_set: std::collections::BTreeSet<_> =
-                        actual_refs.iter().collect();
-                    let expected_set: std::collections::BTreeSet<_> =
-                        expected_refs.iter().collect();
-                    let missing: Vec<_> =
-                        expected_set.difference(&actual_set).collect();
-                    let extra: Vec<_> =
-                        actual_set.difference(&expected_set).collect();
-                    if !missing.is_empty() {
-                        eprintln!("    Missing references (expected, not returned):");
-                        for r in &missing {
-                            eprintln!("      {:?}", r);
-                        }
-                    }
-                    if !extra.is_empty() {
-                        eprintln!("    Extra references (returned, not expected):");
-                        for r in &extra {
-                            eprintln!("      {:?}", r);
-                        }
-                    }
-                }
-            }
-        }
-    } else if test.test_type == "semantic_tokens" {
-        // For semantic_tokens, check for minimum number of tokens
-        let json = decode_reply(&request, &stdout)?;
-        // The rock-lsp outputs in a custom format with count and tokens fields
-        let token_count = if let Some(count) = json.get("count").and_then(|c| c.as_u64()) {
-            count as usize
-        } else if let Some(tokens) = json.get("tokens").and_then(|t| t.as_array()) {
-            tokens.len()
-        } else if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-            data.len() / 5 // Each token is 5 integers in LSP format
-        } else {
-            return Err(anyhow::anyhow!(
-                "{request}: reply has no `count`, `tokens` or `data` field; raw reply: {stdout}"
-            ));
-        };
-
-        if token_count > 0 {
-            // Check if we have the minimum expected tokens
-            for expected_item in &test.expected {
-                if expected_item.starts_with("min_tokens:") {
-                    let min_tokens: usize = expected_item
-                        .strip_prefix("min_tokens:")
-                        .unwrap()
-                        .trim()
-                        .parse()
-                        .unwrap_or(0);
-
-                    if token_count < min_tokens {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Expected at least {} tokens, got {}", min_tokens, token_count);
-                        }
-                    }
-                }
-            }
-        } else {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    No semantic tokens data found in output");
-            }
-        }
-    } else if test.test_type == "signature_help" {
-        // For signature_help, check the signature in the output.
-        // The LSP may return multiple overloads under `signatures`; an
-        // expected substring passes if it's found in *any* of them. This
-        // lets overload-heavy tests assert on the right arm even when
-        // overload resolution picks a different one as active.
-        let json = decode_reply(&request, &stdout)?;
-        let labels: Vec<String> = if let Some(sig) =
-            json.get("signature").and_then(|s| s.as_str())
-        {
-            vec![sig.to_string()]
-        } else if let Some(sigs) = json.get("signatures").and_then(|s| s.as_array()) {
-            sigs.iter()
-                .filter_map(|s| s.get("label").and_then(|l| l.as_str()).map(|s| s.to_string()))
-                .collect()
-        } else {
-            return Err(anyhow::anyhow!(
-                "{request}: reply has no `signature` or `signatures` field; raw reply: {stdout}"
-            ));
-        };
-
-        let active_idx = json
-            .get("activeSignature")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let active_label = labels.get(active_idx).cloned().unwrap_or_default();
-
-        if test.expected.is_empty() {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!(
-                    "    signature_help test has an empty EXPECTED block — \
-                     assertion would pass vacuously, treating as failure"
-                );
-            }
-        }
-        for expected_item in &test.expected {
-            // `ACTIVE: ...` asserts against the active signature only —
-            // proves overload resolution picked the right arm. Plain
-            // lines match any returned signature.
-            let (needle, search_target): (&str, &[String]) =
-                if let Some(rest) = expected_item.strip_prefix("ACTIVE:") {
-                    (rest.trim(), std::slice::from_ref(&active_label))
-                } else {
-                    (expected_item.as_str(), labels.as_slice())
-                };
-            let found = search_target.iter().any(|l| l.contains(needle));
-            if !found {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Expected '{}' not found (searched {:?})", needle, search_target);
-                    eprintln!("    All signatures: {:?}", labels);
-                }
-            }
-        }
-    } else if test.test_type == "inlay_hints" {
-        // Parse `«hint::LABEL»` markers out of the expected source and
-        // assert each (line, char, label) triple appears in the LSP's
-        // `hints` array. Subset semantics — extra hints are allowed; every
-        // expected hint must be found.
-        let expected_hints = parse_hint_markers(&test.expected);
-        let json = decode_reply(&request, &stdout)?;
-        let actual: Vec<(u64, u64, String)> = reply_array(&request, &stdout, &json, "hints")?
-            .iter()
-            .filter_map(|h| {
-                let line = h.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_u64())?;
-                let ch = h.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_u64())?;
-                let label = h.get("label").and_then(|v| v.as_str())?.to_string();
-                Some((line, ch, label))
-            })
-            .collect();
-
-        // Match on (line, normalised_label). Column is intentionally
-        // loose — test files place `«hint:...»` right before the value,
-        // but the LSP reports `position` differently for type hints
-        // (padding_left, before the value) vs parameter hints
-        // (padding_right, at the leading whitespace), so column
-        // equality is off by one in some cases. Normalised label
-        // strips a leading `:` so that `: int` (type-hint LSP label)
-        // and `«hint:: int»` (marker content `: int`) both match, as
-        // does `«hint::key:»` (marker content `:key:`) vs `key:`.
-        for (line, _ch, label) in &expected_hints {
-            let norm_exp = normalise_hint_label(label);
-            let found = actual.iter().any(|(al, _ac, alabel)| {
-                al == line && normalise_hint_label(alabel) == norm_exp
-            });
-            if !found {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!(
-                        "    Expected inlay hint on line {} with label {:?} (normalised {:?}) not found",
-                        line, label, norm_exp
-                    );
-                    eprintln!("    Actual hints: {:?}", actual);
-                }
-            }
-        }
-        if expected_hints.is_empty() {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    No «hint::...» markers parsed from EXPECTED block");
-            }
-        }
-
-    } else if test.test_type == "hover" {
-        // For hover, check the hover contents
-        let json = decode_reply(&request, &stdout)?;
-        let hover_contents = json.get("hover")
-            .and_then(|h| h.get("contents"))
-            .and_then(|c| {
-                // Handle both string and MarkupContent formats
-                if let Some(s) = c.as_str() {
-                    Some(s.to_string())
-                } else if let Some(markup) = c.as_object() {
-                    markup.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| anyhow::anyhow!(
-                "{request}: reply has no `hover.contents`; raw reply: {stdout}"
-            ))?;
-
-        // Join all expected lines into a single expected string
-        let expected_full = test.expected.join("\n");
-
-        // Normalize whitespace for comparison
-        let contents_normalized = hover_contents.trim();
-        let expected_normalized = expected_full.trim();
-
-        if contents_normalized != expected_normalized {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Hover content mismatch");
-                eprintln!("    Expected:");
-                eprintln!("{}", expected_normalized);
-                eprintln!("    Actual:");
-                eprintln!("{}", contents_normalized);
-            }
-        }
-    } else if test.test_type == "document_symbols" || test.test_type == "workspace_symbols" {
-        // For symbol tests, check the symbol names and kinds
-        let json = decode_reply(&request, &stdout)?;
-        let symbols = if let Some(syms) = json.get("symbols").and_then(|s| s.as_array()) {
-            syms.clone()
-        } else if let Some(syms) = json.as_array() {
-            syms.clone()
-        } else {
-            return Err(anyhow::anyhow!(
-                "{request}: reply has no `symbols` array; raw reply: {stdout}"
-            ));
-        };
-
-        for expected_item in &test.expected {
-            // Expected format: "SymbolName: SymbolKind"
-            let parts: Vec<&str> = expected_item.split(':').collect();
-            if parts.len() == 2 {
-                let expected_name = parts[0].trim();
-                let expected_kind = parts[1].trim();
-
-                let found = symbols.iter().any(|sym| {
-                    let name_matches = sym.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|n| n == expected_name)
-                        .unwrap_or(false);
-
-                    let kind_matches = sym.get("kind")
-                        .and_then(|k| k.as_str())
-                        .map(|k| k.to_lowercase().contains(&expected_kind.to_lowercase()))
-                        .unwrap_or(false);
-
-                    name_matches && kind_matches
-                });
-
+                let found = labels.iter().any(|label| label.contains(expected_item));
                 if !found {
                     all_found = false;
                     if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected symbol '{}' of kind '{}' not found", expected_name, expected_kind);
+                        eprintln!("    Expected '{}' not found in completions", expected_item);
+                        eprintln!("    Available completions: {:?}", labels);
+                    }
+                } else if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                    eprintln!("    Found expected item: '{}'", expected_item);
+                }
+            }
+        }
+        ReplyKind::Definition => {
+            // For goto_definition / goto_type_definition, check the output format
+            // (both emit the same `definitions` array shape).
+            let json = decode_reply(&request, &stdout)?;
+            let definitions = reply_array(&request, &stdout, &json, "definitions")?;
+            // The actual LSP output has definitions[0].range.start.{line,character}
+            let definition = definitions.first();
+
+            // Support `EXPECTED: none` — assert that goto-def found no targets.
+            // Useful for built-in types, keywords, and positions that have no
+            // definition to navigate to (the LSP should return [] not an error).
+            let expects_none = test
+                .expected
+                .iter()
+                .any(|e| e.trim().eq_ignore_ascii_case("none"));
+            if expects_none {
+                if !definitions.is_empty() {
+                    all_found = false;
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        eprintln!("    Expected no definitions, got {:?}", definitions);
+                    }
+                }
+            } else if let Some(def) = definition {
+                // Check file, line, character in the definition
+                for expected_item in &test.expected {
+                    if expected_item.starts_with("file:") {
+                        // For goto_definition tests, we're actually testing the same file,
+                        // so we can skip the file check since it will be the temp file
+                        // The test expectations use "main.rock" but that's just a placeholder
+                        continue;
+                    } else if expected_item.starts_with("line:") {
+                        let expected_line: usize = expected_item.strip_prefix("line:").unwrap().trim().parse().unwrap_or(0);
+                        if let Some(line) = def.get("range")
+                            .and_then(|r| r.get("start"))
+                            .and_then(|s| s.get("line"))
+                            .and_then(|l| l.as_u64()) {
+                            if line != expected_line as u64 {
+                                all_found = false;
+                                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                    eprintln!("    Expected line {}, got {}", expected_line, line);
+                                }
+                            }
+                        } else {
+                            all_found = false;
+                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                eprintln!("    No line field found in definition range");
+                            }
+                        }
+                    } else if expected_item.starts_with("character:") {
+                        let expected_char: usize = expected_item.strip_prefix("character:").unwrap().trim().parse().unwrap_or(0);
+                        if let Some(character) = def.get("range")
+                            .and_then(|r| r.get("start"))
+                            .and_then(|s| s.get("character"))
+                            .and_then(|c| c.as_u64()) {
+                            if character != expected_char as u64 {
+                                all_found = false;
+                                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                    eprintln!("    Expected character {}, got {}", expected_char, character);
+                                }
+                            }
+                        } else {
+                            all_found = false;
+                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                eprintln!("    No character field found in definition range");
+                            }
+                        }
                     }
                 }
             } else {
-                // Just check for symbol name
-                let found = symbols.iter().any(|sym| {
-                    sym.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|n| n == expected_item)
-                        .unwrap_or(false)
-                });
+                all_found = false;
+                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                    eprintln!("    No definitions found in output");
+                    eprintln!("    Actual output: {}", stdout);
+                }
+            }
+        }
+        ReplyKind::References => {
+            // Strict set-equality: the (line, character) pairs returned by the
+            // LSP must equal exactly the pairs expected — no extras, no missing,
+            // order ignored. `file:` lines in EXPECTED are treated as
+            // placeholders and ignored, mirroring the goto_definition validator
+            // (the harness writes a single tempfile named after the test, not
+            // `main.rock`; multi-file `.rock.lsp` is unsupported, so cross-file
+            // assertions live in `rock-lang/crates/rock-lsp/tests/bone/` instead).
+            //
+            // `EXPECTED:` entries come in groups of three consecutive lines:
+            // `file: ...`, `line: N`, `character: N`. A single line containing
+            // `none` (case-insensitive) asserts the empty set.
+            //
+            // The `references` array must decode before the set is built: an
+            // undecodable or shapeless reply is a server bug, never an empty
+            // result, so it cannot satisfy `EXPECTED: none`.
+            let json = decode_reply(&request, &stdout)?;
+            let actual_refs: Vec<(u64, u64)> = reply_array(&request, &stdout, &json, "references")?
+                .iter()
+                .filter_map(|loc| {
+                    let start = loc.get("range")?.get("start")?;
+                    let line = start.get("line")?.as_u64()?;
+                    let character = start.get("character")?.as_u64()?;
+                    Some((line, character))
+                })
+                .collect();
 
-                if !found {
+            let expects_none = test
+                .expected
+                .iter()
+                .any(|e| e.trim().eq_ignore_ascii_case("none"));
+
+            if expects_none {
+                if !actual_refs.is_empty() {
                     all_found = false;
                     if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected symbol '{}' not found", expected_item);
+                        eprintln!("    Expected no references, got {:?}", actual_refs);
+                    }
+                }
+            } else {
+                // Group flat EXPECTED lines into (line, character) pairs.
+                // `file:` lines act as group separators / placeholders.
+                let mut expected_refs: Vec<(u64, u64)> = Vec::new();
+                let mut cur_line: Option<u64> = None;
+                for item in &test.expected {
+                    let item = item.trim();
+                    if item.starts_with("file:") {
+                        cur_line = None;
+                    } else if let Some(l) = item.strip_prefix("line:") {
+                        cur_line = l.trim().parse().ok();
+                    } else if let Some(c) = item.strip_prefix("character:") {
+                        if let (Some(l), Ok(ch)) = (cur_line, c.trim().parse::<u64>()) {
+                            expected_refs.push((l, ch));
+                        }
+                    }
+                }
+
+                let mut a = actual_refs.clone();
+                let mut e = expected_refs.clone();
+                a.sort();
+                e.sort();
+                if a != e {
+                    all_found = false;
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        let actual_set: std::collections::BTreeSet<_> =
+                            actual_refs.iter().collect();
+                        let expected_set: std::collections::BTreeSet<_> =
+                            expected_refs.iter().collect();
+                        let missing: Vec<_> =
+                            expected_set.difference(&actual_set).collect();
+                        let extra: Vec<_> =
+                            actual_set.difference(&expected_set).collect();
+                        if !missing.is_empty() {
+                            eprintln!("    Missing references (expected, not returned):");
+                            for r in &missing {
+                                eprintln!("      {:?}", r);
+                            }
+                        }
+                        if !extra.is_empty() {
+                            eprintln!("    Extra references (returned, not expected):");
+                            for r in &extra {
+                                eprintln!("      {:?}", r);
+                            }
+                        }
                     }
                 }
             }
         }
-    } else if test.test_type == "rename" {
-        // For rename tests, apply the text edits and check the resulting code
-        let json = decode_reply(&request, &stdout)?;
-        if let Some(changes) = json.get("changes").and_then(|c| c.as_object()) {
-                // Multi-file rename: apply edits per file, compare against
-                // expected per-file content.
-                if !test.expected_files.is_empty() {
-                    for (fname, expected_content) in &test.expected_files {
-                        // Skip non-rock manifest entries that the renamer never touches.
-                        if fname == "project.toml" || fname == "stick.toml" {
-                            continue;
+        ReplyKind::SemanticTokens => {
+            // For semantic_tokens, check for minimum number of tokens
+            let json = decode_reply(&request, &stdout)?;
+            // The rock-lsp outputs in a custom format with count and tokens fields
+            let token_count = if let Some(count) = json.get("count").and_then(|c| c.as_u64()) {
+                count as usize
+            } else if let Some(tokens) = json.get("tokens").and_then(|t| t.as_array()) {
+                tokens.len()
+            } else if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                data.len() / 5 // Each token is 5 integers in LSP format
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{request}: reply has no `count`, `tokens` or `data` field; raw reply: {stdout}"
+                ));
+            };
+
+            if token_count > 0 {
+                // Check if we have the minimum expected tokens
+                for expected_item in &test.expected {
+                    if expected_item.starts_with("min_tokens:") {
+                        let min_tokens: usize = expected_item
+                            .strip_prefix("min_tokens:")
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+
+                        if token_count < min_tokens {
+                            all_found = false;
+                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                eprintln!("    Expected at least {} tokens, got {}", min_tokens, token_count);
+                            }
                         }
-                        let original = test
-                            .files
-                            .iter()
-                            .find(|(n, _)| n == fname)
-                            .map(|(_, c)| c.clone())
-                            .unwrap_or_default();
-                        // Find edits whose URI ends with `/<fname>`.
-                        let edits_for_file: Vec<&serde_json::Value> = changes
-                            .iter()
-                            .filter(|(uri, _)| uri.ends_with(&format!("/{}", fname)))
-                            .filter_map(|(_, edits)| edits.as_array())
-                            .flat_map(|arr| arr.iter())
-                            .collect();
-                        let actual = apply_text_edits(&original, &edits_for_file);
-                        let expected_norm = expected_content.trim_end().to_string();
-                        let actual_norm = actual.trim_end().to_string();
+                    }
+                }
+            } else {
+                all_found = false;
+                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                    eprintln!("    No semantic tokens data found in output");
+                }
+            }
+        }
+        ReplyKind::SignatureHelp => {
+            // For signature_help, check the signature in the output.
+            // The LSP may return multiple overloads under `signatures`; an
+            // expected substring passes if it's found in *any* of them. This
+            // lets overload-heavy tests assert on the right arm even when
+            // overload resolution picks a different one as active.
+            let json = decode_reply(&request, &stdout)?;
+            let labels: Vec<String> = if let Some(sig) =
+                json.get("signature").and_then(|s| s.as_str())
+            {
+                vec![sig.to_string()]
+            } else if let Some(sigs) = json.get("signatures").and_then(|s| s.as_array()) {
+                sigs.iter()
+                    .filter_map(|s| s.get("label").and_then(|l| l.as_str()).map(|s| s.to_string()))
+                    .collect()
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{request}: reply has no `signature` or `signatures` field; raw reply: {stdout}"
+                ));
+            };
+
+            let active_idx = json
+                .get("activeSignature")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let active_label = labels.get(active_idx).cloned().unwrap_or_default();
+
+            if test.expected.is_empty() {
+                all_found = false;
+                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                    eprintln!(
+                        "    signature_help test has an empty EXPECTED block — \
+                         assertion would pass vacuously, treating as failure"
+                    );
+                }
+            }
+            for expected_item in &test.expected {
+                // `ACTIVE: ...` asserts against the active signature only —
+                // proves overload resolution picked the right arm. Plain
+                // lines match any returned signature.
+                let (needle, search_target): (&str, &[String]) =
+                    if let Some(rest) = expected_item.strip_prefix("ACTIVE:") {
+                        (rest.trim(), std::slice::from_ref(&active_label))
+                    } else {
+                        (expected_item.as_str(), labels.as_slice())
+                    };
+                let found = search_target.iter().any(|l| l.contains(needle));
+                if !found {
+                    all_found = false;
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        eprintln!("    Expected '{}' not found (searched {:?})", needle, search_target);
+                        eprintln!("    All signatures: {:?}", labels);
+                    }
+                }
+            }
+        }
+        ReplyKind::InlayHints => {
+            // Parse `«hint::LABEL»` markers out of the expected source and
+            // assert each (line, char, label) triple appears in the LSP's
+            // `hints` array. Subset semantics — extra hints are allowed; every
+            // expected hint must be found.
+            let expected_hints = parse_hint_markers(&test.expected);
+            let json = decode_reply(&request, &stdout)?;
+            let actual: Vec<(u64, u64, String)> = reply_array(&request, &stdout, &json, "hints")?
+                .iter()
+                .filter_map(|h| {
+                    let line = h.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_u64())?;
+                    let ch = h.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_u64())?;
+                    let label = h.get("label").and_then(|v| v.as_str())?.to_string();
+                    Some((line, ch, label))
+                })
+                .collect();
+
+            // Match on (line, normalised_label). Column is intentionally
+            // loose — test files place `«hint:...»` right before the value,
+            // but the LSP reports `position` differently for type hints
+            // (padding_left, before the value) vs parameter hints
+            // (padding_right, at the leading whitespace), so column
+            // equality is off by one in some cases. Normalised label
+            // strips a leading `:` so that `: int` (type-hint LSP label)
+            // and `«hint:: int»` (marker content `: int`) both match, as
+            // does `«hint::key:»` (marker content `:key:`) vs `key:`.
+            for (line, _ch, label) in &expected_hints {
+                let norm_exp = normalise_hint_label(label);
+                let found = actual.iter().any(|(al, _ac, alabel)| {
+                    al == line && normalise_hint_label(alabel) == norm_exp
+                });
+                if !found {
+                    all_found = false;
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        eprintln!(
+                            "    Expected inlay hint on line {} with label {:?} (normalised {:?}) not found",
+                            line, label, norm_exp
+                        );
+                        eprintln!("    Actual hints: {:?}", actual);
+                    }
+                }
+            }
+            if expected_hints.is_empty() {
+                all_found = false;
+                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                    eprintln!("    No «hint::...» markers parsed from EXPECTED block");
+                }
+            }
+
+        }
+        ReplyKind::Hover => {
+            // For hover, check the hover contents
+            let json = decode_reply(&request, &stdout)?;
+            let hover_contents = json.get("hover")
+                .and_then(|h| h.get("contents"))
+                .and_then(|c| {
+                    // Handle both string and MarkupContent formats
+                    if let Some(s) = c.as_str() {
+                        Some(s.to_string())
+                    } else if let Some(markup) = c.as_object() {
+                        markup.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| anyhow::anyhow!(
+                    "{request}: reply has no `hover.contents`; raw reply: {stdout}"
+                ))?;
+
+            // Join all expected lines into a single expected string
+            let expected_full = test.expected.join("\n");
+
+            // Normalize whitespace for comparison
+            let contents_normalized = hover_contents.trim();
+            let expected_normalized = expected_full.trim();
+
+            if contents_normalized != expected_normalized {
+                all_found = false;
+                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                    eprintln!("    Hover content mismatch");
+                    eprintln!("    Expected:");
+                    eprintln!("{}", expected_normalized);
+                    eprintln!("    Actual:");
+                    eprintln!("{}", contents_normalized);
+                }
+            }
+        }
+        ReplyKind::Symbols => {
+            // For symbol tests, check the symbol names and kinds
+            let json = decode_reply(&request, &stdout)?;
+            let symbols = if let Some(syms) = json.get("symbols").and_then(|s| s.as_array()) {
+                syms.clone()
+            } else if let Some(syms) = json.as_array() {
+                syms.clone()
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{request}: reply has no `symbols` array; raw reply: {stdout}"
+                ));
+            };
+
+            for expected_item in &test.expected {
+                // Expected format: "SymbolName: SymbolKind"
+                let parts: Vec<&str> = expected_item.split(':').collect();
+                if parts.len() == 2 {
+                    let expected_name = parts[0].trim();
+                    let expected_kind = parts[1].trim();
+
+                    let found = symbols.iter().any(|sym| {
+                        let name_matches = sym.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n == expected_name)
+                            .unwrap_or(false);
+
+                        let kind_matches = sym.get("kind")
+                            .and_then(|k| k.as_str())
+                            .map(|k| k.to_lowercase().contains(&expected_kind.to_lowercase()))
+                            .unwrap_or(false);
+
+                        name_matches && kind_matches
+                    });
+
+                    if !found {
+                        all_found = false;
+                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                            eprintln!("    Expected symbol '{}' of kind '{}' not found", expected_name, expected_kind);
+                        }
+                    }
+                } else {
+                    // Just check for symbol name
+                    let found = symbols.iter().any(|sym| {
+                        sym.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n == expected_item)
+                            .unwrap_or(false)
+                    });
+
+                    if !found {
+                        all_found = false;
+                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                            eprintln!("    Expected symbol '{}' not found", expected_item);
+                        }
+                    }
+                }
+            }
+        }
+        ReplyKind::Rename => {
+            // For rename tests, apply the text edits and check the resulting code
+            let json = decode_reply(&request, &stdout)?;
+            if let Some(changes) = json.get("changes").and_then(|c| c.as_object()) {
+                    // Multi-file rename: apply edits per file, compare against
+                    // expected per-file content.
+                    if !test.expected_files.is_empty() {
+                        for (fname, expected_content) in &test.expected_files {
+                            // Skip non-rock manifest entries that the renamer never touches.
+                            if fname == "project.toml" || fname == "stick.toml" {
+                                continue;
+                            }
+                            let original = test
+                                .files
+                                .iter()
+                                .find(|(n, _)| n == fname)
+                                .map(|(_, c)| c.clone())
+                                .unwrap_or_default();
+                            // Find edits whose URI ends with `/<fname>`.
+                            let edits_for_file: Vec<&serde_json::Value> = changes
+                                .iter()
+                                .filter(|(uri, _)| uri.ends_with(&format!("/{}", fname)))
+                                .filter_map(|(_, edits)| edits.as_array())
+                                .flat_map(|arr| arr.iter())
+                                .collect();
+                            let actual = apply_text_edits(&original, &edits_for_file);
+                            let expected_norm = expected_content.trim_end().to_string();
+                            let actual_norm = actual.trim_end().to_string();
+                            if expected_norm != actual_norm {
+                                all_found = false;
+                                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                    eprintln!("    Rename mismatch in file {}", fname);
+                                    eprintln!("    Expected:\n{}", expected_norm);
+                                    eprintln!("    Actual:\n{}", actual_norm);
+                                }
+                            }
+                        }
+                    } else {
+                    // Single-file rename: apply all edits to one result buffer,
+                    // then compare -- exactly against `expected_code`, or by
+                    // substring for `- snippet` style expectations.
+                    let mut result_code = test.code.clone();
+
+                    for (_file_uri, edits) in changes {
+                        if let Some(edits_array) = edits.as_array() {
+                            // Sort edits by position in reverse order (so we apply from end to start)
+                            let mut edits_sorted: Vec<_> = edits_array.iter().collect();
+                            edits_sorted.sort_by(|a, b| {
+                                let start_a = a.get("range")
+                                    .and_then(|r| r.get("start"))
+                                    .map(|s| {
+                                        let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
+                                        let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
+                                        (line, char)
+                                    })
+                                    .unwrap_or((0, 0));
+                                let start_b = b.get("range")
+                                    .and_then(|r| r.get("start"))
+                                    .map(|s| {
+                                        let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
+                                        let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
+                                        (line, char)
+                                    })
+                                    .unwrap_or((0, 0));
+                                // Reverse order - apply from end to start
+                                start_b.cmp(&start_a)
+                            });
+
+                            // Apply edits in reverse order
+                            for edit in edits_sorted {
+                                if let (Some(new_text), Some(range)) = (
+                                    edit.get("new_text").and_then(|t| t.as_str()),
+                                    edit.get("range")
+                                ) {
+                                    let start_line = range.get("start")
+                                        .and_then(|s| s.get("line"))
+                                        .and_then(|l| l.as_u64())
+                                        .unwrap_or(0) as usize;
+                                    let start_char = range.get("start")
+                                        .and_then(|s| s.get("character"))
+                                        .and_then(|c| c.as_u64())
+                                        .unwrap_or(0) as usize;
+                                    let end_line = range.get("end")
+                                        .and_then(|e| e.get("line"))
+                                        .and_then(|l| l.as_u64())
+                                        .unwrap_or(0) as usize;
+                                    let end_char = range.get("end")
+                                        .and_then(|e| e.get("character"))
+                                        .and_then(|c| c.as_u64())
+                                        .unwrap_or(0) as usize;
+
+                                    // Apply the edit
+                                    let lines: Vec<&str> = result_code.lines().collect();
+                                    let mut new_lines: Vec<String> = Vec::new();
+
+                                    for (i, line) in lines.iter().enumerate() {
+                                        if i < start_line || i > end_line {
+                                            new_lines.push(line.to_string());
+                                        } else if i == start_line && i == end_line {
+                                            // Edit is on a single line
+                                            let before = &line[..start_char.min(line.len())];
+                                            let after = &line[end_char.min(line.len())..];
+                                            new_lines.push(format!("{}{}{}", before, new_text, after));
+                                        } else if i == start_line {
+                                            let before = &line[..start_char.min(line.len())];
+                                            new_lines.push(format!("{}{}", before, new_text));
+                                        } else if i == end_line {
+                                            let after = &line[end_char.min(line.len())..];
+                                            // Append to the last line
+                                            if let Some(last) = new_lines.last_mut() {
+                                                last.push_str(after);
+                                            }
+                                        }
+                                        // Lines between start and end are removed
+                                    }
+
+                                    result_code = new_lines.join("\n");
+                                }
+                            }
+                        }
+                    }
+
+                    // Now check if expected snippets are in the result
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        eprintln!("    Result code after rename:");
+                        for (i, line) in result_code.lines().enumerate() {
+                            eprintln!("      {}: {}", i, line);
+                        }
+                    }
+
+                    if let Some(expected_code) = &test.expected_code {
+                        let expected_norm = expected_code.trim_end();
+                        let actual_norm = result_code.trim_end();
                         if expected_norm != actual_norm {
                             all_found = false;
                             if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    Rename mismatch in file {}", fname);
+                                eprintln!("    Rename mismatch");
                                 eprintln!("    Expected:\n{}", expected_norm);
                                 eprintln!("    Actual:\n{}", actual_norm);
                             }
                         }
-                    }
-                } else {
-                // Single-file rename: apply all edits to one result buffer,
-                // then compare -- exactly against `expected_code`, or by
-                // substring for `- snippet` style expectations.
-                let mut result_code = test.code.clone();
-
-                for (_file_uri, edits) in changes {
-                    if let Some(edits_array) = edits.as_array() {
-                        // Sort edits by position in reverse order (so we apply from end to start)
-                        let mut edits_sorted: Vec<_> = edits_array.iter().collect();
-                        edits_sorted.sort_by(|a, b| {
-                            let start_a = a.get("range")
-                                .and_then(|r| r.get("start"))
-                                .map(|s| {
-                                    let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
-                                    let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
-                                    (line, char)
-                                })
-                                .unwrap_or((0, 0));
-                            let start_b = b.get("range")
-                                .and_then(|r| r.get("start"))
-                                .map(|s| {
-                                    let line = s.get("line").and_then(|l| l.as_u64()).unwrap_or(0);
-                                    let char = s.get("character").and_then(|c| c.as_u64()).unwrap_or(0);
-                                    (line, char)
-                                })
-                                .unwrap_or((0, 0));
-                            // Reverse order - apply from end to start
-                            start_b.cmp(&start_a)
-                        });
-
-                        // Apply edits in reverse order
-                        for edit in edits_sorted {
-                            if let (Some(new_text), Some(range)) = (
-                                edit.get("new_text").and_then(|t| t.as_str()),
-                                edit.get("range")
-                            ) {
-                                let start_line = range.get("start")
-                                    .and_then(|s| s.get("line"))
-                                    .and_then(|l| l.as_u64())
-                                    .unwrap_or(0) as usize;
-                                let start_char = range.get("start")
-                                    .and_then(|s| s.get("character"))
-                                    .and_then(|c| c.as_u64())
-                                    .unwrap_or(0) as usize;
-                                let end_line = range.get("end")
-                                    .and_then(|e| e.get("line"))
-                                    .and_then(|l| l.as_u64())
-                                    .unwrap_or(0) as usize;
-                                let end_char = range.get("end")
-                                    .and_then(|e| e.get("character"))
-                                    .and_then(|c| c.as_u64())
-                                    .unwrap_or(0) as usize;
-
-                                // Apply the edit
-                                let lines: Vec<&str> = result_code.lines().collect();
-                                let mut new_lines: Vec<String> = Vec::new();
-
-                                for (i, line) in lines.iter().enumerate() {
-                                    if i < start_line || i > end_line {
-                                        new_lines.push(line.to_string());
-                                    } else if i == start_line && i == end_line {
-                                        // Edit is on a single line
-                                        let before = &line[..start_char.min(line.len())];
-                                        let after = &line[end_char.min(line.len())..];
-                                        new_lines.push(format!("{}{}{}", before, new_text, after));
-                                    } else if i == start_line {
-                                        let before = &line[..start_char.min(line.len())];
-                                        new_lines.push(format!("{}{}", before, new_text));
-                                    } else if i == end_line {
-                                        let after = &line[end_char.min(line.len())..];
-                                        // Append to the last line
-                                        if let Some(last) = new_lines.last_mut() {
-                                            last.push_str(after);
-                                        }
-                                    }
-                                    // Lines between start and end are removed
+                    } else {
+                        for expected_item in &test.expected {
+                            if !result_code.contains(expected_item) {
+                                all_found = false;
+                                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                    eprintln!("    Expected '{}' not found in output", expected_item);
                                 }
-
-                                result_code = new_lines.join("\n");
                             }
                         }
                     }
-                }
-
-                // Now check if expected snippets are in the result
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Result code after rename:");
-                    for (i, line) in result_code.lines().enumerate() {
-                        eprintln!("      {}: {}", i, line);
-                    }
-                }
-
-                if let Some(expected_code) = &test.expected_code {
-                    let expected_norm = expected_code.trim_end();
-                    let actual_norm = result_code.trim_end();
-                    if expected_norm != actual_norm {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Rename mismatch");
-                            eprintln!("    Expected:\n{}", expected_norm);
-                            eprintln!("    Actual:\n{}", actual_norm);
-                        }
-                    }
+                    } // end single-file rename branch
                 } else {
-                    for expected_item in &test.expected {
-                        if !result_code.contains(expected_item) {
-                            all_found = false;
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    Expected '{}' not found in output", expected_item);
-                            }
-                        }
-                    }
+                    return Err(anyhow::anyhow!(
+                        "{request}: reply has no `changes` object; raw reply: {stdout}"
+                    ));
                 }
-                } // end single-file rename branch
-            } else {
-                return Err(anyhow::anyhow!(
-                    "{request}: reply has no `changes` object; raw reply: {stdout}"
-                ));
-            }
-    } else {
-        // For other test types, use simple string matching
-        for expected_item in &test.expected {
-            if !stdout.contains(expected_item) {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Expected '{}' not found in output", expected_item);
-                }
-            }
         }
     }
 
@@ -2842,6 +2944,108 @@ EXPECTED:\n\
 fn main()\n\
 ===\n";
 
+    const INLAY_HINTS_FIXTURE: &str = "\
+TEST: stub inlay hints\n\
+TYPE: inlay_hints\n\
+---\n\
+fn main() {\n\
+    let count = 1\n\
+}\n\
+---\n\
+OPERATION: inlay_hints\n\
+EXPECTED:\n\
+fn main() {\n\
+    let count«hint:: int» = 1\n\
+}\n\
+===\n";
+
+    const RENAME_FIXTURE: &str = "\
+TEST: stub rename\n\
+TYPE: rename\n\
+---\n\
+fn main() {\n\
+    let «start»count«end» = 1\n\
+    print(count)\n\
+}\n\
+---\n\
+OPERATION: rename\n\
+NEW_NAME: total\n\
+---\n\
+EXPECTED:\n\
+fn main() {\n\
+    let total = 1\n\
+    print(total)\n\
+}\n\
+===\n";
+
+    /// `full_document` is the older spelling of a whole-file semantic-token
+    /// request. It builds the semantic-token operation, so its reply has to
+    /// decode as one whatever the fixture calls the type.
+    const FULL_DOCUMENT_FIXTURE: &str = "\
+TEST: stub full document\n\
+TYPE: full_document\n\
+---\n\
+fn main() {\n\
+    let count = 1;\n\
+}\n\
+---\n\
+OPERATION: full_document\n\
+EXPECTED:\n\
+min_tokens: 5\n\
+===\n";
+
+    /// A fixture the parser must reject, with a type no decoder answers.
+    const UNKNOWN_TYPE_FIXTURE: &str = "\
+TEST: stub unknown type\n\
+TYPE: teleport\n\
+---\n\
+fn main() {\n\
+    let count = 1;\n\
+}\n\
+---\n\
+OPERATION: teleport\n\
+EXPECTED:\n\
+- count\n\
+===\n";
+
+    const MISMATCHED_OPERATION_FIXTURE: &str = "\
+TEST: stub mismatched operation\n\
+TYPE: hover\n\
+---\n\
+fn main() {\n\
+    mai«cursor»n();\n\
+}\n\
+---\n\
+OPERATION: completion\n\
+EXPECTED:\n\
+- count\n\
+===\n";
+
+    const UNKNOWN_OPERATION_FIXTURE: &str = "\
+TEST: stub unknown operation\n\
+TYPE: completion\n\
+---\n\
+fn main() {\n\
+    mai«cursor»n();\n\
+}\n\
+---\n\
+OPERATION: teleport\n\
+EXPECTED:\n\
+- count\n\
+===\n";
+
+    /// Write `fixture` to a temporary `.rock.lsp` file and return the parse
+    /// error it must produce.
+    fn parse_error_of(fixture: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        std::fs::write(&path, fixture).unwrap();
+        parse_lsp_test_file(&path)
+            .err()
+            .expect("the fixture must be rejected when it is parsed")
+            .to_string()
+    }
+
     /// The fixture must fail, and the failure must name the request and quote
     /// the raw reply.
     fn assert_fixture_fails(fixture: &str, reply: &str, request: &str) {
@@ -2907,6 +3111,88 @@ fn main()\n\
         assert_fixture_fails(SYMBOLS_FIXTURE, "not json Widget: struct", "document_symbols");
     }
 
+    #[test]
+    fn a_malformed_full_document_reply_fails_the_fixture() {
+        assert_fixture_fails(
+            FULL_DOCUMENT_FIXTURE,
+            "not json min_tokens: 5",
+            "full_document",
+        );
+    }
+
+    /// Every fixture type the parser accepts must reject a reply that only
+    /// carries the expected text: none of them may fall back to a raw-output
+    /// comparison, and none of them may reach a missing decoder.
+    #[test]
+    fn every_fixture_type_rejects_a_reply_that_only_quotes_the_expected_text() {
+        let cases: [(&str, &str, &str); 9] = [
+            (COMPLETION_FIXTURE, "count", "completion"),
+            (DEFINITION_FIXTURE, "character: 12", "goto_definition"),
+            (REFERENCES_NONE_FIXTURE, "none", "references"),
+            (SIGNATURE_HELP_FIXTURE, "greet(name: string)", "signature_help"),
+            (SYMBOLS_FIXTURE, "Widget: struct", "document_symbols"),
+            (HOVER_FIXTURE, "fn main()", "hover"),
+            (INLAY_HINTS_FIXTURE, ": int", "inlay_hints"),
+            (RENAME_FIXTURE, "let total = 1", "rename"),
+            (FULL_DOCUMENT_FIXTURE, "min_tokens: 5", "full_document"),
+        ];
+        for (fixture, expected_text, request) in cases {
+            let reply = format!("not json {expected_text}");
+            let (result, invocations) = run_against_stub(fixture, &reply);
+            assert_eq!(invocations, 1, "the stub server must have run exactly once");
+            assert_eq!(
+                (result.passed, result.failed),
+                (0, 1),
+                "a reply of {reply:?} must not satisfy a {request} fixture; details: {:?}",
+                result.failed_test_details
+            );
+            let detail = &result.failed_test_details[0].1;
+            assert!(
+                detail.contains(request) && detail.contains(&reply),
+                "failure {detail:?} must name the request {request:?} and quote {reply:?}"
+            );
+            assert!(
+                !detail.contains("no reply decoder"),
+                "{request} must have a decoder, not fall through: {detail:?}"
+            );
+        }
+    }
+
+    /// A type the harness cannot decode fails when the fixture is parsed, so it
+    /// cannot be dropped or compared as text.
+    #[test]
+    fn an_unknown_fixture_type_is_rejected_at_parse_time() {
+        let message = parse_error_of(UNKNOWN_TYPE_FIXTURE);
+        assert!(
+            message.contains("TYPE 'teleport'") && message.contains("stub unknown type"),
+            "{message}"
+        );
+    }
+
+    /// The type names the decoder and the operation names the request; a
+    /// fixture whose two halves disagree would run one request through another
+    /// type's validator.
+    #[test]
+    fn a_fixture_whose_type_and_operation_disagree_is_rejected_at_parse_time() {
+        let message = parse_error_of(MISMATCHED_OPERATION_FIXTURE);
+        assert!(
+            message.contains("TYPE 'hover'")
+                && message.contains("OPERATION 'completion'")
+                && message.contains("stub mismatched operation"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_operation_is_rejected_at_parse_time() {
+        let message = parse_error_of(UNKNOWN_OPERATION_FIXTURE);
+        assert!(
+            message.contains("OPERATION 'teleport'")
+                && message.contains("stub unknown operation"),
+            "{message}"
+        );
+    }
+
     /// Stubs that answer with the documented shape still pass, so the strict
     /// path does not reject well-formed, empty or partial replies.
     #[test]
@@ -2925,6 +3211,15 @@ fn main()\n\
             ),
             (SYMBOLS_FIXTURE, r#"{"symbols": [{"name": "Widget", "kind": "Struct"}]}"#),
             (HOVER_FIXTURE, r#"{"hover": {"contents": "fn main()"}}"#),
+            (
+                INLAY_HINTS_FIXTURE,
+                r#"{"hints": [{"position": {"line": 1, "character": 12}, "label": ": int"}]}"#,
+            ),
+            (
+                RENAME_FIXTURE,
+                r#"{"changes": {"file:///fixture.rock": [{"range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 9}}, "new_text": "total"}, {"range": {"start": {"line": 2, "character": 6}, "end": {"line": 2, "character": 11}}, "new_text": "total"}]}}"#,
+            ),
+            (FULL_DOCUMENT_FIXTURE, r#"{"count": 7}"#),
         ];
         for (fixture, reply) in cases {
             let (result, invocations) = run_against_stub(fixture, reply);
