@@ -499,8 +499,9 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                             expected.push(line.strip_prefix("- ").unwrap().to_string());
                         } else if line.starts_with("file:") || line.starts_with("line:") || line.starts_with("character:") || line.starts_with("min_tokens:") {
                             expected.push(line.to_string());
-                        } else if (test_type == "goto_definition" || test_type == "goto_type_definition") && line.trim().eq_ignore_ascii_case("none") {
-                            // `EXPECTED: none` — goto-def/type-def should return no targets.
+                        } else if (test_type == "goto_definition" || test_type == "goto_type_definition" || test_type == "references") && line.trim().eq_ignore_ascii_case("none") {
+                            // `EXPECTED: none` — this request should return no
+                            // targets (goto-def/type-def/references).
                             expected.push("none".to_string());
                         } else if test_type == "hover" {
                             // For hover tests, include all lines as expected content
@@ -918,6 +919,29 @@ fn lsp_server_bin() -> Result<PathBuf> {
     })
 }
 
+/// Decode a fixture reply. A reply is JSON by contract, so one that does not
+/// decode is a server bug: it fails the fixture and quotes the raw text.
+/// Falling back to a substring match would pass malformed output that happens
+/// to contain the expected text.
+fn decode_reply(request: &str, raw: &str) -> Result<serde_json::Value> {
+    serde_json::from_str(raw)
+        .map_err(|e| anyhow::anyhow!("{request}: reply is not JSON ({e}); raw reply: {raw}"))
+}
+
+/// The array every reply to `request` must carry under `key`. This is the shape
+/// check that runs before any comparison, so a reply missing the field cannot
+/// pass as an empty result.
+fn reply_array<'a>(
+    request: &str,
+    raw: &str,
+    json: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a Vec<serde_json::Value>> {
+    json.get(key)
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("{request}: reply has no `{key}` array; raw reply: {raw}"))
+}
+
 /// Run a single LSP test
 fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
     // Create a test file in a local test directory
@@ -1049,144 +1073,110 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         return Ok(false);
     }
 
-    // Parse the JSON output for completion tests
+    // Names the request in every decode and shape failure below.
+    let request = format!("{} test '{}'", test.test_type, test.name);
     let mut all_found = true;
 
     if test.test_type == "completion" {
-        // Try to parse as JSON for completion results
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            if let Some(completions) = json.get("completions").and_then(|c| c.as_array()) {
-                let labels: Vec<String> = completions
-                    .iter()
-                    .filter_map(|c| c.get("label").and_then(|l| l.as_str()))
-                    .map(|s| s.to_string())
-                    .collect();
+        // `completions` must decode as an array before any label is compared.
+        let json = decode_reply(&request, &stdout)?;
+        let completions = reply_array(&request, &stdout, &json, "completions")?;
+        let labels: Vec<String> = completions
+            .iter()
+            .filter_map(|c| c.get("label").and_then(|l| l.as_str()))
+            .map(|s| s.to_string())
+            .collect();
 
-                // Check each expected item
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Checking completions for test '{}'", test.name);
-                    eprintln!("    Available completions: {:?}", labels);
-                    eprintln!("    Expected items: {:?}", test.expected);
-                }
-                for expected_item in &test.expected {
-                    let found = labels.iter().any(|label| label.contains(expected_item));
-                    if !found {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Expected '{}' not found in completions", expected_item);
-                            eprintln!("    Available completions: {:?}", labels);
-                        }
-                    } else if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Found expected item: '{}'", expected_item);
-                    }
-                }
-            } else {
+        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+            eprintln!("    Checking completions for test '{}'", test.name);
+            eprintln!("    Available completions: {:?}", labels);
+            eprintln!("    Expected items: {:?}", test.expected);
+        }
+        for expected_item in &test.expected {
+            let found = labels.iter().any(|label| label.contains(expected_item));
+            if !found {
                 all_found = false;
                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    No completions array found in JSON output");
+                    eprintln!("    Expected '{}' not found in completions", expected_item);
+                    eprintln!("    Available completions: {:?}", labels);
                 }
-            }
-        } else {
-            // Fallback to string contains for non-JSON output
-            for expected_item in &test.expected {
-                if !stdout.contains(expected_item) {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected '{}' not found in output", expected_item);
-                    }
-                }
+            } else if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                eprintln!("    Found expected item: '{}'", expected_item);
             }
         }
     } else if test.test_type == "goto_definition" || test.test_type == "goto_type_definition" {
         // For goto_definition / goto_type_definition, check the output format
         // (both emit the same `definitions` array shape).
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            // The actual LSP output has definitions[0].range.start.{line,character}
-            // Get the first definition if it exists
-            let definitions_arr = json.get("definitions").and_then(|d| d.as_array());
-            let definition = definitions_arr.and_then(|arr| arr.first());
+        let json = decode_reply(&request, &stdout)?;
+        let definitions = reply_array(&request, &stdout, &json, "definitions")?;
+        // The actual LSP output has definitions[0].range.start.{line,character}
+        let definition = definitions.first();
 
-            // Support `EXPECTED: none` — assert that goto-def found no targets.
-            // Useful for built-in types, keywords, and positions that have no
-            // definition to navigate to (the LSP should return [] not an error).
-            let expects_none = test
-                .expected
-                .iter()
-                .any(|e| e.trim().eq_ignore_ascii_case("none"));
-            if expects_none {
-                if definitions_arr.map(|a| a.is_empty()).unwrap_or(false) {
-                    // pass — no definitions as expected
-                } else {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!(
-                            "    Expected no definitions, got {:?}",
-                            definitions_arr
-                        );
-                    }
-                }
-            } else if let Some(def) = definition {
-                // Check file, line, character in the definition
-                for expected_item in &test.expected {
-                    if expected_item.starts_with("file:") {
-                        // For goto_definition tests, we're actually testing the same file,
-                        // so we can skip the file check since it will be the temp file
-                        // The test expectations use "main.rock" but that's just a placeholder
-                        continue;
-                    } else if expected_item.starts_with("line:") {
-                        let expected_line: usize = expected_item.strip_prefix("line:").unwrap().trim().parse().unwrap_or(0);
-                        if let Some(line) = def.get("range")
-                            .and_then(|r| r.get("start"))
-                            .and_then(|s| s.get("line"))
-                            .and_then(|l| l.as_u64()) {
-                            if line != expected_line as u64 {
-                                all_found = false;
-                                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                    eprintln!("    Expected line {}, got {}", expected_line, line);
-                                }
-                            }
-                        } else {
-                            all_found = false;
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    No line field found in definition range");
-                            }
-                        }
-                    } else if expected_item.starts_with("character:") {
-                        let expected_char: usize = expected_item.strip_prefix("character:").unwrap().trim().parse().unwrap_or(0);
-                        if let Some(character) = def.get("range")
-                            .and_then(|r| r.get("start"))
-                            .and_then(|s| s.get("character"))
-                            .and_then(|c| c.as_u64()) {
-                            if character != expected_char as u64 {
-                                all_found = false;
-                                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                    eprintln!("    Expected character {}, got {}", expected_char, character);
-                                }
-                            }
-                        } else {
-                            all_found = false;
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    No character field found in definition range");
-                            }
-                        }
-                    }
-                }
-            } else {
+        // Support `EXPECTED: none` — assert that goto-def found no targets.
+        // Useful for built-in types, keywords, and positions that have no
+        // definition to navigate to (the LSP should return [] not an error).
+        let expects_none = test
+            .expected
+            .iter()
+            .any(|e| e.trim().eq_ignore_ascii_case("none"));
+        if expects_none {
+            if !definitions.is_empty() {
                 all_found = false;
                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    No definitions found in output");
-                    eprintln!("    Actual output: {}", stdout);
+                    eprintln!("    Expected no definitions, got {:?}", definitions);
+                }
+            }
+        } else if let Some(def) = definition {
+            // Check file, line, character in the definition
+            for expected_item in &test.expected {
+                if expected_item.starts_with("file:") {
+                    // For goto_definition tests, we're actually testing the same file,
+                    // so we can skip the file check since it will be the temp file
+                    // The test expectations use "main.rock" but that's just a placeholder
+                    continue;
+                } else if expected_item.starts_with("line:") {
+                    let expected_line: usize = expected_item.strip_prefix("line:").unwrap().trim().parse().unwrap_or(0);
+                    if let Some(line) = def.get("range")
+                        .and_then(|r| r.get("start"))
+                        .and_then(|s| s.get("line"))
+                        .and_then(|l| l.as_u64()) {
+                        if line != expected_line as u64 {
+                            all_found = false;
+                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                eprintln!("    Expected line {}, got {}", expected_line, line);
+                            }
+                        }
+                    } else {
+                        all_found = false;
+                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                            eprintln!("    No line field found in definition range");
+                        }
+                    }
+                } else if expected_item.starts_with("character:") {
+                    let expected_char: usize = expected_item.strip_prefix("character:").unwrap().trim().parse().unwrap_or(0);
+                    if let Some(character) = def.get("range")
+                        .and_then(|r| r.get("start"))
+                        .and_then(|s| s.get("character"))
+                        .and_then(|c| c.as_u64()) {
+                        if character != expected_char as u64 {
+                            all_found = false;
+                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                eprintln!("    Expected character {}, got {}", expected_char, character);
+                            }
+                        }
+                    } else {
+                        all_found = false;
+                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                            eprintln!("    No character field found in definition range");
+                        }
+                    }
                 }
             }
         } else {
-            // Fallback to string contains
-            for expected_item in &test.expected {
-                if !stdout.contains(expected_item) {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected '{}' not found in output", expected_item);
-                    }
-                }
+            all_found = false;
+            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                eprintln!("    No definitions found in output");
+                eprintln!("    Actual output: {}", stdout);
             }
         }
     } else if test.test_type == "references" {
@@ -1201,24 +1191,20 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         // `EXPECTED:` entries come in groups of three consecutive lines:
         // `file: ...`, `line: N`, `character: N`. A single line containing
         // `none` (case-insensitive) asserts the empty set.
-        let parsed = serde_json::from_str::<serde_json::Value>(&stdout);
-        let actual_refs: Vec<(u64, u64)> = match &parsed {
-            Ok(json) => json
-                .get("references")
-                .and_then(|r| r.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|loc| {
-                            let start = loc.get("range")?.get("start")?;
-                            let line = start.get("line")?.as_u64()?;
-                            let character = start.get("character")?.as_u64()?;
-                            Some((line, character))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        };
+        //
+        // The `references` array must decode before the set is built: an
+        // undecodable or shapeless reply is a server bug, never an empty
+        // result, so it cannot satisfy `EXPECTED: none`.
+        let json = decode_reply(&request, &stdout)?;
+        let actual_refs: Vec<(u64, u64)> = reply_array(&request, &stdout, &json, "references")?
+            .iter()
+            .filter_map(|loc| {
+                let start = loc.get("range")?.get("start")?;
+                let line = start.get("line")?.as_u64()?;
+                let character = start.get("character")?.as_u64()?;
+                Some((line, character))
+            })
+            .collect();
 
         let expects_none = test
             .expected
@@ -1231,11 +1217,6 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
                     eprintln!("    Expected no references, got {:?}", actual_refs);
                 }
-            }
-        } else if parsed.is_err() {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Failed to parse references JSON output");
             }
         } else {
             // Group flat EXPECTED lines into (line, character) pairs.
@@ -1287,47 +1268,43 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         }
     } else if test.test_type == "semantic_tokens" {
         // For semantic_tokens, check for minimum number of tokens
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            // The rock-lsp outputs in a custom format with count and tokens fields
-            let token_count = if let Some(count) = json.get("count").and_then(|c| c.as_u64()) {
-                count as usize
-            } else if let Some(tokens) = json.get("tokens").and_then(|t| t.as_array()) {
-                tokens.len()
-            } else if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                data.len() / 5 // Each token is 5 integers in LSP format
-            } else {
-                0
-            };
+        let json = decode_reply(&request, &stdout)?;
+        // The rock-lsp outputs in a custom format with count and tokens fields
+        let token_count = if let Some(count) = json.get("count").and_then(|c| c.as_u64()) {
+            count as usize
+        } else if let Some(tokens) = json.get("tokens").and_then(|t| t.as_array()) {
+            tokens.len()
+        } else if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+            data.len() / 5 // Each token is 5 integers in LSP format
+        } else {
+            return Err(anyhow::anyhow!(
+                "{request}: reply has no `count`, `tokens` or `data` field; raw reply: {stdout}"
+            ));
+        };
 
-            if token_count > 0 {
-                // Check if we have the minimum expected tokens
-                for expected_item in &test.expected {
-                    if expected_item.starts_with("min_tokens:") {
-                        let min_tokens: usize = expected_item
-                            .strip_prefix("min_tokens:")
-                            .unwrap()
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
+        if token_count > 0 {
+            // Check if we have the minimum expected tokens
+            for expected_item in &test.expected {
+                if expected_item.starts_with("min_tokens:") {
+                    let min_tokens: usize = expected_item
+                        .strip_prefix("min_tokens:")
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap_or(0);
 
-                        if token_count < min_tokens {
-                            all_found = false;
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!("    Expected at least {} tokens, got {}", min_tokens, token_count);
-                            }
+                    if token_count < min_tokens {
+                        all_found = false;
+                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                            eprintln!("    Expected at least {} tokens, got {}", min_tokens, token_count);
                         }
                     }
-                }
-            } else {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    No semantic tokens data found in output");
                 }
             }
         } else {
             all_found = false;
             if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Failed to parse semantic tokens JSON output");
+                eprintln!("    No semantic tokens data found in output");
             }
         }
     } else if test.test_type == "signature_help" {
@@ -1336,61 +1313,52 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         // expected substring passes if it's found in *any* of them. This
         // lets overload-heavy tests assert on the right arm even when
         // overload resolution picks a different one as active.
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            let labels: Vec<String> = if let Some(sig) =
-                json.get("signature").and_then(|s| s.as_str())
-            {
-                vec![sig.to_string()]
-            } else if let Some(sigs) = json.get("signatures").and_then(|s| s.as_array()) {
-                sigs.iter()
-                    .filter_map(|s| s.get("label").and_then(|l| l.as_str()).map(|s| s.to_string()))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let json = decode_reply(&request, &stdout)?;
+        let labels: Vec<String> = if let Some(sig) =
+            json.get("signature").and_then(|s| s.as_str())
+        {
+            vec![sig.to_string()]
+        } else if let Some(sigs) = json.get("signatures").and_then(|s| s.as_array()) {
+            sigs.iter()
+                .filter_map(|s| s.get("label").and_then(|l| l.as_str()).map(|s| s.to_string()))
+                .collect()
+        } else {
+            return Err(anyhow::anyhow!(
+                "{request}: reply has no `signature` or `signatures` field; raw reply: {stdout}"
+            ));
+        };
 
-            let active_idx = json
-                .get("activeSignature")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let active_label = labels.get(active_idx).cloned().unwrap_or_default();
+        let active_idx = json
+            .get("activeSignature")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let active_label = labels.get(active_idx).cloned().unwrap_or_default();
 
-            if test.expected.is_empty() {
+        if test.expected.is_empty() {
+            all_found = false;
+            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                eprintln!(
+                    "    signature_help test has an empty EXPECTED block — \
+                     assertion would pass vacuously, treating as failure"
+                );
+            }
+        }
+        for expected_item in &test.expected {
+            // `ACTIVE: ...` asserts against the active signature only —
+            // proves overload resolution picked the right arm. Plain
+            // lines match any returned signature.
+            let (needle, search_target): (&str, &[String]) =
+                if let Some(rest) = expected_item.strip_prefix("ACTIVE:") {
+                    (rest.trim(), std::slice::from_ref(&active_label))
+                } else {
+                    (expected_item.as_str(), labels.as_slice())
+                };
+            let found = search_target.iter().any(|l| l.contains(needle));
+            if !found {
                 all_found = false;
                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!(
-                        "    signature_help test has an empty EXPECTED block — \
-                         assertion would pass vacuously, treating as failure"
-                    );
-                }
-            }
-            for expected_item in &test.expected {
-                // `ACTIVE: ...` asserts against the active signature only —
-                // proves overload resolution picked the right arm. Plain
-                // lines match any returned signature.
-                let (needle, search_target): (&str, &[String]) =
-                    if let Some(rest) = expected_item.strip_prefix("ACTIVE:") {
-                        (rest.trim(), std::slice::from_ref(&active_label))
-                    } else {
-                        (expected_item.as_str(), labels.as_slice())
-                    };
-                let found = search_target.iter().any(|l| l.contains(needle));
-                if !found {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected '{}' not found (searched {:?})", needle, search_target);
-                        eprintln!("    All signatures: {:?}", labels);
-                    }
-                }
-            }
-        } else {
-            // Fallback to string matching
-            for expected_item in &test.expected {
-                if !stdout.contains(expected_item) {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected '{}' not found in output", expected_item);
-                    }
+                    eprintln!("    Expected '{}' not found (searched {:?})", needle, search_target);
+                    eprintln!("    All signatures: {:?}", labels);
                 }
             }
         }
@@ -1400,178 +1368,146 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         // `hints` array. Subset semantics — extra hints are allowed; every
         // expected hint must be found.
         let expected_hints = parse_hint_markers(&test.expected);
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            let actual: Vec<(u64, u64, String)> = json
-                .get("hints")
-                .and_then(|h| h.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|h| {
-                            let line = h.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_u64())?;
-                            let ch = h.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_u64())?;
-                            let label = h.get("label").and_then(|v| v.as_str())?.to_string();
-                            Some((line, ch, label))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+        let json = decode_reply(&request, &stdout)?;
+        let actual: Vec<(u64, u64, String)> = reply_array(&request, &stdout, &json, "hints")?
+            .iter()
+            .filter_map(|h| {
+                let line = h.get("position").and_then(|p| p.get("line")).and_then(|v| v.as_u64())?;
+                let ch = h.get("position").and_then(|p| p.get("character")).and_then(|v| v.as_u64())?;
+                let label = h.get("label").and_then(|v| v.as_str())?.to_string();
+                Some((line, ch, label))
+            })
+            .collect();
 
-            // Match on (line, normalised_label). Column is intentionally
-            // loose — test files place `«hint:...»` right before the value,
-            // but the LSP reports `position` differently for type hints
-            // (padding_left, before the value) vs parameter hints
-            // (padding_right, at the leading whitespace), so column
-            // equality is off by one in some cases. Normalised label
-            // strips a leading `:` so that `: int` (type-hint LSP label)
-            // and `«hint:: int»` (marker content `: int`) both match, as
-            // does `«hint::key:»` (marker content `:key:`) vs `key:`.
-            for (line, _ch, label) in &expected_hints {
-                let norm_exp = normalise_hint_label(label);
-                let found = actual.iter().any(|(al, _ac, alabel)| {
-                    al == line && normalise_hint_label(alabel) == norm_exp
-                });
-                if !found {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!(
-                            "    Expected inlay hint on line {} with label {:?} (normalised {:?}) not found",
-                            line, label, norm_exp
-                        );
-                        eprintln!("    Actual hints: {:?}", actual);
-                    }
-                }
-            }
-            if expected_hints.is_empty() {
+        // Match on (line, normalised_label). Column is intentionally
+        // loose — test files place `«hint:...»` right before the value,
+        // but the LSP reports `position` differently for type hints
+        // (padding_left, before the value) vs parameter hints
+        // (padding_right, at the leading whitespace), so column
+        // equality is off by one in some cases. Normalised label
+        // strips a leading `:` so that `: int` (type-hint LSP label)
+        // and `«hint:: int»` (marker content `: int`) both match, as
+        // does `«hint::key:»` (marker content `:key:`) vs `key:`.
+        for (line, _ch, label) in &expected_hints {
+            let norm_exp = normalise_hint_label(label);
+            let found = actual.iter().any(|(al, _ac, alabel)| {
+                al == line && normalise_hint_label(alabel) == norm_exp
+            });
+            if !found {
                 all_found = false;
                 if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    No «hint::...» markers parsed from EXPECTED block");
+                    eprintln!(
+                        "    Expected inlay hint on line {} with label {:?} (normalised {:?}) not found",
+                        line, label, norm_exp
+                    );
+                    eprintln!("    Actual hints: {:?}", actual);
                 }
-            }
-        } else {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Failed to parse inlay-hints JSON output");
             }
         }
-    } else if test.test_type == "hover" {
-        // For hover, check the hover contents
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            // Get the hover contents
-            let hover_contents = json.get("hover")
-                .and_then(|h| h.get("contents"))
-                .and_then(|c| {
-                    // Handle both string and MarkupContent formats
-                    if let Some(s) = c.as_str() {
-                        Some(s.to_string())
-                    } else if let Some(markup) = c.as_object() {
-                        markup.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                });
-
-            if let Some(contents) = hover_contents {
-                // Join all expected lines into a single expected string
-                let expected_full = test.expected.join("\n");
-
-                // Normalize whitespace for comparison
-                let contents_normalized = contents.trim();
-                let expected_normalized = expected_full.trim();
-
-                if contents_normalized != expected_normalized {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Hover content mismatch");
-                        eprintln!("    Expected:");
-                        eprintln!("{}", expected_normalized);
-                        eprintln!("    Actual:");
-                        eprintln!("{}", contents_normalized);
-                    }
-                }
-            } else {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    No hover contents found in output");
-                    eprintln!("    Actual output: {}", stdout);
-                }
-            }
-        } else {
+        if expected_hints.is_empty() {
             all_found = false;
             if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Failed to parse hover JSON output");
-                eprintln!("    Actual output: {}", stdout);
+                eprintln!("    No «hint::...» markers parsed from EXPECTED block");
+            }
+        }
+
+    } else if test.test_type == "hover" {
+        // For hover, check the hover contents
+        let json = decode_reply(&request, &stdout)?;
+        let hover_contents = json.get("hover")
+            .and_then(|h| h.get("contents"))
+            .and_then(|c| {
+                // Handle both string and MarkupContent formats
+                if let Some(s) = c.as_str() {
+                    Some(s.to_string())
+                } else if let Some(markup) = c.as_object() {
+                    markup.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow::anyhow!(
+                "{request}: reply has no `hover.contents`; raw reply: {stdout}"
+            ))?;
+
+        // Join all expected lines into a single expected string
+        let expected_full = test.expected.join("\n");
+
+        // Normalize whitespace for comparison
+        let contents_normalized = hover_contents.trim();
+        let expected_normalized = expected_full.trim();
+
+        if contents_normalized != expected_normalized {
+            all_found = false;
+            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                eprintln!("    Hover content mismatch");
+                eprintln!("    Expected:");
+                eprintln!("{}", expected_normalized);
+                eprintln!("    Actual:");
+                eprintln!("{}", contents_normalized);
             }
         }
     } else if test.test_type == "document_symbols" || test.test_type == "workspace_symbols" {
         // For symbol tests, check the symbol names and kinds
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            let symbols = if let Some(syms) = json.get("symbols").and_then(|s| s.as_array()) {
-                syms.clone()
-            } else if json.as_array().is_some() {
-                json.as_array().unwrap().clone()
-            } else {
-                Vec::new()
-            };
-
-            for expected_item in &test.expected {
-                // Expected format: "SymbolName: SymbolKind"
-                let parts: Vec<&str> = expected_item.split(':').collect();
-                if parts.len() == 2 {
-                    let expected_name = parts[0].trim();
-                    let expected_kind = parts[1].trim();
-
-                    let found = symbols.iter().any(|sym| {
-                        let name_matches = sym.get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|n| n == expected_name)
-                            .unwrap_or(false);
-
-                        let kind_matches = sym.get("kind")
-                            .and_then(|k| k.as_str())
-                            .map(|k| k.to_lowercase().contains(&expected_kind.to_lowercase()))
-                            .unwrap_or(false);
-
-                        name_matches && kind_matches
-                    });
-
-                    if !found {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Expected symbol '{}' of kind '{}' not found", expected_name, expected_kind);
-                        }
-                    }
-                } else {
-                    // Just check for symbol name
-                    let found = symbols.iter().any(|sym| {
-                        sym.get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|n| n == expected_item)
-                            .unwrap_or(false)
-                    });
-
-                    if !found {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Expected symbol '{}' not found", expected_item);
-                        }
-                    }
-                }
-            }
+        let json = decode_reply(&request, &stdout)?;
+        let symbols = if let Some(syms) = json.get("symbols").and_then(|s| s.as_array()) {
+            syms.clone()
+        } else if let Some(syms) = json.as_array() {
+            syms.clone()
         } else {
-            // Fallback to string matching
-            for expected_item in &test.expected {
-                if !stdout.contains(expected_item) {
+            return Err(anyhow::anyhow!(
+                "{request}: reply has no `symbols` array; raw reply: {stdout}"
+            ));
+        };
+
+        for expected_item in &test.expected {
+            // Expected format: "SymbolName: SymbolKind"
+            let parts: Vec<&str> = expected_item.split(':').collect();
+            if parts.len() == 2 {
+                let expected_name = parts[0].trim();
+                let expected_kind = parts[1].trim();
+
+                let found = symbols.iter().any(|sym| {
+                    let name_matches = sym.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| n == expected_name)
+                        .unwrap_or(false);
+
+                    let kind_matches = sym.get("kind")
+                        .and_then(|k| k.as_str())
+                        .map(|k| k.to_lowercase().contains(&expected_kind.to_lowercase()))
+                        .unwrap_or(false);
+
+                    name_matches && kind_matches
+                });
+
+                if !found {
                     all_found = false;
                     if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    Expected '{}' not found in output", expected_item);
+                        eprintln!("    Expected symbol '{}' of kind '{}' not found", expected_name, expected_kind);
+                    }
+                }
+            } else {
+                // Just check for symbol name
+                let found = symbols.iter().any(|sym| {
+                    sym.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| n == expected_item)
+                        .unwrap_or(false)
+                });
+
+                if !found {
+                    all_found = false;
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        eprintln!("    Expected symbol '{}' not found", expected_item);
                     }
                 }
             }
         }
     } else if test.test_type == "rename" {
         // For rename tests, apply the text edits and check the resulting code
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            if let Some(changes) = json.get("changes").and_then(|c| c.as_object()) {
+        let json = decode_reply(&request, &stdout)?;
+        if let Some(changes) = json.get("changes").and_then(|c| c.as_object()) {
                 // Multi-file rename: apply edits per file, compare against
                 // expected per-file content.
                 if !test.expected_files.is_empty() {
@@ -1721,17 +1657,10 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                 }
                 } // end single-file rename branch
             } else {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    No changes found in rename output");
-                }
+                return Err(anyhow::anyhow!(
+                    "{request}: reply has no `changes` object; raw reply: {stdout}"
+                ));
             }
-        } else {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Failed to parse rename JSON output");
-            }
-        }
     } else {
         // For other test types, use simple string matching
         for expected_item in &test.expected {
@@ -2671,7 +2600,7 @@ mod stderr_log_tests {
 }
 
 #[cfg(test)]
-mod server_bin_tests {
+mod runner_tests {
     use super::*;
 
     /// `ROCK_LSP_TEST_BIN` is process-global, so tests that set it take this
@@ -2812,4 +2741,201 @@ EXPECTED:\n\
             result.failed_test_details
         );
     }
+    // --- Reply strictness ---------------------------------------------------
+    //
+    // Every reply below either is malformed or lacks the array its request
+    // answers with, yet contains the fixture's EXPECTED text verbatim. A
+    // fixture over such a reply must fail; a substring fallback would pass it.
+
+    const COMPLETION_FIXTURE: &str = "\
+TEST: stub completion\n\
+TYPE: completion\n\
+---\n\
+fn main() {\n\
+    let count = 1;\n\
+    let other = cou«cursor»nt;\n\
+}\n\
+---\n\
+OPERATION: completion\n\
+EXPECTED:\n\
+- count\n\
+===\n";
+
+    const DEFINITION_FIXTURE: &str = "\
+TEST: stub definition\n\
+TYPE: goto_definition\n\
+---\n\
+fn main() {\n\
+    let count = 1;\n\
+    let other = cou«cursor»nt;\n\
+}\n\
+---\n\
+OPERATION: goto_definition\n\
+EXPECTED:\n\
+line: 2\n\
+character: 12\n\
+===\n";
+
+    const DEFINITION_NONE_FIXTURE: &str = "\
+TEST: stub definition none\n\
+TYPE: goto_definition\n\
+---\n\
+fn main() {\n\
+    let other = cou«cursor»nt;\n\
+}\n\
+---\n\
+OPERATION: goto_definition\n\
+EXPECTED:\n\
+none\n\
+===\n";
+
+    const REFERENCES_NONE_FIXTURE: &str = "\
+TEST: stub references none\n\
+TYPE: references\n\
+---\n\
+fn main() {\n\
+    let count = 1;\n\
+    let other = cou«cursor»nt;\n\
+}\n\
+---\n\
+OPERATION: references\n\
+EXPECTED:\n\
+none\n\
+===\n";
+
+    const SIGNATURE_HELP_FIXTURE: &str = "\
+TEST: stub signature help\n\
+TYPE: signature_help\n\
+---\n\
+fn greet(name: string) {}\n\
+fn main() {\n\
+    gre«cursor»et(\n\
+}\n\
+---\n\
+OPERATION: signature_help\n\
+EXPECTED:\n\
+greet(name: string)\n\
+===\n";
+
+    const SYMBOLS_FIXTURE: &str = "\
+TEST: stub symbols\n\
+TYPE: document_symbols\n\
+---\n\
+struct Widget {\n\
+}\n\
+---\n\
+OPERATION: document_symbols\n\
+EXPECTED:\n\
+- Widget: struct\n\
+===\n";
+
+    const HOVER_FIXTURE: &str = "\
+TEST: stub hover\n\
+TYPE: hover\n\
+---\n\
+fn main() {\n\
+    mai«cursor»n();\n\
+}\n\
+---\n\
+OPERATION: hover\n\
+EXPECTED:\n\
+fn main()\n\
+===\n";
+
+    /// The fixture must fail, and the failure must name the request and quote
+    /// the raw reply.
+    fn assert_fixture_fails(fixture: &str, reply: &str, request: &str) {
+        let (result, invocations) = run_against_stub(fixture, reply);
+        assert_eq!(invocations, 1, "the stub server must have run exactly once");
+        assert_eq!(
+            (result.passed, result.failed),
+            (0, 1),
+            "a reply of {reply:?} must not satisfy the fixture; details: {:?}",
+            result.failed_test_details
+        );
+        let detail = &result.failed_test_details[0].1;
+        assert!(
+            detail.contains(request),
+            "failure {detail:?} does not name the request {request:?}"
+        );
+        assert!(
+            detail.contains(reply),
+            "failure {detail:?} does not quote the raw reply {reply:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_completion_reply_fails_the_fixture() {
+        assert_fixture_fails(
+            COMPLETION_FIXTURE,
+            r#"{"completions": [{"label": "count""#,
+            "completion",
+        );
+    }
+
+    #[test]
+    fn a_malformed_definition_reply_fails_the_fixture() {
+        assert_fixture_fails(DEFINITION_FIXTURE, "not json line: 2 character: 12", "goto_definition");
+    }
+
+    #[test]
+    fn a_definition_reply_without_the_array_fails_the_none_expectation() {
+        assert_fixture_fails(DEFINITION_NONE_FIXTURE, r#"{"status": "ok"}"#, "goto_definition");
+    }
+
+    #[test]
+    fn a_malformed_references_reply_fails_the_none_expectation() {
+        assert_fixture_fails(REFERENCES_NONE_FIXTURE, r#"{"references": [{"range": "#, "references");
+    }
+
+    #[test]
+    fn a_references_reply_without_the_array_fails_the_none_expectation() {
+        assert_fixture_fails(REFERENCES_NONE_FIXTURE, r#"{"status": "ok"}"#, "references");
+    }
+
+    #[test]
+    fn a_malformed_signature_help_reply_fails_the_fixture() {
+        assert_fixture_fails(
+            SIGNATURE_HELP_FIXTURE,
+            "not json greet(name: string)",
+            "signature_help",
+        );
+    }
+
+    #[test]
+    fn a_malformed_symbols_reply_fails_the_fixture() {
+        assert_fixture_fails(SYMBOLS_FIXTURE, "not json Widget: struct", "document_symbols");
+    }
+
+    /// Stubs that answer with the documented shape still pass, so the strict
+    /// path does not reject well-formed, empty or partial replies.
+    #[test]
+    fn well_formed_replies_pass_the_fixtures() {
+        let cases = [
+            (COMPLETION_FIXTURE, r#"{"completions": [{"label": "count"}]}"#),
+            (
+                DEFINITION_FIXTURE,
+                r#"{"definitions": [{"range": {"start": {"line": 2, "character": 12}}}]}"#,
+            ),
+            (DEFINITION_NONE_FIXTURE, r#"{"definitions": []}"#),
+            (REFERENCES_NONE_FIXTURE, r#"{"references": []}"#),
+            (
+                SIGNATURE_HELP_FIXTURE,
+                r#"{"signatures": [{"label": "greet(name: string)"}], "activeSignature": 0}"#,
+            ),
+            (SYMBOLS_FIXTURE, r#"{"symbols": [{"name": "Widget", "kind": "Struct"}]}"#),
+            (HOVER_FIXTURE, r#"{"hover": {"contents": "fn main()"}}"#),
+        ];
+        for (fixture, reply) in cases {
+            let (result, invocations) = run_against_stub(fixture, reply);
+            assert_eq!(invocations, 1);
+            assert_eq!(
+                (result.passed, result.failed),
+                (1, 0),
+                "a reply of {reply:?} must satisfy the fixture; details: {:?}",
+                result.failed_test_details
+            );
+        }
+    }
 }
+
