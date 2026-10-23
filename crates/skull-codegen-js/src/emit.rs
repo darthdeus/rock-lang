@@ -38,6 +38,14 @@ fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
 }
 
+fn convert_closures(mf: &mut MirFunc, name: &str) {
+    for nested in &mut mf.nested_fns {
+        let nested_name = nested.name;
+        convert_closures(nested, nested_name.as_str());
+    }
+    skull_transform::convert_closures(mf, name);
+}
+
 fn collect_nested_code_identities(
     mf: &MirFunc,
     out: &mut HashSet<skull_mir::code_identity::CodeIdentity>,
@@ -3000,7 +3008,7 @@ fn emit_body_with_nested(
 ) -> Result<String, CompilerError> {
     let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
     for nf in &mf.nested_fns {
-        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
+        out.push_str(&emit_body_with_nested(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
     }
     Ok(out)
 }
@@ -3428,7 +3436,7 @@ fn assemble_program_core(
                 st.reject(&deco_name, e);
                 continue;
             }
-            skull_transform::convert_closures(&mut mf, &deco_name);
+            convert_closures(&mut mf, &deco_name);
             skull_transform::recover_counted_loops(ws, &mut mf);
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
@@ -4706,7 +4714,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 self.st.reject(&name, e);
                 return Ok(());
             }
-            skull_transform::convert_closures(&mut mf, &name);
+            convert_closures(&mut mf, &name);
             skull_transform::recover_counted_loops(self.ws, &mut mf);
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(self.ws, nf);
@@ -4857,7 +4865,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             self.st.reject(&name, e);
             return Ok(());
         }
-        skull_transform::convert_closures(&mut mf, &name);
+        convert_closures(&mut mf, &name);
         skull_transform::recover_counted_loops(self.ws, &mut mf);
         for nf in &mut mf.nested_fns {
             skull_transform::recover_counted_loops(self.ws, nf);
@@ -4917,7 +4925,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             self.st.reject(&init_name, e);
             return Ok(());
         }
-        skull_transform::convert_closures(&mut mf, &init_name);
+        convert_closures(&mut mf, &init_name);
         skull_transform::recover_counted_loops(self.ws, &mut mf);
         for nf in &mut mf.nested_fns {
             skull_transform::recover_counted_loops(self.ws, nf);
@@ -5055,10 +5063,7 @@ fn emit_lowered_fn(
         .map_err(|reason| err(format!("JS: cannot build concrete coroutine plan: {}", reason.bucket())))?;
         return emit_coroutine_js(ws, interner, &plan, mf, names, hoisted, gctx);
     }
-    let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
-    for nf in &mf.nested_fns {
-        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
-    }
+    let out = emit_body_with_nested(ws, mf, js_name, names, hoisted, gctx)?;
     let mut code_artifact = CodeArtifact::from_mir_tree(mf);
     code_artifact.set_body_names(mf, js_name);
     Ok((out, code_artifact))
@@ -5241,9 +5246,19 @@ fn check_scalar_abi(
 }
 
 /// Program-wide hoisted closure-body names -- the only globals a capture-free
-/// lambda creation site may reference. Flat: nesting is one level.
+/// lambda creation site may reference.
 fn collect_hoisted(bodies: &[&MirFunc]) -> HashSet<ustr::Ustr> {
-    bodies.iter().flat_map(|mf| mf.nested_fns.iter().map(|nf| nf.name)).collect()
+    fn visit(mf: &MirFunc, names: &mut HashSet<Ustr>) {
+        for nested in &mf.nested_fns {
+            names.insert(nested.name);
+            visit(nested, names);
+        }
+    }
+    let mut names = HashSet::new();
+    for body in bodies {
+        visit(body, &mut names);
+    }
+    names
 }
 
 fn register_code_slots(

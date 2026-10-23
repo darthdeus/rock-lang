@@ -32,10 +32,12 @@ fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
 }
 
-/// The env-record field name a captured cell threads under (`c<raw>`), shared by
-/// the creation-site record and the hoisted body's env access.
-fn field_of(c: Idx<Cell>) -> Ustr {
-    Ustr::from(format!("c{}", raw(c)).as_str())
+/// Environment slots are local to the capture plan, so copies of one lambda
+/// site have the same body even when injected into different MIR arena slots.
+fn field_of(plan: &ClosureEnvPlan, c: Idx<Cell>) -> Ustr {
+    let slot = plan.captures().binary_search_by_key(&raw(c), |cell| raw(*cell))
+        .expect("environment field belongs to its capture plan");
+    Ustr::from(format!("c{slot}").as_str())
 }
 
 // Only compiler-owned unwind closures are eligible: their identity and return
@@ -207,7 +209,7 @@ pub fn convert_closures_framed(
     let mut hoisted_name: HashMap<ScopeId, Ustr> = HashMap::default();
     let mut env_plans: HashMap<ScopeId, ClosureEnvPlan> = HashMap::default();
     // Post-partition capture set per scope, for O(1) membership in the block loop:
-    // a member is captured DIRECTLY (env field `e.c<raw>`); a frame cell NOT in the
+    // a member is captured DIRECTLY (env field `e.c<slot>`); a frame cell NOT in the
     // set (collapsed to `s`) reaches via `e.c<S>.c<slot>` instead.
     for &(k, sid) in &ordered {
         hoisted_name.insert(sid, Ustr::from(format!("{name_base}__lambda{k}").as_str()));
@@ -299,8 +301,7 @@ pub fn convert_closures_framed(
                     // resolves to the projected value.
                     if frame_via_s {
                         let f = frame.unwrap();
-                        let env = env_plans[&s].env_cell().expect("frame capture has an env plan");
-                        let sbase = env_frame_base(mf, env, f.s_cell, &mut new);
+                        let sbase = env_frame_base(mf, &env_plans[&s], f.s_cell, &mut new);
                         mf.insts[id] = Inst::Field { base: sbase, field: frame_field(f.slots[&c]) };
                     } else if captured {
                         // A boxed cell reads `.v` on its box table; a by-value
@@ -309,11 +310,11 @@ pub fn convert_closures_framed(
                         let il = mf.alloc_inst(Inst::Load(env));
                         new.push(il);
                         if boxed_c {
-                            let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(c) });
+                            let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(&env_plans[&s], c) });
                             new.push(f);
                             mf.insts[id] = Inst::Field { base: f, field: Ustr::from("v") };
                         } else {
-                            mf.insts[id] = Inst::Field { base: il, field: field_of(c) };
+                            mf.insts[id] = Inst::Field { base: il, field: field_of(&env_plans[&s], c) };
                         }
                     } else {
                         // Local boxed: `.v` on a load of the box table.
@@ -348,14 +349,13 @@ pub fn convert_closures_framed(
                     }
                     let (base, field) = if frame_via_s {
                         let f = frame.unwrap();
-                        let env = env_plans[&s].env_cell().expect("frame capture has an env plan");
-                        let sbase = env_frame_base(mf, env, f.s_cell, &mut new);
+                        let sbase = env_frame_base(mf, &env_plans[&s], f.s_cell, &mut new);
                         (sbase, frame_field(f.slots[&c]))
                     } else if captured {
                         let env = env_plans[&s].env_cell().expect("capture has an env plan");
                         let il = mf.alloc_inst(Inst::Load(env));
                         new.push(il);
-                        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(c) });
+                        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(&env_plans[&s], c) });
                         new.push(f);
                         (f, Ustr::from("v"))
                     } else {
@@ -393,7 +393,7 @@ pub fn convert_closures_framed(
                     let mut fields: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(caps.len());
                     for &cc in caps {
                         let slot = slot_in_scope(mf, own, &env_plans, s, cc, &mut new);
-                        fields.push((field_of(cc), slot));
+                        fields.push((field_of(&env_plans[&child], cc), slot));
                     }
                     mf.insts[id] = Inst::MakeEnv { fn_ref: Some(hoisted_name[&child]), fields };
                     new.push(id);
@@ -713,10 +713,11 @@ fn capture_schema(
 /// Materialize `e.c<S>` -- a load of the env record `env` then its `s`-cell field
 /// -- the base a frame-cell access composes `.c<slot>` onto inside a hoisted body
 /// (D3). Helper insts are appended to `new`; returns the `Field` inst.
-fn env_frame_base(mf: &mut MirFunc, env: Idx<Cell>, s_cell: Idx<Cell>, new: &mut Vec<Idx<Inst>>) -> Idx<Inst> {
+fn env_frame_base(mf: &mut MirFunc, plan: &ClosureEnvPlan, s_cell: Idx<Cell>, new: &mut Vec<Idx<Inst>>) -> Idx<Inst> {
+    let env = plan.env_cell().expect("frame capture has an env plan");
     let il = mf.alloc_inst(Inst::Load(env));
     new.push(il);
-    let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(s_cell) });
+    let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(plan, s_cell) });
     new.push(f);
     f
 }
@@ -751,7 +752,7 @@ fn slot_in_scope(
         let env = env_plans[&s].env_cell().expect("transitive capture has an env plan");
         let il = mf.alloc_inst(Inst::Load(env));
         new.push(il);
-        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(cc) });
+        let f = mf.alloc_inst(Inst::Field { base: il, field: field_of(&env_plans[&s], cc) });
         new.push(f);
         f
     }

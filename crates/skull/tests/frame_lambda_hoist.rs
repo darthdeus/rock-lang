@@ -181,15 +181,14 @@ fn loop_binding_snapshots_by_value_into_record() {
     );
     // The hoisted body reads its by-value snapshot as a single `.c<slot>` field
     // hop off its env, and NEVER through `s` at call time (the final-value bug
-    // D4(b) avoids -- a via-`s` capture would read the s-field `.c<S>`).
-    let s = fn_params(&lua, &format!("{lp_name}__step")).swap_remove(0);
+    // D4(b) avoids -- a via-`s` capture would need another field hop).
     let body = function_body(&lua, &format!("{lp_name}__step__lambda"));
     assert!(
         contains_digit_bridge(body, ".c", ""),
         "the hoisted body must read a snapshot field `.c<slot>` from its env:\n{body}"
     );
-    assert!(
-        !body.contains(&format!(".{s}")),
-        "a read-only loop binding must NOT read through the s-field `.{s}` at call time:\n{body}"
+    assert_eq!(
+        body.matches(".c").count(), 1,
+        "a read-only loop binding must read its snapshot without a second frame-field hop:\n{body}"
     );
 }

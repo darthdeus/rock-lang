@@ -56,6 +56,8 @@ mod coroutine_hook_hoist;
 mod defer_unwind;
 #[path = "dead_lambda_scope.rs"]
 mod dead_lambda_scope;
+#[path = "default_lambda_fields.rs"]
+mod default_lambda_fields;
 #[path = "descriptor_value_repr.rs"]
 mod descriptor_value_repr;
 #[path = "embed_scalarize.rs"]

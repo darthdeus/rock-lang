@@ -1,0 +1,74 @@
+struct Mapper {
+    map: fn(int) -> int = x => x,
+}
+
+fn parameter_after_default(n: int) -> int {
+    let mapper = Mapper {}
+    let later = n + 1
+    mapper.map(later) + n
+}
+
+struct CapturingMapper {
+    map: fn(int) -> int = {
+        let offset = 3
+        x => x + offset
+    },
+}
+
+fn capturing_default(n: int) -> int {
+    let first = CapturingMapper {}
+    let second = CapturingMapper {}
+    let later = n + 1
+    first.map(later) + second.map(n) + n
+}
+
+fn nested_function(n: int) -> int {
+    fn inner(k: int) -> int {
+        let mapper = CapturingMapper {}
+        let later = k + 2
+        mapper.map(later) + k
+    }
+    inner(n) + n
+}
+
+struct TwoMappers {
+    first: fn(int) -> int = x => x + 1,
+    second: fn(int) -> int = x => x * 2,
+}
+
+fn multiple_defaults(n: int) -> int {
+    let mapper = TwoMappers {}
+    let later = n + 1
+    mapper.first(later) + mapper.second(n) + n
+}
+
+nobox value Pair { x: int, y: int }
+
+struct PairMapper {
+    map: fn(Pair) -> Pair = p => p,
+}
+
+fn value_parameter_after_default(p: Pair) -> int {
+    let mapper = PairMapper {}
+    let later = p.x + p.y
+    let mapped = mapper.map(p)
+    mapped.x + mapped.y + later
+}
+
+fn value_default(n: int) -> int {
+    value_parameter_after_default(Pair { x: n, y: n + 1 })
+}
+
+struct NestedMapper {
+    map: fn(int) -> int = {
+        let offset = 2
+        let mapper = Mapper {}
+        x => mapper.map(x) + offset
+    },
+}
+
+fn nested_default(n: int) -> int {
+    let mapper = NestedMapper {}
+    let later = n + 1
+    mapper.map(later) + n
+}

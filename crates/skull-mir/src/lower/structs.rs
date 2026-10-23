@@ -556,6 +556,23 @@ impl Builder<'_> {
         // block, then restore.
         let saved_body = self.body;
         let saved_inf = self.inf;
+        // HIR binding and expression indices are body-local. Defaults share the
+        // caller's MIR arenas, but must neither resolve nor replace its locals.
+        let saved_locals = (
+            std::mem::take(&mut self.binds),
+            std::mem::take(&mut self.group_binds),
+            std::mem::take(&mut self.tuple_binds),
+            std::mem::take(&mut self.owned_value_binds),
+            std::mem::take(&mut self.ref_borrowed_binds),
+            std::mem::take(&mut self.static_cells),
+            std::mem::take(&mut self.nested_fn_globals),
+            std::mem::take(&mut self.flat_ref_binds),
+            std::mem::take(&mut self.flat_ref_cells),
+            std::mem::take(&mut self.flat_scan_lets),
+            std::mem::take(&mut self.f32_round_exprs),
+            std::mem::take(&mut self.presence_only),
+            std::mem::take(&mut self.flat_arg_captures),
+        );
         self.body = defaults_body;
         self.inf = defaults_inf;
         // `site_owner` is NOT swapped -- the sites still belong to the enclosing
@@ -570,6 +587,21 @@ impl Builder<'_> {
         let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
+        (
+            self.binds,
+            self.group_binds,
+            self.tuple_binds,
+            self.owned_value_binds,
+            self.ref_borrowed_binds,
+            self.static_cells,
+            self.nested_fn_globals,
+            self.flat_ref_binds,
+            self.flat_ref_cells,
+            self.flat_scan_lets,
+            self.f32_round_exprs,
+            self.presence_only,
+            self.flat_arg_captures,
+        ) = saved_locals;
         result
     }
 

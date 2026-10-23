@@ -17,6 +17,8 @@ mod bounded_standalone_emission;
 mod closure;
 #[path = "deepcopy.rs"]
 mod deepcopy;
+#[path = "default_lambda_fields.rs"]
+mod default_lambda_fields;
 #[path = "differential.rs"]
 mod differential;
 #[path = "emit.rs"]
