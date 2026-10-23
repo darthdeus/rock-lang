@@ -3803,30 +3803,39 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
     if skull_mir::lower::collect_shader_pairs(ws)?.is_empty() {
         return Ok(None);
     }
-    let name = ustr::Ustr::from("__rock_shader_register");
-    let cands = ws.functions_by_name.get(&name).map(|l| l.as_slice()).unwrap_or(&[]);
-    let target = cands
-        .iter()
-        .find(|(m, f)| {
+    // The registry uses DefKeys for v1 modules. @nomangle changes the emitted
+    // symbol, not that key, so match the declared segment on both dialects.
+    let cands: Vec<_> = ws.functions_by_name.iter()
+        .filter(|(key, _)| skull_mir::mangle::declared_name(key) == "__rock_shader_register")
+        .flat_map(|(_, functions)| functions.iter().copied())
+        .collect();
+    for js_sibling in [true, false] {
+        let mut matches = cands.iter().filter(|(m, f)| {
             let cf = &ws.module(*m).functions[*f];
-            cf.backend == bone_semantic::hir::FnBackend::Js
-                && (matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _)))
-                    || cf.is_extern)
-        })
-        .or_else(|| {
-            cands.iter().find(|(m, f)| {
-                let cf = &ws.module(*m).functions[*f];
+            if js_sibling {
+                cf.backend == bone_semantic::hir::FnBackend::Js
+                    && (matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _)))
+                        || cf.is_extern)
+            } else {
                 cf.inline_body.is_none() && !cf.is_extern
-            })
+            }
         });
-    let Some(&(module, func)) = target else {
-        return Err(err(
-            "JS: `rock_shader` pipelines emit `__rock_shader_register` calls, but no \
-             JS-servable `__rock_shader_register` is reachable (inline(js)/extern(js) \
-             sibling or a plain-Rock body); refusing to drop the shader registration",
-        ));
-    };
-    Ok(Some(FuncRef { module, func }))
+        if let Some(&(module, func)) = matches.next() {
+            if let Some(&(other_module, other_func)) = matches.next() {
+                return Err(err(format!(
+                    "JS: ambiguous `__rock_shader_register`: `{}` and `{}` would own the same driver symbol",
+                    ws.module(module).functions[func].name,
+                    ws.module(other_module).functions[other_func].name,
+                )));
+            }
+            return Ok(Some(FuncRef { module, func }));
+        }
+    }
+    Err(err(
+        "JS: `rock_shader` pipelines emit `__rock_shader_register` calls, but no \
+         JS-servable `__rock_shader_register` is reachable (inline(js)/extern(js) \
+         sibling or a plain-Rock body); refusing to drop the shader registration",
+    ))
 }
 
 /// `rock_shader(vert, frag)` collapses to a pipeline key const; the driver emits
@@ -3835,8 +3844,8 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
 /// raw driver text, not MIR, so the register fn is never discovered
 /// transitively -- force its js sibling into the program under its bare
 /// `@nomangle` name whenever a pair exists, so the register lines resolve. The
-/// native Rock body (WATCHER lookup + GL compile) is not JS-emittable, so a
-/// program with a shader pair but no reachable js sibling REJECTS rather than
+/// registration body must be portable Rock or have a JS sibling, so a
+/// program with a shader pair but no JS-servable declaration REJECTS rather than
 /// silently dropping the registration.
 fn force_shader_register_sibling(
     ws: &Workspace,
