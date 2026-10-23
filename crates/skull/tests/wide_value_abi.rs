@@ -533,12 +533,10 @@ fn main() {{
 
 /// A callee that returns its boxed parameter returns a COPY. The parameter box
 /// is the caller's (borrowed, never written), and a caller may store the result
-/// into a place and write through it, which must not reach the argument. So the
-/// body takes the one box and builds exactly one fresh box from its leaves. A
-/// tail call that passes the parameter on (`tail_forward` above) copies it as
-/// any direct boxed argument does.
+/// into a place and write through it, which must not reach the argument. The
+/// forwarder lends its immutable argument; the mutable store owns the copy.
 #[test]
-fn a_forwarding_callee_returns_a_copy_of_the_box() {
+fn a_forwarding_callee_lends_the_box_until_a_mutable_store() {
     let src = format!(
         "{}struct HoldW {{ w: W }}
 fn forward(w: W) -> W {{ return w }}
@@ -554,7 +552,7 @@ fn main() {{
     let lua = try_emit_module(&src).expect("emits");
     let body = function_body(&lua, "forward");
     assert_eq!(emitted_params(&lua, "forward").len(), 1, "the forwarder must take the box:\n{body}");
-    assert_eq!(body.matches("_ct(").count(), 1, "the forwarder must return one fresh box:\n{body}");
+    assert_eq!(body.matches("_ct(").count(), 0, "the forwarder must reuse the argument box:\n{body}");
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"), "3 9");
 }
 

@@ -241,6 +241,9 @@ impl Builder<'_> {
             ref_borrowed_binds: std::cell::OnceCell::new(),
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::new(),
+            shareable_value_boxes: HashSet::new(),
+            unshareable_value_cells: HashSet::new(),
+            shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::new(),
         tuple_binds: HashMap::new(),
@@ -401,6 +404,7 @@ impl Builder<'_> {
                             self.bind_tuple_slots(name, &slots, shape);
                         } else {
                         let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
+                        let mut shareable = true;
                         let v = match opaque_repr {
                             Some(r) => self.pack(r.into_value())?,
                             None if self.binding_is_ref(name) => self.lower_ref_borrow(value)?,
@@ -412,8 +416,12 @@ impl Builder<'_> {
                                 .value_struct_of(value)
                                 .is_some_and(|n| !self.is_nobox_struct(n)) =>
                             {
-                                let r = self.lower_expr_repr(value)?.into_value();
-                                if self.binding_ref_borrowed(name) { self.pack(r)? } else { self.pack_lent(r)? }
+                                let lend = !self.binding_ref_borrowed(name);
+                                self.with_value_lending(lend, |s| {
+                                    let r = s.lower_expr_repr(value)?.into_value();
+                                    shareable = s.value_repr_is_shareable(&r);
+                                    if lend { s.pack_lent(r) } else { s.pack(r) }
+                                })?
                             }
                             None => self.lower_expr_with_expected(value, expected.as_deref())?,
                         };
@@ -427,6 +435,9 @@ impl Builder<'_> {
                         );
                         if self.binding_is_nonnull_value_struct(name) {
                             self.f.mark_nonnull_value_struct(cell);
+                        }
+                        if !shareable {
+                            self.unshareable_value_cells.insert(cell);
                         }
                         if matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) {
                             self.owned_value_binds.insert(raw(name));

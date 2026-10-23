@@ -297,6 +297,10 @@ impl Builder<'_> {
                 if !self.scx.values_first_class {
                     let owner = self.concrete_expr_ty(e);
                     self.mark_borrowed_value_children(&shape, &repr, owner.as_deref())?;
+                    if self.body.param_bindings.into_iter().any(|pb| pb == b)
+                        && !self.binding_ref_borrowed(b) {
+                        self.share_borrowed_children(&repr);
+                    }
                 }
                 Ok(repr)
             }
@@ -306,6 +310,13 @@ impl Builder<'_> {
             // child) builds a fresh box instead of escaping the borrowed one.
             Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
+                if self.lending_pack && self.binding_value_is_shareable(b) {
+                    if let Some(ty) = self.concrete_expr_ty(e) {
+                        self.borrowed_value_children.insert(boxed, ty);
+                        self.shareable_value_boxes.insert(boxed);
+                    }
+                    return Ok(ValueRepr::Scalar(boxed));
+                }
                 self.boxed_value_copy_repr(boxed, name, self.concrete_expr_ty(e).as_deref())
             }
             // `base.field`: project a Group part directly (no cdata); else a
