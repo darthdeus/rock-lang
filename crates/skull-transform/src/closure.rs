@@ -38,6 +38,39 @@ fn field_of(c: Idx<Cell>) -> Ustr {
     Ustr::from(format!("c{}", raw(c)).as_str())
 }
 
+// Only compiler-owned unwind closures are eligible: their identity and return
+// value never escape the cleanup stack. A mutable capture must keep its box so
+// reassignment after registration is still observed when unwinding.
+fn forwarded_defer_capture(
+    mf: &MirFunc,
+    scope: &crate::scope::Scope,
+    captures: &[Idx<Cell>],
+    boxed: &HashSet<Idx<Cell>>,
+) -> Option<Idx<Cell>> {
+    let [capture] = captures else { return None };
+    if !scope.params.is_empty() || boxed.contains(capture) { return None; }
+    let mut block = scope.entry;
+    let mut visited = HashSet::default();
+    let mut loaded = None;
+    let mut called = false;
+    loop {
+        if !visited.insert(block) { return None; }
+        for &id in &mf.blocks[block].insts {
+            match &mf.insts[id] {
+                Inst::Load(cell) if cell == capture && loaded.is_none() && !called => loaded = Some(id),
+                Inst::CallValue { callee, args } if Some(*callee) == loaded && args.is_empty() && !called => called = true,
+                Inst::Const(Lit::Nil) => {},
+                _ => return None,
+            }
+        }
+        match &mf.blocks[block].term {
+            Term::Goto(next) => block = *next,
+            Term::Return(values) if values.is_empty() && called => return Some(*capture),
+            _ => return None,
+        }
+    }
+}
+
 /// The dense frame-field name a coroutine frame cell renders under (`c<slot>`) --
 /// keyed on the DENSE slot, NOT the raw id (the P2-finding fix). Must match
 /// `FrameCtx`'s `write_cellname` (`s.c<slot>` in the step) and the constructor's
@@ -222,6 +255,19 @@ pub fn convert_closures_framed(
         }
     }
 
+    let mut forwarded_defers = HashMap::default();
+    if frame.is_none() {
+        for inst in mf.insts.values() {
+            let Inst::CallValue { callee, args } = inst else { continue };
+            if !matches!(&mf.insts[*callee], Inst::Global(name) if name.as_str() == DEFER_PUSH) { continue; }
+            let [lambda] = args.as_slice() else { continue };
+            let Some(&sid) = lambda_sid.get(lambda) else { continue };
+            if let Some(capture) = forwarded_defer_capture(mf, &tree.scopes[sid], env_plans[&sid].captures(), &boxed) {
+                forwarded_defers.insert(*lambda, capture);
+            }
+        }
+    }
+
     // --- Rewrite every scoped block: captured/boxed cell accesses become env /
     // `.v` projections, and each `Inst::Lambda` creation site becomes its record
     // (or a bare global). Helper insts are spliced immediately before the inst
@@ -323,6 +369,12 @@ pub fn convert_closures_framed(
                 Inst::Lambda { .. } => {
                     let child = lambda_sid[&id];
                     let caps = env_plans[&child].captures();
+                    if let Some(&capture) = forwarded_defers.get(&id) {
+                        let value = slot_in_scope(mf, own, &env_plans, s, capture, &mut new);
+                        mf.insts[id] = mf.insts[value].clone();
+                        new.push(id);
+                        continue;
+                    }
                     if caps.is_empty() {
                         let hoisted = hoisted_name[&child];
                         // A capture-free lambda becomes a top-level fn of THIS
@@ -411,6 +463,7 @@ pub fn convert_closures_framed(
     let mut nested: Vec<MirFunc> = Vec::with_capacity(ordered.len());
     for &(_k, sid) in &ordered {
         let lambda = tree.scopes[sid].lambda.expect("ordered lambda scope has a creator");
+        if forwarded_defers.contains_key(&lambda) { continue; }
         let mut params: Vec<Idx<Cell>> = Vec::new();
         if let Some(e) = env_plans.get(&sid).and_then(ClosureEnvPlan::env_cell) {
             params.push(e);
