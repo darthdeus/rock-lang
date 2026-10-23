@@ -573,6 +573,18 @@ pub const JS_STRUCTURAL_EQ: &str = r#"
 // the AUTHORITY, mirroring luajit's `_vt.__eq` metatable rule -- consulted before
 // the generic key walk so a Vec/Map/ref-struct field is NOT contents-compared.
 var __rock_vt_eq = {};
+function __rock_native_buffer_prefix_eq(a, b, n) {
+  if (n <= 0) return true;
+  var ap = a.ptr, bp = b.ptr;
+  if (ap == null || bp == null) return ap === bp;
+  var as = ap.__rock_elem_size === undefined ? ap.BYTES_PER_ELEMENT : ap.__rock_elem_size;
+  var bs = bp.__rock_elem_size === undefined ? bp.BYTES_PER_ELEMENT : bp.__rock_elem_size;
+  if (as !== bs) return false;
+  var av = new Uint8Array(ap.buffer, ap.byteOffset, n * as);
+  var bv = new Uint8Array(bp.buffer, bp.byteOffset, n * bs);
+  for (var i = 0; i < av.length; i++) if (av[i] !== bv[i]) return false;
+  return true;
+}
 function __op_eq(a, b) {
   var an = (a === null || a === undefined), bn = (b === null || b === undefined);
   if (an || bn) return an && bn;
@@ -580,6 +592,16 @@ function __op_eq(a, b) {
   if (typeof a !== "object" || typeof b !== "object") return a === b;
   if (typeof __rock_code_ref_kind === "function" &&
       (__rock_code_ref_kind(a) !== null || __rock_code_ref_kind(b) !== null)) return a === b;
+  // C buffers compare bytes, including floating-point bit patterns and padding,
+  // just as LuaJIT does. FlatVec's buffer length is capacity, not live length.
+  if (a.__ty === "FlatVec" || b.__ty === "FlatVec") {
+    if (a.__ty !== "FlatVec" || b.__ty !== "FlatVec" || a.len !== b.len) return false;
+    return __rock_native_buffer_prefix_eq(a.buf, b.buf, a.len);
+  }
+  if (a.__ty === "NativeBuffer" || b.__ty === "NativeBuffer") {
+    if (a.__ty !== "NativeBuffer" || b.__ty !== "NativeBuffer" || a.len !== b.len) return false;
+    return __rock_native_buffer_prefix_eq(a, b, a.len);
+  }
   // A Vec compares live storage only. Each concrete element type has one
   // compiler-selected representation, so unlike representations cannot be
   // values of the same concrete Vec type.

@@ -2106,15 +2106,13 @@ impl Emitter<'_> {
                 }
                 format!("__rock_call({})", rendered.join(", "))
             }
-            // Structs are plain objects tagged with `__ty` (mirrors the Lua
-            // `__rock_create_struct`: sets `obj.__ty`, no metatable). NativeBuffer
-            // keeps its bespoke `{ptr, len}` (no `__ty`) so the nb differential's
-            // pins hold; every other named struct gets `{__ty: "Name", ...}`.
+            // NativeBuffer variants share the equality runtime's buffer tag.
             Inst::MakeStruct { ty, fields } => {
                 let name = ty.map(|t| t.to_string()).unwrap_or_default();
                 let mut parts: Vec<String> = Vec::new();
-                if !name.is_empty() && !is_native_buffer(&name) {
-                    parts.push(format!("__ty: {}", js_string_lit(&name)?));
+                if !name.is_empty() {
+                    let tag = if is_native_buffer(&name) { "NativeBuffer" } else { &name };
+                    parts.push(format!("__ty: {}", js_string_lit(tag)?));
                 }
                 for (f, v) in fields {
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
@@ -2315,7 +2313,12 @@ impl Emitter<'_> {
                              bytes, not a multiple of 4 -- no aligned TypedArray backing"
                         )));
                     }
-                    format!("new Float32Array(({}) * {})", self.render_val(*count)?, size / 4)
+                    // The backing view uses float32 slots regardless of the
+                    // element's C width. Preserve that width for byte equality.
+                    format!(
+                        "Object.assign(new Float32Array(({}) * {}), {{__rock_elem_size: {size}}})",
+                        self.render_val(*count)?, size / 4
+                    )
                 }
             },
             // One typed view over the buffer's storage. luajit casts the pointer;

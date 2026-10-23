@@ -57,7 +57,7 @@ fn main() {
 "#;
 
 const EXPANSION_INTRINSIC: &str = r#"
-value G { x: float, y: float }
+value G { x: f32, y: f32 }
 
 @vertex_expand inline(lua) fn probe_stride(buf: NativeBuffer<G>) -> int = """
     error("probe_stride is compiler-expanded")
@@ -126,7 +126,6 @@ fn a_primitive_element_buffer_is_admitted_on_js() {
 }
 
 #[test]
-#[ignore = "known red (os-m3-js-pure-rock): vertex plan rejects a float attribute with a double leaf"]
 fn an_expansion_intrinsic_over_a_native_buffer_is_admitted() {
     assert!(js(EXPANSION_INTRINSIC).is_ok(), "js: {:?}", js(EXPANSION_INTRINSIC));
     assert!(lua(EXPANSION_INTRINSIC).is_ok());

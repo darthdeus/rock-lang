@@ -178,7 +178,6 @@ fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "known red (os-m3-js-pure-rock): NativeBuffer has no owned representation plan"]
 fn nb_value_differential() {
     if !both_backends_available("nb_value_differential") {
         return;

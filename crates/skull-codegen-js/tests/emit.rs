@@ -166,7 +166,7 @@ fn vec_overload_rejects() {
     );
 }
 
-// NativeBuffer subset pins: struct construction (`{ptr, len}` object literal),
+// NativeBuffer subset pins: tagged struct construction,
 // the checked `buf[i]` sugar routing through the `__nb_checked_*` shim names
 // (JS_NB_CHECK_SHIMS provides the bodies), and a statement-position intrinsic
 // call. Semantics are covered by the nb_differential cross-backend tests;
@@ -233,7 +233,7 @@ fn native_buffer_ctor_emits_object_literal() {
 function native_buffer_float(c0) {
   let v0 = c0;
   let v1 = new Float32Array(v0);
-  return ({ptr: v1, len: v0});
+  return ({__ty: \"NativeBuffer\", ptr: v1, len: v0});
 }
 "
                 );

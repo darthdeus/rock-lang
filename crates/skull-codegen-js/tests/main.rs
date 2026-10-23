@@ -135,3 +135,5 @@ mod stdlib_sibling_location;
 mod host;
 #[path = "safenav_fold.rs"]
 mod safenav_fold;
+#[path = "native_buffer_equality.rs"]
+mod native_buffer_equality;
