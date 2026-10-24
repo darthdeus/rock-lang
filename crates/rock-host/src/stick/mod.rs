@@ -163,16 +163,19 @@ pub struct BuildConfig {
     pub vars: HashMap<String, BuildVar>,
 }
 
-/// One declared build variable. Exactly one of `cmd`/`builtin`/`value` is its
-/// source (`validate_build` enforces arity; the shorthand `NAME = "literal"`
-/// parses as `value`). `channels` restricts where the source runs; outside the
-/// list the var resolves to `default`, and a restricted var with no default is
-/// a resolution error there.
+/// One declared build variable. Exactly one of `cmd`/`builtin`/`value`/
+/// `source_fingerprint` is its source (`validate_build` enforces arity; the
+/// shorthand `NAME = "literal"` parses as `value`). `channels` restricts where
+/// the source runs; outside the list the var resolves to `default`, and a
+/// restricted var with no default is a resolution error there.
 #[derive(Debug, Clone, Default)]
 pub struct BuildVar {
     pub cmd: Option<String>,
     pub builtin: Option<String>,
     pub value: Option<String>,
+    /// A compiler-derived fingerprint resolved after semantic checking,
+    /// without putting a placeholder into the resolved variable map.
+    pub source_fingerprint: Option<SourceFingerprint>,
     pub channels: Option<Vec<String>>,
     /// Channels on which a failing `cmd` degrades to `default` with a warning
     /// instead of failing the build. Per-channel on purpose: a credential a
@@ -188,6 +191,17 @@ pub struct BuildVar {
     /// Explicitly declared metadata that may vary without changing executable
     /// Artifact identity.
     pub volatile: bool,
+}
+
+/// Inputs whose contents contribute to a build variable's source fingerprint.
+/// Empty lists are accepted by deserialization so validation can report the
+/// missing root alongside the owning build variable.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SourceFingerprint {
+    pub roots: Vec<String>,
+    pub files: Vec<String>,
+    pub vars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -539,7 +553,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
         impl<'de> serde::de::Visitor<'de> for Vis {
             type Value = BuildVar;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "a literal string or a table with cmd/builtin/value/channels/optional_channels/default/secret/volatile")
+                write!(f, "a literal string or a table with cmd/builtin/value/source_fingerprint/channels/optional_channels/default/secret/volatile")
             }
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<BuildVar, E> {
                 Ok(BuildVar { value: Some(s.to_string()), ..BuildVar::default() })
@@ -551,6 +565,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                         "cmd" => { var.cmd = Some(map.next_value()?); }
                         "builtin" => { var.builtin = Some(map.next_value()?); }
                         "value" => { var.value = Some(map.next_value()?); }
+                        "source_fingerprint" => { var.source_fingerprint = Some(map.next_value()?); }
                         "channels" => { var.channels = Some(map.next_value()?); }
                         "optional_channels" => { var.optional_channels = Some(map.next_value()?); }
                         "default" => { var.default = Some(map.next_value()?); }
@@ -561,7 +576,7 @@ impl<'de> serde::Deserialize<'de> for BuildVar {
                             // var sourceless and every build_var() reading it stale.
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` in [build.vars] entry; known keys: \
-                                 cmd, builtin, value, channels, optional_channels, default, secret, volatile"
+                                 cmd, builtin, value, source_fingerprint, channels, optional_channels, default, secret, volatile"
                             )));
                         }
                     }
@@ -950,15 +965,20 @@ impl StickConfig {
             }
         }
         for (name, var) in &build.vars {
-            let sources = [var.cmd.is_some(), var.builtin.is_some(), var.value.is_some()];
+            let sources = [
+                var.cmd.is_some(),
+                var.builtin.is_some(),
+                var.value.is_some(),
+                var.source_fingerprint.is_some(),
+            ];
             match sources.iter().filter(|s| **s).count() {
                 1 => {}
                 0 => anyhow::bail!(
-                    "stick.toml: [build.vars] {name} has no source; set one of cmd, builtin, value"
+                    "stick.toml: [build.vars] {name} has no source; set one of cmd, builtin, value, source_fingerprint"
                 ),
                 _ => anyhow::bail!(
                     "stick.toml: [build.vars] {name} has more than one source; \
-                     set exactly one of cmd, builtin, value"
+                     set exactly one of cmd, builtin, value, source_fingerprint"
                 ),
             }
             if let Some(builtin) = var.builtin.as_deref() {
@@ -976,6 +996,50 @@ impl StickConfig {
                             "stick.toml: [build.vars] {name} restricts to channel {:?}, \
                              which is not in [build] channels {:?}",
                             chan, build.channels
+                        );
+                    }
+                }
+            }
+            if let Some(fingerprint) = &var.source_fingerprint {
+                if var.volatile {
+                    anyhow::bail!(
+                        "[build.vars] {name} uses source_fingerprint and cannot be volatile"
+                    );
+                }
+                if fingerprint.roots.is_empty() {
+                    anyhow::bail!(
+                        "[build.vars] {name} source_fingerprint requires at least one root"
+                    );
+                }
+                if fingerprint.roots.iter().any(|root| root.trim().is_empty()) {
+                    anyhow::bail!(
+                        "[build.vars] {name} source_fingerprint roots must be nonempty"
+                    );
+                }
+                if fingerprint.files.iter().any(|file| file.trim().is_empty()) {
+                    anyhow::bail!(
+                        "[build.vars] {name} source_fingerprint files must be nonempty"
+                    );
+                }
+                for dependency in &fingerprint.vars {
+                    if dependency.trim().is_empty() {
+                        anyhow::bail!(
+                            "[build.vars] {name} source_fingerprint var names must be nonempty"
+                        );
+                    }
+                    if dependency == name {
+                        anyhow::bail!(
+                            "[build.vars] {name} source_fingerprint cannot depend on itself"
+                        );
+                    }
+                    let Some(declared) = build.vars.get(dependency) else {
+                        anyhow::bail!(
+                            "[build.vars] {name} source_fingerprint references undeclared var {dependency:?}"
+                        );
+                    };
+                    if declared.source_fingerprint.is_some() {
+                        anyhow::bail!(
+                            "[build.vars] {name} source_fingerprint cannot depend on deferred var {dependency:?}"
                         );
                     }
                 }
@@ -1677,6 +1741,113 @@ mod tests {
             "[package]\nname = \"x\"\n[build.vars]\nX = { comand = \"echo hi\" }\n",
         ).expect_err("unknown var key must be rejected");
         assert!(format!("{err}").contains("comand"), "error names the bad key: {err}");
+    }
+
+    #[test]
+    fn build_var_parses_source_fingerprint_and_rejects_unknown_nested_keys() {
+        let cfg = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "REV = \"abc\"\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"], files = [\"lock.json\"], vars = [\"REV\"] } }\n",
+        )).expect("source fingerprint declaration must parse");
+        let fingerprint = cfg.build.as_ref().unwrap().vars["TREE"]
+            .source_fingerprint.as_ref().expect("source fingerprint is retained");
+        assert_eq!(fingerprint.roots, vec!["src"]);
+        assert_eq!(fingerprint.files, vec!["lock.json"]);
+        assert_eq!(fingerprint.vars, vec!["REV"]);
+        cfg.validate_build().expect("source fingerprint declaration validates");
+
+        let defaults = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = {} }\n",
+        )).expect("omitted source fingerprint fields default to empty lists");
+        let fingerprint = defaults.build.as_ref().unwrap().vars["TREE"]
+            .source_fingerprint.as_ref().expect("source fingerprint is retained");
+        assert!(fingerprint.roots.is_empty());
+        assert!(fingerprint.files.is_empty());
+        assert!(fingerprint.vars.is_empty());
+
+        let err = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"], unknown = [\"x\"] } }\n",
+        )).expect_err("unknown source fingerprint key must reject");
+        assert!(format!("{err}").contains("unknown"), "error names the nested key: {err}");
+    }
+
+    #[test]
+    fn validate_build_counts_source_fingerprint_as_a_source() {
+        let cfg = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"] }, value = \"literal\" }\n",
+        )).expect("both source declarations parse");
+        let err = cfg.validate_build().expect_err("two sources must reject");
+        assert!(format!("{err}").contains("TREE"), "error names the var: {err}");
+    }
+
+    #[test]
+    fn validate_build_requires_nonempty_source_fingerprint_roots_and_entries() {
+        for source in [
+            "roots = []",
+            "roots = [\"\"]",
+            "roots = [\"src\"], files = [\"\"]",
+            "roots = [\"src\"], vars = [\"\"]",
+        ] {
+            let manifest = format!(
+                "[package]\nname = \"x\"\n[build.vars]\nTREE = {{ source_fingerprint = {{ {source} }} }}\n"
+            );
+            let cfg = StickConfig::new_from_str(&manifest).expect("declaration parses");
+            let err = cfg.validate_build().expect_err("empty source fingerprint entries must reject");
+            assert!(format!("{err}").contains("TREE"), "error names the var: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_build_rejects_invalid_source_fingerprint_dependencies_and_metadata() {
+        let missing = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"MISSING\"] } }\n",
+        )).unwrap();
+        let err = missing.validate_build().expect_err("undeclared fingerprint var must reject");
+        assert!(format!("{err}").contains("MISSING"), "error names the missing var: {err}");
+
+        let self_ref = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"TREE\"] } }\n",
+        )).unwrap();
+        self_ref.validate_build().expect_err("self-reference must reject");
+
+        let deferred_ref = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"], vars = [\"OTHER\"] } }\n",
+            "OTHER = { source_fingerprint = { roots = [\"other\"] } }\n",
+        )).unwrap();
+        deferred_ref.validate_build().expect_err("deferred dependency must reject");
+
+        let volatile = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"] }, volatile = true }\n",
+        )).unwrap();
+        volatile.validate_build().expect_err("source fingerprint cannot be volatile");
+    }
+
+    #[test]
+    fn optional_channels_remains_cmd_only_with_source_fingerprint() {
+        let cfg = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\"]\n",
+            "[build.vars]\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"] }, optional_channels = [\"dev\"], default = \"\" }\n",
+        )).unwrap();
+        let err = cfg.validate_build().expect_err("optional_channels remains cmd-only");
+        assert!(format!("{err}").contains("cmd"), "error explains the cmd requirement: {err}");
     }
 
     #[test]

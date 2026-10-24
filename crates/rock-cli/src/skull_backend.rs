@@ -101,6 +101,19 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         }
     }
 
+    fn checked_comptime_inputs(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+    ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
+        let inputs = self.comptime_inputs()?;
+        crate::comptime::resolve_checked_inputs(ws, inputs, |file| {
+            self.sources.files.iter().find_map(|source| {
+                let source = source.borrow();
+                (source.file.to_id_path() == file).then(|| source.contents.clone())
+            })
+        }).map_err(|error| CompilerError::new_no_location(format!("build var resolution failed: {error:#}")))
+    }
+
     fn lint_findings(&mut self, ws: &bone_semantic::inference::Workspace) -> Vec<bone_lints::Finding> {
         crate::lint_pass::findings(ws, self.sources, self.lint_root, self.lint_scope)
     }
@@ -146,6 +159,13 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
         &mut self,
     ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
         self.inner.comptime_inputs()
+    }
+
+    fn checked_comptime_inputs(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+    ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
+        self.inner.checked_comptime_inputs(ws)
     }
 
     fn lint_findings(&mut self, ws: &bone_semantic::inference::Workspace) -> Vec<bone_lints::Finding> {
@@ -2392,6 +2412,7 @@ fn build_rock_state_metadata(
 
 /// Emitted Lua with compiler-owned metadata, passed unchanged to the runtime host.
 pub struct GameProgram {
+    comptime_inputs: bone_semantic::inference::ComptimeInputs,
     lua: String,
     metadata: String,
     metadata_at: usize,
@@ -2403,7 +2424,7 @@ impl GameProgram {
         let at = lua.find(marker).ok_or_else(|| CompilerError::new_no_location(
             "compiler-owned StateSchema is missing its global bridge".to_string(),
         ))?;
-        Ok(Self { lua, metadata, metadata_at: at + marker.len() })
+        Ok(Self { lua, metadata, metadata_at: at + marker.len(), comptime_inputs: Default::default() })
     }
 
     fn parts(&self) -> [&str; 3] {
@@ -2420,7 +2441,9 @@ fn install_rock_state_metadata(
     let mut metadata = build_rock_state_metadata(ws, spec)?;
     let scx = skull_mir::lower::ScalarCtx::new(ws);
     metadata.push_str(&build_state_nobox_accessors(ws, &scx)?);
-    GameProgram::with_metadata(lua, metadata)
+    let mut program = GameProgram::with_metadata(lua, metadata)?;
+    program.comptime_inputs = ws.comptime_inputs.clone();
+    Ok(program)
 }
 
 /// Build `_G.__ROCK_STATE_NOBOX`, the rebuild/take-apart pair per `nobox`
@@ -2644,6 +2667,17 @@ pub fn skull_compile_project_with_inputs(
     output: Option<String>,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<()> {
+    skull_compile_project_with_recorded_inputs(dir, output, inputs).map(|_| ())
+}
+
+/// Compile with pre-resolved host inputs and return the final recorded map,
+/// including compiler-derived declarations resolved after semantic checking.
+/// Packaging uses this map so metadata and executable reads agree.
+pub fn skull_compile_project_with_recorded_inputs(
+    dir: &str,
+    output: Option<String>,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<bone_semantic::inference::ComptimeInputs> {
     let stats = crate::compile_measurements::Scope::begin(dir);
     let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs)?;
     // A game's runnable main.lua is the same shape run/engine produce via
@@ -2663,7 +2697,7 @@ pub fn skull_compile_project_with_inputs(
     }
     crate::compile_measurements::phase("write");
     stats.success();
-    Ok(())
+    Ok(emit.comptime_inputs)
 }
 
 fn skull_run_project(dir: &str) -> Result<()> {

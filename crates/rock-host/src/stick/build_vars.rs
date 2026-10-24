@@ -10,7 +10,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::StickConfig;
+use super::{SourceFingerprint, StickConfig};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedVar {
@@ -26,6 +26,9 @@ pub struct ResolvedBuildVars {
     pub channel: String,
     pub vars: HashMap<String, ResolvedVar>,
     pub volatile_vars: std::collections::HashSet<String>,
+    /// Compiler-derived declarations resolved after semantic checking.
+    /// They have no placeholder in `vars`.
+    pub source_fingerprints: HashMap<String, SourceFingerprint>,
 }
 
 /// `build_command` is the `ROCK_BUILD_COMMAND` a `cmd` var sees; `None`
@@ -57,6 +60,7 @@ pub fn resolve_build_vars(
             channel: "dev".to_string(),
             vars: HashMap::new(),
             volatile_vars: std::collections::HashSet::new(),
+            source_fingerprints: HashMap::new(),
         });
     };
     cfg.validate_build()?;
@@ -88,21 +92,30 @@ pub fn resolve_build_vars(
     }
 
     let mut vars = HashMap::new();
+    let mut source_fingerprints = HashMap::new();
     for (name, var) in &build.vars {
-        let value = if let Some(over) = overrides.get(name) {
-            over.clone()
-        } else if var.channels.as_deref()
+        if let Some(over) = overrides.get(name) {
+            vars.insert(name.clone(), ResolvedVar { value: over.clone(), secret: var.secret });
+            continue;
+        }
+        if var.channels.as_deref()
             .is_some_and(|chans| !chans.iter().any(|c| c == &channel))
         {
-            match var.default.clone() {
-                Some(default) => default,
-                None => anyhow::bail!(
+            let Some(default) = var.default.clone() else {
+                anyhow::bail!(
                     "[build.vars] {name} is restricted to channels {:?} and has no default \
                      for channel {channel:?}",
                     var.channels.as_deref().unwrap_or(&[])
-                ),
-            }
-        } else if let Some(value) = var.value.as_ref() {
+                );
+            };
+            vars.insert(name.clone(), ResolvedVar { value: default, secret: var.secret });
+            continue;
+        }
+        if let Some(fingerprint) = &var.source_fingerprint {
+            source_fingerprints.insert(name.clone(), fingerprint.clone());
+            continue;
+        }
+        let value = if let Some(value) = var.value.as_ref() {
             value.clone()
         } else if let Some(builtin) = var.builtin.as_deref() {
             resolve_builtin(builtin, &channel, target_os, project_dir)?
@@ -134,7 +147,7 @@ pub fn resolve_build_vars(
         .filter(|(_, var)| var.volatile)
         .map(|(name, _)| name.clone())
         .collect();
-    Ok(ResolvedBuildVars { channel, vars, volatile_vars })
+    Ok(ResolvedBuildVars { channel, vars, volatile_vars, source_fingerprints })
 }
 
 /// The platform names the runtime distinguishes; `--target-os` accepts
@@ -287,6 +300,38 @@ mod tests {
         assert_eq!(resolved.vars["ENDPOINT"].value, "https://example.test");
         assert_eq!(resolved.vars["CHANNEL"].value, "steam");
         assert!(resolved.volatile_vars.contains("CLOCK"));
+    }
+
+    #[test]
+    fn source_fingerprint_is_deferred_and_overrides_and_channels_keep_precedence() {
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\", \"steam\"]\n",
+            "[build.vars]\n",
+            "REV = \"abc123\"\n",
+            "TREE = { source_fingerprint = { roots = [\"src\"], files = [\"lock.json\"], vars = [\"REV\"] }, channels = [\"steam\"], default = \"development\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+
+        let dev = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides(), None)
+            .expect("off-channel source uses its default");
+        assert_eq!(dev.vars["TREE"].value, "development");
+        assert!(!dev.source_fingerprints.contains_key("TREE"));
+
+        let steam = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides(), None)
+            .expect("active source fingerprint is deferred");
+        assert!(!steam.vars.contains_key("TREE"), "deferred values must not use placeholders");
+        assert_eq!(steam.vars["REV"].value, "abc123");
+        let declaration = &steam.source_fingerprints["TREE"];
+        assert_eq!(declaration.roots, vec!["src"]);
+        assert_eq!(declaration.files, vec!["lock.json"]);
+        assert_eq!(declaration.vars, vec!["REV"]);
+
+        let overrides = HashMap::from([("TREE".to_string(), "provided".to_string())]);
+        let overridden = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &overrides, None)
+            .expect("an explicit override takes precedence over deferred resolution");
+        assert_eq!(overridden.vars["TREE"].value, "provided");
+        assert!(!overridden.source_fingerprints.contains_key("TREE"));
     }
 
     #[test]

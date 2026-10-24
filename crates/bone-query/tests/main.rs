@@ -70,3 +70,5 @@ mod stdlib_lsp;
 mod struct_fill_from_scope;
 #[path = "workspace.rs"]
 mod workspace;
+#[path = "type_sources.rs"]
+mod type_sources;

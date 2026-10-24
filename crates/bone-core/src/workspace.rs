@@ -101,8 +101,8 @@ pub struct Workspace {
     /// additive and do not change legacy `x :: T` ascription parsing.
     pub legacy_imports: FxHashMap<Ustr, crate::modules::LegacyImports>,
 
-    /// Resolved compile-time inputs, set by the
-    /// host once per session build before emission. bone itself never reads them
+    /// Resolved compile-time inputs, set by the host before emission. Declared
+    /// source fingerprints refresh on edits. bone itself never reads them
     /// -- values don't affect types -- but they live here because every
     /// consumer (skull's `build_var`/`embed_string` expansion at MIR lowering,
     /// on all backends) already holds a `&Workspace` and nothing else with
@@ -121,6 +121,9 @@ pub struct Workspace {
 /// See [`Workspace::comptime_inputs`].
 #[derive(Clone, Debug, Default)]
 pub struct ComptimeInputs {
+    /// Explicit compiler-derived inputs, resolved after checking. Kept after
+    /// resolution so retained builds can recompute them from updated sources.
+    pub source_fingerprints: FxHashMap<Ustr, SourceFingerprint>,
     pub vars: FxHashMap<Ustr, ComptimeVarValue>,
     /// Declared metadata whose value is intentionally outside executable
     /// Artifact identity (for example a presentation build clock). The
@@ -141,6 +144,16 @@ pub struct ComptimeInputs {
     /// Where `embed_string` reads from: the filesystem natively, or the
     /// files a host without one supplied.
     pub embed_files: crate::comptime_files::EmbedFiles,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceFingerprint {
+    pub secret: bool,
+    pub roots: Vec<Ustr>,
+    /// Project-relative support files; `stdlib/` names the selected snapshot.
+    pub files: Vec<String>,
+    /// Other recorded inputs that identify decoder/runtime implementations.
+    pub vars: Vec<Ustr>,
 }
 
 #[derive(Clone, Debug)]

@@ -17,3 +17,4 @@ pub mod suspension;
 pub mod workspace;
 pub mod comptime_files;
 pub mod modules;
+pub mod type_sources;

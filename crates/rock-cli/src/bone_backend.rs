@@ -276,8 +276,12 @@ pub(crate) fn bone_session_for_emission(
     anchor: &std::path::Path,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
     let mut session = bone_session(files)?;
-    session.ws.comptime_inputs = crate::comptime::inputs_for_entry_path(anchor)
+    let inputs = crate::comptime::inputs_for_entry_path(anchor)
+        .and_then(|inputs| crate::comptime::resolve_checked_inputs(&session.ws, inputs, |file| {
+            session.files.get(file).map(|source| source.text.clone())
+        }))
         .map_err(|e| CompilerError::new_no_location(format!("build var resolution failed: {e:#}")))?;
+    session.ws.comptime_inputs = inputs;
     Ok(session)
 }
 

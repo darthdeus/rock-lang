@@ -151,6 +151,13 @@ pub trait CompileHost {
     /// The build inputs (`build_var` values, `embed_string` files), resolved
     /// once the program has type-checked.
     fn comptime_inputs(&mut self) -> Result<ComptimeInputs, CompilerError>;
+
+    /// Resolve compiler-derived inputs against the checked workspace. Hosts
+    /// without deferred declarations retain the ordinary input contract.
+    fn checked_comptime_inputs(&mut self, _ws: &Workspace) -> Result<ComptimeInputs, CompilerError> {
+        self.comptime_inputs()
+    }
+
     /// The lint findings for this build's own files. The host chooses the
     /// report set and the closed-world flag; [`warm_module_ids`] and
     /// `bone_lints::lint_workspace` compute them.
@@ -248,7 +255,7 @@ pub fn compile_modules(
     // would otherwise stay live through the emission peak.
     drop(modules);
     ws.comptime_inputs =
-        host.comptime_inputs().map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
+        host.checked_comptime_inputs(&ws).map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
     let entry = ws.module_ids[&entry];
     // Lints are a compiler pass: an `Error` finding refuses the program
     // through the same path a type error takes.

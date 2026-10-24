@@ -39,6 +39,7 @@ pub(crate) struct LiveRouteTiming {
 }
 
 pub(crate) struct LiveProjectSnapshot {
+    comptime_inputs: bone_semantic::inference::ComptimeInputs,
     sources: SourceFiles,
     entry_path: String,
     previous_contents: Vec<(String, String)>,
@@ -119,6 +120,7 @@ impl LiveProject {
             crate::lint_pass::record_lint_cache_snapshot(stats);
         }
         let snapshot = LiveProjectSnapshot {
+            comptime_inputs: self.session.ws.comptime_inputs.clone(),
             sources: self.sources.clone(),
             entry_path: self.entry_path.clone(),
             previous_contents,
@@ -148,6 +150,7 @@ impl LiveProject {
                 crate::skull_backend::render_project_err(&self.sources, &e)
             )
         })?;
+        self.session.ws.comptime_inputs = snapshot.comptime_inputs;
         crate::lint_pass::rollback_build_lints_cached(
             &mut self.lint_cache,
             self.session.workspace(),
@@ -503,6 +506,20 @@ impl LiveProject {
                 }
             }
         }
+        if changed && !self.session.ws.comptime_inputs.source_fingerprints.is_empty() {
+            let inputs = crate::comptime::resolve_checked_inputs(
+                &self.session.ws,
+                self.session.ws.comptime_inputs.clone(),
+                |file| self.session.files.get(file).map(|source| source.text.clone()),
+            )?;
+            if inputs.source_fingerprints.keys().any(|name| {
+                inputs.vars.get(name).map(|value| &value.value)
+                    != self.session.ws.comptime_inputs.vars.get(name).map(|value| &value.value)
+            }) {
+                full = true;
+            }
+            self.session.ws.comptime_inputs = inputs;
+        }
         let lint_change = if full {
             bone_lints::LintCacheUpdate::full()
         } else {
@@ -580,6 +597,44 @@ mod tests {
             project.recompile(std::slice::from_ref(&source)).unwrap(),
             LiveUpdate::Full { .. }
         ));
+    }
+
+    #[test]
+    fn source_fingerprint_recomputes_body_edits_and_restores_failed_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stick.toml"),
+            "[package]\nname = \"provenance\"\n[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"decoder.rock\"] } }\n").unwrap();
+        let source = dir.path().join("main.rock");
+        let initial = "value Root { count: int = 1 }\nfn main() { print(build_var(\"REV\")) }";
+        std::fs::write(&source, initial).unwrap();
+        let decoder = dir.path().join("decoder.rock");
+        std::fs::write(&decoder, "fn decode() -> int { 1 }").unwrap();
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        let revision = |project: &LiveProject| project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")].value.clone();
+        let before = revision(&project);
+        assert!(matches!(project.apply_edit(&decoder, "fn decode() -> int { 2 }").unwrap(), LiveUpdate::Full { .. }));
+        let decoder_changed = revision(&project);
+        assert_ne!(before, decoder_changed);
+        assert!(project.apply_edit(&source, "fn main() { missing() }").is_err());
+        assert_eq!(decoder_changed, revision(&project));
+        let default_changed = initial.replace("= 1", "= 2");
+        project.apply_edit(&source, &default_changed).unwrap();
+        assert_ne!(decoder_changed, revision(&project));
+        // The editor text, rather than stale disk bytes, supplied both revisions.
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), initial);
+        assert_eq!(std::fs::read_to_string(&decoder).unwrap(), "fn decode() -> int { 1 }");
+    }
+
+    #[test]
+    fn failed_edit_restores_recorded_build_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stick.toml"),
+            "[package]\nname = \"rollback\"\n[build.vars]\nREV = \"before\"\n").unwrap();
+        let source = dir.path().join("main.rock");
+        std::fs::write(&source, "fn main() { print(build_var(\"REV\")) }").unwrap();
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        assert!(project.apply_edit(&source, "fn main() { missing() }").is_err());
+        assert_eq!(project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")].value, "before");
     }
 
     #[test]
