@@ -31,15 +31,7 @@ impl Builder<'_> {
             // `break`, which is exactly what `used_break_targets` records.
             self.f.set_term(self.cur, Term::Goto(body_bb));
         } else {
-            let cond_v = self.lower_condition(cond)?;
-            self.f.set_term(
-                self.cur,
-                Term::Branch {
-                    cond: cond_v,
-                    then_bb: body_bb,
-                    else_bb: exit,
-                },
-            );
+            self.lower_branch(cond, body_bb, exit, true)?;
         }
 
         self.cur = body_bb;

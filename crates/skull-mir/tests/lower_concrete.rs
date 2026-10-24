@@ -1196,3 +1196,22 @@ fn narrowed_nullable_handle_value_can_enter_a_nonnullable_map() {
         }
     "#, "retain");
 }
+
+#[test]
+fn branch_conditions_do_not_materialize_logical_results() {
+    for (body, result_stores) in [
+        ("if a && b && c { 1 } else { 0 }", 2),
+        ("if !(a || b) && c { return 1 } return 0", 0),
+        ("while !(a || b) && c { break } return 0", 0),
+        ("match 0 { _ if !(a || b) && c => 1, _ => 0 }", 2),
+        ("match 0 { _ if !(a || b) && c => { return 1 }, _ => {} } return 0", 0),
+    ] {
+        let src = format!("fn probe(a: bool, b: bool, c: bool) -> int {{ {body} }}");
+        let ast = skull_parser::parse_module_clean(&src, ustr::Ustr::from("<test>")).expect("parse");
+        let dump = lower_dump(vec![ast], "probe");
+        assert!(!dump.contains("const false"), "condition must branch without a boolean result: {dump}");
+        assert!(!dump.contains("const true"), "condition must branch without a boolean result: {dump}");
+        assert!(!dump.contains(" = not "), "native not must swap branch destinations: {dump}");
+        assert_eq!(dump.matches("store ").count(), result_stores, "only the arm value needs stores: {dump}");
+    }
+}

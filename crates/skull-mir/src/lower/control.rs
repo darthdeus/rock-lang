@@ -418,18 +418,10 @@ impl Builder<'_> {
             .flatten();
         let results: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell_typed(None, result_ty)).collect();
-        let cond_v = self.lower_condition(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: cond_v,
-                then_bb,
-                else_bb,
-            },
-        );
+        self.lower_branch(cond, then_bb, else_bb, true)?;
 
         self.cur = then_bb;
         let tv = self.lower_expr_repr(then_branch)?;
@@ -461,11 +453,10 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<(), CompilerError> {
-        let cond_v = self.lower_condition(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: cond_v, then_bb, else_bb });
+        self.lower_branch(cond, then_bb, else_bb, true)?;
 
         self.cur = then_bb;
         self.lower_stmt_expr(then_branch)?;

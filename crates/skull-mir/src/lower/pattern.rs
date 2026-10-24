@@ -38,16 +38,8 @@ impl Builder<'_> {
             // `self.cur` is the block where the bindings are in scope.
             self.match_pattern(&scrut_s, arm.pattern, next, &variants, true, scrut_enum)?;
             if let Some(g) = arm.guard {
-                let gv = self.lower_expr(g)?;
                 let kept = self.f.new_block();
-                self.f.set_term(
-                    self.cur,
-                    Term::Branch {
-                        cond: gv,
-                        then_bb: kept,
-                        else_bb: next,
-                    },
-                );
+                self.lower_branch(g, kept, next, false)?;
                 self.cur = kept;
             }
             let bv = self.lower_expr_repr(arm.body)?;
@@ -81,9 +73,8 @@ impl Builder<'_> {
             let next = self.f.new_block();
             self.match_pattern(&scrut_s, arm.pattern, next, &variants, true, scrut_enum)?;
             if let Some(g) = arm.guard {
-                let gv = self.lower_expr(g)?;
                 let kept = self.f.new_block();
-                self.f.set_term(self.cur, Term::Branch { cond: gv, then_bb: kept, else_bb: next });
+                self.lower_branch(g, kept, next, false)?;
                 self.cur = kept;
             }
             self.lower_stmt_expr(arm.body)?;

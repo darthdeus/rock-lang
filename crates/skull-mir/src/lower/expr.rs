@@ -11,6 +11,55 @@ impl Builder<'_> {
         self.lower_expr_for_use(e, None, true, true)
     }
 
+    /// Lower a branch without materializing short-circuit results. `condition`
+    /// preserves the caller's leaf use: match guards use value coercion.
+    pub(crate) fn lower_branch(
+        &mut self,
+        e: Idx<Expr>,
+        then_bb: Idx<Block>,
+        else_bb: Idx<Block>,
+        condition: bool,
+    ) -> Result<(), CompilerError> {
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let outer_expr = self.cur_expr.replace(e);
+        // Structured targets consume the materialized logical diamonds: their
+        // structurizer cannot yet recover every direct short-circuit CFG.
+        let direct = self.scx.target == bone_semantic::hir::FnBackend::Lua;
+        let result = (|| {
+            match self.body.expr_arena[e].clone() {
+                // Logical left operands always use condition coercion; their
+                // right operands inherit the enclosing use, as in value lowering.
+                Expr::BinOp { op: BinOp::And, lhs, rhs } if direct => {
+                    let rhs_bb = self.f.new_block();
+                    self.lower_branch(lhs, rhs_bb, else_bb, true)?;
+                    self.cur = rhs_bb;
+                    self.lower_branch(rhs, then_bb, else_bb, condition)
+                }
+                Expr::BinOp { op: BinOp::Or, lhs, rhs } if direct => {
+                    let rhs_bb = self.f.new_block();
+                    self.lower_branch(lhs, then_bb, rhs_bb, true)?;
+                    self.cur = rhs_bb;
+                    self.lower_branch(rhs, then_bb, else_bb, condition)
+                }
+                Expr::Not(x, _) if direct && self.overload_target(e).is_none() => {
+                    self.lower_branch(x, else_bb, then_bb, true)
+                }
+                _ => {
+                    let cond = if condition {
+                        self.lower_condition(e)?
+                    } else {
+                        self.lower_expr(e)?
+                    };
+                    self.f.set_term(self.cur, Term::Branch { cond, then_bb, else_bb });
+                    Ok(())
+                }
+            }
+        })();
+        self.cur_span = outer;
+        self.cur_expr = outer_expr;
+        result
+    }
+
     pub(crate) fn lower_iterable_collection(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         self.lower_expr_for_use(e, None, false, false)
     }

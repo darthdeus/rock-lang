@@ -310,3 +310,6 @@ mod removed_global_markers;
 mod int_float_alias;
 #[path = "trace_frames.rs"]
 mod trace_frames;
+
+#[path = "condition_branches.rs"]
+mod condition_branches;
