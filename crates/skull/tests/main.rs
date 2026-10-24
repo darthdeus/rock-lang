@@ -316,3 +316,6 @@ mod condition_branches;
 
 #[path = "projection_demand.rs"]
 mod projection_demand;
+
+#[path = "result_destinations.rs"]
+mod result_destinations;

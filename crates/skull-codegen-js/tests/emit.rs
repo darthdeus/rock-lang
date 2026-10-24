@@ -1,14 +1,15 @@
 //! MIR->JS emitter tests. Lowers each of the eight
 //! differential intrinsics' scalar fallback bodies and pins the emitted JS
-//! exactly -- the two control-flow shapes (clamp's returning-arms diamond,
-//! sign's store-then-merge via post-dominators) and the straight-line
+//! exactly -- the control-flow shapes (clamp's returning-arms diamond, sign's
+//! nested returning arms, and a branch value's store-then-merge via
+//! post-dominators) and the straight-line
 //! expression bodies (lerp/round/fract/smoothstep, incl. intrinsic-call
 //! rendering through the JS table). The emitted JS is node-verified against the
 //! luajit reference values by the execution harness (`differential.rs`); these tests pin the
 //! structure. Vec overloads (multi-value return) reject -- the reject-don't-
 //! fallback discipline that keeps the emitter honest as the subset grows.
 
-use crate::common::{emit_scalar, lower_test_fn, lower_test_ref, stdlib_ws, ws_with};
+use crate::common::{emit_scalar, emit_user, lower_test_fn, lower_test_ref, stdlib_ws, ws_with};
 
 // clamp: the returning-arms diamond -- every branch arm `return`s, so the
 // post-dominator is the virtual exit and the `if` has no fall-through.
@@ -40,32 +41,52 @@ function clamp_fb(c0, c1, c2) {
     );
 }
 
-// sign: store-then-merge -- arms write a result cell then rejoin at the merge
-// block (the immediate post-dominator) that returns it. Pins the CHK ipdom
-// structuring and the hoisted `let` for cells live across the merge.
+// sign: a tail `if` chain writes each arm straight to the return destination,
+// so the nested diamonds return from every arm and need no result cell.
 #[test]
-fn sign_emits_store_then_merge() {
+fn sign_emits_nested_returning_arms() {
     let ws = stdlib_ws();
     assert_eq!(
         emit_scalar(&ws, "sign", 1),
         "\
 function sign_fb(c0) {
+  let v0 = c0;
+  if ((v0 > 0)) {
+    return 1;
+  } else {
+    let v4 = c0;
+    if ((v4 < 0)) {
+      return -1;
+    } else {
+      return 0;
+    }
+  }
+}
+"
+    );
+}
+
+// store-then-merge -- arms write a result cell then rejoin at the merge block
+// (the immediate post-dominator) that uses it. Pins the CHK ipdom structuring
+// and the hoisted `let` for cells live across the merge.
+#[test]
+fn branch_value_emits_store_then_merge() {
+    let ws = ws_with("fn pick(x: int) -> int { let r = if x > 0 { 1 } else { 2 }\n r * 3 }");
+    assert_eq!(
+        emit_user(&ws, "pick"),
+        "\
+function pick(c0) {
   let c1, c2;
   let v0 = c0;
   if ((v0 > 0)) {
     c1 = 1;
   } else {
-    let v5 = c0;
-    if ((v5 < 0)) {
-      c2 = -1;
-    } else {
-      c2 = 0;
-    }
-    let v12 = c2;
-    c1 = v12;
+    c1 = 2;
   }
-  let v14 = c1;
-  return v14;
+  let v7 = c1;
+  c2 = v7;
+  let v9 = c2;
+  return (v9 * 3);
 }
 "
     );

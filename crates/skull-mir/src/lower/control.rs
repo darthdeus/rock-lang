@@ -391,6 +391,24 @@ impl Builder<'_> {
         }
     }
 
+    /// Both arms inherit the return destination, so no result cell or join
+    /// is required. Condition coercion and short-circuiting use the same branch
+    /// funnel as value and statement lowering.
+    pub(crate) fn lower_if_to_return(
+        &mut self,
+        cond: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let then_bb = self.f.new_block();
+        let else_bb = self.f.new_block();
+        self.lower_branch(cond, then_bb, else_bb, true)?;
+        self.cur = then_bb;
+        self.lower_return(Some(then_branch))?;
+        self.cur = else_bb;
+        self.lower_return(Some(else_branch))
+    }
+
     /// `if c { a } else { b }` as a value: branch, store each arm's value into a
     /// shared result **cell**, load it in the join. No block params (P1). A
     /// no-`else` arm yields unit. An arm that diverges (returns/breaks) skips its

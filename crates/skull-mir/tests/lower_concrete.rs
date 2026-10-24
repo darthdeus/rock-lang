@@ -394,14 +394,13 @@ return v1
 
 // --- Phase 2: control flow as branches + cells ---
 
-/// P1, the central bet: `if`-as-value joins through a result **cell** (store
-/// in each arm, load in the join) with NO block params. This lowering output
-/// is byte-identical to the Phase-0 hand-built `sign` shape contract
-/// (`skull-mir/tests/shape.rs`) — RED->GREEN proof the design holds.
+/// An `if` consumed by a local joins through a result cell (store in
+/// each arm, load in the join), with no block params. Terminal destinations
+/// bypass this join, so use a non-tail value consumer to retain this contract.
 #[test]
 fn if_as_value_joins_through_a_cell() {
     assert_eq!(
-        mir("fn sign(x: int) -> int { if x < 0 { 0 } else { 1 } }", "sign"),
+        mir("fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }", "sign"),
         "\
 fn sign(c0) {
   bb0:
@@ -419,7 +418,9 @@ store c1, v4
 goto bb3
   bb3:
 v5 = load c1
-return v5
+store c2, v5
+v6 = load c2
+return v6
 }"
     );
 }
@@ -623,9 +624,8 @@ return v3
 
 #[test]
 fn tuple_return_splats_multi_value() {
-    // A tuple-return fn splats its N elements (multi-return ABI) instead of
-    // returning one heap table. The `tuple` inst here is dead (elided from the
-    // return) and DCE'd by `cleanup` before codegen.
+    // A tuple-return destination consumes its N operands directly through
+    // the multi-return ABI, without constructing an intermediate tuple.
     assert_eq!(
         mir("fn f() -> (int, bool) { (1, true) }", "f"),
         "\
@@ -633,7 +633,6 @@ fn f() {
   bb0:
 v0 = const 1
 v1 = const true
-v2 = tuple [v0, v1]
 return v0, v1
 }"
     );
@@ -1200,7 +1199,7 @@ fn narrowed_nullable_handle_value_can_enter_a_nonnullable_map() {
 #[test]
 fn branch_conditions_do_not_materialize_logical_results() {
     for (body, result_stores) in [
-        ("if a && b && c { 1 } else { 0 }", 2),
+        ("if a && b && c { 1 } else { 0 }", 0),
         ("if !(a || b) && c { return 1 } return 0", 0),
         ("while !(a || b) && c { break } return 0", 0),
         ("match 0 { _ if !(a || b) && c => 1, _ => 0 }", 2),
@@ -1212,6 +1211,6 @@ fn branch_conditions_do_not_materialize_logical_results() {
         assert!(!dump.contains("const false"), "condition must branch without a boolean result: {dump}");
         assert!(!dump.contains("const true"), "condition must branch without a boolean result: {dump}");
         assert!(!dump.contains(" = not "), "native not must swap branch destinations: {dump}");
-        assert_eq!(dump.matches("store ").count(), result_stores, "only the arm value needs stores: {dump}");
+        assert_eq!(dump.matches("store ").count(), result_stores, "only non-terminal arm values need stores: {dump}");
     }
 }

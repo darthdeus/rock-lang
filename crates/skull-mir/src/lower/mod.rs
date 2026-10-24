@@ -3002,26 +3002,24 @@ impl Builder<'_> {
             if self.f.is_coroutine {
                 self.reject_nonunit_coroutine_falloff()?;
             }
-            let leaves = if self.f.is_coroutine {
-                if let Some(tail) = tail {
-                    self.lower_stmt_expr(tail)?;
-                }
-                if !self.is_open() {
-                    self.defers.pop();
-                    return Ok(());
-                }
-                Vec::new()
-            } else {
-                self.return_leaves(tail)?
-            };
+            if !self.f.is_coroutine {
+                self.lower_return(tail)?;
+                self.defers.pop();
+                return Ok(());
+            }
+            if let Some(tail) = tail {
+                self.lower_stmt_expr(tail)?;
+            }
+            if !self.is_open() {
+                self.defers.pop();
+                return Ok(());
+            }
             self.run_top_frame()?; // splice this scope's defers before the return
             self.defers.pop();
-            self.f.set_term(self.cur, Term::Return(leaves));
+            self.f.set_term(self.cur, Term::Return(Vec::new()));
             Ok(())
         } else {
-            let leaves = self.return_leaves(Some(root))?;
-            self.f.set_term(self.cur, Term::Return(leaves));
-            Ok(())
+            self.lower_return(Some(root))
         }
     }
 
@@ -3065,6 +3063,36 @@ impl Builder<'_> {
                 Some(span) => CompilerError::new_with_label(span, msg),
                 None => CompilerError::new_no_location(msg),
             });
+        }
+        Ok(())
+    }
+
+    /// A return is an expression destination, rather than a consumer of a
+    /// materialized expression value. Tail blocks and branches can forward that
+    /// destination; only the leaves cross the existing return ABI boundary.
+    ///
+    /// Keep structured backends, coroutine completion and deferred scopes on
+    /// value lowering. In particular, distributing a destination across a defer
+    /// would duplicate cleanup and can move snapshot conversion across cleanup.
+    fn lower_return(&mut self, opt: Option<Idx<Expr>>) -> Result<(), CompilerError> {
+        let direct = self.scx.target == bone_semantic::hir::FnBackend::Lua
+            && !self.f.is_coroutine
+            && self.ret_rep.is_some()
+            && self.defers.iter().all(Vec::is_empty);
+        if direct && let Some(e) = opt {
+            let outer = self.cur_span.replace(self.body.expr_spans[e]);
+            let outer_expr = self.cur_expr.replace(e);
+            let result = self.lower_expr_to_return(e);
+            self.cur_span = outer;
+            self.cur_expr = outer_expr;
+            if let Some(result) = result {
+                return result;
+            }
+        }
+        let leaves = self.return_leaves(opt)?;
+        if self.is_open() {
+            self.run_all_defers()?;
+            self.f.set_term(self.cur, Term::Return(leaves));
         }
         Ok(())
     }
@@ -3135,6 +3163,9 @@ impl Builder<'_> {
                 let r = self.lower_expr_repr(e)?.into_value();
                 let r = self.owned_value_children(r)?;
                 return self.tuple_repr_to_slots(r, &shape);
+            }
+            if let Expr::Tuple(elems) = self.body.expr_arena[e] {
+                return self.lower_tuple_operands(e, elems);
             }
             let v = self.lower_expr(e)?;
             return Ok(self.tuple_return_operands(v, shape.slots.len()));

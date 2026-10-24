@@ -3,6 +3,35 @@
 use super::*;
 
 impl Builder<'_> {
+    /// Forward a terminal destination through the syntax that has no value
+    /// consumer. `None` leaves materialization to the ordinary value funnel.
+    pub(crate) fn lower_expr_to_return(&mut self, e: Idx<Expr>) -> Option<Result<(), CompilerError>> {
+        if self.f32_round_exprs.contains(&e) {
+            return None;
+        }
+        match self.body.expr_arena[e].clone() {
+            Expr::Block { statements, tail: Some(tail) }
+                if !statements.into_iter().any(|s| matches!(self.body.statement_arena[s], Statement::Defer(_))) =>
+            {
+                Some((|| {
+                    self.defers.push(Vec::new());
+                    let result = (|| {
+                        if !self.lower_stmts(statements)? {
+                            self.lower_return(Some(tail))?;
+                        }
+                        Ok(())
+                    })();
+                    self.defers.pop();
+                    result
+                })())
+            }
+            Expr::If { cond, then_branch, else_branch: Some(else_branch) } => {
+                Some(self.lower_if_to_return(cond, then_branch, else_branch))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         self.lower_expr_with_expected(e, None)
     }
@@ -433,32 +462,7 @@ impl Builder<'_> {
             // splatting form keeps its own repr path in `lower_expr_repr`, where
             // the presence tag stays a leaf and is never at risk.
             Expr::Tuple(elems) => {
-                // A `nobox` element rides the BOX as its leaves, on the same slot
-                // list the multi-return wire uses -- so the box is the wire put in
-                // a table, and `tuple_box_shape` is the one oracle both this
-                // producer and every reader derive the layout from. Without it a
-                // `nobox` part packs to a `<name>_ct` and the guarantee is gone the
-                // moment the tuple escapes into a container (matrix row 13).
-                //
-                // `None` when nothing splats, which is every tuple that compiled
-                // before: those keep today's one-value-per-element box exactly.
-                let shape = self.tuple_box_shape(e)?;
-                let mut vs = Vec::new();
-                for (i, el) in elems.into_iter().enumerate() {
-                    let bundle = self.lower_expr_repr(el)?;
-                    match shape.as_ref().and_then(|s| s.slots.get(i)).cloned() {
-                        Some(slot) if slot.splats() => {
-                            let vals = self.repr_to_slot_values_bundle(&bundle, &slot)?;
-                            vs.extend(vals);
-                        }
-                        _ => {
-                            let outer_expr = self.cur_expr.replace(el);
-                            let packed = self.pack_maybe_absent(bundle.into_value());
-                            self.cur_expr = outer_expr;
-                            vs.push(packed?);
-                        }
-                    }
-                }
+                let vs = self.lower_tuple_operands(e, elems)?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             Expr::Array(elems) => self.lower_array_literal(e, elems),
@@ -874,9 +878,7 @@ impl Builder<'_> {
             // closed, so callers skip any fall-through (via `is_open()`); the
             // placeholder value is never used.
             Expr::Return(opt) => {
-                let leaves = self.return_leaves(opt)?;
-                self.run_all_defers()?;
-                self.f.set_term(self.cur, Term::Return(leaves));
+                self.lower_return(opt)?;
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
             }
 
@@ -889,6 +891,49 @@ impl Builder<'_> {
 
             other => Err(gap(format!("expression form not in Phase 1: {}", expr_tag(&other)))),
         }
+    }
+
+    /// The tuple's operand list is shared by materialization and a return
+    /// destination. The tuple representation plan remains the layout oracle.
+    pub(crate) fn lower_tuple_operands(
+        &mut self,
+        e: Idx<Expr>,
+        elems: comfy_la_arena::IdxRange<Expr>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let outer_expr = self.cur_expr.replace(e);
+        let result = (|| {
+            // A `nobox` element rides the BOX as its leaves, on the same slot
+            // list the multi-return wire uses -- so the box is the wire put in
+            // a table, and `tuple_box_shape` is the one oracle both this
+            // producer and every reader derive the layout from. Without it a
+            // `nobox` part packs to a `<name>_ct` and the guarantee is gone the
+            // moment the tuple escapes into a container (matrix row 13).
+            //
+            // `None` when nothing splats, which is every tuple that compiled
+            // before: those keep today's one-value-per-element box exactly.
+            let shape = self.tuple_box_shape(e)?;
+            let mut vs = Vec::new();
+            for (i, el) in elems.into_iter().enumerate() {
+                let bundle = self.lower_expr_repr(el)?;
+                match shape.as_ref().and_then(|s| s.slots.get(i)).cloned() {
+                    Some(slot) if slot.splats() => {
+                        let vals = self.repr_to_slot_values_bundle(&bundle, &slot)?;
+                        vs.extend(vals);
+                    }
+                    _ => {
+                        let outer_expr = self.cur_expr.replace(el);
+                        let packed = self.pack_maybe_absent(bundle.into_value());
+                        self.cur_expr = outer_expr;
+                        vs.push(packed?);
+                    }
+                }
+            }
+            Ok(vs)
+        })();
+        self.cur_span = outer;
+        self.cur_expr = outer_expr;
+        result
     }
 
     pub(crate) fn check_ref_holder(&self, e: Idx<Expr>) -> Result<(), CompilerError> {

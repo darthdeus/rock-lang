@@ -4075,6 +4075,30 @@ fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: Idx<Inst>) 
 
 type EnumBoxGroups = Vec<(Vec<ustr::Ustr>, (usize, Vec<ustr::Ustr>))>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionTarget {
+    Cell { cell: Idx<Cell>, join: Idx<Block> },
+    Return,
+}
+
+#[derive(Clone, Copy)]
+enum SelectionArm {
+    Join { store: Option<(Idx<Cell>, Idx<Inst>)>, join: Idx<Block> },
+    Return(Idx<Inst>),
+}
+
+impl SelectionArm {
+    fn target_value(self) -> Option<(SelectionTarget, Idx<Inst>)> {
+        match self {
+            Self::Join { store: Some((cell, value)), join } => {
+                Some((SelectionTarget::Cell { cell, join }, value))
+            }
+            Self::Return(value) => Some((SelectionTarget::Return, value)),
+            _ => None,
+        }
+    }
+}
+
 struct Emitter<'a> {
     enum_box_groups: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxGroups>>>,
     selection_preds: std::cell::OnceCell<PredMap>,
@@ -5653,9 +5677,18 @@ impl Emitter<'_> {
     }
 
     fn selection_arm(&self, bb: Idx<Block>)
-        -> Option<(Option<(Idx<Cell>, Idx<Inst>)>, Idx<Block>)>
+        -> Option<SelectionArm>
     {
         let block = &self.func.blocks[bb];
+        if let Term::Return(values) = &block.term {
+            let [value] = values.as_slice() else { return None; };
+            // A return destination can replace the old store/join sink, but
+            // skipping its arm must obey the same no-effects restriction.
+            if !block.insts.iter().all(|id| *id == *value
+                && matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_)))
+            { return None; }
+            return Some(SelectionArm::Return(*value));
+        }
         let Term::Goto(join) = block.term else { return None; };
         let store = match block.insts.as_slice() {
             [] => None,
@@ -5671,7 +5704,7 @@ impl Emitter<'_> {
             },
             _ => return None,
         };
-        Some((store, join))
+        Some(SelectionArm::Join { store, join })
     }
 
     fn selection_cell_matches(&self, bb: Idx<Block>, cond: Idx<Inst>, cell: Idx<Cell>, operand: Idx<Inst>) -> bool {
@@ -5702,7 +5735,7 @@ impl Emitter<'_> {
     }
 
     fn numeric_selection(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
-        -> Option<(Idx<Cell>, Idx<Inst>, Idx<Inst>, &'static str, Idx<Block>)>
+        -> Option<(SelectionTarget, Idx<Inst>, Idx<Inst>, &'static str)>
     {
         if !self.inlinable[raw(cond) as usize] { return None; }
         let (a, b, less) = match self.func.insts[cond] {
@@ -5717,57 +5750,68 @@ impl Emitter<'_> {
                 && !self.plain_int_to_float(id)
             { return None; }
         }
-        let (yes_store, join) = self.selection_arm(yes)?;
-        let (no_store, no_join) = self.selection_arm(no)?;
-        if join != no_join { return None; }
-        let cell = yes_store.or(no_store)?.0;
-        if yes_store.is_some_and(|s| s.0 != cell) || no_store.is_some_and(|s| s.0 != cell) {
-            return None;
-        }
-        let matches = |store: Option<(Idx<Cell>, Idx<Inst>)>, operand: Idx<Inst>| {
-            match store {
-                Some((_, value)) => self.selection_matches(bb, cond, value, operand),
-                None => self.selection_cell_matches(bb, cond, cell, operand),
+        let (target, yes_value, no_value) = match (self.selection_arm(yes)?, self.selection_arm(no)?) {
+            (SelectionArm::Return(yes), SelectionArm::Return(no)) => {
+                (SelectionTarget::Return, Some(yes), Some(no))
+            }
+            (SelectionArm::Join { store: yes, join }, SelectionArm::Join { store: no, join: no_join }) => {
+                if join != no_join { return None; }
+                let cell = yes.or(no)?.0;
+                if yes.is_some_and(|s| s.0 != cell) || no.is_some_and(|s| s.0 != cell) {
+                    return None;
+                }
+                (SelectionTarget::Cell { cell, join }, yes.map(|s| s.1), no.map(|s| s.1))
+            }
+            _ => return None,
+        };
+        let matches = |value: Option<Idx<Inst>>, operand: Idx<Inst>| {
+            match value {
+                Some(value) => self.selection_matches(bb, cond, value, operand),
+                None => match target {
+                    SelectionTarget::Cell { cell, .. } => self.selection_cell_matches(bb, cond, cell, operand),
+                    SelectionTarget::Return => false,
+                },
             }
         };
-        if matches(yes_store, a) && matches(no_store, b) {
-            Some((cell, a, b, if less { "min" } else { "max" }, join))
-        } else if matches(yes_store, b) && matches(no_store, a) {
+        if matches(yes_value, a) && matches(no_value, b) {
+            Some((target, a, b, if less { "min" } else { "max" }))
+        } else if matches(yes_value, b) && matches(no_value, a) {
             // Native min/max choose the second operand on ties/unordered input.
-            Some((cell, b, a, if less { "max" } else { "min" }, join))
+            Some((target, b, a, if less { "max" } else { "min" }))
         } else {
             None
         }
     }
 
     fn numeric_clamp(&self, bb: Idx<Block>, cond: Idx<Inst>, yes: Idx<Block>, no: Idx<Block>)
-        -> Option<(Idx<Cell>, Idx<Inst>, f64, f64, Idx<Block>)>
+        -> Option<(SelectionTarget, Idx<Inst>, f64, f64)>
     {
         if !self.inlinable[raw(cond) as usize] { return None; }
         let Inst::FloatLt(value, lower) = self.func.insts[cond] else { return None; };
-        let (Some((cell, low_value)), join) = self.selection_arm(yes)? else { return None; };
+        let (target, low_value) = self.selection_arm(yes)?.target_value()?;
         if !self.selection_matches(bb, cond, low_value, lower) { return None; }
         let block = &self.func.blocks[no];
         let Term::Branch { cond: inner, then_bb, else_bb } = block.term else { return None; };
         if !block.insts.iter().all(|id| *id == inner
             || matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_))) { return None; }
-        let (inner_cell, upper, inner_value, "min", tail) =
+        let (inner_target, upper, inner_value, "min") =
             self.numeric_selection(no, inner, then_bb, else_bb)? else { return None; };
         let lo = self.selection_float_literal(bb, lower)?;
         let hi = self.selection_float_literal(no, upper)?;
         // The source tests the lower bound first; an inverted range would lose
         // that priority in a nested min/max expression.
         if !(lo <= hi) || !self.selection_matches(bb, cond, inner_value, value) { return None; }
-        if tail != join || inner_cell != cell {
-            let (Some((target, forwarded)), end) = self.selection_arm(tail)? else { return None; };
-            if end != join || target != cell
+        if inner_target != target {
+            let SelectionTarget::Cell { cell: inner_cell, join: tail } = inner_target else { return None; };
+            let (forwarded_target, forwarded) = self.selection_arm(tail)?.target_value()?;
+            if forwarded_target != target
                 || !matches!(self.func.insts[forwarded], Inst::Load(c) if c == inner_cell)
             { return None; }
         }
         if self.inlinable[raw(value) as usize]
             && !matches!(self.func.insts[value], Inst::Load(_) | Inst::Const(_))
         { return None; }
-        Some((cell, value, lo, hi, join))
+        Some((target, value, lo, hi))
     }
 
     fn selection_float_literal(&self, bb: Idx<Block>, operand: Idx<Inst>) -> Option<f64> {
@@ -5797,6 +5841,33 @@ impl Emitter<'_> {
             let [parent] = preds.get(&block)?.as_slice() else { return None; };
             block = *parent;
             limit = self.func.blocks[block].insts.len();
+        }
+    }
+
+    fn write_selection_result(
+        &self,
+        out: &mut String,
+        bb: Idx<Block>,
+        target: SelectionTarget,
+        value: impl FnOnce(&mut String),
+    ) {
+        out.push_str("  ");
+        match target {
+            SelectionTarget::Cell { cell, .. } => {
+                write_cellname(out, self.func, self.frame, self.cell_colors, cell);
+                out.push_str(" = ");
+            }
+            SelectionTarget::Return => out.push_str("do return "),
+        }
+        value(out);
+        match target {
+            SelectionTarget::Cell { join, .. } => {
+                out.push('\n');
+                // Selection skips arm entry kills; apply them at the join edge.
+                self.write_kills(out, &self.kills.on_edge(bb, join));
+                self.write_goto(out, join);
+            }
+            SelectionTarget::Return => out.push_str(" end\n"),
         }
     }
 
@@ -5831,30 +5902,24 @@ impl Emitter<'_> {
                 then_bb,
                 else_bb,
             } => {
-                if let Some((cell, value, lo, hi, join)) = self.numeric_clamp(bb, *cond, *then_bb, *else_bb) {
-                    out.push_str("  ");
-                    write_cellname(out, self.func, self.frame, self.cell_colors, cell);
-                    write!(out, " = math.max({lo:?}, math.min({hi:?}, ").unwrap();
-                    self.write_opnd(out, value);
-                    out.push_str("))\n");
-                    self.write_kills(out, &self.kills.on_edge(bb, join));
-                    self.write_goto(out, join);
+                if let Some((target, value, lo, hi)) = self.numeric_clamp(bb, *cond, *then_bb, *else_bb) {
+                    self.write_selection_result(out, bb, target, |out| {
+                        write!(out, "math.max({lo:?}, math.min({hi:?}, ").unwrap();
+                        self.write_opnd(out, value);
+                        out.push_str("))");
+                    });
                     return;
                 }
-                if let Some((cell, a, b, op, join)) = self.numeric_selection(bb, *cond, *then_bb, *else_bb) {
-                    out.push_str("  ");
-                    write_cellname(out, self.func, self.frame, self.cell_colors, cell);
-                    out.push_str(" = math.");
-                    out.push_str(op);
-                    out.push('(');
-                    self.write_opnd(out, a);
-                    out.push_str(", ");
-                    self.write_opnd(out, b);
-                    out.push_str(")\n");
-                    // The arm blocks are skipped, so their entry kills are too;
-                    // what dies between here and the join is killed here.
-                    self.write_kills(out, &self.kills.on_edge(bb, join));
-                    self.write_goto(out, join);
+                if let Some((target, a, b, op)) = self.numeric_selection(bb, *cond, *then_bb, *else_bb) {
+                    self.write_selection_result(out, bb, target, |out| {
+                        out.push_str("math.");
+                        out.push_str(op);
+                        out.push('(');
+                        self.write_opnd(out, a);
+                        out.push_str(", ");
+                        self.write_opnd(out, b);
+                        out.push(')');
+                    });
                     return;
                 }
                 out.push_str("  if ");

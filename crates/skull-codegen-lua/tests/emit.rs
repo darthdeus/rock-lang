@@ -1189,11 +1189,11 @@ fn use_it() -> int { let t = pair(); t.1 }";
 
 #[test]
 fn if_as_value_branch_and_cell_join() {
-    // The `if`-as-value joins through a cell (no block params). Cell coloring
-    // coalesces the param `x` (dead after the branch in bb0) with the join cell,
-    // so both are `c0`. Single-use pure values are tree-folded into their uses.
+    // A local consumes the if's value, so it retains a cell join even though
+    // terminal ifs forward their return destination. Cell coloring coalesces
+    // the dead param with result cells; pure values fold into their uses.
     assert_eq!(
-        emit("fn sign(x: int) -> int { if x < 0 { 0 } else { 1 } }", "sign"),
+        emit("fn sign(x: int) -> int { let value = if x < 0 { 0 } else { 1 }; value }", "sign"),
         "\
 function sign_int(c0)
   local r0
@@ -1206,6 +1206,8 @@ function sign_int(c0)
   c0 = (1)
   goto bb3
   ::bb3::
+  r0 = c0
+  c0 = r0
   r0 = c0
   do return r0 end
 end

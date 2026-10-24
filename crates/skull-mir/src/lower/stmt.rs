@@ -296,13 +296,10 @@ impl Builder<'_> {
         if let Expr::Block { statements, tail } = child.body.expr_arena[body] {
             let terminated = child.lower_stmts(statements)?;
             if !terminated {
-                let leaves = child.return_leaves(tail)?;
-                child.run_top_frame()?;
-                child.f.set_term(child.cur, Term::Return(leaves));
+                child.lower_return(tail)?;
             }
         } else {
-            let leaves = child.return_leaves(Some(body))?;
-            child.f.set_term(child.cur, Term::Return(leaves));
+            child.lower_return(Some(body))?;
         }
         child.defers.pop();
 
@@ -440,11 +437,7 @@ impl Builder<'_> {
                     self.lower_stmt_expr(e)?;
                 }
                 Statement::Return(opt) => {
-                    let leaves = self.return_leaves(opt)?;
-                    // Run every pending defer (all enclosing block scopes, LIFO)
-                    // before the actual return.
-                    self.run_all_defers()?;
-                    self.f.set_term(self.cur, Term::Return(leaves));
+                    self.lower_return(opt)?;
                     return Ok(true);
                 }
                 // Collected, not run inline; spliced at every scope exit. Dying
