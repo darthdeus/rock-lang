@@ -1986,8 +1986,22 @@ impl FnEmit<'_> {
         }
         if let Some(Emission::Template(tmpl)) = GlslIntrinsics.lookup(cf) {
             let mut s = tmpl.to_string();
+            let vector_bound_ty = if matches!(name, "min" | "max" | "clamp") {
+                param_types.first().copied().flatten().filter(|ty| {
+                    matches!(ty, GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)
+                })
+            } else {
+                None
+            };
             for (i, a) in args.iter().enumerate() {
-                s = s.replace(&format!("${}", i + 1), &arg_t(i, *a, self)?);
+                let mut arg = arg_t(i, *a, self)?;
+                if i > 0 && param_types.get(i).copied().flatten() == Some(GlslTy::Float) {
+                    if let Some(ty) = vector_bound_ty {
+                        // Mesa's GLSL constant folder can read unsplatted scalar lanes as zero.
+                        arg = format!("{}({arg})", ty.name());
+                    }
+                }
+                s = s.replace(&format!("${}", i + 1), &arg);
             }
             return Ok(s);
         }

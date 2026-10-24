@@ -47,6 +47,48 @@ fn emit_pipeline_profile(src: &str, vert: &str, frag: &str, p: GlslProfile) -> R
     skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, p).map_err(|e| e.message)
 }
 
+#[test]
+fn vector_scalar_bounds_are_splatted() {
+    for width in [2, 3, 4] {
+        let components = &['x', 'y', 'z', 'w'][..width];
+        let ctor = std::iter::repeat("tc.x").take(width).collect::<Vec<_>>().join(", ");
+        let min = components.iter().map(|c| format!("min(a.{c}, b)")).collect::<Vec<_>>().join(", ");
+        let max = components.iter().map(|c| format!("max(a.{c}, b)")).collect::<Vec<_>>().join(", ");
+        // Scalar min/max overloads exercise the intrinsic mapping alongside
+        // the stdlib's scalar clamp and vector-bound overloads.
+        let src = format!(r#"
+            fn Vec{width}.min(a, b: float) -> Vec{width} {{ return v({min}) }}
+            fn Vec{width}.max(a, b: float) -> Vec{width} {{ return v({max}) }}
+            @shader(fragment)
+            fn f(tc: Vec2) -> Vec4 {{
+                let a = v({ctor})
+                let b = a.clamp(0.0, 6.0)
+                let c = a.min(6.0)
+                let d = a.max(0.0)
+                let e = a.clamp(a, a) + a.min(a) + a.max(a)
+                return v(b.x + c.x + d.x + e.x, min(tc.x, 6.0), max(tc.x, 0.0), clamp(tc.x, 0.0, 6.0))
+            }}
+        "#);
+        let (ws, mid) = workspace(&src);
+        for profile in [GlslProfile::Core330, GlslProfile::Es300] {
+            let glsl = skull_codegen_glsl::emit_shader_entry(&ws, mid, "f", profile).expect("emit");
+            for expected in [
+                format!("clamp(a, vec{width}(0.0), vec{width}(6.0))"),
+                format!("min(a, vec{width}(6.0))"),
+                format!("max(a, vec{width}(0.0))"),
+                "clamp(a, a, a)".to_string(),
+                "min(a, a)".to_string(),
+                "max(a, a)".to_string(),
+                "min(tc.x, 6.0)".to_string(),
+                "max(tc.x, 0.0)".to_string(),
+                "clamp(tc.x, 0.0, 6.0)".to_string(),
+            ] {
+                assert!(glsl.contains(&expected), "missing {expected}:\n{glsl}");
+            }
+        }
+    }
+}
+
 // --- GPU builtins (decision 5): frag_coord / fwidth / discard ----------------
 // Fragment-stage GPU-only intrinsics. Exercised through the A1 fragment entry
 // (they add no params, so the A1 contract still holds). RED until the
