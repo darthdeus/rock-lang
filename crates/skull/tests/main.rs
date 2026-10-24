@@ -313,3 +313,6 @@ mod trace_frames;
 
 #[path = "condition_branches.rs"]
 mod condition_branches;
+
+#[path = "projection_demand.rs"]
+mod projection_demand;

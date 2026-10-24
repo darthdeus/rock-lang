@@ -2187,6 +2187,18 @@ impl Builder<'_> {
         v: Idx<Inst>,
         shape: &ValueShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        self.cdata_leaf_range(v, shape, 0..shape.leaf_count())
+    }
+
+    /// The same physical reader as a whole-box copy, limited to a contiguous
+    /// subtree of its existing representation shape. Nullable ancestors still
+    /// gate their selected payload reads.
+    pub(crate) fn cdata_leaf_range(
+        &mut self,
+        v: Idx<Inst>,
+        shape: &ValueShape,
+        range: std::ops::Range<usize>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if let Some(es) = EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned()) {
             // NIL-SAFE spread: the box may be `nil` (a null nullable enum), and
             // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
@@ -2216,7 +2228,12 @@ impl Builder<'_> {
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
-            return Ok(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect());
+            let selected = if range.start == 0 && range.end == shape.leaf_count() {
+                cells.as_slice()
+            } else {
+                &cells[range]
+            };
+            return Ok(selected.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect());
         }
         // A shape with no nullable and no enum child anywhere is a plain key
         // walk: the paths come from the one rule the uniform packer reads a
@@ -2227,8 +2244,8 @@ impl Builder<'_> {
         if self.shape_is_plain_keys(shape) {
             let paths = self.boxed_leaf_paths(shape)?;
             let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
-            let mut out = Vec::with_capacity(paths.len());
-            for path in paths {
+            let mut out = Vec::with_capacity(range.len());
+            for path in paths.into_iter().skip(range.start).take(range.len()) {
                 let mut cur = v;
                 for depth in 1..=path.len() {
                     let prefix = &path[..depth];
@@ -2257,6 +2274,7 @@ impl Builder<'_> {
         {
             return Ok(value_leaf_paths(shape)
                 .into_iter()
+                .skip(range.start).take(range.len())
                 .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))
                 .collect());
         }
@@ -2264,9 +2282,16 @@ impl Builder<'_> {
         // exact inverse of `gc_table_box_fields`, presence tag included.
         let inline = self.gc_table_inline_layout(shape.name)?;
         let mut out = Vec::new();
+        let mut offset = 0;
         for (i, (fname, fs)) in shape.fields.iter().enumerate() {
+            let count = match fs { FieldShape::Prim => 1, FieldShape::Nested(sub) => sub.leaf_count() };
+            let start = range.start.max(offset);
+            let end = range.end.min(offset + count);
+            offset += count;
+            if start >= end { continue; }
+            let child_range = start - (offset - count)..end - (offset - count);
             if let Some(field) = inline.as_ref().and_then(|layout| layout.get(i)).filter(|f| f.is_inline()) {
-                for (key, _) in field.keys() {
+                for (key, _) in field.keys().into_iter().skip(child_range.start).take(child_range.len()) {
                     out.push(self.emit_cur(Inst::Field { base: v, field: key }));
                 }
                 continue;
@@ -2274,8 +2299,8 @@ impl Builder<'_> {
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             match fs {
                 FieldShape::Prim => out.push(fv),
-                FieldShape::Nested(sub) if sub.nullable => out.extend(self.nullable_child_leaves(fv, sub)?),
-                FieldShape::Nested(sub) => out.extend(self.cdata_leaves(fv, sub)?),
+                FieldShape::Nested(sub) if sub.nullable => out.extend(self.nullable_child_leaf_range(fv, sub, child_range)?),
+                FieldShape::Nested(sub) => out.extend(self.cdata_leaf_range(fv, sub, child_range)?),
             }
         }
         Ok(out)
@@ -2292,7 +2317,18 @@ impl Builder<'_> {
         fv: Idx<Inst>,
         sub: &ValueShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let field_count = sub.leaf_count() - 1;
+        self.nullable_child_leaf_range(fv, sub, 0..sub.leaf_count())
+    }
+
+    fn nullable_child_leaf_range(
+        &mut self,
+        fv: Idx<Inst>,
+        sub: &ValueShape,
+        range: std::ops::Range<usize>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let include_presence = range.start == 0 && !range.is_empty();
+        let payload = range.start.saturating_sub(1)..range.end.saturating_sub(1);
+        let field_count = payload.len();
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let present = self.emit_cur(Inst::NotEq(fv, nil));
         let cells: Vec<Idx<Cell>> = (0..field_count).map(|_| self.f.new_cell(None)).collect();
@@ -2309,15 +2345,58 @@ impl Builder<'_> {
         self.cur = value_bb;
         let mut inner = sub.clone();
         inner.nullable = false;
-        let leaves = self.cdata_leaves(fv, &inner)?;
+        let leaves = self.cdata_leaf_range(fv, &inner, payload)?;
         for (c, lv) in cells.iter().zip(leaves) {
             self.emit_cur(Inst::Store { cell: *c, value: lv });
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
-        let mut out = vec![present];
+        let mut out = if include_presence { vec![present] } else { Vec::new() };
         out.extend(cells.iter().map(|c| self.emit_cur(Inst::Load(*c))));
         Ok(out)
+    }
+
+    /// Select a declared subtree in the same depth-first leaf order consumed
+    /// by `rebuild_from_leaves` and the boxed physical reader.
+    pub(crate) fn value_projection_range(
+        &self,
+        shape: &ValueShape,
+        path: &[Ustr],
+    ) -> Option<(std::ops::Range<usize>, FieldShape)> {
+        let mut shape = shape;
+        let mut selected = None;
+        let mut offset = 0;
+        for (depth, field) in path.iter().enumerate() {
+            offset += usize::from(shape.nullable);
+            let mut found = None;
+            for (name, field_shape) in &shape.fields {
+                if name == field { found = Some(field_shape); break; }
+                offset += match field_shape {
+                    FieldShape::Prim => 1,
+                    FieldShape::Nested(shape) => shape.leaf_count(),
+                };
+            }
+            let field_shape = found?;
+            selected = Some(field_shape);
+            if depth + 1 < path.len() {
+                let FieldShape::Nested(child) = field_shape else { return None };
+                shape = child;
+            }
+        }
+        let selected = selected?.clone();
+        let count = match &selected {
+            FieldShape::Prim => 1,
+            FieldShape::Nested(shape) => shape.leaf_count(),
+        };
+        Some((offset..offset + count, selected))
+    }
+
+    pub(crate) fn shape_has_flat_enum(&self, shape: &ValueShape) -> bool {
+        EnumPlan::for_name(self.ws, shape.name).is_some_and(|plan| plan.flat().is_some())
+            || shape.fields.iter().any(|(_, field)| match field {
+                FieldShape::Nested(child) => self.shape_has_flat_enum(child),
+                FieldShape::Prim => false,
+            })
     }
 
     /// Whether every leaf of `shape` is reached by a plain key walk: no

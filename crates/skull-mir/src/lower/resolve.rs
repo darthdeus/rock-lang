@@ -180,6 +180,74 @@ impl Builder<'_> {
         out
     }
 
+    /// Select an immediate projection before expanding its storage. Both
+    /// scalarized cells and borrowed boxes use the same shape-owned leaf range;
+    /// reads happen here, with no deferred place carried to a later consumer.
+    fn immediate_value_projection_repr(&mut self, e: Idx<Expr>) -> Result<Option<ValueRepr>, CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(None);
+        }
+        let mut root = e;
+        while let Expr::FieldAccess { base, .. } = self.body.expr_arena[root] {
+            root = base;
+        }
+        let Expr::Var(binding) = self.body.expr_arena[root] else { return Ok(None) };
+        let grouped = self.group_binds.contains_key(&raw(binding));
+        let boxed = if grouped { None } else { self.boxed_value_local(binding, root) };
+        if !grouped && boxed.is_none() { return Ok(None); }
+        let mut path = Vec::new();
+        let mut at = e;
+        while let Expr::FieldAccess { base, field } = self.body.expr_arena[at] {
+            if self.swizzle_of(base, field).is_some() {
+                return Ok(None);
+            }
+            path.push(field);
+            at = base;
+        }
+        path.reverse();
+        let boxed_shape = boxed.map(|name| self.nominal_rep_shape_required(name, false)).transpose()?;
+        let shape = match &boxed_shape {
+            Some(shape) => shape,
+            None => &self.group_binds[&raw(binding)].1,
+        };
+        let Some((range, selected)) = self.value_projection_range(shape, &path) else { return Ok(None) };
+        // An opaque value slot needs the parent's borrowed-child copy policy.
+        // Keep that existing path when the type is absent too; only slice known
+        // primitive leaves and shape-owned nested groups.
+        if matches!(selected, FieldShape::Prim)
+            && self.concrete_expr_ty(e).is_none_or(|ty| {
+                ty.peel_nullable().0.nominal().is_some_and(|name| self.is_value_struct(name))
+            })
+        {
+            return Ok(None);
+        }
+        // GC boxes share flat enum children whole in the copy policy. Keep that
+        // representation boundary rather than replacing it with a tag spread.
+        if boxed_shape.is_some()
+            && let FieldShape::Nested(shape) = &selected
+            && self.shape_has_flat_enum(shape)
+        {
+            return Ok(None);
+        }
+        let leaves = if let Some(shape) = boxed_shape {
+            let value = self.emit_cur(Inst::Load(self.binds[&raw(binding)]));
+            self.cdata_leaf_range(value, &shape, range)?
+        } else {
+            let cells = self.group_binds[&raw(binding)].0[range].to_vec();
+            cells.into_iter().map(|cell| self.emit_cur(Inst::Load(cell))).collect()
+        };
+        let repr = match selected {
+            FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
+            FieldShape::Nested(shape) => {
+                let repr = self.rebuild_from_leaves(&shape, &leaves, &mut 0);
+                let owner = self.concrete_expr_ty(e);
+                self.mark_borrowed_value_children(&shape, &repr, owner.as_deref())?;
+                repr
+            }
+        };
+        Ok(Some(repr))
+    }
+
     fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         if let Some(read) = self.flat_ref_read(e)? {
             return Ok(read.into_value());
@@ -311,6 +379,9 @@ impl Builder<'_> {
             // `base.field`: project a Group part directly (no cdata); else a
             // boxed field read off the packed base.
             Expr::FieldAccess { base, field } => {
+                if let Some(repr) = self.immediate_value_projection_repr(e)? {
+                    return Ok(repr);
+                }
                 // A swizzle read: select the
                 // components into a fresh VecN Group (len 1: the bare scalar) --
                 // scalarized end to end, so a swizzle never boxes by itself.
