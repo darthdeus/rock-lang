@@ -57,9 +57,6 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         std::process::exit(code);
     }
 
-    // Apply the process-wide purge default; early entries keep their default.
-    allocator::purge_freed_pages_immediately();
-
     // Install the one logger before anything can log (see
     // the compiler contract). Idempotent; reads ROCK_LOG.
     rock_log::init();

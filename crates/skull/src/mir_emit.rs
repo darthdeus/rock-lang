@@ -7109,29 +7109,38 @@ fn emit_full_in_with_mutation(
     // Generated glue is part of the ROOT INPUT. Shader declarations are known
     // before the graph; their GLSL bodies are rendered only after the view owns
     // the retained instances.
-    let shader_collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let (collections, roots) = parallel_join(
+        || {
+            let shaders = skull_mir::lower::collect_shader_collection(ws)?;
+            let compute = skull_mir::lower::collect_compute_collection(ws)?;
+            Ok::<_, CompilerError>((shaders, compute))
+        },
+        || {
+            Ok::<_, CompilerError>(match build {
+                FullBuild::Program | FullBuild::OneShotProgram => (emission_roots(ws, project_root), sim_glue_roots(ws)),
+                FullBuild::PackageTest(tests) => (explicit_and_global_roots(ws, tests), Vec::new()),
+                FullBuild::SelectedSims(names) => {
+                    let sims = sim_refs_by_wire(ws);
+                    let mut roots = names.iter().map(|name| sims.get(name.as_str()).copied().ok_or_else(||
+                        CompilerError::new_no_location(format!("unknown sim root: {name}"))))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    roots.extend(ws.modules.iter().flat_map(|m| m.functions.iter().filter_map(|(fid, f)|
+                        (skull_mir::mangle::declared_name(f.name.as_str()) == "main")
+                            .then_some(FuncRef { module: m.id, func: fid }))));
+                    (explicit_and_global_roots(ws, &roots), sim_glue_roots(ws))
+                }
+            })
+        },
+    );
+    let (shader_collection, compute_collection) = collections?;
     let shader_programs = shader_programs(&shader_collection);
-    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
     let compute_programs = compute_programs(&compute_collection);
     let shader_roots: Vec<FuncRef> = shader_programs
         .iter()
         .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
-    let (mut interface_roots, sim_roots) = match build {
-        FullBuild::Program | FullBuild::OneShotProgram => (emission_roots(ws, project_root), sim_glue_roots(ws)),
-        FullBuild::PackageTest(tests) => (explicit_and_global_roots(ws, tests), Vec::new()),
-        FullBuild::SelectedSims(names) => {
-            let sims = sim_refs_by_wire(ws);
-            let mut roots = names.iter().map(|name| sims.get(name.as_str()).copied().ok_or_else(||
-                CompilerError::new_no_location(format!("unknown sim root: {name}"))))
-                .collect::<Result<Vec<_>, _>>()?;
-            roots.extend(ws.modules.iter().flat_map(|m| m.functions.iter().filter_map(|(fid, f)|
-                (skull_mir::mangle::declared_name(f.name.as_str()) == "main")
-                    .then_some(FuncRef { module: m.id, func: fid }))));
-            (explicit_and_global_roots(ws, &roots), sim_glue_roots(ws))
-        }
-    };
+    let (mut interface_roots, sim_roots) = roots?;
     let mut emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
     #[cfg(test)]
     if matches!(build, FullBuild::Program | FullBuild::OneShotProgram) {
@@ -7301,13 +7310,7 @@ fn emit_full_in_with_mutation(
     // The graph is complete before these lanes start; shared interning remains
     // synchronized. ABI plans carry their own representation arena, so the
     // warmed context is adopted after join.
-    let shader_plans = std::sync::Arc::new(
-        concrete
-            .plans
-            .iter()
-            .map(|(instance, plan)| (instance.clone(), std::sync::Arc::clone(plan)))
-            .collect(),
-    );
+    let shader_plans = std::sync::Arc::clone(&concrete.plans);
     let abi_plans = std::sync::Arc::clone(&concrete.plans);
     let abi_always_plans = &concrete.always_plans;
     let mono_before_lanes = graph.interner().stats();

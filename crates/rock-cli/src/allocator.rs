@@ -67,6 +67,9 @@ fn linux_current_rss() -> std::io::Result<u64> {
 const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
 
 /// Return freed mimalloc pages promptly; explicit environment options win.
+/// Active compilation keeps the allocator's reuse delay to avoid purging and
+/// faulting the same pages across workers. Hosts can request immediate purging
+/// explicitly; `release_freed_memory` reclaims every worker before child waits.
 pub fn purge_freed_pages_immediately() {
     // A set default yields to an option mimalloc read from the environment.
     // SAFETY: mi_option_set_default takes no pointers; the option is valid.
