@@ -434,7 +434,7 @@ pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
 pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
     modules.push(
-        skull_parser::parse_module_clean(lib, Ustr::from("/tmp/rock-mono-dependency/engine.rock"))
+        skull_parser::parse_module_clean(lib, Ustr::from("/tmp/rock-mono-project-library/engine.rock"))
             .expect("parse lib"),
     );
     modules.push(

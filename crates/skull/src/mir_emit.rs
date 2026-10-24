@@ -2134,7 +2134,7 @@ fn is_library_module(file: &str, project_root: Option<&str>) -> bool {
         return true;
     }
     match project_root {
-        Some(root) => !file.starts_with(root),
+        Some(root) => !std::path::Path::new(file).starts_with(root),
         None => false,
     }
 }
@@ -6969,7 +6969,7 @@ pub fn emit_full_with_callee_binding(
     )
 }
 
-/// Absolutize `project_root` so it can be prefix-matched against module file
+/// Absolutize `project_root` so it can be path-component-matched against module file
 /// paths, which are absolute for a project build.
 ///
 /// Rejects a root that matches NO module. The caller passing a relative or stale
@@ -6988,7 +6988,7 @@ fn canonical_project_root(
     let matches = ws
         .modules
         .iter()
-        .any(|m| !is_stdlib_module_file(m.file.as_str()) && m.file.as_str().starts_with(&abs));
+        .any(|m| !is_library_module(m.file.as_str(), Some(&abs)));
     if !matches {
         return Err(CompilerError::new_no_location(format!(
             "skull: project root `{abs}` matches no module file -- every project source would \

@@ -105,17 +105,40 @@ fn an_unrelated_library_body_stays_pruned() {
 }
 
 #[test]
-fn an_unretained_dependency_body_needs_no_concrete_plan() {
+fn shared_prefix_dependency_retains_only_reached_bodies() {
     let ws = ws_with_dependency_module(
-        "fn unused_dependency_body() -> int { return 7 }",
-        "fn main() { print(\"hi\") }",
+        "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
+        "fn main() { print(reached_dependency_body()) }",
     );
     let mid = *ws
         .module_ids
         .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
         .expect("project module");
-    skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono-project"))
+    let (emit, mut cache) = skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono-project"))
         .expect("pruned dependency bodies must not require lowering plans");
+    let unused = Instance::base(fn_ref(&ws, "unused_dependency_body"));
+    let reached = Instance::base(fn_ref(&ws, "reached_dependency_body"));
+    assert!(!cache.lua_view().retains(&unused), "a sibling directory is not part of the target");
+    assert!(cache.lua_view().retains(&reached), "reachable dependency bodies must remain");
+    assert!(!definition_symbols(&emit.lua).iter().any(|s| s.starts_with("unused_dependency_body")));
+    assert!(definition_symbols(&emit.lua).iter().any(|s| s.starts_with("reached_dependency_body")));
+    common::require_luajit();
+    assert_eq!(common::run_luajit(&format!("{}\nmain()", emit.lua), "shared_prefix_dependency"), "9");
+
+    let edited = ws_with_dependency_module(
+        "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
+        "fn main() { print(0) }",
+    );
+    let main = fn_ref(&edited, "main");
+    let incremental = skull::mir_emit::emit_incremental(
+        &edited, &mut cache, &[(main.module, bone_semantic::hir::BodyOwner::Function(main.func))],
+    ).expect("remove the dependency call incrementally");
+    let removed = Instance::base(fn_ref(&edited, "reached_dependency_body"));
+    assert!(!cache.lua_view().retains(&removed), "cached roots must not pin sibling bodies");
+    let fresh = skull::mir_emit::emit_full_in(&edited, main.module, Some("/tmp/rock-mono-project"))
+        .expect("fresh emission after removing the dependency call").0;
+    assert_eq!(incremental.lua, fresh.lua);
+    assert_eq!(common::run_luajit(&format!("{}\nmain()", incremental.lua), "shared_prefix_incremental"), "0");
 }
 
 /// A registered `rock_shader` program's dependencies -- its stage entries and
@@ -264,4 +287,58 @@ fn v1_sim_glue_rejects_two_register_sim_definitions() {
         "{}",
         error.message
     );
+}
+
+#[test]
+fn a_shared_prefix_alone_does_not_validate_the_project_root() {
+    let ws = ws_with_dependency_module(
+        "fn unused_dependency_body() -> int { return 7 }",
+        "fn main() { print(\"hi\") }",
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("/tmp/rock-mono-project/main.rock")).unwrap();
+    let result = skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono"));
+    assert!(result.is_err(), "textual prefixes must not validate a nonexistent project root");
+}
+
+#[test]
+fn nested_project_sources_keep_uncalled_public_functions() {
+    let file = "/tmp/rock-root-contract/app/nested/helpers.rock";
+    let ws = ws_v1_package("root_contract", &[
+        V1Fragment { file, src: "mod helpers;\npub fn uncalled_api() -> int { return 7 }" },
+    ]);
+    let mid = *ws.module_ids.get(&Ustr::from(file)).expect("nested module");
+    let (emit, cache) = skull::mir_emit::emit_full_in(
+        &ws, mid, Some("/tmp/rock-root-contract/app"),
+    ).expect("a nested source validates its project root");
+    let api = Instance::base(fn_ref(&ws, "root_contract::helpers::uncalled_api"));
+    assert!(cache.lua_view().retains(&api), "uncalled project APIs are roots");
+    let symbol = &cache.lua_view().symbols[&api];
+    assert!(definition_symbols(&emit.lua).contains(symbol));
+}
+
+#[test]
+fn single_file_compilation_keeps_uncalled_functions() {
+    let ws = common::ws_with_stdlib("fn uncalled_helper() -> int { return 7 }");
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("single-file module");
+    let (emit, cache) = emit_full(&ws, mid).expect("single-file emission");
+    let helper = Instance::base(fn_ref(&ws, "uncalled_helper"));
+    assert!(cache.lua_view().retains(&helper), "single-file helpers are roots");
+    let symbol = &cache.lua_view().symbols[&helper];
+    assert!(definition_symbols(&emit.lua).contains(symbol));
+}
+
+#[test]
+fn shared_prefix_dependency_keeps_bare_name_api_roots() {
+    let ws = ws_with_dependency_module(
+        "@nomangle fn external_api() -> int { return 7 }",
+        "fn main() {}",
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
+        .expect("project module");
+    let (emit, cache) = skull::mir_emit::emit_full_in(
+        &ws, mid, Some("/tmp/rock-mono-project"),
+    ).expect("dependency API emission");
+    let api = Instance::base(fn_ref(&ws, "external_api"));
+    assert!(cache.lua_view().retains(&api), "bare-name APIs remain roots in dependencies");
+    assert!(definition_symbols(&emit.lua).iter().any(|s| s == "external_api"));
 }
