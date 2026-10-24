@@ -326,6 +326,7 @@ pub(crate) fn resolve_checked_inputs(
     if inputs.source_fingerprints.is_empty() {
         return Ok(inputs);
     }
+    let started = std::time::Instant::now();
     let root = inputs.embed_root.clone();
     resolve_source_fingerprints(ws, &mut inputs, |file| {
         if let Some(name) = file.strip_prefix("<stdlib>/").or_else(|| file.strip_prefix("stdlib/")) {
@@ -338,6 +339,7 @@ pub(crate) fn resolve_checked_inputs(
             source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())
         })
     }, &compiler_identity()?)?;
+    crate::compile_measurements::timings("comptime", &[("source-fingerprint", started.elapsed())]);
     Ok(inputs)
 }
 
