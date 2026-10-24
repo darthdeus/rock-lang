@@ -1314,9 +1314,7 @@ pub(crate) fn struct_expand_variants(
 }
 
 pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
-    value_shape(ws, n)
-        .or_else(|| value_shape_gc(ws, n))
-        .or_else(|| EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape())))
+    value_shape_of_nominal(ws, n)
 }
 
 /// [`sig_shape_of_nominal`] for a NULLABLE nominal: a presence leaf, then the
@@ -1327,7 +1325,7 @@ pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     let scalar = is_nobox_nominal(ws, n) || ws.struct_by_name.contains_key(&n);
     if scalar {
-        if let Some(mut shape) = value_shape(ws, n).or_else(|| value_shape_gc(ws, n)) {
+        if let Some(mut shape) = planned_value(ws, n).and_then(|plan| plan.shape.or(plan.gc_shape)) {
             shape.nullable = true;
             return Some(shape);
         }
@@ -1337,8 +1335,8 @@ pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<V
 
 /// The value shape of a `name` nominal (value struct or flat enum), or `None`.
 pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
-    value_shape(ws, name)
-        .or_else(|| value_shape_gc(ws, name))
+    planned_value(ws, name)
+        .and_then(|plan| plan.shape.or(plan.gc_shape))
         .or_else(|| EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().map(|s| s.value_shape())))
 }
 

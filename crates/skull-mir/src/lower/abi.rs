@@ -874,17 +874,26 @@ impl AbiPlanCache {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 struct RepArenaInner {
     plans: Vec<RepPlan>,
-    by_key: HashMap<(FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool, bool), RepId>,
+    by_key: HashMap<RepKey, RepId>,
 }
+
+impl PartialEq for RepArenaInner {
+    fn eq(&self, other: &Self) -> bool {
+        // Input aliases are lookup history, not additional physical plans.
+        self.plans == other.plans
+    }
+}
+
+impl Eq for RepArenaInner {}
 
 /// The one build-scoped physical representation arena.  `ScalarCtx` owns the
 /// handle and every ABI plan references the same arena, so equal answers are
 /// equal identities rather than merely equal cloned shapes.
 ///
-/// The counters ride outside `inner` so [`RepArenaInner`]'s derived equality
+/// The counters ride outside `inner` so [`RepArenaInner`]'s plan equality
 /// (the [`BackendFnAbiPlan`] identity check) never compares them.
 ///
 /// READS ARE SERVED THROUGH A WORKER-LOCAL CACHE. The arena is monotonic
@@ -922,7 +931,19 @@ impl Default for RepArena {
     }
 }
 
-type RepKey = (FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool, bool);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum RepKey {
+    Layout(FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool, bool),
+    Concrete {
+        target: FnBackend,
+        use_context: RepUse,
+        ty: crate::monoty::MonoTy,
+        tuple_spelled: bool,
+        nobox: bool,
+        allow_opaque: bool,
+    },
+    ValueShape(FnBackend, RepUse, ValueShape),
+}
 
 #[derive(Default)]
 struct RepReadCache {
@@ -979,22 +1000,22 @@ fn value_shape_facts(
     ws: &Workspace,
     ty: &crate::monoty::MonoTy,
     shape: &ValueShape,
-) -> (Option<ValueStorage>, bool) {
+) -> (Option<ValueStorage>, bool, bool) {
     let (payload, _) = ty.peel_nullable();
     let crate::monoty::MonoTy::App {
         ctor: crate::monoty::MonoCtor::Nominal(name), ..
     } = payload
     else {
-        return (None, false);
+        return (None, false, true);
     };
     assert_eq!(*name, shape.name, "value shape must describe its nominal type");
     let Some(plan) = super::shape::planned_value(ws, *name) else {
-        return (None, false);
+        return (None, false, true);
     };
     let column_eligible = ws.struct_by_name.get(name).is_some_and(|sid| {
         super::shape::has_value_plan(&ws.modules[sid.module.index()].structs[sid.def])
     }) && (plan.shape.is_some() || (declared_nobox(ws, ty) && plan.gc_shape.is_some()));
-    (Some(plan.storage), column_eligible)
+    (Some(plan.storage), column_eligible, !plan_box_materializes_nobox(ws, &plan))
 }
 
 /// The Lua wide-value calling convention. An ORDINARY `value`
@@ -1136,6 +1157,30 @@ fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
 }
 
 impl RepArena {
+    fn lookup_key(&self, key: &RepKey) -> Option<RepId> {
+        REP_READ_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(self.arena_id);
+            if let Some(id) = cache.by_key.get(key) {
+                return Some(*id);
+            }
+            let id = self.inner.lock().expect("RepArena lock poisoned").by_key.get(key).copied();
+            if let Some(id) = id {
+                cache.by_key.insert(key.clone(), id);
+            }
+            id
+        })
+    }
+
+    fn alias_key(&self, key: RepKey, id: RepId) {
+        self.inner.lock().expect("RepArena lock poisoned").by_key.insert(key.clone(), id);
+        REP_READ_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(self.arena_id);
+            cache.by_key.insert(key, id);
+        });
+    }
+
     fn equivalent(&self, other: &Self) -> bool {
         if std::ptr::eq(self, other) {
             return true;
@@ -1174,7 +1219,7 @@ impl RepArena {
         boxable: bool,
     ) -> RepId {
         self.intern_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let key = (target, use_context, layout, storage, column_eligible, nobox);
+        let key = RepKey::Layout(target, use_context, layout, storage, column_eligible, nobox);
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_id);
@@ -1192,8 +1237,8 @@ impl RepArena {
                             arena: self.arena_id,
                             index: inner.plans.len() as u32,
                         };
-                        let (target, use_context, layout, storage, column_eligible, nobox) =
-                            key.clone();
+                        let RepKey::Layout(target, use_context, layout, storage, column_eligible, nobox) =
+                            key.clone() else { unreachable!() };
                         inner.plans.push(RepPlan {
                             id,
                             target,
@@ -1222,13 +1267,16 @@ impl RepArena {
         ty: &crate::monoty::MonoTy,
         shape: ValueShape,
     ) -> RepId {
-        let (storage, column_eligible) = value_shape_facts(ws, ty, &shape);
+        let key = RepKey::ValueShape(target, use_context, shape.clone());
+        if let Some(id) = self.lookup_key(&key) {
+            return id;
+        }
+        let (storage, column_eligible, boxable) = value_shape_facts(ws, ty, &shape);
         let nobox = declared_nobox(ws, ty);
         // Boxing legality is a function of the interned layout: a `Leaves`
         // shape names its nominal type (`value_shape_facts` asserts it), and
         // this predicate reads only that name and the workspace, so the plan
         // needs no extra key slot to keep two answers apart.
-        let boxable = !box_would_materialize_nobox(ws, ty);
         let id = self.intern_with_facts(
             target,
             use_context,
@@ -1239,6 +1287,7 @@ impl RepArena {
             boxable,
         );
         self.intern_nested_value_plans(ws, target, &shape);
+        self.alias_key(key, id);
         id
     }
 
@@ -1607,6 +1656,41 @@ impl RepArena {
     /// explicit representation, not an absent answer; only a guarantee that
     /// forbids that representation can produce an error.
     pub fn plan(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+        use_context: RepUse,
+        facts: &RepUseFacts,
+        guarantees: RepGuarantees,
+    ) -> Result<RepId, RepError> {
+        use crate::monoty::{MonoCtor, MonoTy};
+
+        if !matches!(ty, MonoTy::Nullable(_) | MonoTy::Tuple(_)
+            | MonoTy::App { ctor: MonoCtor::Nominal(_), .. })
+        {
+            return self.plan_uncached(ws, target, ty, use_context, facts, guarantees);
+        }
+        // The arena belongs to one build's declarations. Index successful
+        // requests before shape selection, retaining the same canonical RepId.
+        // Errors are re-derived so their span always belongs to this use site.
+        let key = RepKey::Concrete {
+            target,
+            use_context,
+            ty: ty.clone(),
+            tuple_spelled: facts.tuple_spelled,
+            nobox: guarantees.nobox,
+            allow_opaque: guarantees.allow_opaque,
+        };
+        if let Some(id) = self.lookup_key(&key) {
+            return Ok(id);
+        }
+        let id = self.plan_uncached(ws, target, ty, use_context, facts, guarantees)?;
+        self.alias_key(key, id);
+        Ok(id)
+    }
+
+    fn plan_uncached(
         &self,
         ws: &Workspace,
         target: FnBackend,
