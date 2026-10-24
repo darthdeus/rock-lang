@@ -2261,6 +2261,7 @@ fn emit_named_framed_with_statics_impl(
         }
     }
     alias_int_to_float(func, &rpo, &mut inlinable, &repeatable);
+    skull_mir::sinking::preserve_effect_order(func, &rpo, &mut inlinable);
     // Frame fields map to their dense slots before this table is consulted.
     // Frame accesses name `s` implicitly in the printer rather than through a
     // MIR cell use; reserve its parameter's color so a later local can never
@@ -3394,9 +3395,10 @@ fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>]) -> HashSet<Idx<Cel
     out
 }
 
-/// The set of values to TREE-FOLD into their use site (no `local rN`). Pure
-/// expressions qualify at one same-block use. Loads of parameters never written
-/// in this scope qualify at every use: the Lua parameter is already their value.
+/// The set of values to TREE-FOLD into their use site (no `local rN`). Expression
+/// candidates qualify at one same-block use, subject to the shared order check.
+/// Loads of parameters never written in this scope qualify at every use: the
+/// Lua parameter is already their value.
 /// Returns the folded values, and the folded loads that may be rendered at any
 /// number of use sites: a parameter never written here, or a cell whose one
 /// write dominates every read.

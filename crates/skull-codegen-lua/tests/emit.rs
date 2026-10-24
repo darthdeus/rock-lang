@@ -93,6 +93,62 @@ fn non_nil_constant_field_store_keeps_direct_assignment() {
 }
 
 #[test]
+fn sinking_preserves_dynamic_format_error_order() {
+    common::require_luajit();
+    for result in ["s", "\"[{s}]\""] {
+        let lua = emit_clean(&format!(r#"
+@nomangle fn compute(w: int, mark: fn()) -> string {{
+    let x = 3.25
+    let s = "{{x:{{w}}.2f}}"
+    let result = {result}
+    mark()
+    return result
+}}
+"#), "compute");
+        let driver = format!(r#"{lua}
+for _, width in ipairs({{8, 1000, 1000000000}}) do
+    local actual_marks, expected_marks = 0, 0
+    local ok, value = pcall(compute, width, function() actual_marks = actual_marks + 1 end)
+    local expected_ok, expected = pcall(function()
+        local s = string.format('%' .. width .. '.2f', 3.25)
+        local result = {control}
+        expected_marks = expected_marks + 1
+        return result
+    end)
+    assert(ok == expected_ok)
+    assert(actual_marks == expected_marks, 'side effects before error: ' .. actual_marks .. ' vs ' .. expected_marks)
+    if ok then assert(value == expected) else assert(actual_marks == 0) end
+end
+"#, control = if result == "s" { "s" } else { "'[' .. s .. ']'" });
+        let run = std::process::Command::new("luajit").arg("-e").arg(&driver).output().expect("run ordering probe");
+        assert!(run.status.success(), "{}\n{lua}", String::from_utf8_lossy(&run.stderr));
+    }
+}
+
+#[test]
+fn sinking_preserves_checked_numeric_error_order() {
+    common::require_luajit();
+    for (ty, expr, bad) in [("float", "x as uint", "-1"), ("uint", "(1 as uint) << x", "32")] {
+        let lua = emit_clean(&format!(
+            "@nomangle fn compute(x: {ty}, mark: fn()) -> uint {{ let v = {expr}; let result = v + (1 as uint); mark(); return result }}"
+        ), "compute");
+        // Checked casts and shifts bind the shared runtime helpers, which this
+        // bare harness does not emit -- pull in the canonical definitions.
+        let driver = format!(r#"{prelude}
+{lua}
+for _, input in ipairs({{2, {bad}}}) do
+    local marks = 0
+    local ok = pcall(compute, input, function() marks = marks + 1 end)
+    assert(ok == (input == 2))
+    assert(marks == (ok and 1 or 0), 'side effects before checked numeric error: ' .. marks)
+end
+"#, prelude = skull_codegen_lua::UINT_CHECK_PRELUDE);
+        let run = std::process::Command::new("luajit").arg("-e").arg(&driver).output().expect("run numeric ordering probe");
+        assert!(run.status.success(), "{}\n{lua}", String::from_utf8_lossy(&run.stderr));
+    }
+}
+
+#[test]
 fn numeric_selection_through_local_copies_uses_native_minmax() {
     for (comparison, yes, no, native) in [
         ("<", "d", "b", "min"), ("<", "b", "d", "max"),

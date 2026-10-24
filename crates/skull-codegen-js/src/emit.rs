@@ -7560,7 +7560,8 @@ fn for_each_term_operand(term: &Term, f: &mut impl FnMut(Idx<Inst>)) {
 }
 
 
-/// A pure, position-independent value inst that folds into its single use site.
+/// An expression candidate for folding into its single use site. The shared
+/// sinking check separately constrains potentially throwing evaluations.
 /// EXCLUDES `Load`/`Call`/`Index`/`Field`/`Len` (impure or cell-order-sensitive)
 /// -- those materialize at their program position. Mirrors codegen-lua's
 /// `always_inlinable`.
@@ -7593,7 +7594,7 @@ fn always_inlinable(inst: &Inst) -> bool {
 /// Use counts (dense by raw inst id, over reachable blocks) + the inlinable
 /// mask: an `always_inlinable` value used EXACTLY ONCE with def and use in the
 /// SAME block folds into that use; everything else materializes at its program
-/// position. Same-block + single-use makes the fold order-safe.
+/// position. The shared sinking check also preserves effect/error order.
 fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
     compute_inlinable_over(mf, &reachable_blocks(mf))
 }
@@ -7637,6 +7638,7 @@ fn compute_inlinable_over(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec
             }
         }
     }
+    skull_mir::sinking::preserve_effect_order(mf, blocks, &mut inl);
     (use_count, inl)
 }
 

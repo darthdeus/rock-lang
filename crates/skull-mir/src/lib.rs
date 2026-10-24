@@ -28,6 +28,7 @@ pub mod reach;
 pub mod shader_ir;
 pub mod instance;
 pub mod site;
+pub mod sinking;
 pub mod spec_census;
 pub mod state_schema;
 pub mod state_image;
