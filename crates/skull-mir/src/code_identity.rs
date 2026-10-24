@@ -708,6 +708,10 @@ impl CodeArtifact {
                         entry.escaping = true;
                     }
                     next.entries.insert(identity.clone(), entry);
+                } else if entry.escaping {
+                    // A newly stored function value can refer to a body that
+                    // already exists. Keep its payload, but publish its slot.
+                    next.entries.get_mut(identity).expect("existing body").escaping = true;
                 }
             }
         }

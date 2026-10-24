@@ -325,6 +325,7 @@ fn serves_target(b: bone_semantic::hir::FnBackend, target: bone_semantic::hir::F
 /// Value/enum REPRESENTATION analysis over a `Workspace` -- what a type looks
 /// like, as opposed to how a body lowers. Re-exported flat so the ~168 external
 /// `skull_mir::lower::*` call sites keep their paths.
+mod parameter_demand;
 mod shape;
 pub use shape::*;
 
@@ -3149,6 +3150,8 @@ impl Builder<'_> {
                     .collect());
             }
             let r = self.lower_expr_repr(e)?;
+            // A terminating block returns a placeholder, not an aggregate to project.
+            if !self.is_open() { return Ok(Vec::new()); }
             if self.scx.rep_arena().value_shape(r.representation()).is_none() {
                 return self.opaque_boundary_leaves(&r, &shape, "return boundary");
             }
@@ -3161,6 +3164,7 @@ impl Builder<'_> {
             }
             if shape.splats() {
                 let r = self.lower_expr_repr(e)?.into_value();
+                if !self.is_open() { return Ok(Vec::new()); }
                 let r = self.owned_value_children(r)?;
                 return self.tuple_repr_to_slots(r, &shape);
             }
@@ -3168,6 +3172,7 @@ impl Builder<'_> {
                 return self.lower_tuple_operands(e, elems);
             }
             let v = self.lower_expr(e)?;
+            if !self.is_open() { return Ok(Vec::new()); }
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
         let expected = self
@@ -3176,6 +3181,7 @@ impl Builder<'_> {
             .result
             .map(|result| self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering));
         let v = self.lower_expr_with_expected(e, expected.as_deref())?;
+        if !self.is_open() { return Ok(Vec::new()); }
         let v = match self.concrete_plan.signature.result {
             Some(result) => {
                 let result = self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering);
@@ -3211,6 +3217,7 @@ impl Builder<'_> {
         shape: &TupleRetShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let r = self.lower_expr_repr(e)?.into_value();
+        if !self.is_open() { return Ok(Vec::new()); }
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Err(gap(

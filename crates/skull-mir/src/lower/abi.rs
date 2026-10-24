@@ -2430,6 +2430,14 @@ pub struct BackendFnAbiPlan {
     /// shape from the declaration.
     representation: FunctionRepPlan,
     arena: Arc<RepArena>,
+    transport: Option<ParameterTransport>,
+    body_dependent_parameters: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParameterTransport {
+    original: Vec<RepId>,
+    lanes: Vec<usize>,
 }
 
 /// Shared immutable ABI plan returned by cache-eligible consumers. The value
@@ -2442,6 +2450,8 @@ impl PartialEq for BackendFnAbiPlan {
         self.subject == other.subject
             && self.target == other.target
             && self.representation == other.representation
+            && self.transport == other.transport
+            && self.body_dependent_parameters == other.body_dependent_parameters
             && self.arena.equivalent(&other.arena)
     }
 }
@@ -2507,12 +2517,18 @@ impl BackendFnAbiPlan {
             &signature.param_tuple_spelled,
             mode,
         );
-        Self {
+        let mut abi = Self {
             subject: inst.clone(),
             target: scx.target,
             representation,
             arena,
+            transport: None,
+            body_dependent_parameters: false,
+        };
+        if !params.iter().any(|ty| matches!(ty, crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Ref, .. })) {
+            abi.narrow_parameter_transport(ws, scx);
         }
+        abi
     }
 
     /// ABI for a declaration-owned opaque boundary with no instance arguments.
@@ -2559,8 +2575,86 @@ impl BackendFnAbiPlan {
             target: scx.target,
             representation,
             arena,
+            transport: None,
+            body_dependent_parameters: false,
         }
     }
+
+    fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
+        use bone_semantic::hir::BodyOwner;
+        let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
+        if scx.values_first_class || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
+            || scx.taken_by_ref.contains(&f.name) || f.is_extern || f.inline_body.is_some()
+            || f.is_coroutine || f.is_variadic || !f.annotations.is_empty()
+            || f.num_required != f.param_decls.len() || !self.uses_scalar_abi()
+        { return; }
+        self.body_dependent_parameters = self.representation.params.iter().any(|id| {
+            matches!(self.arena.get(*id).layout(), RepLayout::Leaves(shape)
+                if !shape.nullable && ws.struct_by_name.contains_key(&shape.name))
+        });
+        if !self.body_dependent_parameters { return; }
+        let Some(body) = ws.module(self.subject.func.module).bodies.get(&BodyOwner::Function(self.subject.func.func)) else { return };
+        let Some(demand) = super::parameter_demand::fields(body) else { return };
+        if demand.len() != self.representation.params.len() { return; }
+        let original = self.representation.params.clone();
+        let mut lanes = Vec::new();
+        let mut offset = 0;
+        for (i, &id) in original.iter().enumerate() {
+            let rep = self.arena.get(id);
+            let width = rep.lanes(&self.arena);
+            if let RepLayout::Leaves(shape) = rep.layout()
+                && !shape.nullable && ws.struct_by_name.contains_key(&shape.name)
+                && let Some(fields) = &demand[i]
+                && fields.iter().all(|field| shape.fields.iter().any(|(name, _)| name == field))
+            {
+                let mut narrowed = shape.clone();
+                narrowed.fields.clear();
+                let mut leaf = offset;
+                for (name, field) in &shape.fields {
+                    let n = match field { FieldShape::Prim => 1, FieldShape::Nested(s) => s.leaf_count() };
+                    if fields.contains(name) {
+                        narrowed.fields.push((*name, field.clone()));
+                        lanes.extend(leaf..leaf + n);
+                    }
+                    leaf += n;
+                }
+                if narrowed.fields.len() != shape.fields.len() {
+                    self.representation.params[i] = self.arena.intern_with_facts(
+                        self.target, RepUse::Parameter, RepLayout::Leaves(narrowed),
+                        rep.storage, false, rep.nobox, false,
+                    );
+                }
+            } else { lanes.extend(offset..offset + width); }
+            offset += width;
+        }
+        if lanes.len() != offset { self.transport = Some(ParameterTransport { original, lanes }); }
+    }
+
+    /// Evaluate the original argument layout before dropping unused transport.
+    /// A projected layout is not a complete value and must never be boxed.
+    pub(super) fn argument_shapes(&self) -> Vec<RetSlot> {
+        self.transport.as_ref().map_or_else(|| self.param_shapes(), |transport| {
+            transport.original.iter().map(|id| self.arena.ret_slot(*id)).collect()
+        })
+    }
+
+    pub(super) fn transport_arguments<T: Copy>(&self, args: Vec<T>) -> Result<Vec<T>, skull_parser::CompilerError> {
+        match &self.transport {
+            Some(transport) => {
+                let expected: usize = transport.original.iter().map(|id| self.arena.get(*id).lanes(&self.arena)).sum();
+                if args.len() != expected {
+                    return Err(skull_parser::CompilerError::new_no_location(format!(
+                        "argument transport expected {expected} original lanes, received {}", args.len()
+                    )));
+                }
+                Ok(transport.lanes.iter().map(|&lane| args[lane]).collect())
+            }
+            None => Ok(args),
+        }
+    }
+
+    /// Body edits can change this direct-call layout even when it is currently full.
+    pub fn body_dependent_parameters(&self) -> bool { self.body_dependent_parameters }
 
     pub fn decl(&self) -> FuncRef {
         self.subject.func

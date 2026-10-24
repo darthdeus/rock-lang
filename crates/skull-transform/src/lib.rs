@@ -191,7 +191,8 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             if is_dead_rc(&func.insts[i], i, &use_count, &load_count)
-                || cp.is_some_and(|cp| cp.self_stores[raw(i) as usize])
+                || cp.is_some_and(|cp| cp.self_stores[raw(i) as usize]
+                    || (cp.nonthrowing[raw(i) as usize] && use_count[raw(i) as usize] == 0))
             {
                 dead[raw(i) as usize] = true;
                 work.push(i);
@@ -204,7 +205,9 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
         value_operands(&func.insts[i], &mut |op| {
             let k = raw(op) as usize;
             use_count[k] = use_count[k].saturating_sub(1);
-            if !dead[k] && use_count[k] == 0 && is_dead_value(&func.insts[op]) {
+            if !dead[k] && use_count[k] == 0
+                && (is_dead_value(&func.insts[op]) || cp.is_some_and(|cp| cp.nonthrowing[k]))
+            {
                 dead[k] = true;
                 work.push(op);
             }
@@ -277,11 +280,8 @@ fn index_read_is_checked(kind: &ContainerKind) -> bool {
 /// `Call`/`CallValue` run for effect; a checked `Index` must still execute.
 fn is_dead_value(inst: &Inst) -> bool {
     match inst {
-        Inst::Call { .. } | Inst::CallValue { .. } => false,
-        Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
-        // The shared bounds check of a flat element read raises on its own.
-        Inst::VecCheckedIndex { .. } => false,
-        _ => inst.produces_value(),
+        Inst::Index { kind, .. } => !index_read_is_checked(kind),
+        _ => inst.produces_value() && !skull_mir::sinking::may_throw(inst),
     }
 }
 
@@ -294,6 +294,10 @@ fn is_dead_value(inst: &Inst) -> bool {
 /// inst) and the use-counting share one traversal instead of two back-to-back.
 /// The standalone `copy_propagate` / `dce` keep their independent behavior.
 pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
+    cleanup_in(None, func)
+}
+
+fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(), CompilerError> {
     scalarize_native_buffer_stores(func);
     // SROA and copy-prop/DCE INTERLEAVE to a fixpoint: peeling a cursor struct
     // leaves its (now-dead) ctor behind, and that ctor's operand uses pin the
@@ -317,7 +321,7 @@ pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
         // nullable value field's read to the literal that filled it leaves a
         // presence test whose operand is now a fresh ctor.
         let folded = fold_never_nil_compares(func);
-        let cp = copy_propagate_analysis(func);
+        let cp = copy_propagate_analysis(func, ws);
         dce_core(func, cp.as_ref());
         if !changed && !folded {
             break;
@@ -838,7 +842,7 @@ pub fn flatten_nobox_nested_ctors(
 /// function's own first step. Were a site to miss it, the failure would be
 /// CLOSED -- a spurious rejection from the verifier, never a silent miscompile.
 pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), CompilerError> {
-    cleanup(func)?;
+    cleanup_in(Some(ws), func)?;
     // INTERLEAVED, not once each. Flattening replaces a nested nobox ctor's
     // users with leaf reads, and that is exactly the shape SROA needs to split
     // the field cell the ctor is stored to: while the outer ctor still reads the
@@ -846,7 +850,7 @@ pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), Comp
     // the field cell alone, so the box survives. Terminates because the pass is
     // idempotent -- a flattened ctor no longer matches the trigger.
     while flatten_nobox_nested_ctors(ws, func)? {
-        cleanup(func)?;
+        cleanup_in(Some(ws), func)?;
     }
     dce(func);
     promote_direct_cells(func);
@@ -1829,7 +1833,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
 /// now-unloaded cell) are removed by [`dce`].
 /// Cross-block loads are left untouched (conservative — a later mem2reg, P7).
 pub fn copy_propagate(func: &mut MirFunc) {
-    let Some(cp) = copy_propagate_analysis(func) else {
+    let Some(cp) = copy_propagate_analysis(func, None) else {
         return;
     };
     let m = |x: Idx<Inst>| resolve_subst(&cp.subst, x);
@@ -1851,13 +1855,15 @@ struct CopyProp {
     /// Per-inst flags; a true entry is a `Store` writing back the value its cell
     /// already holds, i.e. removable even though the cell still has loads.
     self_stores: Vec<bool>,
+    /// Projections proven not to raise; their abandoned nodes need not survive DCE.
+    nonthrowing: Vec<bool>,
 }
 
 /// Build the analysis without applying it. Returns `None` when the walk proves
 /// nothing (the common case for small bodies), so callers skip the remap
 /// entirely. Shared by the standalone [`copy_propagate`] (which then remaps the
 /// whole arena) and [`cleanup`] (which folds the remap into DCE's count scan).
-fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
+fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<CopyProp> {
     // A cell STORED inside a closure body can be mutated indirectly by ANY call
     // (the call may invoke that closure — e.g. `with_callback(() => { count = .. })`),
     // so its cached value is not stable across calls. Exclude such cells entirely
@@ -1924,6 +1930,7 @@ fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
     }
     let mut subst: Vec<Option<Idx<Inst>>> = vec![None; func.insts.len()];
     let mut self_stores = vec![false; func.insts.len()];
+    let mut nonthrowing = vec![false; func.insts.len()];
     let mut any_subst = false;
     let mut cur: Vec<Option<Idx<Inst>>> = vec![None; func.cells.len()];
     let mut touched: Vec<usize> = Vec::new();
@@ -1932,8 +1939,18 @@ fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
             cur[t] = None;
         }
         touched.clear();
+        let mut checked_native_buffers = HashSet::default();
         for &id in &b.insts {
             match &func.insts[id] {
+                Inst::Call { func: target, args } if args.len() == 2 && ws.is_some_and(|ws| {
+                    let module = ws.module(target.module);
+                    let f = &module.functions[target.func];
+                    bone_semantic::prelude::is_stdlib_module_file(module.file.as_str())
+                        && f.name.as_str() == "__nb_checked_index" && f.inline_body.is_some()
+                        && f.annotations.iter().any(|a| a.is_builtin("nomangle"))
+                }) => {
+                    checked_native_buffers.insert(resolve_subst(&subst, args[0]));
+                }
                 Inst::Store { cell, value } if !escaping[raw(*cell) as usize] => {
                     let ck = raw(*cell) as usize;
                     let v = resolve_subst(&subst, *value);
@@ -1976,7 +1993,14 @@ fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
                 Inst::Field { base, field } => {
                     let (base, field) = (*base, *field);
                     let rb = resolve_subst(&subst, base);
-                    if let Inst::MakeValueStruct { fields, .. } = &func.insts[rb] {
+                    if checked_native_buffers.contains(&rb) && skull_mir::lower::is_leaf_view_field(field.as_str()) {
+                        // The retained bounds check already accessed this exact
+                        // buffer. Its generated view keys are plain table fields.
+                        nonthrowing[raw(id) as usize] = true;
+                    }
+                    if let Inst::MakeValueStruct { fields, form, .. } = &func.insts[rb] {
+                        nonthrowing[raw(id) as usize] = fields.iter().any(|(name, _)| *name == field)
+                            || (*form == ValueCtorForm::Leaves && fields.iter().any(|(name, _)| name.as_str().strip_prefix(field.as_str()).is_some_and(|tail| tail.starts_with('.'))));
                         if let Some((_, op)) = fields.iter().find(|(n, _)| *n == field) {
                             subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
@@ -1987,6 +2011,8 @@ fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
                             unreachable!("leaf_form_path roots at a value ctor")
                         };
                         let key = format!("{prefix}.{field}");
+                        nonthrowing[raw(id) as usize] = fields.iter().any(|(name, _)| name.as_str() == key
+                            || name.as_str().strip_prefix(&key).is_some_and(|tail| tail.starts_with('.')));
                         if let Some((_, op)) = fields.iter().find(|(n, _)| n.as_str() == key) {
                             subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
@@ -2005,6 +2031,7 @@ fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
                     let rb = resolve_subst(&subst, base);
                     if let Inst::MakeTuple(vs) = &func.insts[rb] {
                         if let Some(op) = vs.get(index) {
+                            nonthrowing[raw(id) as usize] = true;
                             subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
                         }
@@ -2014,7 +2041,8 @@ fn copy_propagate_analysis(func: &MirFunc) -> Option<CopyProp> {
             }
         }
     }
-    (any_subst || self_stores.iter().any(|&noop| noop)).then_some(CopyProp { subst, self_stores })
+    (any_subst || self_stores.iter().any(|&noop| noop) || nonthrowing.iter().any(|&safe| safe))
+        .then_some(CopyProp { subst, self_stores, nonthrowing })
 }
 
 /// The value ctor and dotted child path `x` reads when it is an unfolded
@@ -2052,12 +2080,8 @@ fn resolve_subst(subst: &[Option<Idx<Inst>>], mut x: Idx<Inst>) -> Idx<Inst> {
 /// checked `Index` read can error, so a discarded read must still run.
 fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) -> bool {
     match inst {
-        Inst::Call { .. } | Inst::CallValue { .. } => false,
-        Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
-        Inst::VecCheckedIndex { .. } => false,
         Inst::Store { cell, .. } => load_count[raw(*cell) as usize] == 0,
-        _ if inst.produces_value() => use_count[raw(i) as usize] == 0,
-        _ => false,
+        _ => is_dead_value(inst) && use_count[raw(i) as usize] == 0,
     }
 }
 

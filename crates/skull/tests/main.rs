@@ -319,3 +319,7 @@ mod projection_demand;
 
 #[path = "result_destinations.rs"]
 mod result_destinations;
+
+mod discarded_effects;
+mod overlay_function_values;
+mod argument_demand;

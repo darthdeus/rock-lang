@@ -2511,6 +2511,8 @@ struct Chunk {
     /// These always invalidate on a body edit; residual edges can instead use
     /// the old/new inline candidate's eligibility facts.
     embedded_deps: FxHashSet<FuncRef>,
+    /// Body-derived transport is independent of inline candidate eligibility.
+    abi_deps: FxHashSet<FuncRef>,
     /// Global-init ordering facts (globals read + functions called).
     direct_globals: Vec<Ustr>,
     direct_calls: Vec<Ustr>,
@@ -3255,6 +3257,12 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
     }
 }
 
+fn collect_abi_dependencies(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
+    out.extend(mf.call_abi_plans.values()
+        .filter(|plan| plan.body_dependent_parameters()).map(|plan| plan.subject.func));
+    for nested in &mf.nested_fns { collect_abi_dependencies(nested, out); }
+}
+
 fn emit_function_with_allocation_report(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -3371,7 +3379,7 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let (lua, code_artifact, allocation_bodies, deps, statics) = crate::coroutine_emit::emit_coroutine_with_artifact(
+    let (lua, code_artifact, allocation_bodies, mut deps, statics) = crate::coroutine_emit::emit_coroutine_with_artifact(
         ws,
         cg,
         scx,
@@ -3387,7 +3395,11 @@ fn emit_coroutine_chunk(
     // the GRAPH's fact, and `update_chunk_cache` reads it through
     // `instances_of`. `deps` carries only what codegen alone knows -- which
     // bodies this chunk's TEXT contains.
+    let mut abi_deps = FxHashSet::default();
+    collect_abi_dependencies(&mf, &mut abi_deps);
+    deps.extend(abi_deps.iter().copied());
     Ok(Chunk {
+        abi_deps,
         lua,
         literal_globals: skull_mir::reach::global_ref_names(mf),
         allocation_bodies,
@@ -3684,7 +3696,11 @@ fn emit_body_chunk_with_mutation(
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
     let calls = skull_mir::reach::call_targets(&mf);
+    let mut abi_deps = FxHashSet::default();
+    collect_abi_dependencies(&mf, &mut abi_deps);
+    deps.extend(abi_deps.iter().copied());
     Ok(Chunk {
+        abi_deps,
         lua,
         literal_globals: skull_mir::reach::global_ref_names(&mf),
         allocation_bodies,
@@ -4087,6 +4103,8 @@ fn emit_spec_chunk(
     times.regalloc_work |= regalloc > Duration::ZERO;
     let mut statics = mf.statics.clone();
     let literal_globals = skull_mir::reach::global_ref_names(&mf);
+    let mut nested_abi_deps = FxHashSet::default();
+    collect_abi_dependencies(&mf, &mut nested_abi_deps);
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
     emit_pass_nested_fns(
@@ -4102,7 +4120,11 @@ fn emit_spec_chunk(
     collect_callee_frefs(&mf, &mut deps);
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
+    let mut abi_deps = nested_abi_deps;
+    collect_abi_dependencies(&mf, &mut abi_deps);
+    deps.extend(abi_deps.iter().copied());
     Ok(Chunk {
+        abi_deps,
         lua,
         allocation_bodies,
         embedded_deps: deps.clone(),
@@ -8637,7 +8659,7 @@ fn update_chunk_cache(
             affected.extend(deps.iter().filter(|body| {
                 !stable_residual_frefs.contains(c)
                     || !matches!(cache.chunks.get(*body), Some(Ok(chunk))
-                        if !chunk.embedded_deps.contains(c))
+                        if !chunk.embedded_deps.contains(c) && !chunk.abi_deps.contains(c))
             }).cloned());
         }
     }
@@ -8823,10 +8845,14 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
+    initialize_code_slots: bool,
     mut fingerprint_identities: FxHashSet<skull_mir::code_identity::CodeIdentity>,
 ) -> Result<(MirEmit, UnitComptimeReads, crate::artifact_fingerprint::CodeRows, usize), CompilerError> {
     let t_clone_artifact = Instant::now();
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
+    if initialize_code_slots {
+        out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
+    }
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut candidate_code_artifact = cache.code_artifact.clone();
     let d_clone_artifact = t_clone_artifact.elapsed();
@@ -9210,6 +9236,8 @@ pub fn emit_overlay_with_span_edits(
         .map(|chunk| &chunk.code_artifact)
         .collect();
     let next_code_artifact = cache.code_artifact.with_replacements(&replacements);
+    let initialize_code_slots = !cache.code_artifact.entries.values().any(|entry| entry.escaping)
+        && next_code_artifact.entries.values().any(|entry| entry.escaping);
     let d_replacements = t_replacements.elapsed();
     if !cache.code_artifact.compatible_overlay(&next_code_artifact) {
         return Err(CompilerError::new_no_location(
@@ -9330,7 +9358,7 @@ pub fn emit_overlay_with_span_edits(
     let t3 = Instant::now();
     let published_code_artifact = cache.code_artifact.clone();
     let (mut emit, overlay_unit_reads, fingerprint_code_rows, fingerprint_rows_derived) =
-        assemble_overlay(ws, cache, shader_changed, fingerprint_identities)?;
+        assemble_overlay(ws, cache, shader_changed, initialize_code_slots, fingerprint_identities)?;
     cache.fingerprint_code_rows = Some(fingerprint_code_rows);
     cache.repair_stats.fingerprint_code_rows_derived = fingerprint_rows_derived;
     cache.repair_stats.code_artifact_assembly_reused =

@@ -1070,8 +1070,9 @@ impl Builder<'_> {
         dc: &DirectCall,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if dc.plan.uses_scalar_abi() {
-            let param_shapes = dc.plan.param_shapes();
-            return self.scalar_call_args(e, func, arg_idxs, any_named, &param_shapes);
+            let param_shapes = dc.plan.argument_shapes();
+            let args = self.scalar_call_args(e, func, arg_idxs, any_named, &param_shapes)?;
+            return dc.plan.transport_arguments(args);
         }
         let callee = &self.ws.module(func.module).functions[func.func];
         self.reject_nobox_boxed_call_args(func, arg_idxs)?;
@@ -1290,7 +1291,7 @@ impl Builder<'_> {
                 }
             });
         };
-        let param_shapes = dc.plan.param_shapes();
+        let param_shapes = dc.plan.argument_shapes();
         let mut argv = Vec::new();
         // The RECEIVER arrives already lowered, so it cannot go through
         // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
@@ -1321,6 +1322,7 @@ impl Builder<'_> {
             )?;
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
+        let argv = dc.plan.transport_arguments(argv)?;
         match dc.plan.ret_shape() {
             Some(shape) => {
                 let n = shape.leaf_count();
@@ -1875,7 +1877,7 @@ impl Builder<'_> {
         let slot = if !plan.uses_scalar_abi() {
             RetSlot::Opaque
         } else {
-            plan.param_shapes().first().cloned().ok_or_else(|| {
+            plan.argument_shapes().first().cloned().ok_or_else(|| {
                 gap(format!(
                     "`for`-protocol iter witness `{}` has a scalar ABI with no parameters, \
                      so it cannot receive the collection",
@@ -1883,7 +1885,8 @@ impl Builder<'_> {
                 ))
             })?
         };
-        self.repr_to_slot_values_bundle(&bundle, &slot)
+        let args = self.repr_to_slot_values_bundle(&bundle, &slot)?;
+        plan.transport_arguments(args)
     }
 
     pub(crate) fn repr_to_leaves_shape(

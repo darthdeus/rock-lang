@@ -1113,3 +1113,184 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
         .expect_err("an unresolved field type must reject");
     assert!(unresolved.message.contains("resolved type"), "{unresolved}");
 }
+
+#[test]
+fn direct_leaf_reader_compacts_parameter_transport() {
+    let ws = ws_of(r#"
+value Sample { x: float, y: float, z: float }
+fn selected(v: Sample) -> float { return v.y }
+fn main() -> float { return selected(Sample { x: 1.0, y: 2.0, z: 3.0 }) }
+"#);
+    let selected = func_ref(&ws, "selected");
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let entry = lower_test_root(&ws, &scx, &bodies, selected);
+    assert_eq!(entry.params.len(), 1, "entry binds only the demanded interior field");
+    let args = caller.insts.iter().find_map(|(_, inst)| match inst {
+        skull_mir::mir::Inst::Call { func, args } if *func == selected => Some(args),
+        _ => None,
+    }).expect("direct call");
+    assert_eq!(args.len(), 1, "caller uses the same compact transport");
+    assert!(matches!(caller.insts[args[0]], skull_mir::mir::Inst::Const(skull_mir::mir::Lit::Float(v)) if v == 2.0));
+}
+
+#[test]
+fn demanded_top_level_field_retains_nested_layout_and_nobox_guarantee() {
+    let ws = ws_of(r#"
+nobox value Inner { x: float, y: float }
+nobox value Outer { unused: float, kept: Inner, tail: float }
+fn selected(v: Outer) -> float { return v.kept.y }
+fn main(v: Outer) -> float { return selected(v) }
+"#);
+    let selected = func_ref(&ws, "selected");
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let entry = lower_test_root(&ws, &scx, &bodies, selected);
+    assert_eq!(entry.params.len(), 2, "selected nested field retains both lanes");
+    let plan = entry.abi_plan.as_ref().unwrap();
+    let rep = plan.rep_plan(plan.representation().params()[0]);
+    assert!(rep.nobox());
+    assert!(!rep.boxable(), "partial transport is not a complete boxable value");
+}
+
+#[test]
+fn whole_use_and_mutation_keep_complete_parameter_transport() {
+    let ws = ws_of(r#"
+value Sample { x: float, y: float }
+fn identity(v: Sample) -> Sample { return v }
+fn mutate(v: Sample) -> float { v = Sample { x: v.y, y: v.x }; return v.x }
+fn captured(v: Sample) -> fn() -> float { return () => v.x }
+fn main(v: Sample) -> float { return mutate(identity(v)) }
+"#);
+    let main = func_ref(&ws, "main");
+    let identity = func_ref(&ws, "identity");
+    let mutate = func_ref(&ws, "mutate");
+    let captured = func_ref(&ws, "captured");
+    let (scx, bodies) = lower_test_roots(&ws, &[main, captured]);
+    for f in [identity, mutate, captured] {
+        assert_eq!(lower_test_root(&ws, &scx, &bodies, f).params.len(), 2);
+    }
+}
+
+#[test]
+fn unused_aggregate_parameter_has_zero_transport_but_keeps_eager_call() {
+    let ws = ws_of(r#"
+value Sample { x: float, y: float }
+fn selected(v: Sample) -> float { return 5.0 }
+fn main() -> float { return selected(Sample { x: 1.0, y: 2.0 }) }
+"#);
+    let selected = func_ref(&ws, "selected");
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    assert_eq!(lower_test_root(&ws, &scx, &bodies, selected).params.len(), 0);
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    assert!(caller.insts.iter().any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::Call { func, args } if *func == selected && args.is_empty())));
+}
+
+#[test]
+fn fixed_names_nullable_and_defaulted_parameters_keep_complete_transport() {
+    let ws = ws_of(r#"
+value Sample { x: float, y: float }
+@nomangle fn demand_fixed(v: Sample) -> float { return v.y }
+fn demand_default(v: Sample = Sample { x: 1.0, y: 2.0 }) -> float { return v.y }
+fn demand_nullable(v: Sample?) -> Sample? { return v }
+"#);
+    let roots = [func_ref(&ws, "demand_fixed"), func_ref(&ws, "demand_default"), func_ref(&ws, "demand_nullable")];
+    let (scx, bodies) = lower_test_roots(&ws, &roots);
+    // Fixed-name boundaries use the existing boxed ABI; defaulted and nullable
+    // internal parameters retain their complete declared leaf layouts.
+    for (f, width) in roots.into_iter().zip([1, 2, 3]) {
+        assert_eq!(lower_test_root(&ws, &scx, &bodies, f).params.len(), width);
+    }
+}
+
+#[test]
+fn safe_navigation_receiver_uses_the_same_compact_transport() {
+    let ws = ws_of(r#"
+value Sample { x: float, y: float }
+fn demand_method(v: Sample) -> float { return v.y }
+fn main(v: Sample?) -> float { return v?.demand_method() ?? 0.0 }
+"#);
+    let selected = func_ref(&ws, "demand_method");
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    assert_eq!(lower_test_root(&ws, &scx, &bodies, selected).params.len(), 1);
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    assert!(caller.insts.iter().any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::Call { func, args } if *func == selected && args.len() == 1)));
+}
+
+#[test]
+fn match_parameter_demand_retains_nested_payload_and_guard_fields() {
+    let ws = ws_of(r#"
+nobox value DemandPayload { a: int, b: int, c: int, d: int }
+enum DemandSubject { Present(DemandPayload), Empty }
+nobox value DemandEvent { unused: int, subject: DemandSubject, guard_value: int }
+fn demand_match_selected(event: DemandEvent) -> int {
+    return match event.subject {
+        DemandSubject::Present(payload) => payload.c,
+        DemandSubject::Empty => 0,
+    }
+}
+fn demand_match_guarded(event: DemandEvent) -> int {
+    return match event.subject {
+        DemandSubject::Present(payload) if event.guard_value > 0 => payload.c,
+        _ => 0,
+    }
+}
+fn demand_match_nested_pattern(event: DemandEvent) -> int {
+    return match event.subject {
+        DemandSubject::Present(DemandPayload { a: 0..=10, c: kept, .. }) => kept,
+        DemandSubject::Empty => 0,
+        _ => -1,
+    }
+}
+global demand_match_calls: int = 0
+fn demand_match_effect(n: int) -> int { demand_match_calls += 1; return n }
+fn demand_match_unsupported(event: DemandEvent) -> int {
+    return match event.subject {
+        DemandSubject::Present(payload) => demand_match_effect(payload.c),
+        _ => 0,
+    }
+}
+"#);
+    let roots = ["demand_match_selected", "demand_match_guarded", "demand_match_unsupported", "demand_match_nested_pattern"]
+        .map(|name| func_ref(&ws, name));
+    let (scx, bodies) = lower_test_roots(&ws, &roots);
+    for (root, expected) in roots.into_iter().zip([5, 6, 7, 5]) {
+        let mir = lower_test_root(&ws, &scx, &bodies, root);
+        assert_eq!(mir.params.len(), expected, "{}", mir.name);
+    }
+}
+
+#[test]
+fn match_to_nullable_unit_enum_compacts_wide_event_subject() {
+    let padding = (0..63).map(|i| format!("cold_{i}: int")).collect::<Vec<_>>().join(", ");
+    let src = format!(r#"
+nobox value UnitMatchIdentity {{ scene: int, arena: int, index: int, generation: int }}
+enum UnitMatchSubject {{ Absent, Primary, First(UnitMatchIdentity), Second(UnitMatchIdentity) }}
+enum UnitMatchDirection {{ ToPrimary, ToEntity }}
+nobox value UnitMatchEvent {{ {padding}, subject: UnitMatchSubject }}
+fn demand_unit_match_direction(event: UnitMatchEvent) -> UnitMatchDirection? {{
+    return match event.subject {{
+        UnitMatchSubject::Primary => UnitMatchDirection::ToPrimary,
+        UnitMatchSubject::First(_) => UnitMatchDirection::ToEntity,
+        UnitMatchSubject::Second(_) => UnitMatchDirection::ToEntity,
+        UnitMatchSubject::Absent => null,
+    }}
+}}
+fn demand_unit_match_caller(event: UnitMatchEvent) -> UnitMatchDirection? {{
+    return demand_unit_match_direction(event)
+}}
+"#);
+    let ws = ws_of(&src);
+    let caller = func_ref(&ws, "demand_unit_match_caller");
+    let selected = func_ref(&ws, "demand_unit_match_direction");
+    let (scx, bodies) = lower_test_roots(&ws, &[caller]);
+    let entry = lower_test_root(&ws, &scx, &bodies, selected);
+    let caller = lower_test_root(&ws, &scx, &bodies, caller);
+    assert_eq!(caller.params.len(), 68, "unsupported forwarding body keeps original event layout");
+    assert_eq!(entry.params.len(), 5, "subject keeps tag and all identity payload lanes");
+    assert!(caller.insts.iter().any(|(_, inst)| matches!(inst,
+        skull_mir::mir::Inst::Call { func, args } if *func == selected && args.len() == 5)));
+}
