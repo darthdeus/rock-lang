@@ -302,58 +302,6 @@ impl Builder<'_> {
         callee: Callee,
         args: IdxRange<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
-        let trusted = match callee {
-            Callee::Unresolved { name, .. } => self.resolve_funcref(e, name).ok()
-                .and_then(|f| self.select_backend_variant(e, name, f).ok())
-                .is_some_and(|f| self.ws.module(f.module).functions[f.func].inline_body.is_none()),
-            _ => false,
-        };
-        let r = self.with_value_lending(false, |s| s.lower_call_repr_inner(e, callee, args))?;
-        self.finish_call_repr(e, r, trusted)
-    }
-
-    fn finish_call_repr(
-        &mut self,
-        e: Idx<Expr>,
-        r: ValueRepr,
-        trusted: bool,
-    ) -> Result<ValueRepr, CompilerError> {
-        // Iterator protocols use phantom()'s nil even at a non-null value type.
-        if matches!(&r, ValueRepr::Scalar(v) if matches!(self.f.insts[*v], Inst::Const(Lit::Nil))) {
-            return Ok(r);
-        }
-        if !self.scx.values_first_class {
-            if let Some(ty) = self.concrete_expr_ty(e) {
-                if trusted {
-                    self.mark_boundary_value_repr(&r, &ty, true)?;
-                } else if let ValueRepr::Scalar(v) = r {
-                    if matches!(self.f.insts[v], Inst::Call { .. } | Inst::CallValue { .. }) {
-                        let mut payload = ty.as_ref();
-                        while let MonoTy::Nullable(inner) = payload { payload = inner; }
-                        if let Some(name) = payload.nominal()
-                            .filter(|name| self.is_value_struct(*name) && !self.is_nobox_struct(*name))
-                        {
-                            let copy = self.with_value_lending(false, |s| {
-                                s.nullable_boxed_value_copy(v, name, Some(payload))
-                            })?;
-                            return Ok(ValueRepr::Scalar(copy));
-                        }
-                    }
-                }
-                if !trusted {
-                    self.mark_boundary_value_repr(&r, &ty, false)?;
-                }
-            }
-        }
-        Ok(r)
-    }
-
-    fn lower_call_repr_inner(
-        &mut self,
-        e: Idx<Expr>,
-        callee: Callee,
-        args: IdxRange<Expr>,
-    ) -> Result<ValueRepr, CompilerError> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
         if matches!(
             self.scx.target(),
@@ -1153,8 +1101,7 @@ impl Builder<'_> {
                     if self.is_ref_call_arg(e, a) {
                         self.lower_ref_borrow(a)
                     } else {
-                        let lend = callee.inline_body.is_none() && !callee.is_extern;
-                        let v = self.with_value_lending(lend, |s| s.lower_expr_with_expected(a, Some(t.as_ref())))?;
+                        let v = self.lower_expr_with_expected(a, Some(t.as_ref()))?;
                         Ok(self.coerced_mono(v, a, t.as_ref()))
                     }
                 })
@@ -1321,18 +1268,6 @@ impl Builder<'_> {
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
-        let trusted = self.ws.module(func.module).functions[func.func].inline_body.is_none();
-        let r = self.with_value_lending(false, |s| s.ufcs_call_repr_inner(e, func, recv, arg_idxs))?;
-        self.finish_call_repr(e, r, trusted)
-    }
-
-    fn ufcs_call_repr_inner(
-        &mut self,
-        e: Idx<Expr>,
-        func: FuncRef,
-        recv: Idx<Inst>,
-        arg_idxs: &[Idx<Expr>],
-    ) -> Result<ValueRepr, CompilerError> {
         let dc = self.plan_direct_call(e, func)?;
         self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
         if !dc.plan.uses_scalar_abi() {
@@ -1429,9 +1364,7 @@ impl Builder<'_> {
                     |slot| slot.clone(),
                     |message| self.gap_here(message),
                 )?;
-                let callee = &self.ws.module(func.module).functions[func.func];
-                let lend = callee.inline_body.is_none() && !callee.is_extern;
-                out.extend(self.arg_values_for_call_slot(e, &slot, a, lend)?);
+                out.extend(self.arg_values_for_call_slot(e, &slot, a)?);
             }
             out.extend(self.trailing_default_args(func, arg_idxs.len(), Some(param_shapes))?);
             return Ok(out);
@@ -1561,14 +1494,7 @@ impl Builder<'_> {
             r => r,
         };
         match r {
-            ValueRepr::Scalar(v) => {
-                if !self.shallow_pack && !self.lending_pack && self.shareable_value_boxes.contains(&v)
-                    && let Some(ty) = self.borrowed_value_children.get(&v).cloned()
-                {
-                    return self.copied_value_box(&ty, v);
-                }
-                Ok(v)
-            }
+            ValueRepr::Scalar(v) => Ok(v),
             // A splatting tuple's box. Its `nobox` elements pack too, which is
             // exactly how a whole-tuple use reaches the guarantee's rejection.
             ValueRepr::Tuple { parts, .. } => {
@@ -2106,8 +2032,6 @@ impl Builder<'_> {
         expected: &ValueShape,
         reason: &str,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let owned = self.owned_value_children(bundle.value().clone())?;
-        let bundle = &ValueBundle::new(bundle.representation(), owned);
         let plan = self
             .scx
             .rep_arena()
@@ -2600,29 +2524,20 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// Own borrowed boxes at mutable escapes. Immutable boundaries may share
-    /// boxes whose source cannot be written through; mutable-place reads still
-    /// snapshot their children before reaching such a boundary.
+    /// `r` with each borrowed opaque value child copied, at an escape: a box
+    /// ([`Self::pack_boxed`]), a return, or an enum payload. A child is
+    /// borrowed when a copy, a scalarized parameter or a binding read it from
+    /// a source that still holds it.
     pub(crate) fn owned_value_children(&mut self, r: ValueRepr) -> Result<ValueRepr, CompilerError> {
-        if self.scx.values_first_class || self.shallow_pack {
+        if self.scx.values_first_class || self.lending_pack {
             return Ok(r);
         }
         match r {
-            ValueRepr::Scalar(v)
-                if !(self.lending_pack && self.shareable_value_boxes.contains(&v)) =>
-            {
-                if let Some(ty) = self.borrowed_value_children.get(&v).cloned() {
-                    let copy = self.copied_value_repr(&ty, v)?;
-                    return self.owned_value_children(copy);
-                }
-                Ok(ValueRepr::Scalar(v))
-            }
             ValueRepr::Group { name, parts, present } => {
                 let parts = parts
                     .into_iter()
                     .map(|part| match part {
                         ValueRepr::Scalar(v) => match self.borrowed_value_children.get(&v).cloned() {
-                            Some(_) if self.lending_pack && self.shareable_value_boxes.contains(&v) => Ok(ValueRepr::Scalar(v)),
                             Some(ty) => self.copied_value_box(&ty, v).map(ValueRepr::Scalar),
                             None => Ok(ValueRepr::Scalar(v)),
                         },
@@ -2646,75 +2561,10 @@ impl Builder<'_> {
     /// borrowed, since only the binding holds the box and each whole use of
     /// it copies ([`Self::boxed_value_local`]).
     pub(crate) fn pack_lent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
-        let outer = std::mem::replace(&mut self.shallow_pack, true);
+        let outer = std::mem::replace(&mut self.lending_pack, true);
         let packed = self.pack(r);
-        self.shallow_pack = outer;
-        packed
-    }
-
-    pub(crate) fn value_repr_is_shareable(&self, r: &ValueRepr) -> bool {
-        match r {
-            ValueRepr::Scalar(v) => !self.borrowed_value_children.contains_key(v)
-                || self.shareable_value_boxes.contains(v),
-            ValueRepr::Group { parts, .. } | ValueRepr::Tuple { parts, .. } => {
-                parts.iter().all(|p| self.value_repr_is_shareable(p))
-            }
-        }
-    }
-
-    pub(crate) fn with_value_lending<T>(
-        &mut self,
-        lend: bool,
-        f: impl FnOnce(&mut Self) -> Result<T, CompilerError>,
-    ) -> Result<T, CompilerError> {
-        let outer = std::mem::replace(&mut self.lending_pack, lend);
-        let result = f(self);
         self.lending_pack = outer;
-        result
-    }
-
-    fn mark_boundary_value_repr(
-        &mut self,
-        r: &ValueRepr,
-        ty: &MonoTy,
-        share: bool,
-    ) -> Result<(), CompilerError> {
-        let mut payload = ty;
-        while let MonoTy::Nullable(inner) = payload { payload = inner; }
-        match r {
-            ValueRepr::Scalar(v) if payload.nominal().is_some_and(|name| {
-                self.is_value_struct(name) && !self.is_nobox_struct(name)
-            }) => {
-                self.borrowed_value_children.insert(*v, Rc::new(ty.clone()));
-                if share { self.shareable_value_boxes.insert(*v); }
-            }
-            ValueRepr::Group { name, .. } => {
-                let shape = self.nominal_rep_shape_required(*name, false)?;
-                self.mark_borrowed_value_children(&shape, r, Some(payload))?;
-                if share { self.share_borrowed_children(r); }
-            }
-            ValueRepr::Tuple { parts, .. } => {
-                if let MonoTy::Tuple(types) = payload {
-                    for (part, ty) in parts.iter().zip(types) {
-                        self.mark_boundary_value_repr(part, ty, share)?;
-                    }
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    pub(crate) fn share_borrowed_children(&mut self, r: &ValueRepr) {
-        match r {
-            ValueRepr::Scalar(v) if self.borrowed_value_children.contains_key(v) => {
-                self.shareable_value_boxes.insert(*v);
-            }
-            ValueRepr::Group { parts, .. } | ValueRepr::Tuple { parts, .. } => {
-                for part in parts { self.share_borrowed_children(part); }
-            }
-            _ => {}
-        }
+        packed
     }
 
     /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
@@ -2829,10 +2679,10 @@ impl Builder<'_> {
         ty: &MonoTy,
         v: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.with_value_lending(false, |s| match s.copied_value_repr(ty, v)? {
+        match self.copied_value_repr(ty, v)? {
             ValueRepr::Scalar(v) => Ok(v),
-            copy => s.pack(copy),
-        })
+            copy => self.pack(copy),
+        }
     }
 
     /// [`Self::copied_value_box`] before packing: a non-null copy stays a
@@ -2842,12 +2692,7 @@ impl Builder<'_> {
         ty: &MonoTy,
         v: Idx<Inst>,
     ) -> Result<ValueRepr, CompilerError> {
-        let mut payload = ty;
-        let mut nullable = false;
-        while let MonoTy::Nullable(inner) = payload {
-            payload = inner;
-            nullable = true;
-        }
+        let (payload, nullable) = ty.peel_nullable();
         let Some(name) = payload
             .nominal()
             .filter(|name| self.is_value_struct(*name) && !self.is_nobox_struct(*name))

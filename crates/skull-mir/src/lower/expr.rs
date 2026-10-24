@@ -150,9 +150,6 @@ impl Builder<'_> {
     }
 
     fn lower_expr_inner(&mut self, e: Idx<Expr>, condition: bool) -> Result<Idx<Inst>, CompilerError> {
-        if self.lending_pack && matches!(self.body.expr_arena[e], Expr::Lambda { .. }) {
-            return self.with_value_lending(false, |s| s.lower_expr_inner(e, condition));
-        }
         if let Some(read) = self.flat_ref_read(e)? {
             return self.pack(read.into_value());
         }
@@ -214,17 +211,11 @@ impl Builder<'_> {
             // it reached. The unboxed route (`lower_expr_repr`) only reads leaves.
             Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
-                if self.lending_pack && self.binding_value_is_shareable(b) {
-                    return Ok(boxed);
-                }
                 let copy = self.boxed_value_copy_repr(boxed, name, self.concrete_expr_ty(e).as_deref())?;
                 self.pack(copy)
             }
             Expr::Var(b) if let Some(name) = self.nullable_boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
-                if self.lending_pack && self.binding_value_is_shareable(b) {
-                    return Ok(boxed);
-                }
                 self.nullable_boxed_value_copy(boxed, name, self.concrete_expr_ty(e).as_deref())
             }
             Expr::Var(b) => {
@@ -1089,14 +1080,6 @@ impl Builder<'_> {
         target: Idx<Expr>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        self.with_value_lending(false, |s| s.lower_assign_effect_owned(target, value))
-    }
-
-    fn lower_assign_effect_owned(
-        &mut self,
-        target: Idx<Expr>,
-        value: Idx<Expr>,
-    ) -> Result<(), CompilerError> {
         if self.assign_target_is_f32(target) {
             self.f32_round_exprs.insert(value);
         }
@@ -1117,8 +1100,7 @@ impl Builder<'_> {
             Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.tuple_binds.get(&raw(b)).cloned().unwrap();
                 let r = self.lower_expr_repr(value)?;
-                let owned = self.owned_value_children(r.into_value())?;
-                let slots = self.tuple_repr_to_slots(owned, &shape)?;
+                let slots = self.tuple_repr_to_slots(r.into_value(), &shape)?;
                 for (c, sv) in cells.iter().zip(slots) {
                     self.emit_cur(Inst::Store { cell: *c, value: sv });
                 }
@@ -1396,16 +1378,6 @@ impl Builder<'_> {
     }
 
     pub(crate) fn lower_compound_assign_effect(
-        &mut self,
-        e: Idx<Expr>,
-        target: Idx<Expr>,
-        op_fn: Ustr,
-        value: Idx<Expr>,
-    ) -> Result<(), CompilerError> {
-        self.with_value_lending(false, |s| s.lower_compound_assign_owned(e, target, op_fn, value))
-    }
-
-    fn lower_compound_assign_owned(
         &mut self,
         e: Idx<Expr>,
         target: Idx<Expr>,
@@ -2119,15 +2091,6 @@ impl Builder<'_> {
     }
 
     fn lower_array_literal_with_expected(
-        &mut self,
-        lit: Idx<Expr>,
-        elems: IdxRange<Expr>,
-        expected: Option<&crate::monoty::MonoTy>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        self.with_value_lending(false, |s| s.lower_array_literal_owned(lit, elems, expected))
-    }
-
-    fn lower_array_literal_owned(
         &mut self,
         lit: Idx<Expr>,
         elems: IdxRange<Expr>,
