@@ -68,6 +68,7 @@ fn main() {{
         opaque: Plain {{ x: 7, y: 11 }} }}, nullable: Flat {{ x: 13, y: 17 }} }}, calls: 0 }}
     let local = o.wide
     let before = selected(local)
+    let direct_before = o.wide.child
     let opaque_before = opaque(local)
     let nullable_before = nullable(local)
     print(scalar(local))
@@ -77,6 +78,7 @@ fn main() {{
     if o.wide.child.opaque != null {{ o.wide.child.opaque.y = 101 }}
     o.wide.nullable = Flat {{ x: 103, y: 107 }}
     print(before.point.y)
+    print(direct_before.point.y)
     print(before.opaque?.y ?? -1)
     print(opaque_before?.y ?? -1)
     print(nullable_before?.y ?? -1)
@@ -94,7 +96,7 @@ fn main() {{
     let lua = emit_module(&source);
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "boxed_projection_demand"),
-        "1\n5\n2\n5\n11\n11\n17\n17\n1\n-1\n1\n1\ntrue\n-1\n2"
+        "1\n5\n2\n5\n5\n11\n11\n17\n17\n1\n-1\n1\n1\ntrue\n-1\n2"
     );
 }
 
@@ -142,4 +144,21 @@ fn main() {
     let lua = emit_module(source);
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "global_projection_demand"),
         "17\n5\n5\n5\n99\n5\n5\n5\n11\ntrue\ntrue\n5\n-1\n11\n-1");
+}
+
+#[test]
+fn reference_owned_value_projection_reads_only_the_selected_field() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let fields = (0..50).map(|i| format!("unused_sibling{i}: int = {i}")).collect::<Vec<_>>().join(", ");
+    let lua = emit_module(&format!(r#"
+enum Choice {{ Empty, Number(int) }}
+value Config {{ chosen: int, choice: Choice, items: [string], {fields} }}
+struct Owner {{ config: Config }}
+@nomangle fn probe(owner: Owner) -> int {{ owner.config.chosen }}
+fn main() {{ print(probe(Owner {{ config: Config {{ chosen: 7, choice: Choice::Empty, items: [] }} }})) }}
+"#));
+    let probe = lua.split("\nfunction probe(").nth(1).unwrap().split("\nend").next().unwrap();
+    assert!(!probe.contains(".unused_sibling"), "an immediate projection must not expand its siblings: {probe}");
+    assert_eq!(run_luajit(&format!("{lua}\nmain(); local a = pcall(probe, nil); local b = pcall(probe, {{config=nil}}); print(a, b)\n"),
+        "reference_owned_projection"), "7\nfalse\tfalse");
 }

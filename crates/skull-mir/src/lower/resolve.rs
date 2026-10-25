@@ -188,7 +188,25 @@ impl Builder<'_> {
             return Ok(None);
         }
         let mut root = e;
-        while let Expr::FieldAccess { base, .. } = self.body.expr_arena[root] {
+        let mut reference_field = None;
+        while let Expr::FieldAccess { base, field } = self.body.expr_arena[root] {
+            // A reference-owned box is storage too. Select the requested subtree
+            // before taking a value snapshot, just as for a local or global box.
+            if root != e
+                && let Some(name) = self.value_struct_of(root)
+                && !self.is_nobox_struct(name)
+                && let Some(TypeExpr::App { ctor: TypeCtor::Nominal(owner), .. }) = self.field_base_ty(base)
+                && !self.is_value_struct(owner)
+                && let plan = self.struct_field_plan(owner, field, false)?
+                && plan.is_direct() && !plan.nullable()
+                // Native layouts already use physical leaf aliases below.
+                && self.scx.rep_arena()
+                    .nominal_value_storage_required(self.ws, self.scx.target, name)
+                    .map_err(|err| self.gap_here(err.message))? == ValueStorage::GcTable
+            {
+                reference_field = Some((base, field, name));
+                break;
+            }
             root = base;
         }
         let (binding, boxed_read, boxed) = match self.body.expr_arena[root] {
@@ -206,11 +224,14 @@ impl Builder<'_> {
                 if self.is_nobox_struct(name) { return Ok(None); }
                 (None, Some(Inst::Global(global)), Some(name))
             }
+            Expr::FieldAccess { .. } if reference_field.is_some() => {
+                (None, None, Some(reference_field.unwrap().2))
+            }
             _ => return Ok(None),
         };
         let mut path = Vec::new();
         let mut at = e;
-        while let Expr::FieldAccess { base, field } = self.body.expr_arena[at] {
+        while at != root && let Expr::FieldAccess { base, field } = self.body.expr_arena[at] {
             if self.swizzle_of(base, field).is_some() {
                 return Ok(None);
             }
@@ -243,7 +264,13 @@ impl Builder<'_> {
             return Ok(None);
         }
         let leaves = if let Some(shape) = boxed_shape {
-            let value = self.emit_cur(boxed_read.expect("boxed projection"));
+            let value = if let Some(read) = boxed_read {
+                self.emit_cur(read)
+            } else {
+                let (base, field, _) = reference_field.expect("reference-owned projection");
+                let base = self.lower_expr(base)?;
+                self.emit_cur(Inst::Field { base, field })
+            };
             self.cdata_leaf_range(value, &shape, range)?
         } else {
             let cells = self.group_binds[&raw(binding.expect("grouped projection"))].0[range].to_vec();
